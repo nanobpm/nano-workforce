@@ -342,7 +342,7 @@ test("progress-check: a lost completion-ack REDELIVERS the same job — the reco
   );
   assertEquals(first.progressed, true, "the first delivery sees the advance and progresses");
   const writesAfterFirst = updates.length;
-  assertEquals(agentReads, 0, "a progressing round never reads agent-work");
+  assertEquals(agentReads, 1, "a progressing round reads agent-work once to maintain the attempt watermark (#789)");
 
   // Second delivery: the SAME job key redelivered after a lost ack. The baseline is now "sha-2" and
   // the head is unchanged, so a RECOMPUTE would read "no advance" and escalate. The guard must
@@ -353,7 +353,7 @@ test("progress-check: a lost completion-ack REDELIVERS the same job — the reco
   );
   assertEquals(replay.progressed, true, "the redelivery REPLAYS progressed:true, never mis-escalates");
   assertEquals(replay.huskRetry, undefined, "the replay is not a no-advance/husk escalation");
-  assertEquals(agentReads, 0, "the replay never recomputes, so it never reads agent-work");
+  assertEquals(agentReads, 1, "the replay short-circuits before recomputing, so it adds no further read");
   assertEquals(updates.length, writesAfterFirst, "the replay makes no new write (pure replay)");
 });
 
@@ -414,15 +414,32 @@ test("progress-check: resolves repo/prNumber from the prKey when the vars are ab
   assertEquals(seen, ["o/r", 1], "falls back to parsing owner/repo#N from the prKey");
 });
 
-test("progress-check: only reads agent-instances on the no-advance path, not on a progressing round", async () => {
+test("progress-check: reads agent-instances on EVERY addressed round (incl. a progressing one) to maintain the attempt watermark (#789)", async () => {
+  // Copilot #789: the husk verdict is only consulted on the no-advance path, but the read must ALSO
+  // run on a progressing round so its fresh `review-round` instance is CONSUMED into the watermark —
+  // otherwise the next round's pre-registration husk would see that stale terminal instance as
+  // "newer than the watermark" and mis-escalate. The advancing head still fails open to progress.
   let agentReads = 0;
   const handler = await makeUnderTest(async () => "sha-2", async () => {
     agentReads++;
     return true;
   });
   const { app } = fakeApp({ last_round_head: "sha-1" });
-  await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2 } } as any, app as any);
-  assertEquals(agentReads, 0, "an advancing head never wastes an engine read");
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2 } } as any, app as any);
+  assertEquals(agentReads, 1, "a progressing round still reads once to advance the attempt watermark");
+  assertEquals(out.progressed, true, "an advancing head is still progress regardless of the read");
+});
+
+test("progress-check: an unreadable head skips the agent-work read (nothing to correlate)", async () => {
+  let agentReads = 0;
+  const handler = await makeUnderTest(async () => null, async () => {
+    agentReads++;
+    return true;
+  });
+  const { app } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2 } } as any, app as any);
+  assertEquals(agentReads, 0, "an unreadable head has nothing to correlate, so no read");
+  assertEquals(out.progressed, true, "an unreadable head fails open to progress");
 });
 
 // ── The DEFAULT (availability-aware) agent-work reader over app.engine.searchAgentInstances ──────
@@ -531,6 +548,50 @@ test("progress-check default reader: an engine read that THROWS degrades to no-a
   assertEquals(out.progressed, false);
   assertEquals(out.huskRetry, false, "a read outage must never auto-retry");
   assertEquals(out.noProgressReason, "no-advance");
+});
+
+test("progress-check default reader: a prior round's TERMINAL instance does NOT mask a current pre-registration husk (#789)", async () => {
+  // Copilot #789 suppressed comment (worker.ts:184): if an earlier round's `review-round` instance
+  // is terminal and the CURRENT attempt husks BEFORE registering any AgentInstance, the scoped
+  // search still returns that earlier terminal row as `newest` — which, read naively, returns `true`
+  // and routes to a no-advance escalation, BYPASSING the bounded husk retry. The attempt watermark
+  // fixes it: the persisted watermark (100) already ACCOUNTED FOR that terminal instance, so a scoped
+  // search whose greatest key is still 100 (no NEWER instance) means the current attempt registered
+  // nothing new — a genuine husk (auto-retry), not a no-advance.
+  const handler = await makeUnderTest(async () => "sha-1");
+  const { app, updates } = fakeApp(
+    { last_round_head: "sha-1", last_progress_agent_watermark: "100" },
+    async () => [
+      { status: "completed", completionDate: "2024-01-01T00:00:00Z", elementInstanceKeys: ["100"] }, // prior terminal, already consumed
+    ],
+  );
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 6, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, false);
+  assertEquals(out.huskRetry, true, "no instance newer than the watermark ⇒ the current attempt husked pre-registration");
+  assertEquals(out.noProgressReason, "husk");
+  // The watermark stays where it was — nothing new was consumed.
+  const wm = updates.at(-1)?.patch.last_progress_agent_watermark;
+  assertEquals(wm, "100", "a pre-registration husk leaves the watermark unchanged");
+});
+
+test("progress-check default reader: a NEW terminal attempt past the watermark ⇒ no-advance and ADVANCES the watermark (#789)", async () => {
+  // The complement: the current attempt DID register (a `review-round` instance keyed 200, newer than
+  // the watermark 100), and it is terminal — a genuine no-advance. The watermark advances to 200 so
+  // the NEXT round can tell the attempt after it from this one.
+  const handler = await makeUnderTest(async () => "sha-1");
+  const { app, updates } = fakeApp(
+    { last_round_head: "sha-1", last_progress_agent_watermark: "100" },
+    async () => [
+      { status: "completed", completionDate: "2024-01-01T00:00:00Z", elementInstanceKeys: ["100"] }, // prior, consumed
+      { status: "completed", completionDate: "2024-01-02T00:00:00Z", elementInstanceKeys: ["200"] }, // fresh terminal attempt
+    ],
+  );
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 6, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, false);
+  assertEquals(out.huskRetry, false, "a fresh terminal attempt is a genuine no-advance");
+  assertEquals(out.noProgressReason, "no-advance");
+  const wm = updates.at(-1)?.patch.last_progress_agent_watermark;
+  assertEquals(wm, "200", "consuming a fresh attempt advances the watermark");
 });
 
 // ── Structural guard over the committed BPMN (no engine) ─────────────────────

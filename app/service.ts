@@ -295,6 +295,12 @@ export interface PullRequest {
   // the recorded outcome instead of recomputing against the already-advanced `last_round_head`.
   last_progress_job_key: string | null;
   last_progress_result: string | null;
+  // Attempt watermark for pr.progress-check husk correlation (103; Copilot PR #789): the greatest
+  // `review-round` AgentInstance key an earlier progress-check already accounted for. Lets the next
+  // round tell a freshly-registered attempt from a historical one, so a current attempt that husks
+  // BEFORE registering its AgentInstance is classified as a husk instead of masked by a prior round's
+  // terminal instance. Cleared on re-open with the rest of the per-run state. NULL before any read.
+  last_progress_agent_watermark: string | null;
   // Merge-protocol liveness (012_merge_protocol_attempt.sql): head commit last nudged by the
   // frugal-CI fresh-head-run remedy. A rebase changes the head and therefore permits a new nudge.
   fresh_head_run_head: string | null;
@@ -581,6 +587,11 @@ export async function submitPr(
       // `last_round_head` lets a resubmission whose branch changed read `currentHead !== previousHead`
       // on its first husked round, mis-route it as progress, and bypass the bounded husk retry (#786).
       last_round_head: null,
+      // Clear the attempt watermark too: it is scoped to the prior convergence run's `review-round`
+      // instances (Copilot #789). A fresh run mints new, higher-keyed instances so a carried-over
+      // watermark would still be below them, but clearing keeps the per-run husk-correlation state
+      // unambiguous and self-contained.
+      last_progress_agent_watermark: null,
       outcome: null,
       converged_at: null,
       merged_at: null,

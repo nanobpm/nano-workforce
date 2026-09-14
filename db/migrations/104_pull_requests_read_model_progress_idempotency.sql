@@ -1,8 +1,9 @@
--- Re-create the `pull_requests_read_model` VIEW so it re-exports the two base columns added by
--- 103_pr_progress_idempotency.sql (`last_progress_job_key`, `last_progress_result`). The read-model
--- VIEW must pass through EVERY base `pull_requests` column (the static pages↔schema contract guard +
--- app/pullRequestReadModel.test.ts DRIFT GUARD assert it), so adding a base column obliges a fresh
--- VIEW definition — 094 is immutable and cannot be edited in place.
+-- Re-create the `pull_requests_read_model` VIEW so it re-exports the base columns added by
+-- 103_pr_progress_idempotency.sql (`last_progress_job_key`, `last_progress_result`,
+-- `last_progress_agent_watermark`). The read-model VIEW must pass through EVERY base `pull_requests`
+-- column (the static pages↔schema contract guard + app/pullRequestReadModel.test.ts DRIFT GUARD
+-- assert it), so adding a base column obliges a fresh VIEW definition — 094 is immutable and cannot
+-- be edited in place.
 --
 -- Every DERIVED column below is emitted VERBATIM from the ONE declaration in
 -- app/pullRequestReadModel.ts (`pullRequestReadModel.sqlSelectFor(col, { baseAlias: "pr" })`) — the
@@ -45,6 +46,7 @@ SELECT
   pr.last_round_head AS last_round_head,
   pr.last_progress_job_key AS last_progress_job_key,
   pr.last_progress_result AS last_progress_result,
+  pr.last_progress_agent_watermark AS last_progress_agent_watermark,
   pr.root_request_key AS root_request_key,
   pr.epic_phase_label AS epic_phase_label,
   pr.acknowledged_at AS acknowledged_at,

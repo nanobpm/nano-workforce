@@ -36,18 +36,45 @@ type Out = WorkerOutputs["pr.progress-check"];
 // the PR carries NO head ref at all.
 export type HeadReader = (repo: string, prNumber: number) => Promise<string | null>;
 
+/** The outcome of an agent-work corroboration, optionally carrying the ATTEMPT WATERMARK it
+ * consumed. `work` is the husk verdict decideProgress routes on (`true` no-advance / `false` husk /
+ * `null` unknown). `consumedKey` — when present — is the greatest `review-round` instance key this
+ * read has now ACCOUNTED FOR; the handler persists it (`last_progress_agent_watermark`) so the NEXT
+ * round can tell a freshly-registered attempt from a historical one (see {@link agentWorkFromEngine}
+ * and Copilot PR #789). A bare `boolean | null` return (the injected test readers) carries no
+ * watermark and leaves the persisted one untouched. */
+export interface AgentWorkObservation {
+  readonly work: boolean | null;
+  readonly consumedKey?: string | null;
+}
+
 // Corroborates whether a no-advance `addressed` round produced DURABLE agent work: `true` when the
 // completing `review-round` element-instance ran to a terminal agent-instance (→ `no-advance`),
-// `false` when the completing attempt husked — a non-terminal `review-round` instance is present
-// (→ `husk`), `null` when the read is UNAVAILABLE (the engine has no AgentInstance channel, or the
-// read threw → `no-advance`, never an auto-retry). Injectable for tests; the default is
-// availability-aware over the engine's AgentInstance channel (see {@link agentWorkFromEngine}). The
-// `round` argument is retained for the reader contract but no longer participates in the decision —
-// correlation is by the COMPLETING element-instance, not an aggregate round count (#786).
+// `false` when the completing attempt husked — a non-terminal `review-round` instance is present, OR
+// the completing attempt registered NO instance at all on a channel-present engine (→ `husk`),
+// `null` when the read is UNAVAILABLE (the engine has no AgentInstance channel, or the read threw →
+// `no-advance`, never an auto-retry). May return a bare verdict or an {@link AgentWorkObservation}
+// that also carries the consumed attempt watermark. Injectable for tests; the default is
+// availability- and attempt-aware over the engine's AgentInstance channel (see {@link
+// agentWorkFromEngine}). `priorWatermark` is the greatest `review-round` instance key an earlier
+// progress-check already accounted for, so a current pre-registration husk is not masked by a prior
+// round's terminal instance. The `round` argument is retained for the reader contract but no longer
+// participates in the decision — correlation is by the COMPLETING element-instance, not an aggregate
+// round count (#786).
 export type AgentWorkReader = (
   processInstanceKey: string | null | undefined,
   round: number,
-) => Promise<boolean | null>;
+  priorWatermark?: string | null,
+) => Promise<boolean | null | AgentWorkObservation>;
+
+/** Normalize a reader's return (a bare verdict, or a full {@link AgentWorkObservation}) to the
+ * observation shape the handler threads: an injected `boolean | null` carries no watermark. */
+function normalizeAgentWork(raw: boolean | null | AgentWorkObservation | undefined): AgentWorkObservation {
+  if (raw === true || raw === false || raw === null || raw === undefined) {
+    return { work: raw ?? null };
+  }
+  return raw;
+}
 
 /** Build the default head reader over injected GitHub fetchers. Exported (with injectable fetchers)
  * so the branch-ref-over-stale-`head.sha` preference — the whole point of {@link fetchBranchHead}
@@ -139,24 +166,31 @@ function recencyKey(s: AgentInstanceSummary): bigint {
  *    process husking before registering, with zero prior instances anywhere, is indistinguishable
  *    from an absent channel and fails safe to `no-advance` — a human resume, not a wedge.)
  *
- *  • CORRELATION to the COMPLETING element-instance: once the channel is known present, classify
- *    ONLY the most-recently-created `review-round` instance — the one with the greatest monotonic
- *    engine key (its `elementInstanceKeys`, else its `agentInstanceKey`; see {@link recencyKey}).
- *    Each attempt (initial, review-loop, answer-loop resume, husk retry) re-enters `review-round` as
- *    a FRESH element-instance, so the newest instance IS the completing attempt. Classifying only it
- *    — rather than aggregating `.every(isTerminalInstance)` over ALL historical instances — is what
- *    correlates the verdict to the completing invocation: a stale non-terminal instance left by an
- *    EARLIER husked attempt can no longer drag an otherwise-terminal current attempt into a false
- *    husk, and a terminal earlier attempt in the same round can no longer mask a current husk. The
- *    newest terminal ⇒ `no-advance` (`true`); the newest non-terminal ⇒ the completing attempt
- *    husked (`false`). Round-INDEPENDENT, so a same-round human-answered resume is classified on its
- *    OWN fresh attempt (the worker.ts:105 correlation defect #786 flagged).
+ *  • CORRELATION to the COMPLETING attempt via an ATTEMPT WATERMARK (Copilot PR #789). Once the
+ *    channel is known present, the newest `review-round` instance is NOT necessarily the completing
+ *    attempt: because a pre-registration husk mints NOTHING, a current attempt that husks before
+ *    registering leaves the newest instance pointing at an EARLIER, terminal attempt — which, read
+ *    naively, would classify as `no-advance` and bypass the bounded husk retry. So the completing
+ *    attempt is correlated against `priorWatermark`: the greatest `review-round` instance key an
+ *    earlier progress-check already accounted for. (a) A `review-round` instance NEWER than the
+ *    watermark exists ⇒ the current attempt DID register ⇒ classify that newest instance — terminal
+ *    ⇒ `no-advance` (`true`), non-terminal ⇒ the completing attempt husked (`false`) — and consume
+ *    it (advance the watermark to its key). (b) NO instance newer than the watermark ⇒ the current
+ *    attempt registered nothing new ⇒ it husked pre-registration ⇒ `husk` (`false`, auto-retry),
+ *    leaving the watermark where it is. Each attempt (initial, review-loop, answer-loop resume, husk
+ *    retry) re-enters `review-round` as a FRESH element-instance with a strictly greater monotonic
+ *    key (its `elementInstanceKeys`, else its `agentInstanceKey`; see {@link recencyKey}), so "newer
+ *    than the watermark" is exactly "a not-yet-accounted-for attempt". A stale terminal instance
+ *    from an earlier attempt can therefore neither fabricate nor mask a current husk. The watermark
+ *    is maintained on EVERY addressed round with a readable head (including progressing rounds), so a
+ *    progressing round's fresh instance is consumed and can't be mistaken for the next round's
+ *    completing attempt.
  *
  * Any read FAILURE degrades to `null` (unknown → `no-advance`, never an auto-retry), so a transient
  * read outage can never duplicate genuinely-completed agent work. */
 function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
-  return async (processInstanceKey, _round) => {
-    if (!processInstanceKey) return null;
+  return async (processInstanceKey, _round, priorWatermark): Promise<AgentWorkObservation> => {
+    if (!processInstanceKey) return { work: null };
     try {
       const instances = await engine.searchAgentInstances({
         processInstanceKey: String(processInstanceKey),
@@ -171,12 +205,9 @@ function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
         const anyInProcess = await engine.searchAgentInstances({
           processInstanceKey: String(processInstanceKey),
         });
-        return anyInProcess.length === 0 ? null : false;
+        return { work: anyInProcess.length === 0 ? null : false };
       }
-      // Correlate to the COMPLETING attempt: the most-recently-created instance (greatest monotonic
-      // engine key). Its terminality is the verdict — newest terminal ⇒ no-advance (`true`); newest
-      // non-terminal ⇒ the completing attempt husked (`false`). Older instances are ignored so a
-      // stale prior attempt can neither fabricate nor mask a husk.
+      // Find the newest `review-round` instance (greatest monotonic engine key).
       let newest = instances[0];
       let newestKey = recencyKey(newest);
       for (const inst of instances) {
@@ -186,9 +217,20 @@ function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
           newestKey = k;
         }
       }
-      return isTerminalInstance(newest);
+      // ATTEMPT-WATERMARK correlation (Copilot #789): only an instance NEWER than the watermark is
+      // the current, not-yet-accounted-for attempt. If none is newer, the completing attempt
+      // registered nothing new — it husked before registering — even though a stale terminal instance
+      // from an earlier attempt is still present. That is a genuine husk (auto-retry), NOT a
+      // no-advance; classifying `newest` naively here would wrongly escalate it.
+      const prior = engineKey(priorWatermark);
+      if (newestKey <= prior) {
+        return { work: false, consumedKey: priorWatermark ?? null };
+      }
+      // A fresh attempt registered: classify it (terminal ⇒ no-advance, non-terminal ⇒ husk) and
+      // consume it so the next round can distinguish the attempt AFTER it from this one.
+      return { work: isTerminalInstance(newest), consumedKey: newestKey.toString() };
     } catch {
-      return null;
+      return { work: null };
     }
   };
 }
@@ -211,6 +253,7 @@ export function makeHandler(deps: {
       updated_at: string | null;
       last_progress_job_key: string | null;
       last_progress_result: string | null;
+      last_progress_agent_watermark: string | null;
     }>("pull_requests", "pr_key");
     const row = await prs.get(prKey);
 
@@ -237,7 +280,7 @@ export function makeHandler(deps: {
     // here resolves it, and the poller never sees a transient `waiting_review` for a husk-retry round.
     const commit = async (
       out: Out,
-      opts: { head?: string | null; status?: "waiting_review" | "converging" },
+      opts: { head?: string | null; status?: "waiting_review" | "converging"; agentWatermark?: string | null },
     ): Promise<Out> => {
       const ts = new Date().toISOString();
       await prs.update(prKey, {
@@ -246,6 +289,11 @@ export function makeHandler(deps: {
         ...(opts.head ? { last_round_head: opts.head } : {}),
         ...(opts.status === "waiting_review" ? { status: "waiting_review", waiting_since: ts } : {}),
         ...(opts.status === "converging" ? { status: "converging" } : {}),
+        // Advance the attempt watermark ONLY when an agent-work read consumed a `review-round`
+        // instance (Copilot #789); `undefined` leaves the persisted watermark untouched (an
+        // unreadable head, a non-addressed round, or an injected bare-verdict reader), so the next
+        // round still correlates against the last real attempt.
+        ...(opts.agentWatermark !== undefined ? { last_progress_agent_watermark: opts.agentWatermark } : {}),
         ...(jobKey ? { last_progress_job_key: jobKey, last_progress_result: JSON.stringify(out) } : {}),
         updated_at: ts,
       });
@@ -285,16 +333,23 @@ export function makeHandler(deps: {
     // longer gates the agent-work corroboration (correlation is by the completing element-instance,
     // not an aggregate round count — #786); it only tunes the human-facing escalation question.
     const roundNo = typeof round === "number" && round > 0 ? Math.floor(round) : 1;
-    // Corroborate durable agent work whenever we are on a potential no-progress path: an addressed
-    // round whose head did NOT advance, OR a no-BASELINE addressed round (previousHead null) whose
-    // head is readable — the latter so a first-addressed-round husk can be corroborated head-
-    // independently (#786 first-round-husk gap). An advanced head, or an unreadable current head,
-    // needs no read (the decision fails open regardless), so the engine read is not wasted there.
+    // Corroborate durable agent work on EVERY addressed round with a READABLE head — not only the
+    // no-advance path. The husk verdict itself is only consulted when the head did not advance (or on
+    // a no-baseline round — the #786 first-round-husk gap), but the read must also run on a
+    // PROGRESSING round to MAINTAIN THE ATTEMPT WATERMARK (Copilot #789): a progressing round
+    // registers a fresh `review-round` instance that must be CONSUMED, else the next round's
+    // pre-registration husk would see that stale terminal instance as "newer than the watermark" and
+    // mis-escalate as no-advance. An unreadable current head skips the read (the decision fails open
+    // regardless and there is nothing to correlate).
     const readAgentWork = deps.readAgentWork ?? agentWorkFromEngine(app.engine);
-    const agentWorkObserved =
-      currentHead && (!previousHead || currentHead === previousHead)
-        ? await readAgentWork(job.processInstanceKey, roundNo).catch(() => null)
-        : null;
+    const priorWatermark = row?.last_progress_agent_watermark ?? null;
+    const observation = currentHead
+      ? normalizeAgentWork(await readAgentWork(job.processInstanceKey, roundNo, priorWatermark).catch(() => null))
+      : normalizeAgentWork(null);
+    const agentWorkObserved = observation.work;
+    // The watermark to persist: the key this read consumed (a fresh attempt), else undefined so the
+    // stored one is left untouched (an unreadable head or an injected bare-verdict reader).
+    const agentWatermark = observation.consumedKey;
 
     const decision = decideProgress(
       status,
@@ -320,18 +375,18 @@ export function makeHandler(deps: {
       // keep the PR on the running `converging` aggregate: the poller must see an in-flight round,
       // not a `waiting_review` it would solicit a spurious Copilot review for (and pollJobActivation
       // treats only `converging` as live).
-      return commit(out, { head: currentHead, status: "converging" });
+      return commit(out, { head: currentHead, status: "converging", agentWatermark });
     }
     if (decision.progressed) {
       // Genuine progress → the loop parks at wait-review. THIS is the review-wait park, written only
       // once the husk retry has been ruled out, so a husk-retry round never transits `waiting_review`.
-      return commit(out, { head: currentHead, status: "waiting_review" });
+      return commit(out, { head: currentHead, status: "waiting_review", agentWatermark });
     }
     // The remaining outcome (progressed:false, huskRetry:false) escalates to a human; the
     // persist-escalation-noprogress worker owns the status, so leave it unset — but still advance the
     // baseline and stamp the idempotency record so a redelivered escalation replays instead of
     // recomputing.
-    return commit(out, { head: currentHead });
+    return commit(out, { head: currentHead, agentWatermark });
   };
 }
 

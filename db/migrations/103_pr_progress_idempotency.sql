@@ -15,9 +15,15 @@
 --
 --   • last_progress_job_key  — the engine job key of the last progress-check that committed a write.
 --   • last_progress_result   — that job's serialized `PrProgressCheckOut` (JSON), replayed verbatim.
+--   • last_progress_agent_watermark — the greatest `review-round` AgentInstance key an earlier
+--     progress-check has ALREADY accounted for (Copilot PR #789). It lets the next round distinguish
+--     a freshly-registered `review-round` attempt from a historical one, so a CURRENT attempt that
+--     husks BEFORE the worker registers its AgentInstance is classified as a husk (bounded auto-
+--     retry) instead of being masked by a prior round's terminal instance and mis-escalated.
 --
--- Forward-only, additive (expand): both columns are nullable with no default. Numbered after the
+-- Forward-only, additive (expand): all columns are nullable with no default. Numbered after the
 -- current highest prefix (102); the runner wraps each file in its own transaction, so this file must
 -- NOT contain BEGIN/COMMIT.
 ALTER TABLE pull_requests ADD COLUMN last_progress_job_key TEXT;
 ALTER TABLE pull_requests ADD COLUMN last_progress_result TEXT;
+ALTER TABLE pull_requests ADD COLUMN last_progress_agent_watermark TEXT;
