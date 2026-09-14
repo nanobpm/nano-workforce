@@ -248,6 +248,7 @@ export function makeHandler(deps: {
 
     const prs = app.data.table<{
       pr_key: string;
+      process_key: string | null;
       last_round_head: string | null;
       status: string | null;
       updated_at: string | null;
@@ -283,6 +284,22 @@ export function makeHandler(deps: {
       opts: { head?: string | null; status?: "waiting_review" | "converging"; agentWatermark?: string | null },
     ): Promise<Out> => {
       const ts = new Date().toISOString();
+      // PROCESS-INSTANCE FENCE (Copilot #789). A straggler progress-check from a SUPERSEDED
+      // convergence instance can slip past the replay guard (its idempotency stamp was cleared when
+      // `submitPr` re-opened the PR) and reach here AFTER `submitPr` has reset the per-run fields and
+      // started a NEW convergence instance. Its stale baseline / status / watermark / result must not
+      // clobber the fresh run (which could be parked on `waiting_review` or replay stale output).
+      // Re-read the row's CURRENT owner immediately before the write and drop the write when this
+      // job's own `processInstanceKey` no longer owns the row — the straggler's token lives in a
+      // terminated instance, so acking without persisting is correct. Fail open when either key is
+      // absent (an older instance, or a row whose `process_key` is not yet seeded) so normal
+      // single-run behaviour is untouched. Compare as strings — `process_key` is persisted via
+      // `String(processInstanceKey)`, and a job key can arrive numeric.
+      const currentOwner = (await prs.get(prKey))?.process_key ?? null;
+      const jobOwner = job.processInstanceKey ?? null;
+      if (currentOwner && jobOwner && String(currentOwner) !== String(jobOwner)) {
+        return out;
+      }
       await prs.update(prKey, {
         // Only overwrite the baseline when we actually read a head, so a null (unreadable) head
         // never clobbers a good `last_round_head`.
@@ -319,28 +336,23 @@ export function makeHandler(deps: {
     const currentHead = await deps.readHead(ghRepo, ghNumber).catch(() => null);
     const previousHead = row?.last_round_head ?? null;
 
-    // Only an `addressed` round claims a push, so only it can be a no-progress round — and a
-    // blank/unknown status counts as `addressed` here (gw-status defaults it down the addressed arm
-    // and pr.persist-round records a missing status as `addressed`), so it is the safe-default trap
-    // this guard exists for. An explicitly recognized non-addressed status (`waiting`, etc.)
-    // legitimately has no push and always continues to the review wait — after the baseline write.
-    // Park it for review (persist-round no longer does).
-    if (!isAddressedStatus(status)) {
-      return commit({ progressed: true, huskRetries: 0 }, { head: currentHead, status: "waiting_review" });
-    }
-
     // Round numbers are 1-based; coerce a missing/invalid `round` to a positive 1. The round no
     // longer gates the agent-work corroboration (correlation is by the completing element-instance,
     // not an aggregate round count — #786); it only tunes the human-facing escalation question.
     const roundNo = typeof round === "number" && round > 0 ? Math.floor(round) : 1;
-    // Corroborate durable agent work on EVERY addressed round with a READABLE head — not only the
-    // no-advance path. The husk verdict itself is only consulted when the head did not advance (or on
-    // a no-baseline round — the #786 first-round-husk gap), but the read must also run on a
-    // PROGRESSING round to MAINTAIN THE ATTEMPT WATERMARK (Copilot #789): a progressing round
-    // registers a fresh `review-round` instance that must be CONSUMED, else the next round's
-    // pre-registration husk would see that stale terminal instance as "newer than the watermark" and
-    // mis-escalate as no-advance. An unreadable current head skips the read (the decision fails open
-    // regardless and there is nothing to correlate).
+    // Corroborate durable agent work on EVERY round with a READABLE head — the addressed rounds AND
+    // the non-addressed `waiting` round — not only the no-advance path. The husk verdict itself is
+    // only consulted when the head did not advance (or on a no-baseline round — the #786
+    // first-round-husk gap), but the read must ALSO run to MAINTAIN THE ATTEMPT WATERMARK (Copilot
+    // #789): every round runs `review-round` BEFORE this progress-check
+    // (`…→review-round→gw-status→…→check-progress`), registering a fresh `review-round` instance that
+    // must be CONSUMED into the watermark, else the NEXT round's pre-registration husk would see that
+    // stale terminal instance as "newer than the watermark" and mis-escalate as no-advance. This
+    // includes the `waiting` round (Copilot #789 worker.ts:329): a `waiting` round's own review runs
+    // and can leave a terminal instance, so if its progress-check returned early WITHOUT consuming it,
+    // the first addressed round's pre-registration husk would inherit that unconsumed terminal
+    // instance and bypass the bounded husk retry. An unreadable current head skips the read (the
+    // decision fails open regardless and there is nothing to correlate).
     const readAgentWork = deps.readAgentWork ?? agentWorkFromEngine(app.engine);
     const priorWatermark = row?.last_progress_agent_watermark ?? null;
     const observation = currentHead
@@ -350,6 +362,20 @@ export function makeHandler(deps: {
     // The watermark to persist: the key this read consumed (a fresh attempt), else undefined so the
     // stored one is left untouched (an unreadable head or an injected bare-verdict reader).
     const agentWatermark = observation.consumedKey;
+
+    // Only an `addressed` round claims a push, so only it can be a no-progress round — and a
+    // blank/unknown status counts as `addressed` here (gw-status defaults it down the addressed arm
+    // and pr.persist-round records a missing status as `addressed`), so it is the safe-default trap
+    // this guard exists for. An explicitly recognized non-addressed status (`waiting`, etc.)
+    // legitimately has no push and always continues to the review wait — after the baseline write.
+    // Park it for review (persist-round no longer does), but still advance the attempt watermark so a
+    // following addressed husk isn't masked by this round's own review instance (Copilot #789).
+    if (!isAddressedStatus(status)) {
+      return commit(
+        { progressed: true, huskRetries: 0 },
+        { head: currentHead, status: "waiting_review", agentWatermark },
+      );
+    }
 
     const decision = decideProgress(
       status,

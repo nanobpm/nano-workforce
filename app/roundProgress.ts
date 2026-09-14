@@ -74,12 +74,16 @@ export function routeProgress(
 // A no-advance `addressed` round is not one failure mode but two, and they warrant different
 // handling:
 //
-//  • `husk` — the agent job completed reporting `addressed`, but minted NO durable work: no commit
-//    was pushed AND no `review-round` agent-instance ever reached a terminal state (the producer
-//    harness died mid-run, so the round is a phantom — jwulf/c8ctl-plugin-nano#230/#229). This is a
-//    transient worker/harness defect, not a real design impasse, so it is *resumable onto a healthy
-//    worker*: re-run the SAME round rather than parking a human. Bounded by {@link MAX_HUSK_RETRIES}
-//    so a persistently-husking worker still escalates instead of looping forever.
+//  • `husk` — the agent job completed reporting `addressed`, but the COMPLETING attempt minted NO
+//    durable work: no commit was pushed AND the round's completing `review-round` agent-instance did
+//    not reach a terminal state — either it registered a non-terminal instance, or it husked before
+//    registering any instance at all (the producer harness died mid-run, so the round is a phantom —
+//    jwulf/c8ctl-plugin-nano#230/#229). The verdict is scoped to the completing attempt via the
+//    attempt watermark (Copilot #789), so an EARLIER attempt's terminal instance neither masks nor
+//    fabricates this one. This is a transient worker/harness defect, not a real design impasse, so it
+//    is *resumable onto a healthy worker*: re-run the SAME round rather than parking a human. Bounded
+//    by {@link MAX_HUSK_RETRIES} so a persistently-husking worker still escalates instead of looping
+//    forever.
 //
 //  • `no-advance` — the agent DID run to a terminal agent-instance but pushed no commit (it genuinely
 //    believes nothing was needed, or is wrong about the code). Re-running would loop on identical

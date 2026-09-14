@@ -212,16 +212,23 @@ function fakeApp(
 
 async function makeUnderTest(
   readHead: (repo: string, n: number) => Promise<string | null>,
-  readAgentWork?: (pik: string | null | undefined, round: number) => Promise<boolean | null>,
+  readAgentWork?: (
+    pik: string | null | undefined,
+    round: number,
+    priorWatermark?: string | null,
+  ) => Promise<boolean | null | { work: boolean | null; consumedKey?: string | null }>,
 ) {
   const { makeHandler } = await import("../workers/progress-check/worker.ts");
   return makeHandler(readAgentWork ? { readHead, readAgentWork } : { readHead });
 }
 
-test("progress-check: a non-addressed round records the baseline but never escalates or reads agent-work", async () => {
+test("progress-check: a non-addressed round records the baseline and consumes the attempt watermark but never escalates", async () => {
   // Post-#786 the head read + baseline write happen for EVERY round (so the first `addressed` round
-  // has a baseline to compare against), but a non-addressed `waiting` round still short-circuits to
-  // progressed:true and never consults the agent-work channel.
+  // has a baseline to compare against). Post-#789 (worker.ts:329) a non-addressed `waiting` round
+  // ALSO consults the agent-work channel — its own review runs BEFORE this progress-check, so it must
+  // CONSUME that review-round instance into the attempt watermark, else a following addressed
+  // pre-registration husk would see the stale terminal instance as "newer than the watermark" and
+  // bypass the bounded husk retry. It still short-circuits to progressed:true and never escalates.
   let called = false;
   let agentReads = 0;
   const handler = await makeUnderTest(
@@ -231,21 +238,29 @@ test("progress-check: a non-addressed round records the baseline but never escal
     },
     async () => {
       agentReads++;
-      return false;
+      // The waiting round's own review-round left a terminal instance keyed "9"; the reader reports
+      // it consumed (its verdict is irrelevant on the non-addressed path).
+      return { work: true, consumedKey: "9" };
     },
   );
   const { app, updates } = fakeApp({ last_round_head: "sha-1" });
   const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "waiting", repo: "o/r", prNumber: 1 } } as any, app as any);
   assertEquals(out, { progressed: true, huskRetries: 0 });
   assertEquals(called, true, "a waiting round reads the head to seed the baseline");
-  assertEquals(agentReads, 0, "but never consults the agent-work channel");
-  // ONE atomic write now (Copilot #789): the baseline head advance and the review-wait PARK are
-  // folded into a single row update so a redelivery can't observe a half-state. persist-round no
-  // longer parks — pr.progress-check is the single writer of `waiting_review` (#786).
+  assertEquals(agentReads, 1, "and consults the agent-work channel to consume its own review instance");
+  // ONE atomic write now (Copilot #789): the baseline head advance, the review-wait PARK, and the
+  // attempt-watermark advance are folded into a single row update so a redelivery can't observe a
+  // half-state. persist-round no longer parks — pr.progress-check is the single writer of
+  // `waiting_review` (#786).
   assertEquals(updates.length, 1, "records the baseline and parks for review in one atomic write");
   assertEquals(updates[0]!.patch.last_round_head, "sha-2", "the observed head is the new baseline");
   assertEquals(updates[0]!.patch.status, "waiting_review", "the round parks for review");
   assertEquals(typeof updates[0]!.patch.waiting_since, "string", "and stamps the review-wait start");
+  assertEquals(
+    updates[0]!.patch.last_progress_agent_watermark,
+    "9",
+    "the waiting round consumes its own review instance into the watermark (Copilot #789 worker.ts:329)",
+  );
 });
 
 test("progress-check: a blank/unknown status is treated as addressed — reads the head and can report no progress", async () => {
@@ -594,6 +609,40 @@ test("progress-check default reader: a NEW terminal attempt past the watermark �
   assertEquals(wm, "200", "consuming a fresh attempt advances the watermark");
 });
 
+test("progress-check: a straggler from a SUPERSEDED process instance does NOT write into the re-opened row (process-instance fence #789)", async () => {
+  // Copilot #789 (worker.ts:290): after `submitPr` re-opens a PR it clears the per-run fields
+  // (including the idempotency stamp) and starts a NEW convergence instance, setting the row's
+  // `process_key` to that new instance. An OLD progress-check job from the SUPERSEDED instance can
+  // slip past the (now-cleared) replay guard and reach `commit`; writing its stale baseline / status
+  // / watermark would clobber the fresh run. The commit re-reads the row's current `process_key` and
+  // drops the write when the job's own `processInstanceKey` no longer owns the row.
+  const handler = await makeUnderTest(async () => "sha-stale", async () => true);
+  const { app, updates } = fakeApp({ last_round_head: "sha-new", process_key: "PI-NEW" });
+  const out = await handler(
+    // The straggler job belongs to the OLD instance PI-OLD, but the row is now owned by PI-NEW.
+    { jobKey: "job-old", processInstanceKey: "PI-OLD", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0 } } as any,
+    app as any,
+  );
+  // The job still ACKs with a computed outcome (its token lives in a terminated instance), but it
+  // must persist NOTHING — the fresh run's row is untouched.
+  assertEquals(updates.length, 0, "the superseded straggler writes nothing into the re-opened row");
+  assertEquals(typeof out.progressed, "boolean", "the straggler still returns an outcome to ACK");
+});
+
+test("progress-check: a job whose processInstanceKey OWNS the row still writes normally (fence fails open on match)", async () => {
+  // The complement of the fence: when the job's `processInstanceKey` matches the row's current
+  // `process_key`, the write proceeds exactly as before — the fence only drops a SUPERSEDED straggler.
+  const handler = await makeUnderTest(async () => "sha-2");
+  const { app, updates } = fakeApp({ last_round_head: "sha-1", process_key: "PI-CURRENT" });
+  const out = await handler(
+    { processInstanceKey: "PI-CURRENT", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2 } } as any,
+    app as any,
+  );
+  assertEquals(out.progressed, true, "the owning job progresses");
+  assertEquals(updates.length, 1, "the owning job writes its baseline/park normally");
+  assertEquals(updates[0]!.patch.last_round_head, "sha-2");
+});
+
 // ── Structural guard over the committed BPMN (no engine) ─────────────────────
 
 const bpmn = readFileSync("resources/processes/convergence-loop.bpmn", "utf8");
@@ -653,6 +702,25 @@ test("gw-husk auto-retries a husk back into review-round, and defaults to the hu
   const reviewRound = flat.match(/<bpmn:serviceTask\b[^>]*\bid="review-round"[^>]*>.*?<\/bpmn:serviceTask>/);
   assert(reviewRound, "review-round task missing");
   assertStringIncludes(reviewRound[0], "<bpmn:incoming>f_huskRetry</bpmn:incoming>");
+});
+
+test("record-answer resets huskRetries on every human resume (Copilot #789)", () => {
+  // #789 worker.ts:172: `huskRetries` is a process variable bounding the husk auto-retry chain. Every
+  // escalation resume funnels through the SINGLE chokepoint gw-escalated → wait-answer → record-answer
+  // → review-round, so record-answer must reset the counter to 0 — otherwise a fresh review attempt
+  // after a human intervention inherits a `huskRetries` a prior escalation left at MAX and the next
+  // husk escalates immediately with no self-heal. Scoping the reset here bounds the counter to one
+  // uninterrupted husk-retry chain.
+  const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="record-answer"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(task, "record-answer task missing");
+  assertStringIncludes(task[0], 'source="=0"');
+  assertStringIncludes(task[0], 'target="huskRetries"');
+  // record-answer is the loop-back into review-round (the human-resume chokepoint the reset guards).
+  assertStringIncludes(task[0], "<bpmn:outgoing>f_answerLoop</bpmn:outgoing>");
+  const loop = flowElement("f_answerLoop");
+  assert(loop, "f_answerLoop flow missing");
+  assertStringIncludes(loop, 'sourceRef="record-answer"');
+  assertStringIncludes(loop, 'targetRef="review-round"');
 });
 
 test("gw-progress default arm re-enters the review wait with no condition", () => {
