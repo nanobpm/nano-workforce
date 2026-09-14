@@ -89,6 +89,7 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
           title: "old title",
           status: "abandoned", // terminal -> re-open path
           current_round: 3,
+          last_round_head: "stale-sha-from-prior-run",
         }],
         key: "pr_key",
       },
@@ -120,6 +121,10 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
     const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
     assertEquals(pr.status, "converging");
     assertEquals(pr.current_round, 1);
+    // The no-progress head baseline is scoped to the prior run; a fresh run must clear it so the
+    // first addressed round is compared from a clean slate and the bounded husk retry isn't bypassed
+    // when the branch changed between runs (#786).
+    assertEquals(pr.last_round_head, null);
     assertEquals(pr.open_escalation_id, undefined);
     assertEquals(pr.open_escalation_question, undefined);
     assertEquals(pr.process_key, "PI-9");

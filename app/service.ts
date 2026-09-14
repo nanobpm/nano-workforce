@@ -284,6 +284,11 @@ export interface PullRequest {
   // review for this PR, so the nudge is throttled to one attempt per REVIEW_NUDGE_MS window.
   // NULL means never nudged.
   last_nudge_at: string | null;
+  // No-progress head baseline (033_pr_round_head.sql, issue #786): the PR head SHA observed at the
+  // last recorded round, written by pr.progress-check to detect an addressed round that pushed no
+  // commit. Scoped to the current convergence run — cleared on re-open so a resubmission starts from
+  // a clean slate. NULL before the first round is recorded.
+  last_round_head: string | null;
   // Merge-protocol liveness (012_merge_protocol_attempt.sql): head commit last nudged by the
   // frugal-CI fresh-head-run remedy. A rebase changes the head and therefore permits a new nudge.
   fresh_head_run_head: string | null;
@@ -565,6 +570,11 @@ export async function submitPr(
       waiting_since: null,
       last_review_id: null,
       last_nudge_at: null,
+      // Clear the no-progress head baseline: it is scoped to the PRIOR convergence run, and a fresh
+      // run at round 1 must compare its first addressed round against a clean slate. Leaving a stale
+      // `last_round_head` lets a resubmission whose branch changed read `currentHead !== previousHead`
+      // on its first husked round, mis-route it as progress, and bypass the bounded husk retry (#786).
+      last_round_head: null,
       outcome: null,
       converged_at: null,
       merged_at: null,
