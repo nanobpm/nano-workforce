@@ -25,6 +25,13 @@ export interface ConvergeGateInput {
 export interface ConvergeGateResult {
   convergeBlocked: boolean;
   convergeBlockReason: string;
+  /** True when the block is caused SOLELY by unacknowledged suppressed advisories (no unresolved
+   * review threads). This is the recoverable case the loop can auto-ack: re-dispatching the
+   * review-round agent posts the missing `nano-ack:` threads and converges, so the process routes an
+   * ack-only block through a bounded agent auto-ack step BEFORE the human `wait-answer` (issue #796).
+   * A block that includes any unresolved inline thread (which needs the round agent's code/reply
+   * work) is NOT ack-only and escalates to a human as before. Always false when not blocked. */
+  ackOnly: boolean;
 }
 
 /** Decide whether a self-reported "converged" round may proceed to finalize. Pure; the worker
@@ -46,10 +53,13 @@ export function evaluateConvergeGate(input: ConvergeGateInput): ConvergeGateResu
     reasons.push(`${unacked.length} unacknowledged suppressed ${noun} (${unacked.map((a) => a.label).join(", ")})`);
   }
   if (reasons.length === 0) {
-    return { convergeBlocked: false, convergeBlockReason: "" };
+    return { convergeBlocked: false, convergeBlockReason: "", ackOnly: false };
   }
   return {
     convergeBlocked: true,
     convergeBlockReason: `Convergence blocked: ${reasons.join("; ")}. Resolve every review thread and reply-and-resolve an ack thread (nano-ack: <path> :: <verbatim advisory text>) for each suppressed advisory before converging.`,
+    // Ack-only iff the sole block reason is unacked suppressed advisories — no unresolved inline
+    // threads. Only this case is auto-recoverable by re-dispatching the review-round agent (#796).
+    ackOnly: input.unresolvedThreadCount === 0 && unacked.length > 0,
   };
 }

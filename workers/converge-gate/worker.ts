@@ -73,22 +73,23 @@ export function makeHandler(deps: {
     const ghRepo = repo ?? parsed?.repo;
     const ghNumber = typeof prNumber === "number" ? prNumber : parsed?.number;
     if (!ghRepo || typeof ghNumber !== "number") {
-      return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
+      return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false };
     }
 
     let result: ConvergeGateResult;
     try {
       const threads = await deps.readThreads(ghRepo, ghNumber);
       // A null threads read is an unverifiable gate — fail closed. (An empty ARRAY is a verified
-      // "no threads" and is fine.)
+      // "no threads" and is fine.) An unverifiable block is NOT ack-only: it needs a human to
+      // confirm GitHub state, so it must not enter the bounded agent auto-ack path (#796).
       if (threads === null) {
-        return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
+        return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false };
       }
       const reviewBody = await deps.readReviewBody(ghRepo, ghNumber);
       // A null review body is an unverifiable read (no usable transport) — fail closed, same as a
       // null threads read. (An empty STRING is a verified "no Copilot review / no advisories".)
       if (reviewBody === null) {
-        return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
+        return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false };
       }
       const unresolvedThreadCount = threads.filter((t) => !t.isResolved).length;
       const advisories = parseSuppressedAdvisories(reviewBody);
@@ -98,12 +99,15 @@ export function makeHandler(deps: {
         acknowledgedKeys: parseAckedAdvisories(threads),
       });
     } catch {
-      return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
+      return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false };
     }
 
     return {
       convergeBlocked: result.convergeBlocked,
       convergeBlockReason: result.convergeBlockReason,
+      // Signals the bounded agent auto-ack path (#796): a block whose sole cause is unacked
+      // suppressed advisories re-dispatches the review-round agent before escalating to a human.
+      convergeAckOnly: result.ackOnly,
     };
   };
 }

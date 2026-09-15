@@ -125,8 +125,9 @@ test("convergence-loop golden has arbitrary-graph features the structured builde
     const body = rest.slice(0, close);
     return (body.match(new RegExp(`<bpmn:${tag}\\b`, "g")) ?? []).length;
   };
-  // (a) the loop head is a serviceTask that MERGES three back-edges directly.
-  assertEquals(between("review-round", "serviceTask", "incoming"), 3, "review-round should merge 3 flows on the task itself");
+  // (a) the loop head is a serviceTask that MERGES its back-edges directly. It now merges FOUR:
+  // f_start, f_reviewLoop, f_answerLoop, and the bounded auto-ack re-entry f_ackRetry (#796).
+  assertEquals(between("review-round", "serviceTask", "incoming"), 4, "review-round should merge 4 flows on the task itself");
   // (b) a single exclusive gateway forks FOUR heterogeneous-condition out-edges.
   assertEquals(between("gw-status", "exclusiveGateway", "outgoing"), 4, "gw-status should be a 4-way exclusive gateway");
   // (c) a single exclusive gateway is at once a 6-way merge and a 2-way split.

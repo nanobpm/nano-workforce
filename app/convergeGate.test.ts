@@ -28,12 +28,15 @@ test("evaluateConvergeGate: a clean PR (no unresolved threads, no advisories) co
   const r = evaluateConvergeGate({ unresolvedThreadCount: 0, suppressedAdvisories: [], acknowledgedKeys: [] });
   assertEquals(r.convergeBlocked, false);
   assertEquals(r.convergeBlockReason, "");
+  assertEquals(r.ackOnly, false);
 });
 
 test("evaluateConvergeGate: an unresolved review thread blocks convergence", () => {
   const r = evaluateConvergeGate({ unresolvedThreadCount: 2, suppressedAdvisories: [], acknowledgedKeys: [] });
   assertEquals(r.convergeBlocked, true);
   assertStringIncludes(r.convergeBlockReason, "2 unresolved review threads");
+  // An unresolved inline thread needs the round agent's code/reply work — NOT ack-only (#796).
+  assertEquals(r.ackOnly, false);
 });
 
 test("evaluateConvergeGate: an unacknowledged suppressed advisory blocks convergence", () => {
@@ -46,6 +49,8 @@ test("evaluateConvergeGate: an unacknowledged suppressed advisory blocks converg
   assertStringIncludes(r.convergeBlockReason, "spec/a.json:613");
   // Singular noun for exactly one advisory (explicit, not "advisor" + "y/ies" concatenation).
   assertStringIncludes(r.convergeBlockReason, "1 unacknowledged suppressed advisory (");
+  // Blocked SOLELY on an unacked advisory → the recoverable, bounded-auto-ack case (#796).
+  assertEquals(r.ackOnly, true);
 });
 
 test("evaluateConvergeGate: an ACKNOWLEDGED suppressed advisory no longer blocks convergence", () => {
@@ -98,6 +103,9 @@ test("evaluateConvergeGate: reports both a thread and an advisory when both are 
   assertStringIncludes(r.convergeBlockReason, "1 unresolved review thread");
   assertStringIncludes(r.convergeBlockReason, "y.ts:20");
   assert(!r.convergeBlockReason.includes("x.ts:10"), "an acknowledged advisory must not be listed");
+  // A mix of an unresolved thread AND an unacked advisory is NOT ack-only — the thread still needs
+  // the round agent's code/reply work, so it escalates to a human as before (#796).
+  assertEquals(r.ackOnly, false);
 });
 
 // ── The parsers (app/github.ts) ─────────────────────────────────────────────
@@ -446,7 +454,7 @@ test("converge-gate: a clean PR is allowed to converge", async () => {
     readReviewBody: async () => "## Overview\nNo suppressed block.",
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "" });
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false });
 });
 
 test("converge-gate: an unresolved thread blocks convergence", async () => {
@@ -457,6 +465,7 @@ test("converge-gate: an unresolved thread blocks convergence", async () => {
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
   assertEquals(out.convergeBlocked, true);
   assertStringIncludes(out.convergeBlockReason ?? "", "unresolved review thread");
+  assertEquals(out.convergeAckOnly, false);
 });
 
 test("converge-gate: an unacknowledged suppressed advisory blocks convergence", async () => {
@@ -467,6 +476,8 @@ test("converge-gate: an unacknowledged suppressed advisory blocks convergence", 
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
   assertEquals(out.convergeBlocked, true);
   assertStringIncludes(out.convergeBlockReason ?? "", "spec-app/nano-app.schema.json:613");
+  // Blocked SOLELY on unacked advisories → ack-only, so the loop auto-acks before a human (#796).
+  assertEquals(out.convergeAckOnly, true);
 });
 
 test("converge-gate: an acknowledged advisory (resolved ack thread) is allowed", async () => {
@@ -488,7 +499,7 @@ test("converge-gate: an acknowledged advisory (resolved ack thread) is allowed",
     readReviewBody: async () => SAMPLE_REVIEW_BODY,
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "" });
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false });
 });
 
 test("converge-gate: FAILS CLOSED when the threads read returns null (no transport)", async () => {
@@ -499,6 +510,8 @@ test("converge-gate: FAILS CLOSED when the threads read returns null (no transpo
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
   assertEquals(out.convergeBlocked, true);
   assertStringIncludes(out.convergeBlockReason ?? "", "could not verify");
+  // An unverifiable block is NOT ack-only — it must go to a human, never the auto-ack path (#796).
+  assertEquals(out.convergeAckOnly, false);
 });
 
 test("converge-gate: FAILS CLOSED when the review-body read returns null (no transport)", async () => {
@@ -544,7 +557,7 @@ test("converge-gate: a non-string prKey does not throw — resolves from repo/pr
     readReviewBody: async () => "",
   });
   const out = await handler({ variables: { repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "" });
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false });
 });
 
 test("converge-gate: FAILS CLOSED (no throw) when prKey is non-string and repo/prNumber are absent", async () => {
@@ -602,8 +615,57 @@ test("check-converge runs the deterministic converge-gate job and feeds gw-conve
 test("gw-converge-gate blocks on an explicit convergeBlocked = true condition", () => {
   const f = flowElement("f_convergeBlocked");
   assert(f, "f_convergeBlocked flow missing");
-  assertStringIncludes(f, 'targetRef="persist-escalation-blockedcomments"');
+  // A block now routes to the bounded auto-ack gateway first (#796), not straight to the human.
+  assertStringIncludes(f, 'targetRef="gw-ack-retry"');
   assertStringIncludes(f, "convergeBlocked = true");
+});
+
+// ── Bounded agent auto-ack before human escalation (#796) ────────────────────
+// A converge-gate block whose SOLE cause is unacked suppressed advisories is recoverable by
+// re-dispatching the review-round agent to post the missing acks. gw-ack-retry sends such an
+// ack-only block back into review-round (bounded by ackRetryMax), and only a non-ack-only block
+// (an unresolved inline thread) or an exhausted budget escalates to the human wait-answer.
+
+test("gw-ack-retry routes an ack-only block (within budget) back into the review-round agent", () => {
+  const gw = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-ack-retry"[^>]*>/);
+  assert(gw, "gw-ack-retry gateway missing");
+  assertStringIncludes(gw[0], 'default="f_ackEscalate"');
+  const retry = flowElement("f_ackRetry");
+  assert(retry, "f_ackRetry flow missing");
+  assertStringIncludes(retry, 'sourceRef="gw-ack-retry"');
+  assertStringIncludes(retry, 'targetRef="review-round"');
+  assertStringIncludes(retry, "convergeAckOnly = true");
+  // Bounded: re-dispatch only while the ack-retry budget is not exhausted.
+  assert(/ackRetryRound &lt;= ackRetryMax|ackRetryRound <= ackRetryMax/.test(retry), "f_ackRetry must be budget-bounded");
+});
+
+test("gw-ack-retry default arm escalates to the human (threads or exhausted budget)", () => {
+  const esc = flowElement("f_ackEscalate");
+  assert(esc, "f_ackEscalate flow missing");
+  assertStringIncludes(esc, 'sourceRef="gw-ack-retry"');
+  assertStringIncludes(esc, 'targetRef="persist-escalation-blockedcomments"');
+  assert(!/conditionExpression/.test(esc), "the escalate arm is the default — no conditionExpression");
+});
+
+test("review-round accepts the ack-retry re-entry flow", () => {
+  const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="review-round"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(task, "review-round task missing");
+  assertStringIncludes(task[0], "<bpmn:incoming>f_ackRetry</bpmn:incoming>");
+});
+
+test("check-converge advances the ack-retry counter only on an ack-only block (bounded)", () => {
+  const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="check-converge"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(task, "check-converge task missing");
+  assertStringIncludes(
+    task[0],
+    "if convergeBlocked = true and convergeAckOnly = true then ackRetryRound + 1 else ackRetryRound",
+  );
+});
+
+test("PrConvergeGateOut carries the convergeAckOnly signal for the auto-ack router", () => {
+  const shape = flat.match(/<nano:shape\b[^>]*\bid="PrConvergeGateOut"[^>]*>.*?<\/nano:shape>/);
+  assert(shape, "PrConvergeGateOut envelope missing");
+  assertStringIncludes(shape[0], 'name="convergeAckOnly"');
 });
 
 test("gw-converge-gate default arm routes to the scope classifier (not straight to finalize)", () => {

@@ -132,6 +132,14 @@ export const ENV_CONTRACTS = {
     semantics: "Maximum transient base/head-moved merge-race retries per PR before escalating.",
     default: "5",
   },
+  NANO_PR_MAX_ACK_RETRIES: {
+    category: "env",
+    name: "NANO_PR_MAX_ACK_RETRIES",
+    owner: "app/service.ts",
+    semantics:
+      "Maximum bounded review-round re-dispatches the convergence loop makes to auto-ack unacked suppressed advisories before escalating to a human (#796); 0 escalates on the first ack-only block.",
+    default: "2",
+  },
   NANO_PR_MAX_MERGE_STALL_ROUNDS: {
     category: "env",
     name: "NANO_PR_MAX_MERGE_STALL_ROUNDS",
