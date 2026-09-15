@@ -101,11 +101,17 @@ known at submit time, carried as a process variable and stored on the DB row.
 │    <gateway: status>
 │      ├── converged  → [Mark converged] → (end: converged)
 │      │
-│      ├── addressed  → [Record round] → <event-based gateway: review ready or timeout?>
-│      │                     ├── readiness-ready (msg catch, key = prKey) → round++ ─┐
-│      │                     └── =reviewWaitTimeout (timer catch)                     │
-│      │                          → [Escalate: review stalled] (blocked)              │
-│      │                          → [Wait: wait-answer userTask] ─────────────────────┤
+│      ├── addressed  → [Record round] → [Check progress] (did the PR head advance?)
+│      │                   ├── progressed → <guard: round ≥ maxRounds → escalate "not converged"> │
+│      │                   │                   → <event-based gateway: review ready or timeout?>   │
+│      │                   │      ├── readiness-ready (msg catch, key = prKey) → round++ ─┐
+│      │                   │      └── =reviewWaitTimeout (timer catch)                    │
+│      │                   │           → [Escalate: review stalled] (blocked)             │
+│      │                   │           → [Wait: wait-answer userTask] ────────────────────┤
+│      │                   └── no progress → <husk? no commit AND no terminal instance>   │
+│      │                          ├── husk & retries < MAX → re-enter [Review round] (bypasses the round-cap guard) │
+│      │                          └── no-advance / husk cap → [Escalate: no progress]      │
+│      │                                     → [Wait: wait-answer userTask] ───────────────────┤
 │      │                                                                             │
 │      └── needs_input     [Record escalation]                       │               │
 │          or blocked  →   (kind = question | blocker)               │               │
@@ -124,8 +130,11 @@ step, then retry the same round with the human's `answer`. They differ only by e
 which the UI uses to label the card. Neither ends the run — a human always gets
 a chance to unblock and resume.
 
-Guard: before each Review round, if round > MAX_ROUNDS → force an escalation
-("not converged after N rounds") so a human decides, rather than looping forever.
+Guard: after progress classification, a **progressing** round with round ≥
+MAX_ROUNDS forces an escalation ("not converged after N rounds") so a human
+decides rather than looping forever. The guard sits *after* `check-progress`
+(not before), so a husk auto-retry — which does not consume a round — bypasses
+the cap and is re-tried onto a healthy worker even on the final configured round.
 ```
 
 Notes:
@@ -149,6 +158,59 @@ Notes:
   backstop when even repeated nudges fail.
 - On `needs_input`, the same `round` is retried after the answer (the answer is
   added to the agent's context; the round number does not advance).
+- **No-progress guard + husk classification (issue #786).** Before the review
+  wait, an `addressed` round passes through `pr.progress-check`
+  (`workers/progress-check/worker.ts`, mirrored by `app/roundProgress.ts`): it
+  reads the PR's current head SHA (the branch ref, atomic with the push) and
+  compares it to the **round-entry head** — the head captured by `pr.capture-head`
+  immediately BEFORE `review-round` ran this round, published as the
+  `roundEntryHead` process variable. `pr.capture-head` sits on EVERY entry into
+  `review-round` (the first round from `Start`, a review-loop re-enter, a
+  human-answer resume, and a husk auto-retry), so within any round there is always
+  a baseline captured against the agent's own starting point — closing the
+  no-baseline gap where a FIRST addressed round had no prior-round head to compare
+  against (and either waved a first-round husk through as progress, or risked
+  mis-escalating a straggler push). If `roundEntryHead` is absent — an older
+  in-flight instance whose flow predates `capture-head`, or a capture read that
+  failed open (it publishes the empty string as its "unknown" sentinel) —
+  progress-check falls back to the head persisted from the previous round
+  (`last_round_head`). A round whose head DID advance past the round-entry baseline
+  is real progress and continues to the review-wait gateway. A round whose head did
+  NOT advance pushed no commit, so re-requesting a review would loop on
+  byte-identical code; `gw-progress` routes it to `gw-husk`, which SPLITS it on a
+  corroboration correlated to the COMPLETING `review-round` element-instance (NOT
+  an aggregate terminal count — a same-round human-answered resume is classified on
+  its own fresh attempt):
+    - a **husk** — no commit AND the completing `review-round` attempt is
+      NON-TERMINAL (the producer harness died mid-run, leaving a stuck instance) —
+      is auto-re-run onto a healthy worker up to `MAX_HUSK_RETRIES` (2) before
+      escalating; and
+    - a **no-advance** — the completing attempt ran to a terminal instance but
+      nothing was pushed — (and a husk that exhausts its retries) escalates to the
+      human `wait-answer` task.
+  The agent-instance read is AVAILABILITY-AWARE via a **two-tier probe** and fails
+  SAFE (ADR 0056). `review-round` is an external-agent service task, so a job that
+  husks BEFORE it ever registers an AgentInstance leaves the scoped `review-round`
+  search EMPTY — indistinguishable, on that query alone, from an engine that has no
+  AgentInstance projection at all. The probe therefore resolves an empty
+  `review-round` search against a SECOND, process-wide read:
+    - if the process-wide read also finds NO instance, the **channel is absent**
+      (an engine with no AgentInstance projection) — UNKNOWN, treated as no-advance,
+      never an auto-retry that could duplicate genuinely-completed work;
+    - if the process-wide read finds ANOTHER instance (from `classify-scope`, an
+      earlier round, etc.), the **channel is PRESENT** but this round registered
+      nothing — a genuine **pre-registration husk**, so it is classified as a husk
+      and auto-retried.
+  A head that cannot be read fails OPEN (continue), so a transient GitHub hiccup
+  never fabricates a no-progress escalation. Two supporting invariants keep an
+  auto-retry clean: `pr.persist-round`
+  records a round IDEMPOTENTLY on `(pr_key, round_no, process_instance_key)` — a husk
+  retry (same process instance) updates its row in place, while a resubmission that
+  re-opens the PR at round 1 in a NEW process instance inserts a fresh row and so
+  never clobbers a prior run's durable round history (migration 102) — and the guard flips the PR back to
+  the running `converging` status before a retry re-enters `review-round` so the
+  poller does not solicit a spurious review against the still-running round. The
+  round cap and the review-wait timeout remain the outer safety nets.
 
 
 ## 5. Agent job contract (`senior:pr-review`)

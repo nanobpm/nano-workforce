@@ -89,6 +89,10 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
           title: "old title",
           status: "abandoned", // terminal -> re-open path
           current_round: 3,
+          last_round_head: "stale-sha-from-prior-run",
+          last_progress_job_key: "old-job-key-from-prior-run",
+          last_progress_result: "{\"progressed\":false,\"huskRetries\":0}",
+          last_progress_agent_watermark: "999",
         }],
         key: "pr_key",
       },
@@ -120,6 +124,16 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
     const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
     assertEquals(pr.status, "converging");
     assertEquals(pr.current_round, 1);
+    // The no-progress head baseline is scoped to the prior run; a fresh run must clear it so the
+    // first addressed round is compared from a clean slate and the bounded husk retry isn't bypassed
+    // when the branch changed between runs (#786).
+    assertEquals(pr.last_round_head, null);
+    // The at-least-once replay stamp + attempt watermark are ALSO run-scoped and must be cleared so a
+    // straggler `pr.progress-check` from the prior run can't replay a stale outcome into the fresh run
+    // (Copilot PR #789).
+    assertEquals(pr.last_progress_job_key, null);
+    assertEquals(pr.last_progress_result, null);
+    assertEquals(pr.last_progress_agent_watermark, null);
     assertEquals(pr.open_escalation_id, undefined);
     assertEquals(pr.open_escalation_question, undefined);
     assertEquals(pr.process_key, "PI-9");

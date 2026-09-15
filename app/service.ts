@@ -284,6 +284,23 @@ export interface PullRequest {
   // review for this PR, so the nudge is throttled to one attempt per REVIEW_NUDGE_MS window.
   // NULL means never nudged.
   last_nudge_at: string | null;
+  // No-progress head baseline (033_pr_round_head.sql, issue #786): the PR head SHA observed at the
+  // last recorded round, written by pr.progress-check to detect an addressed round that pushed no
+  // commit. Scoped to the current convergence run — cleared on re-open so a resubmission starts from
+  // a clean slate. NULL before the first round is recorded.
+  last_round_head: string | null;
+  // At-least-once idempotency for pr.progress-check (103_pr_progress_idempotency.sql): the engine
+  // job key that produced the last committed progress decision, and that decision's serialized
+  // `PrProgressCheckOut`. On a lost-ack redelivery the guard recognizes its own job key and replays
+  // the recorded outcome instead of recomputing against the already-advanced `last_round_head`.
+  last_progress_job_key: string | null;
+  last_progress_result: string | null;
+  // Attempt watermark for pr.progress-check husk correlation (103; Copilot PR #789): the greatest
+  // `review-round` AgentInstance key an earlier progress-check already accounted for. Lets the next
+  // round tell a freshly-registered attempt from a historical one, so a current attempt that husks
+  // BEFORE registering its AgentInstance is classified as a husk instead of masked by a prior round's
+  // terminal instance. Cleared on re-open with the rest of the per-run state. NULL before any read.
+  last_progress_agent_watermark: string | null;
   // Merge-protocol liveness (012_merge_protocol_attempt.sql): head commit last nudged by the
   // frugal-CI fresh-head-run remedy. A rebase changes the head and therefore permits a new nudge.
   fresh_head_run_head: string | null;
@@ -565,6 +582,24 @@ export async function submitPr(
       waiting_since: null,
       last_review_id: null,
       last_nudge_at: null,
+      // Clear the no-progress head baseline: it is scoped to the PRIOR convergence run, and a fresh
+      // run at round 1 must compare its first addressed round against a clean slate. Leaving a stale
+      // `last_round_head` lets a resubmission whose branch changed read `currentHead !== previousHead`
+      // on its first husked round, mis-route it as progress, and bypass the bounded husk retry (#786).
+      last_round_head: null,
+      // Clear the attempt watermark too: it is scoped to the prior convergence run's `review-round`
+      // instances (Copilot #789). A fresh run mints new, higher-keyed instances so a carried-over
+      // watermark would still be below them, but clearing keeps the per-run husk-correlation state
+      // unambiguous and self-contained.
+      last_progress_agent_watermark: null,
+      // Clear the at-least-once REPLAY stamp too (Copilot PR #789). The idempotency guard replays a
+      // recorded outcome whenever a redelivered job key matches this row; if the stamp survived a
+      // re-open, an OLD `pr.progress-check` delivery redelivered after the NEW convergence instance
+      // starts would still match its job key here and replay a stale escalation/progress effect into
+      // the fresh run. Clearing it makes the new run treat any such straggler as an unknown key (a
+      // normal, freshly-computed decision) rather than replaying the prior run's outcome.
+      last_progress_job_key: null,
+      last_progress_result: null,
       outcome: null,
       converged_at: null,
       merged_at: null,

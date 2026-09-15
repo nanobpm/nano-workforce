@@ -1067,17 +1067,25 @@ export async function fetchPrFiles(
   return paths;
 }
 
-/** The PR head ref/sha for D3's trial-merge gate. `null` when no transport is usable. */
+/** The PR head ref/sha for D3's trial-merge gate. `null` when no transport is usable. `headRepo` is
+ * the head branch's OWNING repository as `owner/repo` — the FORK for a cross-repo PR, else the base
+ * repo — so a caller that resolves the head ref (e.g. the no-progress head reader, #786) queries the
+ * repository the head branch actually lives in, not the base repo (where a same-named branch would
+ * resolve to an unrelated SHA). `null` when the head repository cannot be resolved (e.g. a deleted
+ * fork). */
 export async function fetchPrHead(
   repo: string,
   number: number | string,
   token: string,
-): Promise<{ headRef: string | null; headSha: string | null; baseRef: string | null } | null> {
+): Promise<{ headRef: string | null; headSha: string | null; baseRef: string | null; headRepo: string | null } | null> {
   if (await useGh()) {
-    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "headRefName,headRefOid,baseRefName"]);
+    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "headRefName,headRefOid,baseRefName,headRepository,headRepositoryOwner"]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const j = JSON.parse(out) as { headRefName?: string | null; headRefOid?: string | null; baseRefName?: string | null };
-    return { headRef: j.headRefName ?? null, headSha: j.headRefOid ?? null, baseRef: j.baseRefName ?? null };
+    const j = JSON.parse(out) as { headRefName?: string | null; headRefOid?: string | null; baseRefName?: string | null; headRepository?: { name?: string | null } | null; headRepositoryOwner?: { login?: string | null } | null };
+    const owner = j.headRepositoryOwner?.login;
+    const name = j.headRepository?.name;
+    const headRepo = owner && name ? `${owner}/${name}` : null;
+    return { headRef: j.headRefName ?? null, headSha: j.headRefOid ?? null, baseRef: j.baseRefName ?? null, headRepo };
   }
   if (!token) return null;
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
@@ -1085,8 +1093,29 @@ export async function fetchPrHead(
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const j = (await r.json()) as { head?: { ref?: string | null; sha?: string | null }; base?: { ref?: string | null } };
-  return { headRef: j.head?.ref ?? null, headSha: j.head?.sha ?? null, baseRef: j.base?.ref ?? null };
+  const j = (await r.json()) as { head?: { ref?: string | null; sha?: string | null; repo?: { full_name?: string | null } | null }; base?: { ref?: string | null } };
+  return { headRef: j.head?.ref ?? null, headSha: j.head?.sha ?? null, baseRef: j.base?.ref ?? null, headRepo: j.head?.repo?.full_name ?? null };
+}
+
+/** The head commit SHA of `branch` on `repo`, read from the git-ref endpoint
+ * (`git/ref/heads/<branch>`) — the ref that GitHub updates ATOMICALLY with the push, unlike a PR
+ * object's `head.sha`, which is an asynchronously-denormalized projection that can briefly report a
+ * stale-but-valid SHA after a push. The no-progress guard (#786) reads this in preference to the PR
+ * head so a lagging PR denormalization can never fabricate a no-advance escalation. `null` when the
+ * branch does not exist (a 404) or no transport is usable; throws only on a genuine transport
+ * failure. */
+export async function fetchBranchHead(
+  repo: string,
+  branch: string,
+  token: string,
+): Promise<string | null> {
+  // Honor the documented no-transport contract at this public boundary, exactly like the sibling
+  // readers `fetchPrHead`/`fetchPrBase`: with no `gh` CLI and no token there is no usable transport,
+  // which is the idle "unknown" case → `null`, NOT an exception. The internal `branchHeadSha` still
+  // throws in that case for `ensureBaseBranch`'s callers, which treat a missing transport as a hard
+  // failure; this wrapper's `Promise<string | null>` contract promises `null` instead.
+  if (!(await useGh()) && !token) return null;
+  return branchHeadSha(repo, branch, token);
 }
 
 /** The PR's current base branch ref — the branch this PR would land *into*. `null` when no
@@ -1483,7 +1512,13 @@ function isEpicBranch(branch: string): boolean {
 /** Resolve the head commit SHA of `branch` on `repo`, or `null` when the branch does not exist
  * (a 404 from the git-ref endpoint). Throws only on a genuine transport failure. */
 async function branchHeadSha(repo: string, branch: string, token: string): Promise<string | null> {
-  const apiPath = `repos/${repo}/git/ref/heads/${branch}`;
+  // Percent-encode each ref SEGMENT (git permits `#`, `?`, spaces, etc. in a branch name) while
+  // preserving the `/` separators that git uses for hierarchical refs (`feat/x`). Interpolating the
+  // raw name would, in the direct `fetch` URL, let a `#` start a fragment (and `?` a query) — the
+  // path is truncated, the wrong ref (or a 404) is read, and the no-progress guard fails open. gh
+  // api receives the same already-encoded path.
+  const encodedBranch = branch.split("/").map(encodeURIComponent).join("/");
+  const apiPath = `repos/${repo}/git/ref/heads/${encodedBranch}`;
   if (await useGh()) {
     try {
       const out = await runGh(["api", apiPath]);
