@@ -181,13 +181,14 @@ describe("nano-workforce PR review-loop escalation (U4 userTask)", () => {
     assert.equal(completed.body.ok, true, "the userTask was completed");
 
     // The typed answer resumed the loop back into the review round: the token took
-    // wait-answer → record-answer (which retires the escalations row) → review-round, and the
-    // review agent saw exactly the submitted answer. An empty or wrong completion would surface a
-    // different `capturedAnswer` — this is the falsifiable core.
+    // wait-answer → record-answer (which retires the escalations row) → capture-head → review-round
+    // (the round-entry head is re-captured before each review round, #786), and the review agent saw
+    // exactly the submitted answer. An empty or wrong completion would surface a different
+    // `capturedAnswer` — this is the falsifiable core.
     await app.settle();
     const flows = takenFlows(app);
     assert.ok(
-      flows.includes("wait-answer->record-answer") && flows.includes("record-answer->review-round"),
+      flows.includes("wait-answer->record-answer") && flows.includes("record-answer->capture-head"),
       `the answer resumed the loop through record-answer back to the review round (flows: ${flows.join(", ")})`,
     );
     assert.equal(reviewCalls, 2, "the review agent ran a second round after the answer");

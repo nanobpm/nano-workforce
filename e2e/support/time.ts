@@ -31,3 +31,37 @@ export async function advancePastTimer(
   await app.engine.advanceTime(ms);
   await app.settle();
 }
+
+/**
+ * Settle the deterministic harness to true quiescence — repeat {@link TestApp.settle} until no job
+ * remains mid-flight (`ACTIVATED`) — for any scenario where a worker ENROLLS a PR.
+ *
+ * The canonical convergence enrollment `submitPr` (used by `pr.record-wave`, `pr.converge-feature`
+ * and `pr.delivery-connector`) calls `engine.createInstance` from INSIDE a worker job handler. The
+ * urban-testkit services that nested creation with a nested `drain()`; now that `convergence-loop`
+ * opens with the host `pr.capture-head` task (issue #786), that nested drain runs real re-entrant
+ * host work and — per the testkit's documented re-entrancy — leaves the ENROLLING worker's own
+ * completion "undrained until a later settle". A single `settle()` therefore observes the enroller
+ * one tick early (e.g. a `feature_runs` row still `opened`, or a plan not yet parked on its
+ * trial-merge task). At real runtime the async job stream drains this with no extra prompting; the
+ * harness just needs to be driven to quiescence.
+ *
+ * The reliable quiescence signal is a job in state `ACTIVATED`: that is a leased, mid-flight job —
+ * the undrained enrolling-worker completion the re-entrancy leaves behind. A `settle()` drains every
+ * *registered*-worker job to completion, so once no `ACTIVATED` job remains the only jobs left are
+ * genuine external parks (`CREATED` agent jobs with no registered worker), and the harness is
+ * quiescent. Keying on `ACTIVATED` is precise, not a retry-and-hope: it is NOT sufficient to compare
+ * successive `snapshot()` signatures, because the undrained completion is invisible between certain
+ * settles (two passes look identical while work is still pending), so a naive fixpoint returns early
+ * and the re-entrant work later fires against a closing DB.
+ */
+export async function settleFully(
+  app: Pick<TestApp, "settle" | "engine">,
+  maxRounds = 16,
+): Promise<void> {
+  for (let round = 0; round < maxRounds; round++) {
+    await app.settle();
+    const jobs = await app.engine.searchJobs({});
+    if (!jobs.some((job) => job.state === "ACTIVATED")) return;
+  }
+}

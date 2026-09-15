@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
-import { advancePastTimer } from "./support/time.ts";
+import { advancePastTimer, settleFully } from "./support/time.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -93,7 +93,11 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
       const planKey = "owner/repo#1";
       const started = await app.api?.call("startPlanFanout", { body: { issue: planKey, baseBranch: "epic/e2e" } });
       assert.equal(started?.status, 202, "startPlanFanout accepted the issue");
-      await app.settle();
+      // Drive the whole fanout to quiescence: a wave whose PRs open enrolls each PR via
+      // `pr.record-wave` -> `submitPr` -> nested `createInstance`, whose re-entrant drain leaves the
+      // enroller undrained for a tick (issue #786's `pr.capture-head`). A single settle parks the
+      // plan one tick early (before the trial-merge gate opens), so settle to true quiescence.
+      await settleFully(app);
       const plan = await app.db
         .table<{ plan_key: string; process_key: string | null }>("plans", "plan_key")
         .findOne({ plan_key: planKey });
