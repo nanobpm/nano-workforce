@@ -62,6 +62,15 @@ export interface DeliveryGraphProposal {
   created_at: string;
   updated_at: string;
   expires_at: string;
+  /** A strictly-monotonic per-write stage revision (migration 102), reassigned to `MAX(stage_seq)+1`
+   * on every stage write (insert AND re-stage). It is the supersede reconcile's same-millisecond
+   * tie-break, AND the version token the dispatch door threads through so `markProposalDispatched`
+   * can guard its terminal flip against a concurrent re-stage that overwrote this same-digest row with
+   * a newer (e.g. credential-differing) graph after this dispatch snapshotted it (issue #778 review —
+   * thread deliveryGraphProposals.ts:243). Persisted rows carry a value ≥ 1; a pre-migration row reads
+   * `0` until its next stage re-sequences it. Assigned atomically in the `stageProposal` SQL, never
+   * from a row object — a freshly-`buildProposalRow`'d row's `0` here is a never-persisted placeholder. */
+  stage_seq: number;
 }
 
 /** The rendered preview a staged proposal carries — the operator-facing view of WHAT the graph does
@@ -150,6 +159,9 @@ export function buildProposalRow(input: {
     created_at: createdAt,
     updated_at: at,
     expires_at: proposalExpiry(createdAt),
+    // Placeholder only: the persisted `stage_seq` is assigned atomically as `MAX(stage_seq)+1` inside
+    // the `stageProposal` INSERT/UPSERT (never bound from this object), so this `0` is never written.
+    stage_seq: 0,
   };
 }
 
@@ -217,28 +229,56 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
         createdAt: isProposalExpired(existing.expires_at) ? undefined : existing.created_at,
       })
     : row;
-  if (existing) {
-    const { digest, ...patch } = toWrite;
-    await table.update(row.digest, patch);
-  } else {
-    await table.insert(toWrite);
-  }
-  // Reconcile to EXACTLY ONE live proposal per logical graph: supersede every `staged` row for this
-  // `logical_key` that has a strictly-NEWER staged sibling (by `updated_at`, with a deterministic
-  // `digest` tie-breaker), leaving only the globally-newest live. This is ORDER-INDEPENDENT — it never
-  // references the just-written digest, so it converges to a single live row regardless of the
-  // interleaving of concurrent stages. A supersede pass keyed to "only flip rows older than the one *I*
-  // just wrote" leaves TWO live proposals when an OLDER stage's pass runs AFTER a newer stage already
-  // committed (the older pass won't flip the newer row, and the newer pass ran before the older row
-  // existed) — and an unordered supersede-all leaves ZERO. Anchoring on the newest staged sibling avoids
-  // both: the newest row is never superseded (no newer sibling), so it stays staged throughout the
-  // statement and every older row's `EXISTS` is satisfied by it. Idempotent: a no-op once one row remains.
-  await data
-    .open()
-    .exec(
-      `UPDATE "delivery_graph_proposals" SET "status" = 'superseded', "updated_at" = ? WHERE "logical_key" = ? AND "status" = 'staged' AND EXISTS (SELECT 1 FROM "delivery_graph_proposals" AS "newer" WHERE "newer"."logical_key" = "delivery_graph_proposals"."logical_key" AND "newer"."status" = 'staged' AND ("newer"."updated_at" > "delivery_graph_proposals"."updated_at" OR ("newer"."updated_at" = "delivery_graph_proposals"."updated_at" AND "newer"."digest" > "delivery_graph_proposals"."digest")))`,
+  // Persist the write, its strictly-monotonic stage sequence, AND the supersede reconcile as ONE
+  // transaction (issue #778 review — threads deliveryGraphProposals.ts:237/:239). Two properties matter:
+  //   • `stage_seq` is assigned ATOMICALLY inside the write itself — `MAX(stage_seq)+1` in the
+  //     INSERT/UPDATE, NOT a separate stamp statement — so there is never a "written but unstamped
+  //     (seq 0)" window in which a rival same-millisecond stage's reconcile could read the half-written
+  //     sibling at its DEFAULT 0 and supersede it out of order (the inversion the old two-statement
+  //     stamp+reconcile allowed). Assigning inside the serialized transaction keeps `MAX(...)` atomic, so
+  //     `+1` is strictly greater than every committed seq and reflects true write order.
+  //   • wrapping the reconcile in the SAME transaction means no concurrent stage observes an intermediate
+  //     state between the write and the reconcile.
+  // `MAX(stage_seq)` reads the pre-write table via the `stage_seq` index (migration 102), an O(1)
+  // reverse-index seek rather than the full-history scan a bare aggregate over the retained terminal rows
+  // would cost.
+  const w = toWrite;
+  const nextSeq = `(SELECT COALESCE(MAX("stage_seq"), 0) + 1 FROM "delivery_graph_proposals")`;
+  await data.open().tx(async (t) => {
+    // Single idempotent UPSERT rather than a read-`existing`-then-branch INSERT/UPDATE: `existing` was
+    // read BEFORE this transaction, so two concurrent FIRST stages of the same digest both saw `null` and
+    // would both take an INSERT — the second hitting a primary-key conflict that fails the stage and drops
+    // its reconciliation. `ON CONFLICT("digest") DO UPDATE` collapses the raced insert into an in-place
+    // update instead, so a same-digest stage is idempotent regardless of arrival order (issue #778 review —
+    // thread deliveryGraphProposals.ts:245). `stage_seq` is still assigned ATOMICALLY inside the write
+    // (`MAX(stage_seq)+1`, materialised once as `excluded."stage_seq"` so the insert and the on-conflict
+    // update use the exact same value), preserving the strictly-monotonic ordering the supersede reconcile
+    // below tie-breaks on.
+    await t.exec(
+      `INSERT INTO "delivery_graph_proposals" ("digest", "logical_key", "title", "graph", "preview", "node_count", "human_node_count", "side_effect_count", "side_effecting", "status", "created_at", "updated_at", "expires_at", "stage_seq") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeq}) ON CONFLICT("digest") DO UPDATE SET "logical_key" = excluded."logical_key", "title" = excluded."title", "graph" = excluded."graph", "preview" = excluded."preview", "node_count" = excluded."node_count", "human_node_count" = excluded."human_node_count", "side_effect_count" = excluded."side_effect_count", "side_effecting" = excluded."side_effecting", "status" = excluded."status", "created_at" = excluded."created_at", "updated_at" = excluded."updated_at", "expires_at" = excluded."expires_at", "stage_seq" = excluded."stage_seq"`,
+      [w.digest, w.logical_key, w.title, w.graph, w.preview, w.node_count, w.human_node_count, w.side_effect_count, w.side_effecting, w.status, w.created_at, w.updated_at, w.expires_at],
+    );
+    // Reconcile to EXACTLY ONE live proposal per logical graph: supersede every `staged` row for this
+    // `logical_key` that has a strictly-NEWER staged sibling (by `updated_at`, with a deterministic
+    // `stage_seq` tie-breaker), leaving only the globally-newest live. This is ORDER-INDEPENDENT
+    // — it never references the just-written digest, so it converges to a single live row regardless of the
+    // interleaving of concurrent stages. A supersede pass keyed to "only flip rows older than the one *I*
+    // just wrote" leaves TWO live proposals when an OLDER stage's pass runs AFTER a newer stage already
+    // committed (the older pass won't flip the newer row, and the newer pass ran before the older row
+    // existed) — and an unordered supersede-all leaves ZERO. Anchoring on the newest staged sibling avoids
+    // both: the newest row is never superseded (no newer sibling), so it stays staged throughout the
+    // statement and every older row's `EXISTS` is satisfied by it. Idempotent: a no-op once one row remains.
+    // The tie-break is the monotonic `stage_seq` (atomically assigned in the write above), NOT the content
+    // `digest` NOR the frozen `rowid`: two stages landing in the SAME millisecond tie on `updated_at`, and a
+    // `digest`-string tie-break is arbitrary w.r.t. submission order while `rowid` does not advance on a
+    // re-stage UPDATE — so either could pick the LATER-submitted graph as the one superseded, inverting
+    // "the latest stage wins". `stage_seq` advances on every stage (insert AND re-stage alike), so the
+    // most-recently-written row deterministically wins the tie.
+    await t.exec(
+      `UPDATE "delivery_graph_proposals" SET "status" = 'superseded', "updated_at" = ? WHERE "logical_key" = ? AND "status" = 'staged' AND EXISTS (SELECT 1 FROM "delivery_graph_proposals" AS "newer" WHERE "newer"."logical_key" = "delivery_graph_proposals"."logical_key" AND "newer"."status" = 'staged' AND ("newer"."updated_at" > "delivery_graph_proposals"."updated_at" OR ("newer"."updated_at" = "delivery_graph_proposals"."updated_at" AND "newer"."stage_seq" > "delivery_graph_proposals"."stage_seq")))`,
       [now(), row.logical_key],
     );
+  });
 
   // Report what the stage did to siblings (issue #740). `superseded` = the same-logical-key proposals
   // this stage retired (re-read post-reconcile so a concurrent newer stage that kept ITS row live —
@@ -321,9 +361,36 @@ export async function listStagedProposals(
 }
 
 /** Mark a staged proposal `dispatched` once the operator launches it — it drops out of the cockpit's
- * staged list (the run then shows in the in-flight grid). */
-export async function markProposalDispatched(data: DataLayer, digest: string): Promise<void> {
-  await deliveryGraphProposals(data).update(digest, { status: "dispatched", updated_at: now() });
+ * staged list (the run then shows in the in-flight grid).
+ *
+ * Like `markProposalExpired`/`markProposalDismissed`/`sweepExpiredProposals`, this is a GUARDED UPDATE
+ * (`... WHERE digest=? AND status='staged'`), not a blind update-by-key. The dispatch door's
+ * `getStagedProposal` liveness read, the launch, and this terminal flip are separate statements, so the
+ * row can leave `staged` in the window between them (a concurrent dispatch consumed it, or a
+ * dismiss/supersede/expiry sweep retired it); a blind `table.update(digest, …)` would clobber that
+ * newer terminal status back to `dispatched`, breaking monotonic lifecycle transitions.
+ *
+ * When `expectedStageSeq` is supplied the guard ALSO pins `stage_seq` to the value the dispatch door
+ * snapshotted when it loaded the proposal (issue #778 review — thread deliveryGraphProposals.ts:243). A
+ * concurrent RE-STAGE of the SAME digest overwrites the row in place with a newer graph (two
+ * credential-differing graphs share a semantic digest) and bumps `stage_seq`; without the seq pin, this
+ * flip would retire that newer, never-launched graph — the dispatch launched the STALE snapshot it read
+ * yet marks the fresh row consumed. Pinning `stage_seq` makes the flip a no-op in that race, leaving the
+ * re-staged graph `staged` for its own dispatch. Omit `expectedStageSeq` (e.g. a pre-migration row whose
+ * seq is `0`) to fall back to the `status='staged'`-only guard.
+ *
+ * Returns whether the guarded UPDATE actually flipped a row (`res.changed > 0`), mirroring
+ * `markProposalDismissed`/`sweepExpiredProposals`. A `false` return means the row was no longer the
+ * `staged` revision this dispatch snapshotted (a concurrent dispatch/re-stage/retire won) — the launched
+ * run still stands, but the mark was intentionally skipped so the newer row is not clobbered. */
+export async function markProposalDispatched(data: DataLayer, digest: string, expectedStageSeq?: number): Promise<boolean> {
+  const db = data.open();
+  const guardSeq = typeof expectedStageSeq === "number";
+  const res = await db.exec(
+    `UPDATE "delivery_graph_proposals" SET "status" = 'dispatched', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'${guardSeq ? ` AND "stage_seq" = ?` : ""}`,
+    guardSeq ? [now(), digest, expectedStageSeq] : [now(), digest],
+  );
+  return res.changed > 0;
 }
 
 /** Retire a proposal by flipping it to `expired` — its `graph` payload is unusable (e.g. corrupt JSON
@@ -342,12 +409,18 @@ export async function markProposalDispatched(data: DataLayer, digest: string): P
  * Returns whether the guarded UPDATE actually flipped a row (`res.changed > 0`), mirroring
  * `markProposalDismissed`/`sweepExpiredProposals`. A `false` return means the row was no longer `staged`
  * at write time (a dismiss/supersede/dispatch race won), so the caller must not treat the retirement as
- * having happened. */
-export async function markProposalExpired(data: DataLayer, digest: string): Promise<boolean> {
+ * having happened.
+ *
+ * When an `expectedStageSeq` is supplied (the dispatch door's corrupt-graph retirement), the flip is
+ * ADDITIONALLY guarded on `stage_seq = ?`, exactly like `markProposalDispatched`: a concurrent re-stage
+ * of the same digest bumps `stage_seq`, so guarding on the revision we inspected keeps the expiry from
+ * retiring a newer graph that landed in the read→write window (issue #778 review). */
+export async function markProposalExpired(data: DataLayer, digest: string, expectedStageSeq?: number): Promise<boolean> {
   const db = data.open();
+  const guardSeq = typeof expectedStageSeq === "number";
   const res = await db.exec(
-    `UPDATE "delivery_graph_proposals" SET "status" = 'expired', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'`,
-    [now(), digest],
+    `UPDATE "delivery_graph_proposals" SET "status" = 'expired', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'${guardSeq ? ` AND "stage_seq" = ?` : ""}`,
+    guardSeq ? [now(), digest, expectedStageSeq] : [now(), digest],
   );
   return res.changed > 0;
 }
@@ -404,9 +477,15 @@ export async function sweepExpiredProposals(data: DataLayer, at: Date = new Date
   let swept = 0;
   for (const row of staged) {
     if (isProposalExpired(row.expires_at, at)) {
+      // Pin `stage_seq` (like `markProposalDispatched`/`markProposalExpired`): the `find` liveness read and
+      // this flip are separate statements, so a concurrent RE-STAGE can overwrite the row in place with a
+      // newer graph — bumping `stage_seq` and REFRESHING `expires_at` — in the window between them. A blind
+      // `digest + status='staged'` update would then expire that fresh, un-expired revision. Guarding on the
+      // `stage_seq` we inspected makes the flip a no-op in that race, leaving the re-staged graph `staged`
+      // (issue #778 review — thread deliveryGraphProposals.ts:417).
       const res = await db.exec(
-        `UPDATE "delivery_graph_proposals" SET "status" = 'expired', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'`,
-        [ts, row.digest],
+        `UPDATE "delivery_graph_proposals" SET "status" = 'expired', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged' AND "stage_seq" = ?`,
+        [ts, row.digest, row.stage_seq],
       );
       swept += res.changed;
     }

@@ -10,8 +10,10 @@
 // re-dispatch of an already-running run short-circuits with `alreadyRunning`. An unknown / expired /
 // superseded / already-dispatched digest is a clean 400.
 
+import { createHash } from "node:crypto";
 import { isPlausibleBranchName } from "../app/baseBranch.ts";
-import { validateDeliveryGraph } from "../app/deliveryGraph.ts";
+import { canonicalJson, validateDeliveryGraph } from "../app/deliveryGraph.ts";
+import { digestInvisibleRawValues, graphCarriesRedactedSecrets } from "../app/deliveryGraphCompiler.ts";
 import { dispatchDeliveryGraphRun } from "../app/deliveryGraphDispatch.ts";
 import { getStagedProposal, markProposalDispatched, markProposalExpired } from "../app/deliveryGraphProposals.ts";
 import { unresolvedAgentRepoNodes } from "../app/deliveryRunner.ts";
@@ -26,6 +28,31 @@ import { defineOperation } from "../nano-generated/operations.ts";
 const MAX_ECHO_LEN = 80;
 function truncateForEcho(value: string): string {
   return value.length > MAX_ECHO_LEN ? `${value.slice(0, MAX_ECHO_LEN)}… (${value.length} chars)` : value;
+}
+
+/** A STABLE, server-side dispatch run key for a secret-bearing staged proposal (issue #778, Option C).
+ * The graph's identity is content-addressed over the REDACTED `semanticBpmn` digest, so two graphs
+ * differing ONLY in a redacted-away credential (or other {@link digestInvisibleRawValues} content) share
+ * one digest — a keyless dispatch would collapse the second onto the first's still-running instance. The
+ * dispatch core therefore REQUIRES an explicit key for such a graph, but the cockpit's staged-proposals
+ * UI posts no idempotency-key field. The operator clicking Dispatch on THIS specific stored proposal is
+ * unambiguous, so we derive a key from TWO parts:
+ *   • the proposal's semantic `digest` — which the compiler already normalises: it collapses every
+ *     omitted-vs-default field (`edges`/`emits` → `[]`, a `false` boolean vs an absent one, …) and any
+ *     top-level node/edge REORDER, so a re-stage of the same logical graph in a different encoding — which
+ *     shares the digest and OVERWRITES `proposal.graph` — yields the SAME key and short-circuits as
+ *     `alreadyRunning` instead of double-launching (issue #778 review, thread on omitted-vs-empty), and
+ *   • a fingerprint of {@link digestInvisibleRawValues} — the exact raw content the digest CANNOT see —
+ *     so a credential-differing proposal (identical digest) gets a DISTINCT key. That traversal now emits
+ *     its entries in a canonical (code-unit sorted) order, so it too collapses a top-level node reorder:
+ *     the fingerprint is reorder-invariant, matching the digest, so the whole key short-circuits a
+ *     re-stage of the same logical graph regardless of node encoding order (issue #778 review).
+ * Deriving both parts from the digest + the shared invisible-values traversal means the key needs NO
+ * per-field enumeration of the compiler's defaults (which would drift), while still disambiguating on
+ * every secret the digest drops. Prefixed so it is self-describing in run listings. */
+export function stableProposalRunKey(digest: string, graph: DeliveryGraph): string {
+  const fingerprint = canonicalJson(digestInvisibleRawValues(graph));
+  return `staged-${createHash("sha256").update(`${digest}\u0000${fingerprint}`).digest("hex").slice(0, 16)}`;
 }
 
 /** Door-level cap on a duration override, mirroring the `maxLength: 64` on these fields in `openapi.yaml`.
@@ -155,14 +182,23 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
   }
 
   // The stored graph was validated at stage time; dispatch re-compiles it to derive the run-row shape.
+  // Snapshot the proposal's stage revision NOW so the terminal `markProposalDispatched` can guard its
+  // flip against a concurrent re-stage that overwrites this same-digest row with a newer graph after we
+  // read it (issue #778 review — thread dispatchDeliveryGraph.ts:243).
+  const stageSeq = proposal.stage_seq;
   let graph: unknown;
   try {
     graph = JSON.parse(proposal.graph);
   } catch (err) {
     app.log.error("dispatch-delivery-graph: stored graph is corrupt", { digest });
     // Fail closed: a corrupt graph can never launch, so retire the proposal (→ `expired`) instead of
-    // leaving an undismissable `staged` row that fails every dispatch attempt the same way.
-    await markProposalExpired(app.data, digest);
+    // leaving an undismissable `staged` row that fails every dispatch attempt the same way. Guard the
+    // expiry on the SAME `stage_seq` we read the corrupt graph at — a concurrent re-stage that overwrites
+    // this same-digest row with a fresh (valid) graph in the window between `getStagedProposal` and this
+    // update bumps `stage_seq`, so the guard makes the expiry a no-op rather than retiring a revision we
+    // never inspected (issue #778 review — thread dispatchDeliveryGraph.ts:188, same revision guard as the
+    // terminal `markProposalDispatched` below).
+    await markProposalExpired(app.data, digest, stageSeq);
     return { status: 400, body: { ok: false, error: `staged proposal ${digest} is corrupt: ${err instanceof Error ? err.message : String(err)}` } };
   }
 
@@ -196,7 +232,27 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     }
   }
 
-  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: idempotencyKey, title: proposal.title, repository, baseBranch, repoless, ...timeouts });
+  // Derive the dispatch run key (issue #778, Option C). Honour an explicit operator-supplied
+  // `idempotencyKey` verbatim — a BLANK/whitespace-only key is already normalised to `undefined` at the
+  // request edge (`idemRaw`/`idempotencyKey` above), so `=== undefined` here covers both "omitted" and
+  // "blank" (issue #778 review — thread dispatchDeliveryGraph.ts:243, already handled upstream). When the
+  // staged graph carries credential-bearing values that redaction strips from the content-addressed
+  // digest, that digest is NOT a faithful identity — two credential-differing graphs share it — so a
+  // keyless dispatch is refused by the dispatch core. The cockpit UI posts no idempotency-key field, so
+  // supply a STABLE server-side key derived from THIS proposal's parsed graph in canonical form
+  // (`stableProposalRunKey`); a faithful-digest graph keeps its digest identity (key left undefined). A
+  // malformed graph falls through to the core's own validation.
+  let dispatchRunKey: string | undefined = idempotencyKey;
+  if (dispatchRunKey === undefined) {
+    const graphErrors = validateDeliveryGraph(graph);
+    if (graphErrors.length === 0) {
+      // biome-ignore lint/plugin: validated staged graph narrowed to its contract after validateDeliveryGraph
+      const typedGraph = graph as DeliveryGraph;
+      if (graphCarriesRedactedSecrets(typedGraph)) dispatchRunKey = stableProposalRunKey(digest, typedGraph);
+    }
+  }
+
+  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: dispatchRunKey, title: proposal.title, repository, baseBranch, repoless, ...timeouts });
   if (!dispatched.ok) {
     app.log.warn("dispatch-delivery-graph refused: compile", { digest, errors: dispatched.errors.length });
     const outBody: DeliveryGraphTextResult = {
@@ -226,7 +282,49 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
       },
     };
   }
-  await markProposalDispatched(app.data, digest);
+
+  // Even when `dispatched.digest === digest`, that equality does NOT prove the short-circuited run is
+  // THIS graph when the graph carries redacted-away secrets: the digest is content-addressed over the
+  // REDACTED `semanticBpmn`, so two credential-differing graphs share it (the very reason a keyless
+  // secret-bearing dispatch is refused upstream). An EXPLICIT `idempotencyKey` bypasses the lossless
+  // server-side `stableProposalRunKey`, so a caller who re-uses one key across two secret-differing
+  // graphs (which occupy the SAME digest-keyed proposal row, one re-staged over the other) would
+  // short-circuit onto the FIRST graph's still-running run — `dispatched.alreadyRunning` — while the
+  // re-staged graph never launched. Consuming the proposal then marks a graph `dispatched` that never
+  // ran. Since we deliberately do NOT persist a second lossless fingerprint (the digest is the one
+  // content identity; issue #778 review — thread dispatchDeliveryGraph.ts:282), we cannot PROVE the
+  // running run is this exact secret-bearing graph, so refuse the ambiguous short-circuit (409) and
+  // leave the proposal staged rather than falsely consume it. A distinct key per graph (or the keyless
+  // stable-key path) dispatches it unambiguously.
+  const explicitIdempotencyKey = typeof idempotencyKey === "string" && idempotencyKey.trim() !== "";
+  if (dispatched.alreadyRunning && explicitIdempotencyKey && validateDeliveryGraph(graph).length === 0) {
+    // biome-ignore lint/plugin: validated staged graph narrowed to its contract after validateDeliveryGraph
+    const typedGraph = graph as DeliveryGraph;
+    if (graphCarriesRedactedSecrets(typedGraph)) {
+      app.log.warn("dispatch-delivery-graph refused: explicit idempotencyKey short-circuit cannot prove identity of a secret-bearing graph", {
+        digest,
+        runKey: dispatched.runKey,
+      });
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          error:
+            `idempotencyKey is already bound to a running delivery graph and this graph carries redacted-away secret material, ` +
+            `so its content-addressed digest (${digest}) cannot prove the running run is this exact graph; the staged proposal was NOT ` +
+            "dispatched — re-dispatch with a distinct idempotencyKey per graph (or none, to use the lossless server-side key)",
+        },
+      };
+    }
+  }
+  const marked = await markProposalDispatched(app.data, digest, stageSeq);
+  if (!marked) {
+    // The row left the `staged` revision we snapshotted between our load and this flip — a concurrent
+    // dispatch consumed it, or a re-stage overwrote it with a newer graph (bumping stage_seq), or a
+    // dismiss/supersede/expiry retired it. The run we launched still stands; we intentionally skip the
+    // mark so a newer, never-launched revision is not clobbered to `dispatched` (issue #778 review).
+    app.log.warn("dispatch-delivery-graph: staged revision changed before consume; mark skipped", { digest, stageSeq });
+  }
 
   const outBody: DeliveryGraphTextResult = {
     ok: true,

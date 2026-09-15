@@ -141,3 +141,45 @@ test("dispatchDeliveryGraphRun: a malformed graph → ok:false with path-qualifi
   }
   assertEquals(started.length, 0);
 });
+
+// Option C (issue #778): a graph carrying redacted-away credential material has a LOSSY content digest
+// (a sibling differing only in the secret would collide), so a keyless dispatch — which defaults the
+// run identity to that digest — is refused; an explicit `idempotencyKey` disambiguates it.
+const SECRET_BEARING = {
+  name: "deploy with a secret",
+  nodes: [{ id: "deploy", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:s3cr3t@host.example/repo" } }],
+};
+
+test("dispatchDeliveryGraphRun: a secret-bearing graph dispatched KEYLESS is refused, points at idempotencyKey, launches nothing", async () => {
+  const { app, started, runs } = makeApp();
+  const res = await dispatchDeliveryGraphRun(app, SECRET_BEARING, { repoless: true });
+  assertEquals(res.ok, false);
+  if (res.ok) return;
+  assertEquals(res.errors.length, 1);
+  assertEquals(res.errors[0].path, "idempotencyKey");
+  assert(res.errors[0].message.includes("idempotencyKey"));
+  assertEquals(started.length, 0);
+  assertEquals(runs().length, 0); // nothing claimed
+});
+
+test("dispatchDeliveryGraphRun: the SAME secret-bearing graph WITH an explicit idempotencyKey launches", async () => {
+  const { app, started, runs } = makeApp();
+  const res = await dispatchDeliveryGraphRun(app, SECRET_BEARING, { runKey: "deploy-2024-06-a", repoless: true });
+  assertEquals(res.ok, true);
+  if (!res.ok) return;
+  assertEquals(res.status, "running");
+  assertEquals(res.runKey, "deploy-2024-06-a");
+  assertEquals(started.length, 1);
+  assertEquals(runs()[0].run_key, "deploy-2024-06-a");
+});
+
+test("dispatchDeliveryGraphRun: two credential-differing secret graphs with DISTINCT keys get distinct runs (no collision)", async () => {
+  const { app, started, runs } = makeApp();
+  const graphA = { name: "deploy", nodes: [{ id: "d", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:AAA@host.example/repo" } }] };
+  const graphB = { name: "deploy", nodes: [{ id: "d", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:BBB@host.example/repo" } }] };
+  const a = await dispatchDeliveryGraphRun(app, graphA, { runKey: "run-a", repoless: true });
+  const b = await dispatchDeliveryGraphRun(app, graphB, { runKey: "run-b", repoless: true });
+  assert(a.ok && b.ok);
+  assertEquals(started.length, 2);
+  assertEquals(new Set(runs().map((r) => r.run_key)).size, 2);
+});

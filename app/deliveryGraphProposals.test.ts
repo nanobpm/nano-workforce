@@ -17,6 +17,7 @@ import {
   getStagedProposal,
   isLiveStaged,
   isProposalExpired,
+  listStagedProposals,
   markProposalDismissed,
   markProposalDispatched,
   markProposalExpired,
@@ -241,6 +242,60 @@ test("stageProposal: reconciles to EXACTLY ONE live proposal — an older stage 
   });
 });
 
+test("stageProposal: a RE-STAGE wins a same-millisecond `updated_at` tie over an untouched sibling — the monotonic `stage_seq` reflects the re-stage that a frozen `rowid` does not (issue #778 review — thread :245)", async (t) => {
+  await withData(async (data) => {
+    const table = deliveryGraphProposals(data);
+    // Freeze wall-clock time so every `now()` inside `stageProposal` stamps the SAME `updated_at`,
+    // reproducing the same-millisecond concurrent-stage race deterministically (only the `Date` API is
+    // mocked, so async DB I/O on real timers is unaffected).
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2025-06-01T00:00:00.000Z") });
+    // Two staged siblings under logical_key "runbook", both stamped the frozen instant. d2 is staged
+    // AFTER d1, so it is (correctly) the live winner and d1 is superseded — `rowid` and `stage_seq` agree
+    // so far (insertion order == stage order).
+    await stageProposal(data, row({ digest: "d1" }));
+    await stageProposal(data, row({ digest: "d2" }));
+    assertEquals((await table.get("d1"))?.status, "superseded");
+    assertEquals((await table.get("d2"))?.status, "staged");
+    // Now RE-STAGE d1 (an UPDATE) at the SAME frozen instant. This is the newest write, so it MUST become
+    // the sole live proposal. But a re-stage is an `UPDATE`: d1's `rowid` stays frozen BELOW d2's, so the
+    // old `rowid` tie-break wrongly keeps d2 live and leaves the just-re-staged d1 superseded. The
+    // monotonic `stage_seq` (reassigned MAX+1 on every write, including this re-stage) advances past d2,
+    // so the reconcile correctly makes d1 live and supersedes d2.
+    await stageProposal(data, row({ digest: "d1" }));
+    assertEquals(
+      (await table.get("d1"))?.status,
+      "staged",
+      "the just-re-staged digest must be the live proposal, even against an untouched higher-rowid sibling",
+    );
+    assertEquals((await table.get("d2"))?.status, "superseded", "the untouched older sibling is superseded by the re-stage");
+    const live = (await table.all()).filter((r) => r.status === "staged" && r.logical_key === "runbook");
+    assertEquals(live.length, 1, "exactly one live proposal per logical graph after the re-stage");
+    assertEquals(live[0]?.digest, "d1", "the re-staged digest wins the same-`updated_at` tie");
+  });
+});
+
+test("stageProposal: assigns `stage_seq` ATOMICALLY in the write — a fresh stage is strictly > 0 and monotonic, so there is never a DEFAULT-0 window a concurrent reconcile could mis-order (issue #778 review — thread :237/:239)", async () => {
+  await withData(async (data) => {
+    const seqOf = async (digest: string): Promise<number> => {
+      const rows = await data.open().query<{ stage_seq: number }>(
+        `SELECT "stage_seq" FROM "delivery_graph_proposals" WHERE "digest" = ?`,
+        [digest],
+      );
+      return rows.length ? Number(rows[0].stage_seq) : -1;
+    };
+    // A first stage: the seq is assigned in the INSERT itself (MAX+1), never left at the column DEFAULT 0.
+    await stageProposal(data, row({ digest: "d1", logicalKey: "k-a" }));
+    const s1 = await seqOf("d1");
+    assert(s1 > 0, `a fresh stage carries a strictly-positive stage_seq (atomic, no 0 window): ${s1}`);
+    // A second, independent stage is strictly greater — the monotonic secondary ordering.
+    await stageProposal(data, row({ digest: "d2", logicalKey: "k-b" }));
+    assert((await seqOf("d2")) > s1, "a later stage's seq is strictly greater");
+    // A RE-STAGE (UPDATE) also advances the seq — it is reassigned on every write, not frozen like rowid.
+    await stageProposal(data, row({ digest: "d1", logicalKey: "k-a" }));
+    assert((await seqOf("d1")) > (await seqOf("d2")), "a re-stage advances stage_seq past every prior write");
+  });
+});
+
 test("stageProposal outcome: `row` reflects the POST-reconcile status — a stage immediately superseded by a newer sibling reports its own row as `superseded`, not the pre-reconcile `staged`", async () => {
   await withData(async (data) => {
     const table = deliveryGraphProposals(data);
@@ -277,6 +332,88 @@ test("markProposalDispatched: a dispatched proposal is no longer live", async ()
     await markProposalDispatched(data, "d1");
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
     assertEquals(await getStagedProposal(data, "d1"), null);
+  });
+});
+
+test("markProposalDispatched: flipping a live `staged` row returns true; an already-terminal (dispatched) row returns false (guarded, mirrors markProposalDismissed/Expired)", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row());
+    assertEquals(await markProposalDispatched(data, "d1"), true);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+    // A second consume of the same digest (already dispatched) must no-op and report the lost race.
+    assertEquals(await markProposalDispatched(data, "d1"), false);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
+
+test("markProposalDispatched: a concurrent RE-STAGE (bumping stage_seq) after the dispatch snapshot makes the seq-guarded mark a no-op — the newer, never-launched graph stays `staged` (#778 review)", async () => {
+  await withData(async (data) => {
+    // Dispatch snapshots the proposal's stage_seq when it loads the row.
+    await stageProposal(data, row());
+    const snapshot = await getStagedProposal(data, "d1");
+    assert(snapshot, "the freshly staged proposal is live");
+    const snapSeq = snapshot.stage_seq;
+    // A concurrent re-stage overwrites the SAME digest in place with a newer graph (two credential-
+    // differing graphs share a semantic digest), bumping stage_seq past the dispatch's snapshot.
+    await stageProposal(data, row());
+    const reStaged = await deliveryGraphProposals(data).get("d1");
+    assert(reStaged && reStaged.stage_seq > snapSeq, "the re-stage bumped stage_seq past the snapshot");
+    // The dispatch marks with the STALE snapshot seq → the `stage_seq` guard fails → no row flips, so the
+    // newer graph is NOT retired to `dispatched`; it stays `staged` for its own dispatch.
+    assertEquals(await markProposalDispatched(data, "d1", snapSeq), false);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "staged");
+    // Marking with the CURRENT seq consumes it as normal.
+    assertEquals(await markProposalDispatched(data, "d1", reStaged.stage_seq), true);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
+
+test("stageProposal: two concurrent FIRST stages of the SAME digest do NOT primary-key-conflict — the raced insert collapses into an idempotent UPSERT (#778 review — thread :245)", async () => {
+  await withData(async (data) => {
+    // Reproduce the race deterministically: our stage reads `existing = null` (no row yet), then — in the
+    // window BEFORE our transaction commits — a COMPETING first-stage of the same digest lands its row.
+    // The old read-then-branch INSERT would make our write hit a UNIQUE(digest) conflict and THROW,
+    // dropping our reconcile; the `ON CONFLICT("digest") DO UPDATE` upsert must instead collapse it.
+    let injected = false;
+    const racyData = new Proxy(data, {
+      get(target, prop) {
+        if (prop === "open") {
+          return () => {
+            const src = target.open();
+            return new Proxy(src, {
+              get(s, p) {
+                if (p === "tx") {
+                  return async (fn: (t: unknown) => Promise<void>) => {
+                    if (!injected) {
+                      injected = true;
+                      // A competing first-stage commits its row before ours does (real data layer).
+                      await stageProposal(data, row());
+                    }
+                    // @ts-expect-error the wrapped tx forwards the original callback unchanged
+                    return s.tx(fn);
+                  };
+                }
+                const v = Reflect.get(s, p, s);
+                return typeof v === "function" ? v.bind(s) : v;
+              },
+            });
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+
+    // Must NOT throw despite our `existing = null` read racing the competitor's committed insert.
+    await stageProposal(racyData as DataLayer, row());
+    assert(injected, "the competing first-stage should have fired");
+    const finalRow = await deliveryGraphProposals(data).get("d1");
+    assert(finalRow, "exactly one row exists for the digest");
+    assertEquals(finalRow.status, "staged");
+    // The upsert collapsed onto the competitor's row (an UPDATE, not a second INSERT), so stage_seq
+    // advanced past the competitor's — proving no PK conflict and a single reconciled row.
+    assert(finalRow.stage_seq >= 2, `the raced insert collapsed into an upsert (stage_seq advanced): ${finalRow.stage_seq}`);
+    assertEquals((await listStagedProposals(data)).length, 1);
   });
 });
 
@@ -348,6 +485,59 @@ test("sweepExpiredProposals: a dispatch racing between the read and the write is
     assert(raced, "the racing dispatch should have fired");
     assertEquals(swept, 0);
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
+
+test("sweepExpiredProposals: a re-stage racing between the read and the write is NOT expired — the `stage_seq` guard no-ops the stale flip so the fresh revision survives (#778 review — thread deliveryGraphProposals.ts:417)", async () => {
+  await withData(async (data) => {
+    const seqOf = async (digest: string): Promise<number> => {
+      const rows = await data.open().query<{ stage_seq: number }>(`SELECT "stage_seq" FROM "delivery_graph_proposals" WHERE "digest" = ?`, [digest]);
+      return rows.length ? Number(rows[0].stage_seq) : -1;
+    };
+    // One aged-out staged proposal — the sweep's `find()` will see it as `staged` at revision seq0.
+    await stageProposal(data, row({ digest: "d1", createdAt: "2024-01-01T00:00:00.000Z" }));
+    const seq0 = await seqOf("d1");
+    const at = new Date(Date.parse("2024-01-01T00:00:00.000Z") + DELIVERY_PROPOSAL_TTL_MS + 1000);
+
+    // Wrap the data layer so that, in the window between the sweep's `find()` and its per-row guarded
+    // `exec`, a concurrent RE-STAGE overwrites d1 in place with a fresh, future-TTL revision (bumping
+    // stage_seq past seq0). A blind `WHERE digest=? AND status='staged'` flip would expire that never-swept
+    // fresh revision; the `stage_seq`-guarded UPDATE must instead no-op and leave the row live `staged`.
+    let raced = false;
+    const racyData = new Proxy(data, {
+      get(target, prop, receiver) {
+        if (prop === "open") {
+          return () => {
+            const src = target.open();
+            return new Proxy(src, {
+              get(s, p) {
+                if (p === "exec") {
+                  return async (sql: string, params?: unknown[]) => {
+                    if (!raced) {
+                      raced = true;
+                      await stageProposal(data, row({ digest: "d1", createdAt: "2030-01-01T00:00:00.000Z" }));
+                    }
+                    return s.exec(sql, params);
+                  };
+                }
+                const v = Reflect.get(s, p, s);
+                return typeof v === "function" ? v.bind(s) : v;
+              },
+            });
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+
+    const swept = await sweepExpiredProposals(racyData as DataLayer, at);
+    assert(raced, "the racing re-stage should have fired");
+    assertEquals(swept, 0);
+    assert((await seqOf("d1")) > seq0, "the injected re-stage bumped stage_seq past the sweep's snapshot");
+    const d1 = await deliveryGraphProposals(data).get("d1");
+    assertEquals(d1?.status, "staged");
+    assert(!isProposalExpired(d1?.expires_at ?? ""), "the fresh revision retains its future TTL — it was not expired by the stale sweep");
   });
 });
 
@@ -482,5 +672,29 @@ test("markProposalExpired: a dismiss racing between the dispatch door's liveness
     // The guarded UPDATE changed 0 rows (row was `dismissed` at write time) → returns false.
     assertEquals(flipped, false);
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dismissed");
+  });
+});
+
+test("markProposalExpired: an `expectedStageSeq` guard NO-OPs when a concurrent re-stage bumped the revision (corrupt-graph retirement does not retire a newer graph)", async () => {
+  await withData(async (data) => {
+    const seqOf = async (digest: string): Promise<number> => {
+      const rows = await data.open().query<{ stage_seq: number }>(`SELECT "stage_seq" FROM "delivery_graph_proposals" WHERE "digest" = ?`, [digest]);
+      return rows.length ? Number(rows[0].stage_seq) : -1;
+    };
+    // The dispatch door reads a `staged` proposal at revision `seq0` (its graph is corrupt).
+    await stageProposal(data, row());
+    const seq0 = await seqOf("d1");
+    // Before the corrupt-graph retirement fires, a concurrent re-stage overwrites the SAME digest with a
+    // fresh (valid) graph, bumping `stage_seq`.
+    await stageProposal(data, row());
+    const seq1 = await seqOf("d1");
+    assert(seq1 > seq0, "the re-stage bumped stage_seq");
+    // The retirement guarded on the STALE revision must no-op (return false) and leave the newer graph staged.
+    const flipped = await markProposalExpired(data, "d1", seq0);
+    assertEquals(flipped, false);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "staged");
+    // Guarded on the CURRENT revision, it retires as usual.
+    assertEquals(await markProposalExpired(data, "d1", seq1), true);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "expired");
   });
 });
