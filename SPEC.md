@@ -101,16 +101,16 @@ known at submit time, carried as a process variable and stored on the DB row.
 │    <gateway: status>
 │      ├── converged  → [Mark converged] → (end: converged)
 │      │
-│      ├── addressed  → <guard: round ≥ maxRounds → escalate "not converged">
-│      │                   → [Record round] → [Check progress] (did the PR head advance?)
-│      │                       ├── progressed → <event-based gateway: review ready or timeout?>
-│      │                       │      ├── readiness-ready (msg catch, key = prKey) → round++ ─┐
-│      │                       │      └── =reviewWaitTimeout (timer catch)                    │
-│      │                       │           → [Escalate: review stalled] (blocked)             │
-│      │                       │           → [Wait: wait-answer userTask] ────────────────────┤
-│      │                       └── no progress → <husk? no commit AND no terminal instance>   │
-│      │                              ├── husk & retries < MAX → re-enter [Review round]       │
-│      │                              └── no-advance / husk cap → [Escalate: no progress]      │
+│      ├── addressed  → [Record round] → [Check progress] (did the PR head advance?)
+│      │                   ├── progressed → <guard: round ≥ maxRounds → escalate "not converged"> │
+│      │                   │                   → <event-based gateway: review ready or timeout?>   │
+│      │                   │      ├── readiness-ready (msg catch, key = prKey) → round++ ─┐
+│      │                   │      └── =reviewWaitTimeout (timer catch)                    │
+│      │                   │           → [Escalate: review stalled] (blocked)             │
+│      │                   │           → [Wait: wait-answer userTask] ────────────────────┤
+│      │                   └── no progress → <husk? no commit AND no terminal instance>   │
+│      │                          ├── husk & retries < MAX → re-enter [Review round] (bypasses the round-cap guard) │
+│      │                          └── no-advance / husk cap → [Escalate: no progress]      │
 │      │                                     → [Wait: wait-answer userTask] ───────────────────┤
 │      │                                                                             │
 │      └── needs_input     [Record escalation]                       │               │
@@ -130,8 +130,11 @@ step, then retry the same round with the human's `answer`. They differ only by e
 which the UI uses to label the card. Neither ends the run — a human always gets
 a chance to unblock and resume.
 
-Guard: before each Review round, if round > MAX_ROUNDS → force an escalation
-("not converged after N rounds") so a human decides, rather than looping forever.
+Guard: after progress classification, a **progressing** round with round ≥
+MAX_ROUNDS forces an escalation ("not converged after N rounds") so a human
+decides rather than looping forever. The guard sits *after* `check-progress`
+(not before), so a husk auto-retry — which does not consume a round — bypasses
+the cap and is re-tried onto a healthy worker even on the final configured round.
 ```
 
 Notes:
