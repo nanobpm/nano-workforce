@@ -11,7 +11,7 @@ import { memDataFor } from "../test/worldDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
 import { WorldStore } from "./world/index.ts";
-import { abandonClosedPr, isPrSettled, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
+import { abandonClosedPr, isPrSettled, MAX_ACK_RETRIES, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
 import { trackingTargetFor } from "./instanceTracking.ts";
 import type { DataLayer } from "@nanobpm/urban";
 
@@ -361,6 +361,45 @@ test("submitPr defaults convergeOnly to false so the global auto-merge default g
       prKey: "owner/repo#9",
     });
     assertEquals(get(), false);
+  });
+});
+
+// #796 auto-ack budget seeding: `submitPr` is the ONLY production write that makes the retry budget
+// available to a fresh convergence instance — the engine behaviour tests seed `ackRetryRound` /
+// `ackRetryMax` directly and never exercise `submitPr`, so a regression dropping or misconfiguring
+// this seed would leave deployed loops on the escalation default while every added behaviour test
+// still passes. Assert both the initial counter and the configured max propagate onto the instance.
+function captureVars() {
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: { rows: [], key: "pr_key" },
+    escalations: { rows: [], key: "id" },
+    pr_dependencies: { rows: [], key: "pr_key" },
+  };
+  const data = {
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+  } as any;
+  let captured: Record<string, unknown> | undefined;
+  const engine = {
+    createInstance: (req: { variables?: Record<string, unknown> }) => {
+      captured = req.variables;
+      return Promise.resolve({ processInstanceKey: "PI-1" });
+    },
+  } as any;
+  return { data, engine, get: () => captured };
+}
+
+test("submitPr seeds the #796 auto-ack budget onto the instance (ackRetryRound=0, ackRetryMax=MAX_ACK_RETRIES)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, get } = captureVars();
+    await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 10,
+      url: "https://github.com/owner/repo/pull/10",
+      prKey: "owner/repo#10",
+    });
+    const vars = get();
+    assertEquals(vars?.ackRetryRound, 0);
+    assertEquals(vars?.ackRetryMax, MAX_ACK_RETRIES);
   });
 });
 
