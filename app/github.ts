@@ -80,14 +80,21 @@ export async function fetchPrReviews(
   const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
   const path = `repos/${repo}/pulls/${number}/reviews?per_page=100`;
   if (useGh) {
-    // `--paginate` merges EVERY page of the (oldest→newest) reviews array, so a >100-review
-    // convergence loop still surfaces the genuinely newest review rather than the oldest 100.
-    const out = await runGh(["api", "--paginate", path, "-H", "Accept: application/vnd.github+json"]);
+    // `--paginate --slurp` walks EVERY page of the (oldest→newest) reviews array, so a >100-review
+    // convergence loop still surfaces the genuinely newest review rather than the oldest 100. Plain
+    // `--paginate` concatenates one JSON array PER PAGE (multiple documents) which `JSON.parse`
+    // cannot read; `--slurp` wraps the pages in an outer array we flatten one level (mirrors
+    // {@link githubReleasesCommand}/{@link parseReleases}).
+    const out = await runGh([
+      "api", "--paginate", "--slurp", path, "-H", "Accept: application/vnd.github+json",
+    ]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    return JSON.parse(out) as GhReview[];
+    return (JSON.parse(out) as GhReview[][]).flat();
   }
   if (!token) return null; // token mode with no token → poller idles
-  // Page the token transport the same way; 20×100 reviews is far past any real convergence loop.
+  // Page the token transport the same way; 20×100 reviews is far past any real convergence loop, and
+  // a genuinely deeper history we can't reach is unverifiable → fail CLOSED (throw) rather than
+  // return a partial list the poller would treat as complete (selecting an older review, re-nudging).
   const reviews: GhReview[] = [];
   const MAX_PAGES = 20;
   for (let page = 1; page <= MAX_PAGES; page++) {
@@ -98,8 +105,16 @@ export async function fetchPrReviews(
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const batch = (await r.json()) as GhReview[];
     reviews.push(...batch);
-    // A short page means we've read every review — the list is complete.
-    if (batch.length < 100) break;
+    // A short final page means we've read every review — the list is complete.
+    if (batch.length < 100) return reviews;
+    // A full page on the last allowed page is only truncated if GitHub says there's more; trust the
+    // `Link` header's `rel="next"` (mirrors {@link fetchPrFiles}) so an exact multiple of 100 isn't a
+    // false positive, and throw when the cap genuinely truncates rather than under-reading history.
+    if (page === MAX_PAGES && /<[^>]*>;\s*rel="next"/.test(r.headers.get("link") ?? "")) {
+      throw new Error(
+        `github pr reviews truncated: ${repo}#${number} exceeds ${MAX_PAGES * 100}-review paging cap`,
+      );
+    }
   }
   return reviews;
 }
@@ -355,12 +370,16 @@ export async function fetchLatestCopilotReview(
     commit_id?: string | null;
   }
   if (useGh) {
-    // `--paginate` merges EVERY page of the (oldest→newest) reviews array, so a >100-review
+    // `--paginate --slurp` walks EVERY page of the (oldest→newest) reviews array, so a >100-review
     // convergence loop still surfaces the genuinely newest Copilot review rather than the oldest
-    // 100 — reading only the first page here would fail-OPEN the advisory dimension.
-    const out = await runGh(["api", "--paginate", basePath, "-H", "Accept: application/vnd.github+json"]);
+    // 100 — reading only the first page here would fail-OPEN the advisory dimension. Plain
+    // `--paginate` concatenates one JSON array PER PAGE (multiple documents) which `JSON.parse`
+    // cannot read; `--slurp` wraps the pages in an outer array we flatten one level.
+    const out = await runGh([
+      "api", "--paginate", "--slurp", basePath, "-H", "Accept: application/vnd.github+json",
+    ]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const reviews = JSON.parse(out) as Review[];
+    const reviews = (JSON.parse(out) as Review[][]).flat();
     return pickLatestCopilotReview(reviews, false);
   }
   if (!token) return null;

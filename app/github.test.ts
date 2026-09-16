@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, isNotAPullRequestError, listPrsForHead, type Mergeability, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -55,6 +55,70 @@ test("fetchPrFiles: throws when the cap genuinely truncates (full last page + ne
   // 6 pages available but only 5 fetched → the 5th page still advertises `rel="next"`.
   await assertRejects(
     () => withTokenTransport([100, 100, 100, 100, 100, 100], () => fetchPrFiles("o/r", 3, "tok")),
+    Error,
+    "truncated",
+  );
+});
+
+// ── fetchPrReviews token-transport paging (issue #799) ──────────────────────────────────────────
+// The poller picks the NEWEST review by id, so `fetchPrReviews` must page the FULL (oldest→newest)
+// list — reading only the first `per_page=100` page would surface the oldest 100 and miss the
+// genuinely newest review on a >100-review convergence loop. The token transport mirrors
+// `fetchPrFiles`: it fails CLOSED (throws) when the paging cap genuinely truncates rather than
+// returning a partial list the poller would treat as complete.
+
+// A fake `fetch` that serves `pages` of review batches; each page N (1-based) returns `pages[N-1]`
+// reviews (with ascending ids), setting `Link: rel="next"` whenever a later page exists.
+function stubReviewFetch(pages: number[]) {
+  return (url: string | URL | Request): Promise<Response> => {
+    const u = new URL(String(url));
+    const page = Number(u.searchParams.get("page") ?? "1");
+    const count = pages[page - 1] ?? 0;
+    const start = pages.slice(0, page - 1).reduce((a, b) => a + b, 0);
+    const body = Array.from({ length: count }, (_, i) => ({
+      id: start + i + 1,
+      state: "COMMENTED",
+      submitted_at: "2026-01-01T00:00:00Z",
+    }));
+    const headers = new Headers();
+    if (page < pages.length) {
+      headers.set("link", `<https://api.github.com/next?page=${page + 1}>; rel="next"`);
+    }
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers }));
+  };
+}
+
+async function withReviewTransport<T>(pages: number[], fn: () => Promise<T>): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = stubReviewFetch(pages) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+}
+
+test("fetchPrReviews: pages the full list beyond the first 100 (newest review is seen)", async () => {
+  const reviews = await withReviewTransport([100, 37], () => fetchPrReviews("o/r", 1, "tok"));
+  assertEquals(reviews?.length, 137);
+  // The genuinely newest review (highest id) is on the SECOND page — it must be present.
+  assertEquals(reviews?.[reviews.length - 1]?.id, 137);
+});
+
+test("fetchPrReviews: no token → null (idle, not a throw)", async () => {
+  const reviews = await withReviewTransport([100], () => fetchPrReviews("o/r", 2, ""));
+  assertEquals(reviews, null);
+});
+
+test("fetchPrReviews: throws when the cap genuinely truncates (full last page + next)", async () => {
+  // MAX_PAGES=20 full pages, and the 20th still advertises `rel="next"` → fail closed.
+  const capped = Array.from({ length: 21 }, () => 100);
+  await assertRejects(
+    () => withReviewTransport(capped, () => fetchPrReviews("o/r", 3, "tok")),
     Error,
     "truncated",
   );

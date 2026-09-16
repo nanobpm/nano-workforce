@@ -840,7 +840,7 @@ export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
 // steps do. Fails OPEN to `null` (unreadable head → not stale, per `isReviewStale`).
 const readCurrentHead = makeDefaultReadHead({ fetchPrHead, fetchBranchHead });
 
-async function pollReviews(data: DataLayer, engine: EngineClient, token: string) {
+export async function pollReviews(data: DataLayer, engine: EngineClient, token: string) {
   const waiting = await prs(data).find({ status: "waiting_review" });
   for (const pr of waiting) {
     const { repo, number, pr_key: prKey } = pr;
