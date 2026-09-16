@@ -144,7 +144,7 @@ test("convergence-loop golden has arbitrary-graph features the structured builde
 // CLASS 2, empirical — demonstrate WHY the structured builder cannot reproduce
 // (a): a `loop()` whose body starts with a task derives an exclusive-gateway
 // loop head that absorbs the back-edge (in>=2), leaving the task itself at
-// in=1. The golden instead merges its back-edges directly into `review-round`
+// in=1. The golden instead merges its back-edges directly into `capture-head`
 // (capture-head in=5: f_start, f_reviewLoop, f_answerLoop, the #786 f_huskRetry, and the #796
 // f_ackRetry re-entry) with no loop-head gateway — a shape the builder cannot express.
 test("loop() inserts a gateway head, so back-edges cannot merge into a task", () => {

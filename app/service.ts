@@ -166,7 +166,9 @@ export const MAX_MERGE_RETRIES = clampCiFixBudget(process.env.NANO_PR_MAX_MERGE_
  * so the loop tries that — bounded — before parking the human `wait-answer` (issue #796). A resolved
  * `Declined … nano-ack:` advisory is an acknowledgement and CONVERGES (issue #787), so a decline does
  * not escalate; only the agent returning `needs_input` (a genuinely contested advisory it cannot
- * decide), or this budget being exhausted, escalates. Default 2; set
+ * decide) or `blocked` (an external blocker it reports with a question — the `gw-status` arm at
+ * `convergence-loop.bpmn:442-443` routes both to `wait-answer`), or this budget being exhausted,
+ * escalates. Default 2; set
  * `NANO_PR_MAX_ACK_RETRIES=0` to escalate on the first ack-only block. Reuses the CI-fix budget clamp
  * (allows 0 = disable, ceiling-capped). */
 export const MAX_ACK_RETRIES = clampCiFixBudget(process.env.NANO_PR_MAX_ACK_RETRIES, 2);
