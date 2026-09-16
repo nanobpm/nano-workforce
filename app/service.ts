@@ -91,7 +91,7 @@ import {
 // (submitPr/startMerge) and re-exported below so the long-standing `import { repoEnvelopeVars } from
 // "./service.ts"` call sites (and its tests) keep resolving.
 import { repoEnvelopeVars } from "./repoEnvelope.ts";
-import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
+import { clampNudgeMinutes, isReviewStale, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
   buildUserTaskRow,
@@ -851,6 +851,21 @@ async function pollReviews(data: DataLayer, engine: EngineClient, token: string)
         // No fresh review yet. Copilot won't re-review a round with no new commit and dismisses
         // re-requests, so actively (re-)solicit the next review — throttled to one attempt per
         // REVIEW_NUDGE_MS window. The process's timer arm is the backstop if this never lands.
+        await maybeRerequestReview(data, pr, token);
+        continue;
+      }
+      // #799 (FM2): only resume the loop on a review of the CURRENT head. If the PR HEAD has
+      // advanced past the commit the newest review was submitted against, that review is STALE — its
+      // advisories describe code the head has moved past (e.g. an advisory the agent already fixed in
+      // a later commit). Publishing `readiness-ready` on it would resume the loop on obsolete
+      // findings and, at the converge-gate, re-escalate a human on an already-fixed advisory (PR
+      // #789). Treat a stale review like "no fresh review": (re-)solicit a fresh review of the
+      // current head and wait — without bumping `last_review_id`, so the next HEAD-current review is
+      // still detected. The head read fails OPEN (null → not stale), so a transport hiccup never
+      // strands a genuine review; the review-wait timer remains the backstop.
+      const head = await fetchPrHead(repo, number, token).catch(() => null);
+      if (isReviewStale(fresh.commit_id, head?.headSha)) {
+        console.log(`[poller] review ${fresh.id} is stale (predates HEAD) -> re-soliciting ${prKey}`);
         await maybeRerequestReview(data, pr, token);
         continue;
       }

@@ -435,9 +435,21 @@ test("pickLatestCopilotReviewBody: FAILS CLOSED (null) when the reviews read was
 async function makeUnderTest(deps: {
   readThreads: (repo: string, n: number) => Promise<ReviewThread[] | null>;
   readReviewBody: (repo: string, n: number) => Promise<string | null>;
+  // The commit SHA the latest Copilot review was submitted against, and the PR's current HEAD SHA
+  // (issue #799). Absent ⇒ both null ⇒ never stale (the pre-#799 behaviour every existing test
+  // relies on). A stale-review test supplies a `reviewCommitId` that differs from `headSha`.
+  reviewCommitId?: string | null;
+  headSha?: string | null;
 }) {
   const { makeHandler } = await import("../workers/converge-gate/worker.ts");
-  return makeHandler(deps);
+  return makeHandler({
+    readThreads: deps.readThreads,
+    readReview: async (repo, n) => {
+      const body = await deps.readReviewBody(repo, n);
+      return body === null ? null : { body, commitId: deps.reviewCommitId ?? null };
+    },
+    readHeadSha: async () => deps.headSha ?? null,
+  });
 }
 
 test("converge-gate: a clean PR is allowed to converge", async () => {
@@ -446,7 +458,7 @@ test("converge-gate: a clean PR is allowed to converge", async () => {
     readReviewBody: async () => "## Overview\nNo suppressed block.",
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "" });
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", reviewStale: false });
 });
 
 test("converge-gate: an unresolved thread blocks convergence", async () => {
@@ -488,7 +500,7 @@ test("converge-gate: an acknowledged advisory (resolved ack thread) is allowed",
     readReviewBody: async () => SAMPLE_REVIEW_BODY,
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "" });
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", reviewStale: false });
 });
 
 test("converge-gate: FAILS CLOSED when the threads read returns null (no transport)", async () => {
@@ -544,7 +556,7 @@ test("converge-gate: a non-string prKey does not throw — resolves from repo/pr
     readReviewBody: async () => "",
   });
   const out = await handler({ variables: { repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "" });
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", reviewStale: false });
 });
 
 test("converge-gate: FAILS CLOSED (no throw) when prKey is non-string and repo/prNumber are absent", async () => {
@@ -568,6 +580,57 @@ test("converge-gate: resolves repo/prNumber from the prKey when the vars are abs
   });
   await handler({ variables: { prKey: "o/r#7" } } as any, {} as any);
   assertEquals(seen, ["o/r", 7]);
+});
+
+// ── Stale-review guard (issue #799) ──────────────────────────────────────────
+// FM2: when the PR HEAD has advanced past the commit the latest Copilot review was submitted
+// against, that review is stale — its suppressed advisories may already be fixed in code. The gate
+// must NOT block/escalate on it; it must signal `reviewStale` so the loop re-solicits a fresh
+// review of the current HEAD. FM1 (an applied-but-unacked advisory re-escalating forever) is
+// structurally cured by this: once the fixing commit lands, the review that still lists the
+// advisory is stale, so the gate re-solicits instead of re-blocking.
+
+test("converge-gate #799: a STALE review (commit_id predates HEAD) does not block — signals reviewStale", async () => {
+  // The review still lists an unacked suppressed advisory (would block if evaluated), but it was
+  // submitted against an OLD commit — the agent has since pushed a fix. The gate must re-solicit,
+  // not escalate.
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => SAMPLE_REVIEW_BODY,
+    reviewCommitId: "oldsha1111111111111111111111111111111111",
+    headSha: "newsha2222222222222222222222222222222222",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", reviewStale: true });
+});
+
+test("converge-gate #799: a HEAD-CURRENT review still blocks on an unacked advisory (control)", async () => {
+  // Same unacked advisory, but the review's commit_id MATCHES HEAD — it is fresh, so the ordinary
+  // gate runs and blocks. Proves the stale guard does not swallow a genuine block.
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => SAMPLE_REVIEW_BODY,
+    reviewCommitId: "samesha33333333333333333333333333333333",
+    headSha: "samesha33333333333333333333333333333333",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertEquals(out.reviewStale, false);
+  assertStringIncludes(out.convergeBlockReason ?? "", "spec-app/nano-app.schema.json:613");
+});
+
+test("converge-gate #799: an unknown review commit_id or unreadable HEAD is NOT stale (evaluates normally)", async () => {
+  // Fail-safe: without both SHAs we cannot prove staleness, so the gate must fall through to the
+  // ordinary evaluation (here: block on the unacked advisory), never fabricate a re-solicit loop.
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => SAMPLE_REVIEW_BODY,
+    reviewCommitId: null,
+    headSha: "newsha2222222222222222222222222222222222",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertEquals(out.reviewStale, false);
 });
 
 // ── Structural guard over the committed BPMN (no engine) ─────────────────────
@@ -604,6 +667,26 @@ test("gw-converge-gate blocks on an explicit convergeBlocked = true condition", 
   assert(f, "f_convergeBlocked flow missing");
   assertStringIncludes(f, 'targetRef="persist-escalation-blockedcomments"');
   assertStringIncludes(f, "convergeBlocked = true");
+});
+
+test("gw-converge-gate routes a STALE review back to persist-round (re-solicit), not to escalation (#799)", () => {
+  const f = flowElement("f_convergeStale");
+  assert(f, "f_convergeStale flow missing");
+  assertStringIncludes(f, 'sourceRef="gw-converge-gate"');
+  // A stale review re-enters the round loop via persist-round → check-progress, which parks
+  // waiting_review (the single writer) and the poller re-solicits a fresh review.
+  assertStringIncludes(f, 'targetRef="persist-round"');
+  assertStringIncludes(f, "reviewStale = true");
+  // persist-round must accept the stale re-entry as an incoming.
+  const pr = flat.match(/<bpmn:serviceTask\b[^>]*\bid="persist-round"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(pr, "persist-round task missing");
+  assertStringIncludes(pr[0], "<bpmn:incoming>f_convergeStale</bpmn:incoming>");
+  // The gate's output envelope must declare reviewStale for the FEEL condition to read it.
+  assertStringIncludes(flat, 'id="PrConvergeGateOut"');
+  assert(
+    /<nano:shape\b[^>]*\bid="PrConvergeGateOut"[^>]*>.*?name="reviewStale".*?<\/nano:shape>/.test(flat),
+    "PrConvergeGateOut must declare reviewStale",
+  );
 });
 
 test("gw-converge-gate default arm routes to the scope classifier (not straight to finalize)", () => {

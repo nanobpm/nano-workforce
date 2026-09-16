@@ -23,6 +23,10 @@ export interface GhReview {
   id: number;
   state: string;
   submitted_at?: string;
+  /** The commit SHA the review was submitted against (GitHub's `commit_id`). Used to detect a
+   * review that predates the PR's current HEAD — a STALE review whose advisories are about code the
+   * head has since moved past (issue #799). Absent on data GitHub did not carry a `commit_id` for. */
+  commit_id?: string | null;
 }
 
 export type GithubTransport = "gh" | "token" | "auto";
@@ -279,27 +283,60 @@ export function pickLatestCopilotReviewBody(
   reviews: { user?: { login?: string }; body?: string }[],
   truncated: boolean,
 ): string | null {
+  const picked = pickLatestCopilotReview(reviews, truncated);
+  return picked === null ? null : picked.body;
+}
+
+/** Pick the newest Copilot review — body AND the commit SHA it was submitted against — from a
+ * reviews list (GitHub returns them oldest→newest). Semantics mirror {@link pickLatestCopilotReviewBody}
+ * exactly: `truncated = true` fails CLOSED (`null`, unverifiable); a verified-complete read with no
+ * Copilot review returns `{ body: "", commitId: null }` (a verified "no advisories"). The `commitId`
+ * lets a caller detect a review that predates the PR's current HEAD — a STALE review whose advisories
+ * are about code the head has since moved past (issue #799). Pure; unit-tested. */
+export function pickLatestCopilotReview(
+  reviews: { user?: { login?: string }; body?: string; commit_id?: string | null }[],
+  truncated: boolean,
+): { body: string; commitId: string | null } | null {
   if (truncated) return null;
   const copilot = reviews.filter((rv) => isCopilot(rv.user?.login));
-  return copilot[copilot.length - 1]?.body ?? "";
+  const latest = copilot[copilot.length - 1];
+  return { body: latest?.body ?? "", commitId: latest?.commit_id ?? null };
 }
 
 /** Fetch the latest Copilot review body for a PR (the newest review authored by the automated
  * Copilot reviewer). Returns `null` ONLY when no transport is usable (unverifiable → the worker
  * fails closed); returns `""` when transport is usable but the PR has no Copilot review yet (a
  * verified "no suppressed advisories"). Throws on a genuine transport failure. This split keeps
- * `null` from conflating "unverifiable" with "empty" and fail-OPENing the advisory dimension. */
+ * `null` from conflating "unverifiable" with "empty" and fail-OPENing the advisory dimension.
+ * Thin wrapper over {@link fetchLatestCopilotReview} (the single fetch implementation). */
 export async function fetchLatestCopilotReviewBody(
   repo: string,
   number: number | string,
   token: string,
 ): Promise<string | null> {
+  const picked = await fetchLatestCopilotReview(repo, number, token);
+  return picked === null ? null : picked.body;
+}
+
+/** Fetch the latest Copilot review — body AND the commit SHA it was submitted against — for a PR.
+ * Same null/`""`-vs-unverifiable semantics as {@link fetchLatestCopilotReviewBody} (which delegates
+ * here): `null` ONLY when no transport is usable (unverifiable → fail closed); a verified read with
+ * no Copilot review yet returns `{ body: "", commitId: null }`. The `commitId` lets the convergence
+ * gate detect a review that predates the PR's current HEAD — a STALE review whose advisories are
+ * about code the head has since moved past (issue #799) — and re-solicit a fresh review rather than
+ * block/escalate against the obsolete body. Throws on a genuine transport failure. */
+export async function fetchLatestCopilotReview(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<{ body: string; commitId: string | null } | null> {
   const mode = githubTransport();
   const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
   const basePath = `repos/${repo}/pulls/${number}/reviews?per_page=100`;
   interface Review {
     user?: { login?: string };
     body?: string;
+    commit_id?: string | null;
   }
   if (useGh) {
     // `--paginate` merges EVERY page of the (oldest→newest) reviews array, so a >100-review
@@ -308,7 +345,7 @@ export async function fetchLatestCopilotReviewBody(
     const out = await runGh(["api", "--paginate", basePath, "-H", "Accept: application/vnd.github+json"]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const reviews = JSON.parse(out) as Review[];
-    return pickLatestCopilotReviewBody(reviews, false);
+    return pickLatestCopilotReview(reviews, false);
   }
   if (!token) return null;
   // Page the token transport the same way; 20×100 reviews is far past any real convergence loop, and
@@ -324,14 +361,14 @@ export async function fetchLatestCopilotReviewBody(
     const batch = (await r.json()) as Review[];
     reviews.push(...batch);
     // A short page means we've read every review — the list is complete.
-    if (batch.length < 100) return pickLatestCopilotReviewBody(reviews, false);
+    if (batch.length < 100) return pickLatestCopilotReview(reviews, false);
     // A full page on the last allowed page is only truncated if GitHub says there's more; trust the
     // `Link` header's `rel="next"` so an exact multiple of 100 isn't a false positive.
     if (page === MAX_PAGES && /<[^>]*>;\s*rel="next"/.test(r.headers.get("link") ?? "")) {
-      return pickLatestCopilotReviewBody(reviews, true);
+      return pickLatestCopilotReview(reviews, true);
     }
   }
-  return pickLatestCopilotReviewBody(reviews, false);
+  return pickLatestCopilotReview(reviews, false);
 }
 
 /** Raw GraphQL response shape for the review-threads query. */

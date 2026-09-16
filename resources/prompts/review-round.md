@@ -156,6 +156,16 @@ Because several agents may run on the same host at once:
    `path:line`, it is blind to the advisory's prose, so it would let a resolved ack
    for one advisory silently acknowledge a genuinely new advisory re-emitted at that
    same line. Always use the `<path> :: <text>` form.
+
+   > **Fixing an advisory in code is NOT enough — you MUST also post its resolved
+   > `nano-ack:` thread (issues #799 / #789).** Copilot re-lists every suppressed
+   > advisory in each review body, *including ones you already fixed in code*. The
+   > converge-gate cannot see your diff; it sees only the review body's advisory
+   > list and your resolved ack threads. So an advisory you **Applied** (fixed) but
+   > left un-acked is still an *outstanding* advisory to the gate — it re-blocks and
+   > re-escalates to a human every round even though the code is already correct.
+   > Post an `Applied. nano-ack: <path> :: <text>` thread for **every** advisory you
+   > fix, not only for the ones you decline.
 6. **Do NOT request, re-request, or remove the reviewer yourself.** Keeping
    Copilot attached is the **process's** job: a deterministic poller ensures a
    Copilot review is requested (idempotently) whenever this PR is waiting, and it
