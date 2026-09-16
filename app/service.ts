@@ -161,8 +161,10 @@ export const MAX_MERGE_RETRIES = clampCiFixBudget(process.env.NANO_PR_MAX_MERGE_
  * to auto-ack unacked suppressed advisories before escalating to a human. When the converge-gate
  * blocks SOLELY on unacknowledged suppressed advisories (no unresolved inline threads), the block is
  * recoverable: re-running the review-round agent posts the missing `nano-ack:` threads and converges,
- * so the loop tries that — bounded — before parking the human `wait-answer` (issue #796). Only if the
- * agent keeps declining/needs input, or this budget is exhausted, does it escalate. Default 2; set
+ * so the loop tries that — bounded — before parking the human `wait-answer` (issue #796). A resolved
+ * `Declined … nano-ack:` advisory is an acknowledgement and CONVERGES (issue #787), so a decline does
+ * not escalate; only the agent returning `needs_input` (a genuinely contested advisory it cannot
+ * decide), or this budget being exhausted, escalates. Default 2; set
  * `NANO_PR_MAX_ACK_RETRIES=0` to escalate on the first ack-only block. Reuses the CI-fix budget clamp
  * (allows 0 = disable, ceiling-capped). */
 export const MAX_ACK_RETRIES = clampCiFixBudget(process.env.NANO_PR_MAX_ACK_RETRIES, 2);

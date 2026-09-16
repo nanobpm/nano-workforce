@@ -246,6 +246,20 @@ export function parseSuppressedAdvisories(reviewBody: string | null | undefined)
   return out;
 }
 
+/** True when a review thread is a `nano-ack:` acknowledgement thread (any of its comments carries an
+ * ack marker) rather than a substantive code-review thread. An UNRESOLVED ack thread is a partially
+ * completed acknowledgement — the agent posted it but has not resolved it yet — which the bounded
+ * auto-ack retry can finish (post-and-resolve). It must therefore NOT count toward the "unresolved
+ * review thread" total that flips a block off the ack-only path, or a block whose sole remaining
+ * cause is an unresolved ack thread would escalate to a human instead of the recoverable #796 retry.
+ * A reviewer's substantive finding never carries this marker, so it is still counted. */
+export function isAckThread(thread: ReviewThread): boolean {
+  return thread.bodies.some((b) => {
+    ACK_MARKER.lastIndex = 0;
+    return ACK_MARKER.test(b);
+  });
+}
+
 /** Extract the acknowledged advisory keys from a set of review threads (only RESOLVED threads
  * count — an open ack thread is not yet an acknowledgement). Returns line-stable keys (`<path>#<fp>`)
  * parsed from the `nano-ack: <path> :: <text>` form ONLY. A bare `nano-ack: <path>:<line>` marker is

@@ -15,6 +15,7 @@ import { assert, assertEquals, assertNotEquals, assertStringIncludes } from "#te
 import { evaluateConvergeGate } from "./convergeGate.ts";
 import {
   advisoryStableKey,
+  isAckThread,
   parseAckedAdvisories,
   parseReviewThreadsPage,
   parseSuppressedAdvisories,
@@ -144,6 +145,65 @@ test("parseSuppressedAdvisories: returns [] when there is no suppressed block", 
   assertEquals(parseSuppressedAdvisories("## Overview\nLooks good, **file.ts:1** is fine."), []);
   assertEquals(parseSuppressedAdvisories(null), []);
   assertEquals(parseSuppressedAdvisories(undefined), []);
+});
+
+// An UNRESOLVED ack thread (one the round agent posted but has not resolved yet) must NOT count as
+// an unresolved *review* thread: it is a partially-completed acknowledgement the bounded #796
+// auto-ack retry can finish, so counting it would flip an otherwise ack-only block off the
+// recoverable path and escalate to a human despite there being no substantive open code-review
+// thread. `isAckThread` is the single source of truth the converge-gate worker filters on.
+test("isAckThread: a thread carrying a nano-ack marker is an ack thread (resolved or not)", () => {
+  assert(
+    isAckThread({
+      isResolved: false,
+      path: "a.ts",
+      bodies: ["Applied. nano-ack: app/x.ts :: Guard the empty input."],
+    }),
+  );
+  assert(
+    isAckThread({ isResolved: true, path: "a.ts", bodies: ["Declined. nano-ack: app/x.ts :: Narrow this type."] }),
+  );
+});
+
+test("isAckThread: a substantive review thread (no nano-ack marker) is NOT an ack thread", () => {
+  assertEquals(isAckThread({ isResolved: false, path: "a.ts", bodies: ["This can NPE on empty input."] }), false);
+  assertEquals(isAckThread({ isResolved: false, path: "a.ts", bodies: [] }), false);
+});
+
+// Mirrors the converge-gate worker's `unresolvedThreadCount` computation: an unresolved ack thread is
+// excluded, so a block whose sole remaining open thread is an unresolved ack thread stays ack-only
+// (auto-recoverable) instead of escalating to a human.
+test("converge gate: an unresolved ack thread does not count as an unresolved review thread (stays ack-only)", () => {
+  const threads: ReviewThread[] = [
+    { isResolved: false, path: "a.ts", bodies: ["Applied. nano-ack: app/x.ts :: Guard the empty input."] },
+    { isResolved: true, path: "b.ts", bodies: ["already fixed"] },
+  ];
+  const unresolvedThreadCount = threads.filter((t) => !t.isResolved && !isAckThread(t)).length;
+  assertEquals(unresolvedThreadCount, 0);
+  const r = evaluateConvergeGate({
+    unresolvedThreadCount,
+    suppressedAdvisories: [{ key: "app/x.ts#deadbeef", label: "app/x.ts:12" }],
+    acknowledgedKeys: [],
+  });
+  assertEquals(r.convergeBlocked, true);
+  assertEquals(r.ackOnly, true);
+});
+
+// A genuine reviewer thread left open still blocks off the ack-only path (fail-closed intact).
+test("converge gate: a substantive unresolved thread still counts (not ack-only)", () => {
+  const threads: ReviewThread[] = [
+    { isResolved: false, path: "a.ts", bodies: ["This can NPE on empty input."] },
+    { isResolved: false, path: "b.ts", bodies: ["Applied. nano-ack: app/x.ts :: Guard the empty input."] },
+  ];
+  const unresolvedThreadCount = threads.filter((t) => !t.isResolved && !isAckThread(t)).length;
+  assertEquals(unresolvedThreadCount, 1);
+  const r = evaluateConvergeGate({
+    unresolvedThreadCount,
+    suppressedAdvisories: [{ key: "app/x.ts#deadbeef", label: "app/x.ts:12" }],
+    acknowledgedKeys: [],
+  });
+  assertEquals(r.convergeBlocked, true);
+  assertEquals(r.ackOnly, false);
 });
 
 test("parseAckedAdvisories: only RESOLVED threads carrying a nano-ack marker count", () => {

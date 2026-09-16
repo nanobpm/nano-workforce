@@ -6,7 +6,9 @@
 // the comment unaddressed). This step runs on the converged path, BEFORE the scope classifier and
 // pr.finalize hand off to the merge loop, and blocks handoff while GitHub still shows unaddressed
 // comments:
-//   • any review THREAD is still unresolved (GraphQL `isResolved = false`), or
+//   • any substantive review THREAD is still unresolved (GraphQL `isResolved = false`) — an
+//     unresolved `nano-ack:` ack thread is EXCLUDED, since it is a partially-completed
+//     acknowledgement the bounded #796 auto-ack retry can finish, not a code-review finding, or
 //   • any SUPPRESSED advisory in the latest Copilot review body lacks a matching RESOLVED ack
 //     thread (a `nano-ack: <path> :: <verbatim advisory text>` marker whose line-stable prose
 //     fingerprint matches Copilot's advisory). The bare legacy `nano-ack: <path>:<line>` form is
@@ -32,6 +34,7 @@ import { type ConvergeGateResult, evaluateConvergeGate } from "../../app/converg
 import {
   fetchLatestCopilotReviewBody,
   fetchReviewThreads,
+  isAckThread,
   parseAckedAdvisories,
   parseSuppressedAdvisories,
   type ReviewThread,
@@ -91,7 +94,11 @@ export function makeHandler(deps: {
       if (reviewBody === null) {
         return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false };
       }
-      const unresolvedThreadCount = threads.filter((t) => !t.isResolved).length;
+      // An UNRESOLVED ack thread (one carrying a `nano-ack:` marker) is a partially-completed
+      // acknowledgement the bounded auto-ack retry can finish, not a substantive code-review thread —
+      // exclude it so a block whose sole remaining cause is an unresolved ack thread stays ack-only
+      // (recoverable via the #796 retry) instead of escalating to a human.
+      const unresolvedThreadCount = threads.filter((t) => !t.isResolved && !isAckThread(t)).length;
       const advisories = parseSuppressedAdvisories(reviewBody);
       result = evaluateConvergeGate({
         unresolvedThreadCount,

@@ -13,7 +13,9 @@
 // A blocked gate escalates to the human wait-answer task (recoverable), never a hard wedge.
 
 export interface ConvergeGateInput {
-  /** Count of review threads with `isResolved === false`. */
+  /** Count of unresolved review threads that are NOT `nano-ack:` ack threads (the worker excludes an
+   * unresolved ack thread — a partially-completed acknowledgement the #796 auto-ack retry can finish
+   * — so it does not flip an otherwise ack-only block off the recoverable path). */
   unresolvedThreadCount: number;
   /** Copilot's suppressed advisories (latest review body), each with its line-stable key + label. */
   suppressedAdvisories: { key: string; label: string }[];
