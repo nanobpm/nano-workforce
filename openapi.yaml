@@ -456,6 +456,17 @@ components:
         staleMs:
           type: integer
           description: Milliseconds since the last liveness refresh (0 when fresh).
+        harnessProtocol:
+          type: integer
+          minimum: 0
+          description: The worker-harness protocol version this worker advertised at enrolment (issue #802), when a numeric one is known.
+        harnessStale:
+          type: boolean
+          description: >-
+            Whether this worker's harness is STALE (issue #802) — below the configured minimum protocol
+            or advertising no version at all — so it may silently swallow AgentInstance / transcript /
+            result-envelope artifacts. Surfaced so the operator can drain it. Distinct from the
+            liveness `staleMs` heartbeat grade.
     AgenticSupplyLeaf:
       type: object
       description: The supply for one leaf token — the workers registered under it.
@@ -622,6 +633,16 @@ components:
             sets false) redrives a re-leased round from scratch. Recorded only when `instance` is
             a non-blank string — a missing, empty, or whitespace-only `instance` is echoed back for
             provenance but the flag is not persisted.
+        harnessProtocol:
+          type: integer
+          minimum: 0
+          description: >-
+            The worker-harness protocol version (issue #802) — a non-negative integer declaring which
+            machine-readable artifacts the harness emits (AgentInstance, transcript flush, result
+            envelope). An ENROLMENT attribute, never a routing token. Recorded per instance so the app
+            can flag a stale harness in getAgenticSupply / the registry and — under
+            NANO_AGENTIC_STALE_HARNESS_POLICY=refuse — refuse it agent-job routing. A missing version is
+            treated as stale.
     EnrolledRole:
       type: object
       description: One matched role in an enrolment resolution — provenance for the resolved SERVE set.
@@ -655,6 +676,20 @@ components:
             guarantee of durable persistence — recording into the durable-resume registry is
             best-effort (skipped when `instance` is absent/blank, and a registry write hiccup is
             logged without failing enrolment).
+        harnessProtocol:
+          type: integer
+          minimum: 0
+          description: >-
+            Echo of the request's advertised harness protocol version (issue #802). Present only when
+            the request supplied it.
+        harnessStale:
+          type: boolean
+          description: >-
+            Whether this worker's harness is STALE (issue #802) — below the configured minimum protocol
+            (NANO_AGENTIC_MIN_HARNESS_PROTOCOL) or advertising no version at all. Always present. Under
+            NANO_AGENTIC_STALE_HARNESS_POLICY=refuse a stale harness is handed an EMPTY `serve` set so
+            it wins no job leases; under the default `flag` policy `serve` is unchanged and the worker
+            is only flagged for observability/drain.
         serve:
           type: array
           description: The SERVE token set — sorted, de-duplicated leaf tokens the worker may serve.
@@ -813,6 +848,32 @@ components:
           type: string
           enum: [green, amber, red]
           description: The overall SLO — worst of the missing-agent signal and the diversity SLO.
+        staleWorkers:
+          type: array
+          description: >-
+            The enrolled workers whose harness is STALE (issue #802) — below the configured minimum
+            protocol or advertising no version at all — so they may silently swallow AgentInstance /
+            transcript / result-envelope artifacts and should be drained. Present (possibly empty) when
+            the app's harness-protocol registry is available.
+          items:
+            $ref: "#/components/schemas/StaleWorker"
+    StaleWorker:
+      type: object
+      description: One enrolled worker flagged as running a stale harness (issue #802).
+      required:
+        - instance
+        - stale
+      properties:
+        instance:
+          type: string
+          description: The worker instance id.
+        harnessProtocol:
+          type: integer
+          minimum: 0
+          description: The advertised harness protocol version, when a numeric one is known (omitted when none was advertised).
+        stale:
+          type: boolean
+          description: Whether the worker's harness is stale (always true for entries in this list).
     AgenticTranscript:
       type: object
       description: One captured agent session's transcript metadata (H3/#146 transcript store). A durable
@@ -3993,6 +4054,10 @@ paths:
                 durableResume:
                   type: boolean
                   description: "Whether this worker's harness advertises durable-resume (issue #325, ADR 0062 Slice 5/5) — an ENROLMENT attribute, never a routing token. Recorded per instance so the app emits the world-restore marker only to a fleet with a participant; a harness that omits it (or sets false) redrives a re-leased round from scratch. Recorded only when `instance` is a non-blank string — a missing, empty, or whitespace-only `instance` is echoed back for provenance but the flag is not persisted."
+                harnessProtocol:
+                  type: integer
+                  minimum: 0
+                  description: "The worker-harness protocol version (issue #802) — a non-negative integer declaring which machine-readable artifacts the harness emits (AgentInstance, transcript flush, result envelope). An ENROLMENT attribute, never a routing token. Recorded per instance so the app can flag a stale harness in getAgenticSupply / the registry and — under NANO_AGENTIC_STALE_HARNESS_POLICY=refuse — refuse it agent-job routing. A missing version is treated as stale."
               # END generated:mcp-body
       responses:
         "200":

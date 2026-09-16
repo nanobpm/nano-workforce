@@ -18,9 +18,10 @@ import {
   type TaskDefinitionLeaf,
 } from "@nanobpm/agentic/demand";
 import type { RegisteredWorker } from "@nanobpm/agentic/vocab";
-import type { Logger } from "@nanobpm/urban";
-import type { RegistryReport as WireRegistryReport } from "../../../nano-generated/api-io.d.ts";
+import type { DataLayer, Logger } from "@nanobpm/urban";
+import type { StaleWorker, RegistryReport as WireRegistryReport } from "../../../nano-generated/api-io.d.ts";
 import { resolveEngineAddress } from "../../enginePreflight.ts";
+import { assessWorkers, type HarnessAssessment } from "../../harnessProtocol.ts";
 import { envVar } from "../../version.ts";
 import { currentPresenceRegistry } from "../families/presence.family.ts";
 import { CREW_VOCAB_VERSION, crewResolver } from "./crew-vocab.ts";
@@ -38,6 +39,13 @@ export interface RegistryReport extends DemandSupplyReport {
    * demand is unavailable rather than silently showing "no demand".
    */
   readonly demandUnavailable: boolean;
+  /**
+   * The enrolled workers whose harness is STALE (issue #802) — below the configured minimum protocol,
+   * or advertising no version at all — so they may silently swallow AgentInstance / transcript /
+   * result-envelope artifacts and should be drained. Empty when every supplied worker is healthy;
+   * omitted only when the harness-protocol registry could not be consulted.
+   */
+  readonly staleWorkers?: readonly HarnessAssessment[];
 }
 
 /**
@@ -159,15 +167,35 @@ export function toWireReport(report: RegistryReport): WireRegistryReport {
       })),
     },
     status: report.status,
+    ...(report.staleWorkers !== undefined
+      ? {
+          staleWorkers: report.staleWorkers.map((w): StaleWorker => {
+            const out: StaleWorker = { instance: w.instance, stale: w.stale };
+            if (w.harnessProtocol !== undefined) out.harnessProtocol = w.harnessProtocol;
+            return out;
+          }),
+        }
+      : {}),
   };
 }
 
 /**
  * The composition path the `getAgenticRegistry` operation calls: read demand from the engine, read
- * supply from the presence registry, and build the report. Never throws for an engine outage — it
- * degrades to a supply-only report.
+ * supply from the presence registry, assess harness staleness (issue #802), and build the report.
+ * Never throws for an engine outage — it degrades to a supply-only report; the staleness assessment
+ * is best-effort and omitted when no data layer is mounted.
  */
-export async function computeRegistryReport(log?: Logger): Promise<RegistryReport> {
+export async function computeRegistryReport(log?: Logger, data?: DataLayer): Promise<RegistryReport> {
   const taskDefinitions = await readDemand(log);
-  return buildRegistryReport({ taskDefinitions, workers: supplyWorkers() });
+  const workers = supplyWorkers();
+  const report = buildRegistryReport({ taskDefinitions, workers });
+  if (!data) return report;
+  const assessed = await assessWorkers(
+    data,
+    workers.map((w) => w.instance),
+  );
+  const staleWorkers = [...assessed.values()]
+    .filter((a) => a.stale)
+    .sort((a, b) => a.instance.localeCompare(b.instance));
+  return { ...report, staleWorkers };
 }

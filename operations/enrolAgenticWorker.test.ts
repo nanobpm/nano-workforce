@@ -4,6 +4,7 @@ import { assert, assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 import { memDataFor } from "../test/worldDb.ts";
 import { DurableResumeRegistry } from "../app/durableResume.ts";
+import { HarnessProtocolRegistry } from "../app/harnessProtocol.ts";
 import { noopLog } from "../test/log.ts";
 import handler from "./enrolAgenticWorker.ts";
 
@@ -149,5 +150,88 @@ test("enforces the shared secret when NANO_PR_WEBHOOK_SECRET is set", async () =
   } finally {
     if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
     else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+  }
+});
+
+// Harness-protocol enrolment gate (issue #802).
+const HARNESS_MIGRATIONS = ["052_worker_durable_resume.sql", "107_worker_harness_protocol.sql"];
+
+test("echoes harnessProtocol and reports harnessStale=false for a healthy protocol (>= minimum)", async () => {
+  const res = (await handler(input({ capability: { cognition: "decide" }, instance: "w1", harnessProtocol: 2 }), app)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.harnessProtocol, 2);
+  assertEquals(res.body.harnessStale, false);
+  // No routing regression under the default `flag` policy: SERVE is unchanged.
+  assert(res.body.serve.includes("decide"));
+});
+
+test("flags harnessStale=true when the harness advertises no version at all (absent = stale)", async () => {
+  const res = (await handler(input({ capability: { cognition: "decide" }, instance: "w1" }), app)) as any;
+  assertEquals(res.status, 200);
+  assertEquals("harnessProtocol" in res.body, false, "no protocol echoed when none advertised");
+  assertEquals(res.body.harnessStale, true);
+  // Default `flag` policy: a stale harness is still routed (only flagged), so no fleet regression.
+  assert(res.body.serve.includes("decide"), "flag policy leaves SERVE intact");
+});
+
+test("flags harnessStale=true for a below-minimum protocol", async () => {
+  const prev = process.env["NANO_AGENTIC_MIN_HARNESS_PROTOCOL"];
+  process.env["NANO_AGENTIC_MIN_HARNESS_PROTOCOL"] = "3";
+  try {
+    const res = (await handler(input({ capability: { cognition: "decide" }, instance: "w1", harnessProtocol: 1 }), app)) as any;
+    assertEquals(res.status, 200);
+    assertEquals(res.body.harnessStale, true);
+  } finally {
+    if (prev === undefined) delete process.env["NANO_AGENTIC_MIN_HARNESS_PROTOCOL"];
+    else process.env["NANO_AGENTIC_MIN_HARNESS_PROTOCOL"] = prev;
+  }
+});
+
+test("rejects a non-integer/negative harnessProtocol as 400", async () => {
+  const nonInt = (await handler(input({ capability: { cognition: "decide" }, harnessProtocol: 1.5 }), app)) as any;
+  assertEquals(nonInt.status, 400);
+  const negative = (await handler(input({ capability: { cognition: "decide" }, harnessProtocol: -1 }), app)) as any;
+  assertEquals(negative.status, 400);
+  const str = (await handler(input({ capability: { cognition: "decide" }, harnessProtocol: "2" }), app)) as any;
+  assertEquals(str.status, 400);
+});
+
+test("records the advertised harness protocol in the registry when a data layer + instance are present", async () => {
+  const { data } = memDataFor(HARNESS_MIGRATIONS);
+  const withData = { log: noopLog(), data } as unknown as AppApi;
+  const res = (await handler(input({ capability: { cognition: "decide" }, instance: "w1", harnessProtocol: 2 }), withData)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(await new HarnessProtocolRegistry(data).protocolFor("w1"), 2);
+});
+
+test("a re-enrol WITHOUT a protocol clears a stale-healthy recorded value (degrade to stale)", async () => {
+  const { data } = memDataFor(HARNESS_MIGRATIONS);
+  const withData = { log: noopLog(), data } as unknown as AppApi;
+  await handler(input({ capability: { cognition: "decide" }, instance: "w1", harnessProtocol: 3 }), withData);
+  assertEquals(await new HarnessProtocolRegistry(data).protocolFor("w1"), 3);
+  const res = (await handler(input({ capability: { cognition: "decide" }, instance: "w1" }), withData)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(await new HarnessProtocolRegistry(data).protocolFor("w1"), undefined, "stale-healthy value cleared");
+});
+
+test("under the `refuse` policy a stale harness is handed an EMPTY SERVE set (no job leases)", async () => {
+  const prev = process.env["NANO_AGENTIC_STALE_HARNESS_POLICY"];
+  process.env["NANO_AGENTIC_STALE_HARNESS_POLICY"] = "refuse";
+  try {
+    const mod = await import(`./enrolAgenticWorker.ts?refuse=${Date.now()}`);
+    const guarded = mod.default as typeof handler;
+    // A stale (version-less) worker: SERVE withheld.
+    const stale = (await guarded(input({ capability: { cognition: "decide" }, instance: "w1" }), app)) as any;
+    assertEquals(stale.status, 200);
+    assertEquals(stale.body.harnessStale, true);
+    assertEquals(stale.body.serve, [], "refuse policy withholds SERVE for a stale harness");
+    assertEquals(stale.body.roles, []);
+    // A healthy worker is routed exactly as today.
+    const healthy = (await guarded(input({ capability: { cognition: "decide" }, instance: "w2", harnessProtocol: 5 }), app)) as any;
+    assertEquals(healthy.body.harnessStale, false);
+    assert(healthy.body.serve.includes("decide"), "healthy harness routed under refuse policy");
+  } finally {
+    if (prev === undefined) delete process.env["NANO_AGENTIC_STALE_HARNESS_POLICY"];
+    else process.env["NANO_AGENTIC_STALE_HARNESS_POLICY"] = prev;
   }
 });

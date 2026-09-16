@@ -142,3 +142,24 @@ test("engineRestAddress strips trailing slashes from the derived NANOBPMN_BASE_U
     else process.env.NANOBPMN_BASE_URL = prevBase;
   }
 });
+
+test("#802: toWireReport carries staleWorkers through, omitting harnessProtocol when absent", () => {
+  const base = buildRegistryReport({ taskDefinitions: [], workers: [seniorImpl] });
+  const report = {
+    ...base,
+    staleWorkers: [
+      { instance: "wk-old", stale: true },
+      { instance: "wk-low", stale: true, harnessProtocol: 0 },
+    ],
+  };
+  const wire = toWireReport(report);
+  assertEquals(wire.staleWorkers, [
+    { instance: "wk-old", stale: true },
+    { instance: "wk-low", stale: true, harnessProtocol: 0 },
+  ]);
+});
+
+test("#802: toWireReport omits staleWorkers entirely when the report has none (supply-only build)", () => {
+  const report = buildRegistryReport({ taskDefinitions: [], workers: [seniorImpl] });
+  assertEquals("staleWorkers" in toWireReport(report), false);
+});

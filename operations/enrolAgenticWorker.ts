@@ -13,6 +13,12 @@
 import type { Capability } from "@nanobpm/agentic/protocol";
 import { resolveEnrolment } from "../app/agentic/vocab/enrol.ts";
 import { DurableResumeRegistry } from "../app/durableResume.ts";
+import {
+  HarnessProtocolRegistry,
+  isStaleProtocol,
+  minHarnessProtocol,
+  staleHarnessPolicy,
+} from "../app/harnessProtocol.ts";
 import { envVar } from "../app/version.ts";
 import type { EnrolResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -73,6 +79,22 @@ export default defineOperation("enrolAgenticWorker", async ({ req, body }, app) 
     app.log.warn("enrolAgenticWorker rejected: non-boolean durableResume");
     return { status: 400, body: { error: "`durableResume` must be a boolean when provided" } };
   }
+  // The harness-protocol enrolment attribute (issue #802) — a non-negative integer the harness
+  // advertises declaring which machine-readable artifacts it emits (AgentInstance, transcript flush,
+  // result envelope). A directly-invoked delegate bypasses the OpenAPI runtime validation, so guard the
+  // type here: a non-integer / negative value would corrupt the persisted staleness gate.
+  if (
+    body.harnessProtocol !== undefined &&
+    (typeof body.harnessProtocol !== "number" ||
+      !Number.isInteger(body.harnessProtocol) ||
+      body.harnessProtocol < 0)
+  ) {
+    app.log.warn("enrolAgenticWorker rejected: non-integer harnessProtocol");
+    return {
+      status: 400,
+      body: { error: "`harnessProtocol` must be a non-negative integer when provided" },
+    };
+  }
 
   // Fold a top-level `host` into the capability when the capability didn't carry its own — a worker
   // may declare its host either on the capability or beside it (ADR 0059 `{ capability, host }`).
@@ -102,19 +124,57 @@ export default defineOperation("enrolAgenticWorker", async ({ req, body }, app) 
     }
   }
 
+  // Harness-protocol enrolment gate (issue #802): record the advertised protocol per instance so the
+  // app can expose it in getAgenticSupply / the registry and gate on it. Recorded even on a downgrade
+  // (a re-enrol WITHOUT a version clears a stale-healthy value to absent → stale). Like durable-resume
+  // it needs a non-blank `instance` and is best-effort — a registry write hiccup must not fail enrol.
+  if (app.data && instanceKey) {
+    try {
+      await new HarnessProtocolRegistry(app.data).recordEnrolment(instanceKey, body.harnessProtocol);
+    } catch (err) {
+      app.log.warn("enrolAgenticWorker: harness-protocol record failed", { instance: instanceKey, err: String(err) });
+    }
+  }
+
+  // Derive staleness from the just-advertised protocol against the configured minimum (absent version =
+  // stale, the #802 signature). Under the `refuse` policy a stale harness is handed an EMPTY SERVE set
+  // so it wins no job leases — a REGISTER→SERVE gate, never an engine/job-protocol change. Under the
+  // default `flag` policy the SERVE set is unchanged (no routing regression); the worker is only
+  // flagged so the cockpit can surface it for drain.
+  const harnessStale = isStaleProtocol(body.harnessProtocol, minHarnessProtocol());
+  const refuseRouting = harnessStale && staleHarnessPolicy() === "refuse";
+  if (refuseRouting) {
+    app.log.warn("enrolAgenticWorker: refusing routing for a stale harness", {
+      instance: body.instance,
+      harnessProtocol: body.harnessProtocol,
+      minHarnessProtocol: minHarnessProtocol(),
+    });
+  }
+
   const result: EnrolResult = {
-    serve: [...resolved.serve],
-    roles: resolved.roles.map((role) => {
-      const out: EnrolResult["roles"][number] = { token: role.token, seatsDistinctFamily: role.seatsDistinctFamily };
-      if (role.weight !== undefined) out.weight = role.weight;
-      return out;
-    }),
+    serve: refuseRouting ? [] : [...resolved.serve],
+    roles: refuseRouting
+      ? []
+      : resolved.roles.map((role) => {
+          const out: EnrolResult["roles"][number] = { token: role.token, seatsDistinctFamily: role.seatsDistinctFamily };
+          if (role.weight !== undefined) out.weight = role.weight;
+          return out;
+        }),
     demandVersion: resolved.demandVersion,
     leaseTtl: resolved.leaseTtl,
   };
   if (body.instance !== undefined) result.instance = body.instance;
   if (body.durableResume !== undefined) result.durableResume = body.durableResume;
+  if (body.harnessProtocol !== undefined) result.harnessProtocol = body.harnessProtocol;
+  // Always surface the staleness verdict so the caller (and the cockpit) can see a stale harness even
+  // when it advertised no version at all.
+  result.harnessStale = harnessStale;
 
-  app.log.info("agentic enrol resolved", { instance: body.instance, serve: result.serve, family: capability.family });
+  app.log.info("agentic enrol resolved", {
+    instance: body.instance,
+    serve: result.serve,
+    family: capability.family,
+    harnessStale,
+  });
   return { status: 200, body: result };
 });

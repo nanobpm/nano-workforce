@@ -84,6 +84,8 @@ function workerView(worker, staleAfterMs, byJobKey) {
     correlations,
     liveness: liveness(worker, staleAfterMs),
     staleMs: worker.staleMs,
+    harnessStale: worker.harnessStale ?? false,
+    ...(worker.harnessProtocol !== undefined ? { harnessProtocol: worker.harnessProtocol } : {}),
   };
 }
 
@@ -141,6 +143,7 @@ function workerRow(doc, worker, onDrill, onOpenWorker) {
   row.setAttribute("data-worker", worker.instance);
   row.setAttribute("data-liveness", worker.liveness);
   row.setAttribute("data-stream", worker.stream);
+  row.setAttribute("data-harness-stale", String(worker.harnessStale));
 
   const nameCell = el(doc, "td", "cockpit-td cockpit-supply-name");
   nameCell.appendChild(dot(doc, worker.liveness));
@@ -161,6 +164,19 @@ function workerRow(doc, worker, onDrill, onOpenWorker) {
     drill.setAttribute("data-stream", worker.stream);
     if (onDrill) drill.addEventListener("click", () => onDrill(worker.stream));
     nameCell.appendChild(drill);
+  }
+  // A stale harness silently swallows machine-readable artifacts (issue #802) — surface it as a
+  // distinct badge (mirrors app/agentic/cockpit/supply-render.ts).
+  if (worker.harnessStale) {
+    const badge = el(
+      doc,
+      "span",
+      "cockpit-supply-harness-stale",
+      worker.harnessProtocol === undefined ? "stale harness" : `stale harness (v${worker.harnessProtocol})`,
+    );
+    badge.setAttribute("data-harness-stale", "true");
+    badge.setAttribute("title", "Harness protocol below the configured minimum (or none advertised); jobs may dead-end.");
+    nameCell.appendChild(badge);
   }
   row.appendChild(nameCell);
 

@@ -225,6 +225,22 @@ export const ENV_CONTRACTS = {
     semantics:
       "Feature flag for the agentic supply endpoint; a value of 0/off/false/no disables it (enabled when unset).",
   },
+  NANO_AGENTIC_MIN_HARNESS_PROTOCOL: {
+    category: "env",
+    name: "NANO_AGENTIC_MIN_HARNESS_PROTOCOL",
+    owner: "app/harnessProtocol.ts",
+    semantics:
+      "Minimum worker-harness protocol version a worker must advertise at enrolment to be considered healthy (issue #802). A worker advertising a version below this — or advertising NO version at all (absent = stale) — is flagged stale in getAgenticSupply / the registry and, under NANO_AGENTIC_STALE_HARNESS_POLICY=refuse, is refused agent-job routing. Non-integer/blank degrades to the default.",
+    default: "1",
+  },
+  NANO_AGENTIC_STALE_HARNESS_POLICY: {
+    category: "env",
+    name: "NANO_AGENTIC_STALE_HARNESS_POLICY",
+    owner: "app/harnessProtocol.ts",
+    semantics:
+      "How the app treats a stale worker harness (issue #802): 'flag' (default) only marks it stale for observability/drain; 'refuse' additionally withholds its SERVE tokens at enrol so it wins no job leases. Anything other than the exact token 'refuse' is treated as 'flag' so a typo never silently drains the fleet.",
+    default: "flag",
+  },
   NANO_WORKFORCE_GIT_SHA: {
     category: "env",
     name: "NANO_WORKFORCE_GIT_SHA",
