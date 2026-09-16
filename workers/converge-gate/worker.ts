@@ -94,10 +94,13 @@ export function makeHandler(deps: {
       if (reviewBody === null) {
         return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false };
       }
-      // An UNRESOLVED ack thread (one carrying a `nano-ack:` marker) is a partially-completed
-      // acknowledgement the bounded auto-ack retry can finish, not a substantive code-review thread —
-      // exclude it so a block whose sole remaining cause is an unresolved ack thread stays ack-only
-      // (recoverable via the #796 retry) instead of escalating to a human.
+      // An UNRESOLVED ack thread — one whose ROOT comment carries a canonical `nano-ack: <path> ::
+      // <text>` marker (see `isAckThread`) — is a partially-completed acknowledgement the bounded
+      // auto-ack retry can finish, not a substantive code-review thread; exclude it so a block whose
+      // sole remaining cause is an unresolved ack thread stays ack-only (recoverable via the #796
+      // retry) instead of escalating to a human. The classifier is fail-CLOSED: it matches only the
+      // canonical prose-keyed form on the thread ROOT, so a bare `<path>:<line>` marker or a
+      // substantive thread that merely quotes/replies `nano-ack:` stays counted (never dropped).
       const unresolvedThreadCount = threads.filter((t) => !t.isResolved && !isAckThread(t)).length;
       const advisories = parseSuppressedAdvisories(reviewBody);
       result = evaluateConvergeGate({

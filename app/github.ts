@@ -246,39 +246,56 @@ export function parseSuppressedAdvisories(reviewBody: string | null | undefined)
   return out;
 }
 
-/** True when a review thread is a `nano-ack:` acknowledgement thread (any of its comments carries an
- * ack marker) rather than a substantive code-review thread. An UNRESOLVED ack thread is a partially
- * completed acknowledgement — the agent posted it but has not resolved it yet — which the bounded
- * auto-ack retry can finish (post-and-resolve). It must therefore NOT count toward the "unresolved
- * review thread" total that flips a block off the ack-only path, or a block whose sole remaining
- * cause is an unresolved ack thread would escalate to a human instead of the recoverable #796 retry.
- * A reviewer's substantive finding never carries this marker, so it is still counted. */
+/** The line-stable advisory keys carried by a SINGLE comment body's canonical `nano-ack: <path> ::
+ * <text>` markers. This is the SOLE recognizer of an acknowledgement, shared by `isAckThread` and
+ * `parseAckedAdvisories` so "is this an ack?" has ONE canonical implementation (derivation over
+ * duplication — no drift between the two consumers). The bare `nano-ack: <path>:<line>` form yields
+ * NOTHING here: `NEW_ACK` requires the ` :: <text>` prose (a bare `path:line` is prose-blind and
+ * would false-OPEN a new advisory re-emitted at a previously-acked line). */
+function canonicalAckKeys(body: string): string[] {
+  const keys: string[] = [];
+  ACK_MARKER.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
+  while ((m = ACK_MARKER.exec(body)) !== null) {
+    const nw = NEW_ACK.exec(m[1].trim());
+    if (nw) keys.push(advisoryStableKey(nw[1], nw[2]));
+  }
+  return keys;
+}
+
+/** True when a review thread is a DEDICATED `nano-ack:` acknowledgement thread — one whose ROOT
+ * comment (`bodies[0]`, the thread-opening comment) carries a valid canonical `nano-ack: <path> ::
+ * <text>` marker — rather than a substantive code-review thread. An UNRESOLVED ack thread is a
+ * partially completed acknowledgement (the agent posted it but has not resolved it yet) that the
+ * bounded auto-ack retry can finish (post-and-resolve), so it must NOT count toward the "unresolved
+ * review thread" total that flips a block off the ack-only path (#796).
+ *
+ * Two deliberate restrictions keep this FAIL-CLOSED — an exclusion here removes a thread from the
+ * unresolved count, so a false positive could finalize the gate with a genuine thread still open:
+ *   1. Only the canonical prose-keyed form counts (via `canonicalAckKeys`); the retired bare
+ *      `nano-ack: <path>:<line>` form does NOT — matching `parseAckedAdvisories`, so a bare/legacy
+ *      unresolved thread is never silently dropped from the count.
+ *   2. Only the ROOT comment is inspected — a reviewer's substantive finding is ALWAYS its thread's
+ *      root and never carries this marker, so a substantive thread that merely quotes or replies
+ *      `nano-ack:` in a later comment stays counted. A dedicated ack thread the agent opens carries
+ *      the marker in its very first comment. */
 export function isAckThread(thread: ReviewThread): boolean {
-  return thread.bodies.some((b) => {
-    ACK_MARKER.lastIndex = 0;
-    return ACK_MARKER.test(b);
-  });
+  const root = thread.bodies[0];
+  return root !== undefined && canonicalAckKeys(root).length > 0;
 }
 
 /** Extract the acknowledged advisory keys from a set of review threads (only RESOLVED threads
  * count — an open ack thread is not yet an acknowledgement). Returns line-stable keys (`<path>#<fp>`)
- * parsed from the `nano-ack: <path> :: <text>` form ONLY. A bare `nano-ack: <path>:<line>` marker is
- * intentionally NOT honoured: its `path:line` key is blind to the advisory prose and would false-OPEN
- * a genuinely new advisory re-emitted at a previously-acked line. The gate treats an advisory as
- * acked iff its stable key appears here. */
+ * parsed from the `nano-ack: <path> :: <text>` form ONLY (via the shared `canonicalAckKeys`). A bare
+ * `nano-ack: <path>:<line>` marker is intentionally NOT honoured: its `path:line` key is blind to the
+ * advisory prose and would false-OPEN a genuinely new advisory re-emitted at a previously-acked line.
+ * The gate treats an advisory as acked iff its stable key appears here. */
 export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
   const acked = new Set<string>();
   for (const t of threads) {
     if (!t.isResolved) continue;
-    for (const body of t.bodies) {
-      ACK_MARKER.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
-      while ((m = ACK_MARKER.exec(body)) !== null) {
-        const nw = NEW_ACK.exec(m[1].trim());
-        if (nw) acked.add(advisoryStableKey(nw[1], nw[2]));
-      }
-    }
+    for (const body of t.bodies) for (const k of canonicalAckKeys(body)) acked.add(k);
   }
   return [...acked];
 }

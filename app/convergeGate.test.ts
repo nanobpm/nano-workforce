@@ -170,6 +170,33 @@ test("isAckThread: a substantive review thread (no nano-ack marker) is NOT an ac
   assertEquals(isAckThread({ isResolved: false, path: "a.ts", bodies: [] }), false);
 });
 
+// FAIL-CLOSED guard #1 — the retired bare `nano-ack: <path>:<line>` form is prose-blind and NOT
+// honoured by `parseAckedAdvisories`; classifying it as an ack thread would drop a genuine unresolved
+// thread from the count and let the gate finalize with it still open. It must stay counted.
+test("isAckThread: a bare `<path>:<line>` marker is NOT a dedicated ack thread (stays counted)", () => {
+  assertEquals(
+    isAckThread({ isResolved: false, path: "a.ts", bodies: ["Applied. nano-ack: app/x.ts:12"] }),
+    false,
+  );
+});
+
+// FAIL-CLOSED guard #2 — a substantive reviewer thread whose ROOT is the finding, with a later reply
+// merely QUOTING a canonical marker, must NOT be classified as an ack thread. Only the thread root is
+// inspected, and the root here carries no marker, so the substantive thread stays counted.
+test("isAckThread: a substantive thread that only quotes nano-ack in a reply is NOT an ack thread", () => {
+  assertEquals(
+    isAckThread({
+      isResolved: false,
+      path: "a.ts",
+      bodies: [
+        "This can NPE on empty input.",
+        "Re: your `nano-ack: app/x.ts :: Guard the empty input.` — that is unrelated to this finding.",
+      ],
+    }),
+    false,
+  );
+});
+
 // Mirrors the converge-gate worker's `unresolvedThreadCount` computation: an unresolved ack thread is
 // excluded, so a block whose sole remaining open thread is an unresolved ack thread stays ack-only
 // (auto-recoverable) instead of escalating to a human.
