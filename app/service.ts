@@ -877,7 +877,13 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
       // right after a push, which would make the poller advance `last_review_id` on a stale review the
       // gate would then classify stale, wedging the loop. Using the atomic branch ref makes the poller
       // detect the same stale-head case the gate does.
-      const headSha = await readCurrentHead(repo, number).catch(() => null);
+      // Read the head with the SAME per-call token the review fetch above uses (#799) — NOT the
+      // env-token default `makeDefaultReadHead` would otherwise fall back to. A caller that supplies
+      // a `token` without also setting GITHUB_TOKEN would otherwise get a `null` head here, which
+      // `isReviewStale` treats as not-stale (fails OPEN) and would advance `last_review_id` /
+      // publish readiness on a genuinely stale review. Passing `token` keeps both reads on one
+      // credential so the stale guard sees the real head.
+      const headSha = await readCurrentHead(repo, number, token).catch(() => null);
       if (isReviewStale(fresh.commit_id, headSha)) {
         console.log(`[poller] review ${fresh.id} is stale (predates HEAD) -> re-soliciting ${prKey}`);
         await maybeRerequestReview(data, pr, token);

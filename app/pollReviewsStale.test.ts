@@ -47,16 +47,27 @@ const HEAD_REF = "feat/x";
 
 /** Stub the token transport for exactly the endpoints the stale-review branch reads:
  *  - the paged reviews list (one short page → complete),
- *  - the PR object (for the head ref/repo), and
- *  - the atomic branch ref (`git/ref/heads/<branch>`) the shared reader prefers.
- * `branchHead` drives staleness: when it differs from the review's `commit_id` the review is stale. */
-function reviewFetch(opts: { reviewCommitId: string; branchHead: string }) {
-  return (url: string | URL | Request): Promise<Response> => {
+ *  - the PR object (for the head ref/repo),
+ *  - the atomic branch ref (`git/ref/heads/<branch>`) the shared reader prefers, and
+ *  - the requested-reviewers GET/POST the re-solicitation nudge uses.
+ * `branchHead` drives staleness: when it differs from the review's `commit_id` the review is stale.
+ * Every non-GET request is recorded in `posts` so a test can assert the nudge's reviewer-request POST
+ * actually fired (a regression that dropped the stale branch's nudge would leave `posts` empty). */
+function reviewFetch(opts: { reviewCommitId: string; branchHead: string; posts: string[] }) {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const u = typeof url === "string" ? url : url.toString();
-    const json = (body: unknown) =>
+    const method = (init?.method ?? "GET").toUpperCase();
+    const json = (body: unknown, status = 200) =>
       Promise.resolve(
-        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }),
+        new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }),
       );
+    if (u.includes(`/pulls/${NUMBER}/requested_reviewers`)) {
+      if (method !== "GET") {
+        opts.posts.push(`${method} ${u}`);
+        return json({}, 201); // reviewer requested
+      }
+      return json({ users: [] }); // none pending → the nudge proceeds to the POST
+    }
     if (u.includes(`/pulls/${NUMBER}/reviews`)) {
       return json([
         { id: 5, state: "COMMENTED", submitted_at: "2026-09-16T00:45:33Z", commit_id: opts.reviewCommitId },
@@ -68,7 +79,7 @@ function reviewFetch(opts: { reviewCommitId: string; branchHead: string }) {
     if (u.endsWith(`/pulls/${NUMBER}`)) {
       return json({ head: { ref: HEAD_REF, sha: opts.branchHead, repo: { full_name: REPO } }, base: { ref: "main" } });
     }
-    throw new Error(`unexpected fetch: ${u}`);
+    throw new Error(`unexpected fetch: ${method} ${u}`);
   };
 }
 
@@ -104,9 +115,10 @@ function prRow() {
     status: "waiting_review",
     last_review_id: 0,
     waiting_since: "2026-09-16T00:00:00Z",
-    // A recent nudge short-circuits `maybeRerequestReview` so the stale path needs no reviewer-state
-    // fetch — the assertion isolates the STATE TRANSITION (no status/id change, no signal).
-    last_nudge_at: new Date().toISOString(),
+    // An EXPIRED nudge timestamp so `maybeRerequestReview` does NOT short-circuit at its cooldown —
+    // the stale branch must actually re-solicit a fresh review, and the test asserts that POST fired
+    // (a recent nudge would mask a regression that dropped the nudge entirely, #799 review).
+    last_nudge_at: "2000-01-01T00:00:00Z",
     updated_at: "t0",
   };
 }
@@ -122,10 +134,11 @@ test("pollReviews: a STALE review (branch head past the review's commit) nudges 
     ),
   } as any;
   const { engine, published } = makeEngine();
+  const posts: string[] = [];
   const prevFetch = globalThis.fetch;
   await withTokenTransport(async () => {
     // review was submitted against SHA_OLD, but the branch head has advanced to SHA_NEW → stale.
-    globalThis.fetch = reviewFetch({ reviewCommitId: "SHA_OLD", branchHead: "SHA_NEW" }) as typeof fetch;
+    globalThis.fetch = reviewFetch({ reviewCommitId: "SHA_OLD", branchHead: "SHA_NEW", posts }) as typeof fetch;
     try {
       await pollReviews(data, engine, "test-token");
     } finally {
@@ -135,6 +148,12 @@ test("pollReviews: a STALE review (branch head past the review's commit) nudges 
   assertEquals(published.length, 0, "no readiness-ready signal is published for a stale review");
   assertEquals(row.last_review_id, 0, "last_review_id is NOT advanced past the stale review");
   assertEquals(row.status, "waiting_review", "the PR stays parked awaiting a fresh review");
+  assertEquals(posts.length, 1, "the stale branch re-solicits a fresh Copilot review (one nudge POST)");
+  assertEquals(
+    posts[0],
+    `POST https://api.github.com/repos/${REPO}/pulls/${NUMBER}/requested_reviewers`,
+    "the nudge POSTs the requested-reviewers endpoint",
+  );
 });
 
 test("pollReviews: a CURRENT-head review (control) resumes the loop and publishes the readiness signal", async () => {
@@ -148,10 +167,11 @@ test("pollReviews: a CURRENT-head review (control) resumes the loop and publishe
     ),
   } as any;
   const { engine, published } = makeEngine();
+  const posts: string[] = [];
   const prevFetch = globalThis.fetch;
   await withTokenTransport(async () => {
     // review's commit_id equals the current branch head → NOT stale.
-    globalThis.fetch = reviewFetch({ reviewCommitId: "SHA_NEW", branchHead: "SHA_NEW" }) as typeof fetch;
+    globalThis.fetch = reviewFetch({ reviewCommitId: "SHA_NEW", branchHead: "SHA_NEW", posts }) as typeof fetch;
     try {
       await pollReviews(data, engine, "test-token");
     } finally {
@@ -163,4 +183,5 @@ test("pollReviews: a CURRENT-head review (control) resumes the loop and publishe
   assertEquals(published[0]?.correlationKey, `${REPO}#${NUMBER}`);
   assertEquals(row.last_review_id, 5, "last_review_id advances to the fresh review");
   assertEquals(row.status, "converging", "the loop resumes (status flips to converging)");
+  assertEquals(posts.length, 0, "a current-head review resumes directly — no re-solicitation nudge");
 });

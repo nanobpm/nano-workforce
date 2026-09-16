@@ -14,7 +14,14 @@ import type { fetchBranchHead, fetchPrHead } from "./github.ts";
 // escalation (#786). Once a head ref is known this trusts ONLY its atomic ref: a failed/absent
 // ref read fails OPEN (`null`), never falling back to `head.sha`. The PR head is used only when
 // the PR carries NO head ref at all.
-export type HeadReader = (repo: string, prNumber: number) => Promise<string | null>;
+// The optional `token` lets a caller that already holds a per-call GitHub credential (e.g. the
+// poller in `app/service.ts`, which is handed a `token` for its review fetch) read the head with the
+// SAME credential rather than silently diverging to `process.env.GITHUB_TOKEN`. Omitting it keeps
+// the env-token default, so the worker callers (capture-head / progress-check / converge-gate) are
+// unchanged. Binding both reads to one credential closes the drift where a caller supplying a token
+// without that env var would get a `null` head (→ `isReviewStale` fails open, advancing a stale
+// review); see #799.
+export type HeadReader = (repo: string, prNumber: number, token?: string) => Promise<string | null>;
 
 /** Build the real head reader from the GitHub fetchers (injected so tests can stub them). Prefers
  * the branch ref (atomic with the push) over the PR object's denormalized `head.sha` (#786); fails
@@ -25,9 +32,9 @@ export function makeDefaultReadHead(deps: {
   fetchPrHead: typeof fetchPrHead;
   fetchBranchHead: typeof fetchBranchHead;
 }): HeadReader {
-  return async (repo, prNumber) => {
-    const token = process.env.GITHUB_TOKEN ?? "";
-    const pr = await deps.fetchPrHead(repo, prNumber, token).catch(() => null);
+  return async (repo, prNumber, token) => {
+    const tok = token ?? process.env.GITHUB_TOKEN ?? "";
+    const pr = await deps.fetchPrHead(repo, prNumber, tok).catch(() => null);
     if (!pr) return null;
     // Prefer the branch ref (atomic with the push) over the PR object's denormalized head.sha (#786).
     // Once the head branch is known, trust ONLY its atomic ref: a failed/absent ref read fails OPEN
@@ -46,7 +53,7 @@ export function makeDefaultReadHead(deps: {
       // back to the base repo and risk that collision.
       const headRepo = pr.headRepo;
       if (!headRepo) return null;
-      return await deps.fetchBranchHead(headRepo, pr.headRef, token).catch(() => null);
+      return await deps.fetchBranchHead(headRepo, pr.headRef, tok).catch(() => null);
     }
     return pr.headSha ?? null;
   };

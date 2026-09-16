@@ -750,6 +750,19 @@ test("wait-review clears reviewStale when a fresh review lands, so the marker ca
   assertStringIncludes(wr[0], '<zeebe:output source="=false" target="reviewStale" />');
 });
 
+test("record-answer clears reviewStale so a human-resumed round after a review-stall timeout is re-capped (#799)", () => {
+  // reviewStale is cleared on the wait-review MESSAGE arm, but the review-wait TIMER arm bypasses it:
+  // wait-review-timeout → persist-review-stalled → wait-answer → record-answer → capture-head. A
+  // stale-retry round that times out and is resumed by a human therefore re-enters the loop still
+  // carrying reviewStale = true, which — via `f_guardMax`'s `reviewStale != true` guard — would keep
+  // the round cap disabled for that (and every subsequent) human-directed addressed round. Once a
+  // human is answering escalations the automated stale-retry is over, so record-answer must reset the
+  // marker; a genuinely-still-stale next review re-sets it at the converge-gate.
+  const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="record-answer"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(task, "record-answer task missing");
+  assertStringIncludes(task[0], '<zeebe:output source="=false" target="reviewStale" />');
+});
+
 test("gw-converge-gate default arm routes to the scope classifier (not straight to finalize)", () => {
   const gw = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-converge-gate"[^>]*>/);
   assert(gw, "gw-converge-gate gateway missing");
