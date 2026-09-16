@@ -197,23 +197,49 @@ test("isAckThread: a substantive thread that only quotes nano-ack in a reply is 
   );
 });
 
-// Mirrors the converge-gate worker's `unresolvedThreadCount` computation: an unresolved ack thread is
-// excluded, so a block whose sole remaining open thread is an unresolved ack thread stays ack-only
-// (auto-recoverable) instead of escalating to a human.
-test("converge gate: an unresolved ack thread does not count as an unresolved review thread (stays ack-only)", () => {
+// Mirrors the converge-gate worker's split: an unresolved ack thread is classified separately (it
+// still BLOCKS but stays ack-only/recoverable), while a substantive unresolved thread escalates.
+test("converge gate: an unresolved ack thread does not count as a SUBSTANTIVE thread (stays ack-only)", () => {
   const threads: ReviewThread[] = [
     { isResolved: false, path: "a.ts", bodies: ["Applied. nano-ack: app/x.ts :: Guard the empty input."] },
     { isResolved: true, path: "b.ts", bodies: ["already fixed"] },
   ];
-  const unresolvedThreadCount = threads.filter((t) => !t.isResolved && !isAckThread(t)).length;
+  const unresolved = threads.filter((t) => !t.isResolved);
+  const unresolvedAckThreadCount = unresolved.filter((t) => isAckThread(t)).length;
+  const unresolvedThreadCount = unresolved.length - unresolvedAckThreadCount;
   assertEquals(unresolvedThreadCount, 0);
+  assertEquals(unresolvedAckThreadCount, 1);
   const r = evaluateConvergeGate({
     unresolvedThreadCount,
+    unresolvedAckThreadCount,
     suppressedAdvisories: [{ key: "app/x.ts#deadbeef", label: "app/x.ts:12" }],
     acknowledgedKeys: [],
   });
   assertEquals(r.convergeBlocked, true);
   assertEquals(r.ackOnly, true);
+});
+
+// FAIL-CLOSED regression (thread 2): an unresolved ack thread with NO outstanding advisory must NOT
+// finalize the gate — dropping it entirely (the old `!isAckThread` filter) let the process converge
+// with a genuinely-open GitHub thread. It now BLOCKS, classified ack-only (recoverable).
+test("converge gate: a lone unresolved ack thread (no advisory) BLOCKS, ack-only (no fail-open finalize)", () => {
+  const threads: ReviewThread[] = [
+    { isResolved: false, path: "a.ts", bodies: ["Applied. nano-ack: app/x.ts :: Guard the empty input."] },
+  ];
+  const unresolved = threads.filter((t) => !t.isResolved);
+  const unresolvedAckThreadCount = unresolved.filter((t) => isAckThread(t)).length;
+  const unresolvedThreadCount = unresolved.length - unresolvedAckThreadCount;
+  assertEquals(unresolvedThreadCount, 0);
+  assertEquals(unresolvedAckThreadCount, 1);
+  const r = evaluateConvergeGate({
+    unresolvedThreadCount,
+    unresolvedAckThreadCount,
+    suppressedAdvisories: [],
+    acknowledgedKeys: [],
+  });
+  assertEquals(r.convergeBlocked, true);
+  assertEquals(r.ackOnly, true);
+  assertStringIncludes(r.convergeBlockReason, "unresolved acknowledgement thread");
 });
 
 // A genuine reviewer thread left open still blocks off the ack-only path (fail-closed intact).
@@ -222,10 +248,14 @@ test("converge gate: a substantive unresolved thread still counts (not ack-only)
     { isResolved: false, path: "a.ts", bodies: ["This can NPE on empty input."] },
     { isResolved: false, path: "b.ts", bodies: ["Applied. nano-ack: app/x.ts :: Guard the empty input."] },
   ];
-  const unresolvedThreadCount = threads.filter((t) => !t.isResolved && !isAckThread(t)).length;
+  const unresolved = threads.filter((t) => !t.isResolved);
+  const unresolvedAckThreadCount = unresolved.filter((t) => isAckThread(t)).length;
+  const unresolvedThreadCount = unresolved.length - unresolvedAckThreadCount;
   assertEquals(unresolvedThreadCount, 1);
+  assertEquals(unresolvedAckThreadCount, 1);
   const r = evaluateConvergeGate({
     unresolvedThreadCount,
+    unresolvedAckThreadCount,
     suppressedAdvisories: [{ key: "app/x.ts#deadbeef", label: "app/x.ts:12" }],
     acknowledgedKeys: [],
   });
@@ -590,15 +620,14 @@ test("converge-gate: an acknowledged advisory (resolved ack thread) is allowed",
 });
 
 // WIRING regression guard (through makeHandler, not a local re-implementation of the filter): an
-// UNRESOLVED ack thread must be excluded from the worker's unresolved-thread count, so a block whose
-// only substantive cause is unacked advisories stays ack-only. If the worker regressed to counting
-// unresolved ack threads (dropping `!isAckThread` at worker.ts), convergeAckOnly would flip to false
-// and this handler-level test would fail.
-test("converge-gate: an unresolved ack thread is excluded — block stays ack-only (through the handler)", async () => {
+// UNRESOLVED ack thread is classified separately (ack-only), so a block whose only substantive cause
+// is unacked advisories stays ack-only. If the worker regressed to counting an unresolved ack thread
+// as a SUBSTANTIVE thread, convergeAckOnly would flip to false and this handler-level test would fail.
+test("converge-gate: an unresolved ack thread is classified ack-only, not substantive (through the handler)", async () => {
   const handler = await makeUnderTest({
     readThreads: async () => [
       // A partially-completed acknowledgement (posted, not yet resolved) — its root carries the
-      // canonical marker, so isAckThread excludes it from the substantive unresolved-thread count.
+      // canonical marker, so isAckThread classifies it as an (unresolved) ack thread, not substantive.
       {
         isResolved: false,
         path: "spec-app/nano-app.schema.json",
@@ -611,9 +640,32 @@ test("converge-gate: an unresolved ack thread is excluded — block stays ack-on
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
   assertEquals(out.convergeBlocked, true);
-  // No SUBSTANTIVE unresolved thread was counted → the block is caused solely by unacked advisories.
+  // No SUBSTANTIVE unresolved thread was counted → the block is ack-only (recoverable).
   assertEquals(out.convergeAckOnly, true);
   assertStringIncludes(out.convergeBlockReason ?? "", "unacknowledged suppressed");
+});
+
+// FAIL-CLOSED wiring guard (thread 2, through the handler): a lone UNRESOLVED ack thread with NO
+// outstanding advisory must NOT let the gate finalize. The old `!isAckThread` filter dropped it
+// entirely (unresolvedThreadCount = 0, no advisory) → convergeBlocked = false → the process could
+// converge with a genuinely-open GitHub thread. It must now BLOCK (ack-only, recoverable).
+test("converge-gate: a lone unresolved ack thread (no advisory) BLOCKS, ack-only — no fail-open finalize (through the handler)", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [
+      {
+        isResolved: false,
+        path: "spec-app/nano-app.schema.json",
+        bodies: [
+          "Applied. nano-ack: spec-app/nano-app.schema.json :: The description could be clearer about the loopback default.",
+        ],
+      },
+    ],
+    readReviewBody: async () => "## Overview\nNo suppressed block.",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertEquals(out.convergeAckOnly, true);
+  assertStringIncludes(out.convergeBlockReason ?? "", "unresolved acknowledgement thread");
 });
 
 test("converge-gate: FAILS CLOSED when the threads read returns null (no transport)", async () => {

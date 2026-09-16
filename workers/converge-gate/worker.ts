@@ -6,9 +6,11 @@
 // the comment unaddressed). This step runs on the converged path, BEFORE the scope classifier and
 // pr.finalize hand off to the merge loop, and blocks handoff while GitHub still shows unaddressed
 // comments:
-//   • any substantive review THREAD is still unresolved (GraphQL `isResolved = false`) — an
-//     unresolved `nano-ack:` ack thread is EXCLUDED, since it is a partially-completed
-//     acknowledgement the bounded #796 auto-ack retry can finish, not a code-review finding, or
+//   • any SUBSTANTIVE review THREAD is still unresolved (GraphQL `isResolved = false`), or an
+//     unresolved `nano-ack:` ACK thread is open — an ack thread is a partially-completed
+//     acknowledgement the bounded #796 auto-ack retry can finish, so it still BLOCKS (a
+//     genuinely-open GitHub thread) but the block stays ack-only (recoverable) rather than escalating
+//     to a human; only a substantive open thread escalates, or
 //   • any SUPPRESSED advisory in the latest Copilot review body lacks a matching RESOLVED ack
 //     thread (a `nano-ack: <path> :: <verbatim advisory text>` marker whose line-stable prose
 //     fingerprint matches Copilot's advisory). The bare legacy `nano-ack: <path>:<line>` form is
@@ -94,17 +96,22 @@ export function makeHandler(deps: {
       if (reviewBody === null) {
         return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false };
       }
-      // An UNRESOLVED ack thread — one whose ROOT comment carries a canonical `nano-ack: <path> ::
-      // <text>` marker (see `isAckThread`) — is a partially-completed acknowledgement the bounded
-      // auto-ack retry can finish, not a substantive code-review thread; exclude it so a block whose
-      // sole remaining cause is an unresolved ack thread stays ack-only (recoverable via the #796
-      // retry) instead of escalating to a human. The classifier is fail-CLOSED: it matches only the
-      // canonical prose-keyed form on the thread ROOT, so a bare `<path>:<line>` marker or a
-      // substantive thread that merely quotes/replies `nano-ack:` stays counted (never dropped).
-      const unresolvedThreadCount = threads.filter((t) => !t.isResolved && !isAckThread(t)).length;
+      // Split the unresolved threads into SUBSTANTIVE reviewer findings vs partially-completed
+      // `nano-ack:` ACK threads (root carries a canonical `nano-ack: <path> :: <text>` marker — see
+      // `isAckThread`). Neither is ever dropped from the gate: a substantive unresolved thread blocks
+      // and escalates to a human; an unresolved ack thread ALSO blocks (it is a genuinely-open GitHub
+      // thread), but the block stays ack-only (recoverable by the bounded #796 auto-ack retry, which
+      // re-posts/resolves it). Keeping the ack thread a BLOCKING condition — rather than filtering it
+      // away — is what makes the root-marker classifier fail-CLOSED: a mislabelled substantive thread
+      // still blocks (as ack-only) instead of finalizing with the finding open, and the bounded retry
+      // cannot ack a non-advisory, so it escalates to a human on exhaustion.
+      const unresolved = threads.filter((t) => !t.isResolved);
+      const unresolvedAckThreadCount = unresolved.filter((t) => isAckThread(t)).length;
+      const unresolvedThreadCount = unresolved.length - unresolvedAckThreadCount;
       const advisories = parseSuppressedAdvisories(reviewBody);
       result = evaluateConvergeGate({
         unresolvedThreadCount,
+        unresolvedAckThreadCount,
         suppressedAdvisories: advisories.map((a) => ({ key: a.key, label: a.label })),
         acknowledgedKeys: parseAckedAdvisories(threads),
       });

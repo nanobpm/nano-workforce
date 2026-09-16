@@ -161,15 +161,21 @@ Notes:
   deterministic **converge gate** (`pr.converge-gate`, `Check review comments`),
   which re-reads GitHub and re-blocks (`convergeBlocked=true`) while **any
   substantive** review thread is unresolved or **any** suppressed advisory lacks a
-  resolved `nano-ack:` thread. An unresolved `nano-ack:` **ack thread** is
-  **excluded** from that count — it is a partially-completed acknowledgement the
-  bounded auto-ack retry can finish (post-and-resolve), not a code-review finding,
-  so a block whose sole open thread is an unresolved ack stays on the recoverable
-  ack-only path instead of escalating. (An ack thread is one whose *root* comment
-  carries a canonical `nano-ack: <path> :: <text>` marker; a substantive reviewer
-  finding never does, so it is always counted — the classifier is fail-closed.)
+  resolved `nano-ack:` thread. An unresolved `nano-ack:` **ack thread** is **never
+  dropped** from the gate — it is a genuinely-open GitHub thread, so it still
+  **blocks** convergence — but a block whose only open threads are unresolved acks
+  is classified **ack-only**: a partially-completed acknowledgement the bounded
+  auto-ack retry can finish (post-and-resolve), not a code-review finding, so it
+  stays on the recoverable path instead of escalating. (An ack thread is one whose
+  *root* comment carries a canonical `nano-ack: <path> :: <text>` marker; a
+  substantive reviewer finding never does, so it escalates. Because an unresolved
+  ack still blocks either way, this classification is **fail-closed**: even a
+  mislabelled root cannot finalize the gate with an open thread — worst case it
+  routes to the bounded ack-retry, which cannot ack a non-advisory and so escalates
+  to a human on exhaustion.)
   A block whose SOLE cause is unacknowledged suppressed
-  advisories (no unresolved inline thread) is flagged **ack-only**
+  advisories or unresolved ack threads (no unresolved *substantive* thread) is
+  flagged **ack-only**
   (`convergeAckOnly=true`) and is routine + recoverable: rather than pulling a
   human in first, the loop makes a **bounded auto-ack re-dispatch** of
   `review-round` — up to `ackRetryMax` times, advancing `ackRetryRound` on each

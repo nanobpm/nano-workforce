@@ -266,20 +266,23 @@ function canonicalAckKeys(body: string): string[] {
 
 /** True when a review thread is a DEDICATED `nano-ack:` acknowledgement thread — one whose ROOT
  * comment (`bodies[0]`, the thread-opening comment) carries a valid canonical `nano-ack: <path> ::
- * <text>` marker — rather than a substantive code-review thread. An UNRESOLVED ack thread is a
- * partially completed acknowledgement (the agent posted it but has not resolved it yet) that the
- * bounded auto-ack retry can finish (post-and-resolve), so it must NOT count toward the "unresolved
- * review thread" total that flips a block off the ack-only path (#796).
+ * <text>` marker — rather than a substantive code-review thread. This is a CLASSIFICATION only: the
+ * converge gate never DROPS an unresolved thread on the strength of this predicate. An unresolved ack
+ * thread still BLOCKS convergence (it is a genuinely-open GitHub thread); the classification only
+ * routes that block onto the recoverable ack-only path — a partially-completed acknowledgement the
+ * bounded #796 auto-ack retry can finish (post-and-resolve) — instead of escalating a human. A
+ * substantive unresolved thread escalates to a human.
  *
- * Two deliberate restrictions keep this FAIL-CLOSED — an exclusion here removes a thread from the
- * unresolved count, so a false positive could finalize the gate with a genuine thread still open:
+ * Because the gate BLOCKS either way, this predicate is FAIL-CLOSED even under a false positive:
  *   1. Only the canonical prose-keyed form counts (via `canonicalAckKeys`); the retired bare
- *      `nano-ack: <path>:<line>` form does NOT — matching `parseAckedAdvisories`, so a bare/legacy
- *      unresolved thread is never silently dropped from the count.
+ *      `nano-ack: <path>:<line>` form does NOT — matching `parseAckedAdvisories`.
  *   2. Only the ROOT comment is inspected — a reviewer's substantive finding is ALWAYS its thread's
- *      root and never carries this marker, so a substantive thread that merely quotes or replies
- *      `nano-ack:` in a later comment stays counted. A dedicated ack thread the agent opens carries
- *      the marker in its very first comment. */
+ *      root and (canonical-form) never carries this marker, so a substantive thread that merely
+ *      quotes or replies `nano-ack:` in a later comment is not mis-classified.
+ *   3. Even if a root DID quote the canonical marker mid-prose and were mis-labelled an ack, the
+ *      thread is NOT excluded — it still blocks (as ack-only), and the bounded auto-ack retry cannot
+ *      ack a non-advisory, so it escalates to a human on exhaustion. Marker presence never finalizes
+ *      the gate with an open thread (the fail-OPEN this design forecloses). */
 export function isAckThread(thread: ReviewThread): boolean {
   const root = thread.bodies[0];
   return root !== undefined && canonicalAckKeys(root).length > 0;
