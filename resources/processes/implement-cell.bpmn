@@ -37,6 +37,23 @@
       <bpmn:outgoing>ic_escalate</bpmn:outgoing>
       <bpmn:outgoing>ic_done</bpmn:outgoing>
     </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="reconcile-implement" name="Reconcile from GitHub">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.reconcile-implement" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=reconciled" target="reconciled" />
+          <zeebe:output source="=status" target="status" />
+          <zeebe:output source="=pr" target="pr" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>ic_escalate</bpmn:incoming>
+      <bpmn:outgoing>ic_toReconcileGw</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="ic_reconcile_gw" name="reconciled?" default="ic_toRecordEscalation">
+      <bpmn:incoming>ic_toReconcileGw</bpmn:incoming>
+      <bpmn:outgoing>ic_reconciled</bpmn:outgoing>
+      <bpmn:outgoing>ic_toRecordEscalation</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
     <bpmn:callActivity id="escalate" name="Human escalation">
       <bpmn:extensionElements>
         <zeebe:calledElement processId="human-escalation" />
@@ -61,7 +78,7 @@
           <zeebe:output source="=question" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
-      <bpmn:incoming>ic_escalate</bpmn:incoming>
+      <bpmn:incoming>ic_toRecordEscalation</bpmn:incoming>
       <bpmn:outgoing>ic_toEscalate</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:exclusiveGateway id="ic_gw_answer" name="answer?" default="ic_abandon">
@@ -81,6 +98,7 @@
     </bpmn:serviceTask>
     <bpmn:endEvent id="ic_end" name="Task done">
       <bpmn:incoming>ic_done</bpmn:incoming>
+      <bpmn:incoming>ic_reconciled</bpmn:incoming>
       <bpmn:incoming>ic_abandon</bpmn:incoming>
     </bpmn:endEvent>
     <bpmn:sequenceFlow id="ic_toImplement" sourceRef="Start" targetRef="implement-task" />
@@ -88,7 +106,12 @@
     <bpmn:sequenceFlow id="ic_done" name="done" sourceRef="ic_gw" targetRef="ic_end">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "opened" or status = "blocked" or status = "skipped"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
-    <bpmn:sequenceFlow id="ic_escalate" name="escalated" sourceRef="ic_gw" targetRef="record-escalation" />
+    <bpmn:sequenceFlow id="ic_escalate" name="reconcile" sourceRef="ic_gw" targetRef="reconcile-implement" />
+    <bpmn:sequenceFlow id="ic_toReconcileGw" sourceRef="reconcile-implement" targetRef="ic_reconcile_gw" />
+    <bpmn:sequenceFlow id="ic_reconciled" name="adopted" sourceRef="ic_reconcile_gw" targetRef="ic_end">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=reconciled = true</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="ic_toRecordEscalation" name="escalated" sourceRef="ic_reconcile_gw" targetRef="record-escalation" />
     <bpmn:sequenceFlow id="ic_toEscalate" sourceRef="record-escalation" targetRef="escalate" />
     <bpmn:sequenceFlow id="ic_toAnswerGw" sourceRef="escalate" targetRef="ic_gw_answer" />
     <bpmn:sequenceFlow id="ic_answerLoop" name="answer" sourceRef="ic_gw_answer" targetRef="record-implementing">
@@ -114,25 +137,34 @@
           <dc:Bounds x="406" y="62" width="70" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="BPMNShape_escalate" bpmnElement="escalate">
-        <dc:Bounds x="766" y="80" width="100" height="80" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="BPMNShape_record-escalation" bpmnElement="record-escalation">
+      <bpmndi:BPMNShape id="BPMNShape_reconcile-implement" bpmnElement="reconcile-implement">
         <dc:Bounds x="566" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="BPMNShape_ic_gw_answer" bpmnElement="ic_gw_answer" isMarkerVisible="true">
-        <dc:Bounds x="966" y="95" width="50" height="50" />
+      <bpmndi:BPMNShape id="BPMNShape_ic_reconcile_gw" bpmnElement="ic_reconcile_gw" isMarkerVisible="true">
+        <dc:Bounds x="766" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="963" y="76" width="56" height="14" />
+          <dc:Bounds x="751" y="76" width="81" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_escalate" bpmnElement="escalate">
+        <dc:Bounds x="1116" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_record-escalation" bpmnElement="record-escalation">
+        <dc:Bounds x="916" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_ic_gw_answer" bpmnElement="ic_gw_answer" isMarkerVisible="true">
+        <dc:Bounds x="1316" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1313" y="76" width="56" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record-implementing" bpmnElement="record-implementing">
-        <dc:Bounds x="1116" y="240" width="100" height="80" />
+        <dc:Bounds x="1466" y="240" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_ic_end" bpmnElement="ic_end">
-        <dc:Bounds x="1148" y="102" width="36" height="36" />
+        <dc:Bounds x="1498" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1133" y="83" width="66" height="14" />
+          <dc:Bounds x="1483" y="83" width="66" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_toImplement" bpmnElement="ic_toImplement">
@@ -150,41 +182,61 @@
           <dc:Bounds x="483" y="128" width="67" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_ic_toEscalate" bpmnElement="ic_toEscalate">
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_toReconcileGw" bpmnElement="ic_toReconcileGw">
         <di:waypoint x="666" y="120" />
         <di:waypoint x="766" y="120" />
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_toRecordEscalation" bpmnElement="ic_toRecordEscalation">
+        <di:waypoint x="816" y="120" />
+        <di:waypoint x="916" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="833" y="128" width="67" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_toEscalate" bpmnElement="ic_toEscalate">
+        <di:waypoint x="1016" y="120" />
+        <di:waypoint x="1116" y="120" />
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_toAnswerGw" bpmnElement="ic_toAnswerGw">
-        <di:waypoint x="866" y="120" />
-        <di:waypoint x="966" y="120" />
+        <di:waypoint x="1216" y="120" />
+        <di:waypoint x="1316" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_abandon" bpmnElement="ic_abandon">
-        <di:waypoint x="1016" y="120" />
-        <di:waypoint x="1148" y="120" />
+        <di:waypoint x="1366" y="120" />
+        <di:waypoint x="1498" y="120" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1056" y="98" width="53" height="14" />
+          <dc:Bounds x="1406" y="98" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_answerLoop" bpmnElement="ic_answerLoop">
-        <di:waypoint x="991" y="145" />
-        <di:waypoint x="991" y="280" />
-        <di:waypoint x="1116" y="280" />
+        <di:waypoint x="1341" y="145" />
+        <di:waypoint x="1341" y="280" />
+        <di:waypoint x="1466" y="280" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="996" y="206" width="49" height="14" />
+          <dc:Bounds x="1346" y="206" width="49" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_done" bpmnElement="ic_done">
         <di:waypoint x="441" y="145" />
-        <di:waypoint x="441" y="180" />
-        <di:waypoint x="1166" y="180" />
-        <di:waypoint x="1166" y="138" />
+        <di:waypoint x="441" y="200" />
+        <di:waypoint x="1516" y="200" />
+        <di:waypoint x="1516" y="138" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="788" y="188" width="32" height="14" />
+          <dc:Bounds x="963" y="208" width="32" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_reconciled" bpmnElement="ic_reconciled">
+        <di:waypoint x="791" y="145" />
+        <di:waypoint x="791" y="180" />
+        <di:waypoint x="1516" y="180" />
+        <di:waypoint x="1516" y="138" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1047" y="158" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_reImplement" bpmnElement="ic_reImplement">
-        <di:waypoint x="1166" y="320" />
-        <di:waypoint x="1166" y="340" />
+        <di:waypoint x="1516" y="320" />
+        <di:waypoint x="1516" y="340" />
         <di:waypoint x="266" y="340" />
         <di:waypoint x="266" y="160" />
       </bpmndi:BPMNEdge>
