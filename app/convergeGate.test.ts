@@ -18,6 +18,7 @@ import {
   parseAckedAdvisories,
   parseReviewThreadsPage,
   parseSuppressedAdvisories,
+  pickLatestCopilotReview,
   pickLatestCopilotReviewBody,
   type ReviewThread,
 } from "./github.ts";
@@ -432,6 +433,45 @@ test("pickLatestCopilotReviewBody: FAILS CLOSED (null) when the reviews read was
   );
 });
 
+// The COMMIT-ID-carrying picker (`pickLatestCopilotReview`) is the ONLY production path that carries
+// GitHub's `commit_id` into the stale-review guard (#799); the worker tests inject `{ commitId }`
+// directly, so without these the picker's commit_id selection could regress (disabling stale
+// detection) while every other test stays green. These lock: the NEWEST Copilot review's commit_id
+// (and body) is returned; a no-Copilot-review read is verified `{ body: "", commitId: null }`; a
+// truncated read fails closed to `null`.
+test("pickLatestCopilotReview: returns the NEWEST Copilot review's body AND commit_id (oldest\u2192newest)", () => {
+  const picked = pickLatestCopilotReview(
+    [
+      { user: { login: "human" }, body: "human review", commit_id: "humansha" },
+      { user: { login: "Copilot" }, body: "old copilot review", commit_id: "oldsha" },
+      { user: { login: "Copilot" }, body: "newest copilot review", commit_id: "newsha" },
+    ],
+    false,
+  );
+  assertEquals(picked, { body: "newest copilot review", commitId: "newsha" });
+});
+
+test('pickLatestCopilotReview: a complete read with NO Copilot review is verified { body: "", commitId: null }', () => {
+  assertEquals(pickLatestCopilotReview([{ user: { login: "human" }, body: "hi", commit_id: "x" }], false), {
+    body: "",
+    commitId: null,
+  });
+  assertEquals(pickLatestCopilotReview([], false), { body: "", commitId: null });
+});
+
+test("pickLatestCopilotReview: a Copilot review missing commit_id yields commitId null (not stale)", () => {
+  // A review with no commit_id must not fabricate a stale verdict: `isReviewStale` fails safe on a
+  // null review commit_id, and this picker must surface that null rather than an empty string.
+  assertEquals(pickLatestCopilotReview([{ user: { login: "Copilot" }, body: "b" }], false), {
+    body: "b",
+    commitId: null,
+  });
+});
+
+test("pickLatestCopilotReview: FAILS CLOSED (null) when the reviews read was TRUNCATED", () => {
+  assertEquals(pickLatestCopilotReview([{ user: { login: "Copilot" }, body: "possibly stale", commit_id: "s" }], true), null);
+});
+
 async function makeUnderTest(deps: {
   readThreads: (repo: string, n: number) => Promise<ReviewThread[] | null>;
   readReviewBody: (repo: string, n: number) => Promise<string | null>;
@@ -687,6 +727,27 @@ test("gw-converge-gate routes a STALE review back to persist-round (re-solicit),
     /<nano:shape\b[^>]*\bid="PrConvergeGateOut"[^>]*>.*?name="reviewStale".*?<\/nano:shape>/.test(flat),
     "PrConvergeGateOut must declare reviewStale",
   );
+});
+
+test("the round cap does NOT escalate a stale-retry round — f_guardMax is gated on reviewStale != true (#799)", () => {
+  // A stale review re-enters persist-round → check-progress → gw-guard. On the FINAL configured round
+  // the cap would escalate a human instead of soliciting a fresh review — but a stale review is not a
+  // failure to converge, it is a review of obsolete code. The round cap must therefore bypass the
+  // stale-retry path (the review-wait timeout remains the backstop against an indefinitely stalled
+  // re-solicitation).
+  const f = flowElement("f_guardMax");
+  assert(f, "f_guardMax flow missing");
+  assertStringIncludes(f, "maxRounds and reviewStale != true");
+});
+
+test("wait-review clears reviewStale when a fresh review lands, so the marker can't leak into a later round (#799)", () => {
+  // reviewStale is written ONLY by the converge-gate; once a fresh review arrives it is no longer
+  // known-stale, so wait-review resets it to false alongside the round increment. Without this reset
+  // a stale marker would persist and disable the round cap for a subsequent addressed round.
+  const wr = flat.match(/<bpmn:intermediateCatchEvent\b[^>]*\bid="wait-review"[^>]*>.*?<\/bpmn:intermediateCatchEvent>/);
+  assert(wr, "wait-review catch event missing");
+  assertStringIncludes(wr[0], '<zeebe:output source="=round + 1" target="round" />');
+  assertStringIncludes(wr[0], '<zeebe:output source="=false" target="reviewStale" />');
 });
 
 test("gw-converge-gate default arm routes to the scope classifier (not straight to finalize)", () => {

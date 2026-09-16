@@ -135,9 +135,32 @@ MAX_ROUNDS forces an escalation ("not converged after N rounds") so a human
 decides rather than looping forever. The guard sits *after* `check-progress`
 (not before), so a husk auto-retry — which does not consume a round — bypasses
 the cap and is re-tried onto a healthy worker even on the final configured round.
+The **stale-review re-solicitation** path (below) likewise bypasses the cap: its
+`f_guardMax` arm is gated on `round ≥ maxRounds and reviewStale != true`, so a
+stale review received on the final configured round re-solicits a fresh review
+instead of escalating (the review-wait timeout remains the backstop).
 ```
 
 Notes:
+- **Convergence comment-gate + stale-review re-solicitation (issue #799).** The
+  agent's self-reported `converged` does not finalize directly: it first runs the
+  deterministic `pr.converge-gate` (`check-converge` → `gw-converge-gate`). That
+  gate **blocks** convergence (`convergeBlocked = true` → escalate "unaddressed
+  comments") while any review thread is unresolved or any suppressed advisory
+  lacks a resolved `nano-ack:` thread; otherwise it proceeds to the scope
+  classifier and finalizes. A third arm handles a **stale review** — one whose
+  `commit_id` predates the PR's current HEAD (its advisories describe code the
+  head has moved past, e.g. an advisory already fixed in a later commit). Rather
+  than block/escalate on the obsolete body, the gate signals `reviewStale = true`
+  and `f_convergeStale` re-enters `persist-round` → `check-progress` (which parks
+  the PR in `waiting_review`, the single writer), so the poller re-solicits a
+  fresh review of the current HEAD. The head is read via the shared
+  branch-ref-preferring reader (`makeDefaultReadHead`, atomic with the push, #786)
+  in BOTH the gate and the poller so they agree on the current head. `reviewStale`
+  is written only by the gate and cleared by the `wait-review` catch when a fresh
+  review lands, so the marker cannot leak into a later round. Because a stale
+  review is not a failure to converge, this path bypasses the round cap (see the
+  Guard above).
 - On `addressed`, the loop parks at an **event-based gateway** that races the
   canonical `readiness-ready` wait-gate message (ADR 0001 §2; correlated by the
   poller when a fresh review lands)

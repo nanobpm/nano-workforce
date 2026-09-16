@@ -65,7 +65,12 @@ function isGhAvailable(): Promise<boolean> {
 }
 
 /** Fetch the reviews for one PR via the configured transport. Throws on transport failure so
- * the caller can log-and-continue; returns `null` when no transport is usable (idle). */
+ * the caller can log-and-continue; returns `null` when no transport is usable (idle). Pages the
+ * FULL (oldest→newest) reviews list — the poller picks the newest fresh review by id, so reading
+ * only the first `per_page=100` page would, on a >100-review convergence loop, surface the OLDEST
+ * 100 and miss the genuinely newest review (repeatedly nudging while a current-head review sits on a
+ * later page, or classifying an old review as stale). This mirrors {@link fetchLatestCopilotReview}'s
+ * paging so both readers agree on which review is newest. */
 export async function fetchPrReviews(
   repo: string,
   number: number | string,
@@ -75,17 +80,28 @@ export async function fetchPrReviews(
   const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
   const path = `repos/${repo}/pulls/${number}/reviews?per_page=100`;
   if (useGh) {
-    const out = await runGh(["api", path, "-H", "Accept: application/vnd.github+json"]);
+    // `--paginate` merges EVERY page of the (oldest→newest) reviews array, so a >100-review
+    // convergence loop still surfaces the genuinely newest review rather than the oldest 100.
+    const out = await runGh(["api", "--paginate", path, "-H", "Accept: application/vnd.github+json"]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     return JSON.parse(out) as GhReview[];
   }
   if (!token) return null; // token mode with no token → poller idles
-  const r = await fetch(`https://api.github.com/${path}`, {
-    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
-  });
-  if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  return (await r.json()) as GhReview[];
+  // Page the token transport the same way; 20×100 reviews is far past any real convergence loop.
+  const reviews: GhReview[] = [];
+  const MAX_PAGES = 20;
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const r = await fetch(`https://api.github.com/${path}&page=${page}`, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+    });
+    if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const batch = (await r.json()) as GhReview[];
+    reviews.push(...batch);
+    // A short page means we've read every review — the list is complete.
+    if (batch.length < 100) break;
+  }
+  return reviews;
 }
 
 // ── Review-comment convergence gate (don't converge with unaddressed comments) ──────────────

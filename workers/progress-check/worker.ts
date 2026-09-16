@@ -16,6 +16,7 @@
 // could not read fails OPEN — the round cap and the review-wait timeout stay the safety nets so a
 // transient GitHub hiccup can never fabricate a no-progress escalation.
 import type { AgentInstanceSummary, AppApi, AppJobHandler } from "@nanobpm/urban";
+import { type HeadReader, makeDefaultReadHead } from "../../app/currentHead.ts";
 import { fetchBranchHead, fetchPrHead } from "../../app/github.ts";
 import { decideProgress, isAddressedStatus } from "../../app/roundProgress.ts";
 import { parsePr } from "../../app/service.ts";
@@ -25,16 +26,6 @@ import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io
 // convergence-loop.bpmn), the single source of truth for this worker's wire contract (ADR 0040).
 type In = WorkerInputs["pr.progress-check"];
 type Out = WorkerOutputs["pr.progress-check"];
-
-// Reads a PR's current head SHA. Injectable so unit tests never touch git/network; the default
-// binds the real GitHub reader (the shared gh | token transport) and swallows any failure to
-// `null` so the guard fails OPEN. It reads the BRANCH ref (`git/ref/heads/<branch>`) — updated
-// atomically with the push — in preference to the PR object's asynchronously-denormalized
-// `head.sha`, so a lagging PR projection can never fabricate a stale-but-valid no-advance
-// escalation (#786). Once a head ref is known this trusts ONLY its atomic ref: a failed/absent
-// ref read fails OPEN (`null`), never falling back to `head.sha`. The PR head is used only when
-// the PR carries NO head ref at all.
-export type HeadReader = (repo: string, prNumber: number) => Promise<string | null>;
 
 /** The outcome of an agent-work corroboration, optionally carrying the ATTEMPT WATERMARK it
  * consumed. `work` is the husk verdict decideProgress routes on (`true` no-advance / `false` husk /
@@ -76,40 +67,11 @@ function normalizeAgentWork(raw: boolean | null | AgentWorkObservation | undefin
   return raw;
 }
 
-/** Build the default head reader over injected GitHub fetchers. Exported (with injectable fetchers)
- * so the branch-ref-over-stale-`head.sha` preference — the whole point of {@link fetchBranchHead}
- * here (#786) — is covered by a handler-level regression test, not only inside the private binding:
- * a change that stopped reading the branch ref, or fell back to `head.sha`, must turn a test red. */
-export function makeDefaultReadHead(deps: {
-  fetchPrHead: typeof fetchPrHead;
-  fetchBranchHead: typeof fetchBranchHead;
-}): HeadReader {
-  return async (repo, prNumber) => {
-    const token = process.env.GITHUB_TOKEN ?? "";
-    const pr = await deps.fetchPrHead(repo, prNumber, token).catch(() => null);
-    if (!pr) return null;
-    // Prefer the branch ref (atomic with the push) over the PR object's denormalized head.sha (#786).
-    // Once the head branch is known, trust ONLY its atomic ref: a failed/absent ref read fails OPEN
-    // (`null`) rather than falling back to the PR object's asynchronously-denormalized head.sha, which
-    // can still report a stale-but-valid SHA after a push and fabricate a no-advance escalation — the
-    // very projection this branch-ref read exists to avoid. The ref is read in the repository the
-    // head branch actually lives in (the fork for a cross-repo PR — see below), so a fork PR fails
-    // open safely instead of comparing an unrelated base-repo SHA. Fall back to the PR head only when
-    // there is NO head ref.
-    if (pr.headRef) {
-      // Resolve the head ref in the repository the head branch actually lives in — the FORK for a
-      // cross-repo PR (`pr.headRepo`), else the base `repo`. Querying the base repo unconditionally
-      // would, for a fork PR whose head branch shares a name with a base-repo branch, read the
-      // unrelated base-branch SHA and fabricate progress/no-progress (#786). When the head repo
-      // cannot be resolved (a deleted fork ⇒ `headRepo:null`) fail OPEN to `null` rather than fall
-      // back to the base repo and risk that collision.
-      const headRepo = pr.headRepo;
-      if (!headRepo) return null;
-      return await deps.fetchBranchHead(headRepo, pr.headRef, token).catch(() => null);
-    }
-    return pr.headSha ?? null;
-  };
-}
+/** Re-exported from {@link ../../app/currentHead.ts} (the single canonical implementation of the
+ * branch-ref-over-stale-`head.sha` head reader, #786/#799) so existing importers of these symbols
+ * from this worker keep resolving without a duplicated copy — the poller in `app/service.ts` binds
+ * the same reader from `currentHead.ts` directly. */
+export { type HeadReader, makeDefaultReadHead };
 
 const defaultReadHead: HeadReader = makeDefaultReadHead({ fetchPrHead, fetchBranchHead });
 

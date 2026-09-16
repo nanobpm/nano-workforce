@@ -218,6 +218,7 @@
       <bpmn:extensionElements>
         <zeebe:ioMapping>
           <zeebe:output source="=round + 1" target="round" />
+          <zeebe:output source="=false" target="reviewStale" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toReviewWait</bpmn:incoming>
@@ -427,7 +428,7 @@
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=(status = "needs_input" or status = "blocked") and question != null and trim(question) != ""</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_guardMax" name="max rounds" sourceRef="gw-guard" targetRef="persist-escalation-maxrounds">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=round &gt;= maxRounds</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=round &gt;= maxRounds and reviewStale != true</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_guardOk" name="continue" sourceRef="gw-guard" targetRef="gw-review-wait" />
     <bpmn:sequenceFlow id="f_roundWait" sourceRef="persist-round" targetRef="check-progress" />
