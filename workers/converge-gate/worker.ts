@@ -17,8 +17,11 @@
 //     NOT honoured: keyed only on `path:line`, it is blind to the advisory prose and would let a
 //     resolved ack for one advisory silently acknowledge a genuinely new advisory re-emitted at
 //     that same line (a false-OPEN). Only the prose-keyed `<path> :: <text>` form acknowledges.
-// A blocked gate returns `convergeBlocked = true`; the model's `gw-converge-gate` gateway routes to
-// the human `wait-answer` escalation (recoverable), never a hard wedge.
+// A blocked gate returns `convergeBlocked = true` (recoverable, never a hard wedge); the route then
+// depends on WHY it blocked. An ack-only block (`convergeAckOnly = true` — sole cause is unacked
+// suppressed advisories and/or an unresolved `nano-ack:` ack thread) re-dispatches the `review-round`
+// agent first, bounded by `ackRetryMax`, and only reaches the human `wait-answer` escalation once
+// that budget is exhausted. A substantive unresolved thread routes to `wait-answer` immediately.
 //
 // Scope integrity is NO LONGER judged here. A deterministic regex over the PR description could not
 // read the closed issue's acceptance criteria, so it false-positived on any body that merely
@@ -122,8 +125,10 @@ export function makeHandler(deps: {
     return {
       convergeBlocked: result.convergeBlocked,
       convergeBlockReason: result.convergeBlockReason,
-      // Signals the bounded agent auto-ack path (#796): a block whose sole cause is unacked
-      // suppressed advisories re-dispatches the review-round agent before escalating to a human.
+      // Signals the bounded agent auto-ack path (#796): a block whose sole cause is recoverable —
+      // unacked suppressed advisories AND/OR a lone unresolved `nano-ack:` ack thread (a
+      // partially-completed acknowledgement), with NO substantive unresolved thread — re-dispatches
+      // the review-round agent before escalating to a human.
       convergeAckOnly: result.ackOnly,
     };
   };

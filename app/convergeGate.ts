@@ -12,7 +12,11 @@
 //     RESOLVED ack thread (a thread carrying a line-stable `nano-ack: <path> :: <text>` marker; the
 //     bare `nano-ack: <path>:<line>` form is NOT honoured — its `path:line` key is prose-blind and
 //     would false-OPEN a new advisory re-emitted at a previously-acked line).
-// A blocked gate escalates to the human wait-answer task (recoverable), never a hard wedge.
+// A blocked gate is recoverable, never a hard wedge — but the route depends on WHY it blocked: an
+// ack-only block (sole cause unacked advisories and/or an unresolved `nano-ack:` thread) re-enters
+// the `review-round` agent first, bounded by `ackRetryMax`, and only escalates to the human
+// wait-answer task once that budget is exhausted; a substantive unresolved thread escalates to
+// wait-answer immediately.
 
 export interface ConvergeGateInput {
   /** Count of unresolved review threads that are NOT `nano-ack:` ack threads (substantive reviewer
