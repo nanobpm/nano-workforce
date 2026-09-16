@@ -157,10 +157,11 @@ Notes:
   fresh review of the current HEAD. The head is read via the shared
   branch-ref-preferring reader (`makeDefaultReadHead`, atomic with the push, #786)
   in BOTH the gate and the poller so they agree on the current head. `reviewStale`
-  is written only by the gate and cleared by the `wait-review` catch when a fresh
-  review lands, so the marker cannot leak into a later round. Because a stale
-  review is not a failure to converge, this path bypasses the round cap (see the
-  Guard above).
+  is written only by the gate and cleared on BOTH loop re-entry paths — by the
+  `wait-review` catch when a fresh review lands, and by `record-answer` when a
+  human resumes after the review-stall timer — so the marker cannot leak into a
+  later round. Because a stale review is not a failure to converge, this path
+  bypasses the round cap (see the Guard above).
 - On `addressed`, the loop parks at an **event-based gateway** that races the
   canonical `readiness-ready` wait-gate message (ADR 0001 §2; correlated by the
   poller when a fresh review lands)
