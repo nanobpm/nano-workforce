@@ -19,7 +19,8 @@
 //
 // The fix (mirroring the merge loop's `gw-merge-escalated`, PR #331): route EVERY arm that can reach
 // `wait-answer` through the single `gw-escalated` guard, so a `persist-escalation` returning
-// `escalated:false` RE-ENTERS the loop (`gw-guard`) instead of parking a dead wait. This makes the
+// `escalated:false` RE-ENTERS the loop (round processing, `persist-round`) instead of parking a dead
+// wait. This makes the
 // invariant structural — `wait-answer` is reachable ONLY from a `gw-escalated == true` edge, so a
 // "durable answer-wait with no escalation" is unrepresentable.
 //
@@ -77,7 +78,7 @@ test("gw-escalated honours persist-escalation's escalated output for every arm",
   assertStringIncludes(escWait![0], "escalated = true", "the wait arm must be guarded by escalated = true");
   // escalated:false (a non-escalation, e.g. a blank convergeBlockReason) → re-enter the loop, not a dead wait.
   assert(gatewayDefault("gw-escalated", "f_escReenter"), "gw-escalated default must re-enter the loop");
-  assert(flowHasId("f_escReenter", "gw-escalated", "gw-guard"), "the non-escalation arm must re-enter via gw-guard, not park a wait");
+  assert(flowHasId("f_escReenter", "gw-escalated", "persist-round"), "the non-escalation arm must re-enter round processing (persist-round), not park a wait");
 });
 
 test("wait-answer is reachable ONLY from the gw-escalated == true edge (structural invariant)", () => {

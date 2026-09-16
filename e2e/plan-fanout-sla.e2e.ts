@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
-import { advancePastTimer } from "./support/time.ts";
+import { advancePastTimer, settleFully } from "./support/time.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -95,7 +95,10 @@ describe("plan-fanout escalation SLA + assignment (U5)", () => {
       const planKey = "owner/repo#1";
       const started = await app.api?.call("startPlanFanout", { body: { issue: planKey, baseBranch: "epic/e2e" } });
       assert.equal(started?.status, 202, "startPlanFanout accepted the issue");
-      await app.settle();
+      // Fixpoint (not a single tick): the wave fan-out enrolls each opened PR via `submitPr`, whose
+      // nested `createInstance` re-entrantly runs the new `capture-head` host task (#786) and leaves
+      // the enroller's completion undrained until a later settle — see `settleFully`.
+      await settleFully(app);
       const plan = await app.db
         .table<{ plan_key: string; process_key: string | null }>("plans", "plan_key")
         .findOne({ plan_key: planKey });

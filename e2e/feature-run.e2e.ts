@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
+import { settleFully } from "./support/time.ts";
 import { pollUserTasks } from "../app/service.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -103,7 +104,11 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
       const featureKey = "owner/repo#7";
       const started = await app.api?.call("startFeature", { body: { issue: featureKey, ...startBody } });
       assert.equal(started?.status, 202, "startFeature accepted the issue");
-      await app.settle();
+      // Fixpoint (not a single tick): the `converge` hand-off enrolls the opened PR via `submitPr`,
+      // whose nested `createInstance` re-entrantly runs the new `capture-head` host task (#786) and
+      // leaves `pr.converge-feature`'s own completion undrained until a later settle — see
+      // `settleFully`.
+      await settleFully(app);
       const run = await app.db
         .table<FeatureRow>("feature_runs", "feature_key")
         .findOne({ feature_key: featureKey });

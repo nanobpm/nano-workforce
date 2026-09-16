@@ -1,3 +1,15 @@
+## [0.187.6](https://github.com/nanobpm/nano-workforce/compare/v0.187.5...v0.187.6) (2026-09-16)
+
+### Bug Fixes
+
+* **convergence:** re-solicit on a stale Copilot review instead of re-escalating ([#799](https://github.com/nanobpm/nano-workforce/issues/799)) ([#803](https://github.com/nanobpm/nano-workforce/issues/803)) ([58a99b6](https://github.com/nanobpm/nano-workforce/commit/58a99b6024af6cef37f724f9d50cf6151a6f061c)), closes [#789](https://github.com/nanobpm/nano-workforce/issues/789)
+
+## [0.187.5](https://github.com/nanobpm/nano-workforce/compare/v0.187.4...v0.187.5) (2026-09-15)
+
+### Bug Fixes
+
+* **convergence:** classify husked review rounds and bound-retry the no-progress loop ([#789](https://github.com/nanobpm/nano-workforce/issues/789)) ([faebcdc](https://github.com/nanobpm/nano-workforce/commit/faebcdcaca017fab8d7436a50e3dc09354dc3022)), closes [jwulf/c8ctl-plugin-nano#230](https://github.com/jwulf/c8ctl-plugin-nano/issues/230) [#786](https://github.com/nanobpm/nano-workforce/issues/786) [#786](https://github.com/nanobpm/nano-workforce/issues/786)
+
 ## [0.187.4](https://github.com/nanobpm/nano-workforce/compare/v0.187.3...v0.187.4) (2026-09-14)
 
 ### Bug Fixes

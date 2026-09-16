@@ -33,7 +33,7 @@ import {
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const READ_MODEL_MIGRATION = "094_pull_requests_read_model.sql";
+const READ_MODEL_MIGRATION = "104_pull_requests_read_model_progress_idempotency.sql";
 
 // The real base `pull_requests` columns, in schema order — DERIVED from the migration chain (not a
 // hand-kept list that could silently omit one), used by both the drift guard and the e2e stand-in.

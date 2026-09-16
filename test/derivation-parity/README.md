@@ -71,10 +71,11 @@ events` diagnostic pins this against the goldens themselves.
 sufficient_. Three golden features have no structured-builder derivation, each
 pinned by a diagnostic in `derivation-parity.test.ts`:
 
-1. **Task-level back-edge merge.** The loop head `review-round` is a
-   `serviceTask` that merges **four** back-edges directly (`in=4`: `f_start`,
-   `f_reviewLoop`, `f_answerLoop`, and the bounded auto-ack re-entry `f_ackRetry`
-   added in #796). But `loop()`
+1. **Task-level back-edge merge.** The loop head `capture-head` is a
+   `serviceTask` that merges **five** back-edges directly (`in=5`: `f_start`,
+   `f_reviewLoop`, `f_answerLoop`, the #786 husk auto-retry `f_huskRetry`, and
+   the bounded auto-ack re-entry `f_ackRetry` added in #796); `review-round`
+   then takes its single `f_capture` in-edge. But `loop()`
    always inserts an exclusive-gateway loop head that absorbs the back-edge, so
    the body task stays `in=1` — empirically demonstrated by the `loop() inserts a
    gateway head` test.
@@ -83,8 +84,8 @@ pinned by a diagnostic in `derivation-parity.test.ts`:
    complex boolean, one default). No `switch` (equalities + default) or `branch`
    (one condition + default) emits that.
 3. **Shared merge+split gateway.** `gw-escalated` is a single exclusive gateway
-   that is at once a **five-way merge and a two-way split**, reached by back-edges
-   from five distinct points.
+   that is at once a **six-way merge and a two-way split**, reached by back-edges
+   from six distinct points.
 
 The fix is an **arbitrary-graph / explicit-join (named-target)** builder upstream
 in `@nanobpm/workflow` — a **superset** of the class-1 gap.

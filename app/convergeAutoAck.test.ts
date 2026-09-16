@@ -27,6 +27,7 @@ type Responder = Output | Output[] | ((job: { variables: Record<string, unknown>
 
 const ALL_JOB_TYPES = [
   "senior:pr-review",
+  "pr.capture-head",
   "pr.persist-round",
   "pr.progress-check",
   "pr.converge-gate",
@@ -38,6 +39,7 @@ const ALL_JOB_TYPES = [
 
 const DEFAULT_RESPONSES: Record<string, Responder> = {
   "senior:pr-review": { status: "converged", summary: "done" },
+  "pr.capture-head": { roundEntryHead: "sha-entry" },
   "pr.persist-round": {},
   "pr.progress-check": { progressed: true },
   "senior:scope-classify": { scopeBlocked: false, scopeBlockReason: "" },
@@ -68,6 +70,9 @@ const DEFAULT_VARS: Record<string, unknown> = {
   convergeBlocked: null,
   convergeBlockReason: null,
   convergeAckOnly: null,
+  reviewStale: null,
+  roundEntryHead: null,
+  huskRetries: 0,
   progressed: true,
   escalated: null,
 };

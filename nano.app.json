@@ -121,6 +121,10 @@
       "handler": "workers/persist-round/worker.ts"
     },
     {
+      "taskType": "pr.capture-head",
+      "handler": "workers/capture-head/worker.ts"
+    },
+    {
       "taskType": "pr.persist-escalation",
       "handler": "workers/persist-escalation/worker.ts"
     },

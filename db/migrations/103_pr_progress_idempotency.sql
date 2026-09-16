@@ -1,0 +1,29 @@
+-- Make the `pr.progress-check` guard (workers/progress-check/worker.ts) idempotent under the
+-- engine's AT-LEAST-ONCE job delivery. The guard advances the `last_round_head` baseline as its
+-- observation of the current round's head; a job whose side-effects landed but whose completion-ack
+-- was LOST is redelivered with the SAME job key. Without an idempotency record the redelivery reads
+-- the just-advanced baseline as `previousHead`, sees "head did not advance", and can mis-escalate an
+-- already-progressed round (Copilot review, PR #789).
+--
+-- These two columns record, in the SAME atomic row update that advances the baseline and writes the
+-- resting status, the job key that produced the decision and the serialized worker outcome. On
+-- redelivery the guard recognizes its own job key and REPLAYS the recorded outcome instead of
+-- recomputing against the mutated baseline. Because the stamp and the baseline advance are one
+-- update, a redelivery either sees the whole record (replay) or none of it (recompute from the
+-- un-advanced baseline → same decision) — never a half-state. A husk auto-retry re-enters
+-- `review-round` as a NEW job key, so it is never mistaken for a redelivery.
+--
+--   • last_progress_job_key  — the engine job key of the last progress-check that committed a write.
+--   • last_progress_result   — that job's serialized `PrProgressCheckOut` (JSON), replayed verbatim.
+--   • last_progress_agent_watermark — the greatest `review-round` AgentInstance key an earlier
+--     progress-check has ALREADY accounted for (Copilot PR #789). It lets the next round distinguish
+--     a freshly-registered `review-round` attempt from a historical one, so a CURRENT attempt that
+--     husks BEFORE the worker registers its AgentInstance is classified as a husk (bounded auto-
+--     retry) instead of being masked by a prior round's terminal instance and mis-escalated.
+--
+-- Forward-only, additive (expand): all columns are nullable with no default. Numbered after the
+-- current highest prefix (102); the runner wraps each file in its own transaction, so this file must
+-- NOT contain BEGIN/COMMIT.
+ALTER TABLE pull_requests ADD COLUMN last_progress_job_key TEXT;
+ALTER TABLE pull_requests ADD COLUMN last_progress_result TEXT;
+ALTER TABLE pull_requests ADD COLUMN last_progress_agent_watermark TEXT;
