@@ -104,7 +104,7 @@ known at submit time, carried as a process variable and stored on the DB row.
 │      │                       ├── addressed → [Scope classifier] → … → [Mark converged] → (end)
 │      │                       └── unaddressed → <gateway: auto-ack within budget?>
 │      │                            ├── convergeAckOnly and ackRetryRound ≤ ackRetryMax
-│      │                            │      → round++ (bounded auto-ack re-dispatch) ──────────────┐
+│      │                            │      → ackRetryRound++ (round unchanged); re-dispatch ──────┐
 │      │                            └── unresolved thread / budget exhausted                      │
 │      │                                 → [Escalate: unaddressed comments] (blocked)             │
 │      │                                 → [Wait: wait-answer userTask] ────────────────────────────┤
