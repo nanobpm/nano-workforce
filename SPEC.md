@@ -99,21 +99,29 @@ known at submit time, carried as a process variable and stored on the DB row.
 │         │
 │         ▼
 │    <gateway: status>
-│      ├── converged  → [Mark converged] → (end: converged)
-│      │
-│      ├── addressed  → [Record round] → <event-based gateway: review ready or timeout?>
-│      │                     ├── readiness-ready (msg catch, key = prKey) → round++ ─┐
-│      │                     └── =reviewWaitTimeout (timer catch)                     │
-│      │                          → [Escalate: review stalled] (blocked)              │
-│      │                          → [Wait: wait-answer userTask] ─────────────────────┤
-│      │                                                                             │
-│      └── needs_input     [Record escalation]                       │               │
-│          or blocked  →   (kind = question | blocker)               │               │
-│                          → [Wait: wait-answer userTask]            │               │
-│                          → [record-answer: pr.answer-escalation]   │               │
-│                          → set answer ──────────────────────────────┤               │
-│                                                                    │               │
-└────────────────────────────────────────────────────────────────────┴───────────────┘
+│      ├── converged  → [Check review comments] (pr.converge-gate)
+│      │                   → <gateway: comments addressed?>
+│      │                       ├── addressed → [Scope classifier] → … → [Mark converged] → (end)
+│      │                       └── unaddressed → <gateway: auto-ack within budget?>
+│      │                            ├── convergeAckOnly and ackRetryRound ≤ ackRetryMax
+│      │                            │      → round++ (bounded auto-ack re-dispatch) ──────────────┐
+│      │                            └── unresolved thread / budget exhausted                      │
+│      │                                 → [Escalate: unaddressed comments] (blocked)             │
+│      │                                 → [Wait: wait-answer userTask] ────────────────────────────┤
+│      │                                                                                          │
+│      ├── addressed  → [Record round] → <event-based gateway: review ready or timeout?>          │
+│      │                     ├── readiness-ready (msg catch, key = prKey) → round++ ─┐            │
+│      │                     └── =reviewWaitTimeout (timer catch)                     │            │
+│      │                          → [Escalate: review stalled] (blocked)              │            │
+│      │                          → [Wait: wait-answer userTask] ─────────────────────┤            │
+│      │                                                                             │            │
+│      └── needs_input     [Record escalation]                       │               │            │
+│          or blocked  →   (kind = question | blocker)               │               │            │
+│                          → [Wait: wait-answer userTask]            │               │            │
+│                          → [record-answer: pr.answer-escalation]   │               │            │
+│                          → set answer ──────────────────────────────┤               │            │
+│                                                                    │               │            │
+└────────────────────────────────────────────────────────────────────┴───────────────┴────────────┘
 
 Both `needs_input` (the agent has a question) and `blocked` (the agent is stuck
 on something external — auth, a failing push, a missing secret) route to the
@@ -149,6 +157,27 @@ Notes:
   backstop when even repeated nudges fail.
 - On `needs_input`, the same `round` is retried after the answer (the answer is
   added to the agent's context; the round number does not advance).
+- On `converged`, the run does **not** finalize blindly: it first runs the
+  deterministic **converge gate** (`pr.converge-gate`, `Check review comments`),
+  which re-reads GitHub and re-blocks (`convergeBlocked=true`) while **any**
+  review thread is unresolved or **any** suppressed advisory lacks a resolved
+  `nano-ack:` thread. A block whose SOLE cause is unacknowledged suppressed
+  advisories (no unresolved inline thread) is flagged **ack-only**
+  (`convergeAckOnly=true`) and is routine + recoverable: rather than pulling a
+  human in first, the loop makes a **bounded auto-ack re-dispatch** of
+  `review-round` — up to `ackRetryMax` times, advancing `ackRetryRound` on each
+  ack-only block (seeded from `NANO_PR_MAX_ACK_RETRIES`). It escalates to the human
+  `wait-answer` only when the block is **not** ack-only (an unresolved inline
+  thread), or the budget is exhausted. Both counters are process variables.
+- **Contested advisory → human is via the agent's `needs_input`, not a decline
+  (#787 / #796).** A resolved `Declined, false positive. nano-ack: …` thread is a
+  *considered agent adjudication* and, by design (#787), keeps the advisory
+  acknowledged so the gate **converges** — a stateless gate cannot re-block a
+  decline without re-introducing the #787 per-round-escalation livelock. The
+  "genuinely contested advisory surfaces to a human" path of #796 is reached when
+  the (re-dispatched) agent cannot decide and returns **`needs_input`** — that
+  routes through the normal status-escalation arm to `wait-answer`. Decline =
+  agent-adjudicated → converge; `needs_input` = agent defers → human.
 
 
 ## 5. Agent job contract (`senior:pr-review`)

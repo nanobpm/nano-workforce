@@ -184,7 +184,50 @@ test("an ack-only block with a zero budget escalates to a human on the first blo
   assert(completedElementIds(engine).has("persist-escalation-blockedcomments"), "escalation must be the blocked-comments arm");
 });
 
+// ── Acceptance: a POSITIVE budget is exhausted — max-1 re-dispatches once, then escalates ─
+
+test("an ack-only block with a max-1 budget re-dispatches EXACTLY once, then escalates on the second block", async () => {
+  // Two CONSECUTIVE ack-only blocks with a budget of 1. This is the positive-budget exhaustion the
+  // max-2 (converges after one block) and max-0 (escalates on the first block) cases never exercise:
+  // it proves the `ackRetryRound <= ackRetryMax` gate performs exactly ONE re-dispatch and then, on
+  // the SECOND ack-only block, routes to the human — catching an off-by-one in the `<=` / counter.
+  const engine = await boot({
+    vars: { ackRetryMax: 1 },
+    responses: {
+      "pr.converge-gate": [
+        { convergeBlocked: true, convergeBlockReason: "1 unacknowledged suppressed advisory", convergeAckOnly: true },
+        { convergeBlocked: true, convergeBlockReason: "1 unacknowledged suppressed advisory", convergeAckOnly: true },
+      ],
+    },
+  });
+  assertThatInstance(engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+  assert(await openWaitAnswer(engine), "a max-1 budget must escalate on the SECOND ack-only block");
+  assert(
+    completedElementIds(engine).has("persist-escalation-blockedcomments"),
+    "escalation must be the blocked-comments arm",
+  );
+  // Exactly one re-dispatch: the initial round + one auto-ack retry = two review-round runs (not three).
+  assert(
+    completions(engine, "review-round") === 2,
+    `review-round should run exactly twice; ran ${completions(engine, "review-round")}`,
+  );
+  // The budget counter advanced once per ack-only block (0→1→2), landing PAST the max (1) — the exact
+  // condition that flipped `ackRetryRound <= ackRetryMax` false on the second block. The instance is
+  // still ACTIVE (parked on the human), so its variables are readable (a COMPLETED instance folds them).
+  assert(
+    instanceVars(engine).ackRetryRound === 2,
+    `ackRetryRound should be 2 at the escalation; was ${instanceVars(engine).ackRetryRound}`,
+  );
+});
+
 // ── Acceptance: a re-dispatched agent that needs input surfaces to a human ────
+//
+// This is the ONLY path a genuinely-contested advisory reaches a human (#796 reconciled with #787):
+// the "contested → human" trigger is the agent returning `needs_input` (it cannot decide), NOT the
+// agent posting a reasoned `Declined, false positive. nano-ack: …`. A resolved decline is an agent
+// adjudication that converges by design (#787) — a stateless converge-gate cannot re-block a decline
+// without re-introducing the #787 per-round-escalation livelock. Decline = adjudicated → converge;
+// needs_input = deferred → human.
 
 test("a contested advisory — the re-dispatched agent returns needs_input — surfaces to a human", async () => {
   const engine = await boot({

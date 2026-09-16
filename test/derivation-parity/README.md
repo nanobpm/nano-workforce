@@ -72,7 +72,9 @@ sufficient_. Three golden features have no structured-builder derivation, each
 pinned by a diagnostic in `derivation-parity.test.ts`:
 
 1. **Task-level back-edge merge.** The loop head `review-round` is a
-   `serviceTask` that merges **three** back-edges directly (`in=3`). But `loop()`
+   `serviceTask` that merges **four** back-edges directly (`in=4`: `f_start`,
+   `f_reviewLoop`, `f_answerLoop`, and the bounded auto-ack re-entry `f_ackRetry`
+   added in #796). But `loop()`
    always inserts an exclusive-gateway loop head that absorbs the back-edge, so
    the body task stays `in=1` — empirically demonstrated by the `loop() inserts a
    gateway head` test.
