@@ -159,9 +159,16 @@ Notes:
   added to the agent's context; the round number does not advance).
 - On `converged`, the run does **not** finalize blindly: it first runs the
   deterministic **converge gate** (`pr.converge-gate`, `Check review comments`),
-  which re-reads GitHub and re-blocks (`convergeBlocked=true`) while **any**
-  review thread is unresolved or **any** suppressed advisory lacks a resolved
-  `nano-ack:` thread. A block whose SOLE cause is unacknowledged suppressed
+  which re-reads GitHub and re-blocks (`convergeBlocked=true`) while **any
+  substantive** review thread is unresolved or **any** suppressed advisory lacks a
+  resolved `nano-ack:` thread. An unresolved `nano-ack:` **ack thread** is
+  **excluded** from that count — it is a partially-completed acknowledgement the
+  bounded auto-ack retry can finish (post-and-resolve), not a code-review finding,
+  so a block whose sole open thread is an unresolved ack stays on the recoverable
+  ack-only path instead of escalating. (An ack thread is one whose *root* comment
+  carries a canonical `nano-ack: <path> :: <text>` marker; a substantive reviewer
+  finding never does, so it is always counted — the classifier is fail-closed.)
+  A block whose SOLE cause is unacknowledged suppressed
   advisories (no unresolved inline thread) is flagged **ack-only**
   (`convergeAckOnly=true`) and is routine + recoverable: rather than pulling a
   human in first, the loop makes a **bounded auto-ack re-dispatch** of

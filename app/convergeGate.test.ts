@@ -589,6 +589,33 @@ test("converge-gate: an acknowledged advisory (resolved ack thread) is allowed",
   assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false });
 });
 
+// WIRING regression guard (through makeHandler, not a local re-implementation of the filter): an
+// UNRESOLVED ack thread must be excluded from the worker's unresolved-thread count, so a block whose
+// only substantive cause is unacked advisories stays ack-only. If the worker regressed to counting
+// unresolved ack threads (dropping `!isAckThread` at worker.ts), convergeAckOnly would flip to false
+// and this handler-level test would fail.
+test("converge-gate: an unresolved ack thread is excluded — block stays ack-only (through the handler)", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [
+      // A partially-completed acknowledgement (posted, not yet resolved) — its root carries the
+      // canonical marker, so isAckThread excludes it from the substantive unresolved-thread count.
+      {
+        isResolved: false,
+        path: "spec-app/nano-app.schema.json",
+        bodies: [
+          "Applied. nano-ack: spec-app/nano-app.schema.json :: The description could be clearer about the loopback default.",
+        ],
+      },
+    ],
+    readReviewBody: async () => SAMPLE_REVIEW_BODY,
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  // No SUBSTANTIVE unresolved thread was counted → the block is caused solely by unacked advisories.
+  assertEquals(out.convergeAckOnly, true);
+  assertStringIncludes(out.convergeBlockReason ?? "", "unacknowledged suppressed");
+});
+
 test("converge-gate: FAILS CLOSED when the threads read returns null (no transport)", async () => {
   const handler = await makeUnderTest({
     readThreads: async () => null,
