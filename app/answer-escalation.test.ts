@@ -13,11 +13,14 @@
 // `/status` window and a divergence from the merge loop the two paths are meant to share.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
+import { questionFingerprint } from "../app/github.ts";
 import handler from "../workers/answer-escalation/worker.ts";
 
 function fakeApp(escalationRows: Record<string, unknown>[]) {
   const updates: { key: unknown; patch: Record<string, unknown> }[] = [];
   const prUpdates: { key: unknown; patch: Record<string, unknown> }[] = [];
+  const adjudications: Record<string, unknown>[] = [];
+  const completions: Record<string, unknown>[] = [];
   const app = {
     data: {
       table(name: string, _key: string) {
@@ -25,6 +28,24 @@ function fakeApp(escalationRows: Record<string, unknown>[]) {
           return {
             async update(key: unknown, patch: Record<string, unknown>) {
               prUpdates.push({ key, patch });
+            },
+          };
+        }
+        if (name === "pr_adjudications") {
+          return {
+            async find(where: Record<string, unknown>) {
+              return adjudications.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v));
+            },
+            async insert(r: Record<string, unknown>) {
+              adjudications.push({ id: adjudications.length + 1, ...r });
+              return adjudications.length;
+            },
+          };
+        }
+        if (name === "task_completions") {
+          return {
+            async find(where: Record<string, unknown>) {
+              return completions.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v));
             },
           };
         }
@@ -42,7 +63,7 @@ function fakeApp(escalationRows: Record<string, unknown>[]) {
       },
     },
   };
-  return { app, updates, prUpdates };
+  return { app, updates, prUpdates, adjudications, completions };
 }
 
 test("retires the latest open escalation to answered with the submitted answer", async () => {
@@ -103,4 +124,31 @@ test("a blank answer is recorded as NULL, not an empty string", async () => {
   await handler(job as any, app as any);
   assertEquals(updates[0].patch.answer, null);
   assertEquals(updates[0].patch.status, "answered");
+});
+
+// --- issue #806: persist the wait-answer adjudication so a re-derived identical question does not
+// re-escalate. record-answer writes a durable (prKey, questionFingerprint) -> {answer, adjudicatedBy}
+// row keyed by the canonical fingerprint, attributed to whoever just completed the task (the newest
+// task_completions row this resume stamped for the process instance). ---
+
+test("persists a durable adjudication of the answered question, attributed to the completer (#806)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications, completions } = fakeApp(rows);
+  // The resume's completion stamped a ledger row for this process instance (alice answered).
+  completions.push({ id: 1, process_instance_key: "pi-1", element_id: "wait-answer", actor_id: "alice" });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5." } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 1, "one durable adjudication row is written");
+  assertEquals(adjudications[0].pr_key, "o/r#1");
+  assertEquals(adjudications[0].question_fingerprint, questionFingerprint("Which retry cap?"), "keyed by the canonical fingerprint");
+  assertEquals(adjudications[0].answer, "Cap at 5.");
+  assertEquals(adjudications[0].adjudicated_by, "alice", "attributed to the completer from the ledger");
+});
+
+test("a blank answer records NO adjudication (not a replayable decision) (#806)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications } = fakeApp(rows);
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "   " } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 0);
 });

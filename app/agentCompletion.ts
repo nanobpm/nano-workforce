@@ -360,14 +360,14 @@ async function resolveEscalationTask(
   engine: EngineClient,
   userTaskKey: string,
   allowed: ReadonlySet<string> = ESCALATION_TASK_ELEMENTS,
-): Promise<{ ok: true; elementId: string } | { ok: false; reason: string }> {
+): Promise<{ ok: true; elementId: string; processInstanceKey: string | null } | { ok: false; reason: string }> {
   const open = await engine.openUserTasks();
   const match = open.find((t) => t.userTaskKey === userTaskKey);
   if (!match) return { ok: false, reason: "no open completable task" };
   if (!match.elementId || !isCompletableElement(match.elementId, allowed)) {
     return { ok: false, reason: "not a completable task" };
   }
-  return { ok: true, elementId: match.elementId };
+  return { ok: true, elementId: match.elementId, processInstanceKey: match.processInstanceKey ?? null };
 }
 
 /** Whether an open task's `elementId` is completable through the given `allowed` surface. Exact-set
@@ -406,7 +406,7 @@ export async function completeEscalationAsAgent(
   const { completionId } = await completeUserTaskAttributed(
     data,
     engine,
-    { userTaskKey, elementId: resolved.elementId, variables: input.variables },
+    { userTaskKey, processInstanceKey: resolved.processInstanceKey, elementId: resolved.elementId, variables: input.variables },
     { kind: "agent", id: agentId },
   );
   return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };
@@ -439,7 +439,7 @@ export async function completeEscalationAsHuman(
   const { completionId } = await completeUserTaskAttributed(
     data,
     engine,
-    { userTaskKey, elementId: resolved.elementId, variables: input.variables },
+    { userTaskKey, processInstanceKey: resolved.processInstanceKey, elementId: resolved.elementId, variables: input.variables },
     { kind: "human", id: operatorId },
   );
   return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };

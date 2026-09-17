@@ -240,6 +240,16 @@ export function advisoryStableKey(path: string, text: string): string {
   return `${path.trim()}#${fingerprint(normalizeAdvisoryText(text))}`;
 }
 
+/** The line-stable fingerprint of a convergence escalation QUESTION (issue #806): the SAME canonical
+ * `normalizeAdvisoryText` + `fingerprint` digest advisory acks key on, applied to the escalation's
+ * question text. Reuses the ONE normaliser/fingerprint pair (no second implementation) so a durable
+ * wait-answer adjudication keyed by `(prKey, questionFingerprint)` is byte/semantic-stable the exact
+ * disciplined way an advisory ack is — only a semantically-identical, already-answered question is
+ * suppressed; a materially different question keys differently and still escalates. */
+export function questionFingerprint(text: string): string {
+  return fingerprint(normalizeAdvisoryText(text));
+}
+
 /** Parse Copilot's suppressed / low-confidence advisories out of a review body. Copilot renders them
  * under a `<summary>Suppressed comments (N)</summary>` block, each as a bold `**path:line**` header
  * followed by the advisory prose. Returns de-duplicated advisories (empty when there is no block). */

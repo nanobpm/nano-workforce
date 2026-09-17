@@ -17,12 +17,15 @@
 // durable rows; it returns no variables, leaving the submitted `answer` untouched so it flows on to
 // the next review round.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { recordAdjudication } from "../../app/adjudications.ts";
+import { taskCompletions } from "../../app/agentCompletion.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 interface Escalation extends Record<string, unknown> {
   id: number;
   pr_key: string;
   status: string;
+  question: string;
   answer: string | null;
   answered_at: string | null;
 }
@@ -69,8 +72,40 @@ const handler: AppJobHandler<In> = async (job, app) => {
     // `/status` inconsistency and a divergence from the merge path both loops are meant to share.
     const prs = app.data.table<PullRequest>("pull_requests", "pr_key");
     await prs.update(prKey, { status: "converging", updated_at: ts });
+
+    // Persist a DURABLE adjudication of the settled question (issue #806) so a later stateless round
+    // that re-derives the IDENTICAL escalation condition auto-resumes with this answer instead of
+    // re-parking a human (PR #800 / proc 46310: the same design question escalated at round 2 and
+    // again at round 13). Keyed by `(prKey, questionFingerprint(question))` — the canonical
+    // normaliser/fingerprint advisory acks use — so only a semantically-identical, already-answered
+    // question is later suppressed. INSERT-if-absent, so the ORIGINAL adjudicator/answer survives the
+    // record-answer re-run a later auto-resume drives. Attribute it to whoever just completed the
+    // `wait-answer`: the newest `task_completions` row this resume's completion stamped for this
+    // process instance (the canonical completion ledger, app/agentCompletion.ts) — a human operator
+    // or an agent assignee (ADR 0046) — falling back to `null` when the ledger row is absent.
+    await recordAdjudication(app.data, {
+      prKey,
+      question: open[0].question,
+      answer,
+      adjudicatedBy: await latestAdjudicator(app, job.processInstanceKey),
+    });
   }
   return {};
 };
+
+/** Who just completed this `wait-answer`: the actor of the newest `task_completions` row the resume's
+ *  completion stamped for this process instance (`completeUserTaskAttributed` records the actor +
+ *  process-instance key on completion). `undefined` when no ledger row is correlated (e.g. an
+ *  out-of-band resume), so the adjudication records a null adjudicator rather than a wrong one. */
+async function latestAdjudicator(app: Parameters<AppJobHandler<In>>[1], processInstanceKey: unknown): Promise<string | undefined> {
+  const key = processInstanceKey != null ? String(processInstanceKey) : "";
+  if (key === "") return undefined;
+  const rows = await taskCompletions(app.data).find({ process_instance_key: key });
+  let newest: { id: number; actor_id: string } | undefined;
+  for (const r of rows) {
+    if (!newest || r.id > newest.id) newest = r;
+  }
+  return newest?.actor_id;
+}
 
 export default handler;

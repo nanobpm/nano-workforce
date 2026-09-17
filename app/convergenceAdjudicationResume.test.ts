@@ -1,0 +1,140 @@
+// Red/green regression for issue #806 — the convergence loop must not re-escalate an already-answered
+// `wait-answer` question. When a durable adjudication exists for (this PR, this question fingerprint),
+// the poller (`pollUserTasks`) auto-resumes the parked `wait-answer` with the recorded answer through
+// the SAME `completeEscalationAsHuman` door a human uses — attributed to the prior adjudicator —
+// instead of re-parking a human (PR #800 / proc 46310: the same design question escalated at round 2
+// and again at round 13, both answered identically).
+//
+// A materially different question (no matching adjudication) still escalates normally.
+import { test } from "node:test";
+import { assertEquals } from "#test-assert";
+import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { questionFingerprint } from "./github.ts";
+import { pollUserTasks } from "./service.ts";
+
+// biome-ignore lint/suspicious/noExplicitAny: in-memory table double, mirrors pollUserTasks.test.ts
+function memData(seed: Record<string, any[]> = {}): { data: DataLayer; stores: Record<string, any[]> } {
+  // biome-ignore lint/suspicious/noExplicitAny: see above
+  const stores: Record<string, any[]> = {};
+  for (const [k, v] of Object.entries(seed)) stores[k] = v.map((r) => ({ ...r }));
+  function tbl(name: string, pk = "id") {
+    // biome-ignore lint/suspicious/noExplicitAny: see above
+    const rows = (stores[name] ??= [] as any[]);
+    // biome-ignore lint/suspicious/noExplicitAny: see above
+    const match = (r: any, where: any) => Object.entries(where).every(([k, v]) => r[k] === v);
+    return {
+      async all() {
+        return rows.slice();
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: see above
+      async get(id: any) {
+        return rows.find((r) => r[pk] === id);
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: see above
+      async find(where: any = {}) {
+        return rows.filter((r) => match(r, where));
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: see above
+      async insert(r: any) {
+        rows.push({ ...r });
+        return r[pk];
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: see above
+      async update(id: any, patch: any) {
+        const r = rows.find((row) => row[pk] === id);
+        if (r) Object.assign(r, patch);
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: see above
+      async delete(id: any) {
+        const i = rows.findIndex((r) => r[pk] === id);
+        if (i >= 0) rows.splice(i, 1);
+      },
+    };
+  }
+  const data = { table: (n: string, pk?: string) => tbl(n, pk) } as unknown as DataLayer;
+  return { data, stores };
+}
+
+type FakeTask = { userTaskKey: string; elementId: string; processInstanceKey: string };
+
+/** A fake engine backing BOTH the poller's per-instance `openUserTasks({processInstanceKey})` scan AND
+ *  the `completeEscalationAsHuman` door's unfiltered `openUserTasks()` resolve. `completeUserTask`
+ *  removes the task (a resumed task is no longer open) and records the completion for assertions. */
+function fakeEngine(tasks: FakeTask[]) {
+  const open = tasks.slice();
+  const completions: { userTaskKey: string; variables: Record<string, unknown> }[] = [];
+  const engine = {
+    openUserTasks: (filter?: { processInstanceKey?: string; rootProcessInstanceKey?: string }) =>
+      Promise.resolve(
+        open.filter((t) => {
+          if (filter?.processInstanceKey) return t.processInstanceKey === filter.processInstanceKey;
+          if (filter?.rootProcessInstanceKey) return t.processInstanceKey === filter.rootProcessInstanceKey;
+          return true;
+        }),
+      ),
+    completeUserTask: (userTaskKey: string, variables: Record<string, unknown>) => {
+      const i = open.findIndex((t) => t.userTaskKey === userTaskKey);
+      if (i < 0) return Promise.reject(new Error("no such open task"));
+      open.splice(i, 1);
+      completions.push({ userTaskKey, variables });
+      return Promise.resolve();
+    },
+  } as unknown as EngineClient;
+  return { engine, completions };
+}
+
+test("pollUserTasks: auto-resumes an already-answered wait-answer instead of re-parking a human (#806)", async () => {
+  const question = "Should the timeout be a boundary event or a poller sentinel?";
+  const { data, stores } = memData({
+    pull_requests: [{ pr_key: "o/r#800", status: "escalated", process_key: "rp-800", url: "https://github.com/o/r/pull/800", title: "Converge" }],
+    escalations: [{ id: 1, pr_key: "o/r#800", status: "open", question }],
+    pr_adjudications: [
+      {
+        id: 1,
+        pr_key: "o/r#800",
+        // Whitespace/case variant — the canonical fingerprint normalises it to the same key.
+        question_fingerprint: questionFingerprint(`  ${question.toUpperCase()}  `),
+        answer: "Option A: a bounded boundary event.",
+        adjudicated_by: "alice",
+        adjudicated_at: "2025-01-01T00:00:00.000Z",
+      },
+    ],
+  });
+  const { engine, completions } = fakeEngine([{ userTaskKey: "ut-800", elementId: "wait-answer", processInstanceKey: "rp-800" }]);
+
+  await pollUserTasks(data, engine);
+
+  assertEquals(completions.length, 1, "the parked wait-answer is auto-resumed");
+  assertEquals(completions[0].userTaskKey, "ut-800");
+  assertEquals(completions[0].variables.answer, "Option A: a bounded boundary event.", "resumed with the recorded answer");
+  assertEquals((stores.user_tasks ?? []).length, 0, "no wait-answer row is projected — the human is NOT re-parked");
+  const ledger = stores.task_completions ?? [];
+  assertEquals(ledger.length, 1, "the auto-resume is recorded in the completion ledger");
+  assertEquals(ledger[0].actor_id, "alice", "attributed to the prior adjudicator");
+});
+
+test("pollUserTasks: a DIFFERENT question with no adjudication still escalates to a human (#806)", async () => {
+  const { data, stores } = memData({
+    pull_requests: [{ pr_key: "o/r#800", status: "escalated", process_key: "rp-800", url: "https://github.com/o/r/pull/800", title: "Converge" }],
+    escalations: [{ id: 1, pr_key: "o/r#800", status: "open", question: "A brand-new question nobody has answered." }],
+    pr_adjudications: [
+      {
+        id: 1,
+        pr_key: "o/r#800",
+        question_fingerprint: questionFingerprint("Some other, already-settled question."),
+        answer: "Prior answer.",
+        adjudicated_by: "alice",
+        adjudicated_at: "2025-01-01T00:00:00.000Z",
+      },
+    ],
+  });
+  const { engine, completions } = fakeEngine([{ userTaskKey: "ut-800", elementId: "wait-answer", processInstanceKey: "rp-800" }]);
+
+  await pollUserTasks(data, engine);
+
+  assertEquals(completions.length, 0, "no auto-resume — the question is materially different");
+  const rows = stores.user_tasks ?? [];
+  assertEquals(rows.length, 1, "the new question is projected for a human to answer");
+  assertEquals(rows[0].user_task_key, "ut-800");
+  assertEquals(rows[0].question, "A brand-new question nobody has answered.");
+});

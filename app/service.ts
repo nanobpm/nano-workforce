@@ -9,7 +9,8 @@
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
-import { escalationFormId } from "./agentCompletion.ts";
+import { matchAdjudication, prAdjudications } from "./adjudications.ts";
+import { completeEscalationAsHuman, escalationFormId } from "./agentCompletion.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
 import {
   CAPS_RESOLVED_MESSAGE,
@@ -2839,12 +2840,44 @@ export async function pollUserTasks(
   // Desired set, deduped by completable key (a task is open at most once; guard a page overlap / a
   // subject seen under two statuses mid-pass).
   const desiredByKey = new Map<string, UserTaskRow>();
+  // Keys auto-resumed from a durable adjudication this pass (issue #806). The reduced-capability scan
+  // visits each instance twice (direct + callActivity hierarchy), and both queries snapshot the task
+  // BEFORE the resume removes it, so the second visit would otherwise re-attempt a now-gone completion
+  // and fall through to projecting the very row we just retired. Recording the key keeps the resume
+  // one-shot and out of the inbox.
+  const resumedByKey = new Set<string>();
   const project = async (elementId: string | undefined, userTaskKey: string, processInstanceKey: string, rootProcessInstanceKey: string, formKey: string) => {
     if (!elementId) return;
     const rowKey = userTaskKey.trim();
-    if (!rowKey || desiredByKey.has(rowKey)) return;
+    if (!rowKey || desiredByKey.has(rowKey) || resumedByKey.has(rowKey)) return;
     const ctx = await contextFor(elementId, userTaskKey, processInstanceKey, rootProcessInstanceKey, formKey);
     if (!ctx) return;
+    // Durable adjudication auto-resume (issue #806): before surfacing a NEW convergence `wait-answer`
+    // to a human, check whether THIS PR already has a settled adjudication for the SAME question
+    // (canonical `questionFingerprint`). If it does, resume the loop with the recorded answer through
+    // the exact `completeEscalationAsHuman` door a human uses — attributed to the prior adjudicator —
+    // instead of re-parking a human on an already-answered question (PR #800 / proc 46310: the same
+    // design question escalated at round 2 and again at round 13). Scoped to the review loop's
+    // `wait-answer` on a real PR key; on any resolution failure the task still projects, so an
+    // un-resumable question always reaches a human (fail-open to the human).
+    if (elementId === PR_WAIT_ANSWER_ELEMENT && ctx.subjectType === "pr" && ctx.question && parsePr(ctx.subjectKey)) {
+      const adjudication = matchAdjudication(await prAdjudications(data).find({ pr_key: ctx.subjectKey }), ctx.question);
+      if (adjudication) {
+        try {
+          const resumed = await completeEscalationAsHuman(data, engine, {
+            userTaskKey: rowKey,
+            variables: { answer: adjudication.answer },
+            operatorId: adjudication.adjudicated_by?.trim() || "auto-applied",
+          });
+          if (resumed.ok) {
+            resumedByKey.add(rowKey);
+            return;
+          }
+        } catch (err) {
+          console.error(`[poller] adjudication auto-resume (${ctx.subjectKey}): ${err}`);
+        }
+      }
+    }
     const row = buildUserTaskRow(ctx, at);
     if (row) desiredByKey.set(rowKey, row);
   };
