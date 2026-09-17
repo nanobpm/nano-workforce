@@ -39,6 +39,33 @@ function memTable(rows: any[], key: string) {
   };
 }
 
+// Emulates the `data.open().exec` raw-SQL path submitPr uses to atomically reset a PR's adjudication
+// memory (`resetAdjudications` → `DELETE FROM "pr_adjudications" WHERE "pr_key" = ?`, Copilot review of
+// #806). The bulk-DELETE SQL itself is validated against real SQLite in app/adjudications.test.ts; here
+// it need only mutate the in-memory `pr_adjudications` store so submitPr's reset is observable. Pushes
+// an optional ordering token so the fence-ordering test can assert the reset runs AFTER `process_key`.
+function memOpen(stores: Record<string, { rows: any[]; key: string }>, ops?: string[]) {
+  return {
+    exec: async (sql: string, params: any[] = []) => {
+      if (/DELETE FROM "pr_adjudications" WHERE "pr_key" = \?/.test(sql)) {
+        ops?.push("adjudication-delete");
+        const store = stores.pr_adjudications;
+        let changed = 0;
+        if (store) {
+          for (let i = store.rows.length - 1; i >= 0; i--) {
+            if (store.rows[i].pr_key === params[0]) {
+              store.rows.splice(i, 1);
+              changed++;
+            }
+          }
+        }
+        return { changed };
+      }
+      throw new Error(`unexpected exec sql: ${sql}`);
+    },
+  };
+}
+
 function withGithubOff(run: () => Promise<void>): Promise<void> {
   const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
   const prevTok = process.env["GITHUB_TOKEN"];
@@ -104,6 +131,8 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
+      open: () => memOpen(stores),
     } as any;
     const engine = {
       createInstance: () => Promise.resolve({ processInstanceKey: "PI-9" }),
@@ -164,6 +193,8 @@ test("re-submit of a PR invalidates its durable adjudications (#806 review)", as
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
+      open: () => memOpen(stores),
     } as any;
     const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-9" }) } as any;
 
@@ -205,13 +236,12 @@ test("re-submit advances process_key BEFORE resetting adjudications (fence order
           if (name === "pull_requests" && Object.prototype.hasOwnProperty.call(patch, "process_key")) ops.push("process_key");
           return t.update(k, patch);
         },
-        delete: (k: any) => {
-          if (name === "pr_adjudications") ops.push("adjudication-delete");
-          return t.delete(k);
-        },
       };
     };
-    const data = { table: withTrackingViews(wrap) } as any;
+    // The adjudication reset is now the atomic bulk `DELETE` via `data.open().exec` (Copilot review of
+    // #806), so `memOpen(stores, ops)` records the `adjudication-delete` ordering token — the table
+    // `delete` gateway is no longer on the reset path.
+    const data = { table: withTrackingViews(wrap), open: () => memOpen(stores, ops) } as any;
     const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-NEW" }) } as any;
 
     await submitPr(data, engine, { repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", prKey: PR_KEY });
@@ -264,6 +294,7 @@ test("pollIncidents mirrors an ACTIVE incident onto the PR row, then clears it, 
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -317,6 +348,7 @@ test("pollIncidents never queries a PR with no live instance and clears any stal
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -350,6 +382,7 @@ test("pollIncidents picks the oldest incident by creationTime, sorting a missing
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -389,6 +422,8 @@ test("submitPr stringifies a numeric processInstanceKey (contract: string | null
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
+      open: () => memOpen(stores),
     } as any;
     const engine = {
       // A large key delivered as a JS number — the exact case that breaks dev response validation
@@ -423,6 +458,7 @@ function captureConvergeOnly() {
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   let captured: unknown;
   const engine = {
@@ -475,6 +511,7 @@ function captureVars() {
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   let captured: Record<string, unknown> | undefined;
   const engine = {
@@ -513,6 +550,7 @@ function captureRoot() {
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   let captured: unknown;
   const engine = {
@@ -879,6 +917,8 @@ test("pollWaveGatesImpl is level-triggered: PRs merged before the token arrives 
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
+      open: () => memOpen(stores),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];
@@ -968,6 +1008,8 @@ test("pollWaveGatesImpl never releases the barrier on an unverifiable subscripti
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
+      open: () => memOpen(stores),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];
@@ -1072,6 +1114,8 @@ test("pollWaveGatesImpl releases the wave when a member PR is closed-unmerged an
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
+      open: () => memOpen(stores),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];
@@ -1128,6 +1172,7 @@ test("abandonClosedPr is idempotent — the terminal merges audit row is written
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
 
   await abandonClosedPr(data, "owner/repo#70", "closed without merging");
@@ -1156,6 +1201,7 @@ test("abandonClosedPr self-heals a missing pull_requests parent row before the F
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
 
   await abandonClosedPr(data, "owner/repo#71", "closed without merging");
@@ -1182,6 +1228,7 @@ test("abandonClosedPr rejects a malformed prKey with a clear error before any FK
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
 
   const err = await assertRejects(() => abandonClosedPr(data, "not-a-valid-pr-key", "closed without merging"));
@@ -1254,6 +1301,7 @@ function capsProbeExec(ready: boolean) {
 function capsDataLayer(stores: Record<string, { rows: any[]; key: string }>) {
   return {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
 }
 

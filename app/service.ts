@@ -9,7 +9,7 @@
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
-import { matchAdjudication, prAdjudications } from "./adjudications.ts";
+import { matchAdjudication, prAdjudications, resetAdjudications } from "./adjudications.ts";
 import { completeEscalationAutoApplied, escalationFormId } from "./agentCompletion.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
 import {
@@ -701,11 +701,11 @@ export async function submitPr(
   // `process_key`), so it cannot reinsert a stale adjudication after the reset; and the worker reads
   // `process_key` as late as possible so it observes this advance. The insert-if-absent record then
   // re-learns the operator's new answer for the new run. Runs unconditionally (even if `processKey` is
-  // null: the memory must still be clean for the fresh run).
+  // null: the memory must still be clean for the fresh run). The wipe is a SINGLE atomic `DELETE`
+  // (`resetAdjudications`), never a row-by-row loop, so a crash mid-reset cannot leave a partially
+  // cleared memory (Copilot review of #806).
   if (existing) {
-    for (const a of await prAdjudications(data).find({ pr_key: parsed.prKey })) {
-      await prAdjudications(data).delete(a.id);
-    }
+    await resetAdjudications(data, parsed.prKey);
   }
   return { prKey: parsed.prKey, processKey };
 }
@@ -2903,6 +2903,9 @@ export async function pollUserTasks(
               kind: adjudication.adjudicated_kind === "agent" ? "agent" : "human",
               id: adjudicatedBy,
             },
+            // Link the auto-apply back to the replayed adjudication (issue #806) so a human revert of the
+            // resulting completion invalidates this exact decision instead of it being silently re-applied.
+            adjudicationId: adjudication.id,
           });
           if (resumed.ok) {
             resumedByKey.add(rowKey);

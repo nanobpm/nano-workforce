@@ -17,7 +17,7 @@
 // durable rows; it returns no variables, leaving the submitted `answer` untouched so it flows on to
 // the next review round.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { recordAdjudication } from "../../app/adjudications.ts";
+import { generationGuard, recordAdjudication } from "../../app/adjudications.ts";
 import { taskCompletions } from "../../app/agentCompletion.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -130,19 +130,34 @@ const handler: AppJobHandler<In> = async (job, app) => {
         expectedProcessKey: jobProcessKey,
       });
     }
-    await escs.update(open[0].id, {
-      answer: answer ?? null,
-      status: "answered",
-      answered_at: ts,
-    });
+    // Fence the escalation/PR transitions on the run generation too (Copilot review of #806). The
+    // ownership check above is READ-TIME — not atomic with these writes — so in the window between it
+    // and here a concurrent re-submit could advance `process_key` and open a FRESH escalation; a naive
+    // `escs.update`/`prs.update` would then answer the new run's snapshot and flip its PR to
+    // `converging`. Each write is now a guarded conditional statement carrying the SAME `generationGuard`
+    // predicate as the adjudication writes (one guard, no second implementation): it applies only while
+    // the PR's current `process_key` still matches this job's generation, so a superseded worker touches
+    // nothing. Fails open when `jobProcessKey` is undefined, exactly like the gate above.
+    const db = app.data.open();
+    const guard = generationGuard(prKey, jobProcessKey);
+    await db.exec(
+      `UPDATE "escalations" SET "answer" = ?, "status" = 'answered', "answered_at" = ? WHERE "id" = ? AND ${guard.sql}`,
+      [answer ?? null, ts, open[0].id, ...guard.params],
+    );
     for (const dup of open.slice(1)) {
-      await escs.update(dup.id, { status: "stale" });
+      await db.exec(
+        `UPDATE "escalations" SET "status" = 'stale' WHERE "id" = ? AND ${guard.sql}`,
+        [dup.id, ...guard.params],
+      );
     }
     // Move the PR off `status="escalated"` back to
     // `"converging"` now that the question is answered. Without this the row stays `escalated` (with
     // a now-null derived `openEscalation`) until the re-entered round's `persist-round` runs — a
     // `/status` inconsistency and a divergence from the merge path both loops are meant to share.
-    await prs.update(prKey, { status: "converging", updated_at: ts });
+    await db.exec(
+      `UPDATE "pull_requests" SET "status" = 'converging', "updated_at" = ? WHERE "pr_key" = ? AND ${guard.sql}`,
+      [ts, prKey, ...guard.params],
+    );
   }
   return {};
 };

@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
-import { matchAdjudication, prAdjudications, type PrAdjudicationRow, recordAdjudication } from "./adjudications.ts";
+import { invalidateAdjudication, matchAdjudication, prAdjudications, type PrAdjudicationRow, recordAdjudication, resetAdjudications } from "./adjudications.ts";
 import { questionFingerprint } from "./github.ts";
 
 function row(over: Partial<PrAdjudicationRow>): PrAdjudicationRow {
@@ -300,5 +300,50 @@ test("recordAdjudication: a UNIQUE-fence collision against an already-known winn
     assertEquals(rows.length, 1);
     assertEquals(rows[0].adjudicated_by, "bob", "an already-attributed fence winner is immutable");
     assertEquals(rows[0].answer, "Cap at 3.", "the ORIGINAL answer stands");
+  });
+});
+
+// ── resetAdjudications / invalidateAdjudication: the fresh-run and revert boundary invalidations ────
+// (Copilot review of #806). `submitPr` wipes a PR's whole adjudication memory on reopen in ONE atomic
+// statement (never a partial row-by-row loop), and a human revert of an auto-applied completion
+// invalidates the exact adjudication it replayed so the poller cannot silently re-apply it.
+
+test("resetAdjudications: atomically clears EVERY adjudication for the PR (fresh-run boundary)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which timeout?", answer: "30s", adjudicatedBy: "alice", adjudicatedKind: "human" });
+    assertEquals((await findAdj(data, "o/r#1")).length, 2, "two distinct questions were remembered");
+    await resetAdjudications(data, "o/r#1");
+    assertEquals((await findAdj(data, "o/r#1")).length, 0, "the whole PR's memory is wiped in one statement");
+  });
+});
+
+test("resetAdjudications: only touches the target PR, not a sibling's memory", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    await seedPr("o/r#2");
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+    await recordAdjudication(data, { prKey: "o/r#2", question: "Which retry cap?", answer: "Cap at 9.", adjudicatedBy: "bob", adjudicatedKind: "human" });
+    await resetAdjudications(data, "o/r#1");
+    assertEquals((await findAdj(data, "o/r#1")).length, 0);
+    assertEquals((await findAdj(data, "o/r#2")).length, 1, "a sibling PR's memory is untouched");
+  });
+});
+
+test("invalidateAdjudication: deletes exactly the replayed row so the poller cannot re-apply it", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which timeout?", answer: "30s", adjudicatedBy: "alice", adjudicatedKind: "human" });
+    const rows = await findAdj(data, "o/r#1");
+    const target = rows.find((r) => r.answer === "Cap at 5.");
+    await invalidateAdjudication(data, target?.id as number);
+    const after = await findAdj(data, "o/r#1");
+    assertEquals(after.length, 1, "only the reverted decision is invalidated");
+    assertEquals(after[0].answer, "30s", "the unrelated adjudication survives");
+    // Idempotent — a second call (or a prior reset) is a harmless no-op.
+    await invalidateAdjudication(data, target?.id as number);
+    assertEquals((await findAdj(data, "o/r#1")).length, 1);
   });
 });

@@ -56,7 +56,27 @@ function memTable(rows: any[], key: string) {
 }
 
 function memData(stores: Record<string, { rows: any[]; key: string }>) {
+  // Minimal `open().exec` emulating ONLY the `DELETE FROM "pr_adjudications" WHERE "id" = ?` that
+  // `revertAgentCompletion` issues via `invalidateAdjudication` (Copilot review of #806). The DELETE
+  // SQL itself is validated against real SQLite in app/adjudications.test.ts; here it need only mutate
+  // the in-memory store so a revert-invalidation assertion can observe the row being removed.
+  const exec = async (sql: string, params: unknown[] = []) => {
+    const m = /DELETE FROM "pr_adjudications" WHERE "id" = \?/.exec(sql);
+    if (m) {
+      const store = stores.pr_adjudications;
+      if (store) {
+        const i = store.rows.findIndex((r) => r[store.key] === params[0]);
+        if (i >= 0) {
+          store.rows.splice(i, 1);
+          return { changed: 1 };
+        }
+      }
+      return { changed: 0 };
+    }
+    throw new Error(`unexpected exec sql: ${sql}`);
+  };
   return {
+    open: () => ({ exec }),
     table: (name: string, key: string) =>
       memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
   } as any;
@@ -363,6 +383,59 @@ test("a human can revert/override an agent completion (recording who + when + co
   assertEquals(row.reverted_by, "alice");
   assertEquals(row.reverted_note, "wrong — use v3", "the human's correction is captured");
   assert(typeof row.reverted_at === "string" && row.reverted_at.length > 0, "reverted_at is stamped");
+});
+
+test("an auto-applied completion records the source adjudication id, and reverting it invalidates that adjudication (#806 review)", async () => {
+  // The convergence poller auto-resumes an already-answered wait-answer by replaying a
+  // `pr_adjudications` row. Marking that completion reverted alone would NOT stop the replay — the
+  // poller keeps matching the unchanged adjudication row. Reverting must delete the linked adjudication
+  // so the override actually sticks and the next round re-parks a human (Copilot review of #806).
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pr_adjudications: { rows: [{ id: 42, pr_key: "o/r#1", answer: "Cap at 5.", adjudicated_by: "alice" }] as any[], key: "id" },
+  };
+  const data = memData(stores);
+  const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "ut-1", elementId: "feature-escalation", variables: { resolution: "answer", answer: "Cap at 5." } },
+    { kind: "human", id: "alice" },
+    { autoApplied: true, sourceAdjudicationId: 42 },
+  );
+
+  const row = stores.task_completions.rows[0] as TaskCompletion;
+  assertEquals(row.auto_applied, 1, "an auto-apply is recorded auto_applied");
+  assertEquals(row.reversible, 1, "an auto-apply is always reversible, even when attributed to a human adjudicator");
+  assertEquals(row.source_adjudication_id, 42, "the replayed adjudication is linked");
+
+  assertEquals(stores.pr_adjudications.rows.length, 1, "the durable adjudication exists before the revert");
+  const r = await revertAgentCompletion(data, completionId, { kind: "human", id: "bob" }, "override");
+  assertEquals(r.ok, true);
+  assertEquals(stores.pr_adjudications.rows.length, 0, "reverting the auto-apply invalidated its source adjudication so the poller cannot re-apply it");
+});
+
+test("reverting a first-hand (non-auto-applied) completion touches NO adjudication (#806 review)", async () => {
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pr_adjudications: { rows: [{ id: 7, pr_key: "o/r#1", answer: "keep" }] as any[], key: "id" },
+  };
+  const data = memData(stores);
+  const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "ut-1", elementId: "feature-escalation", variables: { resolution: "answer", answer: "first-hand" } },
+    { kind: "agent", id: "bot" },
+  );
+
+  const row = stores.task_completions.rows[0] as TaskCompletion;
+  assertEquals(row.auto_applied, 0);
+  assertEquals(row.source_adjudication_id, null, "a first-hand completion has no linked adjudication");
+  assertEquals((await revertAgentCompletion(data, completionId, { kind: "human", id: "alice" })).ok, true);
+  assertEquals(stores.pr_adjudications.rows.length, 1, "no adjudication is invalidated for a first-hand revert");
 });
 
 test("the ledger rolls back when the engine completion fails (never claims a completion that did not happen)", async () => {

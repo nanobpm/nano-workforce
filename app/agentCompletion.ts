@@ -22,6 +22,7 @@
 
 import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { invalidateAdjudication } from "./adjudications.ts";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT } from "./userTasks.ts";
@@ -54,6 +55,10 @@ export interface TaskCompletion {
   /** 1 when this completion is a machine AUTO-APPLY of a prior durable adjudication (issue #806), not
    *  a first-hand submission — recorded reversible so a human can always override the replayed answer. */
   auto_applied: number;
+  /** The `pr_adjudications.id` this completion replayed, when it is an auto-apply (issue #806). NULL for
+   *  a first-hand submission. `revertAgentCompletion` invalidates this exact adjudication on revert so
+   *  the override is not silently re-applied by the next poller pass. */
+  source_adjudication_id: number | null;
   /** 1 once a human has reverted/overridden it. */
   reverted: number;
   reverted_by: string | null;
@@ -290,7 +295,7 @@ export async function completeUserTaskAttributed(
     variables: Record<string, unknown>;
   },
   actor: Actor,
-  opts?: { autoApplied?: boolean },
+  opts?: { autoApplied?: boolean; sourceAdjudicationId?: number },
 ): Promise<{ completionId: number }> {
   // Normalize + validate the attribution keys upfront so the ledger can never record a row with
   // blank attribution or whitespace-mismatched keys.
@@ -314,6 +319,9 @@ export async function completeUserTaskAttributed(
     variables_json: JSON.stringify(target.variables ?? {}),
     reversible: reversible ? 1 : 0,
     auto_applied: autoApplied ? 1 : 0,
+    // Link an auto-apply back to the durable adjudication it replayed (issue #806) so a later revert can
+    // invalidate it. NULL for a first-hand submission; ignored (NULL) unless this is an auto-apply.
+    source_adjudication_id: autoApplied ? (opts?.sourceAdjudicationId ?? null) : null,
     reverted: 0,
     reverted_by: null,
     reverted_note: null,
@@ -483,7 +491,7 @@ export async function completeEscalationAsHuman(
 export async function completeEscalationAutoApplied(
   data: DataLayer,
   engine: EngineClient,
-  input: { userTaskKey: string; variables: Record<string, unknown>; actor: Actor },
+  input: { userTaskKey: string; variables: Record<string, unknown>; actor: Actor; adjudicationId?: number },
 ): Promise<AgentCompleteResult> {
   const userTaskKey = input.userTaskKey.trim();
   if (!userTaskKey) return { ok: false, reason: "userTaskKey is required" };
@@ -501,7 +509,7 @@ export async function completeEscalationAutoApplied(
     engine,
     { userTaskKey, processInstanceKey: resolved.processInstanceKey, elementId: resolved.elementId, variables: input.variables },
     { kind: input.actor.kind, id: actorId },
-    { autoApplied: true },
+    { autoApplied: true, sourceAdjudicationId: input.adjudicationId },
   );
   return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };
 }
@@ -538,5 +546,14 @@ export async function revertAgentCompletion(
     reverted_note: correction || null,
     reverted_at: now(),
   });
+  // If this completion AUTO-APPLIED a durable adjudication (issue #806), invalidate that exact
+  // decision now. Marking the ledger row reverted alone would NOT stop the replay: the convergence
+  // poller matches the unchanged `pr_adjudications` row and re-applies the same overridden answer on
+  // the next derived task, silently undoing this revert (Copilot review of #806). Deleting the
+  // adjudication makes the revert a real override — the next round re-parks a human — while the
+  // original decision's audit survives on this reverted ledger row. Idempotent (no-op if already gone).
+  if (row.auto_applied && row.source_adjudication_id != null) {
+    await invalidateAdjudication(data, row.source_adjudication_id);
+  }
   return { ok: true, completionId };
 }

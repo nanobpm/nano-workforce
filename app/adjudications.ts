@@ -77,8 +77,10 @@ interface RecordAdjudicationInput {
  *  old key, then paused across a re-submit that advanced the key and deleted the rows, finds this guard
  *  false at write time and no-ops, so it cannot insert its stale adjudication after the reset for the
  *  fresh run to auto-apply. When `expectedProcessKey` is absent the guard is a constant TRUE (fail open,
- *  mirroring the worker gate — an unclassifiable job must not be silently dropped). */
-function generationGuard(prKey: string, expectedProcessKey: string | undefined): { sql: string; params: unknown[] } {
+ *  mirroring the worker gate — an unclassifiable job must not be silently dropped). Exported so the
+ *  `pr.answer-escalation` worker fences its escalation/PR transitions on the SAME generation predicate
+ *  as this store's adjudication writes (one guard, no second implementation — Copilot review of #806). */
+export function generationGuard(prKey: string, expectedProcessKey: string | undefined): { sql: string; params: unknown[] } {
   if (expectedProcessKey == null || expectedProcessKey === "") return { sql: "1 = 1", params: [] };
   return {
     sql: `NOT EXISTS (SELECT 1 FROM "pull_requests" WHERE "pr_key" = ? AND "process_key" IS NOT NULL AND "process_key" <> ?)`,
@@ -168,4 +170,27 @@ async function healBlankProvenance(
      WHERE "id" = ? AND ("adjudicated_by" IS NULL OR TRIM("adjudicated_by") = '') AND ${guard.sql}`,
     [answer, nowBy, input.adjudicatedKind?.trim() || null, new Date().toISOString(), prior.id, ...guard.params],
   );
+}
+
+/** Atomically clear ALL durable adjudications for `prKey` — the fresh-run boundary invalidation
+ *  `submitPr` performs on reopen (issue #806, Copilot review). A SINGLE `DELETE … WHERE pr_key = ?`
+ *  rather than a row-by-row `Table.delete` loop, so a crash mid-reset can never leave a PARTIALLY
+ *  cleared memory (some questions still replayable, others gone) — the whole PR's memory is wiped in
+ *  one statement or not at all. The caller advances `pull_requests.process_key` to the new run BEFORE
+ *  calling this, so any straggler answer job from the retired run is already fenced (its
+ *  `expectedProcessKey` no longer matches) and cannot re-insert between the advance and this wipe. */
+export async function resetAdjudications(data: DataLayer, prKey: string): Promise<void> {
+  await data.open().exec(`DELETE FROM "pr_adjudications" WHERE "pr_key" = ?`, [prKey]);
+}
+
+/** Invalidate a single durable adjudication by surrogate `id` — the decision is no longer replayable,
+ *  so the next convergence round that re-derives the question re-parks a human (issue #806, Copilot
+ *  review). Called from `revertAgentCompletion` when a human reverts the AUTO-APPLIED completion that
+ *  replayed this adjudication: marking the `task_completions` row reverted alone would NOT stop the
+ *  poller — it matches the unchanged `pr_adjudications` row and replays the same overridden answer on
+ *  the next derived task, silently undoing the human's revert. Deleting the row makes the revert an
+ *  actual override: the original decision's audit survives on the reverted completion ledger row.
+ *  Idempotent — a no-op if the row is already gone (a prior reset/revert). */
+export async function invalidateAdjudication(data: DataLayer, id: number): Promise<void> {
+  await data.open().exec(`DELETE FROM "pr_adjudications" WHERE "id" = ?`, [id]);
 }

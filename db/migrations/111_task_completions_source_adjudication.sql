@@ -1,0 +1,18 @@
+-- 111_task_completions_source_adjudication.sql — issue #806 (Copilot review): link an AUTO-APPLIED
+-- escalation completion back to the durable adjudication it replayed, so a human's revert of that
+-- completion can actually invalidate the decision.
+--
+-- The convergence poller auto-resumes an already-answered `wait-answer` by replaying a
+-- `pr_adjudications` row through `completeEscalationAutoApplied` (app/service.ts). That completion is
+-- recorded `auto_applied=1`/`reversible=1` so a human may override it — but reverting it only set
+-- `task_completions.reverted=1`, while the poller keeps matching the UNCHANGED `pr_adjudications` row
+-- and replaying the same overridden answer on the next derived task, silently undoing the revert
+-- (Copilot review of #806). Recording WHICH adjudication a completion replayed lets
+-- `revertAgentCompletion` delete that exact durable decision on revert (`invalidateAdjudication`), so
+-- the revert becomes a real override: the next round re-parks a human. NULL for every first-hand
+-- (human/agent) submission and for legacy rows — only an auto-apply carries a source adjudication.
+--
+-- Forward-only, additive (expand): a nullable `ADD COLUMN`, so every existing completion reads back
+-- NULL (no linked adjudication). Numbered after the current highest committed prefix (110); the
+-- runner wraps each file in its own transaction, so no BEGIN/COMMIT here.
+ALTER TABLE task_completions ADD COLUMN source_adjudication_id INTEGER;

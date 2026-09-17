@@ -48,6 +48,27 @@ function fakeApp(escalationRows: Record<string, unknown>[], prRows: Record<strin
       Object.assign(row, { answer, adjudicated_by, adjudicated_kind, adjudicated_at });
       return { changed: 1 };
     }
+    if (/UPDATE "escalations" SET "answer"/.test(sql)) {
+      // [answer, answered_at, id, ...guard]
+      const [answer, answered_at, id] = params;
+      if (fenced && !generationAllows(params[params.length - 2], params[params.length - 1])) return { changed: 0 };
+      updates.push({ key: id, patch: { answer, status: "answered", answered_at } });
+      return { changed: 1 };
+    }
+    if (/UPDATE "escalations" SET "status" = 'stale'/.test(sql)) {
+      // [id, ...guard]
+      const [id] = params;
+      if (fenced && !generationAllows(params[params.length - 2], params[params.length - 1])) return { changed: 0 };
+      updates.push({ key: id, patch: { status: "stale" } });
+      return { changed: 1 };
+    }
+    if (/UPDATE "pull_requests"/.test(sql)) {
+      // [updated_at, pr_key, ...guard]
+      const [updated_at, pr_key] = params;
+      if (fenced && !generationAllows(params[params.length - 2], params[params.length - 1])) return { changed: 0 };
+      prUpdates.push({ key: pr_key, patch: { status: "converging", updated_at } });
+      return { changed: 1 };
+    }
     throw new Error(`unexpected exec sql: ${sql}`);
   };
   const app = {
@@ -387,12 +408,20 @@ test("records the adjudication BEFORE the escalation row transitions off `open` 
               adjudications.push({ pr_key: params[0], question_fingerprint: params[1], answer: params[2], adjudicated_by: params[3], adjudicated_kind: params[4] });
               return { changed: 1 };
             }
+            if (/UPDATE "escalations"/.test(sql)) {
+              order.push("escalation");
+              return { changed: 1 };
+            }
+            if (/UPDATE "pull_requests"/.test(sql)) {
+              order.push("pr");
+              return { changed: 1 };
+            }
             return { changed: 0 };
           },
         };
       },
       table(name: string) {
-        if (name === "pull_requests") return { async find() { return []; }, async update() { order.push("pr"); } };
+        if (name === "pull_requests") return { async find() { return []; } };
         if (name === "pr_adjudications") {
           return { async find() { return []; } };
         }
@@ -402,7 +431,6 @@ test("records the adjudication BEFORE the escalation row transitions off `open` 
         if (name !== "escalations") throw new Error(`unexpected table ${name}`);
         return {
           async find() { return rows; },
-          async update() { order.push("escalation"); },
         };
       },
     },
