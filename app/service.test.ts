@@ -253,6 +253,57 @@ test("re-submit advances process_key BEFORE resetting adjudications (fence order
   });
 });
 
+// Red/green regression (Copilot review): the durable adjudication RESET runs AFTER the new instance is
+// created and `process_key` is advanced. If the reset DELETE fails, the new convergence instance is
+// already live while the OLD adjudications remain — and because the new instance is ACTIVE the
+// `alreadyRunning` idempotency gate short-circuits every retry, so the reset is never re-run and the
+// fresh run replays STALE decisions forever. `submitPr` must instead ROLL THE NEW RUN BACK on a reset
+// failure: terminate the just-created instance (so nothing auto-applies stale memory) and rethrow, so
+// the submission is not treated as started and a retry re-creates a clean run.
+test("re-submit rolls back (cancels) the new instance when the adjudication reset fails (#806 review)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#42";
+    const stores: Record<string, { rows: any[]; key: string }> = {
+      pull_requests: {
+        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", title: "t", status: "converged", process_key: "PI-OLD" }],
+        key: "pr_key",
+      },
+      escalations: { rows: [], key: "id" },
+      pr_adjudications: {
+        rows: [{ id: 1, pr_key: PR_KEY, question_fingerprint: "fp-a", answer: "prior A", adjudicated_by: "alice", adjudicated_kind: "human", adjudicated_at: "t" }],
+        key: "id",
+      },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    // The reset DELETE throws (a transient DB failure), leaving the new instance live but the memory
+    // uncleared — the exact half-committed state the rollback guards against.
+    const failingOpen = () => ({
+      exec: async (sql: string) => {
+        if (/DELETE FROM "pr_adjudications" WHERE "pr_key" = \?/.test(sql)) throw new Error("boom: reset DELETE failed");
+        throw new Error(`unexpected exec sql: ${sql}`);
+      },
+    });
+    const data = { table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)), open: failingOpen } as any;
+    const cancelled: string[] = [];
+    const engine = {
+      createInstance: () => Promise.resolve({ processInstanceKey: "PI-NEW" }),
+      cancelInstance: (input: { processInstanceKey: string }) => {
+        cancelled.push(input.processInstanceKey);
+        return Promise.resolve();
+      },
+    } as any;
+
+    let threw = false;
+    try {
+      await submitPr(data, engine, { repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", prKey: PR_KEY });
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true, "a failed reset propagates so the caller can retry");
+    assertEquals(cancelled, ["PI-NEW"], "the just-created instance is terminated (rolled back), never left live with stale memory");
+  });
+});
+
 // can hit an engine incident that parks the token; until `pollIncidents` nothing on the PR row
 // reflected it, so the grid kept showing "converging" while the run was dead in the water. This
 // drives the pass's reconciliation core against a stubbed `/v2/incidents/search`:

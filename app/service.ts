@@ -691,21 +691,44 @@ export async function submitPr(
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
-  if (processKey != null) {
-    await table.update(parsed.prKey, { process_key: processKey });
-  }
-  // Invalidate this PR's durable adjudication memory for the fresh run (issue #806, Copilot review) —
-  // deferred to HERE, after `process_key` is advanced to the new instance above, so the reset happens
-  // UNDER the new run identity. On reopen (`existing`), any delayed old-instance answer job is now
-  // rejected by the worker's staleness gate (its `processInstanceKey` no longer matches the advanced
-  // `process_key`), so it cannot reinsert a stale adjudication after the reset; and the worker reads
-  // `process_key` as late as possible so it observes this advance. The insert-if-absent record then
-  // re-learns the operator's new answer for the new run. Runs unconditionally (even if `processKey` is
-  // null: the memory must still be clean for the fresh run). The wipe is a SINGLE atomic `DELETE`
-  // (`resetAdjudications`), never a row-by-row loop, so a crash mid-reset cannot leave a partially
-  // cleared memory (Copilot review of #806).
-  if (existing) {
-    await resetAdjudications(data, parsed.prKey);
+  // The `process_key` advance and the adjudication reset below are the two writes that MAKE the new
+  // run authoritative. If EITHER throws, the newly created instance is already live but the reopen is
+  // only half-committed — and a retry would short-circuit at the `alreadyRunning` idempotency gate
+  // (the new instance is ACTIVE, so `derived_status` is non-terminal), never re-running the reset. A
+  // failed reset would then leave the fresh run replaying STALE adjudication memory indefinitely
+  // (Copilot review). So roll the just-created run back on failure: terminate it and rethrow, so the
+  // submission is NOT treated as started. Terminating flips the PR's derived tracking status to a
+  // terminal edge (`abandoned`) via the `instanceTracking` reconciler, making the PR resubmittable so
+  // a retry re-creates a fresh instance and re-runs the reset cleanly — no orphaned run auto-applies
+  // stale decisions in the meantime.
+  try {
+    if (processKey != null) {
+      await table.update(parsed.prKey, { process_key: processKey });
+    }
+    // Invalidate this PR's durable adjudication memory for the fresh run (issue #806, Copilot review) —
+    // deferred to HERE, after `process_key` is advanced to the new instance above, so the reset happens
+    // UNDER the new run identity. On reopen (`existing`), any delayed old-instance answer job is now
+    // rejected by the worker's staleness gate (its `processInstanceKey` no longer matches the advanced
+    // `process_key`), so it cannot reinsert a stale adjudication after the reset; and the worker reads
+    // `process_key` as late as possible so it observes this advance. The insert-if-absent record then
+    // re-learns the operator's new answer for the new run. Runs unconditionally (even if `processKey` is
+    // null: the memory must still be clean for the fresh run). The wipe is a SINGLE atomic `DELETE`
+    // (`resetAdjudications`), never a row-by-row loop, so a crash mid-reset cannot leave a partially
+    // cleared memory (Copilot review of #806).
+    if (existing) {
+      await resetAdjudications(data, parsed.prKey);
+    }
+  } catch (err) {
+    if (processInstanceKey != null) {
+      try {
+        await engine.cancelInstance({ processInstanceKey: String(processInstanceKey) });
+      } catch (cancelErr) {
+        // Best-effort: a failed rollback-cancel leaves the instance for the abandon/reconcile poller
+        // to reap, but must not mask the original error that the caller needs to see and retry on.
+        console.warn(`[submit] ${parsed.prKey} rollback-cancel of ${processInstanceKey} failed: ${cancelErr}`);
+      }
+    }
+    throw err;
   }
   return { prKey: parsed.prKey, processKey };
 }
