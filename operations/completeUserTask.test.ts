@@ -80,7 +80,7 @@ test("complete-user-task: completes a plan-review escalation and drops its read-
   assertEquals(res.status, 200);
   assertEquals(res.body.ok, true);
   assertEquals(res.body.elementId, "plan-review-decision");
-  assertEquals(completed, [{ userTaskKey: "ut-1", variables: { directive: "revise", notes: "narrow scope" } }]);
+  assertEquals(completed, [{ userTaskKey: "ut-1", variables: { directive: "revise", notes: "narrow scope", completedUserTaskKey: "ut-1", completedCompletionId: 1 } }]);
   assertEquals(stores.user_tasks, []);
   // Attribution recorded as a human completion.
   assertEquals(stores.task_completions.length, 1);
@@ -93,7 +93,7 @@ test("complete-user-task: completes a trial-merge escalation with the typed acti
   const res = await call(app, { userTaskKey: "ut-2", variables: { action: "rebase" } });
 
   assertEquals(res.status, 200);
-  assertEquals(completed, [{ userTaskKey: "ut-2", variables: { action: "rebase" } }]);
+  assertEquals(completed, [{ userTaskKey: "ut-2", variables: { action: "rebase", completedUserTaskKey: "ut-2", completedCompletionId: 1 } }]);
 });
 
 test("complete-user-task: a missing userTaskKey is a 400", async () => {
@@ -120,7 +120,7 @@ test("complete-user-task: completes a feature-blocked acknowledgement with the t
   const res = await call(app, { userTaskKey: "ut-4", variables: { note: "reassigned" } });
   assertEquals(res.status, 200);
   assertEquals(res.body.elementId, "feature-blocked");
-  assertEquals(completed, [{ userTaskKey: "ut-4", variables: { note: "reassigned" } }]);
+  assertEquals(completed, [{ userTaskKey: "ut-4", variables: { note: "reassigned", completedUserTaskKey: "ut-4", completedCompletionId: 1 } }]);
 });
 
 test("complete-user-task: completes a feature-escalation answer (issue #332)", async () => {
@@ -128,7 +128,7 @@ test("complete-user-task: completes a feature-escalation answer (issue #332)", a
   const res = await call(app, { userTaskKey: "ut-6", variables: { resolution: "answer", answer: "use v2" } });
   assertEquals(res.status, 200);
   assertEquals(res.body.elementId, "feature-escalation");
-  assertEquals(completed, [{ userTaskKey: "ut-6", variables: { resolution: "answer", answer: "use v2" } }]);
+  assertEquals(completed, [{ userTaskKey: "ut-6", variables: { resolution: "answer", answer: "use v2", completedUserTaskKey: "ut-6", completedCompletionId: 1 } }]);
 });
 
 test("complete-user-task: refuses a non-completable internal user task (400)", async () => {
@@ -161,5 +161,5 @@ test("complete-user-task: a read-model cleanup failure does not mask a resumed c
 
   assertEquals(res.status, 200);
   assertEquals(res.body.ok, true);
-  assertEquals(completed, [{ userTaskKey: "ut-5", variables: { directive: "revise", notes: "narrow scope" } }]);
+  assertEquals(completed, [{ userTaskKey: "ut-5", variables: { directive: "revise", notes: "narrow scope", completedUserTaskKey: "ut-5", completedCompletionId: 1 } }]);
 });

@@ -9,7 +9,8 @@
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
-import { escalationFormId } from "./agentCompletion.ts";
+import { matchAdjudication, prAdjudications, resetAdjudications } from "./adjudications.ts";
+import { completeEscalationAutoApplied, escalationFormId } from "./agentCompletion.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
 import {
   CAPS_RESOLVED_MESSAGE,
@@ -585,6 +586,14 @@ export async function submitPr(
     for (const e of await escs(data).find({ pr_key: parsed.prKey, status: "open" })) {
       await escs(data).update(e.id, { status: "stale" });
     }
+    // A fresh convergence run must ALSO start with a clean durable adjudication memory (issue #806,
+    // Copilot review): the auto-resume replays a prior `(PR, question)` answer forever, so a re-opened
+    // PR whose question recurs would silently auto-apply the stale decision and an operator could never
+    // force a fresh one. This PR's adjudications are invalidated on reopen — but the reset is deferred
+    // to AFTER `process_key` is advanced to the new instance (see below), NOT here: clearing the memory
+    // while `process_key` still names the OLD instance leaves a window where a delayed old-instance
+    // answer job still passes the worker's staleness gate and reinserts its adjudication into the fresh
+    // run (Copilot review of #806). Advancing the run identity FIRST, then clearing, fences that job.
     // Re-open a previously converged/abandoned/merged PR for a fresh convergence run.
     await table.update(parsed.prKey, {
       status: "converging",
@@ -682,8 +691,44 @@ export async function submitPr(
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
-  if (processKey != null) {
-    await table.update(parsed.prKey, { process_key: processKey });
+  // The `process_key` advance and the adjudication reset below are the two writes that MAKE the new
+  // run authoritative. If EITHER throws, the newly created instance is already live but the reopen is
+  // only half-committed — and a retry would short-circuit at the `alreadyRunning` idempotency gate
+  // (the new instance is ACTIVE, so `derived_status` is non-terminal), never re-running the reset. A
+  // failed reset would then leave the fresh run replaying STALE adjudication memory indefinitely
+  // (Copilot review). So roll the just-created run back on failure: terminate it and rethrow, so the
+  // submission is NOT treated as started. Terminating flips the PR's derived tracking status to a
+  // terminal edge (`abandoned`) via the `instanceTracking` reconciler, making the PR resubmittable so
+  // a retry re-creates a fresh instance and re-runs the reset cleanly — no orphaned run auto-applies
+  // stale decisions in the meantime.
+  try {
+    if (processKey != null) {
+      await table.update(parsed.prKey, { process_key: processKey });
+    }
+    // Invalidate this PR's durable adjudication memory for the fresh run (issue #806, Copilot review) —
+    // deferred to HERE, after `process_key` is advanced to the new instance above, so the reset happens
+    // UNDER the new run identity. On reopen (`existing`), any delayed old-instance answer job is now
+    // rejected by the worker's staleness gate (its `processInstanceKey` no longer matches the advanced
+    // `process_key`), so it cannot reinsert a stale adjudication after the reset; and the worker reads
+    // `process_key` as late as possible so it observes this advance. The insert-if-absent record then
+    // re-learns the operator's new answer for the new run. Runs unconditionally (even if `processKey` is
+    // null: the memory must still be clean for the fresh run). The wipe is a SINGLE atomic `DELETE`
+    // (`resetAdjudications`), never a row-by-row loop, so a crash mid-reset cannot leave a partially
+    // cleared memory (Copilot review of #806).
+    if (existing) {
+      await resetAdjudications(data, parsed.prKey);
+    }
+  } catch (err) {
+    if (processInstanceKey != null) {
+      try {
+        await engine.cancelInstance({ processInstanceKey: String(processInstanceKey) });
+      } catch (cancelErr) {
+        // Best-effort: a failed rollback-cancel leaves the instance for the abandon/reconcile poller
+        // to reap, but must not mask the original error that the caller needs to see and retry on.
+        console.warn(`[submit] ${parsed.prKey} rollback-cancel of ${processInstanceKey} failed: ${cancelErr}`);
+      }
+    }
+    throw err;
   }
   return { prKey: parsed.prKey, processKey };
 }
@@ -2839,12 +2884,67 @@ export async function pollUserTasks(
   // Desired set, deduped by completable key (a task is open at most once; guard a page overlap / a
   // subject seen under two statuses mid-pass).
   const desiredByKey = new Map<string, UserTaskRow>();
+  // Keys auto-resumed from a durable adjudication this pass (issue #806). The reduced-capability scan
+  // visits each instance twice (direct + callActivity hierarchy), and both queries snapshot the task
+  // BEFORE the resume removes it, so the second visit would otherwise re-attempt a now-gone completion
+  // and fall through to projecting the very row we just retired. Recording the key keeps the resume
+  // one-shot and out of the inbox.
+  const resumedByKey = new Set<string>();
   const project = async (elementId: string | undefined, userTaskKey: string, processInstanceKey: string, rootProcessInstanceKey: string, formKey: string) => {
     if (!elementId) return;
     const rowKey = userTaskKey.trim();
-    if (!rowKey || desiredByKey.has(rowKey)) return;
+    if (!rowKey || desiredByKey.has(rowKey) || resumedByKey.has(rowKey)) return;
     const ctx = await contextFor(elementId, userTaskKey, processInstanceKey, rootProcessInstanceKey, formKey);
     if (!ctx) return;
+    // Durable adjudication auto-resume (issue #806): before surfacing a NEW convergence `wait-answer`
+    // to a human, check whether THIS PR already has a settled adjudication for the SAME question
+    // (canonical `questionFingerprint`). If it does, resume the loop with the recorded answer through
+    // the canonical `completeUserTaskAttributed` door — attributed to the prior adjudicator and marked
+    // `auto_applied` (a machine replay, reversible so a human can still override) so it is never
+    // laundered into a first-hand irreversible human authority (Copilot review of #806) — instead of
+    // re-parking a human on an already-answered question (PR #800 / proc 46310: the same design
+    // question escalated at round 2 and again at round 13). Scoped to the review loop's `wait-answer`
+    // on a real PR key; on any resolution failure the task still projects, so an un-resumable question
+    // always reaches a human (fail-open to the human).
+    if (elementId === PR_WAIT_ANSWER_ELEMENT && ctx.subjectType === "pr" && ctx.question && parsePr(ctx.subjectKey)) {
+      try {
+        // The adjudication LOOKUP lives inside this fail-open `try` (not just the resume) so a transient
+        // `pr_adjudications.find` error never rejects `project` and aborts `pollUserTasks` mid-pass — the
+        // task still projects and the question always reaches a human (SPEC: adjudication-resolution
+        // failures fail open to the human).
+        const adjudication = matchAdjudication(await prAdjudications(data).find({ pr_key: ctx.subjectKey }), ctx.question);
+        // Only auto-resume when the prior adjudicator's provenance is KNOWN. A settled row with a blank
+        // `adjudicated_by` (completed out of band, so `latestAdjudicator` returned no actor) must NOT be
+        // manufactured into a synthetic `human` actor — that would audit an unknown-provenance replay as
+        // a first-hand human decision. Fail open to a fresh human task instead (Copilot review of #806).
+        const adjudicatedBy = adjudication?.adjudicated_by?.trim();
+        if (adjudication && adjudicatedBy) {
+          const resumed = await completeEscalationAutoApplied(data, engine, {
+            userTaskKey: rowKey,
+            // The sweep already discovered this task's owning instance — hand it to the resolve so the
+            // auto-apply scans that ONE instance, not every open user task engine-wide (issue #806
+            // Copilot review: an unfiltered per-task scan makes a single poll pass O(N²) across N
+            // already-adjudicated PRs). `contextFor`/the sweep report the task's direct instance, so the
+            // filtered scan finds exactly this task; a miss still fails open to the human.
+            processInstanceKey,
+            variables: { answer: adjudication.answer },
+            actor: {
+              kind: adjudication.adjudicated_kind === "agent" ? "agent" : "human",
+              id: adjudicatedBy,
+            },
+            // Link the auto-apply back to the replayed adjudication (issue #806) so a human revert of the
+            // resulting completion invalidates this exact decision instead of it being silently re-applied.
+            adjudicationId: adjudication.id,
+          });
+          if (resumed.ok) {
+            resumedByKey.add(rowKey);
+            return;
+          }
+        }
+      } catch (err) {
+        console.error(`[poller] adjudication auto-resume (${ctx.subjectKey}): ${err}`);
+      }
+    }
     const row = buildUserTaskRow(ctx, at);
     if (row) desiredByKey.set(rowKey, row);
   };

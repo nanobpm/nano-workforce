@@ -51,6 +51,27 @@ function memData(stores: Stores) {
   return {
     table: withTrackingViews((name: string, key: string) =>
       memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    // Emulates the atomic bulk `DELETE FROM "pr_adjudications" WHERE "pr_key" = ?` submitPr issues via
+    // `data.open().exec` to reset a reopened PR's adjudication memory (Copilot review of #806). The SQL
+    // is validated against real SQLite in app/adjudications.test.ts; here it need only mutate the store.
+    open: () => ({
+      exec: async (sql: string, params: any[] = []) => {
+        if (/DELETE FROM "pr_adjudications" WHERE "pr_key" = \?/.test(sql)) {
+          const store = stores.pr_adjudications;
+          let changed = 0;
+          if (store) {
+            for (let i = store.rows.length - 1; i >= 0; i--) {
+              if (store.rows[i].pr_key === params[0]) {
+                store.rows.splice(i, 1);
+                changed++;
+              }
+            }
+          }
+          return { changed };
+        }
+        throw new Error(`unexpected exec sql: ${sql}`);
+      },
+    }),
   } as any;
 }
 

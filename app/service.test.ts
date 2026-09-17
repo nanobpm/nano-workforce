@@ -39,6 +39,33 @@ function memTable(rows: any[], key: string) {
   };
 }
 
+// Emulates the `data.open().exec` raw-SQL path submitPr uses to atomically reset a PR's adjudication
+// memory (`resetAdjudications` → `DELETE FROM "pr_adjudications" WHERE "pr_key" = ?`, Copilot review of
+// #806). The bulk-DELETE SQL itself is validated against real SQLite in app/adjudications.test.ts; here
+// it need only mutate the in-memory `pr_adjudications` store so submitPr's reset is observable. Pushes
+// an optional ordering token so the fence-ordering test can assert the reset runs AFTER `process_key`.
+function memOpen(stores: Record<string, { rows: any[]; key: string }>, ops?: string[]) {
+  return {
+    exec: async (sql: string, params: any[] = []) => {
+      if (/DELETE FROM "pr_adjudications" WHERE "pr_key" = \?/.test(sql)) {
+        ops?.push("adjudication-delete");
+        const store = stores.pr_adjudications;
+        let changed = 0;
+        if (store) {
+          for (let i = store.rows.length - 1; i >= 0; i--) {
+            if (store.rows[i].pr_key === params[0]) {
+              store.rows.splice(i, 1);
+              changed++;
+            }
+          }
+        }
+        return { changed };
+      }
+      throw new Error(`unexpected exec sql: ${sql}`);
+    },
+  };
+}
+
 function withGithubOff(run: () => Promise<void>): Promise<void> {
   const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
   const prevTok = process.env["GITHUB_TOKEN"];
@@ -104,6 +131,7 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
     } as any;
     const engine = {
       createInstance: () => Promise.resolve({ processInstanceKey: "PI-9" }),
@@ -140,7 +168,142 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
   });
 });
 
-// Red/green regression for technical-incident surfacing (issue #94). A convergence/merge instance
+// Red/green regression for issue #806 (Copilot review): re-submitting a PR must ALSO invalidate its
+// durable adjudication memory. The auto-resume replays a prior `(PR, question)` answer forever, so a
+// re-opened PR whose question recurs would silently auto-apply the stale decision and an operator
+// could never force a fresh one. `submitPr`'s reopen path clears `pr_adjudications` for the PR.
+test("re-submit of a PR invalidates its durable adjudications (#806 review)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#42";
+    const stores: Record<string, { rows: unknown[]; key: string }> = {
+      pull_requests: {
+        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", title: "t", status: "converged" }],
+        key: "pr_key",
+      },
+      escalations: { rows: [], key: "id" },
+      pr_adjudications: {
+        rows: [
+          { id: 1, pr_key: PR_KEY, question_fingerprint: "fp-a", answer: "prior A", adjudicated_by: "alice", adjudicated_kind: "human", adjudicated_at: "t" },
+          { id: 2, pr_key: "owner/repo#99", question_fingerprint: "fp-b", answer: "other PR", adjudicated_by: "bob", adjudicated_kind: "human", adjudicated_at: "t" },
+        ],
+        key: "id",
+      },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const data = {
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
+    } as any;
+    const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-9" }) } as any;
+
+    await submitPr(data, engine, { repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", prKey: PR_KEY });
+
+    const remaining = stores.pr_adjudications.rows as Record<string, unknown>[];
+    assertEquals(remaining.length, 1, "this PR's adjudication is invalidated; another PR's is untouched");
+    assertEquals(remaining[0].pr_key, "owner/repo#99", "only the re-submitted PR's adjudications are cleared");
+  });
+});
+
+// Red/green regression for issue #806 (Copilot review): the durable adjudication RESET must happen
+// AFTER `process_key` is advanced to the new instance — not before createInstance. Clearing the memory
+// while `process_key` still names the OLD instance leaves a window where a delayed old-instance answer
+// job passes the worker's staleness gate and reinserts its adjudication into the fresh run. Advancing
+// the run identity FIRST fences that job, so the ordering is the fix. This asserts the observable
+// invariant: the `pull_requests.process_key` write is issued BEFORE any `pr_adjudications.delete`.
+test("re-submit advances process_key BEFORE resetting adjudications (fence ordering, #806 review)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#42";
+    const ops: string[] = [];
+    const stores: Record<string, { rows: any[]; key: string }> = {
+      pull_requests: {
+        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", title: "t", status: "converged", process_key: "PI-OLD" }],
+        key: "pr_key",
+      },
+      escalations: { rows: [], key: "id" },
+      pr_adjudications: {
+        rows: [{ id: 1, pr_key: PR_KEY, question_fingerprint: "fp-a", answer: "prior A", adjudicated_by: "alice", adjudicated_kind: "human", adjudicated_at: "t" }],
+        key: "id",
+      },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const wrap = (name: string, key: string) => {
+      const t = memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key);
+      return {
+        ...t,
+        update: (k: any, patch: any) => {
+          if (name === "pull_requests" && Object.prototype.hasOwnProperty.call(patch, "process_key")) ops.push("process_key");
+          return t.update(k, patch);
+        },
+      };
+    };
+    // The adjudication reset is now the atomic bulk `DELETE` via `data.open().exec` (Copilot review of
+    // #806), so `memOpen(stores, ops)` records the `adjudication-delete` ordering token — the table
+    // `delete` gateway is no longer on the reset path.
+    const data = { table: withTrackingViews(wrap), open: () => memOpen(stores, ops) } as any;
+    const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-NEW" }) } as any;
+
+    await submitPr(data, engine, { repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", prKey: PR_KEY });
+
+    assertEquals(stores.pr_adjudications.rows.length, 0, "the re-submitted PR's adjudication is invalidated");
+    const pkIdx = ops.indexOf("process_key");
+    const delIdx = ops.indexOf("adjudication-delete");
+    assertEquals(pkIdx >= 0, true, "process_key is advanced on reopen");
+    assertEquals(delIdx >= 0, true, "adjudications are reset on reopen");
+    assertEquals(pkIdx < delIdx, true, "process_key is advanced BEFORE the adjudication memory is reset (the fence ordering)");
+  });
+});
+
+// Red/green regression (Copilot review): the durable adjudication RESET runs AFTER the new instance is
+// created and `process_key` is advanced. If the reset DELETE fails, the new convergence instance is
+// already live while the OLD adjudications remain — and because the new instance is ACTIVE the
+// `alreadyRunning` idempotency gate short-circuits every retry, so the reset is never re-run and the
+// fresh run replays STALE decisions forever. `submitPr` must instead ROLL THE NEW RUN BACK on a reset
+// failure: terminate the just-created instance (so nothing auto-applies stale memory) and rethrow, so
+// the submission is not treated as started and a retry re-creates a clean run.
+test("re-submit rolls back (cancels) the new instance when the adjudication reset fails (#806 review)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#42";
+    const stores: Record<string, { rows: any[]; key: string }> = {
+      pull_requests: {
+        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", title: "t", status: "converged", process_key: "PI-OLD" }],
+        key: "pr_key",
+      },
+      escalations: { rows: [], key: "id" },
+      pr_adjudications: {
+        rows: [{ id: 1, pr_key: PR_KEY, question_fingerprint: "fp-a", answer: "prior A", adjudicated_by: "alice", adjudicated_kind: "human", adjudicated_at: "t" }],
+        key: "id",
+      },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    // The reset DELETE throws (a transient DB failure), leaving the new instance live but the memory
+    // uncleared — the exact half-committed state the rollback guards against.
+    const failingOpen = () => ({
+      exec: async (sql: string) => {
+        if (/DELETE FROM "pr_adjudications" WHERE "pr_key" = \?/.test(sql)) throw new Error("boom: reset DELETE failed");
+        throw new Error(`unexpected exec sql: ${sql}`);
+      },
+    });
+    const data = { table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)), open: failingOpen } as any;
+    const cancelled: string[] = [];
+    const engine = {
+      createInstance: () => Promise.resolve({ processInstanceKey: "PI-NEW" }),
+      cancelInstance: (input: { processInstanceKey: string }) => {
+        cancelled.push(input.processInstanceKey);
+        return Promise.resolve();
+      },
+    } as any;
+
+    let threw = false;
+    try {
+      await submitPr(data, engine, { repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", prKey: PR_KEY });
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true, "a failed reset propagates so the caller can retry");
+    assertEquals(cancelled, ["PI-NEW"], "the just-created instance is terminated (rolled back), never left live with stale memory");
+  });
+});
+
 // can hit an engine incident that parks the token; until `pollIncidents` nothing on the PR row
 // reflected it, so the grid kept showing "converging" while the run was dead in the water. This
 // drives the pass's reconciliation core against a stubbed `/v2/incidents/search`:
@@ -180,6 +343,7 @@ test("pollIncidents mirrors an ACTIVE incident onto the PR row, then clears it, 
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -233,6 +397,7 @@ test("pollIncidents never queries a PR with no live instance and clears any stal
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -266,6 +431,7 @@ test("pollIncidents picks the oldest incident by creationTime, sorting a missing
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -305,6 +471,7 @@ test("submitPr stringifies a numeric processInstanceKey (contract: string | null
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
     } as any;
     const engine = {
       // A large key delivered as a JS number — the exact case that breaks dev response validation
@@ -339,6 +506,7 @@ function captureConvergeOnly() {
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   let captured: unknown;
   const engine = {
@@ -391,6 +559,7 @@ function captureVars() {
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   let captured: Record<string, unknown> | undefined;
   const engine = {
@@ -429,6 +598,7 @@ function captureRoot() {
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
   let captured: unknown;
   const engine = {
@@ -795,6 +965,7 @@ test("pollWaveGatesImpl is level-triggered: PRs merged before the token arrives 
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];
@@ -884,6 +1055,7 @@ test("pollWaveGatesImpl never releases the barrier on an unverifiable subscripti
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];
@@ -988,6 +1160,7 @@ test("pollWaveGatesImpl releases the wave when a member PR is closed-unmerged an
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];
@@ -1044,6 +1217,7 @@ test("abandonClosedPr is idempotent — the terminal merges audit row is written
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
 
   await abandonClosedPr(data, "owner/repo#70", "closed without merging");
@@ -1072,6 +1246,7 @@ test("abandonClosedPr self-heals a missing pull_requests parent row before the F
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
 
   await abandonClosedPr(data, "owner/repo#71", "closed without merging");
@@ -1098,6 +1273,7 @@ test("abandonClosedPr rejects a malformed prKey with a clear error before any FK
   };
   const data = {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
 
   const err = await assertRejects(() => abandonClosedPr(data, "not-a-valid-pr-key", "closed without merging"));
@@ -1170,6 +1346,7 @@ function capsProbeExec(ready: boolean) {
 function capsDataLayer(stores: Record<string, { rows: any[]; key: string }>) {
   return {
     table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
   } as any;
 }
 

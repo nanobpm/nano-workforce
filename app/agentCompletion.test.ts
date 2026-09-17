@@ -55,10 +55,106 @@ function memTable(rows: any[], key: string) {
   };
 }
 
-function memData(stores: Record<string, { rows: any[]; key: string }>) {
+function memData(
+  stores: Record<string, { rows: any[]; key: string }>,
+  opts: { failExec?: (sql: string) => boolean; failUpdate?: (table: string) => boolean } = {},
+) {
+  // Minimal `open().exec` emulating ONLY the tombstone `UPDATE "pr_adjudications" SET "invalidated_at"
+  // = ? WHERE "id" = ? AND "invalidated_at" IS NULL` that `revertAgentCompletion` issues via
+  // `invalidateAdjudication` (Copilot review of #806). A revert TOMBSTONES the source adjudication (it
+  // does NOT delete it) so a redelivered `record-answer` cannot re-insert the same fingerprint and
+  // resurrect the reverted decision. The SQL itself is validated against real SQLite in
+  // app/adjudications.test.ts; here it need only mutate the in-memory store so a revert-invalidation
+  // assertion can observe the row being tombstoned. `open().tx(fn)` runs `fn` against the same store and
+  // ROLLS BACK (restores a pre-tx snapshot) on throw, mirroring the real SQLite transaction the revert
+  // now commits atomically (issue #806 review — atomicity of tombstone + `reverted` flip). `opts` lets a
+  // test inject a transient write failure at a chosen point (exec or a table update) to exercise rollback.
+  const rawExec = async (sql: string, params: unknown[] = []) => {
+    const m = /UPDATE "pr_adjudications" SET "invalidated_at" = \? WHERE "id" = \? AND "invalidated_at" IS NULL/.exec(sql);
+    if (m) {
+      const store = stores.pr_adjudications;
+      if (store) {
+        const r = store.rows.find((r) => r[store.key] === params[1]);
+        if (r && (r.invalidated_at == null || String(r.invalidated_at).trim() === "")) {
+          r.invalidated_at = params[0];
+          return { changed: 1 };
+        }
+      }
+      return { changed: 0 };
+    }
+    // The FIRST-HAND agent-revert tombstone keyed on `source_completion_id` (Copilot review of #806) —
+    // `invalidateAdjudicationByCompletion`. Tombstones EVERY live row this completion produced (a
+    // completion settles one question, so at most one) so reverting a first-hand agent answer (which has
+    // no `source_adjudication_id`) still stops the poller re-auto-applying it.
+    const c = /UPDATE "pr_adjudications" SET "invalidated_at" = \? WHERE "source_completion_id" = \? AND "invalidated_at" IS NULL/.exec(sql);
+    if (c) {
+      const store = stores.pr_adjudications;
+      let changed = 0;
+      if (store) {
+        for (const r of store.rows) {
+          if (r.source_completion_id === params[1] && (r.invalidated_at == null || String(r.invalidated_at).trim() === "")) {
+            r.invalidated_at = params[0];
+            changed++;
+          }
+        }
+      }
+      return { changed };
+    }
+    // The conditional ledger flip the revert now issues (Copilot review of #806): the `reverted = 0`
+    // fence is what serialises two concurrent reverts of the SAME completion — the loser's guarded
+    // UPDATE changes ZERO rows, so the revert throws to roll the whole transaction (its tombstones
+    // included) back, leaving the winner's one-time audit metadata unclobbered. Emulate the fence so
+    // `res.changed` is honest.
+    const rev = /UPDATE "task_completions" SET "reverted" = 1, "reverted_by" = \?, "reverted_note" = \?, "reverted_at" = \? WHERE "id" = \? AND "reverted" = 0/.exec(sql);
+    if (rev) {
+      const store = stores.task_completions;
+      let changed = 0;
+      if (store) {
+        const r = store.rows.find((r) => r[store.key] === params[3]);
+        if (r && (r.reverted === 0 || r.reverted == null)) {
+          r.reverted = 1;
+          r.reverted_by = params[0];
+          r.reverted_note = params[1];
+          r.reverted_at = params[2];
+          changed = 1;
+        }
+      }
+      return { changed };
+    }
+    throw new Error(`unexpected exec sql: ${sql}`);
+  };
+  const exec = async (sql: string, params: unknown[] = []) => {
+    if (opts.failExec?.(sql)) throw new Error("transient write failure");
+    return rawExec(sql, params);
+  };
+  const table = (name: string, key: string) => {
+    const base = memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key);
+    if (opts.failUpdate?.(name)) {
+      return { ...base, update: () => Promise.reject(new Error("transient write failure")) };
+    }
+    return base;
+  };
+  const source: any = {
+    exec,
+    table,
+    tx: async (fn: (t: any) => Promise<unknown>) => {
+      const snap = Object.fromEntries(
+        Object.entries(stores).map(([n, s]) => [n, JSON.parse(JSON.stringify(s.rows))]),
+      );
+      try {
+        return await fn(source);
+      } catch (e) {
+        for (const [n, s] of Object.entries(stores)) {
+          s.rows.length = 0;
+          s.rows.push(...snap[n]);
+        }
+        throw e;
+      }
+    },
+  };
   return {
-    table: (name: string, key: string) =>
-      memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    open: () => source,
+    table,
   } as any;
 }
 
@@ -98,7 +194,7 @@ test("agent completion resumes with the exact typed vars a human submits AND rec
   // Same resume path a human drives: completeUserTask called with the identical typed variables.
   assertEquals(completed.length, 1);
   assertEquals(completed[0].userTaskKey, "ut-1");
-  assertEquals(completed[0].variables, { resolution: "answer", answer: "use v2" });
+  assertEquals(completed[0].variables, { resolution: "answer", answer: "use v2", completedUserTaskKey: "ut-1", completedCompletionId: 1 });
 
   // Attribution recorded: an agent completion, its id, and the submitted variables.
   const row = stores.task_completions.rows[0] as TaskCompletion;
@@ -191,7 +287,7 @@ test("a HUMAN operator completes a feature escalation via the SAME attributed re
 
   // Identical resume path to the agent/task-inbox: completeUserTask with the exact typed variables.
   assertEquals(completed.length, 1);
-  assertEquals(completed[0].variables, { resolution: "answer", answer: "use v2" });
+  assertEquals(completed[0].variables, { resolution: "answer", answer: "use v2", completedUserTaskKey: "ut-1", completedCompletionId: 1 });
 
   // Attribution recorded as a HUMAN completion — the authority, so NOT reversible.
   const row = stores.task_completions.rows[0] as TaskCompletion;
@@ -226,7 +322,7 @@ test("feature-blocked is HUMAN-completable but NOT agent-completable (issue #332
   assertEquals(asHuman.ok, true, "the human completer retires feature-blocked");
   assertEquals(asHuman.elementId, "feature-blocked");
   assertEquals(completed.length, 1);
-  assertEquals(completed[0].variables, { note: "reassigned to a human" });
+  assertEquals(completed[0].variables, { note: "reassigned to a human", completedUserTaskKey: "ut-b", completedCompletionId: 1 });
 });
 
 test("conformance-escalation is HUMAN-completable but NOT agent-completable (issue #216)", async () => {
@@ -254,7 +350,7 @@ test("conformance-escalation is HUMAN-completable but NOT agent-completable (iss
   assertEquals(asHuman.ok, true, "the human completer retires conformance-escalation");
   assertEquals(asHuman.elementId, "conformance-escalation");
   assertEquals(completed.length, 1);
-  assertEquals(completed[0].variables, { note: "filed follow-up" });
+  assertEquals(completed[0].variables, { note: "filed follow-up", completedUserTaskKey: "ut-c", completedCompletionId: 1 });
 });
 
 test("empty-plan-escalation is HUMAN-completable but NOT agent-completable (issues #623/#624)", async () => {
@@ -283,7 +379,7 @@ test("empty-plan-escalation is HUMAN-completable but NOT agent-completable (issu
   assertEquals(asHuman.ok, true, "the human completer retires empty-plan-escalation");
   assertEquals(asHuman.elementId, "empty-plan-escalation");
   assertEquals(completed.length, 1);
-  assertEquals(completed[0].variables, { directive: "revise", notes: "look again" });
+  assertEquals(completed[0].variables, { directive: "revise", notes: "look again", completedUserTaskKey: "ut-e", completedCompletionId: 1 });
 });
 
 test("readiness-escalation(-pf) is HUMAN-completable but NOT agent-completable (issue #674)", async () => {
@@ -314,7 +410,7 @@ test("readiness-escalation(-pf) is HUMAN-completable but NOT agent-completable (
     assertEquals(asHuman.ok, true, `the human completer retires ${elementId}`);
     assertEquals(asHuman.elementId, elementId);
     assertEquals(completed.length, 1);
-    assertEquals(completed[0].variables, { resolution: "abandon", answer: "upstream never published" });
+    assertEquals(completed[0].variables, { resolution: "abandon", answer: "upstream never published", completedUserTaskKey: "ut-r", completedCompletionId: 1 });
   }
 });
 
@@ -363,6 +459,182 @@ test("a human can revert/override an agent completion (recording who + when + co
   assertEquals(row.reverted_by, "alice");
   assertEquals(row.reverted_note, "wrong — use v3", "the human's correction is captured");
   assert(typeof row.reverted_at === "string" && row.reverted_at.length > 0, "reverted_at is stamped");
+});
+
+test("an auto-applied completion records the source adjudication id, and reverting it invalidates that adjudication (#806 review)", async () => {
+  // The convergence poller auto-resumes an already-answered wait-answer by replaying a
+  // `pr_adjudications` row. Marking that completion reverted alone would NOT stop the replay — the
+  // poller keeps matching the unchanged adjudication row. Reverting must TOMBSTONE the linked
+  // adjudication so the override actually sticks and the next round re-parks a human, while a
+  // redelivered `record-answer` cannot resurrect it (Copilot review of #806).
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pr_adjudications: { rows: [{ id: 42, pr_key: "o/r#1", answer: "Cap at 5.", adjudicated_by: "alice", invalidated_at: null }] as any[], key: "id" },
+  };
+  const data = memData(stores);
+  const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "ut-1", elementId: "feature-escalation", variables: { resolution: "answer", answer: "Cap at 5." } },
+    { kind: "human", id: "alice" },
+    { autoApplied: true, sourceAdjudicationId: 42 },
+  );
+
+  const row = stores.task_completions.rows[0] as TaskCompletion;
+  assertEquals(row.auto_applied, 1, "an auto-apply is recorded auto_applied");
+  assertEquals(row.reversible, 1, "an auto-apply is always reversible, even when attributed to a human adjudicator");
+  assertEquals(row.source_adjudication_id, 42, "the replayed adjudication is linked");
+
+  assertEquals(stores.pr_adjudications.rows.length, 1, "the durable adjudication exists before the revert");
+  assertEquals(stores.pr_adjudications.rows[0].invalidated_at, null, "and is live (not tombstoned) before the revert");
+  const r = await revertAgentCompletion(data, completionId, { kind: "human", id: "bob" }, "override");
+  assertEquals(r.ok, true);
+  assertEquals(stores.pr_adjudications.rows.length, 1, "the source adjudication row is TOMBSTONED, not deleted, so a redelivered record-answer cannot re-insert its fingerprint");
+  assert(
+    typeof stores.pr_adjudications.rows[0].invalidated_at === "string" && stores.pr_adjudications.rows[0].invalidated_at.length > 0,
+    "reverting the auto-apply tombstoned its source adjudication so the poller cannot re-apply it",
+  );
+});
+
+test("revert commits the tombstone and the ledger flip ATOMICALLY — a failed tombstone rolls back and is retryable (#806 review)", async () => {
+  // Atomicity: the revert tombstones the source adjudication(s) AND flips the ledger `reverted` flag in
+  // ONE transaction. If the tombstone throws, the whole transaction rolls back, so a retry sees an
+  // un-reverted, un-tombstoned row and completes cleanly — it never trips the `already reverted` guard
+  // with a still-live adjudication (an unrecoverable override, Finding 3).
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pr_adjudications: { rows: [{ id: 42, pr_key: "o/r#1", answer: "Cap at 5.", invalidated_at: null }] as any[], key: "id" },
+  };
+  let failInvalidate = true;
+  // The FIRST tombstone attempt throws (a transient write failure); the transaction must roll back.
+  const data = memData(stores, { failExec: (sql) => failInvalidate && /pr_adjudications/.test(sql) });
+  const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "ut-1", elementId: "feature-escalation", variables: { resolution: "answer", answer: "Cap at 5." } },
+    { kind: "human", id: "alice" },
+    { autoApplied: true, sourceAdjudicationId: 42 },
+  );
+
+  await assertRejects(() => revertAgentCompletion(data, completionId, { kind: "human", id: "bob" }, "override"));
+  assertEquals(
+    (stores.task_completions.rows[0] as TaskCompletion).reverted,
+    0,
+    "a failed tombstone must NOT have flipped the ledger reverted — otherwise the retry below is permanently rejected",
+  );
+
+  // The transient failure clears; a retry now completes and both tombstones + the ledger flip land.
+  failInvalidate = false;
+  const r = await revertAgentCompletion(data, completionId, { kind: "human", id: "bob" }, "override");
+  assertEquals(r.ok, true, "the retry after a transient failure succeeds (the revert is recoverable)");
+  assertEquals((stores.task_completions.rows[0] as TaskCompletion).reverted, 1, "the ledger is now reverted");
+  assert(
+    typeof stores.pr_adjudications.rows[0].invalidated_at === "string" && stores.pr_adjudications.rows[0].invalidated_at.length > 0,
+    "the source adjudication is tombstoned after the successful retry",
+  );
+});
+
+test("revert rolls the tombstone back when the LEDGER flip fails — no reverted=0-but-tombstoned window a redelivered record-answer could revive through (#806 review)", async () => {
+  // Finding B (Copilot review of #806): the tombstone and the `reverted` flip are two writes. Were they
+  // NOT atomic, a redelivered `record-answer` could interleave AFTER the tombstone but BEFORE `reverted`
+  // lands, observe the completion as still live (`reverted = 0`) with a tombstoned decision, and REVIVE
+  // it — resurrecting the operator's reverted override. Committing both in one transaction removes that
+  // intermediate state entirely: this test forces the SECOND write (the ledger flip) to throw and proves
+  // the FIRST (the tombstone) is rolled back, so no `reverted=0`-with-tombstone state is ever left behind.
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pr_adjudications: { rows: [{ id: 42, pr_key: "o/r#1", answer: "Cap at 5.", invalidated_at: null }] as any[], key: "id" },
+  };
+  let failLedgerFlip = true;
+  const data = memData(stores, { failExec: (sql) => failLedgerFlip && /UPDATE "task_completions"/.test(sql) });
+  const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "ut-1", elementId: "feature-escalation", variables: { resolution: "answer", answer: "Cap at 5." } },
+    { kind: "human", id: "alice" },
+    { autoApplied: true, sourceAdjudicationId: 42 },
+  );
+
+  await assertRejects(() => revertAgentCompletion(data, completionId, { kind: "human", id: "bob" }, "override"));
+  assertEquals(
+    stores.pr_adjudications.rows[0].invalidated_at,
+    null,
+    "the tombstone is rolled back when the ledger flip fails — the revert is all-or-nothing, so no revivable intermediate state exists",
+  );
+  assertEquals((stores.task_completions.rows[0] as TaskCompletion).reverted, 0, "the ledger stays un-reverted after the rollback");
+
+  // The transient failure clears; a retry now completes atomically.
+  failLedgerFlip = false;
+  const r = await revertAgentCompletion(data, completionId, { kind: "human", id: "bob" }, "override");
+  assertEquals(r.ok, true, "the retry after a transient failure succeeds");
+  assertEquals((stores.task_completions.rows[0] as TaskCompletion).reverted, 1, "the ledger is reverted after the retry");
+  assert(
+    typeof stores.pr_adjudications.rows[0].invalidated_at === "string" && stores.pr_adjudications.rows[0].invalidated_at.length > 0,
+    "and the source adjudication is tombstoned — both writes land together",
+  );
+});
+
+test("reverting a first-hand completion leaves an UNLINKED adjudication untouched (#806 review)", async () => {
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    // An adjudication that this completion did NOT produce (source_completion_id ≠ our id) must not be
+    // tombstoned by reverting an unrelated completion.
+    pr_adjudications: { rows: [{ id: 7, pr_key: "o/r#1", answer: "keep", source_completion_id: 999, invalidated_at: null }] as any[], key: "id" },
+  };
+  const data = memData(stores);
+  const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "ut-1", elementId: "feature-escalation", variables: { resolution: "answer", answer: "first-hand" } },
+    { kind: "agent", id: "bot" },
+  );
+
+  const row = stores.task_completions.rows[0] as TaskCompletion;
+  assertEquals(row.auto_applied, 0);
+  assertEquals(row.source_adjudication_id, null, "a first-hand completion has no linked adjudication");
+  assertEquals((await revertAgentCompletion(data, completionId, { kind: "human", id: "alice" })).ok, true);
+  assertEquals(stores.pr_adjudications.rows.length, 1, "no adjudication is deleted for a first-hand revert");
+  assertEquals(stores.pr_adjudications.rows[0].invalidated_at, null, "an adjudication this completion did not produce is left live");
+});
+
+test("reverting a FIRST-HAND agent completion tombstones the adjudication it produced, via source_completion_id (#806 review)", async () => {
+  // A first-hand agent answer to a `wait-answer` records its OWN adjudication (auto_applied=0, no
+  // source_adjudication_id) linked back only by `source_completion_id`. Reverting that reversible agent
+  // completion must tombstone that decision, or the convergence poller re-auto-applies the overridden
+  // answer — the exact gap Finding 1 flagged. There is no `source_adjudication_id` to key on, so the
+  // revert finds the decision by the completion that created it.
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pr_adjudications: { rows: [] as any[], key: "id" },
+  };
+  const data = memData(stores);
+  const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "ut-1", elementId: "feature-escalation", variables: { resolution: "answer", answer: "first-hand" } },
+    { kind: "agent", id: "bot" },
+  );
+  // The first-hand answer's own decision, linked to this completion (what `record-answer` records).
+  stores.pr_adjudications.rows.push({ id: 55, pr_key: "o/r#1", answer: "first-hand", source_completion_id: completionId, invalidated_at: null });
+
+  const row = stores.task_completions.rows[0] as TaskCompletion;
+  assertEquals(row.auto_applied, 0);
+  assertEquals(row.source_adjudication_id, null, "a first-hand completion has no source_adjudication_id — only source_completion_id links it");
+  assertEquals((await revertAgentCompletion(data, completionId, { kind: "human", id: "alice" })).ok, true);
+  assert(
+    typeof stores.pr_adjudications.rows[0].invalidated_at === "string" && stores.pr_adjudications.rows[0].invalidated_at.length > 0,
+    "reverting the first-hand agent completion tombstoned the adjudication it produced so the poller cannot re-apply it",
+  );
 });
 
 test("the ledger rolls back when the engine completion fails (never claims a completion that did not happen)", async () => {
@@ -591,7 +863,7 @@ test("completer accepts variables that satisfy the form contract (required prese
 
   assertEquals(r.ok, true);
   assertEquals(completed.length, 1, "a contract-valid completion resumes the process");
-  assertEquals(completed[0].variables, { directive: "revise", notes: "narrow scope" });
+  assertEquals(completed[0].variables, { directive: "revise", notes: "narrow scope", completedUserTaskKey: "ut-3", completedCompletionId: 1 });
 });
 
 test("validateEscalationVariables derives its contract from the canonical .form files", async () => {

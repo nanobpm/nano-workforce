@@ -139,6 +139,22 @@ step, then retry the same round with the human's `answer`. They differ only by e
 which the UI uses to label the card. Neither ends the run — a human always gets
 a chance to unblock and resume.
 
+**Durable adjudication auto-resume (issue #806).** A human's answer to a `wait-answer`
+is remembered durably, keyed by `(PR, canonical question fingerprint)` — the
+`record-answer` step persists it (`pr_adjudications`), and before the poller surfaces a
+*new* `wait-answer` it checks for a settled adjudication of the **same** question. On a
+match it auto-resumes the round with the recorded answer through the canonical
+`completeUserTaskAttributed` door — attributed to the original adjudicator, marked
+`auto_applied` and recorded reversible so a human can still override — instead of
+re-parking a human on an already-settled question (PR #800 saw the same design question
+escalate at round 2 and again at round 13). This is the one exception to "every
+`needs_input`/`blocked` parks `wait-answer`": a question with an existing adjudication for
+this PR resumes without a fresh human park. A *materially different* question still
+escalates, resolution failure fails open to the human, and re-submitting the PR
+(`submitPr`) invalidates its adjudications so a fresh run re-decides. Only the convergence
+loop feeds and reads this memory — a merge-loop answer (same `pr.answer-escalation` step)
+is tagged `answerContext = "merge"` and never recorded as a convergence adjudication.
+
 Guard: after progress classification, a **progressing** round with round ≥
 MAX_ROUNDS forces an escalation ("not converged after N rounds") so a human
 decides rather than looping forever. The guard sits *after* `check-progress`

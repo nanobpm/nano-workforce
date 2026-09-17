@@ -88,6 +88,10 @@
         <nano:shape id="PrAnswerEscalationIn" name="Answer escalation — input">
           <nano:extend name="prKey" type="string" />
           <nano:extend name="answer" type="string" optional="true" />
+          <nano:extend name="answerContext" type="string" optional="true" />
+          <nano:extend name="completedUserTaskKey" type="string" optional="true" />
+          <nano:extend name="completedCompletionId" type="integer" optional="true" />
+          <nano:extend name="escalationId" type="integer" optional="true" />
         </nano:shape>
         <nano:shape id="PrFinalizeIn" name="Mark converged — input">
           <nano:extend name="prKey" type="string" />
@@ -308,9 +312,14 @@
         <zeebe:ioMapping>
           <zeebe:input source="=prKey" target="prKey" />
           <zeebe:input source="=answer" target="answer" />
+          <zeebe:input source="=&#34;convergence&#34;" target="answerContext" />
+          <zeebe:input source="=completedUserTaskKey" target="completedUserTaskKey" />
+          <zeebe:input source="=completedCompletionId" target="completedCompletionId" />
           <zeebe:output source="=(if scopePending = true then answer else scopeAnswer)" target="scopeAnswer" />
           <zeebe:output source="=0" target="huskRetries" />
           <zeebe:output source="=false" target="reviewStale" />
+          <zeebe:output source="=null" target="completedUserTaskKey" />
+          <zeebe:output source="=null" target="completedCompletionId" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_answerRecord</bpmn:incoming>
