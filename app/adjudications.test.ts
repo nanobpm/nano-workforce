@@ -440,3 +440,50 @@ test("invalidateAdjudicationByCompletion: a completion with no linked decision i
     assertEquals(matchAdjudication(after, "Which retry cap?")?.answer, "Cap at 5.", "an unrelated completion id tombstones nothing");
   });
 });
+
+// --- issue #806 review (round 12): a blank→known HEAL must also stamp `source_completion_id`, else a
+// healed decision keeps a NULL link and a revert of the healing first-hand agent completion cannot find
+// it via `invalidateAdjudicationByCompletion` — the overridden answer stays replayable and the poller
+// re-auto-applies it, silently undoing the human's revert. ---
+
+test("healBlankProvenance: a blank→known heal stamps source_completion_id so the healing completion's revert tombstones it (#806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    // An uncorrelated (blank-provenance, no completion link) answer lands first.
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 3.", adjudicatedBy: undefined, adjudicatedKind: undefined });
+    assertEquals((await findAdj(data, "o/r#1"))[0].source_completion_id, null, "the blank row starts with no completion link");
+    // A KNOWN first-hand agent answer (carrying its winning completion id) heals it.
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: 42 });
+    const healed = await findAdj(data, "o/r#1");
+    assertEquals(healed.length, 1);
+    assertEquals(healed[0].adjudicated_by, "bot", "the blank row is promoted to the known adjudicator");
+    assertEquals(healed[0].answer, "Cap at 5.");
+    assertEquals(healed[0].source_completion_id, 42, "the healing completion is linked so a revert can find the decision");
+    // Reverting that completion now tombstones the promoted decision (before the fix, the NULL link made
+    // this a no-op and the overridden answer stayed replayable).
+    await invalidateAdjudicationByCompletion(data, 42);
+    assertEquals(matchAdjudication(await findAdj(data, "o/r#1"), "Which retry cap?"), undefined, "the reverted decision is no longer replayable");
+  });
+});
+
+test("healBlankProvenance: an uncorrelated heal (no completion id) preserves an existing link (#806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    // A blank-provenance row that DID carry a completion link (a first-hand answer whose adjudicator was
+    // not correlated but whose winning completion was known).
+    await prAdjudications(data).insert({
+      pr_key: "o/r#1",
+      question_fingerprint: questionFingerprint("Which retry cap?"),
+      answer: "Cap at 3.",
+      adjudicated_by: null,
+      adjudicated_kind: null,
+      adjudicated_at: "2025-01-01T00:00:00.000Z",
+      source_completion_id: 7,
+    });
+    // A known heal WITHOUT its own completion id must not NULL the existing link (COALESCE preserves it).
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+    const healed = await findAdj(data, "o/r#1");
+    assertEquals(healed[0].adjudicated_by, "alice", "the row is promoted");
+    assertEquals(healed[0].source_completion_id, 7, "an uncorrelated heal preserves the original completion link");
+  });
+});

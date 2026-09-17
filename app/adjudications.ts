@@ -178,12 +178,14 @@ export async function recordAdjudication(data: DataLayer, input: RecordAdjudicat
  *  already false and its update affects zero rows, leaving the first healer's answer/adjudicator intact
  *  (Copilot review of #806 — a read-then-unconditional-update would let the later writer clobber the
  *  earlier known decision). The write is ALSO fenced on the run generation so a pre-reset straggler
- *  cannot heal after a re-submit reset. */
+ *  cannot heal after a re-submit reset. The promotion also carries the healing answer's winning
+ *  completion into `source_completion_id` (issue #806 review) so a later revert of that completion can
+ *  tombstone the promoted decision — see the compare-and-set below. */
 async function healBlankProvenance(
   data: DataLayer,
   prior: PrAdjudicationRow,
   answer: string,
-  input: { prKey: string; adjudicatedBy: string | undefined; adjudicatedKind: string | undefined; expectedProcessKey?: string | undefined },
+  input: { prKey: string; adjudicatedBy: string | undefined; adjudicatedKind: string | undefined; expectedProcessKey?: string | undefined; sourceCompletionId?: number | undefined },
 ): Promise<void> {
   const priorBy = prior.adjudicated_by?.trim();
   const nowBy = input.adjudicatedBy?.trim();
@@ -194,10 +196,18 @@ async function healBlankProvenance(
   if (prior.invalidated_at != null && prior.invalidated_at.trim() !== "") return;
   const db = data.open();
   const guard = generationGuard(input.prKey, input.expectedProcessKey);
+  // Carry the healing answer's WINNING completion into `source_completion_id` in the SAME compare-and-set
+  // (issue #806 review): the promoted decision is now the known adjudicator's, so if that answer came from
+  // a reversible first-hand agent completion, `revertAgentCompletion` must be able to tombstone it via
+  // `invalidateAdjudicationByCompletion`. Without this, a healed row keeps a NULL link and a revert of the
+  // healing completion leaves the overridden answer replayable — the poller re-auto-applies it, silently
+  // undoing the human's revert (the exact failure mode the completion link exists to prevent). `COALESCE`
+  // stamps the healer's completion when present and otherwise preserves any existing link (an uncorrelated
+  // heal never NULLs a link the original first-hand winner recorded).
   await db.exec(
-    `UPDATE "pr_adjudications" SET "answer" = ?, "adjudicated_by" = ?, "adjudicated_kind" = ?, "adjudicated_at" = ?
+    `UPDATE "pr_adjudications" SET "answer" = ?, "adjudicated_by" = ?, "adjudicated_kind" = ?, "adjudicated_at" = ?, "source_completion_id" = COALESCE(?, "source_completion_id")
      WHERE "id" = ? AND ("adjudicated_by" IS NULL OR TRIM("adjudicated_by") = '') AND "invalidated_at" IS NULL AND ${guard.sql}`,
-    [answer, nowBy, input.adjudicatedKind?.trim() || null, new Date().toISOString(), prior.id, ...guard.params],
+    [answer, nowBy, input.adjudicatedKind?.trim() || null, new Date().toISOString(), input.sourceCompletionId ?? null, prior.id, ...guard.params],
   );
 }
 

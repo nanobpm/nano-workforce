@@ -40,12 +40,13 @@ function fakeApp(escalationRows: Record<string, unknown>[], prRows: Record<strin
       return { changed: 1 };
     }
     if (/UPDATE "pr_adjudications"/.test(sql)) {
-      const [answer, adjudicated_by, adjudicated_kind, adjudicated_at, id] = params;
-      if (fenced && !generationAllows(params[5], params[6])) return { changed: 0 };
+      const [answer, adjudicated_by, adjudicated_kind, adjudicated_at, source_completion_id, id] = params;
+      if (fenced && !generationAllows(params[6], params[7])) return { changed: 0 };
       const row = adjudications.find((r) => r.id === id);
       const priorBy = typeof row?.adjudicated_by === "string" ? row.adjudicated_by.trim() : row?.adjudicated_by;
       if (!row || (priorBy !== null && priorBy !== undefined && priorBy !== "")) return { changed: 0 };
-      Object.assign(row, { answer, adjudicated_by, adjudicated_kind, adjudicated_at });
+      // COALESCE(?, "source_completion_id"): stamp the healer's completion when present, else preserve.
+      Object.assign(row, { answer, adjudicated_by, adjudicated_kind, adjudicated_at, source_completion_id: source_completion_id ?? row.source_completion_id });
       return { changed: 1 };
     }
     if (/UPDATE "escalations" SET "answer"/.test(sql)) {
