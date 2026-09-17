@@ -7,8 +7,13 @@ import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { withTrackingViews } from "../test/trackingViews.ts";
-import { deriveFeatureDelivery } from "./feature.ts";
+import { deriveFeatureCompletion, deriveFeatureDelivery } from "./feature.ts";
 import { pollFeatureDelivery } from "./service.ts";
+
+// An engine stub for the CONVERGING-reconcile tests (edge 1), which seed no `running` runs — the
+// COMPLETED→terminal fold (edge 2, issue #808) therefore reads no instance. The completion-fold tests
+// below pass their own state-returning stub.
+const STUB_ENGINE = { searchProcessInstances: async () => [] as any[] } as any;
 
 function memData(): { data: DataLayer; stores: Record<string, any[]> } {
   const stores: Record<string, any[]> = {};
@@ -68,7 +73,7 @@ test("pollFeatureDelivery: a converging run whose PR merged is reconciled to mer
   ];
   stores.pull_requests = [{ pr_key: "o/r#5", status: "merged" }];
 
-  await pollFeatureDelivery(data);
+  await pollFeatureDelivery(data, STUB_ENGINE);
 
   assertEquals(stores.feature_runs[0].status, "merged");
   assertEquals(stores.feature_runs[0].delivery_label, "merged");
@@ -81,7 +86,7 @@ test("pollFeatureDelivery: a run with a still-in-flight PR stays converging with
   ];
   stores.pull_requests = [{ pr_key: "o/r#6", status: "waiting_review" }];
 
-  await pollFeatureDelivery(data);
+  await pollFeatureDelivery(data, STUB_ENGINE);
 
   assertEquals(stores.feature_runs[0].status, "converging");
   assertEquals(stores.feature_runs[0].delivery_label, "waiting_review");
@@ -96,7 +101,7 @@ test("pollFeatureDelivery: only touches converging runs with a pr_key", async ()
   ];
   stores.pull_requests = [{ pr_key: "o/r#9", status: "merged" }];
 
-  await pollFeatureDelivery(data);
+  await pollFeatureDelivery(data, STUB_ENGINE);
 
   assertEquals(stores.feature_runs[0].status, "opened");
   assertEquals(stores.feature_runs[1].status, "converging");
@@ -111,8 +116,94 @@ test("pollFeatureDelivery: a dangling pr_key (missing PR row) stays converging, 
   ];
   stores.pull_requests = [];
 
-  await pollFeatureDelivery(data);
+  await pollFeatureDelivery(data, STUB_ENGINE);
 
   assertEquals(stores.feature_runs[0].status, "converging");
   assertEquals(stores.feature_runs[0].delivery_label, "PR record missing");
+});
+
+// ── Edge 2: COMPLETED → terminal fold for a normally-completing `running` run (issue #808) ─────────
+
+test("deriveFeatureCompletion: a run that raised a PR folds to opened", () => {
+  assertEquals(deriveFeatureCompletion({ pr_key: "o/r#5" }), { status: "opened", label: "PR raised" });
+});
+
+test("deriveFeatureCompletion: a run that raised no PR folds to skipped", () => {
+  assertEquals(deriveFeatureCompletion({ pr_key: null }), { status: "skipped", label: "nothing to do" });
+});
+
+test("pollFeatureDelivery: a raise-only running run whose engine instance is COMPLETED folds to opened (issue #808)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#7", status: "running", process_key: "pi-7", pr_key: "o/r#5", converge: 0, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  const engine = { searchProcessInstances: async () => [{ processInstanceKey: "pi-7", state: "COMPLETED" }] } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  // Red before the fix: it stays wedged at `running` in the Active bucket.
+  assertEquals(stores.feature_runs[0].status, "opened");
+  assertEquals(stores.feature_runs[0].delivery_label, "PR raised");
+});
+
+test("pollFeatureDelivery: a nothing-to-do running run whose instance is COMPLETED folds to skipped (issue #808)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#8", status: "running", process_key: "pi-8", pr_key: null, converge: 0, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  const engine = { searchProcessInstances: async () => [{ processInstanceKey: "pi-8", state: "COMPLETED" }] } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(stores.feature_runs[0].status, "skipped");
+  assertEquals(stores.feature_runs[0].delivery_label, "nothing to do");
+});
+
+test("pollFeatureDelivery: a running run whose instance is STILL ACTIVE is left untouched (idempotent)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#9", status: "running", process_key: "pi-9", pr_key: "o/r#5", converge: 0, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  const engine = { searchProcessInstances: async () => [{ processInstanceKey: "pi-9", state: "ACTIVE" }] } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(stores.feature_runs[0].status, "running");
+  assertEquals(stores.feature_runs[0].delivery_label, null);
+});
+
+test("pollFeatureDelivery: a running run TERMINATED out of band (derived abandoned) is left to onTerminated, never re-queried (issue #808)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#10", status: "running", process_key: "pi-10", pr_key: "o/r#5", converge: 0, delivery_label: null, derived_status: "abandoned" },
+  ];
+  stores.pull_requests = [];
+  let queried = false;
+  const engine = { searchProcessInstances: async () => { queried = true; return []; } } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(queried, false);
+  assertEquals(stores.feature_runs[0].status, "running");
+});
+
+test("pollFeatureDelivery: never touches a CONVERGING run in the COMPLETED fold — that edge stays owned by the converging reconcile (issue #808)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#11", status: "converging", process_key: "pi-11", pr_key: "o/r#5", converge: 1, delivery_label: null },
+  ];
+  stores.pull_requests = [{ pr_key: "o/r#5", status: "waiting_review" }];
+  let queried = false;
+  const engine = { searchProcessInstances: async () => { queried = true; return [{ processInstanceKey: "pi-11", state: "COMPLETED" }]; } } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  // The COMPLETED fold is scoped to `running`, so it never reads the engine for a converging run;
+  // the converging reconcile above keeps it converging while its PR is in flight.
+  assertEquals(queried, false);
+  assertEquals(stores.feature_runs[0].status, "converging");
+  assertEquals(stores.feature_runs[0].delivery_label, "waiting_review");
 });

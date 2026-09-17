@@ -167,6 +167,23 @@ export function deriveFeatureDelivery(prStatus: string | null): FeatureDeliveryR
   }
 }
 
+/** Reconciled TERMINAL outcome for a feature run whose ENGINE instance read COMPLETED while the base
+ * `status` is still the non-terminal `running` (issue #808). A normally-completing raise-only (or
+ * nothing-to-do) run has no PR loop to reconcile it — `pollFeatureDelivery`'s converging reconcile and
+ * `instanceTracking`'s TERMINATED → `abandoned` edge both skip it — so it would wedge in the Active
+ * bucket forever (the "poller owns liveness; never leave a run on a status no pass scans" rule,
+ * AGENTS.md). The terminal is derived from the run's own durable completion shape, ENGINE-truth-gated
+ * by the caller (only ever applied on a real COMPLETED read): a run that raised a PR (its `pr_key`
+ * survives on the row from `record-feature`) folds to `opened`; a run that raised none folds to
+ * `skipped`. Pure and idempotent — the caller writes only when this differs from the current status. */
+export interface FeatureCompletion {
+  status: FeatureRunStatus;
+  label: string;
+}
+export function deriveFeatureCompletion(run: Pick<FeatureRun, "pr_key">): FeatureCompletion {
+  return run.pr_key ? { status: "opened", label: "PR raised" } : { status: "skipped", label: "nothing to do" };
+}
+
 /** The `feature-escalation` user-task element id (feature.bpmn) — the native operator wait a run
  * parks on when the agent escalates. `pollUserTasks` reads the engine's open task for this element to
  * project it onto the `user_tasks` Tasks inbox. */
