@@ -40,9 +40,11 @@ export interface PrAdjudicationRow {
   adjudicated_at: string;
   /** A TOMBSTONE timestamp set when a human reverts the auto-applied completion that replayed this
    *  decision (issue #806 review). While set, the row is no longer replayable — {@link matchAdjudication}
-   *  skips it and {@link recordAdjudication} will not resurrect it — but it stays present so the
-   *  `UNIQUE (pr_key, question_fingerprint)` fence makes a redelivered `record-answer` re-insert a no-op
-   *  (a plain DELETE would let that redelivery recreate the row and undo the revert). NULL = live. */
+   *  skips it — but it stays present so the `UNIQUE (pr_key, question_fingerprint)` fence makes a
+   *  redelivered `record-answer` for the SAME reverted completion a no-op (a plain DELETE would let that
+   *  redelivery recreate the row and undo the revert). A FRESH, non-reverted answer to the re-parked
+   *  question REVIVES it ({@link reviveTombstonedDecision}) — clearing the tombstone so the human's new
+   *  override is remembered — while the reverted completion's own redelivery stays rejected. NULL = live. */
   invalidated_at: string | null;
   /** The `task_completions.id` of the WINNING completion that produced this decision (issue #806 review).
    *  A FIRST-HAND agent answer records its own adjudication with `auto_applied=0` and no
@@ -144,6 +146,10 @@ export function notRevertedGuard(sourceCompletionId: number | undefined): { sql:
  *  every round; when a KNOWN adjudicator later answers the same question, promote the row to a
  *  replayable decision — its answer AND attribution — so future rounds auto-resume instead of
  *  re-parking forever (issue #806 review). A row that ALREADY carries known provenance stays immutable.
+ *  A TOMBSTONED row (a human reverted the auto-applied replay) is REVIVED by a fresh, non-reverted answer
+ *  to the re-parked question ({@link reviveTombstonedDecision}) — otherwise the override is never
+ *  remembered and the question re-parks forever (Copilot review of #806) — while a redelivery of the
+ *  reverted completion itself is still rejected.
  *
  *  Every write is fenced on the run generation ({@link generationGuard}) so a pre-reset straggler cannot
  *  write after `submitPr` advances `process_key`, AND the blank→known promotion is a conditional
@@ -189,7 +195,63 @@ export async function recordAdjudication(data: DataLayer, input: RecordAdjudicat
   // no-op). Re-read the ACTUAL current row and apply the blank→known promotion the winner would have; a
   // stale straggler's heal is likewise fenced to a no-op, and an already-attributed row is immutable.
   const winner = await prAdjudications(data).find({ pr_key: input.prKey, question_fingerprint: fp });
-  if (winner.length > 0) await healBlankProvenance(data, winner[0], answer, input);
+  if (winner.length === 0) return;
+  // A TOMBSTONED winner (a human reverted the auto-applied replay) is REVIVED by a fresh, non-reverted
+  // answer to the re-parked question (issue #806 review) — otherwise the human's override is never
+  // remembered and the question re-parks forever. If the revive fires, we are done; only a LIVE
+  // blank-provenance winner falls through to the blank→known heal (the two preconditions are disjoint,
+  // but returning early keeps the healer off a row the revive just settled).
+  if (await reviveTombstonedDecision(data, winner[0], answer, input)) return;
+  await healBlankProvenance(data, winner[0], answer, input);
+}
+
+/** REVIVE a TOMBSTONED adjudication with a FRESH, non-reverted answer (issue #806 review). After a human
+ *  reverts an auto-applied replay, {@link invalidateAdjudicationByCompletion} tombstones the decision
+ *  (`invalidated_at` set) so {@link matchAdjudication} skips it and the recurring question re-parks a
+ *  human every round. When that human then answers the re-parked `wait-answer`, the fresh answer's
+ *  `record-answer` INSERT trips the `UNIQUE(pr_key, question_fingerprint)` fence, and with ONLY the
+ *  blank→known heal below it no-ops (the tombstoned row already carries known provenance and `invalidated_at`)
+ *  — so the tombstone survives and the override is NEVER remembered (Copilot review of #806: the recurring
+ *  question re-parks a human forever instead of remembering the new decision).
+ *
+ *  This CONDITIONAL compare-and-set clears the tombstone and installs the fresh answer/adjudicator, but
+ *  ONLY for a NEW, non-reverted completion. The `UPDATE … WHERE "invalidated_at" IS NOT NULL` re-checks
+ *  the tombstone precondition INSIDE the write (so it fires on a tombstoned row and no-ops on a live one),
+ *  and the {@link notRevertedGuard} on the INCOMING completion makes a REDELIVERY of the very completion
+ *  that was reverted (its `sourceCompletionId` is `reverted = 1`) affect zero rows — so the reverted
+ *  answer can never resurrect the decision it was reverted from, while a genuinely new human answer IS
+ *  remembered (Copilot review of #806). Run-generation fenced ({@link generationGuard}) like every other
+ *  write, so a pre-reset straggler cannot revive after a re-submit reset. A revive INSTALLS a first-hand
+ *  replayable decision, so it requires a KNOWN adjudicator AND a KNOWN (correlated) completion — an
+ *  unattributed answer cannot launder into a replayable authority (mirrors the auto-resume provenance
+ *  gate), and an UNCORRELATED answer (no `sourceCompletionId`, e.g. a legacy out-of-band resume) cannot
+ *  be told apart from a redelivery of the reverted completion, so it is a no-op that leaves the tombstone
+ *  intact. Returns whether a row was revived. */
+async function reviveTombstonedDecision(
+  data: DataLayer,
+  prior: PrAdjudicationRow,
+  answer: string,
+  input: { prKey: string; adjudicatedBy: string | undefined; adjudicatedKind: string | undefined; expectedProcessKey?: string | undefined; sourceCompletionId?: number | undefined },
+): Promise<boolean> {
+  // Only a tombstoned row is revivable; a live row is owned by the INSERT-if-absent / blank→known heal.
+  if (prior.invalidated_at == null || prior.invalidated_at.trim() === "") return false;
+  const nowBy = input.adjudicatedBy?.trim();
+  if (!nowBy) return false;
+  // A revive requires a KNOWN, correlated completion. Without a `sourceCompletionId` we cannot tell a
+  // genuinely NEW answer from an at-least-once REDELIVERY of the reverted completion's own record-answer
+  // (a legacy/uncorrelated answer carries none) — so an uncorrelated answer never revives, keeping the
+  // revert durable (Copilot review of #806). A correlated completion is additionally fenced on NOT being
+  // reverted below, so a redelivery of the reverted completion itself still no-ops.
+  if (input.sourceCompletionId == null) return false;
+  const db = data.open();
+  const guard = generationGuard(input.prKey, input.expectedProcessKey);
+  const revertGuard = notRevertedGuard(input.sourceCompletionId);
+  const res = await db.exec(
+    `UPDATE "pr_adjudications" SET "answer" = ?, "adjudicated_by" = ?, "adjudicated_kind" = ?, "adjudicated_at" = ?, "source_completion_id" = ?, "invalidated_at" = NULL
+     WHERE "id" = ? AND "invalidated_at" IS NOT NULL AND ${guard.sql} AND ${revertGuard.sql}`,
+    [answer, nowBy, input.adjudicatedKind?.trim() || null, new Date().toISOString(), input.sourceCompletionId ?? null, prior.id, ...guard.params, ...revertGuard.params],
+  );
+  return res.changed > 0;
 }
 
 /** Promote an UNKNOWN-provenance adjudication row to a replayable decision (issue #806 review). The
@@ -266,8 +328,11 @@ export async function resetAdjudications(data: DataLayer, prKey: string): Promis
  *  does not advance the run generation), so the row comes back and the next poller pass re-auto-applies,
  *  undoing the revert (Copilot review of #806). Keeping the row as a tombstone means that redelivered
  *  insert trips the `UNIQUE (pr_key, question_fingerprint)` fence (a no-op) and `recordAdjudication` will
- *  not resurrect it, while `matchAdjudication` skips it — so the revert is a durable override. The
- *  original decision's audit survives on the reverted completion ledger row and on this tombstoned row.
+ *  not resurrect it for the SAME reverted completion (its `notRevertedGuard` is false), while
+ *  `matchAdjudication` skips it — so the revert is a durable override. (A genuinely NEW, non-reverted
+ *  answer to the re-parked question does revive the tombstone via {@link reviveTombstonedDecision}, so
+ *  the human's follow-up decision is remembered.) The original decision's audit survives on the reverted
+ *  completion ledger row and on this tombstoned row.
  *  Conditional on `invalidated_at IS NULL` so it is idempotent (a second revert/reset is a no-op) and
  *  never overwrites the first invalidation time. The tombstone is cleared only by `resetAdjudications`
  *  on a fresh-run re-submit. */

@@ -469,6 +469,18 @@ async function seedCompletion(data: DataLayer, over: { reverted: number }): Prom
   });
 }
 
+/** Flip an existing completion to REVERTED in place — the state a human revert leaves behind, without
+ *  re-inserting a new completion row. Used to reproduce the realistic ordering: a decision is recorded
+ *  against a LIVE completion, THEN that completion is reverted (which tombstones the decision). */
+async function revertCompletion(data: DataLayer, id: number): Promise<void> {
+  await data
+    .open()
+    .exec(`UPDATE "task_completions" SET "reverted" = 1, "reverted_by" = 'alice', "reverted_at" = ? WHERE "id" = ?`, [
+      new Date().toISOString(),
+      id,
+    ]);
+}
+
 test("recordAdjudication: does NOT create a live decision for an already-reverted source completion (revert-before-record, #806 review)", async () => {
   await withData(async (data, seedPr) => {
     await seedPr("o/r#1");
@@ -489,6 +501,110 @@ test("recordAdjudication: a NON-reverted source completion still records normall
     assertEquals(rows.length, 1, "a live completion's decision records");
     assertEquals(rows[0].source_completion_id, live, "linked to its completion");
     assertEquals(matchAdjudication(rows, "Which retry cap?")?.answer, "Cap at 5.");
+  });
+});
+
+// --- issue #806 review (round 14, Copilot): a TOMBSTONED decision must be REVIVABLE by the fresh human
+// answer that follows a revert. After a revert tombstones the decision, the recurring question re-parks a
+// human; when that human answers, the fresh answer's record-answer INSERT trips the UNIQUE fence and — with
+// only the blank→known heal — no-ops, so the override is never remembered and the question re-parks
+// forever. `reviveTombstonedDecision` clears the tombstone for a NEW, non-reverted completion while still
+// rejecting a redelivery of the reverted completion (and any uncorrelated answer). ---
+
+test("recordAdjudication: a fresh, non-reverted answer REVIVES a tombstoned decision so the human's override is remembered (#806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    // A first-hand agent answer records a live decision linked to its (not-yet-reverted) completion,
+    // which a human then reverts — flipping the completion to reverted AND tombstoning the decision.
+    const original = await seedCompletion(data, { reverted: 0 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: original });
+    await revertCompletion(data, original);
+    await invalidateAdjudicationByCompletion(data, original);
+    assertEquals(matchAdjudication(await findAdj(data, "o/r#1"), "Which retry cap?"), undefined, "the decision is tombstoned after the revert");
+    // The human now answers the re-parked question fresh — a NEW, non-reverted completion.
+    const fresh = await seedCompletion(data, { reverted: 0 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "which retry CAP?", answer: "Cap at 3.", adjudicatedBy: "alice", adjudicatedKind: "human", sourceCompletionId: fresh });
+    const rows = await findAdj(data, "o/r#1");
+    assertEquals(rows.length, 1, "the tombstone is revived in place, not duplicated");
+    assertEquals(matchAdjudication(rows, "Which retry cap?")?.answer, "Cap at 3.", "the fresh override is now remembered and replayable");
+    assertEquals(rows[0].adjudicated_by, "alice", "the revived decision carries the fresh adjudicator");
+    assertEquals(rows[0].adjudicated_kind, "human");
+    assertEquals(rows[0].source_completion_id, fresh, "the revived decision links to the fresh completion so a later revert can tombstone it again");
+    assertEquals(rows[0].invalidated_at, null, "the tombstone is cleared");
+  });
+});
+
+test("recordAdjudication: a redelivery of the REVERTED completion cannot revive its own tombstone (#806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    const original = await seedCompletion(data, { reverted: 0 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: original });
+    await revertCompletion(data, original);
+    await invalidateAdjudicationByCompletion(data, original);
+    // The reverted completion's record-answer is redelivered (at-least-once, SAME completion id) — the
+    // notRevertedGuard must make it a zero-row no-op, so the revert stays durable.
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: original });
+    const rows = await findAdj(data, "o/r#1");
+    assertEquals(rows.length, 1, "no duplicate row");
+    assert(typeof rows[0].invalidated_at === "string" && (rows[0].invalidated_at as string).length > 0, "the tombstone survives the redelivery");
+    assertEquals(matchAdjudication(rows, "Which retry cap?"), undefined, "the reverted decision stays un-replayable");
+  });
+});
+
+test("recordAdjudication: an UNCORRELATED answer (no completion id) does NOT revive a tombstone (#806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    const original = await seedCompletion(data, { reverted: 0 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human", sourceCompletionId: original });
+    await revertCompletion(data, original);
+    await invalidateAdjudicationByCompletion(data, original);
+    // A legacy/out-of-band answer carrying NO completion id cannot be told apart from a redelivery of the
+    // reverted completion, so it must not revive — the revert stays durable.
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 3.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+    const rows = await findAdj(data, "o/r#1");
+    assertEquals(rows.length, 1, "no duplicate row");
+    assert(typeof rows[0].invalidated_at === "string" && (rows[0].invalidated_at as string).length > 0, "the tombstone survives an uncorrelated answer");
+    assertEquals(matchAdjudication(rows, "Which retry cap?"), undefined, "the tombstone is not revived without a correlated completion");
+  });
+});
+
+test("recordAdjudication: an unattributed (blank adjudicator) answer does NOT revive a tombstone (#806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    const original = await seedCompletion(data, { reverted: 0 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human", sourceCompletionId: original });
+    await revertCompletion(data, original);
+    await invalidateAdjudicationByCompletion(data, original);
+    // A fresh, non-reverted completion but with UNKNOWN provenance must not launder a replayable authority.
+    const fresh = await seedCompletion(data, { reverted: 0 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 3.", adjudicatedBy: undefined, adjudicatedKind: undefined, sourceCompletionId: fresh });
+    const rows = await findAdj(data, "o/r#1");
+    assert(typeof rows[0].invalidated_at === "string" && (rows[0].invalidated_at as string).length > 0, "an unattributed answer leaves the tombstone intact");
+    assertEquals(matchAdjudication(rows, "Which retry cap?"), undefined, "not revived without a known adjudicator");
+  });
+});
+
+test("recordAdjudication: a stale-generation straggler cannot REVIVE a tombstone after a re-submit reset (#806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1", "gen-2"); // the PR has advanced to a fresh run generation
+    const reverted = await seedCompletion(data, { reverted: 1 });
+    // Seed a tombstoned row directly (as the prior generation left it).
+    await prAdjudications(data).insert({
+      pr_key: "o/r#1",
+      question_fingerprint: questionFingerprint("Which retry cap?"),
+      answer: "Cap at 5.",
+      adjudicated_by: "bot",
+      adjudicated_kind: "agent",
+      adjudicated_at: new Date().toISOString(),
+      invalidated_at: new Date().toISOString(),
+      source_completion_id: 500,
+    } as PrAdjudicationRow);
+    const fresh = await seedCompletion(data, { reverted: 0 });
+    // A straggler from the OLD generation (`gen-1`) tries to revive — its generation guard is false.
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 3.", adjudicatedBy: "alice", adjudicatedKind: "human", expectedProcessKey: "gen-1", sourceCompletionId: fresh });
+    const rows = await findAdj(data, "o/r#1");
+    assert(typeof rows[0].invalidated_at === "string" && (rows[0].invalidated_at as string).length > 0, "the stale straggler cannot revive across the generation advance");
+    assertEquals(matchAdjudication(rows, "Which retry cap?"), undefined, "the tombstone stays under the fresh generation");
   });
 });
 
