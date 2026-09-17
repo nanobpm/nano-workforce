@@ -4062,7 +4062,7 @@ paths:
                 harnessProtocol:
                   type: integer
                   minimum: 0
-                  description: "The worker-harness protocol version (issue #802) — a non-negative integer declaring which machine-readable artifacts the harness emits (AgentInstance, transcript flush, result envelope). An ENROLMENT attribute, never a routing token. Recorded per instance so the app can flag a stale harness in getAgenticSupply / the registry and — under NANO_AGENTIC_STALE_HARNESS_POLICY=refuse — refuse it agent-job routing. A missing version is treated as stale."
+                  description: 'The worker-harness protocol version (issue #802) — a non-negative integer declaring which machine-readable artifacts the harness emits (AgentInstance, transcript flush, result envelope). An ENROLMENT attribute, never a routing token. Recorded per instance so the app can flag a stale harness in getAgenticSupply / the registry and — under NANO_AGENTIC_STALE_HARNESS_POLICY=refuse — refuse it agent-job routing. A missing version is treated as stale.'
               # END generated:mcp-body
       responses:
         "200":
