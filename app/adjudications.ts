@@ -55,6 +55,37 @@ export function matchAdjudication(
   return rows.find((r) => r.question_fingerprint === fp && typeof r.answer === "string" && r.answer.trim() !== "");
 }
 
+/** Input to {@link recordAdjudication}. `expectedProcessKey` is the run generation this answer job
+ *  belongs to (the `pr.answer-escalation` job's own process-instance key); every write is fenced on it
+ *  (see {@link generationGuard}) so a pre-reset straggler cannot resurrect a stale adjudication for a
+ *  fresh run. `undefined` (a job carrying no instance key) fails open, matching the worker's staleness
+ *  gate — an unclassifiable job proceeds rather than dropping a legitimate operator answer. */
+interface RecordAdjudicationInput {
+  prKey: string;
+  question: string;
+  answer: string | undefined;
+  adjudicatedBy: string | undefined;
+  adjudicatedKind: string | undefined;
+  expectedProcessKey?: string | undefined;
+}
+
+/** A SQL predicate (+ bind params) that is TRUE only while this write still belongs to the CURRENT run
+ *  generation: no `pull_requests` row for `prKey` carries a `process_key` that is BOTH set AND different
+ *  from the writer's `expectedProcessKey`. Woven into the adjudication INSERT/UPDATE so the ownership
+ *  check and the write are ONE atomic statement — the fix `submitPr` advances `process_key` BEFORE it
+ *  clears the memory relies on (Copilot review of #806): an `answer-escalation` straggler that read the
+ *  old key, then paused across a re-submit that advanced the key and deleted the rows, finds this guard
+ *  false at write time and no-ops, so it cannot insert its stale adjudication after the reset for the
+ *  fresh run to auto-apply. When `expectedProcessKey` is absent the guard is a constant TRUE (fail open,
+ *  mirroring the worker gate — an unclassifiable job must not be silently dropped). */
+function generationGuard(prKey: string, expectedProcessKey: string | undefined): { sql: string; params: unknown[] } {
+  if (expectedProcessKey == null || expectedProcessKey === "") return { sql: "1 = 1", params: [] };
+  return {
+    sql: `NOT EXISTS (SELECT 1 FROM "pull_requests" WHERE "pr_key" = ? AND "process_key" IS NOT NULL AND "process_key" <> ?)`,
+    params: [prKey, expectedProcessKey],
+  };
+}
+
 /** Persist a human adjudication of `question` for `prKey`, INSERT-if-absent so the ORIGINAL
  *  adjudicator/answer is preserved across later auto-resumes (which re-run record-answer with the
  *  same fingerprint). A blank answer is not a decision and is not recorded. Idempotent: a second
@@ -64,47 +95,47 @@ export function matchAdjudication(
  *  launders an unattributed replay into a human authority), so such a row keeps re-parking a human
  *  every round; when a KNOWN adjudicator later answers the same question, promote the row to a
  *  replayable decision — its answer AND attribution — so future rounds auto-resume instead of
- *  re-parking forever (issue #806 review). A row that ALREADY carries known provenance stays immutable. */
-export async function recordAdjudication(
-  data: DataLayer,
-  input: { prKey: string; question: string; answer: string | undefined; adjudicatedBy: string | undefined; adjudicatedKind: string | undefined },
-): Promise<void> {
+ *  re-parking forever (issue #806 review). A row that ALREADY carries known provenance stays immutable.
+ *
+ *  Every write is fenced on the run generation ({@link generationGuard}) so a pre-reset straggler cannot
+ *  write after `submitPr` advances `process_key`, AND the blank→known promotion is a conditional
+ *  compare-and-set (see {@link healBlankProvenance}) so two concurrent known healers cannot clobber each
+ *  other's answer/adjudicator — only the first promotion of a blank row wins, keeping the documented
+ *  first-known decision immutable (Copilot review of #806). */
+export async function recordAdjudication(data: DataLayer, input: RecordAdjudicationInput): Promise<void> {
   const answer = typeof input.answer === "string" ? input.answer.trim() : "";
   if (answer === "") return;
   const question = input.question.trim();
   if (question === "") return;
   const fp = questionFingerprint(question);
-  const existing = await prAdjudications(data).find({ pr_key: input.prKey, question_fingerprint: fp });
-  if (existing.length > 0) {
-    await healBlankProvenance(data, existing[0], answer, input);
-    return;
-  }
+  const db = data.open();
+  const guard = generationGuard(input.prKey, input.expectedProcessKey);
   try {
-    await prAdjudications(data).insert({
-      pr_key: input.prKey,
-      question_fingerprint: fp,
-      answer,
-      adjudicated_by: input.adjudicatedBy?.trim() || null,
-      adjudicated_kind: input.adjudicatedKind?.trim() || null,
-      adjudicated_at: new Date().toISOString(),
-    });
+    // Conditional INSERT-if-absent: the `... SELECT ? … WHERE <generationGuard>` is atomic, so the
+    // ownership check and the insert are ONE statement — a stale straggler's guard is false and the
+    // insert affects zero rows (no separate read-then-write TOCTOU window). A concurrent/redelivered
+    // answer that already inserted the SAME fingerprint trips the `UNIQUE(pr_key, question_fingerprint)`
+    // fence, which we tolerate below exactly as the sequential no-op the winner's durable row yields.
+    const res = await db.exec(
+      `INSERT INTO "pr_adjudications" ("pr_key","question_fingerprint","answer","adjudicated_by","adjudicated_kind","adjudicated_at")
+       SELECT ?, ?, ?, ?, ?, ? WHERE ${guard.sql}`,
+      [input.prKey, fp, answer, input.adjudicatedBy?.trim() || null, input.adjudicatedKind?.trim() || null, new Date().toISOString(), ...guard.params],
+    );
+    if (res.changed > 0) return; // fresh insert won under the current generation
   } catch (err) {
-    // The `find`-then-`insert` above is racy against the `UNIQUE(pr_key, question_fingerprint)` fence:
-    // a concurrent/redelivered answer job can insert the SAME fingerprint between our read and our
-    // write, so the loser's insert hits the fence. Tolerate ONLY that collision as the idempotent
-    // no-op the sequential path yields (the winner's ORIGINAL row is already durable) — never surface
-    // it as a spurious `pr.answer-escalation` incident. Any other error still propagates. This is the
-    // ONE canonical fence classifier (`app/dbFence.ts`), the same pattern as `deliveryConnector`'s
-    // claim insert and `WorldStore`'s checkpoint insert (derivation over duplication).
+    // Tolerate ONLY the UNIQUE fence as the idempotent no-op the sequential path yields (the winner's
+    // ORIGINAL row is already durable) — never surface it as a spurious `pr.answer-escalation` incident.
+    // Any other error still propagates. This is the ONE canonical fence classifier (`app/dbFence.ts`),
+    // the same pattern as `deliveryConnector`'s claim insert and `WorldStore`'s checkpoint insert
+    // (derivation over duplication).
     if (!isUniqueConstraintFence(err)) throw err;
-    // A fence collision is NOT always a pure no-op: if the racer that WON the insert wrote an
-    // UNKNOWN-provenance row and WE carry a known adjudicator, the sequential-branch healing above never
-    // ran — the row would stay non-replayable and re-park a human forever (issue #806 review). Re-read
-    // the winner and apply the SAME blank→known promotion the sequential path would have. Re-read
-    // (rather than trust our pre-insert `find`, which saw no row) so we heal the ACTUAL winning row.
-    const winner = await prAdjudications(data).find({ pr_key: input.prKey, question_fingerprint: fp });
-    if (winner.length > 0) await healBlankProvenance(data, winner[0], answer, input);
   }
+  // We reach here when the insert affected no row: either a row already exists (UNIQUE fence, or another
+  // writer's row already present) OR the generation guard was false (a stale straggler — leave it a
+  // no-op). Re-read the ACTUAL current row and apply the blank→known promotion the winner would have; a
+  // stale straggler's heal is likewise fenced to a no-op, and an already-attributed row is immutable.
+  const winner = await prAdjudications(data).find({ pr_key: input.prKey, question_fingerprint: fp });
+  if (winner.length > 0) await healBlankProvenance(data, winner[0], answer, input);
 }
 
 /** Promote an UNKNOWN-provenance adjudication row to a replayable decision (issue #806 review). The
@@ -112,20 +143,29 @@ export async function recordAdjudication(
  *  every round; a now-known adjudicator's answer heals the row — its answer AND attribution together, so
  *  the replayed decision is the human's, not the earlier uncorrelated one. Only heal blank→known: a row
  *  that ALREADY carries known provenance is immutable (INSERT-if-absent preserves the ORIGINAL). A no-op
- *  when the prior row is already attributed or the incoming answer is still unattributed. */
+ *  when the prior row is already attributed or the incoming answer is still unattributed.
+ *
+ *  The promotion is a CONDITIONAL compare-and-set — the `UPDATE … WHERE "adjudicated_by" IS NULL OR
+ *  TRIM("adjudicated_by") = ''` re-checks the blank precondition INSIDE the write, so of two concurrent
+ *  known healers that both read the same blank row only the FIRST promotes it; the second's guard is
+ *  already false and its update affects zero rows, leaving the first healer's answer/adjudicator intact
+ *  (Copilot review of #806 — a read-then-unconditional-update would let the later writer clobber the
+ *  earlier known decision). The write is ALSO fenced on the run generation so a pre-reset straggler
+ *  cannot heal after a re-submit reset. */
 async function healBlankProvenance(
   data: DataLayer,
   prior: PrAdjudicationRow,
   answer: string,
-  input: { adjudicatedBy: string | undefined; adjudicatedKind: string | undefined },
+  input: { prKey: string; adjudicatedBy: string | undefined; adjudicatedKind: string | undefined; expectedProcessKey?: string | undefined },
 ): Promise<void> {
   const priorBy = prior.adjudicated_by?.trim();
   const nowBy = input.adjudicatedBy?.trim();
   if (priorBy || !nowBy) return;
-  await prAdjudications(data).update(prior.id, {
-    answer,
-    adjudicated_by: nowBy,
-    adjudicated_kind: input.adjudicatedKind?.trim() || null,
-    adjudicated_at: new Date().toISOString(),
-  });
+  const db = data.open();
+  const guard = generationGuard(input.prKey, input.expectedProcessKey);
+  await db.exec(
+    `UPDATE "pr_adjudications" SET "answer" = ?, "adjudicated_by" = ?, "adjudicated_kind" = ?, "adjudicated_at" = ?
+     WHERE "id" = ? AND ("adjudicated_by" IS NULL OR TRIM("adjudicated_by") = '') AND ${guard.sql}`,
+    [answer, nowBy, input.adjudicatedKind?.trim() || null, new Date().toISOString(), prior.id, ...guard.params],
+  );
 }

@@ -21,8 +21,40 @@ function fakeApp(escalationRows: Record<string, unknown>[], prRows: Record<strin
   const prUpdates: { key: unknown; patch: Record<string, unknown> }[] = [];
   const adjudications: Record<string, unknown>[] = [];
   const completions: Record<string, unknown>[] = [];
+  // Emulates ONLY the two guarded statements `recordAdjudication` issues via `data.open().exec` — the
+  // generation-fenced conditional INSERT and the blank→known compare-and-set UPDATE — over the same
+  // in-memory `adjudications`/`prRows` arrays the `table()` double reads. (The guard SQL itself is
+  // validated end-to-end against real SQLite in app/adjudications.test.ts; here it need only persist so
+  // these worker tests can assert the attribution `latestAdjudicator` computes.)
+  const generationAllows = (prKey: unknown, expectedKey: unknown): boolean =>
+    !prRows.some((r) => r.pr_key === prKey && r.process_key != null && r.process_key !== expectedKey);
+  const exec = async (sql: string, params: unknown[] = []) => {
+    const fenced = sql.includes("NOT EXISTS");
+    if (/^\s*INSERT INTO "pr_adjudications"/.test(sql)) {
+      const [pr_key, question_fingerprint, answer, adjudicated_by, adjudicated_kind, adjudicated_at] = params;
+      if (fenced && !generationAllows(params[6], params[7])) return { changed: 0 };
+      if (adjudications.some((r) => r.pr_key === pr_key && r.question_fingerprint === question_fingerprint)) {
+        throw new Error("UNIQUE constraint failed: pr_adjudications.pr_key, pr_adjudications.question_fingerprint");
+      }
+      adjudications.push({ id: adjudications.length + 1, pr_key, question_fingerprint, answer, adjudicated_by, adjudicated_kind, adjudicated_at });
+      return { changed: 1 };
+    }
+    if (/UPDATE "pr_adjudications"/.test(sql)) {
+      const [answer, adjudicated_by, adjudicated_kind, adjudicated_at, id] = params;
+      if (fenced && !generationAllows(params[5], params[6])) return { changed: 0 };
+      const row = adjudications.find((r) => r.id === id);
+      const priorBy = typeof row?.adjudicated_by === "string" ? row.adjudicated_by.trim() : row?.adjudicated_by;
+      if (!row || (priorBy !== null && priorBy !== undefined && priorBy !== "")) return { changed: 0 };
+      Object.assign(row, { answer, adjudicated_by, adjudicated_kind, adjudicated_at });
+      return { changed: 1 };
+    }
+    throw new Error(`unexpected exec sql: ${sql}`);
+  };
   const app = {
     data: {
+      open() {
+        return { exec };
+      },
       table(name: string, _key: string) {
         if (name === "pull_requests") {
           return {
@@ -347,13 +379,22 @@ test("records the adjudication BEFORE the escalation row transitions off `open` 
   const completions = [{ id: 1, process_instance_key: "pi-1", user_task_key: "ut-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) }];
   const app = {
     data: {
+      open() {
+        return {
+          async exec(sql: string, params: unknown[] = []) {
+            if (/^\s*INSERT INTO "pr_adjudications"/.test(sql)) {
+              order.push("adjudication");
+              adjudications.push({ pr_key: params[0], question_fingerprint: params[1], answer: params[2], adjudicated_by: params[3], adjudicated_kind: params[4] });
+              return { changed: 1 };
+            }
+            return { changed: 0 };
+          },
+        };
+      },
       table(name: string) {
         if (name === "pull_requests") return { async find() { return []; }, async update() { order.push("pr"); } };
         if (name === "pr_adjudications") {
-          return {
-            async find() { return []; },
-            async insert(r: Record<string, unknown>) { order.push("adjudication"); adjudications.push(r); return 1; },
-          };
+          return { async find() { return []; } };
         }
         if (name === "task_completions") {
           return { async find(where: Record<string, unknown>) { return completions.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v)); } };

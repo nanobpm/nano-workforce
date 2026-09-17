@@ -122,6 +122,12 @@ const handler: AppJobHandler<In> = async (job, app) => {
         answer,
         adjudicatedBy: adjudicator?.id,
         adjudicatedKind: adjudicator?.kind,
+        // Run generation this answer belongs to: every adjudication write is fenced on the PR's current
+        // `process_key` still matching it, so a pre-reset straggler (one that passed the check above,
+        // then paused across a re-submit that advanced `process_key` and cleared the memory) cannot
+        // resurrect a stale adjudication after the reset (issue #806, Copilot review). Undefined when the
+        // job carries no instance key — the fence then fails open, exactly like the staleness gate above.
+        expectedProcessKey: jobProcessKey,
       });
     }
     await escs.update(open[0].id, {
