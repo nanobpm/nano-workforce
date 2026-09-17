@@ -41,19 +41,20 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
     };
   }
   const data = { table: withTrackingViews((n: string, pk?: string) => tbl(n, pk)) } as any as DataLayer;
-  // Minimal `open().exec()` for the ONE guarded CAS the COMPLETED fold issues (foldCompletedFeatureRun).
-  // It mutates the in-memory `feature_runs` store exactly as the SQLite guard would, so the race test
-  // below exercises the real CAS predicate (same feature_key + process_key + status='running').
+  // Minimal `open().exec()` for the guarded CAS folds (foldCompletedFeatureRun — the COMPLETED
+  // running→terminal fold AND the mid-handoff opened→abandoned reconcile). It mutates the in-memory
+  // `feature_runs` store exactly as the SQLite guard would, so the race/handoff tests exercise the real
+  // CAS predicate (same feature_key + process_key + status = the observed transient, now a bound param).
   (data as any).open = () => ({
     async exec(sql: string, params: any[]) {
-      if (!/UPDATE "feature_runs" SET .* WHERE "feature_key" = \? AND "process_key" = \? AND "status" = 'running'/.test(sql)) {
+      if (!/UPDATE "feature_runs" SET .* WHERE "feature_key" = \? AND "process_key" = \? AND "status" = \?/.test(sql)) {
         throw new Error(`memData mock: unhandled sql: ${sql}`);
       }
-      const [status, label, updated_at, feature_key, process_key] = params;
+      const [status, label, updated_at, feature_key, process_key, expect_status] = params;
       const rows = stores.feature_runs ?? [];
       let changed = 0;
       for (const r of rows) {
-        if (r.feature_key === feature_key && r.process_key === process_key && r.status === "running") {
+        if (r.feature_key === feature_key && r.process_key === process_key && r.status === expect_status) {
           Object.assign(r, { status, delivery_label: label, updated_at });
           changed++;
         }
@@ -270,4 +271,103 @@ test("foldCompletedFeatureRun: guarded CAS flips a matching running row and is a
   stores.feature_runs[0].process_key = "pi-13-new";
   assertEquals(await foldCompletedFeatureRun(data, "o/r#13", "pi-13", "skipped", "nothing to do"), false);
   assertEquals(stores.feature_runs[0].status, "running");
+});
+
+// ── Edge 3: MID-HANDOFF `opened` → abandoned when the instance died before convergence (PR #809) ────
+//
+// `record-feature` writes base `status="opened"` for a converge-REQUESTED run too, BEFORE `gw-converge`
+// hands it to `converge-feature` (which flips it to `converging`). That transient `opened` + `converge=1`
+// + `pr_key` window is NOT dismissable (featureReadModel excludes it), and no other edge / instanceTracking
+// activeStatus scans it — so an instance TERMINATED mid-handoff would strand the row in Active forever.
+// This edge owns that liveness.
+
+test("pollFeatureDelivery: a mid-handoff opened run whose instance TERMINATED (gone) folds to abandoned (PR #809)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#20", status: "opened", process_key: "pi-20", pr_key: "o/r#5", converge: 1, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  // The instance is gone (terminated + reaped) → searchProcessInstances returns no snapshot.
+  const engine = { searchProcessInstances: async () => [] } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  // Red before the fix: it stays wedged at `opened` (non-dismissable, unowned) in the Active bucket.
+  assertEquals(stores.feature_runs[0].status, "abandoned");
+  assertEquals(stores.feature_runs[0].delivery_label, "handoff interrupted");
+});
+
+test("pollFeatureDelivery: a mid-handoff opened run whose instance read TERMINATED folds to abandoned (PR #809)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#21", status: "opened", process_key: "pi-21", pr_key: "o/r#5", converge: 1, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  const engine = { searchProcessInstances: async () => [{ processInstanceKey: "pi-21", state: "TERMINATED" }] } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(stores.feature_runs[0].status, "abandoned");
+  assertEquals(stores.feature_runs[0].delivery_label, "handoff interrupted");
+});
+
+test("pollFeatureDelivery: a mid-handoff opened run whose instance is STILL ACTIVE is left for converge-feature (PR #809)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#22", status: "opened", process_key: "pi-22", pr_key: "o/r#5", converge: 1, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  const engine = { searchProcessInstances: async () => [{ processInstanceKey: "pi-22", state: "ACTIVE" }] } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(stores.feature_runs[0].status, "opened");
+  assertEquals(stores.feature_runs[0].delivery_label, null);
+});
+
+test("pollFeatureDelivery: a FINISHED raise-only opened run (converge=0) is never queried by the handoff edge (PR #809)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#23", status: "opened", process_key: "pi-23", pr_key: "o/r#5", converge: 0, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  let queried = false;
+  const engine = { searchProcessInstances: async () => { queried = true; return []; } } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  // A raise-only opened is genuinely terminal + dismissable — the handoff edge must not touch it.
+  assertEquals(queried, false);
+  assertEquals(stores.feature_runs[0].status, "opened");
+});
+
+test("pollFeatureDelivery: a keyless opened run (pr_key null) is never queried by the handoff edge (PR #809)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#24", status: "opened", process_key: "pi-24", pr_key: null, converge: 1, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  let queried = false;
+  const engine = { searchProcessInstances: async () => { queried = true; return []; } } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  // A keyless opened never satisfied the gateway's prKey!=null and fell through to End — terminal.
+  assertEquals(queried, false);
+  assertEquals(stores.feature_runs[0].status, "opened");
+});
+
+test("pollFeatureDelivery: a mid-handoff opened run already folded abandoned out of band is not re-queried (PR #809)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#25", status: "opened", process_key: "pi-25", pr_key: "o/r#5", converge: 1, delivery_label: null, derived_status: "abandoned" },
+  ];
+  stores.pull_requests = [];
+  let queried = false;
+  const engine = { searchProcessInstances: async () => { queried = true; return []; } } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(queried, false);
+  assertEquals(stores.feature_runs[0].status, "opened");
 });

@@ -145,26 +145,39 @@ const attention: Expr = caseWhen(
   lit(null),
 );
 
-/** The feature DISMISSABLE-terminal PREDICATE — the epic read model's mid-flight refinement
- * (app/planReadModel.ts / app/listBucket.ts) applied to features. A row is dismissable-terminal IFF it
- * is either in the {@link STAGE_DONE_STATUSES} pipeline-`Done` set OR a genuinely-FINISHED `opened` run
- * — but NOT an `opened` run that is still mid-handoff into the convergence loop.
+/** The one transient to EXCLUDE from the dismissable-terminal set: an `opened` row still mid-handoff
+ * into the convergence loop.
  *
- * Why the extra `opened` guard (issue #808 follow-up): `record-feature` writes `status="opened"` for a
- * converge-REQUESTED run too, BEFORE `gw-converge` routes it into `converge-feature` (which flips it to
- * `converging`). During that in-between window the row reads `opened` while the engine instance is
- * still ACTIVE, so a plain "any `opened` is dismissable" rule would offer Dismiss on an in-flight
- * handoff and let a premature ack later drag a still-converging run to History — the SAME failure mode
- * the epic model guards against by excluding its own mid-flight `converging`. The row itself
- * distinguishes the two: a converge-requested run that actually handed off carries
- * `converge=1 AND pr_key IS NOT NULL` — exactly the transient to exclude. Every other `opened` is
- * finished: a raise-only run (`converge=0`), or a keyless `opened` that never satisfied the gateway's
- * `prKey != null` and so fell through to `End` (`pr_key IS NULL`). `eq(col,col)` is the DSL's null-safe
- * `IS NOT NULL` (see {@link isAckStamped}). */
-const openedMidHandoff: Expr = and(eq(col("converge"), lit(1)), eq(col("pr_key"), col("pr_key")));
-export const featureDismissableTerminal: Expr = or(
-  terminalStatusIn(EFFECTIVE_STATUS_COLUMN, STAGE_DONE_STATUSES),
-  and(eq(col(EFFECTIVE_STATUS_COLUMN), lit("opened")), not(openedMidHandoff)),
+ * Why (issue #808 follow-up): `record-feature` writes `status="opened"` for a converge-REQUESTED run
+ * too, BEFORE `gw-converge` routes it into `converge-feature` (which flips it to `converging`). During
+ * that in-between window the row reads `opened` while the engine instance is still ACTIVE, so a plain
+ * "any `opened` is dismissable" rule would offer Dismiss on an in-flight handoff and let a premature
+ * ack later drag a still-converging run to History — the SAME failure mode the epic model guards
+ * against by excluding its own mid-flight `converging`. The row itself distinguishes the two: a
+ * converge-requested run that actually handed off carries `converge=1 AND pr_key IS NOT NULL` — exactly
+ * the transient to exclude. Every other `opened` is finished: a raise-only run (`converge=0`), or a
+ * keyless `opened` that never satisfied the gateway's `prKey != null` and so fell through to `End`
+ * (`pr_key IS NULL`). The status guard (`derived_status = 'opened'`) scopes the exclusion to `opened`
+ * ONLY, so a genuinely-terminal row (e.g. `merged`) with `converge=1 AND pr_key` stays dismissable.
+ * `eq(col,col)` is the DSL's null-safe `IS NOT NULL` (see {@link isAckStamped}). A run stranded in this
+ * window by an out-of-band termination is reconciled to terminal by `pollFeatureDelivery`'s handoff
+ * edge (app/service.ts), which owns its liveness — so excluding it here never wedges it in Active. */
+const openedMidHandoff: Expr = and(
+  eq(col(EFFECTIVE_STATUS_COLUMN), lit("opened")),
+  eq(col("converge"), lit(1)),
+  eq(col("pr_key"), col("pr_key")),
+);
+
+/** The feature DISMISSABLE-terminal PREDICATE — the epic read model's mid-flight refinement
+ * (app/planReadModel.ts / app/listBucket.ts) applied to features. A row is dismissable-terminal IFF its
+ * effective (terminal-folded) status is in the ONE canonical {@link FEATURE_ACK_TERMINAL_STATUSES} set
+ * (the pipeline-`Done` set PLUS `opened`) AND it is NOT a mid-handoff `opened` transient
+ * ({@link openedMidHandoff}). Built from the single {@link FEATURE_ACK_TERMINAL_STATUSES} source of
+ * truth — never a re-listed copy of its members — so a newly-acknowledgeable status added there flows
+ * through to `list_bucket`/`ack_open` without a second edit that could drift (issue #808 review). */
+export const featureDismissableTerminal: Expr = and(
+  terminalStatusIn(EFFECTIVE_STATUS_COLUMN, FEATURE_ACK_TERMINAL_STATUSES),
+  not(openedMidHandoff),
 );
 
 /** The Active/History partition: `history` IFF the row is DISMISSABLE-terminal AND has been

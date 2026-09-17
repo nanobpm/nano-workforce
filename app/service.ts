@@ -2271,7 +2271,20 @@ export async function pollPromotion(data: DataLayer, engine: EngineClient, token
  *    `converging` run is untouched by this fold. Liveness is read off the ADR-0065 derived tracking
  *    VIEW (`derived_status`), so a run TERMINATED out of band (folding `derived_status` → `abandoned`)
  *    is left to the `onTerminated` edge and never re-queried every pass. Writes only on a real
- *    COMPLETED read (idempotent — a pass over a still-active or already-terminal run is a no-op). */
+ *    COMPLETED read (idempotent — a pass over a still-active or already-terminal run is a no-op).
+ *
+ * 3. MID-HANDOFF `opened` → `abandoned` (from the engine instance; PR #809 review). `record-feature`
+ *    writes base `status = opened` for a converge-REQUESTED run too, BEFORE `gw-converge` hands it to
+ *    `converge-feature` (which flips it to `converging`). That transient `opened` + `converge=1` +
+ *    `pr_key` window is NOT dismissable (`featureReadModel` excludes it so a premature ack can't drag a
+ *    still-converging run to History), yet `opened` is no `instanceTracking` activeStatus and neither
+ *    edge (1) nor (2) scans it — so an instance TERMINATED mid-handoff would strand the row in Active
+ *    forever with `ack_open=0` and no owner. This owns that liveness: a mid-handoff row can only LEAVE
+ *    `opened` by writing `converging`, so a non-ACTIVE instance still reading `opened` means the
+ *    handoff was interrupted — fold it to the terminal `abandoned` (mirroring `onTerminated`). A
+ *    still-ACTIVE instance is left for `converge-feature`. Read off the derived tracking VIEW so an
+ *    out-of-band fold is not re-queried; scoped to `converge=1 AND pr_key` (a raise-only or keyless
+ *    `opened` is genuinely terminal, owned by its own dismissable edge). */
 export async function pollFeatureDelivery(data: DataLayer, engine: Pick<EngineClient, "searchProcessInstances">) {
   // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
   // Read the ADR-0065 derived edge (`derived_status`) so a terminated run reads `abandoned`.
@@ -2314,6 +2327,37 @@ export async function pollFeatureDelivery(data: DataLayer, engine: Pick<EngineCl
       await foldCompletedFeatureRun(data, run.feature_key, processKey, status, label);
     } catch (err) {
       console.error(`[poller] feature completion ${run.feature_key}: ${err}`);
+    }
+  }
+  // Edge (3): mid-handoff `opened` → `abandoned` for a run whose instance died before convergence (PR
+  // #809 review, issue #808 follow-up). `record-feature` writes base `status="opened"` for a
+  // converge-REQUESTED run TOO, BEFORE `gw-converge` hands it to `converge-feature` (which flips it to
+  // `converging`). That transient `opened` + `converge=1` + non-null `pr_key` window is deliberately
+  // NOT dismissable (`featureReadModel` excludes it, so a premature ack can't drag a still-converging
+  // run to History) — but `opened` is not an `instanceTracking` activeStatus (nano.app.json), and
+  // neither the converging edge (1) nor the running edge (2) scans it, so an instance TERMINATED in
+  // that window would strand the row in Active FOREVER with `ack_open=0` and no reconciler. This edge
+  // owns that liveness: a mid-handoff row can only LEAVE `opened` by writing `converging` (a clean
+  // handoff) — so if its instance is no longer ACTIVE while the row still reads `opened`, the handoff
+  // was interrupted (out-of-band terminate / crash) and the run is folded to the terminal `abandoned`
+  // (the same edge `instanceTracking.onTerminated` applies to a tracked run's out-of-band
+  // termination). A still-ACTIVE instance is left untouched — `converge-feature` will advance it. Read
+  // the derived tracking VIEW so a row already folded `abandoned` out of band is skipped and never
+  // re-queried. Guarded CAS on the OLD `process_key` + `status='opened'`, so a concurrent
+  // `startFeature` re-seed is a no-op, never a clobber. Scoped to `converge=1 AND pr_key` — a
+  // raise-only (`converge=0`) or keyless (`pr_key IS NULL`) `opened` is genuinely terminal and owned
+  // by its own dismissable edge, so it is never queried here.
+  for (const run of await featureRunsTracking(data).find({ status: "opened" })) {
+    if (!run.process_key || !run.pr_key || run.converge !== 1) continue;
+    if (run.derived_status !== "opened") continue;
+    const processKey = run.process_key;
+    try {
+      const snapshots = await engine.searchProcessInstances({ processInstanceKeys: [processKey] });
+      const state = snapshots.find((s) => String(s.processInstanceKey) === processKey)?.state ?? null;
+      if (state === "ACTIVE") continue; // still mid-handoff — converge-feature will advance it
+      await foldCompletedFeatureRun(data, run.feature_key, processKey, "abandoned", "handoff interrupted", "opened");
+    } catch (err) {
+      console.error(`[poller] feature handoff ${run.feature_key}: ${err}`);
     }
   }
 }

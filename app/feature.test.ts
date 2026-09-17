@@ -55,19 +55,19 @@ function memData(stores: Record<string, { rows: any[]; key: string }>) {
     // rows — a base row with no explicitly-seeded `derived_status` folds `derived_status := status`.
     table: withTrackingViews((name: string, key: string) =>
       memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
-    // Minimal `open().exec()` for the ONE guarded CAS the COMPLETED fold issues
-    // (`foldCompletedFeatureRun`), so the re-seed-window regression below can drive the real CAS
-    // predicate (same feature_key + process_key + status='running') against the mid-reseed row.
+    // Minimal `open().exec()` for the guarded CAS folds (`foldCompletedFeatureRun`), so the re-seed-
+    // window regression below can drive the real CAS predicate (same feature_key + process_key +
+    // status = the observed transient, now a bound param) against the mid-reseed row.
     open: () => ({
       exec: (sql: string, params: any[]) => {
-        if (!/UPDATE "feature_runs" SET .* WHERE "feature_key" = \? AND "process_key" = \? AND "status" = 'running'/.test(sql)) {
+        if (!/UPDATE "feature_runs" SET .* WHERE "feature_key" = \? AND "process_key" = \? AND "status" = \?/.test(sql)) {
           throw new Error(`memData.exec: unhandled sql: ${sql}`);
         }
-        const [status, label, updated_at, feature_key, process_key] = params;
+        const [status, label, updated_at, feature_key, process_key, expect_status] = params;
         const rows = stores.feature_runs?.rows ?? [];
         let changed = 0;
         for (const r of rows) {
-          if (r.feature_key === feature_key && r.process_key === process_key && r.status === "running") {
+          if (r.feature_key === feature_key && r.process_key === process_key && r.status === expect_status) {
             r.status = status;
             r.delivery_label = label;
             r.updated_at = updated_at;

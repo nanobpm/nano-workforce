@@ -253,32 +253,35 @@ export const FEATURE_BLOCKED_ELEMENT = "feature-blocked";
  * that reproduces the reconciler bypass). */
 export const featureRuns = (data: DataLayer) => data.table<FeatureRun>("feature_runs", "feature_key");
 
-/** Guarded CAS fold of a COMPLETED feature run to its terminal delivery `status` + `delivery_label`
+/** Guarded CAS fold of a settled feature run to its terminal delivery `status` + `delivery_label`
  * (issue #808). This is NOT a blind `featureRuns(data).update(feature_key, …)`: the poller reads the
  * engine instance state (`searchProcessInstances`) BEFORE it writes, and in that window `startFeature`
  * can re-seed the SAME `feature_key` row to a FRESH `running` incarnation with a NEW `process_key`
  * (the old instance completed, a resubmit relaunched). A blind write keyed on `feature_key` alone
  * would clobber that newer incarnation to `opened`/`skipped` while its new instance is still active.
  * The single guarded UPDATE requires the row to still be the exact incarnation we read (same
- * `feature_key` + `process_key` + `status = 'running'`), so a lost race matches zero rows and is a
- * no-op. This is safe across the FULL re-seed window because `startFeature` clears `process_key` to
- * NULL atomically with its `status = 'running'` reset (issue #808) and only reinstalls the new key
- * after `createInstance` returns — so throughout the interval the fresh incarnation carries no key
- * that this guard's OLD `process_key` predicate can match. Mirrors the
- * `markProposalExpired`/`claimRunForLaunch` CAS pattern. Returns whether the write flipped a row
- * (`res.changed > 0`) — `false` means a concurrent re-seed won the race. */
+ * `feature_key` + `process_key` + `status = expectStatus`, the transient the caller observed — the
+ * normally-completing fold reads `running`; the mid-handoff reconcile — {@link pollFeatureDelivery}'s
+ * handoff edge — reads `opened`), so a lost race matches zero rows and is a no-op. This is safe across
+ * the FULL re-seed window because `startFeature` clears `process_key` to NULL atomically with its
+ * `status = 'running'` reset (issue #808) and only reinstalls the new key after `createInstance`
+ * returns — so throughout the interval the fresh incarnation carries no key that this guard's OLD
+ * `process_key` predicate can match. Mirrors the `markProposalExpired`/`claimRunForLaunch` CAS pattern.
+ * Returns whether the write flipped a row (`res.changed > 0`) — `false` means a concurrent re-seed won
+ * the race, OR the observed transient had already advanced. */
 export async function foldCompletedFeatureRun(
   data: DataLayer,
   featureKey: string,
   processKey: string,
   status: string,
   label: string,
+  expectStatus: FeatureRunStatus = "running",
 ): Promise<boolean> {
   const res = await data
     .open()
     .exec(
-      `UPDATE "feature_runs" SET "status" = ?, "delivery_label" = ?, "updated_at" = ? WHERE "feature_key" = ? AND "process_key" = ? AND "status" = 'running'`,
-      [status, label, new Date().toISOString(), featureKey, processKey],
+      `UPDATE "feature_runs" SET "status" = ?, "delivery_label" = ?, "updated_at" = ? WHERE "feature_key" = ? AND "process_key" = ? AND "status" = ?`,
+      [status, label, new Date().toISOString(), featureKey, processKey, expectStatus],
     );
   return res.changed > 0;
 }
