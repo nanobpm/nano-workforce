@@ -317,6 +317,8 @@
           <zeebe:output source="=(if scopePending = true then answer else scopeAnswer)" target="scopeAnswer" />
           <zeebe:output source="=0" target="huskRetries" />
           <zeebe:output source="=false" target="reviewStale" />
+          <zeebe:output source="=null" target="completedUserTaskKey" />
+          <zeebe:output source="=null" target="completedCompletionId" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_answerRecord</bpmn:incoming>

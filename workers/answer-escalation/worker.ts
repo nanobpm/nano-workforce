@@ -154,7 +154,9 @@ const handler: AppJobHandler<In> = async (job, app) => {
  *  is the row with that id, unambiguous even when both racers submitted the IDENTICAL answer (answer
  *  correlation alone cannot separate two same-answer rows on one `user_task_key`; the higher-id one may
  *  be the loser). A pre-#806-fix out-of-band resume that carried no `completedCompletionId` falls back
- *  to the exact `completedUserTaskKey` + winning-answer correlation. The KIND (`human`/`agent`, ADR
+ *  to the exact `completedUserTaskKey` + winning-answer correlation, and attributes ONLY when that
+ *  leaves exactly one candidate — an ambiguous same-answer set fails open rather than guess a winner.
+ *  The KIND (`human`/`agent`, ADR
  *  0046) is preserved so a later auto-resume replays with the ORIGINAL attribution and never launders
  *  an agent decision into a human one. `undefined` (fails open to a fresh human task) when the identity
  *  is unavailable or no ledger row exactly matches — rather than attribute a wrong one. */
@@ -172,17 +174,19 @@ async function latestAdjudicator(app: Parameters<AppJobHandler<In>>[1], processI
   }
   // Fallback for a resume that carried no completion id (a pre-fix / out-of-band token): require the
   // carried user-task identity, then — when the winning answer is known — keep only rows whose recorded
-  // answer matches it, dropping the same-task losing racer whose recorded submission differs.
+  // answer matches it, dropping the same-task losing racer whose recorded submission differs. Without a
+  // completion id there is no evidence WHICH row won, so attribute ONLY when the candidate set is
+  // exactly one (Copilot review of #806): more than one same-answer row on this `user_task_key` is the
+  // very ambiguity the completion id was added to resolve — picking the newest could attribute to the
+  // losing racer — so return undefined and fail open to a human rather than guess.
   if (completedUserTaskKey == null || completedUserTaskKey === "") return undefined;
   let candidates = rows.filter((r) => String(r.user_task_key) === completedUserTaskKey);
   if (winningAnswer != null && winningAnswer !== "") {
     candidates = candidates.filter((r) => completionAnswer(r.variables_json) === winningAnswer);
   }
-  let newest: { id: number; actor_id: string; actor_kind: string } | undefined;
-  for (const r of candidates) {
-    if (!newest || r.id > newest.id) newest = r;
-  }
-  return newest ? { id: newest.actor_id, kind: newest.actor_kind } : undefined;
+  if (candidates.length !== 1) return undefined;
+  const only = candidates[0];
+  return { id: only.actor_id, kind: only.actor_kind };
 }
 
 /** The trimmed `answer` field recorded in a completion's `variables_json`, or undefined when the JSON

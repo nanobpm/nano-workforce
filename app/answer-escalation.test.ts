@@ -188,10 +188,27 @@ test("no ledger row matches the winning answer → null adjudicator (fails open)
   assertEquals(adjudications[0].adjudicated_kind, null, "no wrong kind is laundered in");
 });
 
+// --- Copilot review of #806: the legacy/out-of-band fallback (no `completedCompletionId`) selected the
+// NEWEST candidate when several completions shared this task key AND answer. Without a completion id
+// there is no evidence which row won, so the newest could be the LOSER. Attribute ONLY when exactly one
+// candidate remains; otherwise fail open to a human. ---
+
+test("an ambiguous same-answer fallback (>1 candidate, no completion id) fails open, never picks newest (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications, completions } = fakeApp(rows);
+  // Two completions on the SAME user_task_key with the IDENTICAL answer and NO carried completion id.
+  // The higher-id row (an agent auto-resume loser not yet rolled back) is NOT provably the winner, so a
+  // "newest" pick could attribute to the loser. With no disambiguating id the only safe answer is none.
+  completions.push({ id: 50, process_instance_key: "pi-1", user_task_key: "ut-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  completions.push({ id: 51, process_instance_key: "pi-1", user_task_key: "ut-1", actor_id: "senior-agent", actor_kind: "agent", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-1" } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 1, "the adjudication is still recorded (a real convergence answer)");
+  assertEquals(adjudications[0].adjudicated_by, null, "an ambiguous same-answer set records a null adjudicator, never the newest guess");
+  assertEquals(adjudications[0].adjudicated_kind, null, "no wrong kind is laundered in");
+});
+
 // --- Copilot review of #806: the exact identity of the completion that resumed THIS wait-answer is
-// carried on the token (`completedUserTaskKey`), because a convergence-loop instance is REUSED across
-// rounds — so process-instance + answer alone can collide with an older round's completion or a delayed
-// same-answer redelivery bearing a higher id. Require an EXACT `user_task_key` match. ---
 
 test("excludes an older round's same-answer completion; attributes by exact user-task identity (#806 review)", async () => {
   const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];

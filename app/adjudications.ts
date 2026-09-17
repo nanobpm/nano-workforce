@@ -15,8 +15,10 @@
 //   • `pr.answer-escalation` (record-answer) calls `recordAdjudication` on answering a `wait-answer`,
 //     persisting the settled answer + adjudicator.
 //   • the poller (`pollUserTasks`) calls `matchAdjudication` before surfacing a NEW `wait-answer`;
-//     on a fingerprint match it auto-resumes through the same `completeEscalationAsHuman` door a
-//     human uses, attributed to the prior adjudicator.
+//     on a fingerprint match it auto-resumes through `completeEscalationAutoApplied` — which shares the
+//     canonical `completeUserTaskAttributed` door a human's `completeEscalationAsHuman` uses, but records
+//     the completion `auto_applied`/`reversible` (never laundering the replay into a first-class human
+//     decision) — attributed to the prior adjudicator.
 import type { DataLayer } from "@nanobpm/urban";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { questionFingerprint } from "./github.ts";
@@ -74,22 +76,7 @@ export async function recordAdjudication(
   const fp = questionFingerprint(question);
   const existing = await prAdjudications(data).find({ pr_key: input.prKey, question_fingerprint: fp });
   if (existing.length > 0) {
-    const prior = existing[0];
-    const priorBy = prior.adjudicated_by?.trim();
-    const nowBy = input.adjudicatedBy?.trim();
-    // Heal an UNKNOWN-provenance row (issue #806 review). The prior answer could not be attributed, so
-    // auto-resume fails open and the question re-parks a human every round; a now-known adjudicator's
-    // answer promotes the row to a replayable decision. Only heal blank→known — a known adjudicator is
-    // never overwritten (INSERT-if-absent preserves the ORIGINAL). Update answer + attribution together
-    // so the replayed decision is the human's, not the earlier uncorrelated one.
-    if (!priorBy && nowBy) {
-      await prAdjudications(data).update(prior.id, {
-        answer,
-        adjudicated_by: nowBy,
-        adjudicated_kind: input.adjudicatedKind?.trim() || null,
-        adjudicated_at: new Date().toISOString(),
-      });
-    }
+    await healBlankProvenance(data, existing[0], answer, input);
     return;
   }
   try {
@@ -110,5 +97,35 @@ export async function recordAdjudication(
     // ONE canonical fence classifier (`app/dbFence.ts`), the same pattern as `deliveryConnector`'s
     // claim insert and `WorldStore`'s checkpoint insert (derivation over duplication).
     if (!isUniqueConstraintFence(err)) throw err;
+    // A fence collision is NOT always a pure no-op: if the racer that WON the insert wrote an
+    // UNKNOWN-provenance row and WE carry a known adjudicator, the sequential-branch healing above never
+    // ran — the row would stay non-replayable and re-park a human forever (issue #806 review). Re-read
+    // the winner and apply the SAME blank→known promotion the sequential path would have. Re-read
+    // (rather than trust our pre-insert `find`, which saw no row) so we heal the ACTUAL winning row.
+    const winner = await prAdjudications(data).find({ pr_key: input.prKey, question_fingerprint: fp });
+    if (winner.length > 0) await healBlankProvenance(data, winner[0], answer, input);
   }
+}
+
+/** Promote an UNKNOWN-provenance adjudication row to a replayable decision (issue #806 review). The
+ *  prior answer could not be attributed, so auto-resume fails open and the question re-parks a human
+ *  every round; a now-known adjudicator's answer heals the row — its answer AND attribution together, so
+ *  the replayed decision is the human's, not the earlier uncorrelated one. Only heal blank→known: a row
+ *  that ALREADY carries known provenance is immutable (INSERT-if-absent preserves the ORIGINAL). A no-op
+ *  when the prior row is already attributed or the incoming answer is still unattributed. */
+async function healBlankProvenance(
+  data: DataLayer,
+  prior: PrAdjudicationRow,
+  answer: string,
+  input: { adjudicatedBy: string | undefined; adjudicatedKind: string | undefined },
+): Promise<void> {
+  const priorBy = prior.adjudicated_by?.trim();
+  const nowBy = input.adjudicatedBy?.trim();
+  if (priorBy || !nowBy) return;
+  await prAdjudications(data).update(prior.id, {
+    answer,
+    adjudicated_by: nowBy,
+    adjudicated_kind: input.adjudicatedKind?.trim() || null,
+    adjudicated_at: new Date().toISOString(),
+  });
 }

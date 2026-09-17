@@ -57,3 +57,27 @@ test("the two answer loops stamp DISTINCT answerContext values", () => {
   assert(merge.includes(`&#34;merge&#34;`), "merge loop stamps merge");
   assert(!merge.includes(`&#34;convergence&#34;`), "merge loop must NOT stamp convergence");
 });
+
+// Model-drift guard for the one-shot completion-identity handoff (Copilot review of #806).
+// `completeUserTaskAttributed` stamps `completedUserTaskKey`/`completedCompletionId` onto the resumed
+// convergence instance's variables, and record-answer reads them to pin adjudication attribution to the
+// exact winning completion. But the convergence instance is REUSED across rounds, so if record-answer
+// did not CLEAR them after consuming them, a later metadata-less (direct/legacy) completion would
+// inherit the PREVIOUS round's `completedCompletionId` and `latestAdjudicator` would take the exact-id
+// branch, attributing the new answer to the OLD completion instead of failing open. The `=null` outputs
+// make the handoff one-shot; the worker tests inject these vars directly and so cannot see the clear.
+test("record-answer CLEARS the one-shot completion-identity handoff vars after consuming them (#806 review)", () => {
+  const block = serviceTask("convergence-loop.bpmn", "record-answer");
+  assert(
+    block.includes(`<zeebe:input source="=completedCompletionId" target="completedCompletionId" />`),
+    "record-answer must READ completedCompletionId to pin exact-winner attribution",
+  );
+  assert(
+    block.includes(`<zeebe:output source="=null" target="completedUserTaskKey" />`),
+    "record-answer must CLEAR completedUserTaskKey so a later round cannot inherit a stale handoff",
+  );
+  assert(
+    block.includes(`<zeebe:output source="=null" target="completedCompletionId" />`),
+    "record-answer must CLEAR completedCompletionId so a later metadata-less completion fails open, not mis-attributes to the old completion",
+  );
+});

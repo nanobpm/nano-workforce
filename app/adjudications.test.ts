@@ -184,3 +184,86 @@ test("recordAdjudication: a NON-fence insert error still propagates (#806 review
   }
   assertEquals(threw, true, "a non-fence error is not swallowed");
 });
+
+test("recordAdjudication: heals the winner on a UNIQUE-fence collision when the winner is unknown-provenance and we are known (#806 review)", async () => {
+  // The find-then-insert lost the UNIQUE race: an uncorrelated (unknown-provenance) answer job inserted
+  // the row between our empty read and our write, so our insert hits the fence. Because WE carry a known
+  // adjudicator, the sequential-branch healing never ran — so the catch must re-read the winner and apply
+  // the SAME blank→known promotion, or the row stays non-replayable and re-parks a human forever.
+  let inserted = false;
+  const winner: PrAdjudicationRow = {
+    id: 7,
+    pr_key: "o/r#1",
+    question_fingerprint: questionFingerprint("Which retry cap?"),
+    answer: "Cap at 3.",
+    adjudicated_by: null, // the racer that won the insert had UNKNOWN provenance
+    adjudicated_kind: null,
+    adjudicated_at: "2025-01-01T00:00:00.000Z",
+  };
+  const updates: Array<{ id: number; patch: Record<string, unknown> }> = [];
+  const data = {
+    table(name: string) {
+      if (name !== "pr_adjudications") throw new Error(`unexpected table ${name}`);
+      return {
+        async find() {
+          // Empty until the concurrent racer's insert has landed (i.e. after our own insert fenced).
+          return inserted ? [winner] : ([] as PrAdjudicationRow[]);
+        },
+        async insert() {
+          inserted = true; // the racer's row is now visible to a re-read
+          throw new Error("UNIQUE constraint failed: pr_adjudications.pr_key, pr_adjudications.question_fingerprint");
+        },
+        async update(id: number, patch: Record<string, unknown>) {
+          updates.push({ id, patch });
+          Object.assign(winner, patch);
+        },
+      };
+      // biome-ignore lint/suspicious/noExplicitAny: in-memory table double
+    },
+    // biome-ignore lint/suspicious/noExplicitAny: in-memory table double
+  } as any;
+  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+  assertEquals(updates.length, 1, "the fenced-out known writer heals the unknown-provenance winner");
+  assertEquals(winner.adjudicated_by, "alice", "provenance is healed to the known adjudicator after the fence");
+  assertEquals(winner.adjudicated_kind, "human", "the healed row carries the known adjudicator kind");
+  assertEquals(winner.answer, "Cap at 5.", "the healed row replays the human's answer, not the racer's uncorrelated one");
+});
+
+test("recordAdjudication: a UNIQUE-fence collision against an already-known winner is a pure no-op (#806 review)", async () => {
+  // If the fence winner already carries KNOWN provenance, the loser must NOT overwrite it — the fence is
+  // the idempotent no-op the INSERT-if-absent contract promises (the ORIGINAL decision stands).
+  let inserted = false;
+  const winner: PrAdjudicationRow = {
+    id: 7,
+    pr_key: "o/r#1",
+    question_fingerprint: questionFingerprint("Which retry cap?"),
+    answer: "Cap at 3.",
+    adjudicated_by: "bob",
+    adjudicated_kind: "human",
+    adjudicated_at: "2025-01-01T00:00:00.000Z",
+  };
+  const updates: Array<{ id: number; patch: Record<string, unknown> }> = [];
+  const data = {
+    table() {
+      return {
+        async find() {
+          return inserted ? [winner] : ([] as PrAdjudicationRow[]);
+        },
+        async insert() {
+          inserted = true;
+          throw new Error("UNIQUE constraint failed: pr_adjudications.pr_key, pr_adjudications.question_fingerprint");
+        },
+        async update(id: number, patch: Record<string, unknown>) {
+          updates.push({ id, patch });
+          Object.assign(winner, patch);
+        },
+      };
+      // biome-ignore lint/suspicious/noExplicitAny: in-memory table double
+    },
+    // biome-ignore lint/suspicious/noExplicitAny: in-memory table double
+  } as any;
+  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+  assertEquals(updates.length, 0, "an already-attributed fence winner is immutable");
+  assertEquals(winner.adjudicated_by, "bob", "the ORIGINAL known adjudicator stands");
+  assertEquals(winner.answer, "Cap at 3.", "the ORIGINAL answer stands");
+});
