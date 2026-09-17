@@ -266,7 +266,7 @@ export const featureRuns = (data: DataLayer) => data.table<FeatureRun>("feature_
  * after `createInstance` returns — so throughout the interval the fresh incarnation carries no key
  * that this guard's OLD `process_key` predicate can match. Mirrors the
  * `markProposalExpired`/`claimRunForLaunch` CAS pattern. Returns whether the write flipped a row
- * flipped a row (`res.changed > 0`) — `false` means a concurrent re-seed won the race. */
+ * (`res.changed > 0`) — `false` means a concurrent re-seed won the race. */
 export async function foldCompletedFeatureRun(
   data: DataLayer,
   featureKey: string,
