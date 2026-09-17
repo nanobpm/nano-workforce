@@ -13,8 +13,8 @@
 --
 -- This mirrors `worker_durable_resume` (migration 052): one FK-free table keyed by the worker
 -- instance (`register.instance` / the enrol `instance`). FK-free by design — enrolment is per-worker
--- and connection-agnostic, with no parent row to reference. EXPAND (additive) phase: one new table +
--- its index; nothing is dropped or renamed. Migration-prefix block 107–108 pre-assigned to this slice
+-- and connection-agnostic, with no parent row to reference. EXPAND (additive) phase: one new table;
+-- nothing is dropped or renamed. Migration-prefix block 107–108 pre-assigned to this slice
 -- (issue #802) off the origin/main high-water mark (104). The runner wraps each file in its own
 -- transaction, so this file must NOT contain BEGIN/COMMIT.
 
@@ -28,8 +28,3 @@ CREATE TABLE IF NOT EXISTS worker_harness_protocol (
   harness_protocol  INTEGER,
   updated_at        TEXT NOT NULL
 );
-
--- The gate scans for "which enrolled workers are below the minimum protocol?" — index the version so
--- that read is a covered scan rather than a table walk.
-CREATE INDEX IF NOT EXISTS idx_worker_harness_protocol_version
-  ON worker_harness_protocol(harness_protocol);

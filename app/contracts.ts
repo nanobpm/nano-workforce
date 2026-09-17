@@ -570,6 +570,14 @@ export const TYPE_CONTRACTS = {
       "The `durable-resume` ENROLMENT GATE (issue #325, ADR 0062 Slice 5/5, the INTEGRATION slice). `durable-resume` is a worker attribute declared at enrolment (ADR 0056 §7 — capability gates enrolment, NEVER the routing token `network.role#seat`), recorded per worker instance in `worker_durable_resume` (migration 052). The enrol door (`operations/enrolAgenticWorker.ts`) records it via `recordEnrolment`; `app/service.ts` consults `fleetSupportsDurableResume` before emitting the world-restore `commitSha` (the `io.nanobpm.agentTask.repository` envelope) so a re-leased `senior:pr-review` round RESUMES only on a participating fleet and gracefully DEGRADES (redriven from scratch) otherwise. Consume this ONE module for the durable-resume gate — do not re-declare a synonym or read the flag off a second store.",
     module: "app/durableResume.ts",
   },
+  HarnessProtocolRegistry: {
+    category: "type",
+    name: "HarnessProtocolRegistry",
+    owner: "app/harnessProtocol.ts",
+    semantics:
+      "The durable registry of per-worker advertised harness protocol version (issue #802), over `worker_harness_protocol` (migration 107) through the RAD `Table<T>` surface — mirroring {@link DurableResumeRegistry}. `harness-protocol` is a worker ATTRIBUTE advertised at enrolment (ADR 0056 §7 — capability gates enrolment, NEVER the routing token `network.role#seat`), recorded per worker instance by `recordEnrolment` from the enrol door (`operations/enrolAgenticWorker.ts`); a MISSING version is first-class STALE. It is the ONE shared source consumed by enrolment (record), supply (`getAgenticSupply` staleness verdict) and registry reporting (`computeRegistryReport` → `staleWorkers`, which folds a non-empty stale set into the overall red drain signal). The bounded `protocolsFor(instances)` read scopes to the live presence keys via a single `WHERE instance IN (…)` query — never an N+1 per-worker `findOne`. Consume this ONE module for the harness-protocol gate — do not re-declare a synonym or read the version off a second store.",
+    module: "app/harnessProtocol.ts",
+  },
 } as const satisfies Record<string, TypeContract>;
 
 export const CAPABILITY_URL_CONTRACTS = {
