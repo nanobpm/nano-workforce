@@ -65,21 +65,22 @@ function memData(seed: any[] = []) {
 
 test("recordAdjudication: persists one settled row keyed by the canonical fingerprint", async () => {
   const { data, rows } = memData();
-  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice" });
+  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
   assertEquals(rows.length, 1);
   assertEquals(rows[0].pr_key, "o/r#1");
   assertEquals(rows[0].question_fingerprint, questionFingerprint("Which retry cap?"));
   assertEquals(rows[0].answer, "Cap at 5.");
   assertEquals(rows[0].adjudicated_by, "alice");
+  assertEquals(rows[0].adjudicated_kind, "human", "the adjudicator's kind is preserved for a faithful auto-resume attribution");
   assertEquals(typeof rows[0].adjudicated_at, "string");
 });
 
 test("recordAdjudication: INSERT-if-absent — a second answer to the identical question keeps the first", async () => {
   const { data, rows } = memData();
-  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice" });
+  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
   // A later auto-resume re-runs record-answer with the SAME fingerprint (whitespace-variant) — the
   // original adjudicator/answer must survive rather than be overwritten by the auto-apply attribution.
-  await recordAdjudication(data, { prKey: "o/r#1", question: "which retry cap?", answer: "Cap at 9.", adjudicatedBy: "auto-applied" });
+  await recordAdjudication(data, { prKey: "o/r#1", question: "which retry cap?", answer: "Cap at 9.", adjudicatedBy: "auto-applied", adjudicatedKind: "human" });
   assertEquals(rows.length, 1, "no duplicate row for the same (pr, question)");
   assertEquals(rows[0].answer, "Cap at 5.", "the ORIGINAL answer is preserved");
   assertEquals(rows[0].adjudicated_by, "alice", "the ORIGINAL adjudicator is preserved");
@@ -87,6 +88,6 @@ test("recordAdjudication: INSERT-if-absent — a second answer to the identical 
 
 test("recordAdjudication: a blank answer is not a decision and is not recorded", async () => {
   const { data, rows } = memData();
-  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "   ", adjudicatedBy: "alice" });
+  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "   ", adjudicatedBy: "alice", adjudicatedKind: "human" });
   assertEquals(rows.length, 0);
 });

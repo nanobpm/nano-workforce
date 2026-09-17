@@ -134,21 +134,82 @@ test("a blank answer is recorded as NULL, not an empty string", async () => {
 test("persists a durable adjudication of the answered question, attributed to the completer (#806)", async () => {
   const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
   const { app, adjudications, completions } = fakeApp(rows);
-  // The resume's completion stamped a ledger row for this process instance (alice answered).
-  completions.push({ id: 1, process_instance_key: "pi-1", element_id: "wait-answer", actor_id: "alice" });
-  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5." } };
+  // The resume's completion stamped a ledger row for this process instance (alice, a human, answered).
+  completions.push({ id: 1, process_instance_key: "pi-1", element_id: "wait-answer", actor_id: "alice", actor_kind: "human" });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence" } };
   await handler(job as any, app as any);
   assertEquals(adjudications.length, 1, "one durable adjudication row is written");
   assertEquals(adjudications[0].pr_key, "o/r#1");
   assertEquals(adjudications[0].question_fingerprint, questionFingerprint("Which retry cap?"), "keyed by the canonical fingerprint");
   assertEquals(adjudications[0].answer, "Cap at 5.");
   assertEquals(adjudications[0].adjudicated_by, "alice", "attributed to the completer from the ledger");
+  assertEquals(adjudications[0].adjudicated_kind, "human", "the completer's kind is preserved from the ledger");
 });
 
 test("a blank answer records NO adjudication (not a replayable decision) (#806)", async () => {
   const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
   const { app, adjudications } = fakeApp(rows);
-  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "   " } };
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "   ", answerContext: "convergence" } };
   await handler(job as any, app as any);
   assertEquals(adjudications.length, 0);
+});
+
+// --- Copilot review of #806: this ONE worker services both loops (`record-answer` in the convergence
+// loop AND `record-merge-answer` in the merge loop, #256). Only a CONVERGENCE answer may feed the
+// convergence adjudication memory — a merge decision recorded here could be replayed for a later
+// convergence `wait-answer` whose text happens to match, replaying a merge-context answer that was
+// never a convergence adjudication. The originating step stamps `answerContext`. ---
+
+test("a MERGE-loop answer is NOT recorded as a convergence adjudication (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Rebase or merge-commit?" }];
+  const { app, adjudications, updates, prUpdates } = fakeApp(rows);
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Rebase.", answerContext: "merge" } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 0, "a merge-context answer never contaminates the convergence adjudication memory");
+  assertEquals(updates[0].patch.status, "answered", "the escalation row is still reconciled");
+  assertEquals(prUpdates[0].patch.status, "converging", "the PR row is still moved off `escalated`");
+});
+
+test("an absent answerContext (legacy) is NOT recorded as a convergence adjudication (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications } = fakeApp(rows);
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5." } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 0, "only an explicit convergence context feeds the adjudication memory");
+});
+
+test("records the adjudication BEFORE the escalation row transitions off `open` (crash safety, #806 review)", async () => {
+  // The suppressed advisory: if the adjudication insert happened AFTER the rows flip off `open`, a
+  // crash in that window would lose the adjudication (a retry finds no open row and returns), so the
+  // answered question could re-escalate after restart. Recording it FIRST + INSERT-if-absent makes a
+  // retry re-record a no-op. Assert the ordering by capturing when each write ran.
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const order: string[] = [];
+  const adjudications: Record<string, unknown>[] = [];
+  const completions = [{ id: 1, process_instance_key: "pi-1", actor_id: "alice", actor_kind: "human" }];
+  const app = {
+    data: {
+      table(name: string) {
+        if (name === "pull_requests") return { async update() { order.push("pr"); } };
+        if (name === "pr_adjudications") {
+          return {
+            async find() { return []; },
+            async insert(r: Record<string, unknown>) { order.push("adjudication"); adjudications.push(r); return 1; },
+          };
+        }
+        if (name === "task_completions") {
+          return { async find(where: Record<string, unknown>) { return completions.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v)); } };
+        }
+        if (name !== "escalations") throw new Error(`unexpected table ${name}`);
+        return {
+          async find() { return rows; },
+          async update() { order.push("escalation"); },
+        };
+      },
+    },
+  };
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence" } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 1, "the adjudication is recorded");
+  assertEquals(order[0], "adjudication", "the adjudication is persisted BEFORE any row transitions off `open`");
 });

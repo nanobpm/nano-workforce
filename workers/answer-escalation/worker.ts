@@ -49,6 +49,13 @@ function nonBlank(v: unknown): string | undefined {
 const handler: AppJobHandler<In> = async (job, app) => {
   const { prKey } = job.variables;
   const answer = nonBlank(job.variables.answer);
+  // This one worker services BOTH loops' answer steps (`record-answer` in the convergence loop AND
+  // `record-merge-answer` in the merge loop, #256). Only a CONVERGENCE answer may feed the durable
+  // adjudication memory the convergence poller replays — a merge-loop decision recorded here would let
+  // a later convergence `wait-answer` with the same text replay a merge-context answer that was never a
+  // convergence adjudication (Copilot review of #806). The originating step stamps `answerContext` via a
+  // literal ioMapping so this reconcile can tell them apart.
+  const isConvergence = nonBlank(job.variables.answerContext) === "convergence";
   const escs = app.data.table<Escalation>("escalations", "id");
   // Retire EVERY still-open escalation for this PR. `pr.persist-escalation` always INSERTs a new
   // open row, so a retry/duplicate activation can leave more than one open — answering only the
@@ -58,6 +65,22 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const open = (await escs.find({ pr_key: prKey, status: "open" })).sort((a, b) => b.id - a.id);
   if (open.length > 0) {
     const ts = new Date().toISOString();
+    // Persist the DURABLE adjudication FIRST, BEFORE the escalation/PR rows transition off `open`
+    // (issue #806, Copilot review — crash safety). `recordAdjudication` is INSERT-if-absent idempotent,
+    // so if the worker crashes after this write but before the row transitions, a retry re-finds the
+    // still-open row and re-records a no-op; whereas recording it LAST would mean a crash in the window
+    // after the rows flip loses the adjudication entirely (the retry finds no open row and returns), so
+    // the answered question could re-escalate after restart. Scoped to convergence answers only.
+    if (isConvergence) {
+      const adjudicator = await latestAdjudicator(app, job.processInstanceKey);
+      await recordAdjudication(app.data, {
+        prKey,
+        question: open[0].question,
+        answer,
+        adjudicatedBy: adjudicator?.id,
+        adjudicatedKind: adjudicator?.kind,
+      });
+    }
     await escs.update(open[0].id, {
       answer: answer ?? null,
       status: "answered",
@@ -72,40 +95,25 @@ const handler: AppJobHandler<In> = async (job, app) => {
     // `/status` inconsistency and a divergence from the merge path both loops are meant to share.
     const prs = app.data.table<PullRequest>("pull_requests", "pr_key");
     await prs.update(prKey, { status: "converging", updated_at: ts });
-
-    // Persist a DURABLE adjudication of the settled question (issue #806) so a later stateless round
-    // that re-derives the IDENTICAL escalation condition auto-resumes with this answer instead of
-    // re-parking a human (PR #800 / proc 46310: the same design question escalated at round 2 and
-    // again at round 13). Keyed by `(prKey, questionFingerprint(question))` — the canonical
-    // normaliser/fingerprint advisory acks use — so only a semantically-identical, already-answered
-    // question is later suppressed. INSERT-if-absent, so the ORIGINAL adjudicator/answer survives the
-    // record-answer re-run a later auto-resume drives. Attribute it to whoever just completed the
-    // `wait-answer`: the newest `task_completions` row this resume's completion stamped for this
-    // process instance (the canonical completion ledger, app/agentCompletion.ts) — a human operator
-    // or an agent assignee (ADR 0046) — falling back to `null` when the ledger row is absent.
-    await recordAdjudication(app.data, {
-      prKey,
-      question: open[0].question,
-      answer,
-      adjudicatedBy: await latestAdjudicator(app, job.processInstanceKey),
-    });
   }
   return {};
 };
 
-/** Who just completed this `wait-answer`: the actor of the newest `task_completions` row the resume's
- *  completion stamped for this process instance (`completeUserTaskAttributed` records the actor +
- *  process-instance key on completion). `undefined` when no ledger row is correlated (e.g. an
- *  out-of-band resume), so the adjudication records a null adjudicator rather than a wrong one. */
-async function latestAdjudicator(app: Parameters<AppJobHandler<In>>[1], processInstanceKey: unknown): Promise<string | undefined> {
+/** Who just completed this `wait-answer`: the `{ id, kind }` of the newest `task_completions` row the
+ *  resume's completion stamped for this process instance (`completeUserTaskAttributed` records the actor
+ *  id + kind + process-instance key on completion). The KIND (`human`/`agent`, ADR 0046) is preserved so
+ *  a later auto-resume replays with the ORIGINAL attribution and never launders an agent decision into a
+ *  human one (Copilot review of #806). `undefined` when no ledger row is correlated (e.g. an out-of-band
+ *  resume), so the adjudication records a null adjudicator rather than a wrong one. */
+async function latestAdjudicator(app: Parameters<AppJobHandler<In>>[1], processInstanceKey: unknown): Promise<{ id: string; kind: string } | undefined> {
   const key = processInstanceKey != null ? String(processInstanceKey) : "";
   if (key === "") return undefined;
   const rows = await taskCompletions(app.data).find({ process_instance_key: key });
-  let newest: { id: number; actor_id: string } | undefined;
+  let newest: { id: number; actor_id: string; actor_kind: string } | undefined;
   for (const r of rows) {
     if (!newest || r.id > newest.id) newest = r;
   }
-  return newest?.actor_id;
+  return newest ? { id: newest.actor_id, kind: newest.actor_kind } : undefined;
 }
 
 export default handler;

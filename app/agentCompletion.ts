@@ -51,6 +51,9 @@ export interface TaskCompletion {
   variables_json: string;
   /** 1 when a human may still override this completion (agent completions). */
   reversible: number;
+  /** 1 when this completion is a machine AUTO-APPLY of a prior durable adjudication (issue #806), not
+   *  a first-hand submission — recorded reversible so a human can always override the replayed answer. */
+  auto_applied: number;
   /** 1 once a human has reverted/overridden it. */
   reverted: number;
   reverted_by: string | null;
@@ -287,6 +290,7 @@ export async function completeUserTaskAttributed(
     variables: Record<string, unknown>;
   },
   actor: Actor,
+  opts?: { autoApplied?: boolean },
 ): Promise<{ completionId: number }> {
   // Normalize + validate the attribution keys upfront so the ledger can never record a row with
   // blank attribution or whitespace-mismatched keys.
@@ -295,7 +299,12 @@ export async function completeUserTaskAttributed(
   const actorId = actor.id.trim();
   if (!actorId) throw new Error("actor id is required");
 
-  const reversible = actor.kind === "agent";
+  // An AUTO-APPLIED replay of a prior durable adjudication (issue #806) is always human-overridable,
+  // regardless of the original actor kind — a machine re-application must never be an unchallengeable
+  // authority, so it is recorded `reversible` (and marked `auto_applied`) even when attributed to a
+  // prior HUMAN adjudicator.
+  const autoApplied = opts?.autoApplied === true;
+  const reversible = autoApplied || actor.kind === "agent";
   const id = await taskCompletions(data).insert({
     user_task_key: userTaskKey,
     process_instance_key: target.processInstanceKey ?? null,
@@ -304,6 +313,7 @@ export async function completeUserTaskAttributed(
     actor_id: actorId,
     variables_json: JSON.stringify(target.variables ?? {}),
     reversible: reversible ? 1 : 0,
+    auto_applied: autoApplied ? 1 : 0,
     reverted: 0,
     reverted_by: null,
     reverted_note: null,
@@ -441,6 +451,41 @@ export async function completeEscalationAsHuman(
     engine,
     { userTaskKey, processInstanceKey: resolved.processInstanceKey, elementId: resolved.elementId, variables: input.variables },
     { kind: "human", id: operatorId },
+  );
+  return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };
+}
+
+/** AUTO-APPLY a prior durable adjudication to a re-derived escalation (issue #806). The convergence
+ *  poller calls this to resume an already-answered `wait-answer` with the recorded answer instead of
+ *  re-parking a human — through the SAME canonical `completeUserTaskAttributed` door, so there is no
+ *  parallel completion path. Unlike `completeEscalationAsHuman` it records the completion `auto_applied`
+ *  (a machine replay, distinguishable from a first-hand submission in the ledger) and PRESERVES the
+ *  prior adjudicator's attribution kind (`human`/`agent`), so replaying an agent-settled decision can
+ *  never launder it into an irreversible human authority (Copilot review of #806). Auto-applied
+ *  completions are always recorded reversible, so a human may override the replayed answer. A key with
+ *  no matching open escalation task is a 404-style no-op. */
+export async function completeEscalationAutoApplied(
+  data: DataLayer,
+  engine: EngineClient,
+  input: { userTaskKey: string; variables: Record<string, unknown>; actor: Actor },
+): Promise<AgentCompleteResult> {
+  const userTaskKey = input.userTaskKey.trim();
+  if (!userTaskKey) return { ok: false, reason: "userTaskKey is required" };
+  const actorId = input.actor.id.trim();
+  if (!actorId) return { ok: false, reason: "actor id is required" };
+
+  const resolved = await resolveEscalationTask(engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS);
+  if (!resolved.ok) return resolved;
+
+  const invalid = validateEscalationVariables(resolved.elementId, input.variables);
+  if (invalid) return { ok: false, reason: invalid };
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey, processInstanceKey: resolved.processInstanceKey, elementId: resolved.elementId, variables: input.variables },
+    { kind: input.actor.kind, id: actorId },
+    { autoApplied: true },
   );
   return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };
 }

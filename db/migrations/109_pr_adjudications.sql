@@ -17,8 +17,11 @@
 --     escalation question (app/github.ts `questionFingerprint`), the SAME line-stable normalisation
 --     advisory acks use; so only a byte/semantic-identical, already-answered question is suppressed
 --     while a materially different question still escalates. No second fingerprint implementation.
---   • answer / adjudicated_by / adjudicated_at — the settled answer, who settled it, and when, so the
---     auto-resume replays the exact decision and attributes it to the original adjudicator.
+--   • answer / adjudicated_by / adjudicated_kind / adjudicated_at — the settled answer, who settled it,
+--     whether they were a `human` or an `agent` (ADR 0046), and when, so the auto-resume replays the
+--     exact decision AND preserves the original attribution kind — a human-settled decision replays as
+--     human, an agent-settled one as agent, so an auto-apply can never launder an agent decision into an
+--     irreversible human authority (Copilot review of #806).
 --
 -- `UNIQUE (pr_key, question_fingerprint)` keeps one settled answer per (PR, question); the surrogate
 -- `id` PK gives the `Table<T>` gateway a single-column key. Forward-only, additive (expand). Numbered
@@ -30,6 +33,7 @@ CREATE TABLE IF NOT EXISTS pr_adjudications (
   question_fingerprint TEXT NOT NULL,
   answer               TEXT,
   adjudicated_by       TEXT,
+  adjudicated_kind     TEXT,
   adjudicated_at       TEXT NOT NULL,
   UNIQUE (pr_key, question_fingerprint)
 );

@@ -10,7 +10,7 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { matchAdjudication, prAdjudications } from "./adjudications.ts";
-import { completeEscalationAsHuman, escalationFormId } from "./agentCompletion.ts";
+import { completeEscalationAutoApplied, escalationFormId } from "./agentCompletion.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
 import {
   CAPS_RESOLVED_MESSAGE,
@@ -585,6 +585,14 @@ export async function submitPr(
     // from the canonical `escalations` row status, so there is no denormalised PR-row pointer to clear.
     for (const e of await escs(data).find({ pr_key: parsed.prKey, status: "open" })) {
       await escs(data).update(e.id, { status: "stale" });
+    }
+    // A fresh convergence run must ALSO start with a clean durable adjudication memory (issue #806,
+    // Copilot review): the auto-resume replays a prior `(PR, question)` answer forever, so a re-opened
+    // PR whose question recurs would silently auto-apply the stale decision and an operator could never
+    // force a fresh one. Invalidate this PR's adjudications on reopen — the insert-if-absent record
+    // re-learns the operator's new answer for the new run.
+    for (const a of await prAdjudications(data).find({ pr_key: parsed.prKey })) {
+      await prAdjudications(data).delete(a.id);
     }
     // Re-open a previously converged/abandoned/merged PR for a fresh convergence run.
     await table.update(parsed.prKey, {
@@ -2855,19 +2863,24 @@ export async function pollUserTasks(
     // Durable adjudication auto-resume (issue #806): before surfacing a NEW convergence `wait-answer`
     // to a human, check whether THIS PR already has a settled adjudication for the SAME question
     // (canonical `questionFingerprint`). If it does, resume the loop with the recorded answer through
-    // the exact `completeEscalationAsHuman` door a human uses — attributed to the prior adjudicator —
-    // instead of re-parking a human on an already-answered question (PR #800 / proc 46310: the same
-    // design question escalated at round 2 and again at round 13). Scoped to the review loop's
-    // `wait-answer` on a real PR key; on any resolution failure the task still projects, so an
-    // un-resumable question always reaches a human (fail-open to the human).
+    // the canonical `completeUserTaskAttributed` door — attributed to the prior adjudicator and marked
+    // `auto_applied` (a machine replay, reversible so a human can still override) so it is never
+    // laundered into a first-hand irreversible human authority (Copilot review of #806) — instead of
+    // re-parking a human on an already-answered question (PR #800 / proc 46310: the same design
+    // question escalated at round 2 and again at round 13). Scoped to the review loop's `wait-answer`
+    // on a real PR key; on any resolution failure the task still projects, so an un-resumable question
+    // always reaches a human (fail-open to the human).
     if (elementId === PR_WAIT_ANSWER_ELEMENT && ctx.subjectType === "pr" && ctx.question && parsePr(ctx.subjectKey)) {
       const adjudication = matchAdjudication(await prAdjudications(data).find({ pr_key: ctx.subjectKey }), ctx.question);
       if (adjudication) {
         try {
-          const resumed = await completeEscalationAsHuman(data, engine, {
+          const resumed = await completeEscalationAutoApplied(data, engine, {
             userTaskKey: rowKey,
             variables: { answer: adjudication.answer },
-            operatorId: adjudication.adjudicated_by?.trim() || "auto-applied",
+            actor: {
+              kind: adjudication.adjudicated_kind === "agent" ? "agent" : "human",
+              id: adjudication.adjudicated_by?.trim() || "auto-applied",
+            },
           });
           if (resumed.ok) {
             resumedByKey.add(rowKey);

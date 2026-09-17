@@ -1,0 +1,15 @@
+-- 110_task_completions_auto_applied.sql — issue #806 (Copilot review): mark an AUTO-APPLIED escalation
+-- completion so it is distinguishable from a fresh human/agent submission in the attribution ledger.
+--
+-- The convergence poller auto-resumes an already-answered `wait-answer` by replaying a durable
+-- adjudication through the SAME `completeUserTaskAttributed` door a human/agent uses (app/service.ts,
+-- issue #806). Without a marker that replay is INDISTINGUISHABLE from a real, first-hand submission in
+-- `task_completions`, and — recorded as an irreversible authority — it could launder an earlier
+-- agent-originated decision into an unchallengeable human one. `auto_applied=1` records "this
+-- completion is a machine replay of a prior decision, not a fresh submission"; the app also records
+-- such completions `reversible=1` so a human can always override an auto-applied answer.
+--
+-- Forward-only, additive (expand): a nullable-defaulted `ADD COLUMN`, so every existing completion
+-- reads back `auto_applied=0` (a genuine first-hand submission). Numbered after 109 in the pre-assigned
+-- 109–110 block (#806); the runner wraps each file in its own transaction, so no BEGIN/COMMIT here.
+ALTER TABLE task_completions ADD COLUMN auto_applied INTEGER NOT NULL DEFAULT 0;

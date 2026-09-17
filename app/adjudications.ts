@@ -31,6 +31,9 @@ export interface PrAdjudicationRow {
   answer: string | null;
   /** Who settled it (the prior adjudicator), attributed on auto-resume. */
   adjudicated_by: string | null;
+  /** Whether the prior adjudicator was a `human` or an `agent` (ADR 0046), preserved so an auto-resume
+   *  replays with the ORIGINAL attribution kind — never laundering an agent decision into a human one. */
+  adjudicated_kind: string | null;
   adjudicated_at: string;
 }
 
@@ -55,7 +58,7 @@ export function matchAdjudication(
  *  answer to the identical question keeps the first settled row. */
 export async function recordAdjudication(
   data: DataLayer,
-  input: { prKey: string; question: string; answer: string | undefined; adjudicatedBy: string | undefined },
+  input: { prKey: string; question: string; answer: string | undefined; adjudicatedBy: string | undefined; adjudicatedKind: string | undefined },
 ): Promise<void> {
   const answer = typeof input.answer === "string" ? input.answer.trim() : "";
   if (answer === "") return;
@@ -69,6 +72,7 @@ export async function recordAdjudication(
     question_fingerprint: fp,
     answer,
     adjudicated_by: input.adjudicatedBy?.trim() || null,
+    adjudicated_kind: input.adjudicatedKind?.trim() || null,
     adjudicated_at: new Date().toISOString(),
   });
 }

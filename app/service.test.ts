@@ -140,6 +140,41 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
   });
 });
 
+// Red/green regression for issue #806 (Copilot review): re-submitting a PR must ALSO invalidate its
+// durable adjudication memory. The auto-resume replays a prior `(PR, question)` answer forever, so a
+// re-opened PR whose question recurs would silently auto-apply the stale decision and an operator
+// could never force a fresh one. `submitPr`'s reopen path clears `pr_adjudications` for the PR.
+test("re-submit of a PR invalidates its durable adjudications (#806 review)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#42";
+    const stores: Record<string, { rows: unknown[]; key: string }> = {
+      pull_requests: {
+        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", title: "t", status: "converged" }],
+        key: "pr_key",
+      },
+      escalations: { rows: [], key: "id" },
+      pr_adjudications: {
+        rows: [
+          { id: 1, pr_key: PR_KEY, question_fingerprint: "fp-a", answer: "prior A", adjudicated_by: "alice", adjudicated_kind: "human", adjudicated_at: "t" },
+          { id: 2, pr_key: "owner/repo#99", question_fingerprint: "fp-b", answer: "other PR", adjudicated_by: "bob", adjudicated_kind: "human", adjudicated_at: "t" },
+        ],
+        key: "id",
+      },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const data = {
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    } as any;
+    const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-9" }) } as any;
+
+    await submitPr(data, engine, { repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", prKey: PR_KEY });
+
+    const remaining = stores.pr_adjudications.rows as Record<string, unknown>[];
+    assertEquals(remaining.length, 1, "this PR's adjudication is invalidated; another PR's is untouched");
+    assertEquals(remaining[0].pr_key, "owner/repo#99", "only the re-submitted PR's adjudications are cleared");
+  });
+});
+
 // Red/green regression for technical-incident surfacing (issue #94). A convergence/merge instance
 // can hit an engine incident that parks the token; until `pollIncidents` nothing on the PR row
 // reflected it, so the grid kept showing "converging" while the run was dead in the water. This

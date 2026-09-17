@@ -111,6 +111,40 @@ test("pollUserTasks: auto-resumes an already-answered wait-answer instead of re-
   const ledger = stores.task_completions ?? [];
   assertEquals(ledger.length, 1, "the auto-resume is recorded in the completion ledger");
   assertEquals(ledger[0].actor_id, "alice", "attributed to the prior adjudicator");
+  assertEquals(ledger[0].actor_kind, "human", "the prior adjudicator's kind is preserved (a human-settled decision)");
+  assertEquals(ledger[0].auto_applied, 1, "the replay is marked auto_applied — distinguishable from a first-hand submission");
+  assertEquals(ledger[0].reversible, 1, "an auto-applied replay is human-overridable");
+});
+
+test("pollUserTasks: auto-resume PRESERVES an agent adjudicator's kind and stays reversible (#806 review)", async () => {
+  // A prior AGENT-settled adjudication (ADR 0046) must replay as an agent completion, never laundered
+  // into an irreversible human authority — the whole point of recording `adjudicated_kind`.
+  const question = "Which retry cap should the husk loop use?";
+  const { data, stores } = memData({
+    pull_requests: [{ pr_key: "o/r#801", status: "escalated", process_key: "rp-801", url: "https://github.com/o/r/pull/801", title: "Converge" }],
+    escalations: [{ id: 1, pr_key: "o/r#801", status: "open", question }],
+    pr_adjudications: [
+      {
+        id: 1,
+        pr_key: "o/r#801",
+        question_fingerprint: questionFingerprint(question),
+        answer: "Cap at 3.",
+        adjudicated_by: "senior-agent",
+        adjudicated_kind: "agent",
+        adjudicated_at: "2025-01-01T00:00:00.000Z",
+      },
+    ],
+  });
+  const { engine, completions } = fakeEngine([{ userTaskKey: "ut-801", elementId: "wait-answer", processInstanceKey: "rp-801" }]);
+
+  await pollUserTasks(data, engine);
+
+  assertEquals(completions.length, 1, "the parked wait-answer is auto-resumed");
+  const ledger = stores.task_completions ?? [];
+  assertEquals(ledger[0].actor_kind, "agent", "the agent adjudicator's kind is preserved — not laundered into a human");
+  assertEquals(ledger[0].actor_id, "senior-agent");
+  assertEquals(ledger[0].auto_applied, 1, "still marked auto_applied");
+  assertEquals(ledger[0].reversible, 1, "still reversible — a human may override the replayed agent answer");
 });
 
 test("pollUserTasks: a DIFFERENT question with no adjudication still escalates to a human (#806)", async () => {
