@@ -557,6 +557,14 @@ export async function revertAgentCompletion(
   //     (`auto_applied=0`, no `source_adjudication_id`) that RECORDED a decision linked back by
   //     `source_completion_id`; invalidate by completion id. Without this the reverted first-hand
   //     answer stays live and the poller re-auto-applies it.
+  //
+  // The by-completion tombstone covers the record-THEN-revert ordering (the decision row already
+  // exists, so the tombstone finds and invalidates it). The MIRROR ordering — a revert that lands
+  // BEFORE the downstream `record-answer` job has inserted the row — is closed on the WRITE side:
+  // `recordAdjudication`/`healBlankProvenance` fence their INSERT/UPDATE on the source completion NOT
+  // being reverted ({@link notRevertedGuard}), so once we flip `reverted` below a late record-answer
+  // affects zero rows and cannot create a live decision linked to this reverted completion (issue #806
+  // review, Copilot). SQLite serialises the two writes, so whichever commits first the other observes.
   if (row.auto_applied && row.source_adjudication_id != null) {
     await invalidateAdjudication(data, row.source_adjudication_id);
   }

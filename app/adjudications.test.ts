@@ -13,6 +13,7 @@ import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
 import { invalidateAdjudication, invalidateAdjudicationByCompletion, matchAdjudication, prAdjudications, type PrAdjudicationRow, recordAdjudication, resetAdjudications } from "./adjudications.ts";
+import { taskCompletions } from "./agentCompletion.ts";
 import { questionFingerprint } from "./github.ts";
 
 function row(over: Partial<PrAdjudicationRow>): PrAdjudicationRow {
@@ -438,6 +439,72 @@ test("invalidateAdjudicationByCompletion: a completion with no linked decision i
     await invalidateAdjudicationByCompletion(data, 404);
     const after = await findAdj(data, "o/r#1");
     assertEquals(matchAdjudication(after, "Which retry cap?")?.answer, "Cap at 5.", "an unrelated completion id tombstones nothing");
+  });
+});
+
+// --- issue #806 review (round 13, Copilot): the revert-BEFORE-record ordering. A human reverts a
+// first-hand agent completion, but the downstream `record-answer` job has not yet inserted the decision
+// row — so the revert-time `invalidateAdjudicationByCompletion` finds nothing to tombstone. The insert
+// (and the blank→known heal) must then be FENCED on the completion NOT being reverted, else it creates a
+// LIVE decision linked to an already-reverted completion that the poller re-auto-applies, silently
+// undoing the revert (the mirror of the record-then-revert ordering the by-completion tombstone covers). --
+
+/** Seed a `task_completions` row and return its id, so the notRevertedGuard has a real row to read. */
+async function seedCompletion(data: DataLayer, over: { reverted: number }): Promise<number> {
+  return await taskCompletions(data).insert({
+    user_task_key: "ut-1",
+    process_instance_key: null,
+    element_id: "wait-answer",
+    actor_kind: "agent",
+    actor_id: "bot",
+    variables_json: "{}",
+    reversible: 1,
+    auto_applied: 0,
+    source_adjudication_id: null,
+    reverted: over.reverted,
+    reverted_by: over.reverted ? "alice" : null,
+    reverted_note: null,
+    reverted_at: over.reverted ? new Date().toISOString() : null,
+    created_at: new Date().toISOString(),
+  });
+}
+
+test("recordAdjudication: does NOT create a live decision for an already-reverted source completion (revert-before-record, #806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    const reverted = await seedCompletion(data, { reverted: 1 });
+    // The revert already ran (completion reverted, but no decision existed to tombstone); a late
+    // record-answer now tries to insert. The fence must make it a zero-row no-op.
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: reverted });
+    assertEquals((await findAdj(data, "o/r#1")).length, 0, "no live decision is linked to a reverted completion");
+  });
+});
+
+test("recordAdjudication: a NON-reverted source completion still records normally (#806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    const live = await seedCompletion(data, { reverted: 0 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: live });
+    const rows = await findAdj(data, "o/r#1");
+    assertEquals(rows.length, 1, "a live completion's decision records");
+    assertEquals(rows[0].source_completion_id, live, "linked to its completion");
+    assertEquals(matchAdjudication(rows, "Which retry cap?")?.answer, "Cap at 5.");
+  });
+});
+
+test("healBlankProvenance: does NOT relink a live decision to an already-reverted healing completion (#806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    // A prior uncorrelated answer left a blank-provenance row (no adjudicator, no completion link).
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 3.", adjudicatedBy: undefined, adjudicatedKind: undefined });
+    // A known adjudicator now answers — but its completion was already reverted, so the heal must not
+    // promote/relink the row to the reverted completion.
+    const reverted = await seedCompletion(data, { reverted: 1 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human", sourceCompletionId: reverted });
+    const rows = await findAdj(data, "o/r#1");
+    assertEquals(rows.length, 1, "no duplicate row");
+    assertEquals(rows[0].adjudicated_by, null, "the blank row is NOT healed by a reverted completion");
+    assertEquals(rows[0].source_completion_id, null, "no link to the reverted completion");
   });
 });
 

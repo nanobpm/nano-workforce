@@ -113,6 +113,27 @@ export function generationGuard(prKey: string, expectedProcessKey: string | unde
   };
 }
 
+/** A SQL predicate (+ bind params) that is TRUE only while the WINNING completion `sourceCompletionId`
+ *  has NOT been reverted. Woven into the adjudication INSERT/UPDATE so recording a first-hand agent
+ *  answer's decision and the completion's reverted state are checked in ONE atomic statement — closing
+ *  the revert-before-record race (issue #806 review, Copilot): a human revert of a first-hand agent
+ *  completion runs {@link invalidateAdjudicationByCompletion}, but if the downstream `record-answer` job
+ *  has not yet inserted the `pr_adjudications` row, that tombstone changes zero rows and the later insert
+ *  would otherwise create a LIVE decision linked to an already-reverted completion — which the poller
+ *  then re-auto-applies, silently undoing the revert. Fencing the insert on `reverted = 0` makes the
+ *  revert-then-record ordering a no-op (the insert affects zero rows), the mirror of the record-then-revert
+ *  ordering the by-completion tombstone already covers; SQLite serialises the two writes, so whichever
+ *  commits first, the other observes it. When `sourceCompletionId` is absent (a legacy/uncorrelated
+ *  answer with no completion to check) the guard is a constant TRUE (fail open, mirroring
+ *  {@link generationGuard}) — an unlinkable answer must not be silently dropped. */
+export function notRevertedGuard(sourceCompletionId: number | undefined): { sql: string; params: unknown[] } {
+  if (sourceCompletionId == null) return { sql: "1 = 1", params: [] };
+  return {
+    sql: `NOT EXISTS (SELECT 1 FROM "task_completions" WHERE "id" = ? AND "reverted" = 1)`,
+    params: [sourceCompletionId],
+  };
+}
+
 /** Persist a human adjudication of `question` for `prKey`, INSERT-if-absent so the ORIGINAL
  *  adjudicator/answer is preserved across later auto-resumes (which re-run record-answer with the
  *  same fingerprint). A blank answer is not a decision and is not recorded. Idempotent: a second
@@ -137,16 +158,22 @@ export async function recordAdjudication(data: DataLayer, input: RecordAdjudicat
   const fp = questionFingerprint(question);
   const db = data.open();
   const guard = generationGuard(input.prKey, input.expectedProcessKey);
+  const revertGuard = notRevertedGuard(input.sourceCompletionId);
   try {
     // Conditional INSERT-if-absent: the `... SELECT ? … WHERE <generationGuard>` is atomic, so the
     // ownership check and the insert are ONE statement — a stale straggler's guard is false and the
     // insert affects zero rows (no separate read-then-write TOCTOU window). A concurrent/redelivered
     // answer that already inserted the SAME fingerprint trips the `UNIQUE(pr_key, question_fingerprint)`
     // fence, which we tolerate below exactly as the sequential no-op the winner's durable row yields.
+    // The insert is ALSO fenced on the source completion NOT being reverted ({@link notRevertedGuard}):
+    // if a human reverted this first-hand agent completion before `record-answer` inserted its row, the
+    // revert-time tombstone found nothing to invalidate, so without this fence the insert would create a
+    // LIVE decision linked to an already-reverted completion that the poller re-auto-applies (issue #806
+    // review, Copilot — the revert-before-record ordering). Fenced, the insert affects zero rows.
     const res = await db.exec(
       `INSERT INTO "pr_adjudications" ("pr_key","question_fingerprint","answer","adjudicated_by","adjudicated_kind","adjudicated_at","source_completion_id")
-       SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}`,
-      [input.prKey, fp, answer, input.adjudicatedBy?.trim() || null, input.adjudicatedKind?.trim() || null, new Date().toISOString(), input.sourceCompletionId ?? null, ...guard.params],
+       SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql} AND ${revertGuard.sql}`,
+      [input.prKey, fp, answer, input.adjudicatedBy?.trim() || null, input.adjudicatedKind?.trim() || null, new Date().toISOString(), input.sourceCompletionId ?? null, ...guard.params, ...revertGuard.params],
     );
     if (res.changed > 0) return; // fresh insert won under the current generation
   } catch (err) {
@@ -196,6 +223,7 @@ async function healBlankProvenance(
   if (prior.invalidated_at != null && prior.invalidated_at.trim() !== "") return;
   const db = data.open();
   const guard = generationGuard(input.prKey, input.expectedProcessKey);
+  const revertGuard = notRevertedGuard(input.sourceCompletionId);
   // Carry the healing answer's WINNING completion into `source_completion_id` in the SAME compare-and-set
   // (issue #806 review): the promoted decision is now the known adjudicator's, so if that answer came from
   // a reversible first-hand agent completion, `revertAgentCompletion` must be able to tombstone it via
@@ -203,11 +231,14 @@ async function healBlankProvenance(
   // healing completion leaves the overridden answer replayable — the poller re-auto-applies it, silently
   // undoing the human's revert (the exact failure mode the completion link exists to prevent). `COALESCE`
   // stamps the healer's completion when present and otherwise preserves any existing link (an uncorrelated
-  // heal never NULLs a link the original first-hand winner recorded).
+  // heal never NULLs a link the original first-hand winner recorded). The UPDATE is ALSO fenced on the
+  // healing completion NOT being reverted ({@link notRevertedGuard}) so a promotion cannot relink a live
+  // row to an already-reverted completion (issue #806 review, Copilot — the revert-before-record ordering
+  // applied to the blank→known heal, the mirror of the INSERT fence above).
   await db.exec(
     `UPDATE "pr_adjudications" SET "answer" = ?, "adjudicated_by" = ?, "adjudicated_kind" = ?, "adjudicated_at" = ?, "source_completion_id" = COALESCE(?, "source_completion_id")
-     WHERE "id" = ? AND ("adjudicated_by" IS NULL OR TRIM("adjudicated_by") = '') AND "invalidated_at" IS NULL AND ${guard.sql}`,
-    [answer, nowBy, input.adjudicatedKind?.trim() || null, new Date().toISOString(), input.sourceCompletionId ?? null, prior.id, ...guard.params],
+     WHERE "id" = ? AND ("adjudicated_by" IS NULL OR TRIM("adjudicated_by") = '') AND "invalidated_at" IS NULL AND ${guard.sql} AND ${revertGuard.sql}`,
+    [answer, nowBy, input.adjudicatedKind?.trim() || null, new Date().toISOString(), input.sourceCompletionId ?? null, prior.id, ...guard.params, ...revertGuard.params],
   );
 }
 
