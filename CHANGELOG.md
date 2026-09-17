@@ -1,3 +1,9 @@
+## [0.189.0](https://github.com/nanobpm/nano-workforce/compare/v0.188.1...v0.189.0) (2026-09-17)
+
+### Features
+
+* **agentic:** gate stale worker harnesses via persisted protocol ([#804](https://github.com/nanobpm/nano-workforce/issues/804)) ([e5ba2c3](https://github.com/nanobpm/nano-workforce/commit/e5ba2c39e0f76a2654099c54e37e0d3a97f20473)), closes [#802](https://github.com/nanobpm/nano-workforce/issues/802) [#802](https://github.com/nanobpm/nano-workforce/issues/802) [#802](https://github.com/nanobpm/nano-workforce/issues/802) [#802](https://github.com/nanobpm/nano-workforce/issues/802) [#802](https://github.com/nanobpm/nano-workforce/issues/802) [#802](https://github.com/nanobpm/nano-workforce/issues/802)
+
 ## [0.188.1](https://github.com/nanobpm/nano-workforce/compare/v0.188.0...v0.188.1) (2026-09-17)
 
 ### Bug Fixes
