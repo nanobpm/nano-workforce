@@ -1,3 +1,9 @@
+## [0.189.1](https://github.com/nanobpm/nano-workforce/compare/v0.189.0...v0.189.1) (2026-09-17)
+
+### Bug Fixes
+
+* **convergence:** persist wait-answer human adjudications so an already-answered question does not re-escalate ([#807](https://github.com/nanobpm/nano-workforce/issues/807)) ([9dfeacd](https://github.com/nanobpm/nano-workforce/commit/9dfeacd4c4dffdbb8da02acf1beb5ea5d62aa1ea)), closes [#800](https://github.com/nanobpm/nano-workforce/issues/800) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#256](https://github.com/nanobpm/nano-workforce/issues/256) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806)
+
 ## [0.189.0](https://github.com/nanobpm/nano-workforce/compare/v0.188.1...v0.189.0) (2026-09-17)
 
 ### Features
