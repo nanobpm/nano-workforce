@@ -38,6 +38,11 @@ export type StaleHarnessPolicy = "flag" | "refuse";
  * made VISIBLE but not abruptly drained. An operator opts into `refuse` to hard-gate routing. */
 const DEFAULT_STALE_HARNESS_POLICY: StaleHarnessPolicy = "flag";
 
+/** The durable table backing {@link HarnessProtocolRegistry} (`db/migrations/107_worker_harness_protocol.sql`).
+ * The ONE source of truth for the name so the `Table<T>` gateway and the bounded batch read below can
+ * never drift. */
+const HARNESS_PROTOCOL_TABLE = "worker_harness_protocol";
+
 /** A persisted enrolment row (`worker_harness_protocol`): one worker instance's advertised protocol. */
 interface WorkerHarnessProtocolRow {
   instance: string;
@@ -123,7 +128,7 @@ export class HarnessProtocolRegistry {
   }
 
   #table() {
-    return this.#data.table<WorkerHarnessProtocolRow>("worker_harness_protocol", "instance");
+    return this.#data.table<WorkerHarnessProtocolRow>(HARNESS_PROTOCOL_TABLE, "instance");
   }
 
   /** Canonicalise an instance key: trim surrounding whitespace and reject a blank one — the instance
@@ -194,16 +199,39 @@ export class HarnessProtocolRegistry {
    * Unlike {@link all}, this scopes the query to the CURRENT `instances` set rather than scanning
    * every historical row, so a table that grows with disconnected worker instances does not turn each
    * 2-second cockpit poll into an O(history) full-table load (an instance is never removed on
-   * disconnect). A blank/whitespace instance is skipped (it can key no reachable row). Any read error
+   * disconnect). It issues ONE bounded `WHERE instance IN (…)` query over the normalised, de-duplicated
+   * live keys — not a per-worker `findOne` — so the poll never degrades into an N+1 round-trip pattern
+   * as the fleet grows (Copilot #802). A blank/whitespace instance is skipped (it can key no reachable
+   * row); an empty set short-circuits without a query (`IN ()` is not valid SQL). Any read error
    * propagates so the caller can distinguish "registry unavailable" from "all healthy".
    */
   async protocolsFor(instances: readonly string[]): Promise<Map<string, number | undefined>> {
     const out = new Map<string, number | undefined>();
+    // Normalise + de-duplicate the live keys to bind into a single bounded IN query.
+    const keys = new Set<string>();
+    for (const instance of instances) {
+      const key = HarnessProtocolRegistry.#normaliseInstance(instance);
+      if (key !== undefined) keys.add(key);
+    }
+    if (keys.size === 0) return out;
+    const keyList = [...keys];
+    const placeholders = keyList.map(() => "?").join(", ");
+    const rows = await this.#data
+      .open()
+      .query<WorkerHarnessProtocolRow>(
+        `SELECT instance, harness_protocol FROM ${HARNESS_PROTOCOL_TABLE} WHERE instance IN (${placeholders})`,
+        keyList,
+      );
+    const byKey = new Map<string, number | undefined>();
+    for (const row of rows) {
+      byKey.set(row.instance, typeof row.harness_protocol === "number" ? row.harness_protocol : undefined);
+    }
+    // Key the result back by the caller's ORIGINAL instance strings (the assessment reads it by the
+    // same key it passed in); an instance with no row reads back `undefined` → stale, unchanged.
     for (const instance of instances) {
       const key = HarnessProtocolRegistry.#normaliseInstance(instance);
       if (key === undefined) continue;
-      const row = await this.#table().findOne({ instance: key });
-      out.set(instance, typeof row?.harness_protocol === "number" ? row.harness_protocol : undefined);
+      out.set(instance, byKey.get(key));
     }
     return out;
   }

@@ -184,10 +184,17 @@ export function toWireReport(report: RegistryReport): WireRegistryReport {
  * supply from the presence registry, assess harness staleness (issue #802), and build the report.
  * Never throws for an engine outage — it degrades to a supply-only report; the staleness assessment
  * is best-effort and omitted when no data layer is mounted.
+ *
+ * `workers` defaults to the live presence feed ({@link supplyWorkers}); it is injectable so a test can
+ * drive the full assessment→`staleWorkers` wiring against a real registry without mounting the global
+ * presence family.
  */
-export async function computeRegistryReport(log?: Logger, data?: DataLayer): Promise<RegistryReport> {
+export async function computeRegistryReport(
+  log?: Logger,
+  data?: DataLayer,
+  workers: readonly RegisteredWorker[] = supplyWorkers(),
+): Promise<RegistryReport> {
   const taskDefinitions = await readDemand(log);
-  const workers = supplyWorkers();
   const report = buildRegistryReport({ taskDefinitions, workers });
   if (!data) return report;
   const { registryAvailable, assessments } = await assessWorkersWithAvailability(

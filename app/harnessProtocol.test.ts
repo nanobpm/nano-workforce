@@ -91,6 +91,24 @@ test("assessWorkers: flags absent/below-min as stale, at-or-above as healthy (ca
   assertEquals(out.get("never-enrolled"), { instance: "never-enrolled", stale: true });
 });
 
+test("protocolsFor: one bounded IN query maps each ORIGINAL key back, skips blanks, short-circuits empty", async () => {
+  // The hot-path read is a single bounded `WHERE instance IN (…)` over the live set (not a per-worker
+  // findOne / O(history) scan): assert it maps each key back correctly and handles the edge sets.
+  const { data } = memDataFor(MIGRATIONS);
+  const reg = new HarnessProtocolRegistry(data);
+  await reg.recordEnrolment("a", 3);
+  await reg.recordEnrolment("b", undefined); // NULL row → undefined
+  // "c" never enrolled.
+  const got = await reg.protocolsFor(["a", "b", "c", "   "]);
+  assertEquals(got.get("a"), 3);
+  assertEquals(got.get("b"), undefined);
+  assertEquals(got.get("c"), undefined);
+  assertEquals(got.has("   "), false, "a blank instance keys no row and is skipped");
+  // An empty (or all-blank) set short-circuits without issuing an `IN ()` query.
+  assertEquals((await reg.protocolsFor([])).size, 0);
+  assertEquals((await reg.protocolsFor(["  "])).size, 0);
+});
+
 test("assessWorkers with no data layer treats every worker as stale (fail loud)", async () => {
   const out = await assessWorkers(undefined, ["a", "b"]);
   assertEquals(out.get("a")?.stale, true);

@@ -301,7 +301,14 @@ test("#802: flags harnessStale per worker, joining the harness-protocol registry
     },
     _pk: pk,
   });
-  const data = { source: () => ({ db: sqlite }), table } as unknown as DataLayer;
+  const data = {
+    source: () => ({ db: sqlite }),
+    table,
+    // The raw-SQL surface the harness registry's bounded `WHERE instance IN (…)` read binds to, over
+    // the SAME db as `table`/presence.
+    // biome-ignore lint/suspicious/noExplicitAny: test-only gateway.
+    open: () => ({ query: async (sql: string, params: any[] = []) => raw.prepare(sql).all(...params) as any[] }),
+  } as unknown as DataLayer;
 
   const transport = memTransport();
   const hub = new AgenticHub({ transport: transport.transport, authenticator, sweepIntervalMs: 0 });
