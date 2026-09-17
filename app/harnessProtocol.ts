@@ -43,6 +43,15 @@ const DEFAULT_STALE_HARNESS_POLICY: StaleHarnessPolicy = "flag";
  * never drift. */
 const HARNESS_PROTOCOL_TABLE = "worker_harness_protocol";
 
+/** Max bound host-parameters per `WHERE instance IN (…)` batch in {@link HarnessProtocolRegistry.protocolsFor}.
+ * SQLite caps the number of host parameters per statement (`SQLITE_MAX_VARIABLE_NUMBER` — historically
+ * 999, and still that low on many builds), so a single `IN (…)` binding one placeholder per live worker
+ * would THROW once the fleet outgrows that limit — and the caller's read-failure fallback marks every
+ * worker stale (a false fleet-wide drain/outage signal from mere scale). 900 stays safely under the
+ * conservative 999 floor while keeping the batch count minimal; the live keys are chunked into batches of
+ * this size and unioned, so the bounded hot-path read scales past the parameter cap. */
+const IN_QUERY_MAX_PARAMS = 900;
+
 /** A persisted enrolment row (`worker_harness_protocol`): one worker instance's advertised protocol. */
 interface WorkerHarnessProtocolRow {
   instance: string;
@@ -201,7 +210,10 @@ export class HarnessProtocolRegistry {
    * 2-second cockpit poll into an O(history) full-table load (an instance is never removed on
    * disconnect). It issues ONE bounded `WHERE instance IN (…)` query over the normalised, de-duplicated
    * live keys — not a per-worker `findOne` — so the poll never degrades into an N+1 round-trip pattern
-   * as the fleet grows (Copilot #802). A blank/whitespace instance is skipped (it can key no reachable
+   * as the fleet grows (Copilot #802). The bound keys are chunked into batches under SQLite's
+   * host-parameter cap ({@link IN_QUERY_MAX_PARAMS}) and unioned, so a very large fleet cannot overflow
+   * a single `IN (…)`'s placeholder limit and throw (which the caller would mislabel as a fleet-wide
+   * outage). A blank/whitespace instance is skipped (it can key no reachable
    * row); an empty set short-circuits without a query (`IN ()` is not valid SQL). Any read error
    * propagates so the caller can distinguish "registry unavailable" from "all healthy".
    */
@@ -215,16 +227,22 @@ export class HarnessProtocolRegistry {
     }
     if (keys.size === 0) return out;
     const keyList = [...keys];
-    const placeholders = keyList.map(() => "?").join(", ");
-    const rows = await this.#data
-      .open()
-      .query<WorkerHarnessProtocolRow>(
-        `SELECT instance, harness_protocol FROM ${HARNESS_PROTOCOL_TABLE} WHERE instance IN (${placeholders})`,
-        keyList,
-      );
+    // Chunk the bound keys into batches under SQLite's host-parameter cap (see IN_QUERY_MAX_PARAMS):
+    // a single IN (…) binding one placeholder per live worker would throw once the fleet outgrows the
+    // limit, and the caller then mislabels every worker stale (a false drain/outage signal from scale).
     const byKey = new Map<string, number | undefined>();
-    for (const row of rows) {
-      byKey.set(row.instance, typeof row.harness_protocol === "number" ? row.harness_protocol : undefined);
+    for (let offset = 0; offset < keyList.length; offset += IN_QUERY_MAX_PARAMS) {
+      const batch = keyList.slice(offset, offset + IN_QUERY_MAX_PARAMS);
+      const placeholders = batch.map(() => "?").join(", ");
+      const rows = await this.#data
+        .open()
+        .query<WorkerHarnessProtocolRow>(
+          `SELECT instance, harness_protocol FROM ${HARNESS_PROTOCOL_TABLE} WHERE instance IN (${placeholders})`,
+          batch,
+        );
+      for (const row of rows) {
+        byKey.set(row.instance, typeof row.harness_protocol === "number" ? row.harness_protocol : undefined);
+      }
     }
     // Key the result back by the caller's ORIGINAL instance strings (the assessment reads it by the
     // same key it passed in); an instance with no row reads back `undefined` → stale, unchanged.

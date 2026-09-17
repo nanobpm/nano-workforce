@@ -109,6 +109,26 @@ test("protocolsFor: one bounded IN query maps each ORIGINAL key back, skips blan
   assertEquals((await reg.protocolsFor(["  "])).size, 0);
 });
 
+test("protocolsFor chunks past SQLite's host-parameter cap (a large fleet does not overflow one IN query)", async () => {
+  // A fleet larger than a single IN(…) batch must still resolve every key: the read is chunked under
+  // SQLite's ~999 host-parameter floor, so scale never throws (which the caller would mislabel as a
+  // fleet-wide outage marking everyone stale). Exercise > 900 (two batches) plus a boundary key.
+  const { data } = memDataFor(MIGRATIONS);
+  const reg = new HarnessProtocolRegistry(data);
+  const instances: string[] = [];
+  for (let i = 0; i < 1500; i++) {
+    const id = `wk-${i}`;
+    instances.push(id);
+    if (i % 2 === 0) await reg.recordEnrolment(id, 2); // even = enrolled@2, odd = never enrolled
+  }
+  const got = await reg.protocolsFor(instances);
+  assertEquals(got.size, 1500, "every requested key is mapped back across batches");
+  assertEquals(got.get("wk-0"), 2);
+  assertEquals(got.get("wk-900"), 2, "a key in the second batch still resolves");
+  assertEquals(got.get("wk-1"), undefined, "a never-enrolled key reads back undefined");
+  assertEquals(got.get("wk-1499"), undefined);
+});
+
 test("assessWorkers with no data layer treats every worker as stale (fail loud)", async () => {
   const out = await assessWorkers(undefined, ["a", "b"]);
   assertEquals(out.get("a")?.stale, true);
