@@ -582,18 +582,32 @@ export async function revertAgentCompletion(
   // being reverted ({@link notRevertedGuard}), so once we commit `reverted` below a late record-answer
   // affects zero rows and cannot create a live decision linked to this reverted completion (issue #806
   // review, Copilot). SQLite serialises the two writes, so whichever commits first the other observes.
+  // The `row.reverted` guard above is a READ from before this transaction, so it cannot serialise two
+  // concurrent reverts of the SAME completion: both snapshots observe `reverted = 0`, both pass the
+  // guard, and a blind `update(completionId, …)` would let the SECOND commit overwrite the FIRST's
+  // `reverted_by`/`reverted_note`/`reverted_at`, laundering the audit trail and violating the documented
+  // "a completion can only be reverted once" invariant (issue #806 review, Copilot). Fence the ledger
+  // flip on `reverted = 0` inside the transaction so exactly one revert wins: SQLite serialises the two
+  // transactions, so the loser's guarded UPDATE changes ZERO rows. On that zero-row loss we throw to roll
+  // back the WHOLE transaction — including this revert's tombstones — leaving the winner's revert and its
+  // tombstones as the sole durable state, and report the loss as the same idempotent `already reverted`.
   const src = data.open();
-  await src.tx(async (t: GatewayDataSource) => {
-    if (row.auto_applied && row.source_adjudication_id != null) {
-      await invalidateAdjudication(data, row.source_adjudication_id, t);
-    }
-    await invalidateAdjudicationByCompletion(data, completionId, t);
-    await t.table<TaskCompletion>("task_completions", "id").update(completionId, {
-      reverted: 1,
-      reverted_by: reverterId,
-      reverted_note: correction || null,
-      reverted_at: now(),
+  const alreadyReverted = Symbol("already-reverted");
+  try {
+    await src.tx(async (t: GatewayDataSource) => {
+      if (row.auto_applied && row.source_adjudication_id != null) {
+        await invalidateAdjudication(data, row.source_adjudication_id, t);
+      }
+      await invalidateAdjudicationByCompletion(data, completionId, t);
+      const res = await t.exec(
+        `UPDATE "task_completions" SET "reverted" = 1, "reverted_by" = ?, "reverted_note" = ?, "reverted_at" = ? WHERE "id" = ? AND "reverted" = 0`,
+        [reverterId, correction || null, now(), completionId],
+      );
+      if (res.changed === 0) throw alreadyReverted;
     });
-  });
+  } catch (err) {
+    if (err === alreadyReverted) return { ok: false, reason: "completion already reverted" };
+    throw err;
+  }
   return { ok: true, completionId };
 }

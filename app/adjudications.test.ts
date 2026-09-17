@@ -13,7 +13,7 @@ import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
 import { invalidateAdjudication, invalidateAdjudicationByCompletion, matchAdjudication, prAdjudications, type PrAdjudicationRow, recordAdjudication, resetAdjudications } from "./adjudications.ts";
-import { taskCompletions } from "./agentCompletion.ts";
+import { revertAgentCompletion, taskCompletions } from "./agentCompletion.ts";
 import { questionFingerprint } from "./github.ts";
 
 function row(over: Partial<PrAdjudicationRow>): PrAdjudicationRow {
@@ -480,6 +480,48 @@ async function revertCompletion(data: DataLayer, id: number): Promise<void> {
       id,
     ]);
 }
+
+test("revertAgentCompletion: a concurrent revert whose pre-check read a stale reverted=0 loses at the DB fence — it does NOT overwrite the winner's audit trail and rolls its tombstone back (#806 review, Copilot)", async () => {
+  await withData(async (data) => {
+    const id = await seedCompletion(data, { reverted: 0 });
+    // The FIRST reverter (bob) wins and durably stamps the one-time audit metadata.
+    const winner = await revertAgentCompletion(data, id, { kind: "human", id: "bob" }, "bob-note");
+    assertEquals(winner.ok, true);
+
+    // The SECOND reverter (alice) is a genuine concurrent racer: it read `reverted = 0` BEFORE bob
+    // committed, so its outside-transaction pre-check passes. A data double reproduces exactly that
+    // stale snapshot for the pre-check read, while every write (the guarded UPDATE + tombstones) still
+    // hits the REAL db where bob already committed `reverted = 1`.
+    const live = await taskCompletions(data).get(id);
+    assert(live);
+    const stale = { ...live, reverted: 0, reverted_by: null, reverted_note: null, reverted_at: null };
+    // biome-ignore lint/suspicious/noExplicitAny: data double that forces one stale pre-check read
+    const doubled = {
+      open: () => data.open(),
+      table: (name: string, key: string) => {
+        const base = data.table(name, key);
+        if (name !== "task_completions") return base;
+        return new Proxy(base, {
+          get(t, p, r) {
+            if (p === "get") return (gid: number) => (gid === id ? Promise.resolve(stale) : t.get(gid));
+            const v = Reflect.get(t, p, r);
+            return typeof v === "function" ? v.bind(t) : v;
+          },
+        });
+      },
+    } as any;
+
+    const loser = await revertAgentCompletion(doubled, id, { kind: "human", id: "alice" }, "alice-note");
+    assertEquals(loser.ok, false, "the racer that lost the `reverted = 0` fence reports no revert");
+    assertEquals(loser.reason, "completion already reverted");
+
+    const row = await taskCompletions(data).get(id);
+    assert(row);
+    assertEquals(row.reverted, 1);
+    assertEquals(row.reverted_by, "bob", "the winner's audit identity is intact — the loser did not clobber it");
+    assertEquals(row.reverted_note, "bob-note", "the winner's corrective note is intact");
+  });
+});
 
 test("recordAdjudication: does NOT create a live decision for an already-reverted source completion (revert-before-record, #806 review)", async () => {
   await withData(async (data, seedPr) => {

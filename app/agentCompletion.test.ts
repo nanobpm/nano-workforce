@@ -100,6 +100,27 @@ function memData(
       }
       return { changed };
     }
+    // The conditional ledger flip the revert now issues (Copilot review of #806): the `reverted = 0`
+    // fence is what serialises two concurrent reverts of the SAME completion — the loser's guarded
+    // UPDATE changes ZERO rows, so the revert throws to roll the whole transaction (its tombstones
+    // included) back, leaving the winner's one-time audit metadata unclobbered. Emulate the fence so
+    // `res.changed` is honest.
+    const rev = /UPDATE "task_completions" SET "reverted" = 1, "reverted_by" = \?, "reverted_note" = \?, "reverted_at" = \? WHERE "id" = \? AND "reverted" = 0/.exec(sql);
+    if (rev) {
+      const store = stores.task_completions;
+      let changed = 0;
+      if (store) {
+        const r = store.rows.find((r) => r[store.key] === params[3]);
+        if (r && (r.reverted === 0 || r.reverted == null)) {
+          r.reverted = 1;
+          r.reverted_by = params[0];
+          r.reverted_note = params[1];
+          r.reverted_at = params[2];
+          changed = 1;
+        }
+      }
+      return { changed };
+    }
     throw new Error(`unexpected exec sql: ${sql}`);
   };
   const exec = async (sql: string, params: unknown[] = []) => {
@@ -529,7 +550,7 @@ test("revert rolls the tombstone back when the LEDGER flip fails — no reverted
     pr_adjudications: { rows: [{ id: 42, pr_key: "o/r#1", answer: "Cap at 5.", invalidated_at: null }] as any[], key: "id" },
   };
   let failLedgerFlip = true;
-  const data = memData(stores, { failUpdate: (name) => failLedgerFlip && name === "task_completions" });
+  const data = memData(stores, { failExec: (sql) => failLedgerFlip && /UPDATE "task_completions"/.test(sql) });
   const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
 
   const { completionId } = await completeUserTaskAttributed(
