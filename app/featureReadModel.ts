@@ -34,12 +34,28 @@ import { and, caseWhen, col, defineReadModel, type Expr, eq, exists, lit, neq, n
 import { deriveAckOpenExpr, deriveListBucketExpr } from "./listBucket.ts";
 
 /** The 6 TRULY-terminal statuses that map to the `Done` stage — the single source of truth for the
- * terminal tier of BOTH the pipeline `stage`/`stage_state` derivations and the `list_bucket` history
- * partition. Distinct from `FEATURE_TERMINAL_STATUSES` (app/feature.ts), the redispatch-settled set,
- * which also counts `opened`/`converging` as terminal — those are LIVE pipeline stages (`PR open`/
- * `Converging`), NOT `Done`, so the two lists must stay separate. Re-exported from app/stage.ts for
- * back-compat with its existing importers. */
+ * terminal tier of the pipeline `stage`/`stage_state` derivations (and the `stepAxis` render tier).
+ * Distinct from `FEATURE_TERMINAL_STATUSES` (app/feature.ts), the redispatch-settled set, which also
+ * counts `opened`/`converging` as terminal — those are LIVE pipeline stages (`PR open`/`Converging`),
+ * NOT `Done`, so the two lists stay separate for the STAGE derivations. Re-exported from app/stage.ts
+ * for back-compat with its existing importers.
+ *
+ * NOTE — the Active/History `list_bucket`/`ack_open` derivations do NOT use this set; they use the
+ * WIDER {@link FEATURE_ACK_TERMINAL_STATUSES} (issue #808). The dismissable-terminal set is
+ * deliberately decoupled from the pipeline `Done` set: a raise-only run that ends at `opened` is a live
+ * `PR open` STAGE yet a FINISHED run that must be acknowledgeable into History. */
 export const STAGE_DONE_STATUSES: readonly string[] = ["merged", "converged", "blocked", "failed", "skipped", "abandoned"];
+
+/** The DISMISSABLE-terminal set for the Active/History `list_bucket` + operator-`ack_open` derivations
+ * (issue #808) — the pipeline `Done` set ({@link STAGE_DONE_STATUSES}) PLUS `opened`. A raise-only run
+ * folded to `opened` (a PR was raised, convergence was not requested — `deriveFeatureCompletion`) is a
+ * FINISHED run: its job is done, so it must be acknowledgeable and drop to History on dismissal, even
+ * though the pipeline still renders it in the LIVE `PR open` STAGE (which classifies on
+ * {@link STAGE_DONE_STATUSES}, so `opened` stays `PR open`, never `Done`). This is the decouple of the
+ * ack/History terminal set from the stage-`Done` set: it is WIDER than `STAGE_DONE_STATUSES` (adds
+ * `opened`) and NARROWER than `FEATURE_TERMINAL_STATUSES` (excludes `converging`, still live in the
+ * convergence loop — `pollFeatureDelivery` keeps reconciling it, so it must NOT be dismissable). */
+export const FEATURE_ACK_TERMINAL_STATUSES: readonly string[] = [...STAGE_DONE_STATUSES, "opened"];
 
 /** The DSL projection name the `attention` derivation `exists(...)`-reads. Unregistered in the
  * `projectionRegistry`, so it resolves to the same-named physical table — the app's own `user_tasks`
@@ -129,21 +145,22 @@ const attention: Expr = caseWhen(
   lit(null),
 );
 
-/** The Active/History partition: `history` IFF the row is in a truly-terminal status AND has been
+/** The Active/History partition: `history` IFF the row is in a DISMISSABLE-terminal status AND has been
  * acknowledged; otherwise `active` (live runs + terminal-but-UNACKNOWLEDGED runs). Delegates to the ONE
  * shared `deriveListBucketExpr` oracle (app/listBucket.ts, issue #641) parameterised by the feature
- * terminal set ({@link STAGE_DONE_STATUSES}) so all four "Active …" grids share the identical AST — the
- * emitted SQL stays byte-equivalent to migration 081's already-merged VIEW body (the shared oracle
- * reproduces this model's `isDone`/`isNotNull` forms exactly). */
-const listBucket: Expr = deriveListBucketExpr(EFFECTIVE_STATUS_COLUMN, STAGE_DONE_STATUSES);
+ * DISMISSABLE-terminal set ({@link FEATURE_ACK_TERMINAL_STATUSES}, issue #808) — WIDER than the pipeline
+ * `Done` set so a raise-only `opened` run is dismissable into History while the STAGE derivations still
+ * render it `PR open`. All four "Active …" grids share the identical AST. */
+const listBucket: Expr = deriveListBucketExpr(EFFECTIVE_STATUS_COLUMN, FEATURE_ACK_TERMINAL_STATUSES);
 
-/** The operator "Dismiss" (tick-off) affordance flag — `1` IFF the run is terminal AND not yet
- * acknowledged (so the page's `showWhenField` Dismiss button renders only for a terminal-but-
+/** The operator "Dismiss" (tick-off) affordance flag — `1` IFF the run is DISMISSABLE-terminal AND not
+ * yet acknowledged (so the page's `showWhenField` Dismiss button renders only for a terminal-but-
  * unacknowledged run), else `0`. The feature twin of the PR/Delivery-Graph/Epic `ack_open`, from the
  * ONE shared oracle (app/listBucket.ts, issue #641) parameterised by the SAME {@link
- * STAGE_DONE_STATUSES} terminal set `list_bucket` uses — so the Dismiss button and the
- * `acknowledgeDone` guard consume the identical predicate and cannot drift (issue #654). */
-const ackOpen: Expr = deriveAckOpenExpr(EFFECTIVE_STATUS_COLUMN, STAGE_DONE_STATUSES);
+ * FEATURE_ACK_TERMINAL_STATUSES} set `list_bucket` uses — so the Dismiss button and the `acknowledgeDone`
+ * guard consume the identical predicate and cannot drift (issue #654). Including `opened` (issue #808)
+ * lets a finished raise-only run be ticked off, so it no longer wedges in Active. */
+const ackOpen: Expr = deriveAckOpenExpr(EFFECTIVE_STATUS_COLUMN, FEATURE_ACK_TERMINAL_STATUSES);
 
 /** The keys of {@link featureReadModel}'s DERIVED columns, in the order migration 099 emits them.
  * Base columns are identity pass-throughs (not derivations) and are listed in the migration directly. */

@@ -31,7 +31,7 @@ import { deriveListBucket, deriveStage } from "./stage.ts";
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const MIGRATION_LATEST = "099_feature_read_model_ack_open.sql";
+const MIGRATION_LATEST = "111_feature_read_model_ack_opened.sql";
 
 // The base `feature_runs` shape the VIEW reads, plus the `user_tasks` inbox (034) the `attention`
 // derivation `EXISTS`-reads, plus a stand-in for the managed `feature_runs__tracking` derived VIEW
@@ -251,6 +251,46 @@ test("the migration 080 VIEW derives list_bucket EXACTLY like deriveListBucket (
       `${key} (status=${status}, acknowledged=${ackAt !== null}): list_bucket`,
     );
   }
+});
+
+test("RED/GREEN #808: a raise-only `opened` run is DISMISSABLE into History (ack_open=1, list_bucket active→history on ack) though the pipeline STILL renders `PR open`", () => {
+  // A raise-only feature run (converge not requested) ends at status `opened`: a PR was raised and the
+  // run is FINISHED. #808 folds a COMPLETED such run's frozen `running` status to `opened` so it stops
+  // wedging in Active. But before the ack/History terminal set was decoupled from the stage-`Done` set,
+  // `opened` (deliberately a LIVE `PR open` STAGE, excluded from STAGE_DONE_STATUSES) had `ack_open=0`
+  // and `list_bucket='active'` forever — so `acknowledgeDone` 409'd and the run stayed wedged, the exact
+  // bug #808 aims to fix. The wider FEATURE_ACK_TERMINAL_STATUSES makes `opened` dismissable while the
+  // pipeline STAGE still classifies on STAGE_DONE_STATUSES (so it renders `PR open`, never `Done`).
+  const db = viewDb();
+
+  // Unacknowledged raise-only run: dismissable and still in Active (stays until the operator ticks off).
+  addRun(db, "o/r#opened", { status: "opened", pr_key: "o/r#pr1" });
+  const open = projection(db, "o/r#opened");
+  assertEquals(open.stage, "PR open", "a raise-only `opened` run STILL renders the LIVE `PR open` stage, not Done");
+  assertEquals(open.stage_state, null, "its stage is in-progress (no terminal render state) — it is not `Done`");
+  assertEquals(open.ack_open, 1, "the finished raise-only run is dismissable (ack_open=1) — acknowledgeDone no longer 409s");
+  assertEquals(open.list_bucket, "active", "an un-dismissed `opened` run sits in Active until the operator ticks it off");
+  assertEquals(open.list_bucket, deriveListBucket("opened", null), "matches the TS oracle");
+
+  // Acknowledged raise-only run: dismissed to History (ack_open closes), pipeline still `PR open`.
+  addRun(db, "o/r#openedAck", { status: "opened", pr_key: "o/r#pr2", acknowledged_at: "2026-02-02T00:00:00Z" });
+  const acked = projection(db, "o/r#openedAck");
+  assertEquals(acked.list_bucket, "history", "a dismissed `opened` run drops to History (no longer wedged in Active)");
+  assertEquals(acked.list_bucket, deriveListBucket("opened", "2026-02-02T00:00:00Z"), "matches the TS oracle");
+  assertEquals(acked.ack_open, 0, "an already-dismissed run offers no Dismiss affordance");
+  assertEquals(acked.stage, "PR open", "dismissal does NOT reclassify the pipeline STAGE to Done — it stays `PR open`");
+});
+
+test("#808: a `converging` run stays LIVE (NOT dismissable) — the ack set excludes it (still in the convergence loop)", () => {
+  // `converging` is terminal-for-redispatch but the PR is still in flight — `pollFeatureDelivery` keeps
+  // reconciling it to merged/converged/abandoned — so it must NOT be dismissable (that is why the ack
+  // set is NARROWER than FEATURE_TERMINAL_STATUSES: it adds `opened` but excludes `converging`).
+  const db = viewDb();
+  addRun(db, "o/r#conv", { status: "converging", pr_key: "o/r#pr3" });
+  const row = projection(db, "o/r#conv");
+  assertEquals(row.stage, "Converging", "a handed-off run renders the LIVE Converging stage");
+  assertEquals(row.ack_open, 0, "a still-converging run is NOT dismissable");
+  assertEquals(row.list_bucket, "active", "it stays in Active (live), never History");
 });
 
 test("the migration 080 VIEW IGNORES any stale STORED projection columns — it reads only from status et al.", () => {
