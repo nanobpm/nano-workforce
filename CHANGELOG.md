@@ -1,3 +1,9 @@
+## [0.188.1](https://github.com/nanobpm/nano-workforce/compare/v0.188.0...v0.188.1) (2026-09-17)
+
+### Bug Fixes
+
+* **feature:** reconcile the implement-step result from GitHub before escalating ([#805](https://github.com/nanobpm/nano-workforce/issues/805)) ([7099c31](https://github.com/nanobpm/nano-workforce/commit/7099c31793a6dd4543fddd2494615b166241d302)), closes [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#801](https://github.com/nanobpm/nano-workforce/issues/801)
+
 ## [0.188.0](https://github.com/nanobpm/nano-workforce/compare/v0.187.6...v0.188.0) (2026-09-17)
 
 ### Features
