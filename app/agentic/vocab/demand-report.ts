@@ -21,7 +21,7 @@ import type { RegisteredWorker } from "@nanobpm/agentic/vocab";
 import type { DataLayer, Logger } from "@nanobpm/urban";
 import type { StaleWorker, RegistryReport as WireRegistryReport } from "../../../nano-generated/api-io.d.ts";
 import { resolveEngineAddress } from "../../enginePreflight.ts";
-import { assessWorkers, type HarnessAssessment } from "../../harnessProtocol.ts";
+import { assessWorkersWithAvailability, type HarnessAssessment } from "../../harnessProtocol.ts";
 import { envVar } from "../../version.ts";
 import { currentPresenceRegistry } from "../families/presence.family.ts";
 import { CREW_VOCAB_VERSION, crewResolver } from "./crew-vocab.ts";
@@ -190,11 +190,15 @@ export async function computeRegistryReport(log?: Logger, data?: DataLayer): Pro
   const workers = supplyWorkers();
   const report = buildRegistryReport({ taskDefinitions, workers });
   if (!data) return report;
-  const assessed = await assessWorkers(
+  const { registryAvailable, assessments } = await assessWorkersWithAvailability(
     data,
     workers.map((w) => w.instance),
   );
-  const staleWorkers = [...assessed.values()]
+  // The registry could not be consulted (read outage / legacy DB): OMIT `staleWorkers` per the report
+  // contract, so an operator cannot mistake "the registry is unavailable" for "every harness is stale"
+  // and treat an outage as a fleet-wide drain signal (issue #802).
+  if (!registryAvailable) return report;
+  const staleWorkers = [...assessments.values()]
     .filter((a) => a.stale)
     .sort((a, b) => a.instance.localeCompare(b.instance));
   return { ...report, staleWorkers };

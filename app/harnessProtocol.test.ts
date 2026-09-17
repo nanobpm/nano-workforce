@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import {
   assessWorkers,
+  assessWorkersWithAvailability,
   HarnessProtocolRegistry,
   isStaleProtocol,
   minHarnessProtocol,
@@ -18,6 +19,19 @@ test("minHarnessProtocol defaults to 1 and reads the declared env knob", () => {
   assertEquals(minHarnessProtocol({ NANO_AGENTIC_MIN_HARNESS_PROTOCOL: "3" }), 3);
   // A malformed/blank value degrades to the default rather than NaN-poisoning the gate.
   assertEquals(minHarnessProtocol({ NANO_AGENTIC_MIN_HARNESS_PROTOCOL: "nonsense" }), 1);
+});
+
+test("minHarnessProtocol rejects parseInt-lenient values (Copilot #802): '3junk'/'1.9'/blank → default", () => {
+  // `Number.parseInt` would accept "3junk" (→ 3) and truncate "1.9" (→ 1); a strict integer parse
+  // degrades all of these to the registered default so a malformed knob never silently shifts the gate.
+  assertEquals(minHarnessProtocol({ NANO_AGENTIC_MIN_HARNESS_PROTOCOL: "3junk" }), 1);
+  assertEquals(minHarnessProtocol({ NANO_AGENTIC_MIN_HARNESS_PROTOCOL: "1.9" }), 1);
+  assertEquals(minHarnessProtocol({ NANO_AGENTIC_MIN_HARNESS_PROTOCOL: "" }), 1);
+  assertEquals(minHarnessProtocol({ NANO_AGENTIC_MIN_HARNESS_PROTOCOL: "  " }), 1);
+  assertEquals(minHarnessProtocol({ NANO_AGENTIC_MIN_HARNESS_PROTOCOL: "-2" }), 1);
+  // A clean integer (with surrounding whitespace) still parses.
+  assertEquals(minHarnessProtocol({ NANO_AGENTIC_MIN_HARNESS_PROTOCOL: " 4 " }), 4);
+  assertEquals(minHarnessProtocol({ NANO_AGENTIC_MIN_HARNESS_PROTOCOL: "0" }), 0);
 });
 
 test("staleHarnessPolicy defaults to flag; only the exact 'refuse' token opts into refusal", () => {
@@ -82,4 +96,37 @@ test("assessWorkers with no data layer treats every worker as stale (fail loud)"
   assertEquals(out.get("a")?.stale, true);
   assertEquals(out.get("b")?.stale, true);
   assert(!("harnessProtocol" in (out.get("a") ?? {})), "no protocol known without a registry");
+});
+
+test("assessWorkersWithAvailability: registryAvailable is true on a successful read, false without a data layer", async () => {
+  const { data } = memDataFor(MIGRATIONS);
+  await new HarnessProtocolRegistry(data).recordEnrolment("healthy", 2);
+  const ok = await assessWorkersWithAvailability(data, ["healthy"], { NANO_AGENTIC_MIN_HARNESS_PROTOCOL: "1" });
+  assertEquals(ok.registryAvailable, true);
+  assertEquals(ok.assessments.get("healthy")?.stale, false);
+
+  const noData = await assessWorkersWithAvailability(undefined, ["healthy"]);
+  assertEquals(noData.registryAvailable, false, "no data layer = registry could not be consulted");
+  assertEquals(noData.assessments.get("healthy")?.stale, true, "still fails loud per-worker");
+});
+
+test("assessWorkersWithAvailability: a registry read outage reports registryAvailable=false (not silent all-stale)", async () => {
+  // A legacy DB predating migration 107: the table is absent, so the bounded read throws and is caught.
+  const { data } = memDataFor([]);
+  const res = await assessWorkersWithAvailability(data, ["a", "b"]);
+  assertEquals(res.registryAvailable, false, "read failure surfaces as unavailable, distinct from all-healthy");
+  assertEquals(res.assessments.get("a")?.stale, true, "assessments still fail loud");
+});
+
+test("protocolsFor reads only the requested instances (bounded), not the whole history", async () => {
+  const { data } = memDataFor(MIGRATIONS);
+  const reg = new HarnessProtocolRegistry(data);
+  await reg.recordEnrolment("live-1", 2);
+  await reg.recordEnrolment("live-2", undefined);
+  await reg.recordEnrolment("disconnected-history", 3);
+  const scoped = await reg.protocolsFor(["live-1", "live-2", "never-enrolled"]);
+  assertEquals(scoped.get("live-1"), 2);
+  assertEquals(scoped.get("live-2"), undefined, "an enrolled-but-versionless row reads as undefined");
+  assertEquals(scoped.get("never-enrolled"), undefined, "an absent row reads as undefined");
+  assertEquals(scoped.has("disconnected-history"), false, "a historical instance outside the live set is never read");
 });

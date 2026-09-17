@@ -429,6 +429,7 @@ components:
         - jobKeys
         - live
         - staleMs
+        - harnessStale
       properties:
         instance:
           type: string
@@ -664,6 +665,7 @@ components:
         - roles
         - demandVersion
         - leaseTtl
+        - harnessStale
       properties:
         instance:
           type: string

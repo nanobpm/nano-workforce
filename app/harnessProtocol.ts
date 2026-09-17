@@ -52,9 +52,13 @@ interface WorkerHarnessProtocolRow {
  * fail on a malformed knob).
  */
 export function minHarnessProtocol(env: Record<string, string | undefined> = process.env): number {
-  const raw = readEnvOr("NANO_AGENTIC_MIN_HARNESS_PROTOCOL", String(DEFAULT_MIN_HARNESS_PROTOCOL), env);
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_MIN_HARNESS_PROTOCOL;
+  const raw = readEnvOr("NANO_AGENTIC_MIN_HARNESS_PROTOCOL", String(DEFAULT_MIN_HARNESS_PROTOCOL), env).trim();
+  // `Number.parseInt` accepts `"3junk"` (→ 3) and truncates `"1.9"` (→ 1), so a malformed/non-integer
+  // knob would NOT degrade to the registered default as this function and the env contract promise.
+  // Parse with `Number` and require a strict non-negative integer. A blank value (`Number("")` → 0)
+  // must also fall through to the default, hence the explicit non-empty guard.
+  const parsed = Number(raw);
+  return raw.length > 0 && Number.isInteger(parsed) && parsed >= 0 ? parsed : DEFAULT_MIN_HARNESS_PROTOCOL;
 }
 
 /**
@@ -88,6 +92,21 @@ export interface HarnessAssessment {
   readonly harnessProtocol?: number;
   /** Whether the worker's harness is stale (below minimum, or no version advertised). */
   readonly stale: boolean;
+}
+
+/**
+ * The result of {@link assessWorkersWithAvailability}: the per-instance assessments plus whether the
+ * harness-protocol registry could actually be CONSULTED. `registryAvailable` is `false` when no data
+ * layer is mounted or the read threw (a legacy DB predating migration 107, an in-flight desync); the
+ * assessments still fail loud (every worker reads STALE) so per-worker supply visibility is unchanged,
+ * but the registry report uses this flag to OMIT its `staleWorkers` list rather than mislabel an
+ * outage as a fleet-wide drain signal (issue #802).
+ */
+export interface WorkerAssessment {
+  /** False when the harness-protocol registry could not be consulted (no data layer, or the read threw). */
+  readonly registryAvailable: boolean;
+  /** The canonical per-instance staleness assessment (every requested instance is present). */
+  readonly assessments: Map<string, HarnessAssessment>;
 }
 
 /**
@@ -169,6 +188,25 @@ export class HarnessProtocolRegistry {
     }
     return out;
   }
+
+  /**
+   * The recorded protocols for a bounded set of live instances — the supply/registry hot-path read.
+   * Unlike {@link all}, this scopes the query to the CURRENT `instances` set rather than scanning
+   * every historical row, so a table that grows with disconnected worker instances does not turn each
+   * 2-second cockpit poll into an O(history) full-table load (an instance is never removed on
+   * disconnect). A blank/whitespace instance is skipped (it can key no reachable row). Any read error
+   * propagates so the caller can distinguish "registry unavailable" from "all healthy".
+   */
+  async protocolsFor(instances: readonly string[]): Promise<Map<string, number | undefined>> {
+    const out = new Map<string, number | undefined>();
+    for (const instance of instances) {
+      const key = HarnessProtocolRegistry.#normaliseInstance(instance);
+      if (key === undefined) continue;
+      const row = await this.#table().findOne({ instance: key });
+      out.set(instance, typeof row?.harness_protocol === "number" ? row.harness_protocol : undefined);
+    }
+    return out;
+  }
 }
 
 /** True when `err` is the durable PRIMARY KEY fence firing (a SQLite `UNIQUE constraint failed` from a
@@ -180,22 +218,27 @@ function isFenceCollision(err: unknown): boolean {
 }
 
 /**
- * Assess a set of worker instances against the recorded harness protocols and the configured minimum —
- * the ONE canonical staleness derivation shared by `getAgenticSupply` and the registry report (no
- * second heuristic). Best-effort: any registry read failure (a legacy DB predating migration 107, an
- * in-flight desync, no data layer mounted) degrades to "unknown protocol" → every worker STALE (fail
- * loud, per absent-version-is-stale), rather than throwing.
+ * Assess a set of worker instances against the recorded harness protocols and the configured minimum,
+ * ALSO reporting whether the registry could be consulted — the ONE canonical staleness derivation
+ * shared by `getAgenticSupply` and the registry report (no second heuristic). The read is bounded to
+ * the current `instances` set (not an O(history) full-table scan). Best-effort: any registry read
+ * failure (a legacy DB predating migration 107, an in-flight desync, no data layer mounted) degrades
+ * to "unknown protocol" → every worker STALE (fail loud, per absent-version-is-stale) with
+ * `registryAvailable: false`, rather than throwing — so a caller can OMIT an aggregate stale list
+ * instead of mislabelling an outage as a drain signal.
  */
-export async function assessWorkers(
+export async function assessWorkersWithAvailability(
   data: DataLayer | undefined,
   instances: readonly string[],
   env: Record<string, string | undefined> = process.env,
-): Promise<Map<string, HarnessAssessment>> {
+): Promise<WorkerAssessment> {
   const min = minHarnessProtocol(env);
   let protocols: Map<string, number | undefined> = new Map();
+  let registryAvailable = false;
   if (data) {
     try {
-      protocols = await new HarnessProtocolRegistry(data).all();
+      protocols = await new HarnessProtocolRegistry(data).protocolsFor(instances);
+      registryAvailable = true;
     } catch (err) {
       console.warn(`[harness-protocol] supply assessment read failed: ${err}`);
     }
@@ -206,5 +249,18 @@ export async function assessWorkers(
     const assessment: HarnessAssessment = { instance, stale: isStaleProtocol(protocol, min) };
     out.set(instance, protocol !== undefined ? { ...assessment, harnessProtocol: protocol } : assessment);
   }
-  return out;
+  return { registryAvailable, assessments: out };
+}
+
+/**
+ * The per-instance staleness assessments — the fail-loud supply path (a read failure reads every
+ * worker as STALE). A thin projection of {@link assessWorkersWithAvailability} for callers that only
+ * need the per-worker verdict and not the registry-availability signal (there is ONE derivation).
+ */
+export async function assessWorkers(
+  data: DataLayer | undefined,
+  instances: readonly string[],
+  env: Record<string, string | undefined> = process.env,
+): Promise<Map<string, HarnessAssessment>> {
+  return (await assessWorkersWithAvailability(data, instances, env)).assessments;
 }

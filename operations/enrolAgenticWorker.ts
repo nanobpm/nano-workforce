@@ -162,13 +162,13 @@ export default defineOperation("enrolAgenticWorker", async ({ req, body }, app) 
         }),
     demandVersion: resolved.demandVersion,
     leaseTtl: resolved.leaseTtl,
+    // Always surface the staleness verdict so the caller (and the cockpit) can see a stale harness even
+    // when it advertised no version at all.
+    harnessStale,
   };
   if (body.instance !== undefined) result.instance = body.instance;
   if (body.durableResume !== undefined) result.durableResume = body.durableResume;
   if (body.harnessProtocol !== undefined) result.harnessProtocol = body.harnessProtocol;
-  // Always surface the staleness verdict so the caller (and the cockpit) can see a stale harness even
-  // when it advertised no version at all.
-  result.harnessStale = harnessStale;
 
   app.log.info("agentic enrol resolved", {
     instance: body.instance,

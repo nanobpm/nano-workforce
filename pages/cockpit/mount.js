@@ -84,7 +84,9 @@ function workerView(worker, staleAfterMs, byJobKey) {
     correlations,
     liveness: liveness(worker, staleAfterMs),
     staleMs: worker.staleMs,
-    harnessStale: worker.harnessStale ?? false,
+    // Fail loud: default a missing harness verdict to STALE (mirrors the typed cockpit view and the
+    // server's fail-loud assessment) so an older/cached response can't hide a stale/unknown worker.
+    harnessStale: worker.harnessStale ?? true,
     ...(worker.harnessProtocol !== undefined ? { harnessProtocol: worker.harnessProtocol } : {}),
   };
 }

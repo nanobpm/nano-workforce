@@ -223,7 +223,11 @@ function workerView(
     correlations,
     liveness: liveness(worker, staleAfterMs),
     staleMs: worker.staleMs,
-    harnessStale: worker.harnessStale ?? false,
+    // Fail loud: a report without a harness verdict (an older/cached response) has no trustworthy
+    // protocol assessment, so keep the worker visible as STALE until the server supplies a healthy one
+    // — mirrors the server's `harness?.stale ?? true` (issue #802). Defaulting to `false` here would
+    // let a cached response hide exactly the workers this surface is meant to expose.
+    harnessStale: worker.harnessStale ?? true,
     ...(worker.harnessProtocol !== undefined ? { harnessProtocol: worker.harnessProtocol } : {}),
   };
 }
