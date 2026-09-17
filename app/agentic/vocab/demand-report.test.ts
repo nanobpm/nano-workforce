@@ -183,6 +183,21 @@ test("#802: computeRegistryReport threads live workers through the registry into
     { instance: "w-kimi", stale: true, harnessProtocol: 0 },
     { instance: "w-senior", stale: true },
   ]);
+  // The stale-harness condition is folded into the OVERALL status so the board's status pill (which
+  // renders only `report.status`, not `staleWorkers`) turns RED rather than staying green (issue #802).
+  assertEquals(report.status, "red");
+});
+
+test("#802: computeRegistryReport keeps status green when every enrolled harness is healthy", async () => {
+  // Guards the fold's other edge: a mounted registry with NO stale workers must NOT force `red` — the
+  // overall status stays whatever demand×supply produced (here green, empty demand / no missing).
+  const { data } = memDataFor(HARNESS_MIGRATIONS);
+  const reg = new HarnessProtocolRegistry(data);
+  await reg.recordEnrolment("w-front", 5);
+  await reg.recordEnrolment("w-senior", 5);
+  const report = await computeRegistryReport(noopLog(), data, [plannerFrontier, seniorImpl]);
+  assertEquals(report.staleWorkers, []);
+  assertEquals(report.status, "green");
 });
 
 test("#802: computeRegistryReport OMITS staleWorkers when the registry cannot be consulted", async () => {

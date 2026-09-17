@@ -849,7 +849,10 @@ components:
         status:
           type: string
           enum: [green, amber, red]
-          description: The overall SLO — worst of the missing-agent signal and the diversity SLO.
+          description: >-
+            The overall SLO — worst of the missing-agent signal and the diversity SLO, and folded to
+            `red` when any enrolled harness is stale (`staleWorkers` non-empty, issue #802), since the
+            board renders only this pill as its overall signal.
         staleWorkers:
           type: array
           description: >-

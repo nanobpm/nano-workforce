@@ -43,7 +43,9 @@ export interface RegistryReport extends DemandSupplyReport {
    * The enrolled workers whose harness is STALE (issue #802) — below the configured minimum protocol,
    * or advertising no version at all — so they may silently swallow AgentInstance / transcript /
    * result-envelope artifacts and should be drained. Empty when every supplied worker is healthy;
-   * omitted only when the harness-protocol registry could not be consulted.
+   * omitted only when the harness-protocol registry could not be consulted. When non-empty, the
+   * overall {@link DemandSupplyReport.status} is folded to `red` (a drain signal), because the board
+   * renders only `status` and does not surface this list on its own.
    */
   readonly staleWorkers?: readonly HarnessAssessment[];
 }
@@ -208,5 +210,12 @@ export async function computeRegistryReport(
   const staleWorkers = [...assessments.values()]
     .filter((a) => a.stale)
     .sort((a, b) => a.instance.localeCompare(b.instance));
-  return { ...report, staleWorkers };
+  // Fold the stale-harness condition into the OVERALL status (issue #802). The board renders only
+  // `report.status` as its overall pill and does not surface `staleWorkers`, so without this a
+  // healthy-demand report (status `green`/`amber`) would still show green while enrolled harnesses are
+  // stale — silently swallowing AgentInstance / transcript / result-envelope artifacts. A stale
+  // harness is a drain signal, so any stale worker forces the overall status to `red` (`red` is
+  // already the worst grade, so this never downgrades an existing `red`).
+  const status = staleWorkers.length > 0 ? "red" : report.status;
+  return { ...report, status, staleWorkers };
 }
