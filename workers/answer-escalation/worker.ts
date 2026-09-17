@@ -70,6 +70,14 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // same-answer losing racer on the same `user_task_key` — so record-answer selects that exact row
   // rather than correlating by answer. Absent for an out-of-band resume.
   const completedCompletionId = nonBlankInt(job.variables.completedCompletionId);
+  // The durable id of the escalation THIS completion answers (Copilot review of #806). The originating
+  // `pr.persist-escalation` returns its inserted `escalations.id` as a process variable (`EscalationOut`),
+  // which the `wait-*` completion carries through here. Answering by this exact id — rather than the
+  // newest open row — is what makes a REDELIVERED older answer safe: if the process has since opened a
+  // NEWER escalation (a different question), a stale Q1 `record-answer` whose `escalationId` no longer
+  // matches any open row is a no-op instead of misfiling Q1's answer under Q2's fingerprint and retiring
+  // Q2 unanswered. Absent for a pre-#806 / out-of-band resume — we then fall back to the newest open row.
+  const escalationId = nonBlankInt(job.variables.escalationId);
   const prs = app.data.table<PullRequest>("pull_requests", "pr_key");
   // Reject a delayed/redelivered job from a SUPERSEDED process instance (Copilot review of #806).
   // `pull_requests.process_key` always tracks the CURRENT loop instance for this PR — the convergence
@@ -106,7 +114,13 @@ const handler: AppJobHandler<In> = async (job, app) => {
   if (currentProcessKey !== undefined && jobProcessKey !== undefined && jobProcessKey !== currentProcessKey) {
     return {};
   }
-  if (open.length > 0) {
+  // The escalation this completion actually answers. Prefer the exact `escalationId` the winning
+  // completion carried; fall back to the newest open row only when it is absent (a pre-#806 / out-of-band
+  // resume). If an `escalationId` was carried but no OPEN row bears it, this is a redelivered answer for
+  // an escalation that has already been retired (or superseded by a newer question) — no-op rather than
+  // misfile the answer under a different escalation's question (Copilot review of #806).
+  const target = escalationId != null ? open.find((e) => e.id === escalationId) : open[0];
+  if (target !== undefined) {
     const ts = new Date().toISOString();
     // Persist the DURABLE adjudication FIRST, BEFORE the escalation/PR rows transition off `open`
     // (issue #806, Copilot review — crash safety). `recordAdjudication` is INSERT-if-absent idempotent,
@@ -118,10 +132,14 @@ const handler: AppJobHandler<In> = async (job, app) => {
       const adjudicator = await latestAdjudicator(app, job.processInstanceKey, answer, completedUserTaskKey, completedCompletionId);
       await recordAdjudication(app.data, {
         prKey,
-        question: open[0].question,
+        question: target.question,
         answer,
         adjudicatedBy: adjudicator?.id,
         adjudicatedKind: adjudicator?.kind,
+        // Link the decision to the winning completion (issue #806 review) so a later revert of that
+        // completion can tombstone it even when it is a FIRST-HAND agent answer with no
+        // `source_adjudication_id`. INSERT-if-absent, so it pins to the original first-hand winner.
+        sourceCompletionId: completedCompletionId,
         // Run generation this answer belongs to: every adjudication write is fenced on the PR's current
         // `process_key` still matching it, so a pre-reset straggler (one that passed the check above,
         // then paused across a re-submit that advanced `process_key` and cleared the memory) cannot
@@ -142,9 +160,13 @@ const handler: AppJobHandler<In> = async (job, app) => {
     const guard = generationGuard(prKey, jobProcessKey);
     await db.exec(
       `UPDATE "escalations" SET "answer" = ?, "status" = 'answered', "answered_at" = ? WHERE "id" = ? AND ${guard.sql}`,
-      [answer ?? null, ts, open[0].id, ...guard.params],
+      [answer ?? null, ts, target.id, ...guard.params],
     );
-    for (const dup of open.slice(1)) {
+    // Mark any OTHER still-open row `stale` (a `pr.persist-escalation` retry can leave more than one
+    // open for the same question). We retire every open row except the one we just answered so a phantom
+    // `activePrs` never keeps deriving while the PR is `escalated`.
+    for (const dup of open) {
+      if (dup.id === target.id) continue;
       await db.exec(
         `UPDATE "escalations" SET "status" = 'stale' WHERE "id" = ? AND ${guard.sql}`,
         [dup.id, ...guard.params],

@@ -22,7 +22,7 @@
 
 import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
-import { invalidateAdjudication } from "./adjudications.ts";
+import { invalidateAdjudication, invalidateAdjudicationByCompletion } from "./adjudications.ts";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT } from "./userTasks.ts";
@@ -540,21 +540,32 @@ export async function revertAgentCompletion(
   if (!reverterId) return { ok: false, reason: "reverter id is required" };
 
   const correction = typeof note === "string" ? note.trim() : "";
+  // TOMBSTONE the durable adjudication(s) this completion produced BEFORE marking the ledger row
+  // reverted (issue #806 review — atomicity). If we flipped `reverted` first and an invalidate then
+  // threw, this call returns an error but a retry trips the `row.reverted` guard above and is
+  // permanently rejected — while the still-live adjudication keeps auto-applying, an unrecoverable
+  // override. Tombstoning first (both invalidations are idempotent, conditional on `invalidated_at IS
+  // NULL`) makes a retry after a transient second-write failure safe: it re-tombstones (no-op) and
+  // then reaches the ledger update. Marking the ledger reverted alone would NOT stop the replay — the
+  // convergence poller matches the unchanged `pr_adjudications` row and re-applies the overridden
+  // answer on the next derived task, silently undoing this revert.
+  //
+  // Two disjoint links must be severed, and each no-ops when inapplicable:
+  //   • auto-applied replay — this completion replayed an EXISTING decision (`auto_applied=1`,
+  //     `source_adjudication_id` set); invalidate that decision by id.
+  //   • first-hand agent answer — this completion is the agent's own answer to a `wait-answer`
+  //     (`auto_applied=0`, no `source_adjudication_id`) that RECORDED a decision linked back by
+  //     `source_completion_id`; invalidate by completion id. Without this the reverted first-hand
+  //     answer stays live and the poller re-auto-applies it.
+  if (row.auto_applied && row.source_adjudication_id != null) {
+    await invalidateAdjudication(data, row.source_adjudication_id);
+  }
+  await invalidateAdjudicationByCompletion(data, completionId);
   await taskCompletions(data).update(completionId, {
     reverted: 1,
     reverted_by: reverterId,
     reverted_note: correction || null,
     reverted_at: now(),
   });
-  // If this completion AUTO-APPLIED a durable adjudication (issue #806), invalidate that exact
-  // decision now. Marking the ledger row reverted alone would NOT stop the replay: the convergence
-  // poller matches the unchanged `pr_adjudications` row and re-applies the same overridden answer on
-  // the next derived task, silently undoing this revert (Copilot review of #806). `invalidateAdjudication`
-  // TOMBSTONES the row (it does not DELETE it) so a redelivered `record-answer` cannot re-insert the same
-  // fingerprint and resurrect the decision after the revert — the revert becomes a durable override, and
-  // the next round re-parks a human — while the original decision's audit survives. Idempotent.
-  if (row.auto_applied && row.source_adjudication_id != null) {
-    await invalidateAdjudication(data, row.source_adjudication_id);
-  }
   return { ok: true, completionId };
 }

@@ -76,6 +76,24 @@ function memData(stores: Record<string, { rows: any[]; key: string }>) {
       }
       return { changed: 0 };
     }
+    // The FIRST-HAND agent-revert tombstone keyed on `source_completion_id` (Copilot review of #806) —
+    // `invalidateAdjudicationByCompletion`. Tombstones EVERY live row this completion produced (a
+    // completion settles one question, so at most one) so reverting a first-hand agent answer (which has
+    // no `source_adjudication_id`) still stops the poller re-auto-applying it.
+    const c = /UPDATE "pr_adjudications" SET "invalidated_at" = \? WHERE "source_completion_id" = \? AND "invalidated_at" IS NULL/.exec(sql);
+    if (c) {
+      const store = stores.pr_adjudications;
+      let changed = 0;
+      if (store) {
+        for (const r of store.rows) {
+          if (r.source_completion_id === params[1] && (r.invalidated_at == null || String(r.invalidated_at).trim() === "")) {
+            r.invalidated_at = params[0];
+            changed++;
+          }
+        }
+      }
+      return { changed };
+    }
     throw new Error(`unexpected exec sql: ${sql}`);
   };
   return {
@@ -425,10 +443,61 @@ test("an auto-applied completion records the source adjudication id, and reverti
   );
 });
 
-test("reverting a first-hand (non-auto-applied) completion touches NO adjudication (#806 review)", async () => {
+test("revert tombstones the adjudication BEFORE marking the ledger reverted, so a failed invalidate is retryable (#806 review)", async () => {
+  // Atomicity/ordering: if the ledger row were flipped `reverted` FIRST and the adjudication tombstone
+  // then threw, a retry would trip the `already reverted` guard and be permanently rejected while the
+  // still-live adjudication keeps auto-applying — an unrecoverable override (Finding 3). Tombstoning
+  // first means a transient invalidate failure leaves the ledger UNreverted, so a retry can complete.
   const stores = {
     task_completions: { rows: [] as any[], key: "id" },
-    pr_adjudications: { rows: [{ id: 7, pr_key: "o/r#1", answer: "keep" }] as any[], key: "id" },
+    pr_adjudications: { rows: [{ id: 42, pr_key: "o/r#1", answer: "Cap at 5.", invalidated_at: null }] as any[], key: "id" },
+  };
+  const inner = memData(stores);
+  let failInvalidate = true;
+  // Wrap the data layer so the FIRST tombstone attempt throws (a transient second-write failure).
+  const data: any = {
+    table: inner.table,
+    open: () => ({
+      exec: (sql: string, params: unknown[] = []) => {
+        if (failInvalidate && /pr_adjudications/.test(sql)) return Promise.reject(new Error("transient write failure"));
+        return inner.open().exec(sql, params);
+      },
+    }),
+  };
+  const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "ut-1", elementId: "feature-escalation", variables: { resolution: "answer", answer: "Cap at 5." } },
+    { kind: "human", id: "alice" },
+    { autoApplied: true, sourceAdjudicationId: 42 },
+  );
+
+  await assertRejects(() => revertAgentCompletion(data, completionId, { kind: "human", id: "bob" }, "override"));
+  assertEquals(
+    (stores.task_completions.rows[0] as TaskCompletion).reverted,
+    0,
+    "a failed tombstone must NOT have flipped the ledger reverted — otherwise the retry below is permanently rejected",
+  );
+
+  // The transient failure clears; a retry now completes and both tombstones + the ledger flip land.
+  failInvalidate = false;
+  const r = await revertAgentCompletion(data, completionId, { kind: "human", id: "bob" }, "override");
+  assertEquals(r.ok, true, "the retry after a transient failure succeeds (the revert is recoverable)");
+  assertEquals((stores.task_completions.rows[0] as TaskCompletion).reverted, 1, "the ledger is now reverted");
+  assert(
+    typeof stores.pr_adjudications.rows[0].invalidated_at === "string" && stores.pr_adjudications.rows[0].invalidated_at.length > 0,
+    "the source adjudication is tombstoned after the successful retry",
+  );
+});
+
+test("reverting a first-hand completion leaves an UNLINKED adjudication untouched (#806 review)", async () => {
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    // An adjudication that this completion did NOT produce (source_completion_id ≠ our id) must not be
+    // tombstoned by reverting an unrelated completion.
+    pr_adjudications: { rows: [{ id: 7, pr_key: "o/r#1", answer: "keep", source_completion_id: 999, invalidated_at: null }] as any[], key: "id" },
   };
   const data = memData(stores);
   const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
@@ -444,7 +513,40 @@ test("reverting a first-hand (non-auto-applied) completion touches NO adjudicati
   assertEquals(row.auto_applied, 0);
   assertEquals(row.source_adjudication_id, null, "a first-hand completion has no linked adjudication");
   assertEquals((await revertAgentCompletion(data, completionId, { kind: "human", id: "alice" })).ok, true);
-  assertEquals(stores.pr_adjudications.rows.length, 1, "no adjudication is invalidated for a first-hand revert");
+  assertEquals(stores.pr_adjudications.rows.length, 1, "no adjudication is deleted for a first-hand revert");
+  assertEquals(stores.pr_adjudications.rows[0].invalidated_at, null, "an adjudication this completion did not produce is left live");
+});
+
+test("reverting a FIRST-HAND agent completion tombstones the adjudication it produced, via source_completion_id (#806 review)", async () => {
+  // A first-hand agent answer to a `wait-answer` records its OWN adjudication (auto_applied=0, no
+  // source_adjudication_id) linked back only by `source_completion_id`. Reverting that reversible agent
+  // completion must tombstone that decision, or the convergence poller re-auto-applies the overridden
+  // answer — the exact gap Finding 1 flagged. There is no `source_adjudication_id` to key on, so the
+  // revert finds the decision by the completion that created it.
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pr_adjudications: { rows: [] as any[], key: "id" },
+  };
+  const data = memData(stores);
+  const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "ut-1", elementId: "feature-escalation", variables: { resolution: "answer", answer: "first-hand" } },
+    { kind: "agent", id: "bot" },
+  );
+  // The first-hand answer's own decision, linked to this completion (what `record-answer` records).
+  stores.pr_adjudications.rows.push({ id: 55, pr_key: "o/r#1", answer: "first-hand", source_completion_id: completionId, invalidated_at: null });
+
+  const row = stores.task_completions.rows[0] as TaskCompletion;
+  assertEquals(row.auto_applied, 0);
+  assertEquals(row.source_adjudication_id, null, "a first-hand completion has no source_adjudication_id — only source_completion_id links it");
+  assertEquals((await revertAgentCompletion(data, completionId, { kind: "human", id: "alice" })).ok, true);
+  assert(
+    typeof stores.pr_adjudications.rows[0].invalidated_at === "string" && stores.pr_adjudications.rows[0].invalidated_at.length > 0,
+    "reverting the first-hand agent completion tombstoned the adjudication it produced so the poller cannot re-apply it",
+  );
 });
 
 test("the ledger rolls back when the engine completion fails (never claims a completion that did not happen)", async () => {

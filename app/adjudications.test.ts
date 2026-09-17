@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
-import { invalidateAdjudication, matchAdjudication, prAdjudications, type PrAdjudicationRow, recordAdjudication, resetAdjudications } from "./adjudications.ts";
+import { invalidateAdjudication, invalidateAdjudicationByCompletion, matchAdjudication, prAdjudications, type PrAdjudicationRow, recordAdjudication, resetAdjudications } from "./adjudications.ts";
 import { questionFingerprint } from "./github.ts";
 
 function row(over: Partial<PrAdjudicationRow>): PrAdjudicationRow {
@@ -25,6 +25,7 @@ function row(over: Partial<PrAdjudicationRow>): PrAdjudicationRow {
     adjudicated_kind: "human",
     adjudicated_at: "2025-01-01T00:00:00.000Z",
     invalidated_at: null,
+    source_completion_id: null,
     ...over,
   };
 }
@@ -378,5 +379,64 @@ test("invalidateAdjudication: a redelivered record-answer after a revert cannot 
     assertEquals(after.length, 1, "the redelivery is a UNIQUE-fenced no-op — no second row is inserted");
     assert(typeof after[0].invalidated_at === "string" && (after[0].invalidated_at as string).length > 0, "the row stays tombstoned across the redelivery");
     assertEquals(matchAdjudication(after, "Which retry cap?"), undefined, "the reverted decision stays un-replayable — the revert is durable");
+  });
+});
+
+test("recordAdjudication: stamps source_completion_id linking the decision to its winning completion (#806 review)", async () => {
+  // A first-hand agent answer records its own decision (auto_applied=0, no source_adjudication_id); the
+  // ONLY link back to the completion that produced it is source_completion_id, so a later revert of that
+  // completion can tombstone the decision (invalidateAdjudicationByCompletion). Absent → NULL.
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: 77 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which timeout?", answer: "30s", adjudicatedBy: "bot", adjudicatedKind: "agent" });
+    const rows = await findAdj(data, "o/r#1");
+    assertEquals(rows.find((r) => r.answer === "Cap at 5.")?.source_completion_id, 77, "the winning completion id is stamped");
+    assertEquals(rows.find((r) => r.answer === "30s")?.source_completion_id, null, "an absent completion id records NULL");
+  });
+});
+
+test("recordAdjudication: source_completion_id pins to the ORIGINAL first-hand winner across a later auto-apply re-record (#806 review)", async () => {
+  // The first-hand answer records with its completion id; a later auto-apply replays the SAME question
+  // and re-records — a UNIQUE no-op that must NOT overwrite the link to the first-hand completion, so a
+  // revert of the first-hand completion still finds and tombstones the decision.
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: 10 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: 20 });
+    const rows = await findAdj(data, "o/r#1");
+    assertEquals(rows.length, 1, "the re-record is a UNIQUE no-op");
+    assertEquals(rows[0].source_completion_id, 10, "the link stays pinned to the original first-hand winner");
+  });
+});
+
+test("invalidateAdjudicationByCompletion: tombstones the decision produced by a specific completion (#806 review)", async () => {
+  // The first-hand-agent-revert counterpart to invalidateAdjudication: keyed on source_completion_id
+  // (there is no source_adjudication_id for a first-hand answer). Tombstones (not deletes), idempotent,
+  // and only touches the row that completion produced.
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: 88 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which timeout?", answer: "30s", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: 99 });
+    await invalidateAdjudicationByCompletion(data, 88);
+    const after = await findAdj(data, "o/r#1");
+    assertEquals(after.length, 2, "the decision is tombstoned, not deleted");
+    assertEquals(matchAdjudication(after, "Which retry cap?"), undefined, "the completion's decision is no longer replayable");
+    assertEquals(matchAdjudication(after, "Which timeout?")?.answer, "30s", "a decision from a different completion is untouched");
+    // Idempotent — a retry after a partial revert re-tombstones as a no-op.
+    const firstStamp = (await findAdj(data, "o/r#1")).find((r) => r.answer === "Cap at 5.")?.invalidated_at;
+    await invalidateAdjudicationByCompletion(data, 88);
+    const secondStamp = (await findAdj(data, "o/r#1")).find((r) => r.answer === "Cap at 5.")?.invalidated_at;
+    assertEquals(secondStamp, firstStamp, "a second call leaves the original tombstone stamp untouched");
+  });
+});
+
+test("invalidateAdjudicationByCompletion: a completion with no linked decision is a no-op (#806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "bot", adjudicatedKind: "agent", sourceCompletionId: 5 });
+    await invalidateAdjudicationByCompletion(data, 404);
+    const after = await findAdj(data, "o/r#1");
+    assertEquals(matchAdjudication(after, "Which retry cap?")?.answer, "Cap at 5.", "an unrelated completion id tombstones nothing");
   });
 });

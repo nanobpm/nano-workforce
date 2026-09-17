@@ -91,6 +91,7 @@
           <nano:extend name="answerContext" type="string" optional="true" />
           <nano:extend name="completedUserTaskKey" type="string" optional="true" />
           <nano:extend name="completedCompletionId" type="integer" optional="true" />
+          <nano:extend name="escalationId" type="integer" optional="true" />
         </nano:shape>
         <nano:shape id="PrFinalizeIn" name="Mark converged — input">
           <nano:extend name="prKey" type="string" />

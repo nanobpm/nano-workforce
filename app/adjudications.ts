@@ -44,6 +44,13 @@ export interface PrAdjudicationRow {
    *  `UNIQUE (pr_key, question_fingerprint)` fence makes a redelivered `record-answer` re-insert a no-op
    *  (a plain DELETE would let that redelivery recreate the row and undo the revert). NULL = live. */
   invalidated_at: string | null;
+  /** The `task_completions.id` of the WINNING completion that produced this decision (issue #806 review).
+   *  A FIRST-HAND agent answer records its own adjudication with `auto_applied=0` and no
+   *  `source_adjudication_id`; this link lets {@link invalidateAdjudicationByCompletion} tombstone the
+   *  decision when a human reverts that reversible agent completion — not only a machine auto-apply.
+   *  INSERT-if-absent, so it stays pinned to the ORIGINAL first-hand winner. NULL for a legacy/
+   *  uncorrelated answer. */
+  source_completion_id: number | null;
 }
 
 export const prAdjudications = (data: DataLayer) => data.table<PrAdjudicationRow>("pr_adjudications", "id");
@@ -81,6 +88,10 @@ interface RecordAdjudicationInput {
   adjudicatedBy: string | undefined;
   adjudicatedKind: string | undefined;
   expectedProcessKey?: string | undefined;
+  /** The `task_completions.id` of the winning completion this answer settled (issue #806 review), stored
+   *  as `source_completion_id` so a later revert of that completion can tombstone the decision it created.
+   *  Undefined for a legacy/uncorrelated answer (recorded NULL). */
+  sourceCompletionId?: number | undefined;
 }
 
 /** A SQL predicate (+ bind params) that is TRUE only while this write still belongs to the CURRENT run
@@ -133,9 +144,9 @@ export async function recordAdjudication(data: DataLayer, input: RecordAdjudicat
     // answer that already inserted the SAME fingerprint trips the `UNIQUE(pr_key, question_fingerprint)`
     // fence, which we tolerate below exactly as the sequential no-op the winner's durable row yields.
     const res = await db.exec(
-      `INSERT INTO "pr_adjudications" ("pr_key","question_fingerprint","answer","adjudicated_by","adjudicated_kind","adjudicated_at")
-       SELECT ?, ?, ?, ?, ?, ? WHERE ${guard.sql}`,
-      [input.prKey, fp, answer, input.adjudicatedBy?.trim() || null, input.adjudicatedKind?.trim() || null, new Date().toISOString(), ...guard.params],
+      `INSERT INTO "pr_adjudications" ("pr_key","question_fingerprint","answer","adjudicated_by","adjudicated_kind","adjudicated_at","source_completion_id")
+       SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}`,
+      [input.prKey, fp, answer, input.adjudicatedBy?.trim() || null, input.adjudicatedKind?.trim() || null, new Date().toISOString(), input.sourceCompletionId ?? null, ...guard.params],
     );
     if (res.changed > 0) return; // fresh insert won under the current generation
   } catch (err) {
@@ -226,4 +237,22 @@ export async function invalidateAdjudication(data: DataLayer, id: number): Promi
       new Date().toISOString(),
       id,
     ]);
+}
+
+/** TOMBSTONE the adjudication produced by a specific WINNING completion (issue #806 review), keyed on
+ *  `source_completion_id`. This is the FIRST-HAND agent-answer counterpart to {@link invalidateAdjudication}:
+ *  a first-hand agent completion of a `wait-answer` records its own adjudication with `auto_applied=0` and
+ *  NO `source_adjudication_id`, so reverting it cannot find the decision by adjudication id — it must be
+ *  found by the completion that created it. Without this the reverted answer stays live and the poller
+ *  re-auto-applies it, silently undoing the human's revert. Tombstones (does not DELETE) for the same
+ *  race-safety reason as {@link invalidateAdjudication}, and is conditional on `invalidated_at IS NULL`
+ *  so it is idempotent — a retry after a partial revert is a safe no-op. A completion settles at most one
+ *  question, so at most one row matches; a completion with no linked adjudication matches none (no-op). */
+export async function invalidateAdjudicationByCompletion(data: DataLayer, completionId: number): Promise<void> {
+  await data
+    .open()
+    .exec(
+      `UPDATE "pr_adjudications" SET "invalidated_at" = ? WHERE "source_completion_id" = ? AND "invalidated_at" IS NULL`,
+      [new Date().toISOString(), completionId],
+    );
 }

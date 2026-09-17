@@ -31,12 +31,12 @@ function fakeApp(escalationRows: Record<string, unknown>[], prRows: Record<strin
   const exec = async (sql: string, params: unknown[] = []) => {
     const fenced = sql.includes("NOT EXISTS");
     if (/^\s*INSERT INTO "pr_adjudications"/.test(sql)) {
-      const [pr_key, question_fingerprint, answer, adjudicated_by, adjudicated_kind, adjudicated_at] = params;
-      if (fenced && !generationAllows(params[6], params[7])) return { changed: 0 };
+      const [pr_key, question_fingerprint, answer, adjudicated_by, adjudicated_kind, adjudicated_at, source_completion_id] = params;
+      if (fenced && !generationAllows(params[7], params[8])) return { changed: 0 };
       if (adjudications.some((r) => r.pr_key === pr_key && r.question_fingerprint === question_fingerprint)) {
         throw new Error("UNIQUE constraint failed: pr_adjudications.pr_key, pr_adjudications.question_fingerprint");
       }
-      adjudications.push({ id: adjudications.length + 1, pr_key, question_fingerprint, answer, adjudicated_by, adjudicated_kind, adjudicated_at });
+      adjudications.push({ id: adjudications.length + 1, pr_key, question_fingerprint, answer, adjudicated_by, adjudicated_kind, adjudicated_at, source_completion_id });
       return { changed: 1 };
     }
     if (/UPDATE "pr_adjudications"/.test(sql)) {
@@ -166,6 +166,36 @@ test("retires ALL open rows: newest answered, any duplicate open rows marked sta
   assertEquals(stale?.patch.status, "stale", "the older duplicate open row is marked stale");
   assertEquals(prUpdates.length, 1, "the PR row is moved off `escalated` exactly once");
   assertEquals(prUpdates[0].patch.status, "converging");
+});
+
+test("answers the escalation identified by escalationId, not merely the newest open row (#806 review)", async () => {
+  // The winning completion carries the exact `escalationId` it answers (EscalationOut → process var →
+  // dataEnvelope.in). We answer THAT row and retire the others as stale — even if it is not the newest.
+  const rows = [
+    { id: 3, pr_key: "o/r#1", status: "open", question: "Which retry cap?" },
+    { id: 7, pr_key: "o/r#1", status: "open", question: "Which timeout?" },
+  ];
+  const { app, updates } = fakeApp(rows);
+  const job = { variables: { prKey: "o/r#1", answer: "Cap at 5.", escalationId: 3 } };
+  await handler(job as any, app as any);
+  const answered = updates.find((u) => u.patch.status === "answered");
+  const stale = updates.find((u) => u.patch.status === "stale");
+  assertEquals(answered?.key, 3, "the escalation named by escalationId is the one answered");
+  assertEquals(answered?.patch.answer, "Cap at 5.");
+  assertEquals(stale?.key, 7, "the other open row is retired stale, not answered");
+});
+
+test("a redelivered answer whose escalationId matches no open row is a no-op — it does not misfile under a newer question (#806 review)", async () => {
+  // Finding 2: a redelivered Q1 `record-answer` running after the process opened Q2 must NOT store Q1's
+  // answer under Q2's fingerprint and retire Q2. Q1's job carries escalationId=1 (a snapshot); Q1 is
+  // already retired and only Q2 (id 2) is open, so the id no longer matches any open row → no-op.
+  const rows = [{ id: 2, pr_key: "o/r#1", status: "open", question: "Which timeout?" }];
+  const { app, updates, prUpdates, adjudications } = fakeApp(rows);
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", escalationId: 1 } };
+  await handler(job as any, app as any);
+  assertEquals(updates.length, 0, "Q2 is untouched — no open escalation is answered or staled");
+  assertEquals(prUpdates.length, 0, "the PR row is not moved off escalated by a stale redelivery");
+  assertEquals(adjudications.length, 0, "no adjudication is recorded under the wrong question");
 });
 
 test("no open row is a no-op (idempotent re-completion)", async () => {
@@ -298,6 +328,7 @@ test("attributes by exact completion id even when a same-answer loser has a high
   assertEquals(adjudications.length, 1);
   assertEquals(adjudications[0].adjudicated_by, "alice", "the exact winning completion id wins over a same-answer higher-id loser");
   assertEquals(adjudications[0].adjudicated_kind, "human");
+  assertEquals(adjudications[0].source_completion_id, 30, "the decision is linked to its winning completion so a later revert can tombstone it (#806 review)");
 });
 
 test("a carried completion id that matches no ledger row → null adjudicator (fails open) (#806 review)", async () => {
