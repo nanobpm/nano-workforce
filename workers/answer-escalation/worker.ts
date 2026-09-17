@@ -72,7 +72,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
     // after the rows flip loses the adjudication entirely (the retry finds no open row and returns), so
     // the answered question could re-escalate after restart. Scoped to convergence answers only.
     if (isConvergence) {
-      const adjudicator = await latestAdjudicator(app, job.processInstanceKey);
+      const adjudicator = await latestAdjudicator(app, job.processInstanceKey, answer);
       await recordAdjudication(app.data, {
         prKey,
         question: open[0].question,
@@ -99,21 +99,50 @@ const handler: AppJobHandler<In> = async (job, app) => {
   return {};
 };
 
-/** Who just completed this `wait-answer`: the `{ id, kind }` of the newest `task_completions` row the
- *  resume's completion stamped for this process instance (`completeUserTaskAttributed` records the actor
- *  id + kind + process-instance key on completion). The KIND (`human`/`agent`, ADR 0046) is preserved so
- *  a later auto-resume replays with the ORIGINAL attribution and never launders an agent decision into a
- *  human one (Copilot review of #806). `undefined` when no ledger row is correlated (e.g. an out-of-band
- *  resume), so the adjudication records a null adjudicator rather than a wrong one. */
-async function latestAdjudicator(app: Parameters<AppJobHandler<In>>[1], processInstanceKey: unknown): Promise<{ id: string; kind: string } | undefined> {
+/** Who just completed this `wait-answer`: the `{ id, kind }` of the `task_completions` row that
+ *  actually WON the user-task race, so the durable adjudication is attributed to the completion the
+ *  engine accepted — never a losing racer's transient row. Both canonical completers
+ *  (`completeUserTaskAttributed`) insert their ledger row BEFORE calling `completeUserTask` and the
+ *  loser only removes its row AFTER the engine rejects it, so a bare "newest row for this process
+ *  instance" can transiently select a higher-id LOSER and persist/replay the wrong `actor_kind`
+ *  (Copilot review of #806). Correlate instead on the WINNING answer: the engine resumed this token
+ *  with exactly one completion's variables, and `answer` here is that winning submission — so the
+ *  winner is the newest ledger row whose recorded `variables_json.answer` matches it. The KIND
+ *  (`human`/`agent`, ADR 0046) is preserved so a later auto-resume replays with the ORIGINAL
+ *  attribution and never launders an agent decision into a human one. `undefined` when no ledger row
+ *  is correlated (e.g. an out-of-band resume, or a winner that did not route through the ledger), so
+ *  the adjudication records a null adjudicator — which fails open to a fresh human task — rather than
+ *  a wrong one. */
+async function latestAdjudicator(app: Parameters<AppJobHandler<In>>[1], processInstanceKey: unknown, winningAnswer: string | undefined): Promise<{ id: string; kind: string } | undefined> {
   const key = processInstanceKey != null ? String(processInstanceKey) : "";
   if (key === "") return undefined;
   const rows = await taskCompletions(app.data).find({ process_instance_key: key });
+  // Correlate on the winning answer whenever we know it: the loser recorded a DIFFERENT submission, so
+  // filtering to rows whose recorded answer matches the accepted one drops the transient loser row. If
+  // the winning answer is unknown (blank/out-of-band — recordAdjudication won't persist it anyway) fall
+  // back to the whole set. Selecting nothing (a known winner with no matching ledger row) returns
+  // undefined and fails open, rather than attributing to an unrelated row.
+  const candidates = winningAnswer != null && winningAnswer !== "" ? rows.filter((r) => completionAnswer(r.variables_json) === winningAnswer) : rows;
   let newest: { id: number; actor_id: string; actor_kind: string } | undefined;
-  for (const r of rows) {
+  for (const r of candidates) {
     if (!newest || r.id > newest.id) newest = r;
   }
   return newest ? { id: newest.actor_id, kind: newest.actor_kind } : undefined;
+}
+
+/** The trimmed `answer` field recorded in a completion's `variables_json`, or undefined when the JSON
+ *  is unparseable or carries no string answer. Used to correlate a ledger row with the submission the
+ *  engine actually accepted (see `latestAdjudicator`). */
+function completionAnswer(variablesJson: unknown): string | undefined {
+  if (typeof variablesJson !== "string") return undefined;
+  try {
+    const parsed: unknown = JSON.parse(variablesJson);
+    if (parsed === null || typeof parsed !== "object" || !("answer" in parsed)) return undefined;
+    const answer = parsed.answer;
+    return typeof answer === "string" && answer.trim() !== "" ? answer.trim() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export default handler;

@@ -13,3 +13,10 @@
 -- reads back `auto_applied=0` (a genuine first-hand submission). Numbered after 109 in the pre-assigned
 -- 109–110 block (#806); the runner wraps each file in its own transaction, so no BEGIN/COMMIT here.
 ALTER TABLE task_completions ADD COLUMN auto_applied INTEGER NOT NULL DEFAULT 0;
+
+-- `latestAdjudicator` (workers/answer-escalation) now looks a completion up by `process_instance_key`
+-- for every convergence answer, to correlate the settled adjudicator's attribution (#806). The ledger
+-- is append-only and only carried an index on `user_task_key` (026_agent_completion.sql), so that
+-- lookup would scan the whole completion history as the fleet grows. Index `process_instance_key` too
+-- (additive/expand — a new index, no existing shape touched).
+CREATE INDEX idx_task_completions_pik ON task_completions(process_instance_key);

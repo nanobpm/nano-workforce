@@ -135,7 +135,7 @@ test("persists a durable adjudication of the answered question, attributed to th
   const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
   const { app, adjudications, completions } = fakeApp(rows);
   // The resume's completion stamped a ledger row for this process instance (alice, a human, answered).
-  completions.push({ id: 1, process_instance_key: "pi-1", element_id: "wait-answer", actor_id: "alice", actor_kind: "human" });
+  completions.push({ id: 1, process_instance_key: "pi-1", element_id: "wait-answer", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
   const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence" } };
   await handler(job as any, app as any);
   assertEquals(adjudications.length, 1, "one durable adjudication row is written");
@@ -144,6 +144,41 @@ test("persists a durable adjudication of the answered question, attributed to th
   assertEquals(adjudications[0].answer, "Cap at 5.");
   assertEquals(adjudications[0].adjudicated_by, "alice", "attributed to the completer from the ledger");
   assertEquals(adjudications[0].adjudicated_kind, "human", "the completer's kind is preserved from the ledger");
+});
+
+// --- Copilot review of #806: the attribution lookup must correlate with the completion that actually
+// WON the user-task race, not the newest ledger row. Both canonical completers insert their row BEFORE
+// calling completeUserTask, and the loser only removes its row AFTER the engine rejects it — so a
+// higher-id LOSER row can be transiently present when record-answer runs. Choosing "newest" would
+// persist/replay the loser's actor_kind against the winner's answer. Correlate on the winning answer. ---
+
+test("attributes to the WINNING completion, not a transient higher-id loser row (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications, completions } = fakeApp(rows);
+  // The human (alice) WON — the engine resumed this token with her answer "Cap at 5.". A losing racer
+  // (a poller auto-resume of a stale adjudication, attributed to an AGENT) inserted a HIGHER-id row
+  // carrying a DIFFERENT answer, and has not yet rolled it back. "Newest" would wrongly pick the agent.
+  completions.push({ id: 1, process_instance_key: "pi-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  completions.push({ id: 2, process_instance_key: "pi-1", actor_id: "senior-agent", actor_kind: "agent", variables_json: JSON.stringify({ answer: "Cap at 3." }) });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence" } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 1);
+  assertEquals(adjudications[0].adjudicated_by, "alice", "attributed to the winner (matching answer), not the higher-id loser");
+  assertEquals(adjudications[0].adjudicated_kind, "human", "the winner's kind is recorded, never the loser's");
+});
+
+test("no ledger row matches the winning answer → null adjudicator (fails open), never a wrong one (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications, completions } = fakeApp(rows);
+  // Only a stale loser row (a DIFFERENT answer) is present — the winning completion did not route
+  // through the ledger. Attributing to the unrelated row would be wrong; record a null adjudicator so
+  // the auto-resume gate fails open to a fresh human task instead.
+  completions.push({ id: 1, process_instance_key: "pi-1", actor_id: "senior-agent", actor_kind: "agent", variables_json: JSON.stringify({ answer: "Cap at 3." }) });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence" } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 1, "the adjudication is still recorded (a real convergence answer)");
+  assertEquals(adjudications[0].adjudicated_by, null, "an uncorrelated winner records a null adjudicator");
+  assertEquals(adjudications[0].adjudicated_kind, null, "no wrong kind is laundered in");
 });
 
 test("a blank answer records NO adjudication (not a replayable decision) (#806)", async () => {
@@ -186,7 +221,7 @@ test("records the adjudication BEFORE the escalation row transitions off `open` 
   const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
   const order: string[] = [];
   const adjudications: Record<string, unknown>[] = [];
-  const completions = [{ id: 1, process_instance_key: "pi-1", actor_id: "alice", actor_kind: "human" }];
+  const completions = [{ id: 1, process_instance_key: "pi-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) }];
   const app = {
     data: {
       table(name: string) {
