@@ -23,12 +23,16 @@ import { parsePr } from "./prParse.ts";
  *  its `owner/repo` half is the repository to look in. `taskId` is `task.id`, which fixes the
  *  deterministic implement branch `feat/<task.id>`. `status` is the (blank, on this arm) implement-step
  *  status. `pr` is any PR key already in scope (the implement harness may have set it) — carried through
- *  unchanged on the non-adopt fall-through so re-emitting the output never wipes it. */
+ *  unchanged on the non-adopt fall-through so re-emitting the output never wipes it. `baseBranch` is the
+ *  run's pinned base branch (the epic/graph integration branch every implement-cell caller maps into the
+ *  cell scope): when known, only a PR whose base matches it is adoptable, so a stale/unrelated PR sharing
+ *  the deterministic head branch but targeting a different base is never adopted. */
 export interface ReconcileImplementInput {
   status: unknown;
   subjectKey: unknown;
   taskId: unknown;
   pr?: unknown;
+  baseBranch?: unknown;
 }
 
 /** The reconcile decision. `reconciled` is the `ic_reconcile_gw` gate: true → adopt-and-converge (with
@@ -60,11 +64,17 @@ export function implementCellBranch(taskId: string): string {
 }
 
 /** The adoptable PR from a head-branch listing: the first OPEN one (a merged/closed PR on the branch is
- *  not an in-flight result to converge). `null` when the listing is absent (no transport) or has none
- *  open. */
-export function pickAdoptablePr(prs: HeadPr[] | null): HeadPr | null {
+ *  not an in-flight result to converge). When `baseBranch` is given, only an open PR whose `baseRef`
+ *  matches it is adoptable — GitHub can carry multiple open PRs from one head branch to different bases,
+ *  so adopting blind to the base could converge a stale/unrelated PR; with no base known, fall back to
+ *  the first open PR (unchanged best-effort behaviour). `null` when the listing is absent (no transport)
+ *  or has no adoptable PR. */
+export function pickAdoptablePr(prs: HeadPr[] | null, baseBranch?: string): HeadPr | null {
   if (!prs) return null;
-  return prs.find((p) => p.state === "open") ?? null;
+  const open = prs.filter((p) => p.state === "open");
+  const base = typeof baseBranch === "string" ? baseBranch.trim() : "";
+  if (base) return open.find((p) => p.baseRef === base) ?? null;
+  return open[0] ?? null;
 }
 
 /** The canonical implement-cell reconcile decision (mirror of `ic_reconcile_gw`). Best-effort: any
@@ -96,7 +106,7 @@ export async function reconcileImplement(
   } catch {
     return escalate; // transport hiccup → escalate as today
   }
-  const adopt = pickAdoptablePr(prs);
+  const adopt = pickAdoptablePr(prs, str(input.baseBranch));
   if (!adopt) return escalate;
   return { reconciled: true, status: "opened", pr: `${parsed.repo}#${adopt.number}` };
 }

@@ -38,6 +38,32 @@ test("adopts an open PR on the branch: emits reconciled + status=opened + pr", a
   }
 });
 
+test("wires baseBranch through: a wrong-base open PR is NOT adopted → escalate", async () => {
+  const prevToken = process.env.GITHUB_TOKEN;
+  const prevTransport = process.env.NANO_PR_GITHUB_TRANSPORT;
+  const prevFetch = globalThis.fetch;
+  process.env.GITHUB_TOKEN = "t";
+  process.env.NANO_PR_GITHUB_TRANSPORT = "token";
+  // The only open PR on the head branch targets a different base than the run's pinned `baseBranch`.
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify([{ number: 55, html_url: "https://github.com/owner/repo/pull/55", state: "open", base: { ref: "stale-base" } }]), {
+      status: 200,
+    })) as typeof fetch;
+  try {
+    const out = await handler(
+      { jobKey: "j3", variables: { subjectKey: "owner/repo#7", task: { id: "issue-7" }, status: null, baseBranch: "epic/feat-x" } } as never,
+      fakeApp,
+    );
+    assertEquals(out, { reconciled: false, status: null, pr: null });
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = prevToken;
+    if (prevTransport === undefined) delete process.env.NANO_PR_GITHUB_TRANSPORT;
+    else process.env.NANO_PR_GITHUB_TRANSPORT = prevTransport;
+  }
+});
+
 test("no open PR on the branch: falls through to escalate (reconciled=false)", async () => {
   const prevToken = process.env.GITHUB_TOKEN;
   const prevTransport = process.env.NANO_PR_GITHUB_TRANSPORT;

@@ -39,6 +39,17 @@ test("pickAdoptablePr: the first OPEN PR wins; merged/closed are not adoptable",
   assertEquals(pickAdoptablePr([{ ...openPr(2), state: "closed" }, openPr(3)])?.number, 3);
 });
 
+test("pickAdoptablePr: a known baseBranch adopts only an open PR that targets it", () => {
+  // Multiple open PRs from the same head branch to different bases — only the one matching the
+  // run's pinned base is adoptable; a stale/wrong-base PR (even if first) is never adopted.
+  const prs = [openPr(10, "old-epic-base"), openPr(11, "epic/feat-x")];
+  assertEquals(pickAdoptablePr(prs, "epic/feat-x")?.number, 11);
+  // No open PR targets the pinned base → nothing adoptable (escalate rather than converge the wrong PR).
+  assertEquals(pickAdoptablePr([openPr(12, "some-other-base")], "epic/feat-x"), null);
+  // Whitespace-only base is treated as "unknown" → first-open fallback.
+  assertEquals(pickAdoptablePr([openPr(13, "main")], "  ")?.number, 13);
+});
+
 // The core defect reproduction: blank status + an open PR on the branch → adopt & converge, no escalation.
 test("reconcileImplement: blank status + open PR on feat/<task.id> → adopt (status=opened, pr set)", async () => {
   const calls: Array<{ repo: string; branch: string }> = [];
@@ -123,6 +134,24 @@ test("reconcileImplement: a successful adoption overwrites any existing pr with 
     "token",
   );
   assertEquals(res, { reconciled: true, status: "opened", pr: "owner/repo#99" });
+});
+
+test("reconcileImplement: with a pinned baseBranch, only a PR targeting it is adopted", async () => {
+  // The head branch carries two open PRs to different bases — adopt the one matching the run's base.
+  const adopt = await reconcileImplement(
+    { status: null, subjectKey: "owner/repo#7", taskId: "issue-7", baseBranch: "epic/feat-x" },
+    async () => [openPr(50, "stale-base"), openPr(51, "epic/feat-x")],
+    "token",
+  );
+  assertEquals(adopt, { reconciled: true, status: "opened", pr: "owner/repo#51" });
+
+  // Only a wrong-base PR exists → escalate rather than converge the wrong branch.
+  const escalate = await reconcileImplement(
+    { status: null, subjectKey: "owner/repo#7", taskId: "issue-7", baseBranch: "epic/feat-x", pr: "owner/repo#42" },
+    async () => [openPr(52, "stale-base")],
+    "token",
+  );
+  assertEquals(escalate, { reconciled: false, status: null, pr: "owner/repo#42" });
 });
 
 test("reconcileImplement: a missing taskId or unparseable subjectKey → escalate, no lookup", async () => {

@@ -174,6 +174,7 @@
         <zeebe:calledElement processId="implement-cell" />
         <zeebe:ioMapping>
           <zeebe:input source="=task" target="task" />
+          <zeebe:input source="=baseBranch" target="baseBranch" />
           <zeebe:input source="=if (is defined(baseBranchBrief)) then baseBranchBrief else null" target="baseBranchBrief" />
           <zeebe:input source="=if (is defined(resolvedArtifacts)) then resolvedArtifacts else null" target="resolvedArtifacts" />
           <zeebe:input source="=if (is defined(customInstructions)) then customInstructions else null" target="customInstructions" />

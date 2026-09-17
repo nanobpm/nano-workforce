@@ -14,8 +14,10 @@
 // tested `app/implementReconcile.ts` mirror — this handler is the thin engine seam. `taskId` is
 // derived from the in-scope `task` process variable (`task.id`) — `implement-cell.bpmn` defines no
 // `<zeebe:ioMapping>` input for this step; the engine populates `task` (and `subjectKey`, `status`,
-// `pr`) from process scope. `pr` is passed through so the reconcile step's `pr` output never wipes a
-// PR key the implement harness already set.
+// `pr`, `baseBranch`) from process scope. `pr` is passed through so the reconcile step's `pr` output
+// never wipes a PR key the implement harness already set. `baseBranch` (the run's pinned base) is
+// passed through so an open PR on the deterministic head branch is only adopted when it targets that
+// base — never a stale/unrelated PR sharing the head branch but aimed at a different base.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { listPrsForHead } from "../../app/github.ts";
 import { type ReconcileImplementResult, reconcileImplement } from "../../app/implementReconcile.ts";
@@ -25,6 +27,7 @@ interface In extends Record<string, unknown> {
   task?: unknown;
   status?: unknown;
   pr?: unknown;
+  baseBranch?: unknown;
 }
 
 /** The cell's deterministic branch is `feat/<task.id>`; `task` is the implement-cell's slice object.
@@ -41,6 +44,7 @@ const handler: AppJobHandler<In, ReconcileImplementResult> = async (job, app) =>
       subjectKey: job.variables.subjectKey,
       taskId: taskId(job.variables.task),
       pr: job.variables.pr,
+      baseBranch: job.variables.baseBranch,
     },
     listPrsForHead,
     process.env.GITHUB_TOKEN ?? "",
