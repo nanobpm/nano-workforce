@@ -11,9 +11,11 @@
 // human escalation as today.
 //
 // The decision + the injected GitHub read (`listPrsForHead`) live in the canonical, exhaustively
-// tested `app/implementReconcile.ts` mirror — this handler is the thin engine seam. `taskId` is read
-// from a plain `<zeebe:ioMapping>` input (`=task.id`), NOT a `dataEnvelope.in` field (a synthesised
-// envelope name with no backing process variable would arrive blank — AGENTS.md).
+// tested `app/implementReconcile.ts` mirror — this handler is the thin engine seam. `taskId` is
+// derived from the in-scope `task` process variable (`task.id`) — `implement-cell.bpmn` defines no
+// `<zeebe:ioMapping>` input for this step; the engine populates `task` (and `subjectKey`, `status`,
+// `pr`) from process scope. `pr` is passed through so the reconcile step's `pr` output never wipes a
+// PR key the implement harness already set.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { listPrsForHead } from "../../app/github.ts";
 import { type ReconcileImplementResult, reconcileImplement } from "../../app/implementReconcile.ts";
@@ -22,6 +24,7 @@ interface In extends Record<string, unknown> {
   subjectKey?: unknown;
   task?: unknown;
   status?: unknown;
+  pr?: unknown;
 }
 
 /** The cell's deterministic branch is `feat/<task.id>`; `task` is the implement-cell's slice object.
@@ -33,7 +36,12 @@ function taskId(task: unknown): unknown {
 
 const handler: AppJobHandler<In, ReconcileImplementResult> = async (job, app) => {
   const res = await reconcileImplement(
-    { status: job.variables.status, subjectKey: job.variables.subjectKey, taskId: taskId(job.variables.task) },
+    {
+      status: job.variables.status,
+      subjectKey: job.variables.subjectKey,
+      taskId: taskId(job.variables.task),
+      pr: job.variables.pr,
+    },
     listPrsForHead,
     process.env.GITHUB_TOKEN ?? "",
   );

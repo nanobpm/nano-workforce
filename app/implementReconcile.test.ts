@@ -98,6 +98,33 @@ test("reconcileImplement: a lookup transport failure falls through to escalate (
   assertEquals(res, { reconciled: false, status: null, pr: null });
 });
 
+test("reconcileImplement: an existing pr is carried through unchanged on fall-through (never wiped)", async () => {
+  // A genuine escalation status → escalate; any pr already in scope must survive the re-emit.
+  const escalated = await reconcileImplement(
+    { status: "escalated", subjectKey: "owner/repo#7", taskId: "issue-7", pr: "owner/repo#42" },
+    async () => [],
+    "token",
+  );
+  assertEquals(escalated, { reconciled: false, status: "escalated", pr: "owner/repo#42" });
+
+  // Blank status but no adoptable PR → escalate; an existing pr still survives.
+  const noAdopt = await reconcileImplement(
+    { status: null, subjectKey: "owner/repo#7", taskId: "issue-7", pr: "owner/repo#42" },
+    async () => [],
+    "token",
+  );
+  assertEquals(noAdopt, { reconciled: false, status: null, pr: "owner/repo#42" });
+});
+
+test("reconcileImplement: a successful adoption overwrites any existing pr with the adopted key", async () => {
+  const res = await reconcileImplement(
+    { status: null, subjectKey: "owner/repo#7", taskId: "issue-7", pr: "owner/repo#42" },
+    async () => [openPr(99)],
+    "token",
+  );
+  assertEquals(res, { reconciled: true, status: "opened", pr: "owner/repo#99" });
+});
+
 test("reconcileImplement: a missing taskId or unparseable subjectKey → escalate, no lookup", async () => {
   let consulted = false;
   const lookup = async (): Promise<HeadPr[]> => {

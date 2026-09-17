@@ -22,11 +22,13 @@ import { parsePr } from "./prParse.ts";
  *  cell's `owner/repo#N` subject (a feature run's `feature_key`, or a wave slice's epic `plan_key`) —
  *  its `owner/repo` half is the repository to look in. `taskId` is `task.id`, which fixes the
  *  deterministic implement branch `feat/<task.id>`. `status` is the (blank, on this arm) implement-step
- *  status. */
+ *  status. `pr` is any PR key already in scope (the implement harness may have set it) — carried through
+ *  unchanged on the non-adopt fall-through so re-emitting the output never wipes it. */
 export interface ReconcileImplementInput {
   status: unknown;
   subjectKey: unknown;
   taskId: unknown;
+  pr?: unknown;
 }
 
 /** The reconcile decision. `reconciled` is the `ic_reconcile_gw` gate: true → adopt-and-converge (with
@@ -74,7 +76,14 @@ export async function reconcileImplement(
   lookup: OpenPrLookup,
   token: string,
 ): Promise<ReconcileImplementResult> {
-  const escalate: ReconcileImplementResult = { reconciled: false, status: str(input.status) ?? null, pr: null };
+  const escalate: ReconcileImplementResult = {
+    reconciled: false,
+    status: str(input.status) ?? null,
+    // Carry any existing PR key through unchanged — the reconcile step's `pr` output is mapped back
+    // into the process variable, so returning a bare `null` here would wipe a `pr` the implement
+    // harness already set. Only a successful adoption below overwrites it.
+    pr: str(input.pr) ?? null,
+  };
   if (!shouldReconcileImplement(input.status)) return escalate;
   const taskId = str(input.taskId);
   // `subjectKey` shares the `owner/repo#N` shape parsePr validates; we use only its `repo` half.
