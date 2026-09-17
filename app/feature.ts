@@ -253,6 +253,32 @@ export const FEATURE_BLOCKED_ELEMENT = "feature-blocked";
  * that reproduces the reconciler bypass). */
 export const featureRuns = (data: DataLayer) => data.table<FeatureRun>("feature_runs", "feature_key");
 
+/** Guarded CAS fold of a COMPLETED feature run to its terminal delivery `status` + `delivery_label`
+ * (issue #808). This is NOT a blind `featureRuns(data).update(feature_key, …)`: the poller reads the
+ * engine instance state (`searchProcessInstances`) BEFORE it writes, and in that window `startFeature`
+ * can re-seed the SAME `feature_key` row to a FRESH `running` incarnation with a NEW `process_key`
+ * (the old instance completed, a resubmit relaunched). A blind write keyed on `feature_key` alone
+ * would clobber that newer incarnation to `opened`/`skipped` while its new instance is still active.
+ * The single guarded UPDATE requires the row to still be the exact incarnation we read (same
+ * `feature_key` + `process_key` + `status = 'running'`), so a lost race matches zero rows and is a
+ * no-op. Mirrors the `markProposalExpired`/`claimRunForLaunch` CAS pattern. Returns whether the write
+ * flipped a row (`res.changed > 0`) — `false` means a concurrent re-seed won the race. */
+export async function foldCompletedFeatureRun(
+  data: DataLayer,
+  featureKey: string,
+  processKey: string,
+  status: string,
+  label: string,
+): Promise<boolean> {
+  const res = await data
+    .open()
+    .exec(
+      `UPDATE "feature_runs" SET "status" = ?, "delivery_label" = ?, "updated_at" = ? WHERE "feature_key" = ? AND "process_key" = ? AND "status" = 'running'`,
+      [status, label, new Date().toISOString(), featureKey, processKey],
+    );
+  return res.changed > 0;
+}
+
 /** A `feature_runs` row as seen through its derived tracking VIEW (`feature_runs__tracking`): the base
  * columns plus urban's ADR-0065 `derived_status`, which FOLDS the reconciler's terminal edge
  * (out-of-band terminate / in-app cancel → `abandoned`) over the worker-owned transient. Since urban

@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { withTrackingViews } from "../test/trackingViews.ts";
-import { deriveFeatureCompletion, deriveFeatureDelivery } from "./feature.ts";
+import { deriveFeatureCompletion, deriveFeatureDelivery, foldCompletedFeatureRun } from "./feature.ts";
 import { pollFeatureDelivery } from "./service.ts";
 
 // An engine stub for the CONVERGING-reconcile tests (edge 1), which seed no `running` runs — the
@@ -41,6 +41,26 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
     };
   }
   const data = { table: withTrackingViews((n: string, pk?: string) => tbl(n, pk)) } as any as DataLayer;
+  // Minimal `open().exec()` for the ONE guarded CAS the COMPLETED fold issues (foldCompletedFeatureRun).
+  // It mutates the in-memory `feature_runs` store exactly as the SQLite guard would, so the race test
+  // below exercises the real CAS predicate (same feature_key + process_key + status='running').
+  (data as any).open = () => ({
+    async exec(sql: string, params: any[]) {
+      if (!/UPDATE "feature_runs" SET .* WHERE "feature_key" = \? AND "process_key" = \? AND "status" = 'running'/.test(sql)) {
+        throw new Error(`memData mock: unhandled sql: ${sql}`);
+      }
+      const [status, label, updated_at, feature_key, process_key] = params;
+      const rows = stores.feature_runs ?? [];
+      let changed = 0;
+      for (const r of rows) {
+        if (r.feature_key === feature_key && r.process_key === process_key && r.status === "running") {
+          Object.assign(r, { status, delivery_label: label, updated_at });
+          changed++;
+        }
+      }
+      return { changed };
+    },
+  });
   return { data, stores };
 }
 
@@ -206,4 +226,48 @@ test("pollFeatureDelivery: never touches a CONVERGING run in the COMPLETED fold 
   assertEquals(queried, false);
   assertEquals(stores.feature_runs[0].status, "converging");
   assertEquals(stores.feature_runs[0].delivery_label, "waiting_review");
+});
+
+test("pollFeatureDelivery: a re-seed race (new process_key) between the engine read and the write is a no-op — the guard never clobbers the fresh incarnation (issue #808)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#12", status: "running", process_key: "pi-12-old", pr_key: "o/r#5", converge: 0, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  // The engine read reports the OLD instance COMPLETED, but `startFeature` re-seeds the SAME row to a
+  // fresh `running` incarnation (new process_key) in the window before the write — modelled by mutating
+  // the store from inside the awaited stub. A blind update-by-key would fold this live run to opened.
+  const engine = {
+    searchProcessInstances: async () => {
+      const row = stores.feature_runs[0];
+      row.process_key = "pi-12-new";
+      row.pr_key = null;
+      return [{ processInstanceKey: "pi-12-old", state: "COMPLETED" }];
+    },
+  } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  // The guarded CAS matched zero rows (process_key drifted), so the fresh incarnation is untouched.
+  assertEquals(stores.feature_runs[0].status, "running");
+  assertEquals(stores.feature_runs[0].process_key, "pi-12-new");
+  assertEquals(stores.feature_runs[0].delivery_label, null);
+});
+
+test("foldCompletedFeatureRun: guarded CAS flips a matching running row and is a no-op on a process_key mismatch (issue #808)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#13", status: "running", process_key: "pi-13", pr_key: null, delivery_label: null },
+  ];
+
+  // Matching (feature_key + process_key + status='running') → flips.
+  assertEquals(await foldCompletedFeatureRun(data, "o/r#13", "pi-13", "opened", "PR raised"), true);
+  assertEquals(stores.feature_runs[0].status, "opened");
+  assertEquals(stores.feature_runs[0].delivery_label, "PR raised");
+
+  // A stale process_key (a re-seed already flipped the row back to running under a new key) → no-op.
+  stores.feature_runs[0].status = "running";
+  stores.feature_runs[0].process_key = "pi-13-new";
+  assertEquals(await foldCompletedFeatureRun(data, "o/r#13", "pi-13", "skipped", "nothing to do"), false);
+  assertEquals(stores.feature_runs[0].status, "running");
 });

@@ -34,7 +34,7 @@ import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deli
 import { deliveryHumanContextQuestion, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
-import { deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking } from "./feature.ts";
+import { deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun } from "./feature.ts";
 import {
   classifyMergeability,
   classifyPrLiveness,
@@ -2308,7 +2308,10 @@ export async function pollFeatureDelivery(data: DataLayer, engine: Pick<EngineCl
       const state = snapshots.find((s) => String(s.processInstanceKey) === processKey)?.state ?? null;
       if (state !== "COMPLETED") continue;
       const { status, label } = deriveFeatureCompletion(run);
-      await featureRuns(data).update(run.feature_key, { status, delivery_label: label, updated_at: now() });
+      // Guarded CAS (not a blind update-by-key): a concurrent `startFeature` may have re-seeded this
+      // same row to a fresh `running` incarnation (new `process_key`) in the window since the engine
+      // read above — the guard makes such a lost race a no-op instead of clobbering the new run.
+      await foldCompletedFeatureRun(data, run.feature_key, processKey, status, label);
     } catch (err) {
       console.error(`[poller] feature completion ${run.feature_key}: ${err}`);
     }
