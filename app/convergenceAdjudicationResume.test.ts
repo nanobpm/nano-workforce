@@ -63,15 +63,20 @@ type FakeTask = { userTaskKey: string; elementId: string; processInstanceKey: st
 function fakeEngine(tasks: FakeTask[]) {
   const open = tasks.slice();
   const completions: { userTaskKey: string; variables: Record<string, unknown> }[] = [];
+  // Every `openUserTasks` filter seen this run, so a test can assert the auto-apply resolve scans a
+  // single instance (`{processInstanceKey}`) rather than an engine-wide unfiltered scan (issue #806).
+  const scans: (undefined | { processInstanceKey?: string; rootProcessInstanceKey?: string })[] = [];
   const engine = {
-    openUserTasks: (filter?: { processInstanceKey?: string; rootProcessInstanceKey?: string }) =>
-      Promise.resolve(
+    openUserTasks: (filter?: { processInstanceKey?: string; rootProcessInstanceKey?: string }) => {
+      scans.push(filter);
+      return Promise.resolve(
         open.filter((t) => {
           if (filter?.processInstanceKey) return t.processInstanceKey === filter.processInstanceKey;
           if (filter?.rootProcessInstanceKey) return t.processInstanceKey === filter.rootProcessInstanceKey;
           return true;
         }),
-      ),
+      );
+    },
     completeUserTask: (userTaskKey: string, variables: Record<string, unknown>) => {
       const i = open.findIndex((t) => t.userTaskKey === userTaskKey);
       if (i < 0) return Promise.reject(new Error("no such open task"));
@@ -80,7 +85,7 @@ function fakeEngine(tasks: FakeTask[]) {
       return Promise.resolve();
     },
   } as unknown as EngineClient;
-  return { engine, completions };
+  return { engine, completions, scans };
 }
 
 test("pollUserTasks: auto-resumes an already-answered wait-answer instead of re-parking a human (#806)", async () => {
@@ -229,4 +234,41 @@ test("pollUserTasks: a transient adjudication-lookup error fails open and never 
   const rows = stores.user_tasks ?? [];
   assertEquals(rows.length, 1, "the task still projects — the poller did not abort (fail-open)");
   assertEquals(rows[0].user_task_key, "ut-803");
+});
+
+test("pollUserTasks: auto-resume resolves the task per-instance, never an engine-wide scan (#806 review)", async () => {
+  // Copilot review of #806: `completeEscalationAutoApplied` -> `resolveEscalationTask` used an
+  // UNFILTERED `openUserTasks()` scan, run once per already-adjudicated PR in a single poll pass — so
+  // N parked-and-answered PRs cost N full engine scans (O(N²) work/REST). The poller already knows each
+  // task's owning instance, so the resolve must scan THAT instance (`{processInstanceKey}`) only. Seed
+  // several answered PRs and assert the pass issues ZERO unfiltered scans.
+  const q = "Boundary event or poller sentinel?";
+  const prKeys = ["o/r#810", "o/r#811", "o/r#812"];
+  const { data } = memData({
+    pull_requests: prKeys.map((pr_key, i) => ({
+      pr_key,
+      status: "escalated",
+      process_key: `rp-81${i}`,
+      url: `https://github.com/o/r/pull/81${i}`,
+      title: "Converge",
+    })),
+    escalations: prKeys.map((pr_key, i) => ({ id: i + 1, pr_key, status: "open", question: q })),
+    pr_adjudications: prKeys.map((pr_key, i) => ({
+      id: i + 1,
+      pr_key,
+      question_fingerprint: questionFingerprint(q),
+      answer: "Option A: a bounded boundary event.",
+      adjudicated_by: "alice",
+      adjudicated_at: "2025-01-01T00:00:00.000Z",
+    })),
+  });
+  const { engine, completions, scans } = fakeEngine(
+    prKeys.map((_, i) => ({ userTaskKey: `ut-81${i}`, elementId: "wait-answer", processInstanceKey: `rp-81${i}` })),
+  );
+
+  await pollUserTasks(data, engine);
+
+  assertEquals(completions.length, 3, "all three answered wait-answers auto-resume");
+  const unfiltered = scans.filter((f) => !f?.processInstanceKey && !f?.rootProcessInstanceKey);
+  assertEquals(unfiltered.length, 0, "no engine-wide (unfiltered) openUserTasks scan — the resolve is per-instance");
 });

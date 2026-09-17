@@ -2898,6 +2898,12 @@ export async function pollUserTasks(
         if (adjudication && adjudicatedBy) {
           const resumed = await completeEscalationAutoApplied(data, engine, {
             userTaskKey: rowKey,
+            // The sweep already discovered this task's owning instance — hand it to the resolve so the
+            // auto-apply scans that ONE instance, not every open user task engine-wide (issue #806
+            // Copilot review: an unfiltered per-task scan makes a single poll pass O(N²) across N
+            // already-adjudicated PRs). `contextFor`/the sweep report the task's direct instance, so the
+            // filtered scan finds exactly this task; a miss still fails open to the human.
+            processInstanceKey,
             variables: { answer: adjudication.answer },
             actor: {
               kind: adjudication.adjudicated_kind === "agent" ? "agent" : "human",

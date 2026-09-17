@@ -389,13 +389,22 @@ export interface AgentCompleteResult {
  *  completer passes the wider `HUMAN_COMPLETABLE_ELEMENTS` (which also admits `feature-blocked`).
  *  Queries `openUserTasks` (lifecycle-state `CREATED` only), NOT `searchUserTasks` (which returns
  *  tasks in ANY state) — a looping instance keeps COMPLETED/CANCELED tasks whose key could otherwise
- *  match and drive a doomed re-completion (a thrown 5xx) instead of the intended 404-style no-op. */
+ *  match and drive a doomed re-completion (a thrown 5xx) instead of the intended 404-style no-op.
+ *
+ *  When the CALLER already knows the task's owning `processInstanceKey` (the convergence poller does —
+ *  it just discovered the task in its sweep), pass it so the resolve scans that ONE instance instead of
+ *  every open user task engine-wide. The auto-apply resume runs this once per already-adjudicated PR in
+ *  a single poll pass, so an unfiltered global scan there is O(N²) work/REST load across the fleet
+ *  (Copilot review of #806); a `processInstanceKey`-filtered scan makes it O(N). The filter never
+ *  changes the outcome — the task lives in exactly that instance — and a miss still fails open (the
+ *  one-off human/agent doors, which hold only a bare key, omit it and keep the engine-wide scan). */
 async function resolveEscalationTask(
   engine: EngineClient,
   userTaskKey: string,
   allowed: ReadonlySet<string> = ESCALATION_TASK_ELEMENTS,
+  processInstanceKey?: string,
 ): Promise<{ ok: true; elementId: string; processInstanceKey: string | null } | { ok: false; reason: string }> {
-  const open = await engine.openUserTasks();
+  const open = await (processInstanceKey ? engine.openUserTasks({ processInstanceKey }) : engine.openUserTasks());
   const match = open.find((t) => t.userTaskKey === userTaskKey);
   if (!match) return { ok: false, reason: "no open completable task" };
   if (!match.elementId || !isCompletableElement(match.elementId, allowed)) {
@@ -487,18 +496,20 @@ export async function completeEscalationAsHuman(
  *  prior adjudicator's attribution kind (`human`/`agent`), so replaying an agent-settled decision can
  *  never launder it into an irreversible human authority (Copilot review of #806). Auto-applied
  *  completions are always recorded reversible, so a human may override the replayed answer. A key with
- *  no matching open escalation task is a 404-style no-op. */
+ *  no matching open escalation task is a 404-style no-op. Pass the poller-known `processInstanceKey` so
+ *  the resolve scans that one instance instead of an engine-wide `openUserTasks()` — the resume runs
+ *  once per already-adjudicated PR per poll pass, so a global scan there is O(N²) (Copilot review of #806). */
 export async function completeEscalationAutoApplied(
   data: DataLayer,
   engine: EngineClient,
-  input: { userTaskKey: string; variables: Record<string, unknown>; actor: Actor; adjudicationId?: number },
+  input: { userTaskKey: string; variables: Record<string, unknown>; actor: Actor; adjudicationId?: number; processInstanceKey?: string },
 ): Promise<AgentCompleteResult> {
   const userTaskKey = input.userTaskKey.trim();
   if (!userTaskKey) return { ok: false, reason: "userTaskKey is required" };
   const actorId = input.actor.id.trim();
   if (!actorId) return { ok: false, reason: "actor id is required" };
 
-  const resolved = await resolveEscalationTask(engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS);
+  const resolved = await resolveEscalationTask(engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS, input.processInstanceKey?.trim() || undefined);
   if (!resolved.ok) return resolved;
 
   const invalid = validateEscalationVariables(resolved.elementId, input.variables);
