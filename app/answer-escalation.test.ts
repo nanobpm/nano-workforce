@@ -108,6 +108,9 @@ function fakeApp(escalationRows: Record<string, unknown>[], prRows: Record<strin
             async find(where: Record<string, unknown>) {
               return completions.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v));
             },
+            async get(id: unknown) {
+              return completions.find((r) => r.id === id) ?? undefined;
+            },
           };
         }
         if (name !== "escalations") throw new Error(`unexpected table ${name}`);
@@ -341,6 +344,24 @@ test("a carried completion id that matches no ledger row → null adjudicator (f
   await handler(job as any, app as any);
   assertEquals(adjudications.length, 1, "the adjudication is still recorded (a real convergence answer)");
   assertEquals(adjudications[0].adjudicated_by, null, "an unmatched completion id records a null adjudicator, never a wrong one");
+});
+
+test("attributes by completion id even when the ledger row has a NULL process_instance_key (Copilot review)", async () => {
+  // Production reality: the canonical completers (`completeUserTaskAttributed`) resolve the task
+  // through the typed `openUserTasks` seam, which omits `processInstanceKey` (app/service.ts), so EVERY
+  // real ledger row is stored with `process_instance_key = null`. The winner is identified by the
+  // globally-unique ledger id carried on the resumed token — so attribution must look it up by PRIMARY
+  // KEY, never by a `process_instance_key`-scoped scan (which would never match the null-keyed row and
+  // would fail open, recording a null adjudicator and re-parking an already-answered question).
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications, completions } = fakeApp(rows);
+  completions.push({ id: 42, process_instance_key: null, user_task_key: "ut-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-1", completedCompletionId: 42 } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 1);
+  assertEquals(adjudications[0].adjudicated_by, "alice", "attributed by primary-key completion-id lookup despite the null process_instance_key");
+  assertEquals(adjudications[0].adjudicated_kind, "human", "the winning completer kind is recorded");
+  assertEquals(adjudications[0].source_completion_id, 42, "the decision is linked to its winning completion");
 });
 
 test("carries no user-task identity → null adjudicator (fails open), never a guess (#806 review)", async () => {

@@ -204,24 +204,30 @@ const handler: AppJobHandler<In> = async (job, app) => {
  *  an agent decision into a human one. `undefined` (fails open to a fresh human task) when the identity
  *  is unavailable or no ledger row exactly matches — rather than attribute a wrong one. */
 async function latestAdjudicator(app: Parameters<AppJobHandler<In>>[1], processInstanceKey: unknown, winningAnswer: string | undefined, completedUserTaskKey: string | undefined, completedCompletionId: number | undefined): Promise<{ id: string; kind: string } | undefined> {
+  // Exact ledger-id match by PRIMARY KEY. The engine resumed this token with exactly ONE completion's
+  // variables, and that completion stamped its own (globally unique) ledger id here — so look the
+  // winner up DIRECTLY by primary key, BEFORE the process-instance fallback below. It must NOT be found
+  // via a `process_instance_key`-scoped query: the canonical completers (`completeUserTaskAttributed`)
+  // resolve the task through the typed `openUserTasks` seam, which deliberately omits `processInstanceKey`
+  // (app/service.ts), so EVERY real ledger row is stored with `process_instance_key = null`. A
+  // `process_instance_key`-filtered lookup therefore never matched the winning row and always failed
+  // open — recording a null adjudicator and letting the convergence poller re-park an already-answered
+  // question (Copilot review). Selecting nothing still returns undefined and fails open (never attribute
+  // a wrong row).
+  if (completedCompletionId != null) {
+    const exact = await taskCompletions(app.data).get(completedCompletionId);
+    return exact ? { id: exact.actor_id, kind: exact.actor_kind } : undefined;
+  }
+  // Process-instance fallback for a resume that carried no completion id (a pre-fix / out-of-band
+  // token): require the carried user-task identity, then — when the winning answer is known — keep only
+  // rows whose recorded answer matches it, dropping the same-task losing racer whose recorded submission
+  // differs. Without a completion id there is no evidence WHICH row won, so attribute ONLY when the
+  // candidate set is exactly one (Copilot review of #806): more than one same-answer row on this
+  // `user_task_key` is the very ambiguity the completion id was added to resolve — picking the newest
+  // could attribute to the losing racer — so return undefined and fail open to a human rather than guess.
   const key = processInstanceKey != null ? String(processInstanceKey) : "";
   if (key === "") return undefined;
   const rows = await taskCompletions(app.data).find({ process_instance_key: key });
-  // Exact ledger-id match: the engine resumed this token with exactly ONE completion's variables, and
-  // that completion stamped its own ledger id here, so the winner is unambiguously the row bearing it —
-  // dropping a same-answer losing racer a pure answer correlation could not separate. Selecting nothing
-  // returns undefined and fails open (never attribute a wrong row).
-  if (completedCompletionId != null) {
-    const exact = rows.find((r) => Number(r.id) === completedCompletionId);
-    return exact ? { id: exact.actor_id, kind: exact.actor_kind } : undefined;
-  }
-  // Fallback for a resume that carried no completion id (a pre-fix / out-of-band token): require the
-  // carried user-task identity, then — when the winning answer is known — keep only rows whose recorded
-  // answer matches it, dropping the same-task losing racer whose recorded submission differs. Without a
-  // completion id there is no evidence WHICH row won, so attribute ONLY when the candidate set is
-  // exactly one (Copilot review of #806): more than one same-answer row on this `user_task_key` is the
-  // very ambiguity the completion id was added to resolve — picking the newest could attribute to the
-  // losing racer — so return undefined and fail open to a human rather than guess.
   if (completedUserTaskKey == null || completedUserTaskKey === "") return undefined;
   let candidates = rows.filter((r) => String(r.user_task_key) === completedUserTaskKey);
   if (winningAnswer != null && winningAnswer !== "") {

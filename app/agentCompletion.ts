@@ -277,14 +277,22 @@ export function validateEscalationVariables(
   return null;
 }
 
-/** The canonical attributed completer. Records an attribution row in `task_completions` (reversible
- *  iff the actor is an agent) and THEN completes the user task with the exact typed `variables` — so
- *  the ledger row can never be lost by a resume that fires before the write. If the engine
- *  completion throws (a failed/rejected completion, or a lost race), the just-written row is rolled
- *  back so the ledger never claims a completion that did not happen, and the error is re-raised so
- *  the caller can retry. Returns the new completion id. This is the ONE host-side implementation of
- *  "complete an escalation user task"; both the agent path and the human out-of-band answer paths
- *  route through it. */
+/** The canonical attributed completer. Records an attribution row in `task_completions` and THEN
+ *  completes the user task with the exact typed `variables` — so the ledger row can never be lost by a
+ *  resume that fires before the write. If the engine completion throws (a failed/rejected completion,
+ *  or a lost race), the just-written row is rolled back so the ledger never claims a completion that
+ *  did not happen, and the error is re-raised so the caller can retry. Returns the new completion id.
+ *  This is the ONE host-side implementation of "complete an escalation user task"; the agent path, the
+ *  human out-of-band answer path, AND the auto-apply replay all route through it.
+ *
+ *  Reversibility of the recorded row: a FIRST-HAND completion is reversible IFF the actor is an agent —
+ *  a human's first-hand answer is the authority and is NOT reversible. `opts.autoApplied` OVERRIDES
+ *  that: an auto-applied REPLAY of a prior durable adjudication (issue #806) is ALWAYS recorded
+ *  reversible (and flagged `auto_applied`) even when it preserves a prior HUMAN adjudicator's
+ *  attribution, so a machine re-application is never an unchallengeable human authority and an operator
+ *  may override it. `opts.sourceAdjudicationId` links such a replay back to the adjudication it
+ *  re-applied (persisted only when `autoApplied`) so a later revert can invalidate it. Callers must
+ *  therefore NOT infer irreversibility from a `human` attribution alone — check `auto_applied`. */
 export async function completeUserTaskAttributed(
   data: DataLayer,
   engine: EngineClient,
