@@ -261,7 +261,11 @@ export const featureRuns = (data: DataLayer) => data.table<FeatureRun>("feature_
  * would clobber that newer incarnation to `opened`/`skipped` while its new instance is still active.
  * The single guarded UPDATE requires the row to still be the exact incarnation we read (same
  * `feature_key` + `process_key` + `status = 'running'`), so a lost race matches zero rows and is a
- * no-op. Mirrors the `markProposalExpired`/`claimRunForLaunch` CAS pattern. Returns whether the write
+ * no-op. This is safe across the FULL re-seed window because `startFeature` clears `process_key` to
+ * NULL atomically with its `status = 'running'` reset (issue #808) and only reinstalls the new key
+ * after `createInstance` returns — so throughout the interval the fresh incarnation carries no key
+ * that this guard's OLD `process_key` predicate can match. Mirrors the
+ * `markProposalExpired`/`claimRunForLaunch` CAS pattern. Returns whether the write flipped a row
  * flipped a row (`res.changed > 0`) — `false` means a concurrent re-seed won the race. */
 export async function foldCompletedFeatureRun(
   data: DataLayer,
@@ -423,6 +427,15 @@ export async function startFeature(
       base_branch: base,
       issue_url: parsed.url,
       title,
+      // Clear the OLD process key ATOMICALLY with the status reset (issue #808). The re-seed flips the
+      // row back to `running` but does not install the new process key until AFTER `createInstance`
+      // returns below; leaving the stale `process_key` in place across that await opens a TOCTOU window
+      // where the poller's guarded fold (`foldCompletedFeatureRun`, keyed on the OLD process_key +
+      // `status='running'`) would still match this fresh incarnation and terminalize it to
+      // `opened`/`skipped`. Nulling it here — exactly as the insert branch below does — makes that
+      // guard match zero rows during the window, so the race collapses to a no-op. The new key is
+      // written back once the instance is created.
+      process_key: null,
       pr_key: null,
       converge: converge ? 1 : 0,
       auto_merge: autoMerge ? 1 : 0,

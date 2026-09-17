@@ -8,7 +8,7 @@
 import { after, test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { withTrackingViews } from "../test/trackingViews.ts";
-import { FEATURE_PROCESS_ID, FEATURE_TERMINAL_STATUSES, featureTaskId, startFeature } from "./feature.ts";
+import { FEATURE_PROCESS_ID, FEATURE_TERMINAL_STATUSES, featureTaskId, foldCompletedFeatureRun, startFeature } from "./feature.ts";
 
 // `startFeature` now fetches the issue title (issue #248) via the GitHub transport. Force the token
 // transport with no token so the fetch is a hermetic no-op (returns null) — no `gh` subprocess, no
@@ -55,6 +55,28 @@ function memData(stores: Record<string, { rows: any[]; key: string }>) {
     // rows — a base row with no explicitly-seeded `derived_status` folds `derived_status := status`.
     table: withTrackingViews((name: string, key: string) =>
       memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    // Minimal `open().exec()` for the ONE guarded CAS the COMPLETED fold issues
+    // (`foldCompletedFeatureRun`), so the re-seed-window regression below can drive the real CAS
+    // predicate (same feature_key + process_key + status='running') against the mid-reseed row.
+    open: () => ({
+      exec: (sql: string, params: any[]) => {
+        if (!/UPDATE "feature_runs" SET .* WHERE "feature_key" = \? AND "process_key" = \? AND "status" = 'running'/.test(sql)) {
+          throw new Error(`memData.exec: unhandled sql: ${sql}`);
+        }
+        const [status, label, updated_at, feature_key, process_key] = params;
+        const rows = stores.feature_runs?.rows ?? [];
+        let changed = 0;
+        for (const r of rows) {
+          if (r.feature_key === feature_key && r.process_key === process_key && r.status === "running") {
+            r.status = status;
+            r.delivery_label = label;
+            r.updated_at = updated_at;
+            changed += 1;
+          }
+        }
+        return Promise.resolve({ changed });
+      },
+    }),
   } as any;
 }
 
@@ -275,6 +297,57 @@ test("startFeature: a settled run is restarted in place (status reset, pr/outcom
   assertEquals(row.converge, 1);
   assertEquals(row.auto_merge, 1);
   assertEquals(row.process_key, "PI-2");
+});
+
+// Issue #808 (TOCTOU review follow-up, RED first): the re-seed of a settled run flips `status` back to
+// `running` but installs the NEW process key only AFTER `createInstance` returns. If the OLD
+// `process_key` were left in place across that await, the poller's guarded fold
+// (`foldCompletedFeatureRun`, keyed on the OLD key + `status='running'`) would still match the fresh
+// incarnation mid-reseed and terminalize it. The reset now clears `process_key` to NULL atomically
+// with the status reset, so throughout the window the guard matches ZERO rows. This test fires the
+// exact interval: inside the `createInstance` stub (the window after the reset, before the new key is
+// written) it runs the real CAS against the OLD key and asserts it is a no-op and the row is untouched.
+test("startFeature: the re-seed window nulls process_key so a concurrent COMPLETED fold on the OLD key is a no-op (issue #808)", async () => {
+  const stores = {
+    feature_runs: {
+      rows: [{
+        feature_key: "owner/repo#42",
+        repo: "owner/repo",
+        issue_number: 42,
+        status: "opened", // a prior settled incarnation
+        process_key: "PI-OLD",
+        pr_key: "owner/repo#100",
+        delivery_label: "PR raised",
+        converge: 0,
+        auto_merge: 0,
+      }],
+      key: "feature_key",
+    },
+  };
+  const data = memData(stores);
+  let windowStatus: string | undefined;
+  let windowProcessKey: string | undefined;
+  let foldWon: boolean | undefined;
+  const engine = {
+    // Runs DURING the re-seed window: the row has been reset to `running` but the new key is not yet
+    // installed. Simulate the poller's guarded fold on the OLD key racing here.
+    createInstance: async () => {
+      const row = stores.feature_runs.rows[0];
+      windowStatus = row.status;
+      windowProcessKey = row.process_key;
+      foldWon = await foldCompletedFeatureRun(data, "owner/repo#42", "PI-OLD", "opened", "PR raised");
+      return { processInstanceKey: "PI-NEW" };
+    },
+  } as any;
+  await startFeature(data, engine, PARSED, "main", false, false);
+  // Mid-reseed the row was `running` with process_key CLEARED, so the OLD-key guard matched nothing.
+  assertEquals(windowStatus, "running");
+  assertEquals(windowProcessKey, null);
+  assertEquals(foldWon, false); // the concurrent fold was a no-op — the fresh incarnation is safe
+  const row = stores.feature_runs.rows[0];
+  // The run finished the reseed uncorrupted: still `running`, now carrying the NEW key.
+  assertEquals(row.status, "running");
+  assertEquals(row.process_key, "PI-NEW");
 });
 
 test("startFeature: an in-place restart clears a stale acknowledged_at (re-earn the tick-off)", async () => {
