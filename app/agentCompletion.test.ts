@@ -56,18 +56,21 @@ function memTable(rows: any[], key: string) {
 }
 
 function memData(stores: Record<string, { rows: any[]; key: string }>) {
-  // Minimal `open().exec` emulating ONLY the `DELETE FROM "pr_adjudications" WHERE "id" = ?` that
-  // `revertAgentCompletion` issues via `invalidateAdjudication` (Copilot review of #806). The DELETE
-  // SQL itself is validated against real SQLite in app/adjudications.test.ts; here it need only mutate
-  // the in-memory store so a revert-invalidation assertion can observe the row being removed.
+  // Minimal `open().exec` emulating ONLY the tombstone `UPDATE "pr_adjudications" SET "invalidated_at"
+  // = ? WHERE "id" = ? AND "invalidated_at" IS NULL` that `revertAgentCompletion` issues via
+  // `invalidateAdjudication` (Copilot review of #806). A revert TOMBSTONES the source adjudication (it
+  // does NOT delete it) so a redelivered `record-answer` cannot re-insert the same fingerprint and
+  // resurrect the reverted decision. The SQL itself is validated against real SQLite in
+  // app/adjudications.test.ts; here it need only mutate the in-memory store so a revert-invalidation
+  // assertion can observe the row being tombstoned.
   const exec = async (sql: string, params: unknown[] = []) => {
-    const m = /DELETE FROM "pr_adjudications" WHERE "id" = \?/.exec(sql);
+    const m = /UPDATE "pr_adjudications" SET "invalidated_at" = \? WHERE "id" = \? AND "invalidated_at" IS NULL/.exec(sql);
     if (m) {
       const store = stores.pr_adjudications;
       if (store) {
-        const i = store.rows.findIndex((r) => r[store.key] === params[0]);
-        if (i >= 0) {
-          store.rows.splice(i, 1);
+        const r = store.rows.find((r) => r[store.key] === params[1]);
+        if (r && (r.invalidated_at == null || String(r.invalidated_at).trim() === "")) {
+          r.invalidated_at = params[0];
           return { changed: 1 };
         }
       }
@@ -388,11 +391,12 @@ test("a human can revert/override an agent completion (recording who + when + co
 test("an auto-applied completion records the source adjudication id, and reverting it invalidates that adjudication (#806 review)", async () => {
   // The convergence poller auto-resumes an already-answered wait-answer by replaying a
   // `pr_adjudications` row. Marking that completion reverted alone would NOT stop the replay — the
-  // poller keeps matching the unchanged adjudication row. Reverting must delete the linked adjudication
-  // so the override actually sticks and the next round re-parks a human (Copilot review of #806).
+  // poller keeps matching the unchanged adjudication row. Reverting must TOMBSTONE the linked
+  // adjudication so the override actually sticks and the next round re-parks a human, while a
+  // redelivered `record-answer` cannot resurrect it (Copilot review of #806).
   const stores = {
     task_completions: { rows: [] as any[], key: "id" },
-    pr_adjudications: { rows: [{ id: 42, pr_key: "o/r#1", answer: "Cap at 5.", adjudicated_by: "alice" }] as any[], key: "id" },
+    pr_adjudications: { rows: [{ id: 42, pr_key: "o/r#1", answer: "Cap at 5.", adjudicated_by: "alice", invalidated_at: null }] as any[], key: "id" },
   };
   const data = memData(stores);
   const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
@@ -411,9 +415,14 @@ test("an auto-applied completion records the source adjudication id, and reverti
   assertEquals(row.source_adjudication_id, 42, "the replayed adjudication is linked");
 
   assertEquals(stores.pr_adjudications.rows.length, 1, "the durable adjudication exists before the revert");
+  assertEquals(stores.pr_adjudications.rows[0].invalidated_at, null, "and is live (not tombstoned) before the revert");
   const r = await revertAgentCompletion(data, completionId, { kind: "human", id: "bob" }, "override");
   assertEquals(r.ok, true);
-  assertEquals(stores.pr_adjudications.rows.length, 0, "reverting the auto-apply invalidated its source adjudication so the poller cannot re-apply it");
+  assertEquals(stores.pr_adjudications.rows.length, 1, "the source adjudication row is TOMBSTONED, not deleted, so a redelivered record-answer cannot re-insert its fingerprint");
+  assert(
+    typeof stores.pr_adjudications.rows[0].invalidated_at === "string" && stores.pr_adjudications.rows[0].invalidated_at.length > 0,
+    "reverting the auto-apply tombstoned its source adjudication so the poller cannot re-apply it",
+  );
 });
 
 test("reverting a first-hand (non-auto-applied) completion touches NO adjudication (#806 review)", async () => {

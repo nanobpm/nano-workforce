@@ -38,6 +38,12 @@ export interface PrAdjudicationRow {
    *  replays with the ORIGINAL attribution kind — never laundering an agent decision into a human one. */
   adjudicated_kind: string | null;
   adjudicated_at: string;
+  /** A TOMBSTONE timestamp set when a human reverts the auto-applied completion that replayed this
+   *  decision (issue #806 review). While set, the row is no longer replayable — {@link matchAdjudication}
+   *  skips it and {@link recordAdjudication} will not resurrect it — but it stays present so the
+   *  `UNIQUE (pr_key, question_fingerprint)` fence makes a redelivered `record-answer` re-insert a no-op
+   *  (a plain DELETE would let that redelivery recreate the row and undo the revert). NULL = live. */
+  invalidated_at: string | null;
 }
 
 export const prAdjudications = (data: DataLayer) => data.table<PrAdjudicationRow>("pr_adjudications", "id");
@@ -46,13 +52,21 @@ export const prAdjudications = (data: DataLayer) => data.table<PrAdjudicationRow
  *  `questionFingerprint`), or `undefined`. Only a row carrying a non-blank `answer` is returned — a
  *  blank/absent answer is not a replayable decision (the `pr-escalation.form` requires a non-blank
  *  answer, so auto-resuming with a blank one would fail validation), so it never suppresses a fresh
- *  escalation. */
+ *  escalation. A TOMBSTONED row (`invalidated_at` set — a human reverted the auto-apply that replayed
+ *  it, issue #806 review) is likewise never returned, so a reverted decision re-parks a human instead of
+ *  auto-applying again. */
 export function matchAdjudication(
   rows: readonly PrAdjudicationRow[],
   question: string,
 ): PrAdjudicationRow | undefined {
   const fp = questionFingerprint(question);
-  return rows.find((r) => r.question_fingerprint === fp && typeof r.answer === "string" && r.answer.trim() !== "");
+  return rows.find(
+    (r) =>
+      r.question_fingerprint === fp &&
+      typeof r.answer === "string" &&
+      r.answer.trim() !== "" &&
+      (r.invalidated_at == null || r.invalidated_at.trim() === ""),
+  );
 }
 
 /** Input to {@link recordAdjudication}. `expectedProcessKey` is the run generation this answer job
@@ -163,11 +177,15 @@ async function healBlankProvenance(
   const priorBy = prior.adjudicated_by?.trim();
   const nowBy = input.adjudicatedBy?.trim();
   if (priorBy || !nowBy) return;
+  // Never resurrect a TOMBSTONED row (a human reverted the auto-apply that replayed it, issue #806
+  // review) — a redelivered `record-answer` must not heal a reverted decision back into a replayable
+  // one. The write is also fenced on `invalidated_at IS NULL` below so the check is atomic with it.
+  if (prior.invalidated_at != null && prior.invalidated_at.trim() !== "") return;
   const db = data.open();
   const guard = generationGuard(input.prKey, input.expectedProcessKey);
   await db.exec(
     `UPDATE "pr_adjudications" SET "answer" = ?, "adjudicated_by" = ?, "adjudicated_kind" = ?, "adjudicated_at" = ?
-     WHERE "id" = ? AND ("adjudicated_by" IS NULL OR TRIM("adjudicated_by") = '') AND ${guard.sql}`,
+     WHERE "id" = ? AND ("adjudicated_by" IS NULL OR TRIM("adjudicated_by") = '') AND "invalidated_at" IS NULL AND ${guard.sql}`,
     [answer, nowBy, input.adjudicatedKind?.trim() || null, new Date().toISOString(), prior.id, ...guard.params],
   );
 }
@@ -188,9 +206,24 @@ export async function resetAdjudications(data: DataLayer, prKey: string): Promis
  *  review). Called from `revertAgentCompletion` when a human reverts the AUTO-APPLIED completion that
  *  replayed this adjudication: marking the `task_completions` row reverted alone would NOT stop the
  *  poller — it matches the unchanged `pr_adjudications` row and replays the same overridden answer on
- *  the next derived task, silently undoing the human's revert. Deleting the row makes the revert an
- *  actual override: the original decision's audit survives on the reverted completion ledger row.
- *  Idempotent — a no-op if the row is already gone (a prior reset/revert). */
+ *  the next derived task, silently undoing the human's revert.
+ *
+ *  Sets a TOMBSTONE (`invalidated_at`) rather than DELETING the row. A DELETE is NOT race-safe: the
+ *  reverted completion's `record-answer` job can be redelivered (at-least-once) AFTER the delete and
+ *  re-insert the SAME `(pr_key, question_fingerprint)` — its `generationGuard` still passes (a revert
+ *  does not advance the run generation), so the row comes back and the next poller pass re-auto-applies,
+ *  undoing the revert (Copilot review of #806). Keeping the row as a tombstone means that redelivered
+ *  insert trips the `UNIQUE (pr_key, question_fingerprint)` fence (a no-op) and `recordAdjudication` will
+ *  not resurrect it, while `matchAdjudication` skips it — so the revert is a durable override. The
+ *  original decision's audit survives on the reverted completion ledger row and on this tombstoned row.
+ *  Conditional on `invalidated_at IS NULL` so it is idempotent (a second revert/reset is a no-op) and
+ *  never overwrites the first invalidation time. The tombstone is cleared only by `resetAdjudications`
+ *  on a fresh-run re-submit. */
 export async function invalidateAdjudication(data: DataLayer, id: number): Promise<void> {
-  await data.open().exec(`DELETE FROM "pr_adjudications" WHERE "id" = ?`, [id]);
+  await data
+    .open()
+    .exec(`UPDATE "pr_adjudications" SET "invalidated_at" = ? WHERE "id" = ? AND "invalidated_at" IS NULL`, [
+      new Date().toISOString(),
+      id,
+    ]);
 }

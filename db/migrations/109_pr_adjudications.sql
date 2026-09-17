@@ -22,6 +22,14 @@
 --     exact decision AND preserves the original attribution kind — a human-settled decision replays as
 --     human, an agent-settled one as agent, so an auto-apply can never launder an agent decision into an
 --     irreversible human authority (Copilot review of #806).
+--   • invalidated_at — a TOMBSTONE set when a human REVERTS the auto-applied completion that replayed
+--     this decision (`revertAgentCompletion` → `invalidateAdjudication`, Copilot review of #806). A plain
+--     DELETE is NOT race-safe: the reverted completion's `record-answer` job can be redelivered
+--     (at-least-once) AFTER the delete and re-insert the SAME `(pr_key, question_fingerprint)`, so the
+--     next poller pass re-auto-applies and silently undoes the revert. Keeping the row as a tombstone lets
+--     the `UNIQUE (pr_key, question_fingerprint)` fence make that redelivered re-insert a no-op, and
+--     `matchAdjudication` skips a tombstoned row so it never auto-applies again. The tombstone is cleared
+--     only by `resetAdjudications` on a fresh-run re-submit. NULL for a live, replayable decision.
 --
 -- `UNIQUE (pr_key, question_fingerprint)` keeps one settled answer per (PR, question); the surrogate
 -- `id` PK gives the `Table<T>` gateway a single-column key. Forward-only, additive (expand). Numbered
@@ -35,6 +43,7 @@ CREATE TABLE IF NOT EXISTS pr_adjudications (
   adjudicated_by       TEXT,
   adjudicated_kind     TEXT,
   adjudicated_at       TEXT NOT NULL,
+  invalidated_at       TEXT,
   UNIQUE (pr_key, question_fingerprint)
 );
 CREATE INDEX IF NOT EXISTS idx_pradj_pr ON pr_adjudications(pr_key);

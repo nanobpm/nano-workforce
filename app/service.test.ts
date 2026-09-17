@@ -132,7 +132,6 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
     open: () => memOpen(stores),
-      open: () => memOpen(stores),
     } as any;
     const engine = {
       createInstance: () => Promise.resolve({ processInstanceKey: "PI-9" }),
@@ -194,7 +193,6 @@ test("re-submit of a PR invalidates its durable adjudications (#806 review)", as
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
     open: () => memOpen(stores),
-      open: () => memOpen(stores),
     } as any;
     const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-9" }) } as any;
 
@@ -423,7 +421,6 @@ test("submitPr stringifies a numeric processInstanceKey (contract: string | null
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
     open: () => memOpen(stores),
-      open: () => memOpen(stores),
     } as any;
     const engine = {
       // A large key delivered as a JS number — the exact case that breaks dev response validation
@@ -918,7 +915,6 @@ test("pollWaveGatesImpl is level-triggered: PRs merged before the token arrives 
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
     open: () => memOpen(stores),
-      open: () => memOpen(stores),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];
@@ -1009,7 +1005,6 @@ test("pollWaveGatesImpl never releases the barrier on an unverifiable subscripti
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
     open: () => memOpen(stores),
-      open: () => memOpen(stores),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];
@@ -1115,7 +1110,6 @@ test("pollWaveGatesImpl releases the wave when a member PR is closed-unmerged an
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
     open: () => memOpen(stores),
-      open: () => memOpen(stores),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];

@@ -14,6 +14,18 @@
 -- 109–110 block (#806); the runner wraps each file in its own transaction, so no BEGIN/COMMIT here.
 ALTER TABLE task_completions ADD COLUMN auto_applied INTEGER NOT NULL DEFAULT 0;
 
+-- Link an AUTO-APPLIED escalation completion back to the durable adjudication it replayed (issue #806,
+-- Copilot review), so a human's revert of that completion can invalidate the exact decision. The
+-- convergence poller auto-resumes an already-answered `wait-answer` by replaying a `pr_adjudications`
+-- row through `completeEscalationAutoApplied` (app/service.ts); recording WHICH adjudication it replayed
+-- lets `revertAgentCompletion` tombstone that decision (`invalidateAdjudication`) so the revert becomes a
+-- real override — the next round re-parks a human — instead of the poller silently re-applying the same
+-- overridden answer. NULL for every first-hand (human/agent) submission and for legacy rows; only an
+-- auto-apply carries a source adjudication. Additive (expand): a nullable `ADD COLUMN`. Folded into this
+-- file to keep the whole change inside the pre-assigned 109–110 block (#806, Copilot review) rather than
+-- consuming an unallocated 111 prefix.
+ALTER TABLE task_completions ADD COLUMN source_adjudication_id INTEGER;
+
 -- `latestAdjudicator` (workers/answer-escalation) now looks a completion up by `process_instance_key`
 -- for every convergence answer, to correlate the settled adjudicator's attribution (#806). The ledger
 -- is append-only and only carried an index on `user_task_key` (026_agent_completion.sql), so that

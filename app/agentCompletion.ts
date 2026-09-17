@@ -549,9 +549,10 @@ export async function revertAgentCompletion(
   // If this completion AUTO-APPLIED a durable adjudication (issue #806), invalidate that exact
   // decision now. Marking the ledger row reverted alone would NOT stop the replay: the convergence
   // poller matches the unchanged `pr_adjudications` row and re-applies the same overridden answer on
-  // the next derived task, silently undoing this revert (Copilot review of #806). Deleting the
-  // adjudication makes the revert a real override — the next round re-parks a human — while the
-  // original decision's audit survives on this reverted ledger row. Idempotent (no-op if already gone).
+  // the next derived task, silently undoing this revert (Copilot review of #806). `invalidateAdjudication`
+  // TOMBSTONES the row (it does not DELETE it) so a redelivered `record-answer` cannot re-insert the same
+  // fingerprint and resurrect the decision after the revert — the revert becomes a durable override, and
+  // the next round re-parks a human — while the original decision's audit survives. Idempotent.
   if (row.auto_applied && row.source_adjudication_id != null) {
     await invalidateAdjudication(data, row.source_adjudication_id);
   }

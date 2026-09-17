@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
 import { invalidateAdjudication, matchAdjudication, prAdjudications, type PrAdjudicationRow, recordAdjudication, resetAdjudications } from "./adjudications.ts";
@@ -22,10 +22,19 @@ function row(over: Partial<PrAdjudicationRow>): PrAdjudicationRow {
     question_fingerprint: questionFingerprint("Which retry cap?"),
     answer: "Cap at 5.",
     adjudicated_by: "alice",
+    adjudicated_kind: "human",
     adjudicated_at: "2025-01-01T00:00:00.000Z",
+    invalidated_at: null,
     ...over,
   };
 }
+
+test("matchAdjudication: a TOMBSTONED (reverted) row is not replayable even with a valid answer", () => {
+  // A human revert of an auto-apply tombstones the source row (`invalidated_at`); the poller must
+  // NOT re-apply it, so the same question re-parks a human until a fresh submission (issue #806 review).
+  assertEquals(matchAdjudication([row({ invalidated_at: "2025-02-02T00:00:00.000Z" })], "Which retry cap?"), undefined);
+  assertEquals(matchAdjudication([row({ invalidated_at: "   " })], "Which retry cap?")?.answer, "Cap at 5.", "a blank tombstone marker is treated as live");
+});
 
 test("matchAdjudication: matches a byte/semantic-identical question via the canonical fingerprint", () => {
   const rows = [row({})];
@@ -331,7 +340,7 @@ test("resetAdjudications: only touches the target PR, not a sibling's memory", a
   });
 });
 
-test("invalidateAdjudication: deletes exactly the replayed row so the poller cannot re-apply it", async () => {
+test("invalidateAdjudication: TOMBSTONES exactly the replayed row so the poller cannot re-apply it", async () => {
   await withData(async (data, seedPr) => {
     await seedPr("o/r#1");
     await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
@@ -340,10 +349,34 @@ test("invalidateAdjudication: deletes exactly the replayed row so the poller can
     const target = rows.find((r) => r.answer === "Cap at 5.");
     await invalidateAdjudication(data, target?.id as number);
     const after = await findAdj(data, "o/r#1");
-    assertEquals(after.length, 1, "only the reverted decision is invalidated");
-    assertEquals(after[0].answer, "30s", "the unrelated adjudication survives");
-    // Idempotent — a second call (or a prior reset) is a harmless no-op.
+    // The row is NOT deleted — a DELETE would let a redelivered record-answer re-insert the same
+    // fingerprint and resurrect the reverted decision. It is tombstoned so UNIQUE still fences.
+    assertEquals(after.length, 2, "the reverted row is tombstoned, not deleted (both rows survive)");
+    assertEquals(matchAdjudication(after, "Which retry cap?"), undefined, "the tombstoned decision is no longer replayable");
+    assertEquals(matchAdjudication(after, "Which timeout?")?.answer, "30s", "the unrelated adjudication still replays");
+    // Idempotent — a second call (or a prior reset) is a harmless no-op that does not re-stamp.
+    const firstStamp = (await findAdj(data, "o/r#1")).find((r) => r.answer === "Cap at 5.")?.invalidated_at;
     await invalidateAdjudication(data, target?.id as number);
-    assertEquals((await findAdj(data, "o/r#1")).length, 1);
+    const secondStamp = (await findAdj(data, "o/r#1")).find((r) => r.answer === "Cap at 5.")?.invalidated_at;
+    assertEquals(secondStamp, firstStamp, "a second invalidate leaves the original tombstone stamp untouched");
+  });
+});
+
+test("invalidateAdjudication: a redelivered record-answer after a revert cannot resurrect the tombstoned decision (#806 review)", async () => {
+  // Finding A: a plain DELETE was NOT race-safe — an at-least-once `record-answer` redelivery (same run
+  // generation, so the generation guard passes) would re-INSERT the same (pr_key, fingerprint) after the
+  // human's revert-delete, and the poller would re-auto-apply the overridden answer. The tombstone keeps
+  // the row so UNIQUE fences the re-insert as a no-op and matchAdjudication keeps skipping it.
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+    const target = (await findAdj(data, "o/r#1")).find((r) => r.answer === "Cap at 5.");
+    await invalidateAdjudication(data, target?.id as number);
+    // The record-answer job is redelivered with the SAME question+answer (at-least-once semantics).
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+    const after = await findAdj(data, "o/r#1");
+    assertEquals(after.length, 1, "the redelivery is a UNIQUE-fenced no-op — no second row is inserted");
+    assert(typeof after[0].invalidated_at === "string" && (after[0].invalidated_at as string).length > 0, "the row stays tombstoned across the redelivery");
+    assertEquals(matchAdjudication(after, "Which retry cap?"), undefined, "the reverted decision stays un-replayable — the revert is durable");
   });
 });
