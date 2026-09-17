@@ -18,6 +18,7 @@
 //     on a fingerprint match it auto-resumes through the same `completeEscalationAsHuman` door a
 //     human uses, attributed to the prior adjudicator.
 import type { DataLayer } from "@nanobpm/urban";
+import { isUniqueConstraintFence } from "./dbFence.ts";
 import { questionFingerprint } from "./github.ts";
 
 /** One durable human adjudication of a convergence question, keyed by `(pr_key, question_fingerprint)`
@@ -67,12 +68,23 @@ export async function recordAdjudication(
   const fp = questionFingerprint(question);
   const existing = await prAdjudications(data).find({ pr_key: input.prKey, question_fingerprint: fp });
   if (existing.length > 0) return;
-  await prAdjudications(data).insert({
-    pr_key: input.prKey,
-    question_fingerprint: fp,
-    answer,
-    adjudicated_by: input.adjudicatedBy?.trim() || null,
-    adjudicated_kind: input.adjudicatedKind?.trim() || null,
-    adjudicated_at: new Date().toISOString(),
-  });
+  try {
+    await prAdjudications(data).insert({
+      pr_key: input.prKey,
+      question_fingerprint: fp,
+      answer,
+      adjudicated_by: input.adjudicatedBy?.trim() || null,
+      adjudicated_kind: input.adjudicatedKind?.trim() || null,
+      adjudicated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    // The `find`-then-`insert` above is racy against the `UNIQUE(pr_key, question_fingerprint)` fence:
+    // a concurrent/redelivered answer job can insert the SAME fingerprint between our read and our
+    // write, so the loser's insert hits the fence. Tolerate ONLY that collision as the idempotent
+    // no-op the sequential path yields (the winner's ORIGINAL row is already durable) — never surface
+    // it as a spurious `pr.answer-escalation` incident. Any other error still propagates. This is the
+    // ONE canonical fence classifier (`app/dbFence.ts`), the same pattern as `deliveryConnector`'s
+    // claim insert and `WorldStore`'s checkpoint insert (derivation over duplication).
+    if (!isUniqueConstraintFence(err)) throw err;
+  }
 }

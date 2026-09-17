@@ -172,3 +172,61 @@ test("pollUserTasks: a DIFFERENT question with no adjudication still escalates t
   assertEquals(rows[0].user_task_key, "ut-800");
   assertEquals(rows[0].question, "A brand-new question nobody has answered.");
 });
+
+test("pollUserTasks: an adjudication with UNKNOWN provenance fails open to a human, not a synthetic actor (#806 review)", async () => {
+  // A settled row whose `adjudicated_by` is blank (completed out of band, so `latestAdjudicator`
+  // returned no actor) must NOT be auto-replayed as a manufactured `human` actor — that would audit an
+  // unknown-provenance replay as a first-hand human decision. It fails open to a fresh human task.
+  const question = "Should the cache be write-through or write-back?";
+  const { data, stores } = memData({
+    pull_requests: [{ pr_key: "o/r#802", status: "escalated", process_key: "rp-802", url: "https://github.com/o/r/pull/802", title: "Converge" }],
+    escalations: [{ id: 1, pr_key: "o/r#802", status: "open", question }],
+    pr_adjudications: [
+      {
+        id: 1,
+        pr_key: "o/r#802",
+        question_fingerprint: questionFingerprint(question),
+        answer: "Write-through.",
+        adjudicated_by: null,
+        adjudicated_kind: null,
+        adjudicated_at: "2025-01-01T00:00:00.000Z",
+      },
+    ],
+  });
+  const { engine, completions } = fakeEngine([{ userTaskKey: "ut-802", elementId: "wait-answer", processInstanceKey: "rp-802" }]);
+
+  await pollUserTasks(data, engine);
+
+  assertEquals(completions.length, 0, "no auto-resume — a synthetic human actor is never manufactured");
+  const rows = stores.user_tasks ?? [];
+  assertEquals(rows.length, 1, "the question projects for a human to answer (fail-open)");
+  assertEquals(rows[0].user_task_key, "ut-802");
+});
+
+test("pollUserTasks: a transient adjudication-lookup error fails open and never aborts the pass (#806 review)", async () => {
+  // The adjudication LOOKUP is inside the fail-open try, so a transient `pr_adjudications.find` error
+  // must NOT reject `project`/abort `pollUserTasks` — the task still projects and reaches a human.
+  const question = "Should retries be capped?";
+  const { data, stores } = memData({
+    pull_requests: [{ pr_key: "o/r#803", status: "escalated", process_key: "rp-803", url: "https://github.com/o/r/pull/803", title: "Converge" }],
+    escalations: [{ id: 1, pr_key: "o/r#803", status: "open", question }],
+  });
+  const base = data.table.bind(data);
+  const failing = {
+    table(name: string, pk?: string) {
+      const t = base(name, pk);
+      if (name === "pr_adjudications") {
+        return { ...t, find: () => Promise.reject(new Error("transient db error")) };
+      }
+      return t;
+    },
+  } as unknown as DataLayer;
+  const { engine, completions } = fakeEngine([{ userTaskKey: "ut-803", elementId: "wait-answer", processInstanceKey: "rp-803" }]);
+
+  await pollUserTasks(failing, engine);
+
+  assertEquals(completions.length, 0, "no auto-resume on a lookup error");
+  const rows = stores.user_tasks ?? [];
+  assertEquals(rows.length, 1, "the task still projects — the poller did not abort (fail-open)");
+  assertEquals(rows[0].user_task_key, "ut-803");
+});

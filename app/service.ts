@@ -2871,24 +2871,33 @@ export async function pollUserTasks(
     // on a real PR key; on any resolution failure the task still projects, so an un-resumable question
     // always reaches a human (fail-open to the human).
     if (elementId === PR_WAIT_ANSWER_ELEMENT && ctx.subjectType === "pr" && ctx.question && parsePr(ctx.subjectKey)) {
-      const adjudication = matchAdjudication(await prAdjudications(data).find({ pr_key: ctx.subjectKey }), ctx.question);
-      if (adjudication) {
-        try {
+      try {
+        // The adjudication LOOKUP lives inside this fail-open `try` (not just the resume) so a transient
+        // `pr_adjudications.find` error never rejects `project` and aborts `pollUserTasks` mid-pass — the
+        // task still projects and the question always reaches a human (SPEC: adjudication-resolution
+        // failures fail open to the human).
+        const adjudication = matchAdjudication(await prAdjudications(data).find({ pr_key: ctx.subjectKey }), ctx.question);
+        // Only auto-resume when the prior adjudicator's provenance is KNOWN. A settled row with a blank
+        // `adjudicated_by` (completed out of band, so `latestAdjudicator` returned no actor) must NOT be
+        // manufactured into a synthetic `human` actor — that would audit an unknown-provenance replay as
+        // a first-hand human decision. Fail open to a fresh human task instead (Copilot review of #806).
+        const adjudicatedBy = adjudication?.adjudicated_by?.trim();
+        if (adjudication && adjudicatedBy) {
           const resumed = await completeEscalationAutoApplied(data, engine, {
             userTaskKey: rowKey,
             variables: { answer: adjudication.answer },
             actor: {
               kind: adjudication.adjudicated_kind === "agent" ? "agent" : "human",
-              id: adjudication.adjudicated_by?.trim() || "auto-applied",
+              id: adjudicatedBy,
             },
           });
           if (resumed.ok) {
             resumedByKey.add(rowKey);
             return;
           }
-        } catch (err) {
-          console.error(`[poller] adjudication auto-resume (${ctx.subjectKey}): ${err}`);
         }
+      } catch (err) {
+        console.error(`[poller] adjudication auto-resume (${ctx.subjectKey}): ${err}`);
       }
     }
     const row = buildUserTaskRow(ctx, at);

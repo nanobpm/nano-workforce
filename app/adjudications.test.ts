@@ -91,3 +91,51 @@ test("recordAdjudication: a blank answer is not a decision and is not recorded",
   await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "   ", adjudicatedBy: "alice", adjudicatedKind: "human" });
   assertEquals(rows.length, 0);
 });
+
+test("recordAdjudication: tolerates the UNIQUE fence firing on a concurrent duplicate insert (#806 review)", async () => {
+  // The `find`-then-`insert` is racy against `UNIQUE(pr_key, question_fingerprint)`: a redelivered
+  // answer job can insert the SAME fingerprint between our (empty) read and our write. Simulate that by
+  // making the insert reject with the driver's UNIQUE message — it must be swallowed as the idempotent
+  // no-op the sequential path yields (the winner's row is already durable), NOT surfaced as an incident.
+  const data = {
+    table(name: string) {
+      if (name !== "pr_adjudications") throw new Error(`unexpected table ${name}`);
+      return {
+        async find() {
+          return [] as PrAdjudicationRow[];
+        },
+        async insert() {
+          throw new Error("UNIQUE constraint failed: pr_adjudications.pr_key, pr_adjudications.question_fingerprint");
+        },
+      };
+      // biome-ignore lint/suspicious/noExplicitAny: in-memory table double
+    },
+    // biome-ignore lint/suspicious/noExplicitAny: in-memory table double
+  } as any;
+  // Must resolve, not throw.
+  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+});
+
+test("recordAdjudication: a NON-fence insert error still propagates (#806 review)", async () => {
+  const data = {
+    table() {
+      return {
+        async find() {
+          return [] as PrAdjudicationRow[];
+        },
+        async insert() {
+          throw new Error("disk full");
+        },
+      };
+      // biome-ignore lint/suspicious/noExplicitAny: in-memory table double
+    },
+    // biome-ignore lint/suspicious/noExplicitAny: in-memory table double
+  } as any;
+  let threw = false;
+  try {
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+  } catch {
+    threw = true;
+  }
+  assertEquals(threw, true, "a non-fence error is not swallowed");
+});
