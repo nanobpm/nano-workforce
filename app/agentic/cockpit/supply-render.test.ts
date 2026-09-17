@@ -140,3 +140,23 @@ test("H6: a worker with no correlation renders an em-dash process cell", () => {
   assert.equal(cell?.text(), "—");
   assert.equal(cell?.getAttribute("data-correlations"), "0");
 });
+
+test("#802: renders a stale-harness badge for a worker below the minimum / with no advertised protocol", () => {
+  const host = new FakeElement("body");
+  const staleWorker = { instance: "wk-old", identity: "leaf-1", stream: "wk-old", family: "senior", host: "h1", jobKeys: [], live: true, staleMs: 0, harnessStale: true };
+  const okWorker = { instance: "wk-ok", identity: "leaf-1", stream: "wk-ok", family: "senior", host: "h2", jobKeys: [], live: true, staleMs: 0, harnessStale: false, harnessProtocol: 3 };
+  const report: SupplyReport = {
+    count: 2,
+    workers: [staleWorker, okWorker],
+    leaves: [{ token: "leaf-1", workers: [staleWorker, okWorker] }],
+  };
+  renderSupply(host, doc, supplyView(report));
+
+  const rowOld = host.byData("worker", "wk-old")[0];
+  assert.equal(rowOld?.getAttribute("data-harness-stale"), "true");
+  assert.equal(rowOld?.byClass("cockpit-supply-harness-stale").length, 1, "stale harness badge rendered");
+
+  const rowOk = host.byData("worker", "wk-ok")[0];
+  assert.equal(rowOk?.getAttribute("data-harness-stale"), "false");
+  assert.equal(rowOk?.byClass("cockpit-supply-harness-stale").length, 0, "no badge for a healthy harness");
+});

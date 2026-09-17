@@ -233,6 +233,22 @@ export const ENV_CONTRACTS = {
     semantics:
       "Feature flag for the agentic supply endpoint; a value of 0/off/false/no disables it (enabled when unset).",
   },
+  NANO_AGENTIC_MIN_HARNESS_PROTOCOL: {
+    category: "env",
+    name: "NANO_AGENTIC_MIN_HARNESS_PROTOCOL",
+    owner: "app/harnessProtocol.ts",
+    semantics:
+      "Minimum worker-harness protocol version a worker must advertise at enrolment to be considered healthy (issue #802). A worker advertising a version below this — or advertising NO version at all (absent = stale) — is flagged stale in getAgenticSupply / the registry and, under NANO_AGENTIC_STALE_HARNESS_POLICY=refuse, is refused agent-job routing. Non-integer/blank degrades to the default.",
+    default: "1",
+  },
+  NANO_AGENTIC_STALE_HARNESS_POLICY: {
+    category: "env",
+    name: "NANO_AGENTIC_STALE_HARNESS_POLICY",
+    owner: "app/harnessProtocol.ts",
+    semantics:
+      "How the app treats a stale worker harness (issue #802): 'flag' (default) only marks it stale for observability/drain; 'refuse' additionally withholds its SERVE tokens at enrol so it wins no job leases. Anything other than the exact token 'refuse' is treated as 'flag' so a typo never silently drains the fleet.",
+    default: "flag",
+  },
   NANO_WORKFORCE_GIT_SHA: {
     category: "env",
     name: "NANO_WORKFORCE_GIT_SHA",
@@ -561,6 +577,14 @@ export const TYPE_CONTRACTS = {
     semantics:
       "The `durable-resume` ENROLMENT GATE (issue #325, ADR 0062 Slice 5/5, the INTEGRATION slice). `durable-resume` is a worker attribute declared at enrolment (ADR 0056 §7 — capability gates enrolment, NEVER the routing token `network.role#seat`), recorded per worker instance in `worker_durable_resume` (migration 052). The enrol door (`operations/enrolAgenticWorker.ts`) records it via `recordEnrolment`; `app/service.ts` consults `fleetSupportsDurableResume` before emitting the world-restore `commitSha` (the `io.nanobpm.agentTask.repository` envelope) so a re-leased `senior:pr-review` round RESUMES only on a participating fleet and gracefully DEGRADES (redriven from scratch) otherwise. Consume this ONE module for the durable-resume gate — do not re-declare a synonym or read the flag off a second store.",
     module: "app/durableResume.ts",
+  },
+  HarnessProtocolRegistry: {
+    category: "type",
+    name: "HarnessProtocolRegistry",
+    owner: "app/harnessProtocol.ts",
+    semantics:
+      "The durable registry of per-worker advertised harness protocol version (issue #802), over `worker_harness_protocol` (migration 107) through the RAD `Table<T>` surface — mirroring {@link DurableResumeRegistry}. `harness-protocol` is a worker ATTRIBUTE advertised at enrolment (ADR 0056 §7 — capability gates enrolment, NEVER the routing token `network.role#seat`), recorded per worker instance by `recordEnrolment` from the enrol door (`operations/enrolAgenticWorker.ts`); a MISSING version is first-class STALE. It is the ONE shared source consumed by enrolment (record), supply (`getAgenticSupply` staleness verdict) and registry reporting (`computeRegistryReport` → `staleWorkers`, which folds a non-empty stale set into the overall red drain signal). The bounded `protocolsFor(instances)` read scopes to the live presence keys via a single `WHERE instance IN (…)` query — never an N+1 per-worker `findOne`. Consume this ONE module for the harness-protocol gate — do not re-declare a synonym or read the version off a second store.",
+    module: "app/harnessProtocol.ts",
   },
 } as const satisfies Record<string, TypeContract>;
 

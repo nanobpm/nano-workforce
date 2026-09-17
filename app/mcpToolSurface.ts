@@ -105,8 +105,14 @@ export const MCP_TOOL_COUNT_BUDGET = 60;
  * `x-mcp` convention that read/orient doors stay exposed; only operator-only control doors are
  * excluded, see app/mcpExclusions.test.ts). Measured +1,846 bytes serialized (84,043 → 85,889 —
  * over the old ceiling's 457-byte headroom). Deliberate, documented growth — not schema fat.
+ *
+ * RAISE PROVENANCE — 86_500 → 87_000 (#802): the worker-harness protocol surface adds
+ * `harnessProtocol`/`harnessStale` observability fields to the `enrolAgenticWorker`,
+ * `getAgenticSupply`, and registry read schemas (plus the `StaleWorker` leaf) so an operator can spot
+ * and drain a stale harness from the tool surface alone. Measured 86,509 bytes serialized — 9 over the
+ * old ceiling's headroom. Deliberate, documented growth — not schema fat.
  */
-export const MCP_SURFACE_BYTES_BUDGET = 86_500;
+export const MCP_SURFACE_BYTES_BUDGET = 87_000;
 
 /**
  * The eagerly-loaded curated subset MUST stay materially smaller than the full surface — otherwise it

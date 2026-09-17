@@ -5,8 +5,11 @@ import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { TaskDefinitionLeaf } from "@nanobpm/agentic/demand";
 import type { RegisteredWorker } from "@nanobpm/agentic/vocab";
+import { HarnessProtocolRegistry } from "../../harnessProtocol.ts";
+import { noopLog } from "../../../test/log.ts";
+import { memDataFor } from "../../../test/worldDb.ts";
 import { CREW_VOCAB_VERSION } from "./crew-vocab.ts";
-import { buildRegistryReport, engineRestAddress, toWireReport } from "./demand-report.ts";
+import { buildRegistryReport, computeRegistryReport, engineRestAddress, toWireReport } from "./demand-report.ts";
 
 const NOW = new Date(0);
 // A demanded taskDefinition leaf. `agentic` is the structural signal the engine reads from a task's
@@ -141,4 +144,66 @@ test("engineRestAddress strips trailing slashes from the derived NANOBPMN_BASE_U
     if (prevBase === undefined) delete process.env.NANOBPMN_BASE_URL;
     else process.env.NANOBPMN_BASE_URL = prevBase;
   }
+});
+
+test("#802: toWireReport carries staleWorkers through, omitting harnessProtocol when absent", () => {
+  const base = buildRegistryReport({ taskDefinitions: [], workers: [seniorImpl] });
+  const report = {
+    ...base,
+    staleWorkers: [
+      { instance: "wk-old", stale: true },
+      { instance: "wk-low", stale: true, harnessProtocol: 0 },
+    ],
+  };
+  const wire = toWireReport(report);
+  assertEquals(wire.staleWorkers, [
+    { instance: "wk-old", stale: true },
+    { instance: "wk-low", stale: true, harnessProtocol: 0 },
+  ]);
+});
+
+test("#802: toWireReport omits staleWorkers entirely when the report has none (supply-only build)", () => {
+  const report = buildRegistryReport({ taskDefinitions: [], workers: [seniorImpl] });
+  assertEquals("staleWorkers" in toWireReport(report), false);
+});
+
+const HARNESS_MIGRATIONS = ["107_worker_harness_protocol.sql"];
+
+test("#802: computeRegistryReport threads live workers through the registry into staleWorkers", async () => {
+  // Exercises the real assessment→staleWorkers wiring end-to-end against a mounted registry (migration
+  // 107) rather than hand-building `staleWorkers` before `toWireReport`: a regression in passing the
+  // live workers through `assessWorkersWithAvailability` would otherwise stay green.
+  const { data } = memDataFor(HARNESS_MIGRATIONS);
+  const reg = new HarnessProtocolRegistry(data);
+  await reg.recordEnrolment("w-front", 5); // healthy (>= default min 1)
+  await reg.recordEnrolment("w-kimi", 0); // below minimum → stale
+  // seniorImpl ("w-senior") never enrolled a protocol → absent → stale.
+  const report = await computeRegistryReport(noopLog(), data, [plannerFrontier, plannerKimi, seniorImpl]);
+  assertEquals(report.staleWorkers, [
+    { instance: "w-kimi", stale: true, harnessProtocol: 0 },
+    { instance: "w-senior", stale: true },
+  ]);
+  // The stale-harness condition is folded into the OVERALL status so the board's status pill (which
+  // renders only `report.status`, not `staleWorkers`) turns RED rather than staying green (issue #802).
+  assertEquals(report.status, "red");
+});
+
+test("#802: computeRegistryReport keeps status green when every enrolled harness is healthy", async () => {
+  // Guards the fold's other edge: a mounted registry with NO stale workers must NOT force `red` — the
+  // overall status stays whatever demand×supply produced (here green, empty demand / no missing).
+  const { data } = memDataFor(HARNESS_MIGRATIONS);
+  const reg = new HarnessProtocolRegistry(data);
+  await reg.recordEnrolment("w-front", 5);
+  await reg.recordEnrolment("w-senior", 5);
+  const report = await computeRegistryReport(noopLog(), data, [plannerFrontier, seniorImpl]);
+  assertEquals(report.staleWorkers, []);
+  assertEquals(report.status, "green");
+});
+
+test("#802: computeRegistryReport OMITS staleWorkers when the registry cannot be consulted", async () => {
+  // A legacy DB predating migration 107: the bounded read throws → registryAvailable=false, so the
+  // report must omit staleWorkers rather than mislabel an outage as a fleet-wide drain signal.
+  const { data } = memDataFor([]);
+  const report = await computeRegistryReport(noopLog(), data, [plannerFrontier, seniorImpl]);
+  assertEquals("staleWorkers" in report, false, "an outage omits staleWorkers, not report every worker stale");
 });

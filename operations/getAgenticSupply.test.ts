@@ -5,6 +5,7 @@
 // by instance, family/host/jobKeys/liveness) — driven through a REAL AgenticHub + in-memory transport
 // exactly as the presence family is exercised, so the singleton the operation reads is the live one.
 import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { AgenticHub } from "@nanobpm/agentic/channel";
 import type { Authenticator, ChannelConnection, ChannelTransport } from "@nanobpm/agentic/channel";
@@ -37,6 +38,19 @@ function memSqlite(): SqliteDb {
 
 function memData(db: SqliteDb): DataLayer {
   return { source: () => ({ db }) } as unknown as DataLayer;
+}
+
+/** Wrap an existing DatabaseSync as a SqliteDb (so the presence store and a raw insert share one db). */
+function memSqliteOver(db: DatabaseSync): SqliteDb {
+  return {
+    exec: (sql) => db.exec(sql),
+    run: (sql, params = []) => {
+      const r = db.prepare(sql).run(...(params as never[]));
+      return { changes: Number(r.changes), lastInsertRowid: Number(r.lastInsertRowid) };
+    },
+    all: <T = Record<string, unknown>>(sql: string, params: unknown[] = []) =>
+      db.prepare(sql).all(...(params as never[])) as T[],
+  };
 }
 
 function memTransport(): { transport: ChannelTransport; connect(conn: ChannelConnection): void } {
@@ -257,5 +271,71 @@ test("#738 drift: the supply advertises the producer's instance-scoped stream id
     claimFamily.teardown?.();
     family.teardown?.();
     await hub.close();
+  }
+});
+
+// Harness staleness (issue #802): the supply report flags a worker whose harness protocol is below the
+// minimum / absent, joined by instance from the app's harness-protocol registry.
+test("#802: flags harnessStale per worker, joining the harness-protocol registry by instance", async () => {
+  const raw = new DatabaseSync(":memory:");
+  raw.exec("PRAGMA foreign_keys = ON;");
+  raw.exec(readFileSync(new URL("../db/migrations/107_worker_harness_protocol.sql", import.meta.url), "utf8"));
+  const now = new Date().toISOString();
+  // wk-a advertised a healthy protocol (>= min 1); wk-a's presence row is minted below.
+  raw.prepare("INSERT INTO worker_harness_protocol (instance, harness_protocol, updated_at) VALUES (?, ?, ?)").run("wk-a", 2, now);
+
+  // A data layer providing BOTH the presence `source().db` handle and the RAD `table()` surface over
+  // the SAME db, so the presence family and the harness registry read one store.
+  const sqlite = memSqliteOver(raw);
+  const quote = (id: string) => `"${id.replace(/"/g, '""')}"`;
+  const table = (name: string, pk = "id") => ({
+    // biome-ignore lint/suspicious/noExplicitAny: test-only gateway.
+    async find(where: any = {}): Promise<any[]> {
+      const keys = Object.keys(where);
+      const clause = keys.length ? `WHERE ${keys.map((k) => `${quote(k)} = ?`).join(" AND ")}` : "";
+      return raw.prepare(`SELECT * FROM ${quote(name)} ${clause}`).all(...keys.map((k) => where[k])) as any[];
+    },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only gateway.
+    async findOne(where: any = {}): Promise<any> {
+      return (await this.find(where))[0];
+    },
+    _pk: pk,
+  });
+  const data = {
+    source: () => ({ db: sqlite }),
+    table,
+    // The raw-SQL surface the harness registry's bounded `WHERE instance IN (…)` read binds to, over
+    // the SAME db as `table`/presence.
+    // biome-ignore lint/suspicious/noExplicitAny: test-only gateway.
+    open: () => ({ query: async (sql: string, params: any[] = []) => raw.prepare(sql).all(...params) as any[] }),
+  } as unknown as DataLayer;
+
+  const transport = memTransport();
+  const hub = new AgenticHub({ transport: transport.transport, authenticator, sweepIntervalMs: 0 });
+  await family.mount({ hub, registry: hub.registry, transport: transport.transport as never, data, log: noopLog() });
+  const healthyConn = fakeConn("c1", "leafA");
+  transport.connect(healthyConn.conn);
+  await flush();
+  healthyConn.feed({ lane: "control", family: "register", seq: 1, payload: { instance: "wk-a", capability: {} } });
+  const staleConn = fakeConn("c2", "leafA");
+  transport.connect(staleConn.conn);
+  await flush();
+  // wk-b registers but has NO harness-protocol row → absent = stale.
+  staleConn.feed({ lane: "control", family: "register", seq: 1, payload: { instance: "wk-b", capability: {} } });
+  await flush();
+
+  const withData = { log: noopLog(), data } as unknown as AppApi;
+  try {
+    const res = (await handler(input(), withData)) as { status: number; body: { workers: Array<Record<string, unknown>> } };
+    assertEquals(res.status, 200);
+    const byInstance = new Map(res.body.workers.map((w) => [w.instance, w]));
+    assertEquals(byInstance.get("wk-a")?.harnessStale, false, "healthy protocol is not stale");
+    assertEquals(byInstance.get("wk-a")?.harnessProtocol, 2);
+    assertEquals(byInstance.get("wk-b")?.harnessStale, true, "no recorded protocol = stale");
+    assertEquals("harnessProtocol" in (byInstance.get("wk-b") ?? {}), false, "no protocol echoed for a stale worker");
+  } finally {
+    family.teardown?.();
+    await hub.close();
+    raw.close();
   }
 });

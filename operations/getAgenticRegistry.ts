@@ -20,6 +20,6 @@ export default defineOperation("getAgenticRegistry", async ({ req }, app) => {
     app.log.warn("getAgenticRegistry rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
   }
-  const report = await computeRegistryReport(app.log);
+  const report = await computeRegistryReport(app.log, app.data);
   return { status: 200, body: toWireReport(report) };
 });

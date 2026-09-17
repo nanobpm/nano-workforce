@@ -23,6 +23,7 @@
 import { type ClaimRegistry, currentClaimRegistry } from "../app/agentic/claim-registry.ts";
 import { currentCorrelation, type JobCorrelation } from "../app/agentic/correlation.ts";
 import { currentPresenceRegistry, type SupplyWorker } from "../app/agentic/families/presence.family.ts";
+import { assessWorkers, type HarnessAssessment } from "../app/harnessProtocol.ts";
 import { envVar } from "../app/version.ts";
 import type { AgenticJobCorrelation, AgenticSupplyReport, AgenticSupplyWorker } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -36,7 +37,7 @@ const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 // (`composeStreamId(instance, jobKey)`, issue #738) when the claim registry knows a current claim for
 // it (#713) — keyed by the CLAIM, not by the connection — so drilling in opens the LIVE job's terminal
 // (the exact stream the producer writes) even before any transcript lands.
-function toWorker(w: SupplyWorker, claims: ClaimRegistry | undefined): AgenticSupplyWorker {
+function toWorker(w: SupplyWorker, claims: ClaimRegistry | undefined, harness: HarnessAssessment | undefined): AgenticSupplyWorker {
   const out: AgenticSupplyWorker = {
     instance: w.instance,
     identity: w.identity,
@@ -44,9 +45,13 @@ function toWorker(w: SupplyWorker, claims: ClaimRegistry | undefined): AgenticSu
     jobKeys: [...w.jobKeys],
     live: w.live,
     staleMs: w.staleMs,
+    // Harness staleness (issue #802) — an absent registry entry / unmounted data layer reads as stale
+    // (fail loud). Distinct from the liveness `staleMs` heartbeat grade above.
+    harnessStale: harness?.stale ?? true,
   };
   if (w.family !== undefined) out.family = w.family;
   if (w.host !== undefined) out.host = w.host;
+  if (harness?.harnessProtocol !== undefined) out.harnessProtocol = harness.harnessProtocol;
   return out;
 }
 
@@ -82,11 +87,18 @@ export default defineOperation("getAgenticSupply", async ({ req }, app) => {
   // process-instance / plan context surfaced in `correlations`, but no longer feeds visibility.
   const correlation = currentCorrelation();
   const snapshot = registry.snapshot(claims ? { jobKeysFor: (instance) => claims.jobKeysFor(instance) } : {});
+  // Harness-staleness (issue #802): assess every visible worker's advertised protocol against the
+  // configured minimum — the ONE canonical staleness derivation (no second heuristic). Best-effort:
+  // an unmounted data layer / read failure reads as stale (fail loud).
+  const harness = await assessWorkers(app.data, snapshot.workers.map((w) => w.instance));
   const report: AgenticSupplyReport = {
     count: snapshot.count,
     generatedAt: new Date().toISOString(),
-    workers: snapshot.workers.map((w) => toWorker(w, claims)),
-    leaves: snapshot.leaves.map((leaf) => ({ token: leaf.token, workers: leaf.workers.map((w) => toWorker(w, claims)) })),
+    workers: snapshot.workers.map((w) => toWorker(w, claims, harness.get(w.instance))),
+    leaves: snapshot.leaves.map((leaf) => ({
+      token: leaf.token,
+      workers: leaf.workers.map((w) => toWorker(w, claims, harness.get(w.instance))),
+    })),
     correlations: correlation ? correlation.snapshot().correlations.map(toCorrelation) : [],
   };
   return { status: 200, body: report };

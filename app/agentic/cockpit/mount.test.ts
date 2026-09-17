@@ -111,6 +111,56 @@ test("the rendered transcript region sits directly beneath the Workers — suppl
   }
 });
 
+// #802 — the DEPLOYED browser twin (mount.js) must surface a STALE harness as a distinct badge, and
+// a healthy one with none. The typed renderer (`supply-render.ts`) has its own test, but the twin is
+// hand-maintained and previously had no non-empty supply-row coverage, so it could silently stop
+// surfacing stale harnesses while the typed test stayed green.
+test("#802: mount.js renders a stale-harness badge for a stale worker and none for a healthy one", async () => {
+  const worker = (instance: string, harnessStale: boolean, harnessProtocol?: number) => ({
+    instance,
+    identity: "senior",
+    stream: instance,
+    family: "senior",
+    host: "h1",
+    jobKeys: [],
+    live: true,
+    staleMs: 0,
+    harnessStale,
+    ...(harnessProtocol !== undefined ? { harnessProtocol } : {}),
+  });
+  const workers = [worker("wk-stale", true, 0), worker("wk-ok", false, 3)];
+  const report = { count: workers.length, workers, leaves: [{ token: "senior", workers }], correlations: [] };
+  const restore = installEnv((url) => {
+    const ok = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => body });
+    if (url.includes("/supply")) return ok(report);
+    if (url.includes("/agent-instances")) return ok({ count: 0, instances: [] });
+    if (url.includes("/transcripts")) return ok({ sessions: [] });
+    return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+  });
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await handle.refresh();
+      const staleRow = document.querySelector('.cockpit-supply-worker[data-worker="wk-stale"]');
+      const okRow = document.querySelector('.cockpit-supply-worker[data-worker="wk-ok"]');
+      assert(staleRow != null && okRow != null, "both worker rows rendered");
+      const badge = staleRow?.querySelector('.cockpit-supply-harness-stale[data-harness-stale="true"]');
+      assert(badge != null, "the stale worker carries the harness-stale badge");
+      assertEquals(badge?.textContent, "stale harness (v0)", "the badge shows the advertised protocol");
+      assertEquals(
+        okRow?.querySelector(".cockpit-supply-harness-stale"),
+        null,
+        "the healthy worker carries no harness-stale badge",
+      );
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
+
 test("live drill renders the transcript — a nwfTranscriptEvent chunk is never surfaced verbatim", async () => {
   const restore = installEnv(fetchStub());
   try {
