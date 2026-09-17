@@ -31,10 +31,12 @@ interface Escalation extends Record<string, unknown> {
 }
 
 // The PR-row fields this worker reconciles when an escalation is answered. Only `status`/`updated_at`
-// are written; the rest of the row is untouched.
+// are written; the rest of the row is untouched. `process_key` is READ (never written here) to reject a
+// delayed/redelivered job from a superseded process instance (Copilot review of #806).
 interface PullRequest extends Record<string, unknown> {
   pr_key: string;
   status: string;
+  process_key: string | null;
   updated_at: string;
 }
 
@@ -49,6 +51,25 @@ function nonBlank(v: unknown): string | undefined {
 const handler: AppJobHandler<In> = async (job, app) => {
   const { prKey } = job.variables;
   const answer = nonBlank(job.variables.answer);
+  // The exact identity of the `wait-*` completion that resumed THIS token (Copilot review of #806),
+  // stamped by `completeUserTaskAttributed` on the resumed token. Used to correlate the durable
+  // adjudication to the completion the engine actually accepted; absent for an out-of-band resume.
+  const completedUserTaskKey = nonBlank(job.variables.completedUserTaskKey);
+  const prs = app.data.table<PullRequest>("pull_requests", "pr_key");
+  // Reject a delayed/redelivered job from a SUPERSEDED process instance (Copilot review of #806).
+  // `pull_requests.process_key` always tracks the CURRENT loop instance for this PR — the convergence
+  // instance at submit, reassigned to the merge instance at merge-start (app/service.ts). A job whose
+  // `processInstanceKey` no longer matches is from an old run that a re-submit (or the merge hand-off)
+  // replaced; accepting it would let a stale process reinsert its adjudication after the fresh run's
+  // reset, or even answer the new run's open escalation, so a re-submit would not be a reliable
+  // fresh-decision boundary. No-op such jobs BEFORE any adjudication/escalation/PR write. When the
+  // current process is unknown (no row / null `process_key`) we cannot classify the job as stale, so
+  // we proceed rather than silently drop a legitimate operator answer.
+  const currentProcessKey = nonBlank((await prs.find({ pr_key: prKey }))[0]?.process_key);
+  const jobProcessKey = job.processInstanceKey != null ? String(job.processInstanceKey) : undefined;
+  if (currentProcessKey !== undefined && jobProcessKey !== undefined && jobProcessKey !== currentProcessKey) {
+    return {};
+  }
   // This one worker services BOTH loops' answer steps (`record-answer` in the convergence loop AND
   // `record-merge-answer` in the merge loop, #256). Only a CONVERGENCE answer may feed the durable
   // adjudication memory the convergence poller replays — a merge-loop decision recorded here would let
@@ -72,7 +93,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
     // after the rows flip loses the adjudication entirely (the retry finds no open row and returns), so
     // the answered question could re-escalate after restart. Scoped to convergence answers only.
     if (isConvergence) {
-      const adjudicator = await latestAdjudicator(app, job.processInstanceKey, answer);
+      const adjudicator = await latestAdjudicator(app, job.processInstanceKey, answer, completedUserTaskKey);
       await recordAdjudication(app.data, {
         prKey,
         question: open[0].question,
@@ -93,7 +114,6 @@ const handler: AppJobHandler<In> = async (job, app) => {
     // `"converging"` now that the question is answered. Without this the row stays `escalated` (with
     // a now-null derived `openEscalation`) until the re-entered round's `persist-round` runs — a
     // `/status` inconsistency and a divergence from the merge path both loops are meant to share.
-    const prs = app.data.table<PullRequest>("pull_requests", "pr_key");
     await prs.update(prKey, { status: "converging", updated_at: ts });
   }
   return {};
@@ -101,28 +121,36 @@ const handler: AppJobHandler<In> = async (job, app) => {
 
 /** Who just completed this `wait-answer`: the `{ id, kind }` of the `task_completions` row that
  *  actually WON the user-task race, so the durable adjudication is attributed to the completion the
- *  engine accepted — never a losing racer's transient row. Both canonical completers
- *  (`completeUserTaskAttributed`) insert their ledger row BEFORE calling `completeUserTask` and the
- *  loser only removes its row AFTER the engine rejects it, so a bare "newest row for this process
- *  instance" can transiently select a higher-id LOSER and persist/replay the wrong `actor_kind`
- *  (Copilot review of #806). Correlate instead on the WINNING answer: the engine resumed this token
- *  with exactly one completion's variables, and `answer` here is that winning submission — so the
- *  winner is the newest ledger row whose recorded `variables_json.answer` matches it. The KIND
- *  (`human`/`agent`, ADR 0046) is preserved so a later auto-resume replays with the ORIGINAL
- *  attribution and never launders an agent decision into a human one. `undefined` when no ledger row
- *  is correlated (e.g. an out-of-band resume, or a winner that did not route through the ledger), so
- *  the adjudication records a null adjudicator — which fails open to a fresh human task — rather than
- *  a wrong one. */
-async function latestAdjudicator(app: Parameters<AppJobHandler<In>>[1], processInstanceKey: unknown, winningAnswer: string | undefined): Promise<{ id: string; kind: string } | undefined> {
+ *  engine accepted — never a losing racer's transient row NOR an older round's completion. Both
+ *  canonical completers (`completeUserTaskAttributed`) insert their ledger row BEFORE calling
+ *  `completeUserTask` and the loser only removes its row AFTER the engine rejects it, so a bare
+ *  "newest row for this process instance" can transiently select a higher-id LOSER; and because a
+ *  convergence-loop instance is REUSED across rounds, an older round's completion (or a delayed
+ *  same-answer redelivery) with a higher id can also linger for the SAME process instance (Copilot
+ *  review of #806). Correlate on the EXACT completion identity first: the resumed token carries the
+ *  `completedUserTaskKey` this completion stamped, so the winner is a ledger row for that exact
+ *  `user_task_key`. Both racers on that task share the key, so also require the WINNING answer — the
+ *  engine resumed this token with exactly one completion's variables and `answer` here is that winning
+ *  submission — to drop the losing racer, whose recorded answer differs. The KIND (`human`/`agent`,
+ *  ADR 0046) is preserved so a later auto-resume replays with the ORIGINAL attribution and never
+ *  launders an agent decision into a human one. `undefined` (fails open to a fresh human task) when the
+ *  identity is unavailable (an out-of-band resume that carried no `completedUserTaskKey`) or no ledger
+ *  row exactly matches — rather than attribute a wrong one. */
+async function latestAdjudicator(app: Parameters<AppJobHandler<In>>[1], processInstanceKey: unknown, winningAnswer: string | undefined, completedUserTaskKey: string | undefined): Promise<{ id: string; kind: string } | undefined> {
   const key = processInstanceKey != null ? String(processInstanceKey) : "";
   if (key === "") return undefined;
+  // Require the carried user-task identity — without it we cannot EXACTLY identify the completion for
+  // THIS wait-answer among a reused instance's accumulated rows, so fail open rather than guess.
+  if (completedUserTaskKey == null || completedUserTaskKey === "") return undefined;
   const rows = await taskCompletions(app.data).find({ process_instance_key: key });
-  // Correlate on the winning answer whenever we know it: the loser recorded a DIFFERENT submission, so
-  // filtering to rows whose recorded answer matches the accepted one drops the transient loser row. If
-  // the winning answer is unknown (blank/out-of-band — recordAdjudication won't persist it anyway) fall
-  // back to the whole set. Selecting nothing (a known winner with no matching ledger row) returns
-  // undefined and fails open, rather than attributing to an unrelated row.
-  const candidates = winningAnswer != null && winningAnswer !== "" ? rows.filter((r) => completionAnswer(r.variables_json) === winningAnswer) : rows;
+  // Exact ledger match: keep only rows for the completion this token actually resumed with (drops other
+  // rounds' completions and any unrelated task in the same instance). Then, when the winning answer is
+  // known, keep only rows whose recorded answer matches it — dropping the same-task losing racer, whose
+  // recorded submission differs. Selecting nothing returns undefined and fails open.
+  let candidates = rows.filter((r) => String(r.user_task_key) === completedUserTaskKey);
+  if (winningAnswer != null && winningAnswer !== "") {
+    candidates = candidates.filter((r) => completionAnswer(r.variables_json) === winningAnswer);
+  }
   let newest: { id: number; actor_id: string; actor_kind: string } | undefined;
   for (const r of candidates) {
     if (!newest || r.id > newest.id) newest = r;

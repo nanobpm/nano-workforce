@@ -322,7 +322,17 @@ export async function completeUserTaskAttributed(
   });
   const completionId = Number(id);
   try {
-    await engine.completeUserTask(userTaskKey, target.variables);
+    // Carry the completed user-task's identity forward on the resumed token (Copilot review of #806).
+    // `pr.answer-escalation` (record-answer) reconciles the durable adjudication AFTER this completion
+    // resumes the token; a convergence-loop instance is REUSED across rounds, so correlating the
+    // winning completion by process-instance + answer alone is ambiguous — an older round's completion,
+    // or a delayed higher-id same-answer row, can share both. Stamping the exact `userTaskKey` here lets
+    // that step require an EXACT ledger match against THIS wait-answer's completion (and fail open to a
+    // null adjudicator when the identity is absent) rather than attribute to an unrelated row. Reserved,
+    // additive key — consumed only by record-answer; every other escalation flow simply never reads it.
+    // Injected only into the resumed token's variables, NOT the ledger row's `variables_json` above, so
+    // the recorded completion payload (and the answer correlation over it) is unchanged.
+    await engine.completeUserTask(userTaskKey, { ...target.variables, completedUserTaskKey: userTaskKey });
   } catch (err) {
     // The completion did not take — roll the attribution row back so the ledger reflects only
     // completions that actually happened, and let the caller retry. The rollback is best-effort:

@@ -126,7 +126,7 @@ test("listEscalations: round-trip — the listed userTaskKey is exactly what com
   assertEquals(done.status, 200);
   assertEquals(done.body.ok, true);
   assertEquals(done.body.elementId, "wait-answer");
-  assertEquals(completed, [{ userTaskKey: "ut-answer", variables: { answer: "v2" } }]);
+  assertEquals(completed, [{ userTaskKey: "ut-answer", variables: { answer: "v2", completedUserTaskKey: "ut-answer" } }]);
   // The answered task's read-model row is dropped, so a re-list no longer shows it.
   assertEquals(stores.user_tasks, []);
   const reListed = await callList(app);

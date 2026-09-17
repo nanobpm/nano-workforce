@@ -16,7 +16,7 @@ import { assertEquals } from "#test-assert";
 import { questionFingerprint } from "../app/github.ts";
 import handler from "../workers/answer-escalation/worker.ts";
 
-function fakeApp(escalationRows: Record<string, unknown>[]) {
+function fakeApp(escalationRows: Record<string, unknown>[], prRows: Record<string, unknown>[] = []) {
   const updates: { key: unknown; patch: Record<string, unknown> }[] = [];
   const prUpdates: { key: unknown; patch: Record<string, unknown> }[] = [];
   const adjudications: Record<string, unknown>[] = [];
@@ -26,6 +26,9 @@ function fakeApp(escalationRows: Record<string, unknown>[]) {
       table(name: string, _key: string) {
         if (name === "pull_requests") {
           return {
+            async find(where: Record<string, unknown>) {
+              return prRows.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v));
+            },
             async update(key: unknown, patch: Record<string, unknown>) {
               prUpdates.push({ key, patch });
             },
@@ -135,8 +138,8 @@ test("persists a durable adjudication of the answered question, attributed to th
   const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
   const { app, adjudications, completions } = fakeApp(rows);
   // The resume's completion stamped a ledger row for this process instance (alice, a human, answered).
-  completions.push({ id: 1, process_instance_key: "pi-1", element_id: "wait-answer", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
-  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence" } };
+  completions.push({ id: 1, process_instance_key: "pi-1", user_task_key: "ut-1", element_id: "wait-answer", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-1" } };
   await handler(job as any, app as any);
   assertEquals(adjudications.length, 1, "one durable adjudication row is written");
   assertEquals(adjudications[0].pr_key, "o/r#1");
@@ -158,9 +161,9 @@ test("attributes to the WINNING completion, not a transient higher-id loser row 
   // The human (alice) WON — the engine resumed this token with her answer "Cap at 5.". A losing racer
   // (a poller auto-resume of a stale adjudication, attributed to an AGENT) inserted a HIGHER-id row
   // carrying a DIFFERENT answer, and has not yet rolled it back. "Newest" would wrongly pick the agent.
-  completions.push({ id: 1, process_instance_key: "pi-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
-  completions.push({ id: 2, process_instance_key: "pi-1", actor_id: "senior-agent", actor_kind: "agent", variables_json: JSON.stringify({ answer: "Cap at 3." }) });
-  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence" } };
+  completions.push({ id: 1, process_instance_key: "pi-1", user_task_key: "ut-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  completions.push({ id: 2, process_instance_key: "pi-1", user_task_key: "ut-1", actor_id: "senior-agent", actor_kind: "agent", variables_json: JSON.stringify({ answer: "Cap at 3." }) });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-1" } };
   await handler(job as any, app as any);
   assertEquals(adjudications.length, 1);
   assertEquals(adjudications[0].adjudicated_by, "alice", "attributed to the winner (matching answer), not the higher-id loser");
@@ -173,12 +176,79 @@ test("no ledger row matches the winning answer → null adjudicator (fails open)
   // Only a stale loser row (a DIFFERENT answer) is present — the winning completion did not route
   // through the ledger. Attributing to the unrelated row would be wrong; record a null adjudicator so
   // the auto-resume gate fails open to a fresh human task instead.
-  completions.push({ id: 1, process_instance_key: "pi-1", actor_id: "senior-agent", actor_kind: "agent", variables_json: JSON.stringify({ answer: "Cap at 3." }) });
-  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence" } };
+  completions.push({ id: 1, process_instance_key: "pi-1", user_task_key: "ut-1", actor_id: "senior-agent", actor_kind: "agent", variables_json: JSON.stringify({ answer: "Cap at 3." }) });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-1" } };
   await handler(job as any, app as any);
   assertEquals(adjudications.length, 1, "the adjudication is still recorded (a real convergence answer)");
   assertEquals(adjudications[0].adjudicated_by, null, "an uncorrelated winner records a null adjudicator");
   assertEquals(adjudications[0].adjudicated_kind, null, "no wrong kind is laundered in");
+});
+
+// --- Copilot review of #806: the exact identity of the completion that resumed THIS wait-answer is
+// carried on the token (`completedUserTaskKey`), because a convergence-loop instance is REUSED across
+// rounds — so process-instance + answer alone can collide with an older round's completion or a delayed
+// same-answer redelivery bearing a higher id. Require an EXACT `user_task_key` match. ---
+
+test("excludes an older round's same-answer completion; attributes by exact user-task identity (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications, completions } = fakeApp(rows);
+  // The CURRENT round's winner (alice) has a LOWER id than a delayed higher-id completion of a PRIOR
+  // round's wait-answer (a different `user_task_key`) that recorded the SAME recurring answer. A
+  // "newest matching answer" correlation would wrongly pick the higher-id intruder (the agent); the
+  // exact `completedUserTaskKey` identity keeps attribution on this round's completion.
+  completions.push({ id: 20, process_instance_key: "pi-1", user_task_key: "ut-current", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  completions.push({ id: 25, process_instance_key: "pi-1", user_task_key: "ut-prior", actor_id: "stale-agent", actor_kind: "agent", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-current" } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 1);
+  assertEquals(adjudications[0].adjudicated_by, "alice", "attributed by exact user-task identity, not the higher-id same-answer prior-round row");
+  assertEquals(adjudications[0].adjudicated_kind, "human", "the current round's completer kind is recorded");
+});
+
+test("carries no user-task identity → null adjudicator (fails open), never a guess (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications, completions } = fakeApp(rows);
+  // An out-of-band resume that did not stamp `completedUserTaskKey`. Even with a same-answer ledger row
+  // present, we cannot EXACTLY identify this wait-answer's completion, so we fail open rather than guess.
+  completions.push({ id: 1, process_instance_key: "pi-1", user_task_key: "ut-x", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence" } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 1, "the adjudication is still recorded (a real convergence answer)");
+  assertEquals(adjudications[0].adjudicated_by, null, "no carried identity → null adjudicator, never a guess");
+  assertEquals(adjudications[0].adjudicated_kind, null);
+});
+
+// --- Copilot review of #806: this worker must reject a delayed/redelivered job from a SUPERSEDED
+// process instance. `pull_requests.process_key` tracks the CURRENT loop instance; a re-submit (or the
+// merge hand-off) reassigns it. A stale old-process job must NOT reinsert its adjudication after the
+// fresh run's reset, nor answer the new run's open escalation. ---
+
+test("no-ops a redelivered job from a superseded (non-current) process instance (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, updates, prUpdates, adjudications, completions } = fakeApp(rows, [
+    { pr_key: "o/r#1", status: "escalated", process_key: "pi-current" },
+  ]);
+  // A stale completion from the OLD instance carries a matching identity + answer, but the PR's current
+  // process is `pi-current`. The job is from `pi-stale`, so it must touch nothing.
+  completions.push({ id: 1, process_instance_key: "pi-stale", user_task_key: "ut-old", actor_id: "ghost", actor_kind: "agent", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  const job = { processInstanceKey: "pi-stale", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-old" } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 0, "a superseded-process job never reinserts an adjudication after the reset");
+  assertEquals(updates.length, 0, "it never answers the new run's open escalation");
+  assertEquals(prUpdates.length, 0, "it never moves the PR row");
+});
+
+test("accepts a job whose process instance IS the PR's current process_key (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, updates, adjudications, completions } = fakeApp(rows, [
+    { pr_key: "o/r#1", status: "escalated", process_key: "pi-1" },
+  ]);
+  completions.push({ id: 1, process_instance_key: "pi-1", user_task_key: "ut-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-1" } };
+  await handler(job as any, app as any);
+  assertEquals(updates.length, 1, "the current-process job is honoured");
+  assertEquals(adjudications.length, 1, "and its adjudication is recorded");
+  assertEquals(adjudications[0].adjudicated_by, "alice");
 });
 
 test("a blank answer records NO adjudication (not a replayable decision) (#806)", async () => {
@@ -221,11 +291,11 @@ test("records the adjudication BEFORE the escalation row transitions off `open` 
   const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
   const order: string[] = [];
   const adjudications: Record<string, unknown>[] = [];
-  const completions = [{ id: 1, process_instance_key: "pi-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) }];
+  const completions = [{ id: 1, process_instance_key: "pi-1", user_task_key: "ut-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) }];
   const app = {
     data: {
       table(name: string) {
-        if (name === "pull_requests") return { async update() { order.push("pr"); } };
+        if (name === "pull_requests") return { async find() { return []; }, async update() { order.push("pr"); } };
         if (name === "pr_adjudications") {
           return {
             async find() { return []; },
@@ -243,7 +313,7 @@ test("records the adjudication BEFORE the escalation row transitions off `open` 
       },
     },
   };
-  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence" } };
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-1" } };
   await handler(job as any, app as any);
   assertEquals(adjudications.length, 1, "the adjudication is recorded");
   assertEquals(order[0], "adjudication", "the adjudication is persisted BEFORE any row transitions off `open`");
