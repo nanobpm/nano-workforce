@@ -98,7 +98,7 @@ test("agent completion resumes with the exact typed vars a human submits AND rec
   // Same resume path a human drives: completeUserTask called with the identical typed variables.
   assertEquals(completed.length, 1);
   assertEquals(completed[0].userTaskKey, "ut-1");
-  assertEquals(completed[0].variables, { resolution: "answer", answer: "use v2", completedUserTaskKey: "ut-1" });
+  assertEquals(completed[0].variables, { resolution: "answer", answer: "use v2", completedUserTaskKey: "ut-1", completedCompletionId: 1 });
 
   // Attribution recorded: an agent completion, its id, and the submitted variables.
   const row = stores.task_completions.rows[0] as TaskCompletion;
@@ -191,7 +191,7 @@ test("a HUMAN operator completes a feature escalation via the SAME attributed re
 
   // Identical resume path to the agent/task-inbox: completeUserTask with the exact typed variables.
   assertEquals(completed.length, 1);
-  assertEquals(completed[0].variables, { resolution: "answer", answer: "use v2", completedUserTaskKey: "ut-1" });
+  assertEquals(completed[0].variables, { resolution: "answer", answer: "use v2", completedUserTaskKey: "ut-1", completedCompletionId: 1 });
 
   // Attribution recorded as a HUMAN completion — the authority, so NOT reversible.
   const row = stores.task_completions.rows[0] as TaskCompletion;
@@ -226,7 +226,7 @@ test("feature-blocked is HUMAN-completable but NOT agent-completable (issue #332
   assertEquals(asHuman.ok, true, "the human completer retires feature-blocked");
   assertEquals(asHuman.elementId, "feature-blocked");
   assertEquals(completed.length, 1);
-  assertEquals(completed[0].variables, { note: "reassigned to a human", completedUserTaskKey: "ut-b" });
+  assertEquals(completed[0].variables, { note: "reassigned to a human", completedUserTaskKey: "ut-b", completedCompletionId: 1 });
 });
 
 test("conformance-escalation is HUMAN-completable but NOT agent-completable (issue #216)", async () => {
@@ -254,7 +254,7 @@ test("conformance-escalation is HUMAN-completable but NOT agent-completable (iss
   assertEquals(asHuman.ok, true, "the human completer retires conformance-escalation");
   assertEquals(asHuman.elementId, "conformance-escalation");
   assertEquals(completed.length, 1);
-  assertEquals(completed[0].variables, { note: "filed follow-up", completedUserTaskKey: "ut-c" });
+  assertEquals(completed[0].variables, { note: "filed follow-up", completedUserTaskKey: "ut-c", completedCompletionId: 1 });
 });
 
 test("empty-plan-escalation is HUMAN-completable but NOT agent-completable (issues #623/#624)", async () => {
@@ -283,7 +283,7 @@ test("empty-plan-escalation is HUMAN-completable but NOT agent-completable (issu
   assertEquals(asHuman.ok, true, "the human completer retires empty-plan-escalation");
   assertEquals(asHuman.elementId, "empty-plan-escalation");
   assertEquals(completed.length, 1);
-  assertEquals(completed[0].variables, { directive: "revise", notes: "look again", completedUserTaskKey: "ut-e" });
+  assertEquals(completed[0].variables, { directive: "revise", notes: "look again", completedUserTaskKey: "ut-e", completedCompletionId: 1 });
 });
 
 test("readiness-escalation(-pf) is HUMAN-completable but NOT agent-completable (issue #674)", async () => {
@@ -314,7 +314,7 @@ test("readiness-escalation(-pf) is HUMAN-completable but NOT agent-completable (
     assertEquals(asHuman.ok, true, `the human completer retires ${elementId}`);
     assertEquals(asHuman.elementId, elementId);
     assertEquals(completed.length, 1);
-    assertEquals(completed[0].variables, { resolution: "abandon", answer: "upstream never published", completedUserTaskKey: "ut-r" });
+    assertEquals(completed[0].variables, { resolution: "abandon", answer: "upstream never published", completedUserTaskKey: "ut-r", completedCompletionId: 1 });
   }
 });
 
@@ -591,7 +591,7 @@ test("completer accepts variables that satisfy the form contract (required prese
 
   assertEquals(r.ok, true);
   assertEquals(completed.length, 1, "a contract-valid completion resumes the process");
-  assertEquals(completed[0].variables, { directive: "revise", notes: "narrow scope", completedUserTaskKey: "ut-3" });
+  assertEquals(completed[0].variables, { directive: "revise", notes: "narrow scope", completedUserTaskKey: "ut-3", completedCompletionId: 1 });
 });
 
 test("validateEscalationVariables derives its contract from the canonical .form files", async () => {

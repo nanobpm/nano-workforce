@@ -329,10 +329,16 @@ export async function completeUserTaskAttributed(
     // or a delayed higher-id same-answer row, can share both. Stamping the exact `userTaskKey` here lets
     // that step require an EXACT ledger match against THIS wait-answer's completion (and fail open to a
     // null adjudicator when the identity is absent) rather than attribute to an unrelated row. Reserved,
-    // additive key — consumed only by record-answer; every other escalation flow simply never reads it.
+    // additive keys — consumed only by record-answer; every other escalation flow simply never reads them.
     // Injected only into the resumed token's variables, NOT the ledger row's `variables_json` above, so
     // the recorded completion payload (and the answer correlation over it) is unchanged.
-    await engine.completeUserTask(userTaskKey, { ...target.variables, completedUserTaskKey: userTaskKey });
+    //
+    // Also stamp the EXACT ledger id of THIS completion (`completedCompletionId`). The engine resumes
+    // the token with exactly ONE completion's variables — the winner's — so its ledger id uniquely
+    // identifies the winning racer even when both racers submitted the IDENTICAL answer (answer
+    // correlation alone cannot separate two same-answer rows on the same `user_task_key`; the higher-id
+    // one may be the loser — Copilot review of #806). record-answer selects that exact row by id.
+    await engine.completeUserTask(userTaskKey, { ...target.variables, completedUserTaskKey: userTaskKey, completedCompletionId: completionId });
   } catch (err) {
     // The completion did not take — roll the attribution row back so the ledger reflects only
     // completions that actually happened, and let the caller retry. The rollback is best-effort:

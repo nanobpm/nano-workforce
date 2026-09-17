@@ -175,7 +175,56 @@ test("re-submit of a PR invalidates its durable adjudications (#806 review)", as
   });
 });
 
-// Red/green regression for technical-incident surfacing (issue #94). A convergence/merge instance
+// Red/green regression for issue #806 (Copilot review): the durable adjudication RESET must happen
+// AFTER `process_key` is advanced to the new instance — not before createInstance. Clearing the memory
+// while `process_key` still names the OLD instance leaves a window where a delayed old-instance answer
+// job passes the worker's staleness gate and reinserts its adjudication into the fresh run. Advancing
+// the run identity FIRST fences that job, so the ordering is the fix. This asserts the observable
+// invariant: the `pull_requests.process_key` write is issued BEFORE any `pr_adjudications.delete`.
+test("re-submit advances process_key BEFORE resetting adjudications (fence ordering, #806 review)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#42";
+    const ops: string[] = [];
+    const stores: Record<string, { rows: any[]; key: string }> = {
+      pull_requests: {
+        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", title: "t", status: "converged", process_key: "PI-OLD" }],
+        key: "pr_key",
+      },
+      escalations: { rows: [], key: "id" },
+      pr_adjudications: {
+        rows: [{ id: 1, pr_key: PR_KEY, question_fingerprint: "fp-a", answer: "prior A", adjudicated_by: "alice", adjudicated_kind: "human", adjudicated_at: "t" }],
+        key: "id",
+      },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const wrap = (name: string, key: string) => {
+      const t = memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key);
+      return {
+        ...t,
+        update: (k: any, patch: any) => {
+          if (name === "pull_requests" && Object.prototype.hasOwnProperty.call(patch, "process_key")) ops.push("process_key");
+          return t.update(k, patch);
+        },
+        delete: (k: any) => {
+          if (name === "pr_adjudications") ops.push("adjudication-delete");
+          return t.delete(k);
+        },
+      };
+    };
+    const data = { table: withTrackingViews(wrap) } as any;
+    const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-NEW" }) } as any;
+
+    await submitPr(data, engine, { repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", prKey: PR_KEY });
+
+    assertEquals(stores.pr_adjudications.rows.length, 0, "the re-submitted PR's adjudication is invalidated");
+    const pkIdx = ops.indexOf("process_key");
+    const delIdx = ops.indexOf("adjudication-delete");
+    assertEquals(pkIdx >= 0, true, "process_key is advanced on reopen");
+    assertEquals(delIdx >= 0, true, "adjudications are reset on reopen");
+    assertEquals(pkIdx < delIdx, true, "process_key is advanced BEFORE the adjudication memory is reset (the fence ordering)");
+  });
+});
+
 // can hit an engine incident that parks the token; until `pollIncidents` nothing on the PR row
 // reflected it, so the grid kept showing "converging" while the run was dead in the water. This
 // drives the pass's reconciliation core against a stubbed `/v2/incidents/search`:

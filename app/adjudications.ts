@@ -56,7 +56,13 @@ export function matchAdjudication(
 /** Persist a human adjudication of `question` for `prKey`, INSERT-if-absent so the ORIGINAL
  *  adjudicator/answer is preserved across later auto-resumes (which re-run record-answer with the
  *  same fingerprint). A blank answer is not a decision and is not recorded. Idempotent: a second
- *  answer to the identical question keeps the first settled row. */
+ *  answer to the identical question keeps the first settled row — UNLESS that first row was recorded
+ *  with UNKNOWN provenance (a blank `adjudicated_by`, from an answer that could not be correlated to
+ *  an adjudicator). `pollUserTasks` refuses to auto-resume an unknown-provenance decision (it never
+ *  launders an unattributed replay into a human authority), so such a row keeps re-parking a human
+ *  every round; when a KNOWN adjudicator later answers the same question, promote the row to a
+ *  replayable decision — its answer AND attribution — so future rounds auto-resume instead of
+ *  re-parking forever (issue #806 review). A row that ALREADY carries known provenance stays immutable. */
 export async function recordAdjudication(
   data: DataLayer,
   input: { prKey: string; question: string; answer: string | undefined; adjudicatedBy: string | undefined; adjudicatedKind: string | undefined },
@@ -67,7 +73,25 @@ export async function recordAdjudication(
   if (question === "") return;
   const fp = questionFingerprint(question);
   const existing = await prAdjudications(data).find({ pr_key: input.prKey, question_fingerprint: fp });
-  if (existing.length > 0) return;
+  if (existing.length > 0) {
+    const prior = existing[0];
+    const priorBy = prior.adjudicated_by?.trim();
+    const nowBy = input.adjudicatedBy?.trim();
+    // Heal an UNKNOWN-provenance row (issue #806 review). The prior answer could not be attributed, so
+    // auto-resume fails open and the question re-parks a human every round; a now-known adjudicator's
+    // answer promotes the row to a replayable decision. Only heal blank→known — a known adjudicator is
+    // never overwritten (INSERT-if-absent preserves the ORIGINAL). Update answer + attribution together
+    // so the replayed decision is the human's, not the earlier uncorrelated one.
+    if (!priorBy && nowBy) {
+      await prAdjudications(data).update(prior.id, {
+        answer,
+        adjudicated_by: nowBy,
+        adjudicated_kind: input.adjudicatedKind?.trim() || null,
+        adjudicated_at: new Date().toISOString(),
+      });
+    }
+    return;
+  }
   try {
     await prAdjudications(data).insert({
       pr_key: input.prKey,

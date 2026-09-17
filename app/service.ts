@@ -589,11 +589,11 @@ export async function submitPr(
     // A fresh convergence run must ALSO start with a clean durable adjudication memory (issue #806,
     // Copilot review): the auto-resume replays a prior `(PR, question)` answer forever, so a re-opened
     // PR whose question recurs would silently auto-apply the stale decision and an operator could never
-    // force a fresh one. Invalidate this PR's adjudications on reopen — the insert-if-absent record
-    // re-learns the operator's new answer for the new run.
-    for (const a of await prAdjudications(data).find({ pr_key: parsed.prKey })) {
-      await prAdjudications(data).delete(a.id);
-    }
+    // force a fresh one. This PR's adjudications are invalidated on reopen — but the reset is deferred
+    // to AFTER `process_key` is advanced to the new instance (see below), NOT here: clearing the memory
+    // while `process_key` still names the OLD instance leaves a window where a delayed old-instance
+    // answer job still passes the worker's staleness gate and reinserts its adjudication into the fresh
+    // run (Copilot review of #806). Advancing the run identity FIRST, then clearing, fences that job.
     // Re-open a previously converged/abandoned/merged PR for a fresh convergence run.
     await table.update(parsed.prKey, {
       status: "converging",
@@ -693,6 +693,19 @@ export async function submitPr(
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
   if (processKey != null) {
     await table.update(parsed.prKey, { process_key: processKey });
+  }
+  // Invalidate this PR's durable adjudication memory for the fresh run (issue #806, Copilot review) —
+  // deferred to HERE, after `process_key` is advanced to the new instance above, so the reset happens
+  // UNDER the new run identity. On reopen (`existing`), any delayed old-instance answer job is now
+  // rejected by the worker's staleness gate (its `processInstanceKey` no longer matches the advanced
+  // `process_key`), so it cannot reinsert a stale adjudication after the reset; and the worker reads
+  // `process_key` as late as possible so it observes this advance. The insert-if-absent record then
+  // re-learns the operator's new answer for the new run. Runs unconditionally (even if `processKey` is
+  // null: the memory must still be clean for the fresh run).
+  if (existing) {
+    for (const a of await prAdjudications(data).find({ pr_key: parsed.prKey })) {
+      await prAdjudications(data).delete(a.id);
+    }
   }
   return { prKey: parsed.prKey, processKey };
 }

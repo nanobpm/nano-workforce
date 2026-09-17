@@ -43,6 +43,10 @@ function fakeApp(escalationRows: Record<string, unknown>[], prRows: Record<strin
               adjudications.push({ id: adjudications.length + 1, ...r });
               return adjudications.length;
             },
+            async update(id: number, patch: Record<string, unknown>) {
+              const row = adjudications.find((r) => r.id === id);
+              if (row) Object.assign(row, patch);
+            },
           };
         }
         if (name === "task_completions") {
@@ -205,6 +209,38 @@ test("excludes an older round's same-answer completion; attributes by exact user
   assertEquals(adjudications[0].adjudicated_kind, "human", "the current round's completer kind is recorded");
 });
 
+// --- Copilot review of #806: when both racers submit the IDENTICAL answer on the SAME wait-answer,
+// answer correlation cannot separate them and the higher-id row may be the LOSER. The resumed token
+// carries `completedCompletionId` — the exact ledger id of the winning completion — so record-answer
+// selects that exact row regardless of a same-answer loser's id. ---
+
+test("attributes by exact completion id even when a same-answer loser has a higher id (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications, completions } = fakeApp(rows);
+  // Both racers submitted the SAME answer on the SAME user_task_key. The engine accepted the HUMAN
+  // (ledger id 30); an agent auto-resume loser inserted a HIGHER-id row (31) with the identical answer
+  // and has not yet rolled back. Answer + user-task correlation alone would pick the higher-id agent;
+  // the carried `completedCompletionId` (30) pins attribution to the exact winning row.
+  completions.push({ id: 30, process_instance_key: "pi-1", user_task_key: "ut-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  completions.push({ id: 31, process_instance_key: "pi-1", user_task_key: "ut-1", actor_id: "senior-agent", actor_kind: "agent", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-1", completedCompletionId: 30 } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 1);
+  assertEquals(adjudications[0].adjudicated_by, "alice", "the exact winning completion id wins over a same-answer higher-id loser");
+  assertEquals(adjudications[0].adjudicated_kind, "human");
+});
+
+test("a carried completion id that matches no ledger row → null adjudicator (fails open) (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications, completions } = fakeApp(rows);
+  completions.push({ id: 30, process_instance_key: "pi-1", user_task_key: "ut-1", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  // The carried id (99) matches nothing — never fall back to guessing another row.
+  const job = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-1", completedCompletionId: 99 } };
+  await handler(job as any, app as any);
+  assertEquals(adjudications.length, 1, "the adjudication is still recorded (a real convergence answer)");
+  assertEquals(adjudications[0].adjudicated_by, null, "an unmatched completion id records a null adjudicator, never a wrong one");
+});
+
 test("carries no user-task identity → null adjudicator (fails open), never a guess (#806 review)", async () => {
   const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
   const { app, adjudications, completions } = fakeApp(rows);
@@ -317,4 +353,28 @@ test("records the adjudication BEFORE the escalation row transitions off `open` 
   await handler(job as any, app as any);
   assertEquals(adjudications.length, 1, "the adjudication is recorded");
   assertEquals(order[0], "adjudication", "the adjudication is persisted BEFORE any row transitions off `open`");
+});
+
+// --- issue #806 review: a null-provenance adjudication (an uncorrelated answer) makes the poller
+// fail open and re-park a human every round. A LATER known-adjudicator answer to the same question,
+// arriving through this worker, must HEAL the durable row to a replayable decision instead of being
+// dropped by INSERT-if-absent — otherwise the question re-parks forever. ---
+
+test("a later known-adjudicator answer heals an earlier uncorrelated (null-provenance) adjudication (#806 review)", async () => {
+  const rows = [{ id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" }];
+  const { app, adjudications, completions } = fakeApp(rows);
+  // Round A: an out-of-band answer that carried no completion identity → recorded with null provenance.
+  const jobA = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 3.", answerContext: "convergence" } };
+  await handler(jobA as any, app as any);
+  assertEquals(adjudications.length, 1);
+  assertEquals(adjudications[0].adjudicated_by, null, "round A recorded unknown provenance");
+  // Round B: the question re-parked a human (unknown provenance fails open); the human answers via the
+  // canonical completer, stamping the exact winning completion id. The durable row must be healed.
+  rows.push({ id: 8, pr_key: "o/r#1", status: "open", question: "Which retry cap?" });
+  completions.push({ id: 40, process_instance_key: "pi-1", user_task_key: "ut-b", actor_id: "alice", actor_kind: "human", variables_json: JSON.stringify({ answer: "Cap at 5." }) });
+  const jobB = { processInstanceKey: "pi-1", variables: { prKey: "o/r#1", answer: "Cap at 5.", answerContext: "convergence", completedUserTaskKey: "ut-b", completedCompletionId: 40 } };
+  await handler(jobB as any, app as any);
+  assertEquals(adjudications.length, 1, "still one durable row for the (pr, question)");
+  assertEquals(adjudications[0].adjudicated_by, "alice", "provenance healed to the known adjudicator");
+  assertEquals(adjudications[0].answer, "Cap at 5.", "the healed row replays the human's answer, not the earlier uncorrelated one");
 });

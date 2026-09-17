@@ -57,6 +57,11 @@ function memData(seed: any[] = []) {
           rows.push({ id, ...r });
           return id;
         },
+        // biome-ignore lint/suspicious/noExplicitAny: see above
+        async update(id: number, patch: any) {
+          const row = rows.find((r) => r.id === id);
+          if (row) Object.assign(row, patch);
+        },
       };
     },
   };
@@ -90,6 +95,46 @@ test("recordAdjudication: a blank answer is not a decision and is not recorded",
   const { data, rows } = memData();
   await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "   ", adjudicatedBy: "alice", adjudicatedKind: "human" });
   assertEquals(rows.length, 0);
+});
+
+// --- issue #806 review: an UNKNOWN-provenance row (an answer that could not be correlated to an
+// adjudicator, recorded with a blank `adjudicated_by`) is not auto-resumable — `pollUserTasks` refuses
+// to launder an unattributed replay into a human authority — so it re-parks a human every round. A
+// later KNOWN-adjudicator answer to the SAME question must HEAL the row to a replayable decision,
+// rather than be dropped by INSERT-if-absent (which would re-park forever). ---
+
+test("recordAdjudication: heals an unknown-provenance row when a known adjudicator later answers (#806 review)", async () => {
+  const { data, rows } = memData();
+  // Round A: an uncorrelated answer records the decision with UNKNOWN provenance (blank adjudicator).
+  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 3.", adjudicatedBy: undefined, adjudicatedKind: undefined });
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].adjudicated_by, null, "recorded with unknown provenance");
+  // Round B: the question re-parked a human (unknown provenance fails open); the human answers, now
+  // with a KNOWN adjudicator. The row must be promoted to that human's replayable decision.
+  await recordAdjudication(data, { prKey: "o/r#1", question: "which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+  assertEquals(rows.length, 1, "still one row for the same (pr, question)");
+  assertEquals(rows[0].adjudicated_by, "alice", "provenance is healed to the known adjudicator");
+  assertEquals(rows[0].adjudicated_kind, "human", "the healed row carries the known adjudicator kind");
+  assertEquals(rows[0].answer, "Cap at 5.", "the healed row replays the human's answer, not the earlier uncorrelated one");
+});
+
+test("recordAdjudication: a KNOWN-provenance row is immutable — a later answer never overwrites it (#806 review)", async () => {
+  const { data, rows } = memData();
+  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human" });
+  // A later known-adjudicator answer must NOT overwrite an already-attributed decision.
+  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 9.", adjudicatedBy: "bob", adjudicatedKind: "human" });
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].adjudicated_by, "alice", "the ORIGINAL known adjudicator is preserved");
+  assertEquals(rows[0].answer, "Cap at 5.", "the ORIGINAL answer is preserved");
+});
+
+test("recordAdjudication: an unknown-provenance row stays unknown when a later answer is also uncorrelated (#806 review)", async () => {
+  const { data, rows } = memData();
+  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 3.", adjudicatedBy: undefined, adjudicatedKind: undefined });
+  await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 7.", adjudicatedBy: "   ", adjudicatedKind: undefined });
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].adjudicated_by, null, "no known adjudicator to heal with, so it stays unknown");
+  assertEquals(rows[0].answer, "Cap at 3.", "the row is untouched when there is nothing to heal to");
 });
 
 test("recordAdjudication: tolerates the UNIQUE fence firing on a concurrent duplicate insert (#806 review)", async () => {
