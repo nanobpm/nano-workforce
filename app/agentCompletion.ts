@@ -21,7 +21,7 @@
 // an escalation user task" — the agent path is an extension of it, not a parallel copy.
 
 import { readFileSync } from "node:fs";
-import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import type { DataLayer, EngineClient, GatewayDataSource } from "@nanobpm/urban";
 import { invalidateAdjudication, invalidateAdjudicationByCompletion } from "./adjudications.ts";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
@@ -540,15 +540,21 @@ export async function revertAgentCompletion(
   if (!reverterId) return { ok: false, reason: "reverter id is required" };
 
   const correction = typeof note === "string" ? note.trim() : "";
-  // TOMBSTONE the durable adjudication(s) this completion produced BEFORE marking the ledger row
-  // reverted (issue #806 review — atomicity). If we flipped `reverted` first and an invalidate then
-  // threw, this call returns an error but a retry trips the `row.reverted` guard above and is
-  // permanently rejected — while the still-live adjudication keeps auto-applying, an unrecoverable
-  // override. Tombstoning first (both invalidations are idempotent, conditional on `invalidated_at IS
-  // NULL`) makes a retry after a transient second-write failure safe: it re-tombstones (no-op) and
-  // then reaches the ledger update. Marking the ledger reverted alone would NOT stop the replay — the
-  // convergence poller matches the unchanged `pr_adjudications` row and re-applies the overridden
-  // answer on the next derived task, silently undoing this revert.
+  // TOMBSTONE the durable adjudication(s) this completion produced AND flip the ledger `reverted` flag
+  // in ONE transaction (issue #806 review — atomicity). These are two writes; committing them
+  // atomically is what makes the revert safe against BOTH a crash mid-revert AND a concurrent revive:
+  //   • Retry-safety: if either write throws, the whole transaction rolls back, so a retry sees an
+  //     un-reverted, un-tombstoned row and re-runs cleanly — it never trips the `row.reverted` guard
+  //     above with a still-live adjudication (an unrecoverable override).
+  //   • Revive-race safety: `record-answer` is at-least-once, so a redelivered `record-answer` for this
+  //     completion can run concurrently with this revert. Were the tombstone and the `reverted` flip
+  //     SEPARATE writes, that redelivery could observe the intermediate state (`invalidated_at` set but
+  //     `reverted` still 0), enter {@link reviveTombstonedDecision}, and clear the operator's tombstone —
+  //     resurrecting the reverted decision. Inside a transaction the intermediate state is never visible
+  //     to another connection: the concurrent revive observes EITHER neither write (adjudication live →
+  //     not revivable) OR both (`reverted = 1` → its revive guard fails). Marking the ledger reverted
+  //     alone would NOT stop the replay — the convergence poller matches the unchanged `pr_adjudications`
+  //     row and re-applies the overridden answer on the next derived task, silently undoing this revert.
   //
   // Two disjoint links must be severed, and each no-ops when inapplicable:
   //   • auto-applied replay — this completion replayed an EXISTING decision (`auto_applied=1`,
@@ -562,18 +568,21 @@ export async function revertAgentCompletion(
   // exists, so the tombstone finds and invalidates it). The MIRROR ordering — a revert that lands
   // BEFORE the downstream `record-answer` job has inserted the row — is closed on the WRITE side:
   // `recordAdjudication`/`healBlankProvenance` fence their INSERT/UPDATE on the source completion NOT
-  // being reverted ({@link notRevertedGuard}), so once we flip `reverted` below a late record-answer
+  // being reverted ({@link notRevertedGuard}), so once we commit `reverted` below a late record-answer
   // affects zero rows and cannot create a live decision linked to this reverted completion (issue #806
   // review, Copilot). SQLite serialises the two writes, so whichever commits first the other observes.
-  if (row.auto_applied && row.source_adjudication_id != null) {
-    await invalidateAdjudication(data, row.source_adjudication_id);
-  }
-  await invalidateAdjudicationByCompletion(data, completionId);
-  await taskCompletions(data).update(completionId, {
-    reverted: 1,
-    reverted_by: reverterId,
-    reverted_note: correction || null,
-    reverted_at: now(),
+  const src = data.open();
+  await src.tx(async (t: GatewayDataSource) => {
+    if (row.auto_applied && row.source_adjudication_id != null) {
+      await invalidateAdjudication(data, row.source_adjudication_id, t);
+    }
+    await invalidateAdjudicationByCompletion(data, completionId, t);
+    await t.table<TaskCompletion>("task_completions", "id").update(completionId, {
+      reverted: 1,
+      reverted_by: reverterId,
+      reverted_note: correction || null,
+      reverted_at: now(),
+    });
   });
   return { ok: true, completionId };
 }

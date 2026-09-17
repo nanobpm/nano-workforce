@@ -55,15 +55,21 @@ function memTable(rows: any[], key: string) {
   };
 }
 
-function memData(stores: Record<string, { rows: any[]; key: string }>) {
+function memData(
+  stores: Record<string, { rows: any[]; key: string }>,
+  opts: { failExec?: (sql: string) => boolean; failUpdate?: (table: string) => boolean } = {},
+) {
   // Minimal `open().exec` emulating ONLY the tombstone `UPDATE "pr_adjudications" SET "invalidated_at"
   // = ? WHERE "id" = ? AND "invalidated_at" IS NULL` that `revertAgentCompletion` issues via
   // `invalidateAdjudication` (Copilot review of #806). A revert TOMBSTONES the source adjudication (it
   // does NOT delete it) so a redelivered `record-answer` cannot re-insert the same fingerprint and
   // resurrect the reverted decision. The SQL itself is validated against real SQLite in
   // app/adjudications.test.ts; here it need only mutate the in-memory store so a revert-invalidation
-  // assertion can observe the row being tombstoned.
-  const exec = async (sql: string, params: unknown[] = []) => {
+  // assertion can observe the row being tombstoned. `open().tx(fn)` runs `fn` against the same store and
+  // ROLLS BACK (restores a pre-tx snapshot) on throw, mirroring the real SQLite transaction the revert
+  // now commits atomically (issue #806 review — atomicity of tombstone + `reverted` flip). `opts` lets a
+  // test inject a transient write failure at a chosen point (exec or a table update) to exercise rollback.
+  const rawExec = async (sql: string, params: unknown[] = []) => {
     const m = /UPDATE "pr_adjudications" SET "invalidated_at" = \? WHERE "id" = \? AND "invalidated_at" IS NULL/.exec(sql);
     if (m) {
       const store = stores.pr_adjudications;
@@ -96,10 +102,38 @@ function memData(stores: Record<string, { rows: any[]; key: string }>) {
     }
     throw new Error(`unexpected exec sql: ${sql}`);
   };
+  const exec = async (sql: string, params: unknown[] = []) => {
+    if (opts.failExec?.(sql)) throw new Error("transient write failure");
+    return rawExec(sql, params);
+  };
+  const table = (name: string, key: string) => {
+    const base = memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key);
+    if (opts.failUpdate?.(name)) {
+      return { ...base, update: () => Promise.reject(new Error("transient write failure")) };
+    }
+    return base;
+  };
+  const source: any = {
+    exec,
+    table,
+    tx: async (fn: (t: any) => Promise<unknown>) => {
+      const snap = Object.fromEntries(
+        Object.entries(stores).map(([n, s]) => [n, JSON.parse(JSON.stringify(s.rows))]),
+      );
+      try {
+        return await fn(source);
+      } catch (e) {
+        for (const [n, s] of Object.entries(stores)) {
+          s.rows.length = 0;
+          s.rows.push(...snap[n]);
+        }
+        throw e;
+      }
+    },
+  };
   return {
-    open: () => ({ exec }),
-    table: (name: string, key: string) =>
-      memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    open: () => source,
+    table,
   } as any;
 }
 
@@ -443,27 +477,18 @@ test("an auto-applied completion records the source adjudication id, and reverti
   );
 });
 
-test("revert tombstones the adjudication BEFORE marking the ledger reverted, so a failed invalidate is retryable (#806 review)", async () => {
-  // Atomicity/ordering: if the ledger row were flipped `reverted` FIRST and the adjudication tombstone
-  // then threw, a retry would trip the `already reverted` guard and be permanently rejected while the
-  // still-live adjudication keeps auto-applying — an unrecoverable override (Finding 3). Tombstoning
-  // first means a transient invalidate failure leaves the ledger UNreverted, so a retry can complete.
+test("revert commits the tombstone and the ledger flip ATOMICALLY — a failed tombstone rolls back and is retryable (#806 review)", async () => {
+  // Atomicity: the revert tombstones the source adjudication(s) AND flips the ledger `reverted` flag in
+  // ONE transaction. If the tombstone throws, the whole transaction rolls back, so a retry sees an
+  // un-reverted, un-tombstoned row and completes cleanly — it never trips the `already reverted` guard
+  // with a still-live adjudication (an unrecoverable override, Finding 3).
   const stores = {
     task_completions: { rows: [] as any[], key: "id" },
     pr_adjudications: { rows: [{ id: 42, pr_key: "o/r#1", answer: "Cap at 5.", invalidated_at: null }] as any[], key: "id" },
   };
-  const inner = memData(stores);
   let failInvalidate = true;
-  // Wrap the data layer so the FIRST tombstone attempt throws (a transient second-write failure).
-  const data: any = {
-    table: inner.table,
-    open: () => ({
-      exec: (sql: string, params: unknown[] = []) => {
-        if (failInvalidate && /pr_adjudications/.test(sql)) return Promise.reject(new Error("transient write failure"));
-        return inner.open().exec(sql, params);
-      },
-    }),
-  };
+  // The FIRST tombstone attempt throws (a transient write failure); the transaction must roll back.
+  const data = memData(stores, { failExec: (sql) => failInvalidate && /pr_adjudications/.test(sql) });
   const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
 
   const { completionId } = await completeUserTaskAttributed(
@@ -489,6 +514,48 @@ test("revert tombstones the adjudication BEFORE marking the ledger reverted, so 
   assert(
     typeof stores.pr_adjudications.rows[0].invalidated_at === "string" && stores.pr_adjudications.rows[0].invalidated_at.length > 0,
     "the source adjudication is tombstoned after the successful retry",
+  );
+});
+
+test("revert rolls the tombstone back when the LEDGER flip fails — no reverted=0-but-tombstoned window a redelivered record-answer could revive through (#806 review)", async () => {
+  // Finding B (Copilot review of #806): the tombstone and the `reverted` flip are two writes. Were they
+  // NOT atomic, a redelivered `record-answer` could interleave AFTER the tombstone but BEFORE `reverted`
+  // lands, observe the completion as still live (`reverted = 0`) with a tombstoned decision, and REVIVE
+  // it — resurrecting the operator's reverted override. Committing both in one transaction removes that
+  // intermediate state entirely: this test forces the SECOND write (the ledger flip) to throw and proves
+  // the FIRST (the tombstone) is rolled back, so no `reverted=0`-with-tombstone state is ever left behind.
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pr_adjudications: { rows: [{ id: 42, pr_key: "o/r#1", answer: "Cap at 5.", invalidated_at: null }] as any[], key: "id" },
+  };
+  let failLedgerFlip = true;
+  const data = memData(stores, { failUpdate: (name) => failLedgerFlip && name === "task_completions" });
+  const { engine } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "ut-1", elementId: "feature-escalation", variables: { resolution: "answer", answer: "Cap at 5." } },
+    { kind: "human", id: "alice" },
+    { autoApplied: true, sourceAdjudicationId: 42 },
+  );
+
+  await assertRejects(() => revertAgentCompletion(data, completionId, { kind: "human", id: "bob" }, "override"));
+  assertEquals(
+    stores.pr_adjudications.rows[0].invalidated_at,
+    null,
+    "the tombstone is rolled back when the ledger flip fails — the revert is all-or-nothing, so no revivable intermediate state exists",
+  );
+  assertEquals((stores.task_completions.rows[0] as TaskCompletion).reverted, 0, "the ledger stays un-reverted after the rollback");
+
+  // The transient failure clears; a retry now completes atomically.
+  failLedgerFlip = false;
+  const r = await revertAgentCompletion(data, completionId, { kind: "human", id: "bob" }, "override");
+  assertEquals(r.ok, true, "the retry after a transient failure succeeds");
+  assertEquals((stores.task_completions.rows[0] as TaskCompletion).reverted, 1, "the ledger is reverted after the retry");
+  assert(
+    typeof stores.pr_adjudications.rows[0].invalidated_at === "string" && stores.pr_adjudications.rows[0].invalidated_at.length > 0,
+    "and the source adjudication is tombstoned — both writes land together",
   );
 });
 

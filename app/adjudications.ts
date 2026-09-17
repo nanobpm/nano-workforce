@@ -19,7 +19,7 @@
 //     canonical `completeUserTaskAttributed` door a human's `completeEscalationAsHuman` uses, but records
 //     the completion `auto_applied`/`reversible` (never laundering the replay into a first-class human
 //     decision) — attributed to the prior adjudicator.
-import type { DataLayer } from "@nanobpm/urban";
+import type { DataLayer, GatewayDataSource } from "@nanobpm/urban";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { questionFingerprint } from "./github.ts";
 
@@ -136,6 +136,23 @@ export function notRevertedGuard(sourceCompletionId: number | undefined): { sql:
   };
 }
 
+/** A stricter revive fence than {@link notRevertedGuard}: the source completion must be a FIRST-HAND
+ *  human answer (`auto_applied = 0`) AND not reverted. `record-answer` runs not only for a human's
+ *  first-hand answer to the re-parked `wait-answer` but ALSO for `completeEscalationAutoApplied`
+ *  REPLAYS (`auto_applied = 1`, a machine re-application of an already-recorded decision). If such a
+ *  replay's `record-answer` is in flight while a human reverts the FIRST-HAND source completion, the
+ *  replay completion is itself still `reverted = 0`, so a bare {@link notRevertedGuard} would let the
+ *  machine replay clear the operator's tombstone and RESURRECT the reverted decision (Copilot review of
+ *  #806). Only a genuine human answer (`auto_applied = 0`) may revive; a machine replay is a no-op.
+ *  A missing completion also fails the EXISTS (safe — no revive), so an uncorrelated/legacy id cannot
+ *  launder a revive. */
+export function firstHandRevivableGuard(sourceCompletionId: number): { sql: string; params: unknown[] } {
+  return {
+    sql: `EXISTS (SELECT 1 FROM "task_completions" WHERE "id" = ? AND "auto_applied" = 0 AND "reverted" = 0)`,
+    params: [sourceCompletionId],
+  };
+}
+
 /** Persist a human adjudication of `question` for `prKey`, INSERT-if-absent so the ORIGINAL
  *  adjudicator/answer is preserved across later auto-resumes (which re-run record-answer with the
  *  same fingerprint). A blank answer is not a decision and is not recorded. Idempotent: a second
@@ -215,12 +232,13 @@ export async function recordAdjudication(data: DataLayer, input: RecordAdjudicat
  *  question re-parks a human forever instead of remembering the new decision).
  *
  *  This CONDITIONAL compare-and-set clears the tombstone and installs the fresh answer/adjudicator, but
- *  ONLY for a NEW, non-reverted completion. The `UPDATE … WHERE "invalidated_at" IS NOT NULL` re-checks
- *  the tombstone precondition INSIDE the write (so it fires on a tombstoned row and no-ops on a live one),
- *  and the {@link notRevertedGuard} on the INCOMING completion makes a REDELIVERY of the very completion
- *  that was reverted (its `sourceCompletionId` is `reverted = 1`) affect zero rows — so the reverted
- *  answer can never resurrect the decision it was reverted from, while a genuinely new human answer IS
- *  remembered (Copilot review of #806). Run-generation fenced ({@link generationGuard}) like every other
+ *  ONLY for a NEW, non-reverted, FIRST-HAND completion. The `UPDATE … WHERE "invalidated_at" IS NOT NULL`
+ *  re-checks the tombstone precondition INSIDE the write (so it fires on a tombstoned row and no-ops on a
+ *  live one), and the {@link firstHandRevivableGuard} on the INCOMING completion makes a REDELIVERY of the
+ *  very completion that was reverted (its `sourceCompletionId` is `reverted = 1`) AND a machine
+ *  auto-apply REPLAY (`auto_applied = 1`, whose own `record-answer` also runs) affect zero rows — so
+ *  neither the reverted answer nor an in-flight replay can resurrect the decision it was reverted from,
+ *  while a genuinely new FIRST-HAND human answer IS remembered (Copilot review of #806). Run-generation fenced ({@link generationGuard}) like every other
  *  write, so a pre-reset straggler cannot revive after a re-submit reset. A revive INSTALLS a first-hand
  *  replayable decision, so it requires a KNOWN adjudicator AND a KNOWN (correlated) completion — an
  *  unattributed answer cannot launder into a replayable authority (mirrors the auto-resume provenance
@@ -245,11 +263,11 @@ async function reviveTombstonedDecision(
   if (input.sourceCompletionId == null) return false;
   const db = data.open();
   const guard = generationGuard(input.prKey, input.expectedProcessKey);
-  const revertGuard = notRevertedGuard(input.sourceCompletionId);
+  const reviveGuard = firstHandRevivableGuard(input.sourceCompletionId);
   const res = await db.exec(
     `UPDATE "pr_adjudications" SET "answer" = ?, "adjudicated_by" = ?, "adjudicated_kind" = ?, "adjudicated_at" = ?, "source_completion_id" = ?, "invalidated_at" = NULL
-     WHERE "id" = ? AND "invalidated_at" IS NOT NULL AND ${guard.sql} AND ${revertGuard.sql}`,
-    [answer, nowBy, input.adjudicatedKind?.trim() || null, new Date().toISOString(), input.sourceCompletionId ?? null, prior.id, ...guard.params, ...revertGuard.params],
+     WHERE "id" = ? AND "invalidated_at" IS NOT NULL AND ${guard.sql} AND ${reviveGuard.sql}`,
+    [answer, nowBy, input.adjudicatedKind?.trim() || null, new Date().toISOString(), input.sourceCompletionId ?? null, prior.id, ...guard.params, ...reviveGuard.params],
   );
   return res.changed > 0;
 }
@@ -336,13 +354,11 @@ export async function resetAdjudications(data: DataLayer, prKey: string): Promis
  *  Conditional on `invalidated_at IS NULL` so it is idempotent (a second revert/reset is a no-op) and
  *  never overwrites the first invalidation time. The tombstone is cleared only by `resetAdjudications`
  *  on a fresh-run re-submit. */
-export async function invalidateAdjudication(data: DataLayer, id: number): Promise<void> {
-  await data
-    .open()
-    .exec(`UPDATE "pr_adjudications" SET "invalidated_at" = ? WHERE "id" = ? AND "invalidated_at" IS NULL`, [
-      new Date().toISOString(),
-      id,
-    ]);
+export async function invalidateAdjudication(data: DataLayer, id: number, on?: GatewayDataSource): Promise<void> {
+  await (on ?? data.open()).exec(
+    `UPDATE "pr_adjudications" SET "invalidated_at" = ? WHERE "id" = ? AND "invalidated_at" IS NULL`,
+    [new Date().toISOString(), id],
+  );
 }
 
 /** TOMBSTONE the adjudication produced by a specific WINNING completion (issue #806 review), keyed on
@@ -354,11 +370,9 @@ export async function invalidateAdjudication(data: DataLayer, id: number): Promi
  *  race-safety reason as {@link invalidateAdjudication}, and is conditional on `invalidated_at IS NULL`
  *  so it is idempotent — a retry after a partial revert is a safe no-op. A completion settles at most one
  *  question, so at most one row matches; a completion with no linked adjudication matches none (no-op). */
-export async function invalidateAdjudicationByCompletion(data: DataLayer, completionId: number): Promise<void> {
-  await data
-    .open()
-    .exec(
-      `UPDATE "pr_adjudications" SET "invalidated_at" = ? WHERE "source_completion_id" = ? AND "invalidated_at" IS NULL`,
-      [new Date().toISOString(), completionId],
-    );
+export async function invalidateAdjudicationByCompletion(data: DataLayer, completionId: number, on?: GatewayDataSource): Promise<void> {
+  await (on ?? data.open()).exec(
+    `UPDATE "pr_adjudications" SET "invalidated_at" = ? WHERE "source_completion_id" = ? AND "invalidated_at" IS NULL`,
+    [new Date().toISOString(), completionId],
+  );
 }

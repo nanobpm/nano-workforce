@@ -450,7 +450,7 @@ test("invalidateAdjudicationByCompletion: a completion with no linked decision i
 // undoing the revert (the mirror of the record-then-revert ordering the by-completion tombstone covers). --
 
 /** Seed a `task_completions` row and return its id, so the notRevertedGuard has a real row to read. */
-async function seedCompletion(data: DataLayer, over: { reverted: number }): Promise<number> {
+async function seedCompletion(data: DataLayer, over: { reverted: number; auto_applied?: number }): Promise<number> {
   return await taskCompletions(data).insert({
     user_task_key: "ut-1",
     process_instance_key: null,
@@ -459,7 +459,7 @@ async function seedCompletion(data: DataLayer, over: { reverted: number }): Prom
     actor_id: "bot",
     variables_json: "{}",
     reversible: 1,
-    auto_applied: 0,
+    auto_applied: over.auto_applied ?? 0,
     source_adjudication_id: null,
     reverted: over.reverted,
     reverted_by: over.reverted ? "alice" : null,
@@ -548,6 +548,27 @@ test("recordAdjudication: a redelivery of the REVERTED completion cannot revive 
     assertEquals(rows.length, 1, "no duplicate row");
     assert(typeof rows[0].invalidated_at === "string" && (rows[0].invalidated_at as string).length > 0, "the tombstone survives the redelivery");
     assertEquals(matchAdjudication(rows, "Which retry cap?"), undefined, "the reverted decision stays un-replayable");
+  });
+});
+
+test("recordAdjudication: a machine auto-apply REPLAY (auto_applied=1) cannot revive a tombstoned decision (#806 review)", async () => {
+  await withData(async (data, seedPr) => {
+    await seedPr("o/r#1");
+    // A first-hand human answer records a live decision; a human then reverts it (tombstone + reverted).
+    const original = await seedCompletion(data, { reverted: 0 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human", sourceCompletionId: original });
+    await revertCompletion(data, original);
+    await invalidateAdjudicationByCompletion(data, original);
+    // The convergence poller's auto-apply REPLAY of the (now-reverted) decision produces a MACHINE
+    // completion (auto_applied=1) whose own `record-answer` also runs. That replay completion is itself
+    // not-yet-reverted, so a bare not-reverted fence would let it clear the operator's tombstone and
+    // resurrect the reverted decision — the revive must additionally require a FIRST-HAND source.
+    const replay = await seedCompletion(data, { reverted: 0, auto_applied: 1 });
+    await recordAdjudication(data, { prKey: "o/r#1", question: "Which retry cap?", answer: "Cap at 5.", adjudicatedBy: "alice", adjudicatedKind: "human", sourceCompletionId: replay });
+    const rows = await findAdj(data, "o/r#1");
+    assertEquals(rows.length, 1, "no duplicate row");
+    assert(typeof rows[0].invalidated_at === "string" && (rows[0].invalidated_at as string).length > 0, "a machine replay leaves the operator's tombstone intact");
+    assertEquals(matchAdjudication(rows, "Which retry cap?"), undefined, "the reverted decision is not resurrected by a machine auto-apply replay");
   });
 });
 
