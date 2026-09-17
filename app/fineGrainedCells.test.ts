@@ -52,6 +52,29 @@ test("implement-cell runs the senior:feature loop and delegates escalation to th
   assert(/targetRef="implement-task"/.test(xml), "implement-cell loops the answer back into implement-task");
 });
 
+test("implement-cell reconciles from GitHub before escalating (issue #801)", () => {
+  const xml = flat("implement-cell");
+  // The escalate arm passes through the reconcile step BEFORE the human escalation recorder, so a
+  // machine-recoverable result (an open PR on the cell's branch) adopts-and-converges instead of
+  // dead-ending at a person.
+  assert(
+    /<zeebe:taskDefinition\b[^>]*\btype="pr.reconcile-implement"/.test(xml),
+    "implement-cell must reconcile via pr.reconcile-implement on the escalate arm",
+  );
+  assert(
+    /<bpmn:exclusiveGateway\b[^>]*\bid="ic_reconcile_gw"/.test(xml),
+    "implement-cell must gate the reconcile outcome (adopt vs escalate) on ic_reconcile_gw",
+  );
+  assert(
+    /<bpmn:sequenceFlow\b[^>]*\bid="ic_reconciled"[^>]*\btargetRef="ic_end"/.test(xml),
+    "a reconciled (adopted) PR routes straight to the cell's done end — no human escalation",
+  );
+  assert(
+    /<bpmn:sequenceFlow\b[^>]*\bid="ic_toRecordEscalation"[^>]*\btargetRef="record-escalation"/.test(xml),
+    "an unreconciled result still escalates through record-escalation",
+  );
+});
+
 test("converge-cell and merge-cell keep their engine-native handoff task types", () => {
   assert(/<zeebe:taskDefinition\b[^>]*\btype="pr.converge-feature"/.test(flat("converge-cell")), "converge-cell hands off via pr.converge-feature");
   assert(/<zeebe:taskDefinition\b[^>]*\btype="senior:trial-merge"/.test(flat("merge-cell")), "merge-cell runs the senior:trial-merge agent");
