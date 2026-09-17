@@ -307,10 +307,20 @@ test("RED/GREEN #808 follow-up: a MID-HANDOFF `opened` run (converge=1 AND pr_ke
   assertEquals(mid.stage, "PR open", "a mid-handoff `opened` still renders the LIVE `PR open` stage");
   assertEquals(mid.ack_open, 0, "a mid-handoff `opened` run is NOT dismissable (it is about to hand off to converging)");
   assertEquals(mid.list_bucket, "active", "it stays in Active — a premature ack must never drag a converging run to History");
+  // SQL/TS oracle parity (PR #809 review): the `deriveListBucket` adapter MUST receive `converge`/`pr_key`
+  // — the mid-handoff carve-out reads them — or it diverges from the VIEW for this state.
+  assertEquals(mid.list_bucket, deriveListBucket("opened", null, { converge: 1, pr_key: "o/r#pr1" }), "TS oracle matches SQL for a mid-handoff `opened`");
 
   // A stray/premature ack on a mid-handoff row must STILL not drop it to History.
   addRun(db, "o/r#midAck", { status: "opened", converge: 1, pr_key: "o/r#pr2", acknowledged_at: "2026-02-02T00:00:00Z" });
   assertEquals(projection(db, "o/r#midAck").list_bucket, "active", "a stray ack on a mid-handoff `opened` does NOT move it to History");
+  // RED without the `converge`/`pr_key` args: a converge/pr_key-blind oracle would wrongly return `history`
+  // for this ACKED mid-handoff row (the parity gap the review flagged); with them it agrees with the VIEW.
+  assertEquals(
+    projection(db, "o/r#midAck").list_bucket,
+    deriveListBucket("opened", "2026-02-02T00:00:00Z", { converge: 1, pr_key: "o/r#pr2" }),
+    "TS oracle matches SQL for an ACKED mid-handoff `opened` (stays active, not history)",
+  );
 
   // Raise-only (converge=0) with a PR: a FINISHED run — dismissable (the #808 case).
   addRun(db, "o/r#raise", { status: "opened", converge: 0, pr_key: "o/r#pr3" });

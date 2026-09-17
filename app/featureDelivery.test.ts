@@ -371,3 +371,63 @@ test("pollFeatureDelivery: a mid-handoff opened run already folded abandoned out
   assertEquals(queried, false);
   assertEquals(stores.feature_runs[0].status, "opened");
 });
+
+test("pollFeatureDelivery: a mid-handoff opened run whose instance read a KNOWN terminal (COMPLETED) folds to abandoned (PR #809 review, thread 3)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#26", status: "opened", process_key: "pi-26", pr_key: "o/r#5", converge: 1, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  // COMPLETED is a KNOWN terminal (ENGINE_TERMINAL_STATES) — a positive "the instance is gone", so a
+  // still-`opened` mid-handoff row is a genuinely interrupted handoff and folds to abandoned.
+  const engine = { searchProcessInstances: async () => [{ processInstanceKey: "pi-26", state: "COMPLETED" }] } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(stores.feature_runs[0].status, "abandoned");
+  assertEquals(stores.feature_runs[0].delivery_label, "handoff interrupted");
+});
+
+test("RED/GREEN pollFeatureDelivery: a mid-handoff opened run whose instance snapshot carries an EMPTY/UNKNOWN state is SPARED, never folded (PR #809 review, thread 3)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#28", status: "opened", process_key: "pi-28", pr_key: "o/r#5", converge: 1, delivery_label: null },
+    { feature_key: "o/r#29", status: "opened", process_key: "pi-29", pr_key: "o/r#5", converge: 1, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  // The engine ANSWERED (the instance is present) but with an empty / newly-introduced state we cannot
+  // interpret — a partial read, NOT a confirmed death. The reconcile-probe tri-state spares such a row;
+  // folding it to `abandoned` would kill a possibly still-live handoff off a wire shape we misread.
+  const engine = {
+    searchProcessInstances: async ({ processInstanceKeys }: any) => {
+      const key = String(processInstanceKeys[0]);
+      return [{ processInstanceKey: key, state: key === "pi-28" ? "" : "SUSPENDED_NOVEL_STATE" }];
+    },
+  } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  // Red before the fix (`state !== "ACTIVE"` folded everything non-ACTIVE): both rows would go abandoned.
+  assertEquals(stores.feature_runs[0].status, "opened", "an empty engine state spares the row");
+  assertEquals(stores.feature_runs[0].delivery_label, null);
+  assertEquals(stores.feature_runs[1].status, "opened", "an unrecognised engine state spares the row");
+  assertEquals(stores.feature_runs[1].delivery_label, null);
+});
+
+test("RED/GREEN pollFeatureDelivery: a running run edge (2) folds to `opened` in a pass is NOT re-folded to abandoned by the handoff edge in the SAME pass (PR #809 review, thread 1)", async () => {
+  const { data, stores } = memData();
+  // A `running` run carrying converge=1 + pr_key whose instance COMPLETED: edge (2) folds it running→
+  // `opened` (PR raised). Edge (3) then re-reads the DB, sees that just-folded `opened`+converge=1+pr_key
+  // row with a non-ACTIVE (COMPLETED) instance, and — without the same-pass exclusion — would clobber
+  // edge (2)'s legitimate terminal to `abandoned`.
+  stores.feature_runs = [
+    { feature_key: "o/r#27", status: "running", process_key: "pi-27", pr_key: "o/r#5", converge: 1, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  const engine = { searchProcessInstances: async () => [{ processInstanceKey: "pi-27", state: "COMPLETED" }] } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(stores.feature_runs[0].status, "opened", "edge (2)'s terminal outcome stands — the same-pass handoff edge leaves it alone");
+  assertEquals(stores.feature_runs[0].delivery_label, "PR raised");
+});
