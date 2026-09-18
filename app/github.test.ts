@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, type Mergeability, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, type GhReview, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -39,6 +39,51 @@ async function withTokenTransport<T>(pages: number[], fn: () => Promise<T>): Pro
     else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
   }
 }
+
+function reviewFetch(pages: GhReview[][], requests: string[]) {
+  return (url: string | URL | Request): Promise<Response> => {
+    const u = new URL(String(url));
+    requests.push(u.toString());
+    const page = Number(u.searchParams.get("page") ?? "1");
+    const headers = new Headers();
+    if (page < pages.length) {
+      headers.set(
+        "link",
+        `<https://api.github.com/repos/o/r/pulls/1/reviews?per_page=100&page=${page + 1}>; rel="next", ` +
+          `<https://api.github.com/repos/o/r/pulls/1/reviews?per_page=100&page=${pages.length}>; rel="last"`,
+      );
+    }
+    return Promise.resolve(new Response(JSON.stringify(pages[page - 1] ?? []), { status: 200, headers }));
+  };
+}
+
+async function withTokenFetch<T>(fetchImpl: typeof fetch, fn: () => Promise<T>): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = fetchImpl;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+}
+
+test("fetchPrReviews: returns the newest review when it is beyond page one", async () => {
+  const requests: string[] = [];
+  const pages = [
+    Array.from({ length: 100 }, (_, i) => ({ id: i + 1, state: "COMMENTED" })),
+    [{ id: 101, state: "APPROVED", submitted_at: "2026-09-15T12:00:00Z" }],
+  ];
+  const reviews = await withTokenFetch(reviewFetch(pages, requests) as typeof fetch, () =>
+    fetchPrReviews("o/r", 1, "tok"),
+  );
+  assertEquals(reviews?.length, 101);
+  assertEquals(reviews?.[reviews.length - 1]?.id, 101);
+  assertEquals(requests.length, 2, "the final page must be fetched after page one");
+});
 
 test("fetchPrFiles: returns the complete list for a sub-cap PR (short final page)", async () => {
   const files = await withTokenTransport([100, 42], () => fetchPrFiles("o/r", 1, "tok"));

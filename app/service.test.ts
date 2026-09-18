@@ -11,9 +11,10 @@ import { memDataFor } from "../test/worldDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
 import { WorldStore } from "./world/index.ts";
-import { abandonClosedPr, isPrSettled, MAX_ACK_RETRIES, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
+import { abandonClosedPr, isPrSettled, MAX_ACK_RETRIES, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollReviews, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
 import { trackingTargetFor } from "./instanceTracking.ts";
 import type { DataLayer } from "@nanobpm/urban";
+import { READINESS_READY_MESSAGE } from "./readiness.ts";
 
 function memTable(rows: any[], key: string) {
   return {
@@ -77,6 +78,90 @@ function withGithubOff(run: () => Promise<void>): Promise<void> {
     if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
   });
 }
+
+function reviewPagesFetch(pages: Record<string, unknown>[][], requests: string[]) {
+  return (url: string | URL | Request): Promise<Response> => {
+    const u = new URL(String(url));
+    if (!u.pathname.endsWith("/reviews")) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ head: { ref: null, sha: "SHA_CURRENT" } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    }
+    requests.push(u.toString());
+    const page = Number(u.searchParams.get("page") ?? "1");
+    const headers = new Headers();
+    if (page < pages.length) {
+      headers.set(
+        "link",
+        `<https://api.github.com/repos/owner/repo/pulls/42/reviews?per_page=100&page=${page + 1}>; rel="next", ` +
+          `<https://api.github.com/repos/owner/repo/pulls/42/reviews?per_page=100&page=${pages.length}>; rel="last"`,
+      );
+    }
+    return Promise.resolve(new Response(JSON.stringify(pages[page - 1] ?? []), { status: 200, headers }));
+  };
+}
+
+test("pollReviews publishes readiness-ready for a fresh review on the final page (#793)", async () => {
+  const oldReviews = Array.from({ length: 100 }, (_, i) => ({
+    id: i + 1,
+    state: "COMMENTED",
+    submitted_at: "2026-09-01T00:00:00Z",
+    commit_id: "SHA_CURRENT",
+  }));
+  const pages = [
+    oldReviews,
+    [{ id: 101, state: "APPROVED", submitted_at: "2026-09-15T12:00:00Z", commit_id: "SHA_CURRENT" }],
+  ];
+  const requests: string[] = [];
+  const pr = {
+    pr_key: "owner/repo#42",
+    repo: "owner/repo",
+    number: 42,
+    status: "waiting_review",
+    waiting_since: "2026-09-10T00:00:00Z",
+    last_review_id: 100,
+  };
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    pull_requests: { rows: [pr], key: "pr_key" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], key),
+  } as any as DataLayer;
+  const messages: { name: string; correlationKey?: string; variables?: Record<string, unknown> }[] = [];
+  const engine = {
+    publishMessage: async (message: { name: string; correlationKey?: string; variables?: Record<string, unknown> }) => {
+      messages.push(message);
+    },
+  } as any;
+
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = reviewPagesFetch(pages, requests) as typeof fetch;
+  try {
+    await pollReviews(data, engine, "tok");
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+
+  assertEquals(requests.length, 2, "the poller must read the final reviews page");
+  assertEquals(
+    messages,
+    [{
+      name: READINESS_READY_MESSAGE,
+      correlationKey: "owner/repo#42",
+      variables: { ready: true, detail: "review 101 (APPROVED)" },
+    }],
+    "fresh review must release the review wait",
+  );
+  assertEquals(pr.last_review_id, 101);
+  assertEquals(pr.status, "converging");
+});
 
 test("isPrSettled reads the derived tracking view — an out-of-band-abandoned PR (base row still converging) is settled", async () => {
   // The base `pull_requests` row still reads `converging`, but the ADR-0065 derived tracking VIEW
