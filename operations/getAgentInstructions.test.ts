@@ -40,7 +40,8 @@ test("the guide covers every capability the endpoint promises", async () => {
   const md = ((await handler(input(), app)) as any).body.instructions as string;
   // Submit a PR (converge vs. merge), submit an epic, answer escalations…
   assert(md.includes("start/convergence-loop"), "covers submitting a PR for convergence");
-  assert(md.includes("convergeOnly"), "documents review-only vs. merge");
+  assert(md.includes("autoMerge"), "documents the per-request merge control");
+  assert(!md.includes("convergeOnly"), "does not expose the legacy merge control in agent guidance");
   assert(md.includes("start/plan-fanout"), "covers submitting an epic");
   assert(md.includes("complete-user-task"), "covers answering escalations via the native user-task door");
   // …debug the system.

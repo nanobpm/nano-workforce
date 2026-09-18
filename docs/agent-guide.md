@@ -73,7 +73,7 @@ The body is flat. Fields:
 | field | type | meaning |
 |---|---|---|
 | `pr` (or `url`) | string | the PR — `owner/repo#123` or a full PR URL. Required. |
-| `convergeOnly` | boolean | **`true` = review only.** The PR stops at `converged` and is **never** handed to the merge loop, even when `NANO_PR_AUTO_MERGE` is on. Omit / `false` = converge **then merge**. |
+| `autoMerge` | boolean | **Positive per-request setting.** `false` = review only, stopping at `converged`, regardless of the global default; `true` = converge **then merge** when `NANO_PR_AUTO_MERGE` is enabled. |
 | `maxRounds` | integer | per-submit cap before escalating (clamped 1–100; default from `NANO_PR_MAX_ROUNDS`, 20). |
 | `dependsOn` | string[] | other `prKey`s that must land before this one merges (merge-loop barrier). |
 
@@ -84,12 +84,12 @@ The body is flat. Fields:
 # or is only after a review pass):
 curl -sS -X POST __BASE__/actions/start/convergence-loop \
   -H 'content-type: application/json' \
-  -d '{ "pr": "owner/repo#123", "convergeOnly": true }'
+  -d '{ "pr": "owner/repo#123", "autoMerge": false }'
 
 # Converge then merge, with a dependency barrier and a tighter round cap:
 curl -sS -X POST __BASE__/actions/start/convergence-loop \
   -H 'content-type: application/json' \
-  -d '{ "pr": "owner/repo#42", "maxRounds": 8, "dependsOn": ["owner/repo#40"] }'
+  -d '{ "pr": "owner/repo#42", "autoMerge": true, "maxRounds": 8, "dependsOn": ["owner/repo#40"] }'
 ```
 
 Submitting is **idempotent on the PR key** — re-POSTing the same PR refreshes the
@@ -311,7 +311,7 @@ the answer becomes the agent's next-round context.
 ```
  submit ──► convergence-loop
    round (senior:pr-review) ──► addressed ──► wait review-ready ─┐
-                             ├─ converged  ──► finalize ──► merge-loop (unless convergeOnly)
+                             ├─ converged  ──► finalize ──► merge-loop (when autoMerge and NANO_PR_AUTO_MERGE are enabled)
                              └─ needs_input/blocked ──► escalate ──► wait-answer userTask (task inbox)
  merge-loop: wait deps ─► arm merge ─► (queue-aware) merge / land
              blocked (CI red) ─► senior:fix-ci ─► retry     conflict ─► senior:rebase ─► retry
@@ -774,13 +774,13 @@ only job was "go run convergence yourself".
 - **`converge-merge`** — the **unit-level** land: drive review convergence **and then the merge
   loop**, landing the PR onto **its own base branch** (for a unit inside an epic that base is the
   epic integration branch, never `main` directly — ADR 0003 base-branch admission). Equivalent to a
-  submit with `convergeOnly: false`.
+  submit with `autoMerge: true`.
 - **`merge-main`** — the **graph-level** top-level land: the second level of the two-level merge
   (ADR 0006 §3), landing the graph/epic **integration** PR onto **`main`**. Dispatch-identical to
   `converge-merge` (both enroll + merge); the distinction is the *level*, kept a first-class literal
   so the two levels are authored explicitly rather than left emergent.
 - **`converge`** — **converge-only**: drive review convergence and stop at `converged`, never
-  handing off to the merge loop (equivalent to `convergeOnly: true`).
+  handing off to the merge loop (equivalent to `autoMerge: false`).
 
 > **converge/merge are cell POLICY, not raw nodes.** A raw `senior:converge` / `senior:merge`
 > **agent** job is **not expressible** — the compiler rejects it (`raw-converge-node`). Express
@@ -788,10 +788,10 @@ only job was "go run convergence yourself".
 > policy flags (`merge` requires `converge`), or, for enrolling an already-open PR, the
 > `connector` targets above (ADR 0006 §3 / S5).
 
-**Payload:** `{ pr: "owner/repo#123", convergeOnly?: boolean, dependsOn?: string[] }`. `pr` is
+**Payload:** `{ pr: "owner/repo#123", autoMerge?: boolean, dependsOn?: string[] }`. `pr` is
 required (a literal `owner/repo#N`, identical to how a `wait: pr` node targets a known PR).
-`convergeOnly` defaults from the target and may be overridden per-node; `dependsOn` is unioned
-into the PR's merge-stage dependency set. The enrollment is idempotent (the connector's
+`autoMerge` defaults from the target and may be overridden per-node; `dependsOn` is unioned into
+the PR's merge-stage dependency set. The enrollment is idempotent (the connector's
 at-least-once dedupe fence **plus** `submitPr`'s own `prKey` idempotency), so a graph resume /
 redelivery never double-enrolls.
 

@@ -105,8 +105,8 @@
             "type": "number"
           },
           {
-            "key": "convergeOnly",
-            "label": "Converge only \u2014 stop at review consensus, do not merge",
+            "key": "autoMerge",
+            "label": "Auto-merge \u2014 after convergence, drive the merge-loop",
             "type": "checkbox"
           }
         ]
