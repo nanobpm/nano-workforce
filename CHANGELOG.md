@@ -1,3 +1,9 @@
+## [0.189.2](https://github.com/nanobpm/nano-workforce/compare/v0.189.1...v0.189.2) (2026-09-18)
+
+### Bug Fixes
+
+* **poller:** fetch newest GitHub reviews ([#797](https://github.com/nanobpm/nano-workforce/issues/797)) ([c488410](https://github.com/nanobpm/nano-workforce/commit/c488410645d1df55ca5121448364c8f89ed4a7a6)), closes [#793](https://github.com/nanobpm/nano-workforce/issues/793)
+
 ## [0.189.1](https://github.com/nanobpm/nano-workforce/compare/v0.189.0...v0.189.1) (2026-09-17)
 
 ### Bug Fixes
