@@ -167,6 +167,23 @@ export function deriveFeatureDelivery(prStatus: string | null): FeatureDeliveryR
   }
 }
 
+/** Reconciled TERMINAL outcome for a feature run whose ENGINE instance read COMPLETED while the base
+ * `status` is still the non-terminal `running` (issue #808). A normally-completing raise-only (or
+ * nothing-to-do) run has no PR loop to reconcile it — `pollFeatureDelivery`'s converging reconcile and
+ * `instanceTracking`'s TERMINATED → `abandoned` edge both skip it — so it would wedge in the Active
+ * bucket forever (the "poller owns liveness; never leave a run on a status no pass scans" rule,
+ * AGENTS.md). The terminal is derived from the run's own durable completion shape, ENGINE-truth-gated
+ * by the caller (only ever applied on a real COMPLETED read): a run that raised a PR (its `pr_key`
+ * survives on the row from `record-feature`) folds to `opened`; a run that raised none folds to
+ * `skipped`. Pure and idempotent — the caller writes only when this differs from the current status. */
+export interface FeatureCompletion {
+  status: FeatureRunStatus;
+  label: string;
+}
+export function deriveFeatureCompletion(run: Pick<FeatureRun, "pr_key">): FeatureCompletion {
+  return run.pr_key ? { status: "opened", label: "PR raised" } : { status: "skipped", label: "nothing to do" };
+}
+
 /** The `feature-escalation` user-task element id (feature.bpmn) — the native operator wait a run
  * parks on when the agent escalates. `pollUserTasks` reads the engine's open task for this element to
  * project it onto the `user_tasks` Tasks inbox. */
@@ -235,6 +252,39 @@ export const FEATURE_BLOCKED_ELEMENT = "feature-blocked";
  * reuse; app/featureReadModel.test.ts pins the VIEW to them (including a raw-datasource `status` write
  * that reproduces the reconciler bypass). */
 export const featureRuns = (data: DataLayer) => data.table<FeatureRun>("feature_runs", "feature_key");
+
+/** Guarded CAS fold of a settled feature run to its terminal delivery `status` + `delivery_label`
+ * (issue #808). This is NOT a blind `featureRuns(data).update(feature_key, …)`: the poller reads the
+ * engine instance state (`searchProcessInstances`) BEFORE it writes, and in that window `startFeature`
+ * can re-seed the SAME `feature_key` row to a FRESH `running` incarnation with a NEW `process_key`
+ * (the old instance completed, a resubmit relaunched). A blind write keyed on `feature_key` alone
+ * would clobber that newer incarnation to `opened`/`skipped` while its new instance is still active.
+ * The single guarded UPDATE requires the row to still be the exact incarnation we read (same
+ * `feature_key` + `process_key` + `status = expectStatus`, the transient the caller observed — the
+ * normally-completing fold reads `running`; the mid-handoff reconcile — {@link pollFeatureDelivery}'s
+ * handoff edge — reads `opened`), so a lost race matches zero rows and is a no-op. This is safe across
+ * the FULL re-seed window because `startFeature` clears `process_key` to NULL atomically with its
+ * `status = 'running'` reset (issue #808) and only reinstalls the new key after `createInstance`
+ * returns — so throughout the interval the fresh incarnation carries no key that this guard's OLD
+ * `process_key` predicate can match. Mirrors the `markProposalExpired`/`claimRunForLaunch` CAS pattern.
+ * Returns whether the write flipped a row (`res.changed > 0`) — `false` means a concurrent re-seed won
+ * the race, OR the observed transient had already advanced. */
+export async function foldCompletedFeatureRun(
+  data: DataLayer,
+  featureKey: string,
+  processKey: string,
+  status: string,
+  label: string,
+  expectStatus: FeatureRunStatus = "running",
+): Promise<boolean> {
+  const res = await data
+    .open()
+    .exec(
+      `UPDATE "feature_runs" SET "status" = ?, "delivery_label" = ?, "updated_at" = ? WHERE "feature_key" = ? AND "process_key" = ? AND "status" = ?`,
+      [status, label, new Date().toISOString(), featureKey, processKey, expectStatus],
+    );
+  return res.changed > 0;
+}
 
 /** A `feature_runs` row as seen through its derived tracking VIEW (`feature_runs__tracking`): the base
  * columns plus urban's ADR-0065 `derived_status`, which FOLDS the reconciler's terminal edge
@@ -380,6 +430,15 @@ export async function startFeature(
       base_branch: base,
       issue_url: parsed.url,
       title,
+      // Clear the OLD process key ATOMICALLY with the status reset (issue #808). The re-seed flips the
+      // row back to `running` but does not install the new process key until AFTER `createInstance`
+      // returns below; leaving the stale `process_key` in place across that await opens a TOCTOU window
+      // where the poller's guarded fold (`foldCompletedFeatureRun`, keyed on the OLD process_key +
+      // `status='running'`) would still match this fresh incarnation and terminalize it to
+      // `opened`/`skipped`. Nulling it here — exactly as the insert branch below does — makes that
+      // guard match zero rows during the window, so the race collapses to a no-op. The new key is
+      // written back once the instance is created.
+      process_key: null,
       pr_key: null,
       converge: converge ? 1 : 0,
       auto_merge: autoMerge ? 1 : 0,

@@ -35,7 +35,7 @@ import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deli
 import { deliveryHumanContextQuestion, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
-import { deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
+import { deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun } from "./feature.ts";
 import {
   classifyMergeability,
   classifyPrLiveness,
@@ -88,6 +88,7 @@ import {
   readinessPollEvery,
   readinessTimeout,
 } from "./readiness.ts";
+import { ENGINE_TERMINAL_STATES } from "./reconcile.ts";
 // The repository-provisioning envelope builder lives in its own module (app/repoEnvelope.ts) so the
 // PRE-PR implementation dispatch (`feature.ts`/`plan.ts`) can reuse the ONE canonical implementation
 // without a `plan.ts ↔ service.ts` import cycle (issue #684). Imported for the PR-based callers
@@ -2294,15 +2295,46 @@ export async function pollPromotion(data: DataLayer, engine: EngineClient, token
   }
 }
 
-/** Reconcile each in-flight FEATURE run against its handed-off PR (fix: Feature history stuck at
- * `converging`). A feature run ends its own process with `status = converging` and its PR's live
- * outcome (merged / converged / abandoned) thereafter lives only on the `pull_requests` row keyed
- * by `pr_key` — so the Feature history grid, which reads `feature_runs`, showed `converging` forever.
- * This is the `feature_runs` twin of `pollDelivery` (which does the same for epic `plans`): for each
- * run currently `converging` with a `pr_key`, project the PR's status onto `feature_runs.status`
- * (advancing it to the matching terminal outcome once the PR settles) + a human `delivery_label`.
- * Never touches a run that isn't `converging` — additive/derived only, idempotent, best-effort. */
-export async function pollFeatureDelivery(data: DataLayer) {
+/** Reconcile each in-flight FEATURE run against ENGINE truth (fix: Feature history stuck at
+ * `converging`; issue #808: raise-only runs wedge in Active). Two idempotent, best-effort edges over
+ * the canonical feature reconciliation — no parallel reconciler:
+ *
+ * 1. CONVERGING → terminal (from its handed-off PR). A feature run ends its own process with
+ *    `status = converging` and its PR's live outcome (merged / converged / abandoned) thereafter lives
+ *    only on the `pull_requests` row keyed by `pr_key` — so the Feature history grid, which reads
+ *    `feature_runs`, showed `converging` forever. The `feature_runs` twin of `pollDelivery`: for each
+ *    run currently `converging` with a `pr_key`, project the PR's status onto `feature_runs.status`
+ *    (advancing it to the matching terminal outcome once the PR settles) + a human `delivery_label`.
+ *
+ * 2. COMPLETED → terminal (from the engine instance; issue #808). A raise-only / normally-completing
+ *    run ends its process with the non-terminal base `status = running` and is NEVER handed to a PR
+ *    loop, so neither edge (1) nor `instanceTracking`'s TERMINATED → `abandoned` edge folds it — it
+ *    would wedge in Active forever ("poller owns liveness; never leave a run on a status no pass
+ *    scans"). This owns the COMPLETED → terminal fold for such runs, mirroring the taskless-plan pass
+ *    ({@link pollTasklessPlanTermination}, #624) and {@link pollDeliveryGraphPhase}. Scoped to
+ *    `running` — the only non-terminal, non-parked status that can reach COMPLETED (`escalated` /
+ *    `awaiting_operator` keep the instance ALIVE at a user task, owned by their own edges) — so a
+ *    `converging` run is untouched by this fold. Liveness is read off the ADR-0065 derived tracking
+ *    VIEW (`derived_status`), so a run TERMINATED out of band (folding `derived_status` → `abandoned`)
+ *    is left to the `onTerminated` edge and never re-queried every pass. Writes only on a real
+ *    COMPLETED read (idempotent — a pass over a still-active or already-terminal run is a no-op).
+ *
+ * 3. MID-HANDOFF `opened` → `abandoned` (from the engine instance; PR #809 review). `record-feature`
+ *    writes base `status = opened` for a converge-REQUESTED run too, BEFORE `gw-converge` hands it to
+ *    `converge-feature` (which flips it to `converging`). That transient `opened` + `converge=1` +
+ *    `pr_key` window is NOT dismissable (`featureReadModel` excludes it so a premature ack can't drag a
+ *    still-converging run to History), yet `opened` is no `instanceTracking` activeStatus and neither
+ *    edge (1) nor (2) scans it — so an instance TERMINATED mid-handoff would strand the row in Active
+ *    forever with `ack_open=0` and no owner. This owns that liveness: a mid-handoff row can only LEAVE
+ *    `opened` by writing `converging`, so an instance that is a KNOWN terminal (or genuinely absent)
+ *    while the row still reads `opened` means the handoff was interrupted — fold it to the terminal
+ *    `abandoned` (mirroring `onTerminated`). Applies the reconcile-probe tri-state (app/reconcile.ts):
+ *    ACTIVE is left for `converge-feature`, and an instance whose snapshot carries an empty/unknown
+ *    state is SPARED (never folded off a wire shape we misread). A key edge (2) folded THIS pass is
+ *    skipped (it is already terminalized, not stranded). Read off the derived tracking VIEW so an
+ *    out-of-band fold is not re-queried; scoped to `converge=1 AND pr_key` (a raise-only or keyless
+ *    `opened` is genuinely terminal, owned by its own dismissable edge). */
+export async function pollFeatureDelivery(data: DataLayer, engine: Pick<EngineClient, "searchProcessInstances">) {
   // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
   // Read the ADR-0065 derived edge (`derived_status`) so a terminated run reads `abandoned`.
   const statusByPrKey = new Map<string, string>();
@@ -2324,6 +2356,77 @@ export async function pollFeatureDelivery(data: DataLayer) {
       }
     } catch (err) {
       console.error(`[poller] feature delivery ${run.feature_key}: ${err}`);
+    }
+  }
+  // Edge (2): COMPLETED → terminal for a normally-completing `running` run (issue #808). Read the
+  // derived tracking VIEW so a base-`running` row whose instance TERMINATED out of band (derived
+  // `abandoned`) is skipped here (the `onTerminated` edge owns it) and never re-queried the engine.
+  // Feature keys this edge folds this pass are tracked in `foldedByCompletion` so edge (3) — which
+  // re-reads the DB and would otherwise see a row edge (2) just moved to `opened` in the SAME pass —
+  // leaves them alone (PR #809 review): edge (2) has already assigned such a row its terminal outcome.
+  const foldedByCompletion = new Set<string>();
+  for (const run of await featureRunsTracking(data).find({ status: "running" })) {
+    if (!run.process_key) continue;
+    if (run.derived_status !== "running") continue;
+    const processKey = run.process_key;
+    try {
+      const snapshots = await engine.searchProcessInstances({ processInstanceKeys: [processKey] });
+      const state = snapshots.find((s) => String(s.processInstanceKey) === processKey)?.state ?? null;
+      if (state !== "COMPLETED") continue;
+      const { status, label } = deriveFeatureCompletion(run);
+      // Guarded CAS (not a blind update-by-key): a concurrent `startFeature` may have re-seeded this
+      // same row to a fresh `running` incarnation (new `process_key`) in the window since the engine
+      // read above — the guard makes such a lost race a no-op instead of clobbering the new run.
+      if (await foldCompletedFeatureRun(data, run.feature_key, processKey, status, label)) {
+        foldedByCompletion.add(run.feature_key);
+      }
+    } catch (err) {
+      console.error(`[poller] feature completion ${run.feature_key}: ${err}`);
+    }
+  }
+  // Edge (3): mid-handoff `opened` → `abandoned` for a run whose instance died before convergence (PR
+  // #809 review, issue #808 follow-up). `record-feature` writes base `status="opened"` for a
+  // converge-REQUESTED run TOO, BEFORE `gw-converge` hands it to `converge-feature` (which flips it to
+  // `converging`). That transient `opened` + `converge=1` + non-null `pr_key` window is deliberately
+  // NOT dismissable (`featureReadModel` excludes it, so a premature ack can't drag a still-converging
+  // run to History) — but `opened` is not an `instanceTracking` activeStatus (nano.app.json), and
+  // neither the converging edge (1) nor the running edge (2) scans it, so an instance TERMINATED in
+  // that window would strand the row in Active FOREVER with `ack_open=0` and no reconciler. This edge
+  // owns that liveness: a mid-handoff row can only LEAVE `opened` by writing `converging` (a clean
+  // handoff) — so if its instance is a KNOWN terminal (or genuinely absent) while the row still reads
+  // `opened`, the handoff was interrupted (out-of-band terminate / crash) and the run is folded to the
+  // terminal `abandoned` (the same edge `instanceTracking.onTerminated` applies to a tracked run's
+  // out-of-band termination). The snapshot is read with the SAME tri-state as the reconcile probe
+  // (app/reconcile.ts): a still-ACTIVE instance is left untouched (`converge-feature` will advance it),
+  // and an instance present with an empty/unknown/newly-introduced state is SPARED, never folded off a
+  // wire shape we misread. A row edge (2) folded to `opened` in THIS pass is skipped (`foldedByCompletion`)
+  // — it is already terminalized, not a stranded handoff. Read the derived tracking VIEW so a row
+  // already folded `abandoned` out of band is skipped and never re-queried. Guarded CAS on the OLD
+  // `process_key` + `status='opened'`, so a concurrent `startFeature` re-seed is a no-op, never a
+  // clobber. Scoped to `converge=1 AND pr_key` — a raise-only (`converge=0`) or keyless (`pr_key IS
+  // NULL`) `opened` is genuinely terminal and owned by its own dismissable edge, so it is never queried here.
+  for (const run of await featureRunsTracking(data).find({ status: "opened" })) {
+    if (!run.process_key || !run.pr_key || run.converge !== 1) continue;
+    if (run.derived_status !== "opened") continue;
+    // Edge (2) may have folded a COMPLETED `running` run to `opened` in THIS pass (thread 1): that row
+    // is already terminalized by its own derivation, not a stranded mid-handoff — never re-fold it here.
+    if (foldedByCompletion.has(run.feature_key)) continue;
+    const processKey = run.process_key;
+    try {
+      const snapshots = await engine.searchProcessInstances({ processInstanceKeys: [processKey] });
+      const match = snapshots.find((s) => String(s.processInstanceKey) === processKey);
+      // Interpret the snapshot with the SAME tri-state semantics as the reconcile engine-probe
+      // (app/reconcile.ts): ACTIVE → still mid-handoff; a KNOWN terminal state or a genuinely-absent
+      // instance → the handoff was interrupted (fold); an instance present with an empty/unknown/
+      // newly-introduced state → a partial answer this app cannot interpret, so spare the row rather
+      // than fold a possibly still-live run to `abandoned` off a wire shape we misread (thread 3).
+      const state = match ? String(match.state ?? "").trim().toUpperCase() : null;
+      if (state === "ACTIVE") continue; // still mid-handoff — converge-feature will advance it
+      if (state !== null && !ENGINE_TERMINAL_STATES.has(state)) continue; // unknown/empty → spare
+      // state === null (engine answered, instance absent) OR a known terminal → interrupted handoff.
+      await foldCompletedFeatureRun(data, run.feature_key, processKey, "abandoned", "handoff interrupted", "opened");
+    } catch (err) {
+      console.error(`[poller] feature handoff ${run.feature_key}: ${err}`);
     }
   }
 }
@@ -3102,7 +3205,7 @@ export async function pollOnce(
   await pollMerges(data, engine, token);
   await pollWaitGate(data);
   await pollPromotion(data, engine, token);
-  await pollFeatureDelivery(data);
+  await pollFeatureDelivery(data, engine);
   await pollLineage(data);
   await pollUserTasks(data, engine, engineRest);
   await pollEpicPhase(data, engine, engineRest);

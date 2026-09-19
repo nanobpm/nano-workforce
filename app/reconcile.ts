@@ -232,7 +232,7 @@ interface InstanceSearchStateItem {
  *  outside this set is a partial/malformed read this app cannot interpret, so it degrades to `null`
  *  ("unknown" → the caller spares the row). Classifying an unrecognized state as "gone" would fold
  *  live work off a wire shape we misread — the exact failure mode the #736 cross-check exists to stop. */
-const ENGINE_TERMINAL_STATES: ReadonlySet<string> = new Set(["COMPLETED", "TERMINATED", "CANCELED", "FAILED"]);
+export const ENGINE_TERMINAL_STATES: ReadonlySet<string> = new Set(["COMPLETED", "TERMINATED", "CANCELED", "FAILED"]);
 
 /** Build an {@link EngineActiveProbe} that queries the engine's own `/v2/process-instances/search` for
  *  a single process instance key and reports whether the engine still considers it ACTIVE. This is the
