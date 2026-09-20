@@ -580,6 +580,82 @@ test("submitPr stringifies a numeric processInstanceKey (contract: string | null
   });
 });
 
+// Phantom-enrollment guard (#704/#497, PR #809 review): `submitPr` INSERTS the `pull_requests` row
+// (`status='converging'`, `process_key` NULL) BEFORE `createInstance` and writes `process_key` only
+// after it returns. A create-instance failure/crash in that window strands a NON-terminal row with NO
+// `process_key` and NO live instance. Such a row must NOT be classified `alreadyRunning` (that would
+// wedge it forever, and `pollFeatureDelivery` edge (1) would skip it as non-terminal) — it must fall
+// through and RE-ENROLL, exactly as a genuinely-live row (non-terminal + `process_key` present) is
+// still short-circuited to `alreadyRunning`.
+test("submitPr re-enrolls a phantom row (non-terminal, process_key NULL) rather than reporting alreadyRunning (#704/#497)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#77";
+    const phantom = { pr_key: PR_KEY, repo: "owner/repo", number: 77, status: "converging", process_key: null };
+    const stores: Record<string, { rows: unknown[]; key: string }> = {
+      pull_requests: { rows: [phantom], key: "pr_key" },
+      escalations: { rows: [], key: "id" },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const data = {
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+      open: () => memOpen(stores as any),
+    } as any;
+    let created = 0;
+    const engine = {
+      createInstance: () => {
+        created++;
+        return Promise.resolve({ processInstanceKey: "PI-77" });
+      },
+    } as any;
+
+    const res = await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 77,
+      url: "https://github.com/owner/repo/pull/77",
+      prKey: PR_KEY,
+    });
+
+    assertEquals((res as any).alreadyRunning, undefined, "a phantom row is not short-circuited as alreadyRunning");
+    assertEquals(created, 1, "the phantom row is re-enrolled with a fresh instance");
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.process_key, "PI-77", "the previously-missing process_key is installed");
+  });
+});
+
+test("submitPr still short-circuits a genuinely-live non-terminal row (process_key present) as alreadyRunning (#704/#497)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#78";
+    const live = { pr_key: PR_KEY, repo: "owner/repo", number: 78, status: "converging", process_key: "PI-live" };
+    const stores: Record<string, { rows: unknown[]; key: string }> = {
+      pull_requests: { rows: [live], key: "pr_key" },
+      escalations: { rows: [], key: "id" },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const data = {
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    } as any;
+    let created = 0;
+    const engine = {
+      createInstance: () => {
+        created++;
+        return Promise.resolve({ processInstanceKey: "PI-new" });
+      },
+    } as any;
+
+    const res = await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 78,
+      url: "https://github.com/owner/repo/pull/78",
+      prKey: PR_KEY,
+    });
+
+    assertEquals((res as any).alreadyRunning, true, "a live enrolled PR is still short-circuited");
+    assertEquals(created, 0, "no duplicate instance is created for a live PR");
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.process_key, "PI-live", "the live PR's process_key is untouched");
+  });
+});
+
 // Per-request review-only override: `submitPr` carries `convergeOnly` onto the convergence
 // instance so `pr.finalize` can stop at `converged` without handing off to the merge-loop. Default
 // false (so the global auto-merge default governs); true when the caller pins review-only.

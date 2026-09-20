@@ -31,7 +31,7 @@ import { deriveListBucket, deriveStage } from "./stage.ts";
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const MIGRATION_LATEST = "099_feature_read_model_ack_open.sql";
+const MIGRATION_LATEST = "112_feature_read_model_opened_midhandoff.sql";
 
 // The base `feature_runs` shape the VIEW reads, plus the `user_tasks` inbox (034) the `attention`
 // derivation `EXISTS`-reads, plus a stand-in for the managed `feature_runs__tracking` derived VIEW
@@ -251,6 +251,85 @@ test("the migration 080 VIEW derives list_bucket EXACTLY like deriveListBucket (
       `${key} (status=${status}, acknowledged=${ackAt !== null}): list_bucket`,
     );
   }
+});
+
+test("RED/GREEN #808: a raise-only `opened` run is DISMISSABLE into History (ack_open=1, list_bucket active→history on ack) though the pipeline STILL renders `PR open`", () => {
+  // A raise-only feature run (converge not requested) ends at status `opened`: a PR was raised and the
+  // run is FINISHED. #808 folds a COMPLETED such run's frozen `running` status to `opened` so it stops
+  // wedging in Active. But before the ack/History terminal set was decoupled from the stage-`Done` set,
+  // `opened` (deliberately a LIVE `PR open` STAGE, excluded from STAGE_DONE_STATUSES) had `ack_open=0`
+  // and `list_bucket='active'` forever — so `acknowledgeDone` 409'd and the run stayed wedged, the exact
+  // bug #808 aims to fix. The wider FEATURE_ACK_TERMINAL_STATUSES makes `opened` dismissable while the
+  // pipeline STAGE still classifies on STAGE_DONE_STATUSES (so it renders `PR open`, never `Done`).
+  const db = viewDb();
+
+  // Unacknowledged raise-only run: dismissable and still in Active (stays until the operator ticks off).
+  addRun(db, "o/r#opened", { status: "opened", pr_key: "o/r#pr1" });
+  const open = projection(db, "o/r#opened");
+  assertEquals(open.stage, "PR open", "a raise-only `opened` run STILL renders the LIVE `PR open` stage, not Done");
+  assertEquals(open.stage_state, null, "its stage is in-progress (no terminal render state) — it is not `Done`");
+  assertEquals(open.ack_open, 1, "the finished raise-only run is dismissable (ack_open=1) — acknowledgeDone no longer 409s");
+  assertEquals(open.list_bucket, "active", "an un-dismissed `opened` run sits in Active until the operator ticks it off");
+  assertEquals(open.list_bucket, deriveListBucket("opened", null), "matches the TS oracle");
+
+  // Acknowledged raise-only run: dismissed to History (ack_open closes), pipeline still `PR open`.
+  addRun(db, "o/r#openedAck", { status: "opened", pr_key: "o/r#pr2", acknowledged_at: "2026-02-02T00:00:00Z" });
+  const acked = projection(db, "o/r#openedAck");
+  assertEquals(acked.list_bucket, "history", "a dismissed `opened` run drops to History (no longer wedged in Active)");
+  assertEquals(acked.list_bucket, deriveListBucket("opened", "2026-02-02T00:00:00Z"), "matches the TS oracle");
+  assertEquals(acked.ack_open, 0, "an already-dismissed run offers no Dismiss affordance");
+  assertEquals(acked.stage, "PR open", "dismissal does NOT reclassify the pipeline STAGE to Done — it stays `PR open`");
+});
+
+test("#808: a `converging` run stays LIVE (NOT dismissable) — the ack set excludes it (still in the convergence loop)", () => {
+  // `converging` is terminal-for-redispatch but the PR is still in flight — `pollFeatureDelivery` keeps
+  // reconciling it to merged/converged/abandoned — so it must NOT be dismissable (that is why the ack
+  // set is NARROWER than FEATURE_TERMINAL_STATUSES: it adds `opened` but excludes `converging`).
+  const db = viewDb();
+  addRun(db, "o/r#conv", { status: "converging", pr_key: "o/r#pr3" });
+  const row = projection(db, "o/r#conv");
+  assertEquals(row.stage, "Converging", "a handed-off run renders the LIVE Converging stage");
+  assertEquals(row.ack_open, 0, "a still-converging run is NOT dismissable");
+  assertEquals(row.list_bucket, "active", "it stays in Active (live), never History");
+});
+
+test("RED/GREEN #808 follow-up: a MID-HANDOFF `opened` run (converge=1 AND pr_key set) is NOT dismissable, but a finished `opened` (raise-only, or keyless converge=1) IS", () => {
+  // `record-feature` writes `status='opened'` for a converge-REQUESTED run too, BEFORE `gw-converge`
+  // routes it into `converge-feature` (which flips it to `converging`). In that window the row reads
+  // `opened` while the engine instance is still ACTIVE, so offering Dismiss would let a premature ack
+  // later drag a still-converging run to History. The row distinguishes the transient (`converge=1 AND
+  // pr_key IS NOT NULL`) from a genuinely-finished `opened`. Same mid-flight guard the epic model uses.
+  const db = viewDb();
+
+  // Mid-handoff: converge requested AND a keyed PR — about to enter the convergence loop. NOT dismissable.
+  addRun(db, "o/r#mid", { status: "opened", converge: 1, pr_key: "o/r#pr1" });
+  const mid = projection(db, "o/r#mid");
+  assertEquals(mid.stage, "PR open", "a mid-handoff `opened` still renders the LIVE `PR open` stage");
+  assertEquals(mid.ack_open, 0, "a mid-handoff `opened` run is NOT dismissable (it is about to hand off to converging)");
+  assertEquals(mid.list_bucket, "active", "it stays in Active — a premature ack must never drag a converging run to History");
+  // SQL/TS oracle parity (PR #809 review): the `deriveListBucket` adapter MUST receive `converge`/`pr_key`
+  // — the mid-handoff carve-out reads them — or it diverges from the VIEW for this state.
+  assertEquals(mid.list_bucket, deriveListBucket("opened", null, { converge: 1, pr_key: "o/r#pr1" }), "TS oracle matches SQL for a mid-handoff `opened`");
+
+  // A stray/premature ack on a mid-handoff row must STILL not drop it to History.
+  addRun(db, "o/r#midAck", { status: "opened", converge: 1, pr_key: "o/r#pr2", acknowledged_at: "2026-02-02T00:00:00Z" });
+  assertEquals(projection(db, "o/r#midAck").list_bucket, "active", "a stray ack on a mid-handoff `opened` does NOT move it to History");
+  // RED without the `converge`/`pr_key` args: a converge/pr_key-blind oracle would wrongly return `history`
+  // for this ACKED mid-handoff row (the parity gap the review flagged); with them it agrees with the VIEW.
+  assertEquals(
+    projection(db, "o/r#midAck").list_bucket,
+    deriveListBucket("opened", "2026-02-02T00:00:00Z", { converge: 1, pr_key: "o/r#pr2" }),
+    "TS oracle matches SQL for an ACKED mid-handoff `opened` (stays active, not history)",
+  );
+
+  // Raise-only (converge=0) with a PR: a FINISHED run — dismissable (the #808 case).
+  addRun(db, "o/r#raise", { status: "opened", converge: 0, pr_key: "o/r#pr3" });
+  assertEquals(projection(db, "o/r#raise").ack_open, 1, "a raise-only `opened` run (converge=0) is dismissable");
+
+  // Keyless `opened` with converge requested: never satisfied the gateway's `prKey != null`, fell through
+  // to End — a FINISHED run, so dismissable (not a mid-handoff, since it never handed off).
+  addRun(db, "o/r#keyless", { status: "opened", converge: 1, pr_key: null });
+  assertEquals(projection(db, "o/r#keyless").ack_open, 1, "a keyless `opened` (converge=1, pr_key NULL) is finished and dismissable");
 });
 
 test("the migration 080 VIEW IGNORES any stale STORED projection columns — it reads only from status et al.", () => {

@@ -109,12 +109,29 @@ export function deriveStage(run: StageInput): DerivedStage {
   };
 }
 
-/** The Active/History partition label (§5): `history` iff the row is in a truly-terminal status AND
+/** The Active/History partition label (§5): `history` iff the row is DISMISSABLE-terminal AND
  * acknowledged; otherwise `active` (live runs + terminal-but-UNACKNOWLEDGED runs). DERIVED on read from
  * the ONE `featureReadModel` `list_bucket` declaration — the same AST the VIEW compiles (migration 076),
  * NOT a write-time projection: the page's tabs filter the VIEW's derived `list_bucket`, and the stored
  * `feature_runs.list_bucket` base column is vestigial (retired as a write projection, issue #439). This
- * adapter is the TS lowering of that derivation, used off the write path (redispatch gating, tests). */
-export function deriveListBucket(status: string, acknowledgedAt: string | null | undefined): "active" | "history" {
-  return evalDerived<"active" | "history">("list_bucket", { [EFFECTIVE_STATUS_COLUMN]: status, acknowledged_at: acknowledgedAt ?? null });
+ * adapter is the TS lowering of that derivation, used off the write path (redispatch gating, tests).
+ *
+ * The `list_bucket` derivation is NOT a pure function of `status`/`acknowledged_at` alone: its
+ * DISMISSABLE-terminal predicate ({@link featureDismissableTerminal}) also reads `converge`/`pr_key` to
+ * carve out a mid-handoff `opened` transient (issue #808 follow-up). The optional `row` MUST therefore
+ * carry those two columns for any `opened` input, or the TS oracle diverges from the SQL VIEW for the
+ * mid-handoff case (SQL keeps it `active`; a converge/pr_key-blind oracle would drop an acked one to
+ * `history`) — the exact SQL/TS parity gap the PR #809 review flagged. Omit `row` only for a status
+ * that cannot be a mid-handoff `opened`. */
+export function deriveListBucket(
+  status: string,
+  acknowledgedAt: string | null | undefined,
+  row?: { pr_key?: string | null; converge?: number | boolean | null },
+): "active" | "history" {
+  return evalDerived<"active" | "history">("list_bucket", {
+    [EFFECTIVE_STATUS_COLUMN]: status,
+    acknowledged_at: acknowledgedAt ?? null,
+    pr_key: row?.pr_key ?? null,
+    converge: row?.converge ?? null,
+  });
 }
