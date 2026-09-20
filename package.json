@@ -61,7 +61,8 @@
     "pree2e": "urban gen",
     "e2e": "node --experimental-strip-types --test \"e2e/**/*.e2e.ts\"",
     "lint": "biome check app operations workers pages components scripts e2e main.ts",
-    "lint:fix": "biome check --write app operations workers pages components scripts e2e main.ts"
+    "lint:fix": "biome check --write app operations workers pages components scripts e2e main.ts",
+    "train:decision": "node --experimental-strip-types scripts/train-decision-model.ts"
   },
   "dependencies": {
     "@nanobpm/agentic": "^0.14.0",
