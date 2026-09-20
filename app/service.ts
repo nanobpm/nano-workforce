@@ -2274,22 +2274,32 @@ export async function pollPromotion(data: DataLayer, engine: EngineClient, token
  *    is left to the `onTerminated` edge and never re-queried every pass. Writes only on a real
  *    COMPLETED read (idempotent — a pass over a still-active or already-terminal run is a no-op).
  *
- * 3. MID-HANDOFF `opened` → `abandoned` (from the engine instance; PR #809 review). `record-feature`
- *    writes base `status = opened` for a converge-REQUESTED run too, BEFORE `gw-converge` hands it to
- *    `converge-feature` (which flips it to `converging`). That transient `opened` + `converge=1` +
- *    `pr_key` window is NOT dismissable (`featureReadModel` excludes it so a premature ack can't drag a
- *    still-converging run to History), yet `opened` is no `instanceTracking` activeStatus and neither
- *    edge (1) nor (2) scans it — so an instance TERMINATED mid-handoff would strand the row in Active
- *    forever with `ack_open=0` and no owner. This owns that liveness: a mid-handoff row can only LEAVE
- *    `opened` by writing `converging`, so an instance that is a KNOWN terminal (or genuinely absent)
- *    while the row still reads `opened` means the handoff was interrupted — fold it to the terminal
- *    `abandoned` (mirroring `onTerminated`). Applies the reconcile-probe tri-state (app/reconcile.ts):
- *    ACTIVE is left for `converge-feature`, and an instance whose snapshot carries an empty/unknown
- *    state is SPARED (never folded off a wire shape we misread). A key edge (2) folded THIS pass is
- *    skipped (it is already terminalized, not stranded). Read off the derived tracking VIEW so an
+ * 3. MID-HANDOFF `opened` → terminal (PR #809 review / escalation 162). `record-feature` writes base
+ *    `status = opened` for a converge-REQUESTED run too, BEFORE `gw-converge` hands it to
+ *    `converge-feature` (which flips it to `converging` and enrolls the PR via `submitPr`). That
+ *    transient `opened` + `converge=1` + `pr_key` window is NOT dismissable (`featureReadModel` excludes
+ *    it so a premature ack can't drag a still-converging run to History), yet `opened` is no
+ *    `instanceTracking` activeStatus and neither edge (1) nor (2) scans it — so a row stranded there has
+ *    no owner. This owns that liveness, deciding PR-FIRST (never off the FEATURE instance state alone —
+ *    that was the drift surface): the `pull_requests` row keyed by `pr_key` is the single source of truth
+ *    for whether `submitPr` enrollment happened. If a PR row EXISTS, enrollment succeeded and the PR is a
+ *    live/settled SEPARATE process whose outcome edge (1) owns — fold `opened` → `converging`/terminal via
+ *    the same `deriveFeatureDelivery`, NEVER `abandoned` (it is structurally impossible for this edge to
+ *    abandon an enrolled PR). ONLY when NO PR row exists (enrollment never happened) is the engine probed:
+ *    a mid-handoff row can then only be stranded if its instance died before `submitPr`, so a KNOWN
+ *    terminal (or genuinely absent) instance means the handoff was interrupted — fold to the terminal
+ *    `abandoned` (mirroring `onTerminated`). That probe applies the reconcile-probe tri-state
+ *    (app/reconcile.ts): ACTIVE is left for `converge-feature`, and an instance whose snapshot carries an
+ *    empty/unknown state is SPARED (never folded off a wire shape we misread). A key edge (2) folded THIS
+ *    pass is skipped (it is already terminalized, not stranded). Read off the derived tracking VIEW so an
  *    out-of-band fold is not re-queried; scoped to `converge=1 AND pr_key` (a raise-only or keyless
  *    `opened` is genuinely terminal, owned by its own dismissable edge). */
-export async function pollFeatureDelivery(data: DataLayer, engine: Pick<EngineClient, "searchProcessInstances">) {
+export async function pollFeatureDelivery(
+  data: DataLayer,
+  // Full `EngineClient`: edge (1) re-enrolls a converging run whose PR row is still missing via
+  // `submitPr` (which needs `createInstance`), not just the `searchProcessInstances` the fold edges use.
+  engine: EngineClient,
+) {
   // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
   // Read the ADR-0065 derived edge (`derived_status`) so a terminated run reads `abandoned`.
   const statusByPrKey = new Map<string, string>();
@@ -2301,6 +2311,17 @@ export async function pollFeatureDelivery(data: DataLayer, engine: Pick<EngineCl
     if (!run.pr_key) continue;
     try {
       const prStatus = statusByPrKey.get(run.pr_key) ?? null;
+      // No `pull_requests` row for this `pr_key` yet (`prStatus === null`). Since `converge-feature`
+      // now writes `converging` BEFORE `submitPr` (PR #809 review), a terminate/crash in that gap — or
+      // an old submit failure / store desync — leaves a `converging` row whose PR was never enrolled;
+      // it would otherwise wedge here forever ("PR record missing"). RE-ENROLL it idempotently, exactly
+      // as `pollPromotion` re-enrolls a promotion PR whose convergence row went missing: `submitPr` is
+      // idempotent on the PR key, so a redundant call on an already-enrolled PR is a no-op. `convergeOnly`
+      // mirrors `converge-feature` — the inverse of the run's `auto_merge` flag.
+      if (prStatus === null) {
+        const parsed = parsePr(run.pr_key);
+        if (parsed) await submitPr(data, engine, parsed, [], MAX_ROUNDS, run.auto_merge !== 1, run.feature_key);
+      }
       const { status, label } = deriveFeatureDelivery(prStatus);
       if (run.status !== status || run.delivery_label !== label) {
         await featureRuns(data).update(run.feature_key, {
@@ -2368,6 +2389,21 @@ export async function pollFeatureDelivery(data: DataLayer, engine: Pick<EngineCl
     if (foldedByCompletion.has(run.feature_key)) continue;
     const processKey = run.process_key;
     try {
+      // PR-DERIVED liveness FIRST (PR #809 review / escalation 162 decision 2): a `pull_requests` row
+      // keyed by `pr_key` is the single source of truth for "did `submitPr` enrollment actually happen".
+      // If one EXISTS, `converge-feature` already enrolled the PR — it is a live/settled SEPARATE process
+      // whose outcome edge (1) owns — so the handoff was NOT interrupted regardless of the FEATURE
+      // instance's engine state. Project the PR's derived outcome onto the row (fold `opened` →
+      // `converging`/terminal via the SAME `deriveFeatureDelivery` edge (1) uses) and NEVER abandon it.
+      // This makes it structurally impossible for the handoff edge to abandon an enrolled PR — inferring
+      // "interrupted" from the FEATURE instance state alone was the drift surface. The engine probe below
+      // is reached ONLY when no PR row exists (enrollment never happened), the genuine interrupted handoff.
+      const prStatus = statusByPrKey.get(run.pr_key) ?? null;
+      if (prStatus !== null) {
+        const { status, label } = deriveFeatureDelivery(prStatus);
+        await foldCompletedFeatureRun(data, run.feature_key, processKey, status, label, "opened");
+        continue;
+      }
       const snapshots = await engine.searchProcessInstances({ processInstanceKeys: [processKey] });
       const match = snapshots.find((s) => String(s.processInstanceKey) === processKey);
       // Interpret the snapshot with the SAME tri-state semantics as the reconcile engine-probe

@@ -10,10 +10,28 @@ import { withTrackingViews } from "../test/trackingViews.ts";
 import { deriveFeatureCompletion, deriveFeatureDelivery, foldCompletedFeatureRun } from "./feature.ts";
 import { pollFeatureDelivery } from "./service.ts";
 
+// Pin the GitHub transport to `token` with an EMPTY token so the edge (1) re-enroll tests — which now
+// reach the real `submitPr` for a converging run whose PR row is missing (PR #809 review) — never shell
+// out to `gh`/`fetch`: `fetchPrMeta` short-circuits to `null` (best-effort), keeping the tests hermetic.
+const PRIOR_TRANSPORT = process.env["NANO_PR_GITHUB_TRANSPORT"];
+const PRIOR_TOKEN = process.env["GITHUB_TOKEN"];
+process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+process.env["GITHUB_TOKEN"] = "";
+process.on("exit", () => {
+  if (PRIOR_TRANSPORT === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+  else process.env["NANO_PR_GITHUB_TRANSPORT"] = PRIOR_TRANSPORT;
+  if (PRIOR_TOKEN === undefined) delete process.env["GITHUB_TOKEN"];
+  else process.env["GITHUB_TOKEN"] = PRIOR_TOKEN;
+});
+
 // An engine stub for the CONVERGING-reconcile tests (edge 1), which seed no `running` runs — the
 // COMPLETED→terminal fold (edge 2, issue #808) therefore reads no instance. The completion-fold tests
-// below pass their own state-returning stub.
-const STUB_ENGINE = { searchProcessInstances: async () => [] as any[] } as any;
+// below pass their own state-returning stub. `createInstance` records the re-enroll (edge 1, PR #809)
+// and returns a fresh instance key so `submitPr` completes; `searchProcessInstances` stays empty.
+const STUB_ENGINE = {
+  searchProcessInstances: async () => [] as any[],
+  createInstance: async () => ({ processInstanceKey: "pi-reenroll" }),
+} as any;
 
 function memData(): { data: DataLayer; stores: Record<string, any[]> } {
   const stores: Record<string, any[]> = {};
@@ -30,6 +48,9 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
       async find(where: any = {}) {
         return rows.filter((r) => match(r, where));
       },
+      async findOne(where: any = {}) {
+        return rows.find((r) => match(r, where));
+      },
       async insert(row: any) {
         rows.push({ ...row });
         return row[pk];
@@ -37,6 +58,9 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
       async update(id: any, patch: any) {
         const r = rows.find((row) => row[pk] === id);
         if (r) Object.assign(r, patch);
+      },
+      async delete(id: any) {
+        for (let i = rows.length - 1; i >= 0; i--) if (rows[i][pk] === id) rows.splice(i, 1);
       },
     };
   }
@@ -130,15 +154,29 @@ test("pollFeatureDelivery: only touches converging runs with a pr_key", async ()
   assertEquals(stores.feature_runs[2].status, "blocked");
 });
 
-test("pollFeatureDelivery: a dangling pr_key (missing PR row) stays converging, never a false terminal", async () => {
+test("pollFeatureDelivery: a converging run whose PR row is MISSING is re-enrolled (idempotent) and stays converging, never a false terminal (PR #809)", async () => {
   const { data, stores } = memData();
   stores.feature_runs = [
-    { feature_key: "o/r#6", status: "converging", pr_key: "o/r#404", delivery_label: null },
+    { feature_key: "o/r#6", status: "converging", pr_key: "o/r#404", auto_merge: 0, delivery_label: null },
   ];
   stores.pull_requests = [];
+  let created = 0;
+  const engine = {
+    searchProcessInstances: async () => [],
+    createInstance: async () => {
+      created++;
+      return { processInstanceKey: "pi-404" };
+    },
+  } as any;
 
-  await pollFeatureDelivery(data, STUB_ENGINE);
+  await pollFeatureDelivery(data, engine);
 
+  // `converge-feature` now writes `converging` BEFORE `submitPr`, so a crash in that gap leaves a
+  // converging row with no enrolled PR. Edge (1) heals it by RE-ENROLLING via `submitPr` (which starts
+  // a fresh convergence instance) rather than wedging it forever at "PR record missing".
+  assertEquals(created, 1, "the missing-PR converging run is re-enrolled via submitPr");
+  assertEquals(stores.pull_requests.length, 1, "submitPr registered the pull_requests row");
+  assertEquals(stores.pull_requests[0].pr_key, "o/r#404");
   assertEquals(stores.feature_runs[0].status, "converging");
   assertEquals(stores.feature_runs[0].delivery_label, "PR record missing");
 });
@@ -386,6 +424,43 @@ test("pollFeatureDelivery: a mid-handoff opened run whose instance read a KNOWN 
 
   assertEquals(stores.feature_runs[0].status, "abandoned");
   assertEquals(stores.feature_runs[0].delivery_label, "handoff interrupted");
+});
+
+test("RED/GREEN pollFeatureDelivery: a mid-handoff opened run whose PR row EXISTS (enrolled) folds to converging, NEVER abandoned, even when the instance TERMINATED (PR #809 review / escalation 162)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#30", status: "opened", process_key: "pi-30", pr_key: "o/r#5", converge: 1, delivery_label: null },
+  ];
+  // `converge-feature` already enrolled the PR (a `pull_requests` row EXISTS), then the FEATURE instance
+  // terminated mid-handoff before flipping the row to `converging`. The PR is a live/settled SEPARATE
+  // process — the handoff was NOT interrupted.
+  stores.pull_requests = [{ pr_key: "o/r#5", status: "converging" }];
+  // Instance gone AND read as a KNOWN terminal — either signal would drive the OLD instance-only edge to
+  // `abandoned`. The PR-first rule must override both.
+  const engine = { searchProcessInstances: async () => [{ processInstanceKey: "pi-30", state: "TERMINATED" }] } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  // Red before the fix (instance-only edge): folds an ENROLLED, live PR to `abandoned`, losing its outcome.
+  assertEquals(stores.feature_runs[0].status, "converging", "an enrolled PR is projected, never abandoned");
+  assertEquals(stores.feature_runs[0].delivery_label, "converging");
+});
+
+test("pollFeatureDelivery: a mid-handoff opened run whose enrolled PR already MERGED projects the terminal outcome (merged), not abandoned (PR #809 review / escalation 162)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#31", status: "opened", process_key: "pi-31", pr_key: "o/r#5", converge: 1, delivery_label: null },
+  ];
+  stores.pull_requests = [{ pr_key: "o/r#5", status: "merged" }];
+  let queried = false;
+  // The PR row settles the liveness question — the handoff edge must not even probe the engine.
+  const engine = { searchProcessInstances: async () => { queried = true; return []; } } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(queried, false, "an existing PR row is authoritative — no engine probe needed");
+  assertEquals(stores.feature_runs[0].status, "merged");
+  assertEquals(stores.feature_runs[0].delivery_label, "merged");
 });
 
 test("RED/GREEN pollFeatureDelivery: a mid-handoff opened run whose instance snapshot carries an EMPTY/UNKNOWN state is SPARED, never folded (PR #809 review, thread 3)", async () => {
