@@ -346,6 +346,7 @@ test("submitPr re-enrolls a phantom row (non-terminal, process_key NULL) rather 
     };
     const data = {
       table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+      open: () => memOpen(stores as any),
     } as any;
     let created = 0;
     const engine = {

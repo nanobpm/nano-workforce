@@ -71,6 +71,22 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
   // CAS predicate (same feature_key + process_key + status = the observed transient, now a bound param).
   (data as any).open = () => ({
     async exec(sql: string, params: any[]) {
+      // The re-enrol edge (1) heals a partially-enrolled PR via `submitPr`, which — on an existing row —
+      // atomically wipes that PR's durable adjudication memory (`resetAdjudications` →
+      // `DELETE FROM "pr_adjudications" WHERE "pr_key" = ?`, issue #806). Model it against the in-memory
+      // `pr_adjudications` store so the re-enrol path completes exactly as it does on SQLite.
+      if (/DELETE FROM "pr_adjudications" WHERE "pr_key" = \?/.test(sql)) {
+        const [pr_key] = params;
+        const rows = stores.pr_adjudications ?? [];
+        let changed = 0;
+        for (let i = rows.length - 1; i >= 0; i--) {
+          if (rows[i].pr_key === pr_key) {
+            rows.splice(i, 1);
+            changed++;
+          }
+        }
+        return { changed };
+      }
       if (!/UPDATE "feature_runs" SET .* WHERE "feature_key" = \? AND "process_key" = \? AND "status" = \?/.test(sql)) {
         throw new Error(`memData mock: unhandled sql: ${sql}`);
       }
