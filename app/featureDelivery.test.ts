@@ -181,6 +181,59 @@ test("pollFeatureDelivery: a converging run whose PR row is MISSING is re-enroll
   assertEquals(stores.feature_runs[0].delivery_label, "PR record missing");
 });
 
+test("pollFeatureDelivery: a converging run whose PR row is PARTIALLY enrolled (present, non-terminal, process_key NULL) is re-enrolled — a create-instance crash after the row insert does not wedge it (PR #809)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#40", status: "converging", pr_key: "o/r#405", auto_merge: 0, delivery_label: null },
+  ];
+  // `submitPr` inserts the PR row (`status='converging'`) BEFORE `engine.createInstance`, then writes
+  // `process_key` only after it returns. A create-instance crash in that window leaves this shape:
+  // a NON-terminal PR row with NO `process_key` and NO live instance (#704/#497 phantom). `prStatus`
+  // is non-null ("converging"), so the missing-row check alone would skip it and it would wedge forever.
+  stores.pull_requests = [{ pr_key: "o/r#405", status: "converging", process_key: null }];
+  let created = 0;
+  const engine = {
+    searchProcessInstances: async () => [],
+    createInstance: async () => {
+      created++;
+      return { processInstanceKey: "pi-405" };
+    },
+  } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  // Edge (1) recognises the partial enrollment and RE-ENROLLS via the idempotent `submitPr`, which now
+  // treats a keyless non-terminal row as resubmittable — re-creating the instance and installing the key.
+  assertEquals(created, 1, "the partially-enrolled converging run is re-enrolled via submitPr");
+  assertEquals(stores.pull_requests.length, 1, "no duplicate pull_requests row is inserted");
+  assertEquals(stores.pull_requests[0].process_key, "pi-405", "submitPr installed the missing process_key");
+  assertEquals(stores.feature_runs[0].status, "converging");
+});
+
+test("pollFeatureDelivery: a converging run whose PR is FULLY enrolled (process_key present) is NOT re-enrolled — no redundant createInstance (PR #809)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#41", status: "converging", pr_key: "o/r#406", auto_merge: 0, delivery_label: null },
+  ];
+  stores.pull_requests = [{ pr_key: "o/r#406", status: "waiting_review", process_key: "pi-406" }];
+  let created = 0;
+  const engine = {
+    searchProcessInstances: async () => [],
+    createInstance: async () => {
+      created++;
+      return { processInstanceKey: "pi-x" };
+    },
+  } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  // A live PR (non-null `process_key`) is enrolled — edge (1) must project its status, never re-enroll.
+  assertEquals(created, 0, "a fully-enrolled PR is never re-enrolled");
+  assertEquals(stores.pull_requests[0].process_key, "pi-406");
+  assertEquals(stores.feature_runs[0].status, "converging");
+  assertEquals(stores.feature_runs[0].delivery_label, "waiting_review");
+});
+
 // ── Edge 2: COMPLETED → terminal fold for a normally-completing `running` run (issue #808) ─────────
 
 test("deriveFeatureCompletion: a run that raised a PR folds to opened", () => {
@@ -254,7 +307,7 @@ test("pollFeatureDelivery: never touches a CONVERGING run in the COMPLETED fold 
   stores.feature_runs = [
     { feature_key: "o/r#11", status: "converging", process_key: "pi-11", pr_key: "o/r#5", converge: 1, delivery_label: null },
   ];
-  stores.pull_requests = [{ pr_key: "o/r#5", status: "waiting_review" }];
+  stores.pull_requests = [{ pr_key: "o/r#5", status: "waiting_review", process_key: "pi-pr5" }];
   let queried = false;
   const engine = { searchProcessInstances: async () => { queried = true; return [{ processInstanceKey: "pi-11", state: "COMPLETED" }]; } } as any;
 

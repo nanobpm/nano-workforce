@@ -534,7 +534,16 @@ export async function submitPr(
   // it `alreadyRunning` forever (the #497 phantom). Route the idempotency gate through the derived view
   // so a cancelled PR is correctly seen terminal and RESUBMITTABLE.
   const trackedExisting = existing ? await prsTracking(data).get(parsed.prKey) : undefined;
-  if (trackedExisting && !TERMINAL_STATUSES.includes(trackedExisting.derived_status)) {
+  // Phantom-enrollment guard (#704/#497, PR #809 review): a non-terminal row is "already running" ONLY
+  // if an engine instance was actually dispatched — i.e. it holds a `process_key`. `submitPr` INSERTS
+  // the `pull_requests` row (`status='converging'`, `process_key` NULL) BEFORE `createInstance` and
+  // writes `process_key` only AFTER it returns (below), so a create-instance failure/crash in that
+  // window strands a `converging` row with NO `process_key` and NO live instance. Classifying it off
+  // the derived status alone would wedge it `alreadyRunning` forever (and `pollFeatureDelivery` edge (1)
+  // would skip it as non-terminal, never re-enrolling). Treat a keyless non-terminal row as
+  // RESUBMITTABLE — fall through and re-enroll, exactly as `startFeature`'s intake guard (feature.ts)
+  // treats a keyless `running` feature row. A terminal row (any `process_key`) already falls through.
+  if (trackedExisting && existing?.process_key != null && !TERMINAL_STATUSES.includes(trackedExisting.derived_status)) {
     return { prKey: parsed.prKey, alreadyRunning: true };
   }
 
@@ -2303,7 +2312,16 @@ export async function pollFeatureDelivery(
   // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
   // Read the ADR-0065 derived edge (`derived_status`) so a terminated run reads `abandoned`.
   const statusByPrKey = new Map<string, string>();
-  for (const pr of await prsTracking(data).all()) statusByPrKey.set(pr.pr_key, pr.derived_status);
+  // Also index each tracked PR row so edge (1) can distinguish a NEVER-enrolled PR (no row) from a
+  // PARTIALLY-enrolled one (row present, but `submitPr` crashed after the row insert and before
+  // `createInstance` returned, so `process_key` is NULL and no instance exists — #704/#497 phantom).
+  // Keep the whole row (not just the key) so the terminal-status classification below reads the
+  // ADR-0065 `.derived_status`, satisfying the derive-only-reader class guard (#503/#704).
+  const prRowByKey = new Map<string, TrackedPullRequest>();
+  for (const pr of await prsTracking(data).all()) {
+    statusByPrKey.set(pr.pr_key, pr.derived_status);
+    prRowByKey.set(pr.pr_key, pr);
+  }
   // Only `converging` runs are ever reconciled — query them via the `feature_runs(status)` index
   // (db/migrations/028) instead of scanning all history, so this pass stays O(in-flight), not
   // O(total runs), as the table grows.
@@ -2311,14 +2329,24 @@ export async function pollFeatureDelivery(
     if (!run.pr_key) continue;
     try {
       const prStatus = statusByPrKey.get(run.pr_key) ?? null;
-      // No `pull_requests` row for this `pr_key` yet (`prStatus === null`). Since `converge-feature`
-      // now writes `converging` BEFORE `submitPr` (PR #809 review), a terminate/crash in that gap — or
-      // an old submit failure / store desync — leaves a `converging` row whose PR was never enrolled;
-      // it would otherwise wedge here forever ("PR record missing"). RE-ENROLL it idempotently, exactly
-      // as `pollPromotion` re-enrolls a promotion PR whose convergence row went missing: `submitPr` is
-      // idempotent on the PR key, so a redundant call on an already-enrolled PR is a no-op. `convergeOnly`
+      const trackedPr = prRowByKey.get(run.pr_key) ?? null;
+      // RE-ENROLL a converging run whose PR is not actually live, in EITHER of two shapes (PR #809
+      // review):
+      //   (a) NO `pull_requests` row (`prStatus === null`) — since `converge-feature` writes
+      //       `converging` BEFORE `submitPr`, a terminate/crash in that gap (or an old submit failure /
+      //       store desync) leaves a converging row whose PR was never enrolled; and
+      //   (b) a PARTIALLY-enrolled row — present but with NO `process_key` and a non-terminal status:
+      //       `submitPr` inserts the row before `createInstance`, so a create-instance failure/crash
+      //       after the insert leaves a `converging` PR row with `process_key` NULL and no instance
+      //       (#704/#497 phantom). `prStatus` is non-null there, so the (a) check alone would skip it and
+      //       it would wedge `converging` forever with no PR process.
+      // Both heal via the SAME idempotent `submitPr`: it is idempotent on the PR key (a redundant call
+      // on an already-live PR early-returns `alreadyRunning`), and now treats a keyless non-terminal row
+      // as resubmittable, so it re-creates the instance and installs `process_key`. `convergeOnly`
       // mirrors `converge-feature` — the inverse of the run's `auto_merge` flag.
-      if (prStatus === null) {
+      const partiallyEnrolled =
+        trackedPr != null && trackedPr.process_key == null && !TERMINAL_STATUSES.includes(trackedPr.derived_status);
+      if (prStatus === null || partiallyEnrolled) {
         const parsed = parsePr(run.pr_key);
         if (parsed) await submitPr(data, engine, parsed, [], MAX_ROUNDS, run.auto_merge !== 1, run.feature_key);
       }
