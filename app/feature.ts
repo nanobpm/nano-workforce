@@ -438,6 +438,14 @@ export async function startFeature(
       // `opened`/`skipped`. Nulling it here — exactly as the insert branch below does — makes that
       // guard match zero rows during the window, so the race collapses to a no-op. The new key is
       // written back once the instance is created.
+      //
+      // DEFERRED (issue #810): nulling `process_key` across the `createInstance` await also opens a
+      // SECOND, distinct window — a concurrent `startFeature` for the same key sees `process_key=null`
+      // and, because the already-active guard is null-blind by design, can launch a DUPLICATE instance
+      // that orphans the first. This is a pre-existing intake-path race (the fresh-insert branch below
+      // already nulls the key the same way), out of scope for this reconciliation PR. The race-free fix
+      // — a launch-generation claim / serialized re-seed-and-recheck on the intake path — is tracked in
+      // issue #810; do NOT expand this PR back into the intake path to fix it here.
       process_key: null,
       pr_key: null,
       converge: converge ? 1 : 0,

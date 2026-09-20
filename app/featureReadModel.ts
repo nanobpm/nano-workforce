@@ -168,6 +168,16 @@ const openedMidHandoff: Expr = and(
   eq(col("pr_key"), col("pr_key")),
 );
 
+/* DEFERRED (issue #810): `openedMidHandoff` only excludes the `converge=1 AND pr_key` handoff window,
+ * so a raise-only (`converge=0`) or keyless `opened` row IS treated as dismissable-terminal even in the
+ * brief window before `record-feature`'s token reaches `gw-blocked`/`gw-converge`/End. This is an
+ * accepted, bounded sub-transaction transient: `record-feature` writes `opened` only AFTER the
+ * productive work (the PR was raised) is done, so the sole still-"live" work in that window is one inert
+ * gateway→End hop the instance auto-completes near-instantly — there is nothing productive for an
+ * ack/resubmission to hide or replace. The categorical fix — gating dismissability on a PERSISTED
+ * engine-completion marker (which would reverse the option-1a `pr_key` heuristic adjudicated in
+ * escalation 162) — is tracked in issue #810; do NOT reverse option-1a here. */
+
 /** The feature DISMISSABLE-terminal PREDICATE — the epic read model's mid-flight refinement
  * (app/planReadModel.ts / app/listBucket.ts) applied to features. A row is dismissable-terminal IFF its
  * effective (terminal-folded) status is in the ONE canonical {@link FEATURE_ACK_TERMINAL_STATUSES} set
