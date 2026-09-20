@@ -1,3 +1,9 @@
+## [0.189.3](https://github.com/nanobpm/nano-workforce/compare/v0.189.2...v0.189.3) (2026-09-20)
+
+### Bug Fixes
+
+* **feature:** reconcile a COMPLETED feature-run engine instance to terminal (raise-only runs wedge in Active) ([#809](https://github.com/nanobpm/nano-workforce/issues/809)) ([39add8c](https://github.com/nanobpm/nano-workforce/commit/39add8c81f419ef41c7c4596adb1f5ad05c80e5a)), closes [#624](https://github.com/nanobpm/nano-workforce/issues/624) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#3](https://github.com/nanobpm/nano-workforce/issues/3) [704/#497](https://github.com/704/nano-workforce/issues/497) [503/#704](https://github.com/503/nano-workforce/issues/704) [#810](https://github.com/nanobpm/nano-workforce/issues/810) [#810](https://github.com/nanobpm/nano-workforce/issues/810) [#806](https://github.com/nanobpm/nano-workforce/issues/806)
+
 ## [0.189.2](https://github.com/nanobpm/nano-workforce/compare/v0.189.1...v0.189.2) (2026-09-18)
 
 ### Bug Fixes
