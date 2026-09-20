@@ -41,6 +41,12 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   // key (it early-returns `alreadyRunning` for a non-terminal PR), and a `converging` row is owned by
   // edge (1), never by the handoff edge. `convergeOnly` is the inverse of auto-merge: converge-only
   // stops at `converged`; auto-merge lets the merge-loop drive the merge.
+  // #810 (deferred, follow-up to #809 review): this `converging`-before-`submitPr` reorder shrinks the
+  // interrupted-handoff window but does not fully close a duplicate-enrollment race — a poll pass can
+  // observe the row before `submitPr` runs (or observe its keyless in-flight PR row) and re-enroll,
+  // while this worker's own `submitPr` proceeds; `submitPr` only short-circuits once `process_key` is
+  // installed. The race-free fix is an atomic enrollment claim/transaction (same class as #810 §A);
+  // accepted here as a bounded sub-transaction transient per the escalation-163 decision.
   await featureRuns(app.data).update(featureKey, {
     status: "converging",
     pr_key: parsed.prKey,

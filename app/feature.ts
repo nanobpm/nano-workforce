@@ -277,6 +277,12 @@ export async function foldCompletedFeatureRun(
   label: string,
   expectStatus: FeatureRunStatus = "running",
 ): Promise<boolean> {
+  // #810 (deferred, follow-up to #809 review): the `process_key` predicate treats the engine key as a
+  // unique incarnation, but engine keys are REUSABLE after a reset/rewind (see `app/reconcile.ts`). If a
+  // stale terminal read races a re-seed that happens to receive the SAME key, this CAS could still match
+  // and fold a fresh live run. The race-free fix is an engine-incarnation / launch-generation fence on
+  // the guarded write — the same intake-path launch-generation claim tracked in #810 §A; accepted here
+  // as a bounded sub-transaction transient per the escalation-163 decision.
   const res = await data
     .open()
     .exec(

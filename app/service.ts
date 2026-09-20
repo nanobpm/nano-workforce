@@ -2344,6 +2344,13 @@ export async function pollFeatureDelivery(
       // on an already-live PR early-returns `alreadyRunning`), and now treats a keyless non-terminal row
       // as resubmittable, so it re-creates the instance and installs `process_key`. `convergeOnly`
       // mirrors `converge-feature` — the inverse of the run's `auto_merge` flag.
+      // #810 (deferred, follow-up to #809 review): re-enrolling a keyless non-terminal PR row can race
+      // an in-flight `submitPr` — which inserts the PR row BEFORE `createInstance` and installs
+      // `process_key` only afterward — and create a SECOND convergence instance, orphaning whichever
+      // loses. The race-free fix is an atomic enrollment claim/lease distinguishing an in-flight submit
+      // from a failed partial enrollment (the same duplicate-enrollment concurrency class as #810 §A);
+      // accepted here as a bounded sub-transaction transient per the escalation-163 decision. The poll
+      // loop reconciles the surviving instance's delivery status idempotently below.
       const partiallyEnrolled =
         trackedPr != null && trackedPr.process_key == null && !TERMINAL_STATUSES.includes(trackedPr.derived_status);
       if (prStatus === null || partiallyEnrolled) {
