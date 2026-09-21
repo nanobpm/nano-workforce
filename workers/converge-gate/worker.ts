@@ -155,7 +155,15 @@ export function makeHandler(deps: {
       // and persist both the gate's verdict (ground truth) and the scored one for calibration. It is
       // best-effort — `recordConvergeShadow` swallows every error — so the gate verdict below is
       // never perturbed. Only runs on the fully-computed path (where we have the real gate inputs).
-      if (app?.data) await recordConvergeShadow(app.data, { prKey }, gateInput, result);
+      //
+      // Dispatched FIRE-AND-FORGET, never awaited (#812): a locked/stalled SQLite write does not
+      // reject — it simply never settles — so awaiting it would hold this converge-gate job open and
+      // let the engine retry/incident the gate, delaying convergence despite the shadow being
+      // non-gating. Keeping it off the critical path guarantees the gate returns on the gate's own
+      // clock. The synchronous prefix (feature/label derivation) still runs inline; only the DB write
+      // is detached. `.catch` guards against an unhandled rejection (recordConvergeShadow already
+      // swallows internally, so this only ever fires on a truly unexpected throw).
+      if (app?.data) void recordConvergeShadow(app.data, { prKey }, gateInput, result).catch(() => {});
     } catch {
       return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false, reviewStale: false };
     }

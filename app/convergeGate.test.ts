@@ -891,6 +891,31 @@ test("converge-gate #811: the handler persists a shadow row carrying the real ga
   assertEquals(rows[0].ground_truth, "converged");
 });
 
+test("converge-gate #812: a NEVER-SETTLING shadow write does not hold the gate open", async () => {
+  // The shadow write is best-effort AND non-gating, so it must never be on the gate's critical path.
+  // A locked/stalled SQLite write manifests as a promise that never settles (it does not reject, so
+  // recordConvergeShadow's own try/catch cannot rescue it). If the handler AWAITED it, this test
+  // would hang until the runner's timeout. Fire-and-forget dispatch means the handler returns on the
+  // gate's own clock regardless.
+  const handler = await makeUnderTest({
+    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["ok"] }],
+    readReviewBody: async () => "## Overview\nNo suppressed block.",
+  });
+  const stallingApp = {
+    data: {
+      table() {
+        return {
+          insert() {
+            return new Promise<void>(() => {}); // never settles
+          },
+        };
+      },
+    },
+  };
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, stallingApp as any);
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: false });
+});
+
 test("converge-gate #811: a THROWING shadow datasource leaves the gate verdict unchanged", async () => {
   // An unresolved thread blocks; the shadow insert throws. The block verdict must survive intact —
   // the shadow pass is best-effort and can never turn a block into an error or a converge.

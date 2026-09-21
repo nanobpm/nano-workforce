@@ -31,6 +31,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { CONVERGE_LABELS } from "../app/convergeShadow.ts";
 import { evaluate, type Sample, type TrainOptions, trainDecisionModel } from "../app/decisionTrain.ts";
 
 interface Args {
@@ -188,6 +189,26 @@ function main(): void {
   }
 
   const { train, test, inSample } = split(samples, holdout);
+  // A converge-shadow model is scored ONLY over the fixed canonical routes, and `observeConvergeShadow`
+  // (app/convergeShadow.ts) SILENTLY IGNORES any model whose labels don't carry all three — falling back
+  // to the labelled-only observation. The model's label set comes from the TRAINING partition, so if the
+  // deterministic holdout strands a rare route (e.g. a lone `ack-retry`) entirely in `test`, we'd write a
+  // two-label `converge-shadow.json` that every live shadow observation discards while this report claims a
+  // usable calibration model. Fail loudly without writing rather than emit that dead artifact (#812).
+  if (source === "converge-shadow") {
+    const trainLabels = new Set(train.map((s) => s.label));
+    const missing = CONVERGE_LABELS.filter((l) => !trainLabels.has(l));
+    if (missing.length > 0) {
+      console.error(
+        `\nconverge-shadow needs all canonical labels [${CONVERGE_LABELS.join(", ")}] in the TRAINING partition, ` +
+          `but it is missing: ${missing.join(", ")}. A model without every canonical label is silently ignored by ` +
+          `observeConvergeShadow, so writing it would produce a live-dead converge-shadow.json. Gather more ` +
+          `converge-shadow rows (especially the rare route) and retrain — nothing was written.`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+  }
   const opts: TrainOptions = {
     name,
     dim: args.dim ? Number(args.dim) : 4096,
