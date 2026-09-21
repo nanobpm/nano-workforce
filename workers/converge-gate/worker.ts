@@ -42,6 +42,7 @@
 // merge-gating check must escalate-on-uncertainty so #770 cannot recur.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { type ConvergeGateResult, evaluateConvergeGate } from "../../app/convergeGate.ts";
+import { recordConvergeShadow } from "../../app/convergeShadow.ts";
 import {
   fetchBranchHead,
   fetchLatestCopilotReview,
@@ -91,7 +92,7 @@ export function makeHandler(deps: {
   readHeadSha?: HeadReader;
 }): AppJobHandler<In, Out> {
   const readHeadSha = deps.readHeadSha ?? defaultReadHead;
-  return async (job) => {
+  return async (job, app) => {
     const { prKey, repo, prNumber } = job.variables;
     // `parsePr` is total on any input (fails closed to `null` on a missing/non-string prKey), so
     // pass it straight through — a malformed prKey degrades to the fail-closed target check below.
@@ -143,12 +144,26 @@ export function makeHandler(deps: {
       const unresolvedAckThreadCount = unresolved.filter((t) => isAckThread(t)).length;
       const unresolvedThreadCount = unresolved.length - unresolvedAckThreadCount;
       const advisories = parseSuppressedAdvisories(review.body);
-      result = evaluateConvergeGate({
+      const gateInput = {
         unresolvedThreadCount,
         unresolvedAckThreadCount,
         suppressedAdvisories: advisories.map((a) => ({ key: a.key, label: a.label })),
         acknowledgedKeys: parseAckedAdvisories(threadsRead),
-      });
+      };
+      result = evaluateConvergeGate(gateInput);
+      // NON-GATING shadow pass (#811): score this same decision with the tier-3a fixed-answer model
+      // and persist both the gate's verdict (ground truth) and the scored one for calibration. It is
+      // best-effort — `recordConvergeShadow` swallows every error — so the gate verdict below is
+      // never perturbed. Only runs on the fully-computed path (where we have the real gate inputs).
+      //
+      // Dispatched FIRE-AND-FORGET, never awaited (#812): a locked/stalled SQLite write does not
+      // reject — it simply never settles — so awaiting it would hold this converge-gate job open and
+      // let the engine retry/incident the gate, delaying convergence despite the shadow being
+      // non-gating. Keeping it off the critical path guarantees the gate returns on the gate's own
+      // clock. The synchronous prefix (feature/label derivation) still runs inline; only the DB write
+      // is detached. `.catch` guards against an unhandled rejection (recordConvergeShadow already
+      // swallows internally, so this only ever fires on a truly unexpected throw).
+      if (app?.data) void recordConvergeShadow(app.data, { prKey }, gateInput, result).catch(() => {});
     } catch {
       return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false, reviewStale: false };
     }
