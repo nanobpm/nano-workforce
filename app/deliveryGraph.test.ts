@@ -916,6 +916,25 @@ test("#778 redactConnectorValue: an EMBEDDED absolute-URL token (explicit `schem
   assertEquals(redactConnectorValue("owner/repo#42"), "owner/repo#42");
 });
 
+test("#778 redactConnectorValue: an embedded absolute-URL token whose userinfo or path carries an XML-valid TAB/LF/CR (`prefix https://user:pa\\tss@host/path?token=secret`) still has its `?query`/`#fragment` secret redacted — the embedded-URL scan is bounded by a literal SPACE, so it crosses the internal whitespace the primary `[^\\s]+` token stopped at (#778 review — thread deliveryGraph.ts:188)", () => {
+  // The embedded-URL redactor used `[^\s]+`, which stops at an XML-valid TAB/LF/CR the value may still
+  // carry after `stripXmlInvalidChars`. So `https://user:pa\tss@host/path?token=secret` matched only up
+  // to the TAB; the credential pass then collapsed `//user:pa\tss@` to `//***@` but left the trailing
+  // `?token=secret` un-rescanned, leaking the query into the connector display. Bounding the token by a
+  // literal SPACE (like the free-text belt) makes the whole URL — userinfo AND query — one span.
+  const tabUserinfo = redactConnectorValue("prefix https://user:pa\tss@host/path?token=secret");
+  assert(!tabUserinfo.includes("token=secret"), `an embedded-URL query after an internal-TAB userinfo must be redacted: ${JSON.stringify(tabUserinfo)}`);
+  assert(!tabUserinfo.includes("user:pa"), `the split userinfo must be redacted: ${JSON.stringify(tabUserinfo)}`);
+  // Same leak without userinfo: whitespace inside the path/query must not truncate the scan.
+  const tabPath = redactConnectorValue("prefix https://host/pa\tth?token=secret");
+  assert(!tabPath.includes("token=secret"), `an embedded-URL query after an internal-TAB path must be redacted: ${JSON.stringify(tabPath)}`);
+  // A newline inside the embedded URL is crossed the same way.
+  const lf = redactConnectorValue("see https://host/p\n#sig=zzz");
+  assert(!lf.includes("sig=zzz"), `an embedded-URL fragment after an internal newline must be redacted: ${JSON.stringify(lf)}`);
+  // The scheme-relative `//host#42` PR ref (no explicit scheme) still keeps its meaningful `#42`.
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+});
+
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
   const errors = validateDeliveryGraph({
     nodes: [

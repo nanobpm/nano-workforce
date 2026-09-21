@@ -1216,9 +1216,14 @@ export function redactEmbeddedCredential(s: string): string {
  * UNAMBIGUOUSLY URL syntax and may hide a token, so they are safe to strip; a scheme-relative
  * `//host#42` (or an opaque `slack:#releases`, `owner/repo#42`) instead carries a MEANINGFUL opaque
  * `#`/`?` (a `parsePrTarget` PR ref) that must survive, so it is left to the userinfo-only
- * {@link redactEmbeddedCredential}. `[^\s]+` is a single-quantifier match — linear, no catastrophic
+ * {@link redactEmbeddedCredential}. The token runs to the next literal SPACE (`[^ ]+`), NOT the wider
+ * `\s` class, so it CROSSES an XML-valid internal TAB/LF/CR (0x09/0x0A/0x0D — the only whitespace
+ * `stripXmlInvalidChars` keeps) and still redacts a `?query`/`#fragment` secret sitting past it
+ * (`https://host/pa\tth?token=secret`); a `\s`-bounded token stopped at that internal whitespace and
+ * leaked the tail (#778 review — thread deliveryGraph.ts:188). Over-redacting across an internal
+ * newline is the safe direction. `[^ ]+` is a single-quantifier match — linear, no catastrophic
  * backtracking. */
-const EMBEDDED_SCHEME_URL_SRC = "[a-z][a-z0-9+.-]*:\\/\\/[^\\s]+";
+const EMBEDDED_SCHEME_URL_SRC = "[a-z][a-z0-9+.-]*:\\/\\/[^ ]+";
 
 /** Redact each embedded ABSOLUTE-URL (explicit `scheme://…`) token in a free-form value IN PLACE via
  * {@link redactString} — stripping that token's `user:pass@` userinfo AND `?query`/`#fragment` — while

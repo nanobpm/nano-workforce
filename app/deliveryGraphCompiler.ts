@@ -1235,19 +1235,21 @@ const DECLARED_MATCH_FIELDS: ReadonlySet<string> = new Set([
 
 /** The declared `wait.match` fields `parseMatch` (`app/readiness.ts`) reads through `num()` — a value of
  * any OTHER type coerces to `undefined` (the predicate is treated as UNSET). Every other declared field is
- * read through `str()`, i.e. string-typed. `describeProbeMatch` renders `String(v)`, so a numeric
- * `status:200` and a string `status:"200"` render IDENTICALLY (`status=200`) yet parse DIFFERENTLY (`200`
- * vs. unset/any-2xx) — a digest-invisible fork. `matchValueTypeMismatch` flags exactly that cross-type
- * case so it is fingerprinted; a correctly-typed value is NOT flagged, so a normal graph's digest stays a
- * faithful identity and keyless dispatch is unaffected (issue #778 review — thread :1495). */
+ * read through `str(v).trim()`, so a numeric `conclusion:1` and a string `conclusion:"1"` coerce to the
+ * SAME probe value (`"1"`) and parse IDENTICALLY. `describeProbeMatch` renders `String(v)`, so both also
+ * render `conclusion=1` — genuinely one identity, NOT a fork. Only a `num()`-backed field forks
+ * invisibly: a numeric `status:200` and a string `status:"200"` render IDENTICALLY (`status=200`) yet
+ * parse DIFFERENTLY (`200` vs. unset/any-2xx). `matchValueTypeMismatch` flags EXACTLY that numeric-field
+ * cross-type case so it is fingerprinted; a string-field cross-type value is runtime-equivalent and must
+ * NOT be flagged, or two identical graphs fork their stable run key and double-dispatch (issue #778
+ * review — thread deliveryGraphCompiler.ts:1251). */
 const NUMERIC_MATCH_FIELDS: ReadonlySet<string> = new Set(["status", "exitCode"]);
 
 function matchValueTypeMismatch(key: string, value: unknown): boolean {
-  if (NUMERIC_MATCH_FIELDS.has(key)) return typeof value !== "number";
-  // Remaining declared fields are string-typed (`str().trim()`); an unknown key is IGNORED by `parseMatch`
-  // (runtime-inert), so it is never a digest-invisible fork and must NOT be fingerprinted.
-  if (DECLARED_MATCH_FIELDS.has(key)) return typeof value !== "string";
-  return false;
+  // ONLY `num()`-backed fields are type-sensitive: a non-number coerces to "unset" (any-2xx), a
+  // runtime-distinct meaning that renders identically. Every string field runs through `str(v).trim()`,
+  // so a number and its string twin are the SAME probe — never a fork. Unknown keys are `parseMatch`-inert.
+  return NUMERIC_MATCH_FIELDS.has(key) && typeof value !== "number";
 }
 function describeProbeMatch(match: Extract<DeliveryNode, { kind: "wait" }>["wait"]["match"]): string {
   if (match === undefined || match === null) return "";
@@ -1472,15 +1474,21 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         // it MUST be gated before that probe), (b) a present-but-empty object or any extra key beyond
         // `pr`, (c) an omitted / non-string / empty `pr`, or (d) a string `pr` whose redaction drops
         // content. The whole raw payload (canonicalised so key order is not spuriously distinguishing)
-        // is the disambiguator.
+        // is the disambiguator — but NORMALISE `pr` (trim) first: `nodeDisplay` and the runtime both read
+        // `payload.pr.trim()` (`resolveConvergePr`/`parsePr`), so a padded credential-bearing `pr` and its
+        // trimmed twin are ONE runtime identity; fingerprinting the untrimmed payload forked their stable
+        // run key and double-launched the connector side effect (issue #778 review — thread
+        // deliveryGraphCompiler.ts:1484).
         if (c.payload !== undefined && c.payload !== null) {
+          const normalisedPayload =
+            isRecord(c.payload) && typeof c.payload.pr === "string" ? { ...c.payload, pr: c.payload.pr.trim() } : c.payload;
           let invisible = true;
-          if (isRecord(c.payload)) {
-            const keys = Object.keys(c.payload);
-            const pr = c.payload.pr;
+          if (isRecord(normalisedPayload)) {
+            const keys = Object.keys(normalisedPayload);
+            const pr = normalisedPayload.pr;
             invisible = keys.length !== 1 || keys[0] !== "pr" || typeof pr !== "string" || pr === "" || pr !== redactConnectorValue(pr);
           }
-          if (invisible) out.push(`${id}\u0000connector.payload\u0000${canonicalJson(c.payload)}`);
+          if (invisible) out.push(`${id}\u0000connector.payload\u0000${canonicalJson(normalisedPayload)}`);
         }
         break;
       }
@@ -1527,12 +1535,13 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
             // transform leaves content the digest cannot see while the raw probe config differs; both cases
             // are digest-invisible and the raw value is the disambiguator (issue #778 review — thread :1169).
             if (REDACTED_MATCH_FIELDS.has(k)) {
-              // A redacted field is ALWAYS invisible (display is `<redacted>`). `parseMatch` TRIMS these
-              // free-form strings before the worker uses them, so fingerprint the TRIMMED value — a
-              // whitespace-only variant collapses to the same runtime match (an internal invalid char
-              // still distinguishes) instead of forking the server-derived run key (issue #778 review —
-              // thread :1363).
-              out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(typeof v === "string" ? v.trim() : v)}`);
+              // A redacted field is ALWAYS invisible (display is `<redacted>`). `parseMatch` coerces these
+              // free-form predicates through `str(v).trim()`, so fingerprint the SAME coercion — a
+              // whitespace-only variant AND a number/string cross-type twin (`1` vs `"1"`) both collapse to
+              // the one runtime match (an internal invalid char still distinguishes) instead of forking the
+              // server-derived run key (issue #778 review — threads :1363 / deliveryGraphCompiler.ts:1251).
+              // `v` is guaranteed non-null here; `str` is not exported, so inline `String(v).trim()`.
+              out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(String(v).trim())}`);
             } else if (hasXmlInvalidChars(String(v)) || redactConnectorValue(String(v)) !== String(v) || matchValueTypeMismatch(k, v)) {
               out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(v)}`);
             }

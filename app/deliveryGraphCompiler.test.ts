@@ -1134,6 +1134,57 @@ test("#778 a connector bound-`pr` payload differing ONLY in surrounding whitespa
   assertEquals(digestInvisibleRawValues(mk("  owner/repo#1  ")), digestInvisibleRawValues(mk("owner/repo#1")), "no invisible token forks the two pr variants");
 });
 
+test("#778 a connector bound-`pr` payload carrying a CREDENTIAL differing ONLY in surrounding whitespace does not fork the invisible-value set — nodeDisplay/runtime trim `pr` before use, so the padded and trimmed twins are the SAME run key (thread deliveryGraphCompiler.ts:1484)", () => {
+  // A credential-bearing `pr` makes the payload digest-INVISIBLE (redaction drops content), so the whole
+  // payload is fingerprinted as the disambiguator. That fingerprint used the UNTRIMMED payload, so a
+  // padded `pr` and its trimmed twin — which display + runtime treat identically (`payload.pr.trim()`) —
+  // got DIFFERENT stable run keys, letting a re-stage launch the connector side effect twice. Normalising
+  // `pr` (trim) before the redaction test AND before canonicalising collapses them.
+  const mk = (pr: string): DeliveryGraph => ({
+    name: "g",
+    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#releases", payload: { pr } } }],
+    edges: [],
+  });
+  const padded = digestInvisibleRawValues(mk("  //user:pass@host  "));
+  const tight = digestInvisibleRawValues(mk("//user:pass@host"));
+  assertEquals(padded, tight, "a padded credential-bearing pr must not fork the run key from its trimmed twin");
+  // The credential IS invisible, so a payload fingerprint entry is still present (just the trimmed form).
+  assert(tight.some((t) => t.includes("connector.payload")), `the credential-bearing payload is fingerprinted: ${JSON.stringify(tight)}`);
+  assert(!padded.join("").includes("//user:pass@host  "), `the fingerprinted payload carries the trimmed pr, not the padded raw: ${JSON.stringify(padded)}`);
+});
+
+test("#778 a github-check `match.conclusion` authored as the NUMBER 1 vs the STRING \"1\" does not fork the run key — `parseMatch` coerces every string field through `str().trim()`, so they are the SAME runtime probe; only num()-backed fields (`status`/`exitCode`) stay type-sensitive (thread deliveryGraphCompiler.ts:1251)", () => {
+  // `matchValueTypeMismatch` flagged EVERY non-string value on a declared string field as a digest-invisible
+  // fork, but `parseMatch` runs those fields through `str(v).trim()`, so `conclusion: 1` and `conclusion: "1"`
+  // probe identically and render identically — flagging one forked the stable run key of equivalent graphs.
+  // A JSON round-trip injects the runtime cross-type value the untyped ingress produces.
+  const mkConclusion = (conclusion: string | number): DeliveryGraph =>
+    JSON.parse(JSON.stringify({ name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "github-check", target: "o/r@main", match: { conclusion } } }], edges: [] }));
+  assertEquals(
+    digestInvisibleRawValues(mkConclusion(1)),
+    digestInvisibleRawValues(mkConclusion("1")),
+    "a string-field match value coerces uniformly, so a number and its string twin share one run key",
+  );
+  // A num()-backed field STAYS type-sensitive: `status: 200` (probes 200) and `status: "200"` (coerces to
+  // undefined = any-2xx) are runtime-DIFFERENT yet render identically, so they MUST still be disambiguated.
+  const mkStatus = (status: string | number): DeliveryGraph =>
+    JSON.parse(JSON.stringify({ name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://x/health", match: { status } } }], edges: [] }));
+  assert(
+    JSON.stringify(digestInvisibleRawValues(mkStatus(200))) !== JSON.stringify(digestInvisibleRawValues(mkStatus("200"))),
+    "a numeric-field cross-type value stays a distinct run key (its runtime meaning genuinely differs)",
+  );
+});
+
+test("#778 a REDACTED match field (`verifyCommand`) authored as the NUMBER 1 vs the STRING \"1\" does not fork the run key — its display is a constant `<redacted>`, so the fingerprint must use the SAME `str().trim()` runtime coercion (thread deliveryGraphCompiler.ts:1251, same class)", () => {
+  const mk = (verifyCommand: string | number): DeliveryGraph =>
+    JSON.parse(JSON.stringify({ name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "@nanobpm/urban", match: { package: "@nanobpm/urban", capabilityRef: "#1", verifyCommand } } }], edges: [] }));
+  assertEquals(
+    digestInvisibleRawValues(mk(1)),
+    digestInvisibleRawValues(mk("1")),
+    "a redacted string field coerces uniformly, so a number and its string twin share one run key",
+  );
+});
+
 test("#778 nodeDisplay redacts a connector value whose URL is prefixed by an XML-invalid control char (strip-before-classify)", () => {
   // A control char (U+0001) that XML 1.0 forbids gets stripped by `escapeXml`/`stripXmlInvalidChars` at
   // render time. If classification/redaction ran on the RAW value, the anchored `^(scheme:)?//` check
@@ -1848,9 +1899,12 @@ test("#778 graphCarriesRedactedSecrets: a wait.match value of the WRONG type for
   // Same class for a numeric-typed string on `exitCode` (also `num()`-read).
   const exitStr = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target: "x", match: { exitCode: "0" } } }], edges: [] };
   assertEquals(graphCarriesRedactedSecrets(exitStr), true);
-  // ...and a NON-string on a string-typed field (`conclusion`) likewise forks.
+  // ...but a NON-string on a string-typed field (`conclusion`) does NOT fork: `parseMatch` coerces it
+  // through `str(v).trim()`, so `conclusion: 1` and `conclusion: "1"` are ONE runtime probe (and render
+  // identically) — flagging it forked the stable run key of equivalent graphs (#778 review — thread
+  // deliveryGraphCompiler.ts:1251).
   const concNum = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "github-check", target: "acme/repo#1", match: { conclusion: 1 } } }], edges: [] };
-  assertEquals(graphCarriesRedactedSecrets(concNum), true);
+  assertEquals(graphCarriesRedactedSecrets(concNum), false);
 });
 
 test("#778 graphCarriesRedactedSecrets: an UNKNOWN wait.match key is runtime-inert (parseMatch ignores it) so it is NOT a digest fork — push-back on fingerprinting it (#778 review — thread :1495)", () => {
