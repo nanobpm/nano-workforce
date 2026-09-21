@@ -6,12 +6,22 @@
 // enough at usable coverage before anyone reaches for a WASM encoder (3b) or an in-process GGUF (3c).
 //
 // Sources (auto-detected, override with --source):
-//   • sqlite  — the app DB's `rounds` table: text = summary, label = status. Reads via the built-in
-//               node:sqlite (no native dep). DB path from NANO_APP_DB_URL (file: URL) or --db.
+//   • converge-shadow — the app DB's `converge_shadow` table: text = features, label = ground_truth
+//               (converged | escalate | ack-retry — the canonical converge routes). THIS is the
+//               source that produces the model the shadow gate consumes
+//               (app/convergeShadow.ts → app/models/converge-shadow.json); it defaults --name to
+//               `converge-shadow`. Reads via the built-in node:sqlite (no native dep). DB path from
+//               NANO_APP_DB_URL (file: URL) or --db.
+//   • sqlite  — the app DB's `rounds` table: text = summary, label = status
+//               (converged | addressed | waiting | needs_input | blocked). This is a DIFFERENT label
+//               space from the converge gate — it trains the `round-status` model, NOT the shadow
+//               model, so it cannot produce a usable converge-shadow.json. DB path from
+//               NANO_APP_DB_URL (file: URL) or --db.
 //   • jsonl   — a file of {"text","label"} lines (--in), for offline experiments / fixtures.
 //
 // Usage:
-//   npm run train:decision -- --source sqlite [--db file:./app.db] [--out app/models/round-status.json]
+//   npm run train:decision -- --source converge-shadow [--db file:./app.db]   # → app/models/converge-shadow.json
+//   npm run train:decision -- --source sqlite [--db file:./app.db]            # → app/models/round-status.json
 //   npm run train:decision -- --source jsonl --in data/rounds.jsonl
 //
 // Prototype scope: this trains and REPORTS a calibration model. The converge-gate now observes a
@@ -87,6 +97,30 @@ function loadFromSqlite(dbPath: string): Sample[] {
   }
 }
 
+/** converge_shadow.features → text, converge_shadow.ground_truth → label; skip rows missing either.
+ *  This is the labelled dataset the shadow gate (app/convergeShadow.ts) is measured against — its
+ *  labels are the canonical converge routes (converged | escalate | ack-retry), so it (not the
+ *  `rounds` source) is what produces a usable converge-shadow.json. */
+function loadFromConvergeShadow(dbPath: string): Sample[] {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const rows = db
+      .prepare(
+        "SELECT features, ground_truth FROM converge_shadow WHERE features IS NOT NULL AND ground_truth IS NOT NULL ORDER BY id",
+      )
+      .all();
+    const samples: Sample[] = [];
+    for (const row of rows) {
+      const text = typeof row.features === "string" ? row.features.trim() : "";
+      const label = typeof row.ground_truth === "string" ? row.ground_truth.trim() : "";
+      if (text && label) samples.push({ text, label });
+    }
+    return samples;
+  } finally {
+    db.close();
+  }
+}
+
 function loadFromJsonl(path: string): Sample[] {
   const samples: Sample[] = [];
   for (const line of readFileSync(path, "utf8").split("\n")) {
@@ -122,7 +156,7 @@ function split(samples: Sample[], holdoutFrac: number): { train: Sample[]; test:
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
   const source = args.source ?? (args.in ? "jsonl" : "sqlite");
-  const name = args.name ?? "round-status";
+  const name = args.name ?? (source === "converge-shadow" ? "converge-shadow" : "round-status");
   const out = args.out ?? `app/models/${name}.json`;
   const holdout = args.holdout ? Number(args.holdout) : 0.2;
 
@@ -130,9 +164,12 @@ function main(): void {
   if (source === "jsonl") {
     if (!args.in) throw new Error("--in <file.jsonl> is required for --source jsonl");
     samples = loadFromJsonl(args.in);
-  } else {
+  } else if (source === "sqlite" || source === "converge-shadow") {
     const dbUrl = args.db ?? process.env.NANO_APP_DB_URL ?? "file:./app.db";
-    samples = loadFromSqlite(fileUrlToPath(dbUrl));
+    const dbPath = fileUrlToPath(dbUrl);
+    samples = source === "converge-shadow" ? loadFromConvergeShadow(dbPath) : loadFromSqlite(dbPath);
+  } else {
+    throw new Error(`unknown --source "${source}" (expected: converge-shadow | sqlite | jsonl)`);
   }
 
   console.log(`loaded ${samples.length} samples from ${source}`);
