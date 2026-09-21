@@ -1191,9 +1191,23 @@ const EMBEDDED_CREDENTIAL_SRC = "\\/\\/[^/@]*@";
  * first pass it through `stripXmlInvalidChars` so an XML-forbidden control (e.g. U+000B) inside the
  * userinfo cannot split the `//…@` match and be re-joined at render. */
 export function redactString(s: string): string {
-  return s
-    .replace(new RegExp(EMBEDDED_CREDENTIAL_SRC, "g"), "//***@")
-    .replace(/[?#][\s\S]*$/, (m) => `${m[0]}***`);
+  return redactEmbeddedCredential(s).replace(/[?#][\s\S]*$/, (m) => `${m[0]}***`);
+}
+
+/** Strip ONLY the embedded `//<userinfo>@` credential span(s) from a string, collapsing each to
+ * `//***@` and leaving everything else (including any `?query`/`#fragment`, which may be a MEANINGFUL
+ * opaque-token character rather than URL syntax) untouched. Shares the ONE canonical
+ * {@link EMBEDDED_CREDENTIAL_SRC} span so "what counts as an embedded credential" can never drift from
+ * the redactor ({@link redactString}) or the validator ({@link hasEmbeddedCredential}). A `//<userinfo>@`
+ * span is UNAMBIGUOUSLY a credential wherever it sits — a plain opaque identifier
+ * (`slack:#releases`, `owner/repo#42`, `pkg@version`) never contains one — so it is safe to strip
+ * regardless of the value's URL-shape or the span's position, which is why {@link redactConnectorValue}
+ * runs it on a NON-URL-shaped free-form value (a probe target / PR ref) whose credential rides AFTER a
+ * prefix (`prefix //user:pass@host#42`) that the anchored {@link isUrlShaped} check would miss (issue
+ * #778 review — thread deliveryGraph.ts:162/566). `[^/@]*@` is a single-quantifier match — linear, no
+ * catastrophic backtracking. */
+export function redactEmbeddedCredential(s: string): string {
+  return s.replace(new RegExp(EMBEDDED_CREDENTIAL_SRC, "g"), "//***@");
 }
 
 /** True when `value` embeds a `//<userinfo>@host` credential token (see {@link EMBEDDED_CREDENTIAL_SRC};

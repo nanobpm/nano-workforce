@@ -10,6 +10,7 @@ import {
   DELIVERY_NODE_KINDS,
   type DeliveryGraphError,
   type DeliveryGraphErrorCode,
+  redactConnectorValue,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 
@@ -880,6 +881,20 @@ test("credential-in-job-type: a PASSWORDLESS userinfo token (`senior:feature //t
   });
   const err = hasCode(errors, "credential-in-job-type");
   assert(!err.message.includes("tok3n"), `the credential-in-job-type message must redact the passwordless token, got: ${err.message}`);
+});
+
+test("#778 redactConnectorValue: an EMBEDDED `//user:pass@host` credential after a non-URL prefix (a `parsePrTarget` value like `prefix //user:pass@host#42`) is redacted, not echoed verbatim, while the meaningful `#42` PR ref and opaque `#`/`?` tokens survive (#778 review — thread deliveryGraph.ts:162/566)", () => {
+  const out = redactConnectorValue("prefix //user:pass@host#42");
+  assert(!out.includes("user:pass"), `an embedded credential must be redacted even without a URL prefix: ${out}`);
+  assert(out.includes("//***@host"), `the userinfo collapses to the redaction marker: ${out}`);
+  assert(out.includes("#42"), `the meaningful PR ref must survive (opaque-token behaviour): ${out}`);
+  // A passwordless `//token@host` bearer token embedded after a prefix is redacted too.
+  const bearer = redactConnectorValue("route //tok3n@host now");
+  assert(!bearer.includes("tok3n") && bearer.includes("//***@host"), `a passwordless embedded token must be redacted: ${bearer}`);
+  // Opaque identifiers where `#`/`?`/`@` are MEANINGFUL and carry no embedded `//…@` are shown verbatim.
+  assertEquals(redactConnectorValue("slack:#releases"), "slack:#releases");
+  assertEquals(redactConnectorValue("owner/repo#42"), "owner/repo#42");
+  assertEquals(redactConnectorValue("pkg@1.2.3"), "pkg@1.2.3");
 });
 
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {

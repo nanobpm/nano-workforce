@@ -1256,6 +1256,25 @@ test("#778 redactFreeText consumes a `?query` split from its URL by a line break
   assert(!frag.includes("sig=zzz"), `a break-spanning fragment must be redacted: ${frag}`);
 });
 
+test("#778 redactFreeText: a PASSWORDLESS `//<userinfo>@host` bearer token wrapped across a whitespace break right before its `@` (`//token\\n@host`) is redacted, while an ordinary new-line email in prose survives (#778 review — thread deliveryGraphCompiler.ts:1140/:1460)", () => {
+  // The on-one-line passwordless `//token@host` is already caught by the primary `//[^\s]+` pass, but a
+  // userinfo that WRAPPED across a break lands past that pass's whitespace stop, and the belt's
+  // `:`-before-`@` credential test was blind to the colon-less bearer form. Requiring a whitespace char
+  // immediately before the `@` catches the wrapped userinfo while leaving an ordinary new-line email
+  // (a word precedes its `@`) untouched.
+  const out = redactFreeText("use //token\n@host please");
+  assert(!out.includes("//token") && !out.includes("token\n@"), `a wrapped passwordless userinfo must be redacted: ${JSON.stringify(out)}`);
+  assert(out.includes("//***@"), `the userinfo collapses to the redaction marker: ${JSON.stringify(out)}`);
+  // A TAB-wrapped passwordless userinfo is likewise caught.
+  const tab = redactFreeText("use //token\t@host please");
+  assert(!tab.includes("//token"), `a tab-wrapped passwordless userinfo must be redacted: ${JSON.stringify(tab)}`);
+  // Ordinary prose — a `//comment` reference then a new-line email — still survives (a WORD, not
+  // whitespace, precedes the `@`), preserving the existing protection.
+  const prose = redactFreeText("Use //comment\nowner@example.com for context");
+  assert(prose.includes("owner@example.com") && prose.includes("//comment"), `non-credential prose must survive: ${prose}`);
+  assert(!prose.includes("//***@"), "a break-spanning email is not mistaken for a credential");
+});
+
 test("#778 redactFreeText is linear on an adversarial `//…:…` prompt (no catastrophic backtracking)", () => {
   // The old `/\/\/[^ @]*:[^ @]*@[^ ]*/g` belt regex backtracked quadratically on a long run of `//…:…`
   // segments that never reach an `@`. The linear span scanner walks each `//`-run once, so a 20 000-char

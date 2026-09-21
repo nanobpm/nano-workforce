@@ -1135,7 +1135,16 @@ function redactCredentialSpans(text: string): string {
 function redactCredentialSpan(span: string): string {
   const at = span.indexOf("@");
   const colon = span.indexOf(":");
-  const credentialShaped = colon >= 0 && at >= 0 && colon < at;
+  // A PASSWORDLESS `//<userinfo>@host` bearer token whose userinfo WRAPPED across a whitespace break
+  // right before its `@` (`//token\n@host`, `//token\t@host`): the on-one-line form is already redacted
+  // by the primary `//[^\s]+` pass, and the belt's `:`-before-`@` test is blind to the colon-less
+  // bearer form. Requiring a whitespace char IMMEDIATELY before the `@` catches the wrapped userinfo
+  // while leaving an ordinary new-line email in prose (`//comment\nowner@example.com`, where a WORD, not
+  // whitespace, precedes the `@`) untouched — preserving the existing prose protection (issue #778
+  // review — thread deliveryGraphCompiler.ts:1140/:1460). `[^/@]*\s@` is a single-quantifier match, so
+  // the walk stays linear with no catastrophic backtracking.
+  const passwordlessAcrossBreak = /\/\/[^/@]*\s@/.test(span);
+  const credentialShaped = passwordlessAcrossBreak || (colon >= 0 && at >= 0 && colon < at);
   const hasQueryOrFragment = span.indexOf("?") >= 0 || span.indexOf("#") >= 0;
   if (!credentialShaped && !hasQueryOrFragment) return span;
   // Collapse a `user:pass@` userinfo (the `//…:…@` class, which may cross a break OR a literal SPACE
