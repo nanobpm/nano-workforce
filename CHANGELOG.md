@@ -1,3 +1,9 @@
+## [0.190.0](https://github.com/nanobpm/nano-workforce/compare/v0.189.3...v0.190.0) (2026-09-21)
+
+### Features
+
+* **ui:** make Convergence auto-merge opt-in ([#752](https://github.com/nanobpm/nano-workforce/issues/752)) ([db18b17](https://github.com/nanobpm/nano-workforce/commit/db18b17ceadc1cccd48e50a12c98d867f657f3d5)), closes [#751](https://github.com/nanobpm/nano-workforce/issues/751)
+
 ## [0.189.3](https://github.com/nanobpm/nano-workforce/compare/v0.189.2...v0.189.3) (2026-09-20)
 
 ### Bug Fixes
