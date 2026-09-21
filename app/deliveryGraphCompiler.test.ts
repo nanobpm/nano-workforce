@@ -579,6 +579,30 @@ test("a wait node with a LITERAL pr target compiles the probe unchanged (no spur
   assert(/source="=nodeInputs\.[^"]+\.probe" target="probe"/.test(r.bpmn), "the probe is seeded directly from nodeInputs");
 });
 
+test("a wait node whose fact-reference target is PADDED still late-binds via context put (target is trimmed before the bind match)", async () => {
+  // Regression (#778 review, thread deliveryGraphCompiler.ts:1476): `parseProbe` trims `wait.target`
+  // before the worker uses it, and the display/digest render the trimmed form — but the compiler's
+  // late-bind match compared `node.wait.target` VERBATIM, so a padded `" open.pr "` rendered/digested
+  // like the trimmed ref yet skipped the `context put` binding, leaving the runtime with the literal
+  // `open.pr` (which the wait can never resolve). Trimming the target before the match keeps display,
+  // digest, and the executable model in agreement.
+  const graph = {
+    name: "padded fact-ref target",
+    nodes: [
+      {
+        id: "open",
+        kind: "agent",
+        agent: { jobType: "senior:feature", prompt: "Implement and open a PR." },
+        emits: [{ name: "pr", type: "pr" }],
+      },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: " open.pr ", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "open.pr", to: "merged" }],
+  };
+  const r = await compileOk(graph);
+  assert(/context put\([^)]*\.probe, "target",/.test(r.bpmn), "the padded fact-ref target is late-bound via context put");
+});
+
 test("resolved edges carry the resolved fromNode and the referenced fact", async () => {
   const r = await compileOk(RELEASE_RUNBOOK);
   const factEdge = r.resolved.edges.find((e) => e.from === "watch-b.mergedSha");

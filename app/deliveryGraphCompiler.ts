@@ -1629,7 +1629,13 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       // target (a real `owner/repo#N` is never `<node>.<fact>`-shaped) can't match a bound ref, so it
       // passes through unchanged. Guarded (`is defined`) so an as-yet-unobserved fact keeps the
       // authored value rather than raising a FEEL error.
-      const boundTarget = boundInputs.find((b) => `${b.fromNode}.${b.fact}` === node.wait.target);
+      // TRIM the target before the bind match — `parseProbe` (`readiness.ts`) trims `wait.target` before
+      // the worker keys on it, and the display/digest render the trimmed form (`p.target.trim()`,
+      // deliveryGraphCompiler.ts:1476). Matching the RAW `node.wait.target` here let a padded fact
+      // reference (`" open.pr "`) render/digest like the trimmed ref yet SKIP this binding, leaving the
+      // runtime with the literal `open.pr` the wait can never resolve (issue #778 review — thread
+      // deliveryGraphCompiler.ts:1476). Mirrors the connector's `payload.pr.trim()` normalisation.
+      const boundTarget = boundInputs.find((b) => `${b.fromNode}.${b.fact}` === node.wait.target.trim());
       if (boundTarget) {
         const varName = `${boundTarget.producerElement}_${boundTarget.fact}`;
         const probeRef = cfg("probe").slice(1);
