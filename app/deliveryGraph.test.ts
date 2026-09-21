@@ -935,6 +935,21 @@ test("#778 redactConnectorValue: an embedded absolute-URL token whose userinfo o
   assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
 });
 
+test("#778 redactConnectorValue: an embedded absolute-URL whose scheme is separated from the `//` authority by XML-valid whitespace (`prefix https:\\t//user:pass@host?token=secret`) still has its userinfo AND `?query` secret redacted — the embedded-URL token now allows `scheme:\\s*//`, aligned with `isUrlShaped` (#778 review — thread readiness.ts:1239)", () => {
+  // The value is not whole-value URL-shaped (a non-URL prefix precedes it), so the anchored `isUrlShaped`
+  // check misses it and it falls to the embedded-URL scan. Before the fix that scan required a contiguous
+  // `://`, so `https:\t//user:pass@host?token=secret` was not matched as an absolute URL; the userinfo-only
+  // fallback then stripped `//…@` but LEFT the `?token=secret` query in the connector/probe display.
+  for (const ws of ["\t", "\n", "\r", " "]) {
+    const v = `prefix https:${ws}//user:pass@host?token=secret`;
+    const out = redactConnectorValue(v);
+    assert(!out.includes("token=secret"), `an embedded-URL query after a scheme${JSON.stringify(ws)}// gap must be redacted: ${JSON.stringify(out)}`);
+    assert(!out.includes("user:pass"), `the userinfo after a scheme${JSON.stringify(ws)}// gap must be redacted: ${JSON.stringify(out)}`);
+  }
+  // A scheme-relative `//host#42` PR ref (no explicit scheme) still keeps its meaningful `#42`.
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+});
+
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
   const errors = validateDeliveryGraph({
     nodes: [

@@ -50,7 +50,7 @@ import {
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
-import { redactString } from "./readiness.ts";
+import { isProbeKind, redactString } from "./readiness.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
 
@@ -72,8 +72,12 @@ function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait"
   // with `kind: " command "` runs as a COMMAND probe at runtime. Comparing the RAW (padded) kind here
   // would miss that, route its arbitrary shell target through the URL-only `redactConnectorValue`, and
   // leak it into the deployed BPMN documentation instead of `<redacted>` (issue #778 review — thread
-  // deliveryGraphCompiler.ts:70). Trim to match the runtime kind.
-  const kind = probe.kind.trim();
+  // deliveryGraphCompiler.ts:70). Trim to match the runtime kind AND `stripXmlInvalidChars` it, so a
+  // control-char-smuggled `kind: "command\x01"` — which the validator accepts (non-empty) and which
+  // sanitises toward `command` in the serialised display — is recognised as a command and redacted, not
+  // routed down the URL-only path with its shell target leaked verbatim (issue #778 review — thread
+  // deliveryGraphCompiler.ts:78).
+  const kind = stripXmlInvalidChars(probe.kind.trim());
   if (kind === "command") return "<redacted>";
   // TRIM the target first — `parseProbe` (`readiness.ts`) trims `target` for EVERY kind before the worker
   // keys on it, so a padded ` owner/repo#1 ` and `owner/repo#1` are the SAME runtime probe. Rendering the
@@ -85,6 +89,14 @@ function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait"
   // the `user:pass@` userinfo would otherwise split `redactString`'s `//…@` match, escape redaction, and
   // be re-joined into a live credential once the renderer strips that control (issue #778 review).
   if (kind === "http") return redactString(stripXmlInvalidChars(target));
+  // A kind that is not a recognised {@link isProbeKind} is MALFORMED — `parseProbe` rejects it at
+  // dispatch so it never runs, but the compiler still renders its target into the STAGED BPMN
+  // documentation/preview at compile time. That target could be an arbitrary command-like/secret-bearing
+  // snippet smuggled under a not-quite-`command` kind (`kind:"command\x01"`, `kind:"cmd"`), so routing it
+  // through the URL-only `redactConnectorValue` would leak it verbatim. Redact it unconditionally, exactly
+  // like a `command` target — only a genuinely structured kind (`pr`/`epic`/`npm`/`github-check`/
+  // `capability`) shows its target (issue #778 review — thread deliveryGraphCompiler.ts:78).
+  if (!isProbeKind(kind)) return "<redacted>";
   return redactConnectorValue(target);
 }
 
@@ -1247,22 +1259,52 @@ const DECLARED_MATCH_FIELDS: ReadonlySet<string> = new Set([
  * NOT be flagged, or two identical graphs fork their stable run key and double-dispatch (issue #778
  * review — thread deliveryGraphCompiler.ts:1251). */
 const NUMERIC_MATCH_FIELDS: ReadonlySet<string> = new Set(["status", "exitCode"]);
-
 function matchValueTypeMismatch(key: string, value: unknown): boolean {
   // ONLY `num()`-backed fields are type-sensitive: a non-number coerces to "unset" (any-2xx), a
   // runtime-distinct meaning that renders identically. Every string field runs through `str(v).trim()`,
   // so a number and its string twin are the SAME probe — never a fork. Unknown keys are `parseMatch`-inert.
   return NUMERIC_MATCH_FIELDS.has(key) && typeof value !== "number";
 }
-function describeProbeMatch(match: Extract<DeliveryNode, { kind: "wait" }>["wait"]["match"]): string {
+/** The per-kind `match` field whose AUTHORED value equals the runtime matcher's DEFAULT — i.e. writing
+ * it explicitly is behaviourally identical to OMITTING it. `matchPr` defaults `prState` to `"merged"`,
+ * `matchEpic` defaults `epicState` to `"merged"`, `matchGithubCheck` defaults `conclusion` to
+ * `"success"`, and `matchCommand` defaults `exitCode` to `0` (`readiness.ts`). Rendering an authored
+ * default into the display doc forks `semanticBpmn`/the digest from the omitted-but-equivalent graph, so
+ * two runtime-identical encodings get DISTINCT digests/run keys and dispatch TWICE instead of colliding
+ * as `alreadyRunning`. {@link describeProbeMatch} drops a field equal to its kind's default so the two
+ * collapse (issue #778 review — thread deliveryGraphCompiler.ts:1267). Only the fields whose matcher
+ * reads a SCALAR default belong here: `http`'s `status` default is "any 2xx" (not a value), and `npm`'s
+ * `version` default is the target's own `pkg@version` (not a constant), so neither has an
+ * omitted-equivalent scalar. */
+const EFFECTIVE_MATCH_DEFAULT: ReadonlyMap<string, { field: string; value: string | number }> = new Map([
+  ["pr", { field: "prState", value: "merged" }],
+  ["epic", { field: "epicState", value: "merged" }],
+  ["github-check", { field: "conclusion", value: "success" }],
+  ["command", { field: "exitCode", value: 0 }],
+]);
+/** True when `[key,value]` is `kind`'s defaulted match field carrying exactly the runtime default — so
+ * rendering it would spuriously fork the digest from the omitted-equivalent graph. String defaults are
+ * compared trimmed (the matcher/`parseMatch` trim), numeric defaults by strict number equality (a
+ * type-mismatched `"0"`/`"5"` is NOT collapsed here — {@link matchValueTypeMismatch} already fingerprints
+ * it as digest-invisible). */
+function matchFieldIsEffectiveDefault(kind: string, key: string, value: unknown): boolean {
+  const def = EFFECTIVE_MATCH_DEFAULT.get(kind);
+  if (!def || def.field !== key) return false;
+  if (typeof def.value === "number") return typeof value === "number" && value === def.value;
+  return typeof value === "string" && value.trim() === def.value;
+}
+function describeProbeMatch(kind: string, match: Extract<DeliveryNode, { kind: "wait" }>["wait"]["match"]): string {
   if (match === undefined || match === null) return "";
   // Render the NORMALISED (trimmed) string value — `parseMatch` (`readiness.ts`) trims each string
   // predicate before the worker uses it, so a padded `version:" 1.2.3 "` and `"1.2.3"` probe the same
   // value. Rendering the raw value would leave the whitespace in `semanticBpmn`, forking the digest/run
   // key from the trimmed-equivalent graph while both run the identical match (issue #778 review — thread
-  // deliveryGraphCompiler.ts:1206). Non-string values (numbers/booleans) are shown as-is.
+  // deliveryGraphCompiler.ts:1206). Non-string values (numbers/booleans) are shown as-is. A field whose
+  // authored value equals its kind's runtime DEFAULT ({@link matchFieldIsEffectiveDefault}) is DROPPED —
+  // writing e.g. `prState:"merged"` explicitly is identical to omitting it, so surfacing it would fork the
+  // digest from the omitted-equivalent graph and double-dispatch (issue #778 review — thread :1267).
   return Object.entries(match)
-    .filter(([k, v]) => v !== undefined && v !== null && DECLARED_MATCH_FIELDS.has(k))
+    .filter(([k, v]) => v !== undefined && v !== null && DECLARED_MATCH_FIELDS.has(k) && !matchFieldIsEffectiveDefault(kind, k, v))
     .sort(([a], [b]) => byCodeUnit(a, b))
     .map(([k, v]) => `${k}=${REDACTED_MATCH_FIELDS.has(k) ? "<redacted>" : redactConnectorValue(typeof v === "string" ? v.trim() : String(v))}`)
     .join(", ");
@@ -1344,7 +1386,7 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
       const kind = p.kind.trim();
       const safeTarget = redactProbeTargetForDisplay(p);
       const doc: string[] = [`Readiness probe: ${kind}`, `Target: ${safeTarget}`];
-      const match = describeProbeMatch(p.match);
+      const match = describeProbeMatch(kind, p.match);
       if (match) doc.push(`Match: ${match}`);
       // `credentialEnv` names a DECLARED env-contract key (validated `isEnvKey`, never a secret value —
       // the secret is read from the ambient env at execution time), yet it is carried raw into the

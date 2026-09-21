@@ -130,6 +130,35 @@ test("dispatchDeliveryGraphRun: an explicit idempotency key forces a distinct ru
   assertEquals(started.length, 2);
 });
 
+test("#778 dispatchDeliveryGraphRun: a recompiled digest that drifts from `expectedDigest` is REFUSED before any launch — no run, no engine instance (thread :1605)", async () => {
+  // A staged proposal is keyed by its stage-time digest. If the compiler ships a digest-affecting change
+  // (this PR adds labels/`<bpmn:documentation>`), the stored graph recompiles to a DIFFERENT digest. The
+  // door hands the stage-time digest as `expectedDigest`; a mismatch must refuse cleanly BEFORE the
+  // durable launch claim, so we never strand a live run against a proposal left `staged`.
+  const { app, started, runs } = makeApp();
+  const res = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true, expectedDigest: "sha256-stale-address" });
+  assertEquals(res.ok, false);
+  if (res.ok) return;
+  assert(res.errors.some((e) => e.path === "digest"), "the refusal is a digest-address error");
+  assertEquals(started.length, 0); // nothing launched
+  assertEquals(runs().length, 0); // no run row claimed
+});
+
+test("#778 dispatchDeliveryGraphRun: a matching `expectedDigest` dispatches normally (the same-compiler no-op path)", async () => {
+  // Compute the graph's true digest first, then pass it as `expectedDigest` — the normal deterministic
+  // recompile matches, so the address check is a no-op and the run launches.
+  const { app, started } = makeApp();
+  const probe = await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { repoless: true });
+  assert(probe.ok);
+  if (!probe.ok) return;
+  const { app: app2, started: started2 } = makeApp();
+  const res = await dispatchDeliveryGraphRun(app2, HUMAN_ONLY, { repoless: true, expectedDigest: probe.digest });
+  assertEquals(res.ok, true);
+  if (!res.ok) return;
+  assertEquals(res.status, "running");
+  assertEquals(started2.length, 1);
+});
+
 test("dispatchDeliveryGraphRun: a malformed graph → ok:false with path-qualified errors, nothing launched", async () => {
   const { app, started } = makeApp();
   const res = await dispatchDeliveryGraphRun(app, { name: "empty", nodes: [] });

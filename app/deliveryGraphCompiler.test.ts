@@ -976,11 +976,11 @@ test("#778 nodeDisplay derives a descriptive label + documentation per kind, wit
   const wait = nodeDisplay({
     id: "gate",
     kind: "wait",
-    wait: { kind: "github-check", target: "o/r@main", match: { conclusion: "success" }, poll: { everyMs: 60000, timeoutMs: 3600000 } },
+    wait: { kind: "github-check", target: "o/r@main", match: { conclusion: "neutral" }, poll: { everyMs: 60000, timeoutMs: 3600000 } },
   });
   assertEquals(wait.name, "Wait: github-check o/r@main · gate");
   assert(wait.documentation.includes("Readiness probe: github-check"), "wait doc names the probe kind");
-  assert(wait.documentation.includes("Match: conclusion=success"), "wait doc names the match criteria");
+  assert(wait.documentation.includes("Match: conclusion=neutral"), "wait doc names the match criteria");
   assert(wait.documentation.includes("Poll: every 60000ms, timeout 3600000ms"), "wait doc names the poll budget");
 
   const human = nodeDisplay({ id: "otp", kind: "human", human: { prompt: "Run the manual OTP publish", formKey: "publish-form" } });
@@ -1524,11 +1524,11 @@ test("#778 nodeDisplay redacts free-form probe match fields (bodyIncludes/stdout
   const cmd = nodeDisplay({
     id: "c",
     kind: "wait",
-    wait: { kind: "command", target: "check.sh", match: { exitCode: 0, stdoutIncludes: "apikey=SUPER_SECRET_STDOUT" } },
+    wait: { kind: "command", target: "check.sh", match: { exitCode: 1, stdoutIncludes: "apikey=SUPER_SECRET_STDOUT" } },
   });
   assert(cmd.documentation.includes("stdoutIncludes=<redacted>"), "stdoutIncludes is redacted");
   assert(!cmd.documentation.includes("SUPER_SECRET_STDOUT"), "the raw stdout substring never reaches the doc");
-  assert(cmd.documentation.includes("exitCode=0"), "structured match fields stay verbatim");
+  assert(cmd.documentation.includes("exitCode=1"), "structured match fields stay verbatim");
 });
 
 test("#778 describeProbeMatch DROPS an undeclared `wait.match` key so a text-ingress graph cannot leak a secret through an attacker-named field (thread :1121)", async () => {
@@ -1541,7 +1541,7 @@ test("#778 describeProbeMatch DROPS an undeclared `wait.match` key so a text-ing
       {
         id: "w",
         kind: "wait",
-        wait: { kind: "command", target: "check.sh", match: { exitCode: 0, "x-smuggled": "LEAK_SECRET_VALUE" } },
+        wait: { kind: "command", target: "check.sh", match: { exitCode: 1, "x-smuggled": "LEAK_SECRET_VALUE" } },
       },
     ],
     edges: [],
@@ -1549,7 +1549,62 @@ test("#778 describeProbeMatch DROPS an undeclared `wait.match` key so a text-ing
   const r = await compileOk(graph);
   assert(!r.bpmn.includes("LEAK_SECRET_VALUE"), "an undeclared match key's value never reaches the compiled documentation");
   assert(!r.bpmn.includes("x-smuggled"), "the undeclared match key itself is dropped from the display");
-  assert(r.bpmn.includes("exitCode=0"), "a declared match field still renders verbatim");
+  assert(r.bpmn.includes("exitCode=1"), "a declared match field still renders verbatim");
+});
+
+test("#778 redactProbeTargetForDisplay redacts a command-like probe kind smuggled behind an XML-invalid control char (thread :78)", async () => {
+  // `validateDeliveryGraph` only requires a non-empty `wait.kind`, so `kind: "command\x01"` compiles.
+  // The raw kind is not `=== "command"`, so before the fix its arbitrary shell target took the URL-only
+  // `redactConnectorValue` display path and leaked into the staged BPMN documentation. It must be
+  // recognised as a command (the control char sanitises away) and its target shown only as `<redacted>`.
+  const display = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "command\u0001", target: "curl -H 'Authorization: Bearer sk-SUPER_SECRET'", poll: { everyMs: 1000 } },
+  });
+  assert(!display.documentation.includes("sk-SUPER_SECRET"), "a command-like kind's shell target never reaches the doc");
+  assert(display.documentation.includes("Target: <redacted>"), "a control-char-smuggled command kind is redacted");
+
+  // An entirely unrecognised (malformed) kind also redacts its target rather than leaking it verbatim.
+  const unknown = nodeDisplay({
+    id: "h",
+    kind: "wait",
+    wait: { kind: "cmd", target: "run --token=SUPER_SECRET_UNKNOWN", poll: { everyMs: 1000 } },
+  });
+  assert(!unknown.documentation.includes("SUPER_SECRET_UNKNOWN"), "an unrecognised kind's target never reaches the doc");
+  assert(unknown.documentation.includes("Target: <redacted>"), "an unrecognised probe kind is redacted");
+
+  // A genuine structured kind still shows its (credential-free) target verbatim — no over-redaction.
+  const pr = nodeDisplay({ id: "p", kind: "wait", wait: { kind: "pr", target: "o/r#42", poll: { everyMs: 1000 } } });
+  assert(pr.documentation.includes("Target: o/r#42"), "a structured probe kind still shows its target");
+});
+
+test("#778 describeProbeMatch drops an authored match value equal to its kind's runtime default so an equivalent graph does not fork the digest (thread :1267)", async () => {
+  // `matchPr`/`matchEpic`/`matchGithubCheck`/`matchCommand` default `prState`/`epicState`/`conclusion`/
+  // `exitCode` to `merged`/`merged`/`success`/`0`, so authoring that value is IDENTICAL to omitting it.
+  // Rendering it would fork `semanticBpmn`/the digest from the omitted-equivalent graph → a double
+  // dispatch. The explicit-default and the omitted graph must compile to the SAME `semanticBpmn`.
+  const cases: { kind: string; target: string; field: string; def: string | number; nonDefault: string }[] = [
+    { kind: "pr", target: "o/r#1", field: "prState", def: "merged", nonDefault: "open" },
+    { kind: "epic", target: "o/r#1", field: "epicState", def: "merged", nonDefault: "settled" },
+    { kind: "github-check", target: "o/r@main", field: "conclusion", def: "success", nonDefault: "neutral" },
+    { kind: "command", target: "check.sh", field: "exitCode", def: 0, nonDefault: "7" },
+  ];
+  for (const c of cases) {
+    const withDefault = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, match: { [c.field]: c.def }, poll: { everyMs: 1000 } } }], edges: [] };
+    const omitted = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, poll: { everyMs: 1000 } } }], edges: [] };
+    const a = await compileOk(withDefault);
+    const b = await compileOk(omitted);
+    assertEquals(a.semanticBpmn, b.semanticBpmn, `${c.kind}: an authored default \`${c.field}\` must render identically to omitting it`);
+    assert(!a.bpmn.includes(`${c.field}=`), `${c.kind}: the defaulted \`${c.field}\` is dropped from the doc`);
+    // A NON-default value still renders (and forks the digest) — the drop is default-only.
+    const nonDef = c.field === "exitCode"
+      ? { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, match: { [c.field]: Number(c.nonDefault) }, poll: { everyMs: 1000 } } }], edges: [] }
+      : { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, match: { [c.field]: c.nonDefault }, poll: { everyMs: 1000 } } }], edges: [] };
+    const n = await compileOk(nonDef);
+    assert(n.bpmn.includes(`${c.field}=${c.nonDefault}`), `${c.kind}: a non-default \`${c.field}\` still renders`);
+    assert(n.semanticBpmn !== b.semanticBpmn, `${c.kind}: a non-default \`${c.field}\` genuinely forks the digest`);
+  }
 });
 
 test("#778 digestInvisibleRawValues fingerprints an XML-invalid `agent`/`connector` timeout so two runtime-different graphs do not collide (thread :1251)", () => {

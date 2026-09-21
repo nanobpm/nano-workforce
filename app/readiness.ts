@@ -307,7 +307,7 @@ export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean
 
 // Membership guards that narrow a validated string to its union without a type assertion (the
 // `no-unsafe-type-assertion` gate bans `as`).
-function isProbeKind(v: string): v is ProbeKind {
+export function isProbeKind(v: string): v is ProbeKind {
   for (const k of PROBE_KINDS) if (k === v) return true;
   return false;
 }
@@ -1229,14 +1229,21 @@ export function redactEmbeddedCredential(s: string): string {
  * UNAMBIGUOUSLY URL syntax and may hide a token, so they are safe to strip; a scheme-relative
  * `//host#42` (or an opaque `slack:#releases`, `owner/repo#42`) instead carries a MEANINGFUL opaque
  * `#`/`?` (a `parsePrTarget` PR ref) that must survive, so it is left to the userinfo-only
- * {@link redactEmbeddedCredential}. The token runs to the next literal SPACE (`[^ ]+`), NOT the wider
- * `\s` class, so it CROSSES an XML-valid internal TAB/LF/CR (0x09/0x0A/0x0D — the only whitespace
- * `stripXmlInvalidChars` keeps) and still redacts a `?query`/`#fragment` secret sitting past it
- * (`https://host/pa\tth?token=secret`); a `\s`-bounded token stopped at that internal whitespace and
- * leaked the tail (#778 review — thread deliveryGraph.ts:188). Over-redacting across an internal
- * newline is the safe direction. `[^ ]+` is a single-quantifier match — linear, no catastrophic
- * backtracking. */
-const EMBEDDED_SCHEME_URL_SRC = "[a-z][a-z0-9+.-]*:\\/\\/[^ ]+";
+ * {@link redactEmbeddedCredential}. The scheme may be followed by XML-attribute whitespace
+ * (`\s*` — TAB/LF/CR/space) BEFORE the `//` authority, exactly like {@link isUrlShaped}: those are valid
+ * XML `Char`s that `stripXmlInvalidChars` does NOT remove, so an embedded `scheme<whitespace>//authority`
+ * after a non-URL prefix (`prefix https:\t//user:pass@host?token=secret`) is not whole-value URL-shaped,
+ * escapes the anchored {@link isUrlShaped} check, and — without this `\s*` — was missed here too, leaving
+ * the fallback {@link redactEmbeddedCredential} to strip only the `//…@` userinfo and LEAK the
+ * `?token=secret` tail. Keeping this token's `scheme:` + `\s*` + `//` shape aligned with `isUrlShaped`
+ * closes that gap (issue #778 review — thread readiness.ts:1239). The token then runs to the next literal
+ * (`[^ ]+`), NOT the wider `\s` class, so it CROSSES an XML-valid internal TAB/LF/CR (0x09/0x0A/0x0D —
+ * the only whitespace `stripXmlInvalidChars` keeps) and still redacts a `?query`/`#fragment` secret
+ * sitting past it (`https://host/pa\tth?token=secret`); a `\s`-bounded token stopped at that internal
+ * whitespace and leaked the tail (#778 review — thread deliveryGraph.ts:188). Over-redacting across an
+ * internal newline is the safe direction. `\s*` and `[^ ]+` are separated by the literal `:`/`//`
+ * anchors, so the match stays linear with no catastrophic backtracking. */
+const EMBEDDED_SCHEME_URL_SRC = "[a-z][a-z0-9+.-]*:\\s*\\/\\/[^ ]+";
 
 /** Redact each embedded ABSOLUTE-URL (explicit `scheme://…`) token in a free-form value IN PLACE via
  * {@link redactString} — stripping that token's `user:pass@` userinfo AND `?query`/`#fragment` — while

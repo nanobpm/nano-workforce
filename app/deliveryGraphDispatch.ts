@@ -49,7 +49,7 @@ export type DispatchDeliveryGraphResult =
 export async function dispatchDeliveryGraphRun(
   app: Pick<AppApi, "data" | "engine" | "log">,
   graph: unknown,
-  options: { runKey?: string | null; title?: string | null; repository?: string | null; baseBranch?: string | null; repoless?: boolean } & DeliveryRunTimeouts = {},
+  options: { runKey?: string | null; title?: string | null; repository?: string | null; baseBranch?: string | null; repoless?: boolean; expectedDigest?: string | null } & DeliveryRunTimeouts = {},
 ): Promise<DispatchDeliveryGraphResult> {
   const validationErrors = validateDeliveryGraph(graph);
   if (validationErrors.length > 0) {
@@ -64,6 +64,32 @@ export async function dispatchDeliveryGraphRun(
   }
 
   const digest = deliveryGraphDigest(compiled.semanticBpmn);
+  // ADDRESS-BEFORE-LAUNCH (issue #778 review — thread deliveryGraphCompiler.ts:1605): a staged proposal
+  // is keyed by the digest computed AT STAGE TIME. The labels/`<bpmn:documentation>` this PR adds are
+  // covered by that content digest, so after this compiler ships every proposal staged by the PREVIOUS
+  // compiler RECOMPILES to a different digest. The caller (the dispatch door) hands us that stage-time
+  // digest as `expectedDigest`; if the fresh recompile no longer matches it, the stored graph pre-dates
+  // this compiler and its content address has drifted. REFUSE here — BEFORE the durable launch claim —
+  // so we never launch the run and THEN report a post-launch 409 mismatch, which stranded a live run
+  // against a proposal left `staged`. A clean refusal leaves nothing running; the operator recompiles to
+  // re-stage under the current compiler. (A normal, same-compiler dispatch recompiles deterministically
+  // to the same digest, so this is a no-op there.)
+  const expectedDigest = typeof options.expectedDigest === "string" && options.expectedDigest.trim() !== "" ? options.expectedDigest.trim() : "";
+  if (expectedDigest !== "" && digest !== expectedDigest) {
+    app.log.warn("dispatch-delivery-graph refused: recompiled digest drifted from the staged address", { expectedDigest, digest });
+    return {
+      ok: false,
+      errors: [
+        {
+          path: "digest",
+          message:
+            `this staged proposal was compiled under a different compiler version — it now recompiles to digest ${digest}, ` +
+            `not the staged ${expectedDigest} its content address was pinned to, so it was NOT launched; recompile the graph to ` +
+            "re-stage it under the current compiler before dispatching (issue #778)",
+        },
+      ],
+    };
+  }
   const explicitKey = typeof options.runKey === "string" && options.runKey.trim() !== "";
   // Option C (issue #778): the graph's identity is content-addressed over the REDACTED `semanticBpmn`
   // (issue #716), so two graphs differing ONLY in a redacted-away credential (a URL secret/`?query`/
