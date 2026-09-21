@@ -1309,6 +1309,21 @@ test("#778 redactFreeText consumes a `//user:secret pass@host` userinfo split by
   assert(!bounded.documentation.includes("//***@"), `a '/'-bounded lookahead does not fabricate a credential: ${bounded.documentation}`);
 });
 
+test("#778 redactFreeText: a PASSWORDLESS `//<userinfo>@host` bearer token split from its `@host` by a literal SPACE (`//token @host`) is redacted, while ordinary spaced prose (`//comment owner@example.com`) survives (#778 review — thread deliveryGraphCompiler.ts:1108)", () => {
+  // The SPACE bounding a belt span cuts a colon-LESS bearer `//token @host` too, so `//token` escaped
+  // both the belt (`:`-before-`@` blind) and the primary `//[^\s]+` pass, leaking into the display doc.
+  // The belt now bridges the whitespace to an IMMEDIATELY-following `@` (no intervening word) — catching
+  // the wrapped bearer while leaving prose (`//comment owner@…`, a WORD before the `@`) untouched.
+  const out = redactFreeText("use //token @host please");
+  assert(!out.includes("//token ") && out.includes("//***@host"), `a space-split passwordless userinfo must be redacted: ${JSON.stringify(out)}`);
+  const multi = redactFreeText("use //token  @host please");
+  assert(!multi.includes("//token ") && multi.includes("//***@host"), `a multi-space bridge must redact: ${JSON.stringify(multi)}`);
+  // Ordinary prose: a `//comment` reference followed by a spaced email survives — a WORD (`owner`), not
+  // the `@`, follows the space, so no credential is fabricated.
+  const prose = redactFreeText("Use //comment owner@example.com for context");
+  assert(prose.includes("owner@example.com") && prose.includes("//comment"), `non-credential spaced prose must survive: ${prose}`);
+});
+
 test("#778 wait.target digest fingerprint is TRIMMED so a whitespace-only variant shares one staged run key (all kinds)", () => {
   // `parseProbe` trims `target` for every kind before the worker keys on it, so ` run-task ` and
   // `run-task` are the SAME runtime probe. A `command` probe's display is a constant `<redacted>`, so
@@ -1852,6 +1867,24 @@ test("#778 wait display: a padded probe `kind` (\" http \") renders trimmed in n
   const plain = await compileOk(mk("http"));
   assertEquals(padded.digest, plain.digest);
   assertEquals(graphCarriesRedactedSecrets(mk(" http ")), false);
+});
+
+test("#778 connector escalation descriptor: a padded connector `target` (\" converge-merge \") renders TRIMMED in the compiled BPMN, so it shares the trimmed twin's digest (runtime connector worker + `nodeDisplay` both trim) (#778 review — thread deliveryGraphCompiler.ts:1741)", async () => {
+  const mk = (t: string) => ({
+    name: "n",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:feature", prompt: "Open a PR." } },
+      { id: "land", kind: "connector", connector: { target: t, payload: { pr: "acme/repo#1" } } },
+    ],
+    edges: [{ from: "open", to: "land" }],
+  });
+  const padded = await compileOk(mk(" converge-merge "));
+  const plain = await compileOk(mk("converge-merge"));
+  // The escalation descriptor (`connector → …`) embedded in the compiled BPMN must trim the target, or a
+  // whitespace-only variant forks the digest from the trimmed-equivalent graph the runtime dispatches
+  // identically (issue #778 review — thread deliveryGraphCompiler.ts:1741).
+  assertEquals(padded.digest, plain.digest);
+  assert(padded.semanticBpmn.includes("connector → converge-merge"), `the descriptor must embed the trimmed target: ${padded.semanticBpmn.match(/connector →[^<"&]*/)?.[0]}`);
 });
 
 test("#778 graphCarriesRedactedSecrets: whitespace-only dedupeKey/formKey difference is NOT lossy (runtime trims both)", () => {

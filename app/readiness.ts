@@ -1210,6 +1210,27 @@ export function redactEmbeddedCredential(s: string): string {
   return s.replace(new RegExp(EMBEDDED_CREDENTIAL_SRC, "g"), "//***@");
 }
 
+/** The ONE canonical embedded ABSOLUTE-URL token: an EXPLICIT-scheme `scheme://authority…` run bounded
+ * by whitespace. Deliberately requires an explicit `scheme:` before the `//` (NOT the scheme-relative
+ * `//authority` {@link isUrlShaped} also accepts): an absolute URL's `?query`/`#fragment` are
+ * UNAMBIGUOUSLY URL syntax and may hide a token, so they are safe to strip; a scheme-relative
+ * `//host#42` (or an opaque `slack:#releases`, `owner/repo#42`) instead carries a MEANINGFUL opaque
+ * `#`/`?` (a `parsePrTarget` PR ref) that must survive, so it is left to the userinfo-only
+ * {@link redactEmbeddedCredential}. `[^\s]+` is a single-quantifier match — linear, no catastrophic
+ * backtracking. */
+const EMBEDDED_SCHEME_URL_SRC = "[a-z][a-z0-9+.-]*:\\/\\/[^\\s]+";
+
+/** Redact each embedded ABSOLUTE-URL (explicit `scheme://…`) token in a free-form value IN PLACE via
+ * {@link redactString} — stripping that token's `user:pass@` userinfo AND `?query`/`#fragment` — while
+ * leaving surrounding prose and any scheme-relative/opaque `//…`/`#`/`?` run untouched (those are
+ * handled, credential-only, by {@link redactEmbeddedCredential}). Lets {@link redactConnectorValue}
+ * catch a query/fragment secret riding an embedded absolute URL after a non-URL prefix
+ * (`prefix https://host/path?token=secret`) that the anchored {@link isUrlShaped} whole-value check
+ * misses (issue #778 review — thread deliveryGraph.ts:181). Deterministic and total. */
+export function redactEmbeddedUrl(s: string): string {
+  return s.replace(new RegExp(EMBEDDED_SCHEME_URL_SRC, "gi"), (m) => redactString(m));
+}
+
 /** True when `value` embeds a `//<userinfo>@host` credential token (see {@link EMBEDDED_CREDENTIAL_SRC};
  * the userinfo colon is optional, so a passwordless `//token@host` bearer token also matches).
  * A plain worker-routing job type / opaque id never contains one, so a match is a credential leak to reject. */

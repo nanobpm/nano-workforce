@@ -1090,19 +1090,27 @@ function redactCredentialSpans(text: string): string {
     out += text.slice(i, start);
     let end = start;
     while (end < text.length && text.charCodeAt(end) !== 0x20 /* SPACE */) end++;
-    // Malformed-userinfo fallback (issue #778 review — deliveryGraphCompiler.ts:1080/1102): the SPACE that
-    // bounds the span above also cuts a `user:secret pass@host` userinfo that carries a literal space
-    // BEFORE its `@`, so the span (`//user:secret`) has a `:` but no `@` and neither branch of
-    // `redactCredentialSpan` fires — the credential tail escapes into the display doc. When a span is
-    // credential-PREFIX-shaped (a `:` and no `@`), look PAST the space(s) for the userinfo's `@` before a
-    // URL boundary (`/ ? #`). A raw CR/LF/TAB embedded in the userinfo does NOT stop the scan — a
-    // `//user:secret pass\n@host?token=x` (space THEN newline before the `@`) would otherwise leave the
-    // credential+token un-redacted — so only `/ ? #` bound it; the redactor's `[^/@]*@` class then spans
-    // whatever whitespace/break the extension pulled in. The forward scan is still bounded (it stops at the
-    // first `/ ? # @` or end-of-text), so a colon-run with no reachable `@` (the adversarial `//a://a:…`
-    // prompt, or ordinary `//foo:bar` prose) stops immediately and the walk stays linear.
+    // Malformed-userinfo fallback (issue #778 review — deliveryGraphCompiler.ts:1080/1102/1108): the SPACE
+    // that bounds the span above also cuts a userinfo that carries a literal space BEFORE its `@` — a
+    // `user:secret pass@host` (colon-prefix) OR a colon-less bearer `//token @host` — so the span
+    // (`//user:secret` / `//token`) has no `@` and neither branch of `redactCredentialSpan` fires, leaking
+    // the credential tail into the display doc. The bridging rule below extends the span through that `@`.
     const span = text.slice(start, end);
-    if (span.indexOf(":") >= 0 && span.indexOf("@") < 0) {
+    // Look PAST the bounding space(s) for a userinfo `@` before a URL boundary (`/ ? #`), extending the
+    // span through it. Two shapes need this, distinguished by whether the span already carries a `:`:
+    //   • Colon-PREFIX userinfo (`//user:secret pass@host`): a literal space sits INSIDE the userinfo, so
+    //     ANY char (incl. a word like `pass`) may bridge the span to the `@` (issue #778 review — :1080).
+    //   • Colon-LESS passwordless bearer (`//token @host`): the belt's `:`-before-`@` test AND the
+    //     primary `//[^\s]+` pass are both blind to it once the space cuts `//token` off from `@host`,
+    //     leaking the token. Bridge it too — but ONLY across whitespace, so the `@` IMMEDIATELY follows
+    //     the break: an ordinary spaced email in prose (`//comment owner@example.com`, where a WORD, not
+    //     the `@`, follows the space) is left intact, matching `redactCredentialSpan`'s prose protection
+    //     (issue #778 review — thread deliveryGraphCompiler.ts:1108).
+    // A raw CR/LF/TAB embedded in the userinfo does NOT stop the scan; only `/ ? #` bound it. The forward
+    // scan is still bounded (stops at the first `/ ? # @` or end-of-text), so a colon-run with no
+    // reachable `@` stops immediately and the walk stays linear.
+    const hasColon = span.indexOf(":") >= 0;
+    if (span.indexOf("@") < 0) {
       let j = end;
       let foundAt = -1;
       while (j < text.length) {
@@ -1112,6 +1120,8 @@ function redactCredentialSpans(text: string): string {
           foundAt = j;
           break;
         }
+        // Colon-less bearer: only whitespace may bridge the span to the `@`, or we'd swallow prose.
+        if (!hasColon && c !== 0x20 /* SPACE */ && c !== 0x09 /* TAB */ && c !== 0x0a /* LF */ && c !== 0x0d /* CR */) break;
         j++;
       }
       if (foundAt >= 0) {
@@ -1738,7 +1748,11 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName);
     }
     case "connector":
-      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target)}`, undefined, [], displayName);
+      // TRIM the target before building the escalation descriptor — `nodeDisplay` and the connector
+      // worker both key on the trimmed value, so an untrimmed `" converge-merge "` would fork the
+      // `semanticBpmn`/digest from the trimmed-equivalent graph that dispatches identically (issue #778
+      // review — thread deliveryGraphCompiler.ts:1741).
+      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target.trim())}`, undefined, [], displayName);
     case "wait":
       return waitBodyLines(el, node, displayName);
     case "human":

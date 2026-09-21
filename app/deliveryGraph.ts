@@ -23,7 +23,7 @@ import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
-import { hasEmbeddedCredential, isUrlShaped, redactEmbeddedCredential, redactString } from "./readiness.ts";
+import { hasEmbeddedCredential, isUrlShaped, redactEmbeddedCredential, redactEmbeddedUrl, redactString } from "./readiness.ts";
 import { isResolvableRepo } from "./repoEnvelope.ts";
 
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
@@ -165,7 +165,12 @@ export function hasXmlInvalidChars(value: string): boolean {
  * Because a `//<userinfo>@` span is UNAMBIGUOUSLY a credential wherever it sits (an opaque id never
  * contains one), strip it regardless of position via {@link redactEmbeddedCredential} — while still
  * gating the `?`/`#` strip on URL-shape, where `#`/`?` are URL syntax rather than a meaningful opaque
- * token character (issue #778 review — thread deliveryGraph.ts:162/566). Canonical HERE (the low-level
+ * token character (issue #778 review — thread deliveryGraph.ts:162/566). An embedded ABSOLUTE URL
+ * (an explicit `scheme://…` token) after a non-URL prefix (`prefix https://host/path?token=secret`)
+ * likewise hides a `?query`/`#fragment` token the anchored whole-value {@link isUrlShaped} check
+ * misses; its `?`/`#` ARE URL syntax (explicit scheme), so redact that token in full via
+ * {@link redactEmbeddedUrl}, while a scheme-relative `//host#42` keeps its meaningful opaque `#42`
+ * (issue #778 review — thread deliveryGraph.ts:181). Canonical HERE (the low-level
  * graph module, alongside {@link stripXmlInvalidChars} and the URL classifier it shares) so the
  * compiler's DISPLAY path AND `validateDeliveryGraph`'s reject/error path use ONE redactor — no drift
  * surface (issue #778 review — thread deliveryGraphCompiler.ts:1606). Deterministic and total. */
@@ -176,9 +181,11 @@ export function redactConnectorValue(value: string): string {
   // anchored check, escapes redaction, then loses that prefix during `escapeXml`/`stripXmlInvalidChars`
   // — surfacing the credential verbatim in the BPMN name/documentation and connector escalation FEEL.
   const cleaned = stripXmlInvalidChars(value);
-  // A whole-value URL gets the full redact (userinfo + query/fragment); any other value keeps its
-  // meaningful `#`/`?` opaque-token characters but still has an embedded `//…@` credential stripped.
-  return isUrlShaped(cleaned) ? redactString(cleaned) : redactEmbeddedCredential(cleaned);
+  // A whole-value URL gets the full redact (userinfo + query/fragment). Any other value keeps its
+  // meaningful `#`/`?` opaque-token characters, but still has (a) each embedded ABSOLUTE-URL
+  // (`scheme://…`) token redacted in full — its `?query`/`#fragment` IS URL syntax — and (b) any bare
+  // scheme-relative `//<userinfo>@` credential stripped, wherever it sits.
+  return isUrlShaped(cleaned) ? redactString(cleaned) : redactEmbeddedCredential(redactEmbeddedUrl(cleaned));
 }
 
 /** True when `value` contains a whitespace character that XML **attribute-value normalization**

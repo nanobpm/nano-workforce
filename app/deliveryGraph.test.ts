@@ -897,6 +897,25 @@ test("#778 redactConnectorValue: an EMBEDDED `//user:pass@host` credential after
   assertEquals(redactConnectorValue("pkg@1.2.3"), "pkg@1.2.3");
 });
 
+test("#778 redactConnectorValue: an EMBEDDED absolute-URL token (explicit `scheme://…`) after a non-URL prefix (`prefix https://host/path?token=secret`) has its `?query`/`#fragment` secret redacted, while a scheme-relative `//host#42` PR ref and opaque `#`/`?` identifiers survive (#778 review — thread deliveryGraph.ts:181)", () => {
+  const q = redactConnectorValue("prefix https://host/path?token=secret");
+  assert(!q.includes("token=secret"), `an embedded absolute-URL query secret must be redacted: ${q}`);
+  assert(q.includes("https://host/path?***"), `the query collapses to the redaction marker: ${q}`);
+  const frag = redactConnectorValue("see https://host/p#sig=zzz");
+  assert(!frag.includes("sig=zzz") && frag.includes("#***"), `an embedded absolute-URL fragment secret must be redacted: ${frag}`);
+  // userinfo AND query of an embedded absolute URL are both redacted.
+  const both = redactConnectorValue("go https://user:pass@host/p?token=x");
+  assert(
+    !both.includes("user:pass") && !both.includes("token=x") && both.includes("https://***@host/p?***"),
+    `embedded absolute-URL userinfo + query are both redacted: ${both}`,
+  );
+  // A scheme-RELATIVE `//host#42` (no explicit scheme) keeps its meaningful opaque `#42` PR ref — the
+  // `?`/`#` there are opaque-token characters, not URL syntax (parsePrTarget behaviour, unchanged).
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+  assertEquals(redactConnectorValue("slack:#releases"), "slack:#releases");
+  assertEquals(redactConnectorValue("owner/repo#42"), "owner/repo#42");
+});
+
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
   const errors = validateDeliveryGraph({
     nodes: [
