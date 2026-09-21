@@ -67,7 +67,7 @@ export interface WaitProbeEntry {
 export interface ConnectorTargetEntry {
   target: string;
   status: "real" | "forward-declared";
-  convergeOnlyDefault?: boolean;
+  autoMergeDefault?: boolean;
   summary: string;
 }
 
@@ -143,7 +143,7 @@ const NODE_KIND_DETAIL: Record<string, Omit<NodeKindEntry, "kind">> = {
     mayEmit: true,
     summary:
       "An automated, side-effecting outbound action. `payload` for a converge target is " +
-      "`{ pr, convergeOnly?, dependsOn? }` (`pr` may be a literal `owner/repo#N`, a `<node>.pr` fact " +
+      "`{ pr, autoMerge?, dependsOn? }` (`pr` may be a literal `owner/repo#N`, a `<node>.pr` fact " +
       "reference, or omitted to auto-bind the single incoming `pr` fact). Carries a `dedupeKey` " +
       "(at-least-once safe). See connectorTargets for which targets are real vs. forward-declared.",
   },
@@ -218,13 +218,13 @@ const REAL_CONNECTOR_TARGETS: ConnectorTargetEntry[] = [
   {
     target: CONVERGE_TARGET,
     status: "real",
-    convergeOnlyDefault: convergeOnlyForTarget(CONVERGE_TARGET),
-    summary: "Converge-only: drive review convergence and STOP at `converged`, never handing off to the merge loop.",
+    autoMergeDefault: !convergeOnlyForTarget(CONVERGE_TARGET),
+    summary: "Review-only: drive convergence and STOP at `converged`, never handing off to the merge loop.",
   },
   {
     target: CONVERGE_MERGE_TARGET,
     status: "real",
-    convergeOnlyDefault: convergeOnlyForTarget(CONVERGE_MERGE_TARGET),
+    autoMergeDefault: !convergeOnlyForTarget(CONVERGE_MERGE_TARGET),
     summary:
       "Unit-level land: drive review convergence AND the merge loop, landing the PR onto its OWN base branch " +
       "(for a unit inside an epic that base is the epic integration branch, never `main` directly).",
@@ -232,7 +232,7 @@ const REAL_CONNECTOR_TARGETS: ConnectorTargetEntry[] = [
   {
     target: MERGE_MAIN_TARGET,
     status: "real",
-    convergeOnlyDefault: convergeOnlyForTarget(MERGE_MAIN_TARGET),
+    autoMergeDefault: !convergeOnlyForTarget(MERGE_MAIN_TARGET),
     summary:
       "Graph-level top-level land (two-level merge, ADR 0006 §3): land the graph/epic INTEGRATION PR onto `main`. " +
       "Dispatch-identical to `converge-merge`; the distinction is the LEVEL, kept a first-class literal.",
