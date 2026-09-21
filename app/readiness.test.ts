@@ -918,6 +918,19 @@ test("redactString: a `//user:secret pass@` userinfo that embeds a literal SPACE
   assertStringIncludes(r, "//***@");
 });
 
+test("redactString: userinfo carrying MULTIPLE raw `@` collapses the WHOLE authority credential, not just the prefix (multi-@ suffix-leak, #778 review — thread readiness.ts:1175)", () => {
+  // Per RFC 3986 the userinfo runs to the LAST `@` before the authority's path. An earlier `[^/@]*@`
+  // span stopped at the FIRST `@`, so `https://user:pass@ss@host` rendered as `https://***@ss@host` —
+  // leaking `ss@host`, the userinfo suffix, into the display artifact. The class is now `[^/]` so the
+  // span reaches the final `@` and the entire credential authority collapses to `//***@` (leaving the
+  // real host `host`).
+  const r = redactString("https://user:pass@ss@host/path?token=s3cr3t");
+  assert(!r.includes("ss@host"), `the multi-@ userinfo suffix must not leak: ${r}`);
+  assert(!r.includes("user:pass"), "the userinfo prefix is redacted");
+  assert(!r.includes("s3cr3t"), "the query token is redacted");
+  assertStringIncludes(r, "//***@host");
+});
+
 test("redactTarget: a command target is never logged — only the kind + a fixed placeholder", () => {
   const ct = redactTarget(parseProbe({ kind: "command", target: "curl -H 'Authorization: Bearer s3cr3t' https://h/p" }));
   assertEquals(ct, "command:<redacted>");

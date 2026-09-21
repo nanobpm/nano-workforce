@@ -1326,6 +1326,17 @@ test("#778 redactFreeText: a PASSWORDLESS `//<userinfo>@host` bearer token wrapp
   assert(!prose.includes("//***@"), "a break-spanning email is not mistaken for a credential");
 });
 
+test("#778 redactFreeText: a `//user:pass@ss@host` userinfo with MULTIPLE raw `@` collapses the WHOLE authority credential, not just the prefix (multi-@ suffix-leak — thread deliveryGraphCompiler.ts:1056)", () => {
+  // The belt's `redactCredentialSpan` rewrite regex stopped at the FIRST `@`, so an embedded
+  // `//user:pass@ss@host` in prose left `ss@host` — the userinfo suffix — visible in the display doc.
+  // The class is now `[^/]` so the span reaches the LAST `@` before the path and the whole credential
+  // authority collapses to `//***@`.
+  const out = redactFreeText("clone //user:pass@ss@host/repo now");
+  assert(!out.includes("ss@host"), `the multi-@ userinfo suffix must not leak: ${JSON.stringify(out)}`);
+  assert(!out.includes("user:pass"), "the userinfo prefix is redacted");
+  assert(out.includes("//***@host"), `the whole authority credential collapses to the marker: ${JSON.stringify(out)}`);
+});
+
 test("#778 redactFreeText is linear on an adversarial `//…:…` prompt (no catastrophic backtracking)", () => {
   // The old `/\/\/[^ @]*:[^ @]*@[^ ]*/g` belt regex backtracked quadratically on a long run of `//…:…`
   // segments that never reach an `@`. The linear span scanner walks each `//`-run once, so a 20 000-char

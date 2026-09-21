@@ -1159,9 +1159,12 @@ function redactCredentialSpan(span: string): string {
   if (!credentialShaped && !hasQueryOrFragment) return span;
   // Collapse a `user:pass@` userinfo (the `//…:…@` class, which may cross a break OR a literal SPACE
   // inside it after the malformed-userinfo span extension in `redactCredentialSpans`) to `//***@`. The
-  // class is `[^/@]` (not `[^/@ ]`) so a space the extended span pulled in (`//user:secret pass@host`) is
-  // consumed up to the `@`; single-quantifier, so still linear (issue #778 review).
-  const s = credentialShaped ? span.replace(/\/\/[^/@]*@/g, "//***@") : span;
+  // class is `[^/]` (not `[^/@ ]`, and not `[^/@]`) so a space the extended span pulled in
+  // (`//user:secret pass@host`) is consumed up to the `@` AND a malformed multi-`@` userinfo
+  // (`//user:pass@ss@host`) collapses through EVERY `@` to the last one before a `/` — matching
+  // {@link EMBEDDED_CREDENTIAL_SRC} so the belt never leaks a suffix the whole-value redactor strips
+  // (issue #778 review — thread deliveryGraphCompiler.ts:1056). Single-quantifier, so still linear.
+  const s = credentialShaped ? span.replace(/\/\/[^/]*@/g, "//***@") : span;
   const qMark = s.indexOf("?");
   const hMark = s.indexOf("#");
   const qi = qMark < 0 ? hMark : hMark < 0 ? qMark : Math.min(qMark, hMark);
