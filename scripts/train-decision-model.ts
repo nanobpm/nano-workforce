@@ -34,7 +34,7 @@ import { DatabaseSync } from "node:sqlite";
 import { CONVERGE_LABELS } from "../app/convergeShadow.ts";
 import { evaluate, type Sample, type TrainOptions, trainDecisionModel } from "../app/decisionTrain.ts";
 
-interface Args {
+export interface Args {
   source?: string;
   db?: string;
   in?: string;
@@ -45,7 +45,7 @@ interface Args {
   dim?: string;
 }
 
-function parseArgs(argv: string[]): Args {
+export function parseArgs(argv: string[]): Args {
   const args: Args = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -57,7 +57,7 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
-function fileUrlToPath(u: string): string {
+export function fileUrlToPath(u: string): string {
   if (!u.startsWith("file:")) throw new Error(`--db / NANO_APP_DB_URL must be a file: URL, got: ${u}`);
   // Mirror the established datasource-URL handling (scripts/reconcile-contracts.ts): percent-decode
   // the path and strip any `?query`/`#hash` suffix so a SQLite-style URL like `file:./my%20app.db` or
@@ -80,7 +80,7 @@ function safeDecodeURIComponent(s: string): string {
 }
 
 /** rounds.summary → text, rounds.status → label; skip rows missing either. */
-function loadFromSqlite(dbPath: string): Sample[] {
+export function loadFromSqlite(dbPath: string): Sample[] {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
     const rows = db
@@ -102,7 +102,7 @@ function loadFromSqlite(dbPath: string): Sample[] {
  *  This is the labelled dataset the shadow gate (app/convergeShadow.ts) is measured against — its
  *  labels are the canonical converge routes (converged | escalate | ack-retry), so it (not the
  *  `rounds` source) is what produces a usable converge-shadow.json. */
-function loadFromConvergeShadow(dbPath: string): Sample[] {
+export function loadFromConvergeShadow(dbPath: string): Sample[] {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
     const rows = db
@@ -122,7 +122,7 @@ function loadFromConvergeShadow(dbPath: string): Sample[] {
   }
 }
 
-function loadFromJsonl(path: string): Sample[] {
+export function loadFromJsonl(path: string): Sample[] {
   const samples: Sample[] = [];
   for (const line of readFileSync(path, "utf8").split("\n")) {
     const t = line.trim();
@@ -142,7 +142,7 @@ function loadFromJsonl(path: string): Sample[] {
  *  Returns `inSample: true` when it could not carve out a genuine holdout (holdout disabled, or too
  *  few rows to leave BOTH partitions non-empty) — the caller then reports in-sample rather than
  *  passing off training data as held-out calibration. */
-function split(samples: Sample[], holdoutFrac: number): { train: Sample[]; test: Sample[]; inSample: boolean } {
+export function split(samples: Sample[], holdoutFrac: number): { train: Sample[]; test: Sample[]; inSample: boolean } {
   if (holdoutFrac <= 0 || samples.length < 4) return { train: samples, test: samples, inSample: true };
   const step = Math.max(2, Math.round(1 / holdoutFrac));
   const train: Sample[] = [];
@@ -154,8 +154,12 @@ function split(samples: Sample[], holdoutFrac: number): { train: Sample[]; test:
   return { train, test, inSample: false };
 }
 
-function main(): void {
-  const args = parseArgs(process.argv.slice(2));
+/** Run the trainer end-to-end. Returns the process exit code (0 = success) instead of mutating
+ *  `process.exitCode`, and takes `argv`/`env` as parameters, so tests can drive every branch —
+ *  source dispatch, the canonical-label guard, and the model-file write — without spawning a
+ *  subprocess or touching the real environment. */
+export function main(argv: string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): number {
+  const args = parseArgs(argv);
   const source = args.source ?? (args.in ? "jsonl" : "sqlite");
   const name = args.name ?? (source === "converge-shadow" ? "converge-shadow" : "round-status");
   const out = args.out ?? `app/models/${name}.json`;
@@ -166,7 +170,7 @@ function main(): void {
     if (!args.in) throw new Error("--in <file.jsonl> is required for --source jsonl");
     samples = loadFromJsonl(args.in);
   } else if (source === "sqlite" || source === "converge-shadow") {
-    const dbUrl = args.db ?? process.env.NANO_APP_DB_URL ?? "file:./app.db";
+    const dbUrl = args.db ?? env.NANO_APP_DB_URL ?? "file:./app.db";
     const dbPath = fileUrlToPath(dbUrl);
     samples = source === "converge-shadow" ? loadFromConvergeShadow(dbPath) : loadFromSqlite(dbPath);
   } else {
@@ -184,8 +188,7 @@ function main(): void {
       `\nnot enough data to train (need ≥8 samples across ≥2 labels; have ${samples.length} across ${distinct}).`,
     );
     console.error("Run some convergence loops first, or pass --source jsonl --in <fixture>.");
-    process.exitCode = 1;
-    return;
+    return 1;
   }
 
   const { train, test, inSample } = split(samples, holdout);
@@ -205,8 +208,7 @@ function main(): void {
           `observeConvergeShadow, so writing it would produce a live-dead converge-shadow.json. Gather more ` +
           `converge-shadow rows (especially the rare route) and retrain — nothing was written.`,
       );
-      process.exitCode = 1;
-      return;
+      return 1;
     }
   }
   const opts: TrainOptions = {
@@ -229,6 +231,7 @@ function main(): void {
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, `${JSON.stringify(model)}\n`);
   console.log(`\nwrote ${out}`);
+  return 0;
 }
 
-main();
+if (import.meta.main) process.exitCode = main();

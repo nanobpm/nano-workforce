@@ -7,6 +7,7 @@ import type { ConvergeGateInput, ConvergeGateResult } from "./convergeGate.ts";
 import {
   buildShadowText,
   deriveGateLabel,
+  isDecisionModel,
   observeConvergeShadow,
   recordConvergeShadow,
 } from "./convergeShadow.ts";
@@ -143,4 +144,47 @@ test("recordConvergeShadow swallows a throwing datasource (gate must be unaffect
   // biome-ignore lint/suspicious/noExplicitAny: structural DataLayer stub for the insert seam
   const obs = await recordConvergeShadow(data as any, { prKey: "o/r#1" }, cleanInput, converged);
   assertEquals(obs, null);
+});
+
+test("isDecisionModel accepts a well-formed model and rejects malformed artifacts", () => {
+  const good = trainDecisionModel(
+    [
+      { text: buildShadowText(cleanInput), label: "converged" },
+      { text: buildShadowText(cleanInput), label: "converged" },
+      { text: buildShadowText({ ...cleanInput, unresolvedThreadCount: 3 }), label: "escalate" },
+      { text: buildShadowText({ ...cleanInput, unresolvedThreadCount: 3 }), label: "escalate" },
+    ],
+    { name: "converge-shadow", epochs: 30 },
+  );
+  assert(isDecisionModel(good), "a freshly trained model is valid");
+
+  // A shallow guard that only checks "arrays + numeric dim" would wrongly accept every case below;
+  // `recordConvergeShadow` would then throw mid-scoring (ragged/short rows) or persist NaN/always-
+  // escalate scores instead of taking the graceful labelled-only path (#812).
+  assertEquals(isDecisionModel(null), false);
+  assertEquals(isDecisionModel({ ...good, version: 2 }), false, "wrong version");
+  assertEquals(isDecisionModel({ ...good, dim: 0 }), false, "non-positive dim");
+  assertEquals(isDecisionModel({ ...good, dim: 4.5 }), false, "non-integer dim");
+  assertEquals(isDecisionModel({ ...good, ngram: 3 }), false, "invalid ngram");
+  assertEquals(isDecisionModel({ ...good, threshold: Number.NaN }), false, "NaN threshold");
+  const { margin, ...noMargin } = good;
+  void margin;
+  assertEquals(isDecisionModel(noMargin), false, "missing margin");
+  assertEquals(isDecisionModel({ ...good, labels: [] }), false, "empty labels");
+  assertEquals(
+    isDecisionModel({ ...good, weights: good.weights.slice(0, good.weights.length - 1) }),
+    false,
+    "weight rows fewer than labels",
+  );
+  assertEquals(
+    isDecisionModel({ ...good, weights: good.weights.map((r) => r.slice(0, -1)) }),
+    false,
+    "a short (ragged) weight row",
+  );
+  assertEquals(isDecisionModel({ ...good, bias: [0] }), false, "bias length != labels");
+  assertEquals(
+    isDecisionModel({ ...good, weights: good.weights.map((r) => r.map(() => Number.NaN)) }),
+    false,
+    "NaN weights",
+  );
 });

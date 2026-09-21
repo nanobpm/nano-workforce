@@ -113,17 +113,33 @@ export function resetConvergeShadowModelCache(next?: DecisionModel | null): void
   modelCache = next;
 }
 
-function isDecisionModel(v: unknown): v is DecisionModel {
+const isFiniteNum = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
+const isFiniteNumRow = (x: unknown, len: number): boolean =>
+  Array.isArray(x) && x.length === len && x.every(isFiniteNum);
+
+/** Structural guard for a persisted `DecisionModel` artifact. Validates the COMPLETE shape — not just
+ *  that the fields are arrays — so a malformed artifact (mismatched weight rows, a short/ragged row,
+ *  a missing/invalid `ngram`/`threshold`/`margin`, or a non-positive `dim`) is rejected here and
+ *  `loadConvergeShadowModel` falls back to `null` (the graceful labelled-only path) instead of letting
+ *  `scoreChoices` throw mid-scoring — after which `recordConvergeShadow` would swallow the exception
+ *  and drop even the labelled row — or persist NaN / always-escalate shadow scores (#812). */
+export function isDecisionModel(v: unknown): v is DecisionModel {
   if (!v || typeof v !== "object") return false;
   const m: Record<string, unknown> = { ...v };
-  return (
-    m.version === 1 &&
-    typeof m.name === "string" &&
-    Array.isArray(m.labels) &&
-    Array.isArray(m.weights) &&
-    Array.isArray(m.bias) &&
-    typeof m.dim === "number"
-  );
+  if (m.version !== 1 || typeof m.name !== "string") return false;
+  const dim = m.dim;
+  if (!isFiniteNum(dim) || !Number.isInteger(dim) || dim <= 0) return false;
+  if (m.ngram !== 1 && m.ngram !== 2) return false;
+  if (!isFiniteNum(m.threshold) || !isFiniteNum(m.margin)) return false;
+  if (!Array.isArray(m.labels) || m.labels.length === 0 || !m.labels.every((l) => typeof l === "string")) {
+    return false;
+  }
+  const nLabels = m.labels.length;
+  // One dense weight row per label, each exactly `dim` finite numbers; one finite bias per label.
+  if (!Array.isArray(m.weights) || m.weights.length !== nLabels) return false;
+  if (!m.weights.every((row) => isFiniteNumRow(row, dim))) return false;
+  if (!isFiniteNumRow(m.bias, nLabels)) return false;
+  return true;
 }
 
 interface ConvergeShadowRow {
