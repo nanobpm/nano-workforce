@@ -85,6 +85,29 @@ test("observeConvergeShadow with a model scores over the fixed converge routes",
   assert(typeof obs.shadowTopP === "number");
 });
 
+test("observeConvergeShadow declines to score a model missing a canonical converge label (labelled-only)", () => {
+  // A model trained from `rounds.status` carries non-converge labels (addressed/blocked) and lacks
+  // some canonical routes. Scoring over its full label set could persist a non-converge label as
+  // `shadow_action` and corrupt the calibration, so the observer must fall back to the labelled-only
+  // row (no scored fields) exactly as when no model is present (reviewer #811).
+  const model = trainDecisionModel(
+    [
+      { text: buildShadowText(cleanInput), label: "converged" },
+      { text: buildShadowText(cleanInput), label: "converged" },
+      { text: buildShadowText({ ...cleanInput, unresolvedThreadCount: 3 }), label: "addressed" },
+      { text: buildShadowText({ ...cleanInput, unresolvedThreadCount: 3 }), label: "addressed" },
+      { text: buildShadowText({ ...cleanInput, suppressedAdvisories: [{ key: "a#1", label: "x" }] }), label: "blocked" },
+      { text: buildShadowText({ ...cleanInput, suppressedAdvisories: [{ key: "a#1", label: "x" }] }), label: "blocked" },
+    ],
+    { name: "round-status", epochs: 50 },
+  );
+  const obs = observeConvergeShadow(cleanInput, converged, model);
+  assertEquals(obs.groundTruth, "converged");
+  assertEquals(obs.modelName, undefined);
+  assertEquals(obs.shadowAction, undefined);
+  assertEquals(obs.agree, undefined);
+});
+
 test("recordConvergeShadow inserts a row and never throws (best-effort)", async () => {
   const inserted: unknown[] = [];
   const data = {

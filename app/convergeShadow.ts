@@ -24,7 +24,6 @@ import { type DecisionModel, ESCALATE, scoreChoices } from "./scoreChoices.ts";
  *  are the fixed answers the shadow model scores over. */
 export const CONVERGE_LABELS = ["converged", "escalate", "ack-retry"] as const;
 export type ConvergeLabel = (typeof CONVERGE_LABELS)[number];
-const CONVERGE_LABEL_SET: ReadonlySet<string> = new Set(CONVERGE_LABELS);
 
 /** Derive the gate's own verdict as a canonical label — the ground truth the shadow is measured
  *  against. Mirrors the worker's routing: not blocked → converged; blocked & ack-only → the bounded
@@ -74,9 +73,14 @@ export function observeConvergeShadow(
   const features = buildShadowText(input);
   const groundTruth = deriveGateLabel(result);
   if (!model) return { features, groundTruth };
-  // Restrict the softmax to the fixed converge routes even if the model carries extra labels.
-  const allow = model.labels.filter((l) => CONVERGE_LABEL_SET.has(l));
-  const decision = scoreChoices(features, model, { allow: allow.length >= 2 ? allow : undefined });
+  // Restrict the softmax to EXACTLY the fixed converge routes. A model that does not carry all three
+  // canonical labels cannot be scored over the converge decision safely: falling back to the model's
+  // full label set would let a non-converge label (e.g. `addressed`/`blocked` learned from
+  // `rounds.status`) win and be persisted as `shadow_action`, corrupting the calibration. In that
+  // case keep the labelled-only observation (scored fields omitted, exactly as when no model loads).
+  const hasAllCanonical = CONVERGE_LABELS.every((l) => model.labels.includes(l));
+  if (!hasAllCanonical) return { features, groundTruth };
+  const decision = scoreChoices(features, model, { allow: [...CONVERGE_LABELS] });
   return {
     features,
     groundTruth,

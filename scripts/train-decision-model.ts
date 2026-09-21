@@ -14,8 +14,9 @@
 //   npm run train:decision -- --source sqlite [--db file:./app.db] [--out app/models/round-status.json]
 //   npm run train:decision -- --source jsonl --in data/rounds.jsonl
 //
-// Prototype scope: this trains and REPORTS. Nothing gates on the model yet — wiring a shadow pass onto
-// convergeGate is the deliberate next step, only after the calibration numbers justify it.
+// Prototype scope: this trains and REPORTS a calibration model. The converge-gate now observes a
+// model in a NON-GATING shadow pass (workers/converge-gate/worker.ts → recordConvergeShadow); the
+// model is NOT yet authoritative — nothing gates on it until the calibration numbers justify it.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -47,15 +48,33 @@ function parseArgs(argv: string[]): Args {
 
 function fileUrlToPath(u: string): string {
   if (!u.startsWith("file:")) throw new Error(`--db / NANO_APP_DB_URL must be a file: URL, got: ${u}`);
-  if (u.startsWith("file://")) return new URL(u).pathname;
-  return u.slice("file:".length);
+  // Mirror the established datasource-URL handling (scripts/reconcile-contracts.ts): percent-decode
+  // the path and strip any `?query`/`#hash` suffix so a SQLite-style URL like `file:./my%20app.db` or
+  // `file:./app.db?mode=ro` resolves to the real on-disk path, not a different/nonexistent one.
+  if (u.startsWith("file://")) {
+    const p = safeDecodeURIComponent(new URL(u).pathname);
+    return /^\/[A-Za-z]:/.test(p) ? p.slice(1) : p;
+  }
+  const raw = u.slice("file:".length).replace(/[?#].*$/, "");
+  const p = safeDecodeURIComponent(raw);
+  return /^\/[A-Za-z]:/.test(p) ? p.slice(1) : p;
+}
+
+function safeDecodeURIComponent(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
 }
 
 /** rounds.summary → text, rounds.status → label; skip rows missing either. */
 function loadFromSqlite(dbPath: string): Sample[] {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
-    const rows = db.prepare("SELECT summary, status FROM rounds WHERE summary IS NOT NULL AND status IS NOT NULL").all();
+    const rows = db
+      .prepare("SELECT summary, status FROM rounds WHERE summary IS NOT NULL AND status IS NOT NULL ORDER BY id")
+      .all();
     const samples: Sample[] = [];
     for (const row of rows) {
       const text = typeof row.summary === "string" ? row.summary.trim() : "";
@@ -84,16 +103,20 @@ function loadFromJsonl(path: string): Sample[] {
   return samples;
 }
 
-/** Deterministic interleaved split (every k-th row to holdout) — no RNG, so the report is stable. */
-function split(samples: Sample[], holdoutFrac: number): { train: Sample[]; test: Sample[] } {
-  if (holdoutFrac <= 0 || samples.length < 10) return { train: samples, test: samples };
+/** Deterministic interleaved split (every k-th row to holdout) — no RNG, so the report is stable.
+ *  Returns `inSample: true` when it could not carve out a genuine holdout (holdout disabled, or too
+ *  few rows to leave BOTH partitions non-empty) — the caller then reports in-sample rather than
+ *  passing off training data as held-out calibration. */
+function split(samples: Sample[], holdoutFrac: number): { train: Sample[]; test: Sample[]; inSample: boolean } {
+  if (holdoutFrac <= 0 || samples.length < 4) return { train: samples, test: samples, inSample: true };
   const step = Math.max(2, Math.round(1 / holdoutFrac));
   const train: Sample[] = [];
   const test: Sample[] = [];
   for (let i = 0; i < samples.length; i++) {
     (i % step === 0 ? test : train).push(samples[i]);
   }
-  return { train: train.length ? train : samples, test: test.length ? test : samples };
+  if (!train.length || !test.length) return { train: samples, test: samples, inSample: true };
+  return { train, test, inSample: false };
 }
 
 function main(): void {
@@ -127,7 +150,7 @@ function main(): void {
     return;
   }
 
-  const { train, test } = split(samples, holdout);
+  const { train, test, inSample } = split(samples, holdout);
   const opts: TrainOptions = {
     name,
     dim: args.dim ? Number(args.dim) : 4096,
@@ -136,7 +159,11 @@ function main(): void {
   const model = trainDecisionModel(train, opts);
   const report = evaluate(model, test);
 
-  console.log(`\ntrained "${name}" on ${train.length} / held out ${test.length}`);
+  const calibrationKind = inSample ? "IN-SAMPLE (not held out)" : "held out";
+  console.log(`\ntrained "${name}" on ${train.length} / ${calibrationKind} ${test.length}`);
+  if (inSample) {
+    console.log("  ⚠ too few samples for a genuine holdout — the figures below are IN-SAMPLE and overstate generalisation.");
+  }
   console.log(`  accuracy         ${(report.accuracy * 100).toFixed(1)}%`);
   console.log(`  coverage         ${(report.coverage * 100).toFixed(1)}%  (auto-acted, did not escalate)`);
   console.log(`  covered accuracy ${(report.coveredAccuracy * 100).toFixed(1)}%  (correct WHEN it acted)`);
