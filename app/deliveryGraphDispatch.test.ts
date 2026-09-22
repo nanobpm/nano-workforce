@@ -6,15 +6,27 @@
 // graph's side effects. These tests drive it against an in-memory app/data/engine faithful to the run
 // aggregate's PRIMARY KEY fence and the guarded raw UPDATE the claim issues.
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 import { dispatchDeliveryGraphRun } from "./deliveryGraphDispatch.ts";
 import { noopLog } from "../test/log.ts";
 
-function makeApp() {
+function makeApp(opts: { failIdentityWrite?: boolean } = {}) {
   const tables = new Map<string, Record<string, unknown>[]>();
   const started: { processDefinitionId: string }[] = [];
   const table = (name: string, key: string) => {
+    if (opts.failIdentityWrite && name === "delivery_graph_run_identity") {
+      // Simulate a transient side-table write error (e.g. a SQLite `disk I/O error`) — NOT a UNIQUE
+      // collision, so `upsertRunIdentity` rethrows it rather than folding it into an UPDATE.
+      return {
+        get: () => Promise.resolve(null),
+        find: () => Promise.resolve([]),
+        all: () => Promise.resolve([]),
+        insert: () => Promise.reject(new Error("disk I/O error")),
+        update: () => Promise.reject(new Error("disk I/O error")),
+        delete: () => Promise.resolve(),
+      };
+    }
     const rows =
       tables.get(name) ??
       (() => {
@@ -99,6 +111,19 @@ test("dispatchDeliveryGraphRun: a human-only graph launches straight away (runni
   assertEquals(res.sideEffecting, false);
   assertEquals(started.length, 1);
   assertEquals(runs()[0].status, "running");
+});
+
+test("#778 dispatchDeliveryGraphRun: a post-claim identity-write failure flips the claimed run to `failed`, not a stranded null-process_key `running` — so a phantom run never short-circuits a later dispatch (thread deliveryGraphDispatch.ts:229)", async () => {
+  const { app, started, runs } = makeApp({ failIdentityWrite: true });
+  // The identity side-table write throws AFTER the durable `running` claim; dispatch must propagate it.
+  await assertRejects(() => dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true }), Error, "disk I/O error");
+  // The claimed row was flipped to `failed` (never left `running` with a null process key), so a later
+  // same-key dispatch does NOT short-circuit onto a phantom run — it can retry cleanly.
+  assertEquals(runs().length, 1);
+  assertEquals(runs()[0].status, "failed");
+  assertEquals(runs()[0].process_key ?? null, null);
+  // The side effect never launched.
+  assertEquals(started.length, 0);
 });
 
 test("dispatchDeliveryGraphRun: a side-effecting graph dispatches with NO approval token — the operator seam IS the approval", async () => {

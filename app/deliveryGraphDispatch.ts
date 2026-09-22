@@ -223,22 +223,34 @@ export async function dispatchDeliveryGraphRun(
       processDefinitionId: won?.process_definition_id ?? undefined,
     };
   }
-  // The claim is ours — persist THIS run's lossless identity so a later same-key short-circuit can prove
-  // the running run is this exact graph. Upsert: a relaunch off a persisted (e.g. failed) row under an
-  // explicit key may carry a different graph, so overwrite the stored fingerprint.
-  await upsertRunIdentity(identities, { run_key: runKey, graph_fingerprint: graphFingerprint, created_at: claim.created_at });
-  if (existing) {
-    const { run_key, created_at, ...patch } = claim;
-    await runs.update(runKey, patch);
-  }
-
-  // Launch — deploy + start the compiled definition. On ANY launch failure flip the claimed row to
-  // `failed` so no null-process_key `running` row is ever stranded.
+  // On ANY post-claim failure — the identity/patch persistence just below OR the launch further down —
+  // flip the claimed row to `failed` so no null-process_key `running` row is ever stranded and later
+  // dispatches never short-circuit onto a phantom run.
   const markClaimFailed = async () => {
     const failed = buildDeliveryGraphRunRow({ ...rowBase, status: "failed", phase: DELIVERY_PHASE.FAILED, processKey: null });
     const { run_key, created_at, ...patch } = failed;
     await runs.update(runKey, patch);
   };
+  // The claim is ours — persist THIS run's lossless identity so a later same-key short-circuit can prove
+  // the running run is this exact graph. Upsert: a relaunch off a persisted (e.g. failed) row under an
+  // explicit key may carry a different graph, so overwrite the stored fingerprint. This runs AFTER the
+  // durable `running` claim but is a SEPARATE write, so a transient failure here would otherwise strand
+  // the claimed row as `running` with a null process key — later same-key dispatches would then
+  // short-circuit onto that phantom run. Route the failure through the same claim-failure cleanup before
+  // rethrowing so the phantom self-heals (issue #778 review — thread deliveryGraphDispatch.ts:229).
+  try {
+    await upsertRunIdentity(identities, { run_key: runKey, graph_fingerprint: graphFingerprint, created_at: claim.created_at });
+    if (existing) {
+      const { run_key, created_at, ...patch } = claim;
+      await runs.update(runKey, patch);
+    }
+  } catch (err) {
+    await markClaimFailed();
+    app.log.error("dispatch-delivery-graph identity persistence threw", { runKey });
+    throw err;
+  }
+
+  // Launch — deploy + start the compiled definition.
   let launched: Awaited<ReturnType<typeof runDeliveryGraph>>;
   try {
     // Thread the operator-supplied run-level timeouts (#505) so a submission override reaches every
