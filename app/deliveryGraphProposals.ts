@@ -62,7 +62,7 @@ export interface DeliveryGraphProposal {
   created_at: string;
   updated_at: string;
   expires_at: string;
-  /** A strictly-monotonic per-write stage revision (migration 102), reassigned to `MAX(stage_seq)+1`
+  /** A strictly-monotonic per-write stage revision (migration 114), reassigned to `MAX(stage_seq)+1`
    * on every stage write (insert AND re-stage). It is the supersede reconcile's same-millisecond
    * tie-break, AND the version token the dispatch door threads through so `markProposalDispatched`
    * can guard its terminal flip against a concurrent re-stage that overwrote this same-digest row with
@@ -239,7 +239,7 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
   //     `+1` is strictly greater than every committed seq and reflects true write order.
   //   • wrapping the reconcile in the SAME transaction means no concurrent stage observes an intermediate
   //     state between the write and the reconcile.
-  // `MAX(stage_seq)` reads the pre-write table via the `stage_seq` index (migration 102), an O(1)
+  // `MAX(stage_seq)` reads the pre-write table via the `stage_seq` index (migration 114), an O(1)
   // reverse-index seek rather than the full-history scan a bare aggregate over the retained terminal rows
   // would cost.
   const w = toWrite;

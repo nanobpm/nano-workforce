@@ -323,7 +323,7 @@ function isOnTimeout(v: string): v is OnTimeout {
 
 // `isBackoff` narrows a validated string to its union without a type assertion (the
 // `no-unsafe-type-assertion` gate bans `as`).
-function isBackoff(v: string): v is Backoff {
+export function isBackoff(v: string): v is Backoff {
   for (const b of BACKOFFS) if (b === v) return true;
   return false;
 }

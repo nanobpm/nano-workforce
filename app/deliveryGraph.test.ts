@@ -874,6 +874,42 @@ test("invalid-credential-env: a padded probe `kind` (\" http \") still accepts a
   );
 });
 
+test("invalid-backoff: an invalid `poll.backoff` (e.g. `linear`) is rejected at the semantic boundary — `normalizePoll` would silently default it to `exponential`, colliding its digest with a valid default-poll graph so a malformed proposal is marked dispatched instead of rejected; reject it before defaulting (#778 review, thread readiness.ts:432)", () => {
+  // `parseProbe`→`parsePoll` throws on `backoff: "linear"` at DISPATCH, but the compiler's display/digest
+  // path calls `normalizePoll` on the RAW graph, which maps every unrecognised backoff to `exponential`.
+  // With the doc suppressing a default backoff and `digestInvisibleRawValues` only fingerprinting
+  // XML-strip differences (`"linear"` is XML-clean), the malformed graph shares the omitted-poll graph's
+  // digest/key — letting keyless dispatch short-circuit onto a valid run and mark the malformed proposal
+  // dispatched. Reject it here (mirroring `parsePoll`'s canonical `isBackoff` guard) so it fails loudly
+  // at the preview/stage door, exactly like the `credentialEnv`/`onTimeout` semantic-boundary checks.
+  for (const backoff of ["linear", "LINEAR", "expo", "fixed ", "bogus"]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: "pr", target: "acme/repo#1", poll: { everyMs: 1000, backoff } } }],
+      edges: [],
+    });
+    // `"fixed "` (padded) is VALID — `parsePoll` trims before `isBackoff`, so validation must trim too
+    // and accept it (agreement with execution), while genuinely invalid values are rejected.
+    if (backoff.trim() === "fixed") {
+      assertEquals(errors.filter((e) => e.code === "invalid-backoff"), [], `padded-but-valid backoff ${JSON.stringify(backoff)} must pass`);
+    } else {
+      hasCode(errors, "invalid-backoff");
+    }
+  }
+});
+
+test("invalid-backoff: a valid or omitted `poll.backoff` passes — `fixed`/`exponential`/omitted are accepted, agreeing with `parsePoll` (#778 review, thread readiness.ts:432)", () => {
+  for (const poll of [{ everyMs: 1000 }, { everyMs: 1000, backoff: "fixed" }, { everyMs: 1000, backoff: "exponential" }, { everyMs: 1000, backoff: "" }]) {
+    assertEquals(
+      validateDeliveryGraph({
+        nodes: [{ id: "g", kind: "wait", wait: { kind: "pr", target: "acme/repo#1", poll } }],
+        edges: [],
+      }).filter((e) => e.code === "invalid-backoff"),
+      [],
+      `backoff ${JSON.stringify(poll)} must pass`,
+    );
+  }
+});
+
 test("credential-in-job-type: a PASSWORDLESS userinfo token (`senior:feature //token@host`, no colon) is REJECTED — a bearer/OAuth token riding the userinfo is a credential too, and a routing key never contains `//…@` at all (#778 review push-back — thread readiness.ts:1170)", () => {
   const errors = validateDeliveryGraph({
     nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //tok3n@host" } }],

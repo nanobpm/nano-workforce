@@ -72,12 +72,15 @@ function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait"
   // with `kind: " command "` runs as a COMMAND probe at runtime. Comparing the RAW (padded) kind here
   // would miss that, route its arbitrary shell target through the URL-only `redactConnectorValue`, and
   // leak it into the deployed BPMN documentation instead of `<redacted>` (issue #778 review — thread
-  // deliveryGraphCompiler.ts:70). Trim to match the runtime kind AND `stripXmlInvalidChars` it, so a
-  // control-char-smuggled `kind: "command\x01"` — which the validator accepts (non-empty) and which
-  // sanitises toward `command` in the serialised display — is recognised as a command and redacted, not
-  // routed down the URL-only path with its shell target leaked verbatim (issue #778 review — thread
-  // deliveryGraphCompiler.ts:78).
-  const kind = stripXmlInvalidChars(probe.kind.trim());
+  // deliveryGraphCompiler.ts:70). Classify on the TRIMMED-RAW kind — the SAME `str(raw.kind).trim()`
+  // the runtime `parseProbe` keys on — and do NOT `stripXmlInvalidChars` it first: an XML-invalid char
+  // is not whitespace `parseProbe` trims, so a control-char-smuggled kind (`kind: "command\x01"`,
+  // `kind: "pr\x01"`) is REJECTED at runtime and never runs. Stripping the char before classifying
+  // would sanitise `"pr\x01"` toward a genuine `pr`, take the verbatim structured-target path, and leak
+  // an arbitrary secret-bearing target into the staged BPMN documentation for a probe that can never run
+  // (issue #778 review — thread deliveryGraphCompiler.ts:81, over :78). Any kind that is not an exact
+  // recognised `isProbeKind` after trimming falls to the unconditional `<redacted>` below.
+  const kind = probe.kind.trim();
   if (kind === "command") return "<redacted>";
   // TRIM the target first — `parseProbe` (`readiness.ts`) trims `target` for EVERY kind before the worker
   // keys on it, so a padded ` owner/repo#1 ` and `owner/repo#1` are the SAME runtime probe. Rendering the
@@ -92,10 +95,11 @@ function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait"
   // A kind that is not a recognised {@link isProbeKind} is MALFORMED — `parseProbe` rejects it at
   // dispatch so it never runs, but the compiler still renders its target into the STAGED BPMN
   // documentation/preview at compile time. That target could be an arbitrary command-like/secret-bearing
-  // snippet smuggled under a not-quite-`command` kind (`kind:"command\x01"`, `kind:"cmd"`), so routing it
-  // through the URL-only `redactConnectorValue` would leak it verbatim. Redact it unconditionally, exactly
-  // like a `command` target — only a genuinely structured kind (`pr`/`epic`/`npm`/`github-check`/
-  // `capability`) shows its target (issue #778 review — thread deliveryGraphCompiler.ts:78).
+  // snippet smuggled under a not-quite-known kind (`kind:"command\x01"`, `kind:"pr\x01"`, `kind:"cmd"`),
+  // so routing it through the URL-only `redactConnectorValue` would leak it verbatim. Redact it
+  // unconditionally, exactly like a `command` target — only a genuinely structured kind (`pr`/`epic`/
+  // `npm`/`github-check`/`capability`) shows its target (issue #778 review — thread
+  // deliveryGraphCompiler.ts:81, over :78).
   if (!isProbeKind(kind)) return "<redacted>";
   return redactConnectorValue(target);
 }

@@ -23,7 +23,7 @@ import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
-import { hasEmbeddedCredential, hasEmbeddedUrl, hasSchemeRelativeAuthority, isUrlShaped, parsePrTarget, redactEmbeddedCredentialUrl, redactEmbeddedSchemeRelativeUrl, redactEmbeddedUrl, redactString } from "./readiness.ts";
+import { BACKOFFS, hasEmbeddedCredential, hasEmbeddedUrl, hasSchemeRelativeAuthority, isBackoff, isUrlShaped, parsePrTarget, redactEmbeddedCredentialUrl, redactEmbeddedSchemeRelativeUrl, redactEmbeddedUrl, redactString } from "./readiness.ts";
 import { isResolvableRepo } from "./repoEnvelope.ts";
 
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
@@ -107,6 +107,7 @@ export type DeliveryGraphErrorCode =
   | "embedded-url-in-job-type"
   | "scheme-relative-url-in-job-type"
   | "invalid-credential-env"
+  | "invalid-backoff"
   | "unbound-pr";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
@@ -498,6 +499,32 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "execution, Magikcraft/nano-bpm#978); use `escalate` (default) or `continue`",
             code: "unsupported-on-timeout",
           });
+        }
+        // A `wait` node's `poll.backoff` names a policy `parseProbe`→`parsePoll` validates against the
+        // closed `BACKOFFS` enum at DISPATCH: an unrecognised value (`"linear"`) THROWS there. But the
+        // compiler's display/digest path calls `normalizePoll` on the RAW graph, which silently maps every
+        // unrecognised backoff to `exponential` (the default). With the doc suppressing a default backoff
+        // and `digestInvisibleRawValues` only fingerprinting XML-strip differences (`"linear"` is XML-
+        // clean), a `backoff:"linear"` graph shares the omitted/default-poll graph's semantic digest+run
+        // key — so keyless dispatch can short-circuit the malformed proposal onto a valid running instance
+        // and mark it DISPATCHED instead of rejecting it. Enforce the SAME `isBackoff` contract here at the
+        // semantic boundary — trimming first, exactly like `parsePoll` (`str(raw.backoff).trim()`), so a
+        // padded-but-valid `" fixed "` the runtime accepts is not false-rejected — so a malformed backoff
+        // fails loudly at the preview/stage door BEFORE defaulting can mask it (issue #778 review — thread
+        // readiness.ts:432, same class as the `credentialEnv` semantic-boundary checks below).
+        if (kind === "wait" && isRecord(config.poll) && config.poll.backoff !== undefined && config.poll.backoff !== null) {
+          const backoff = typeof config.poll.backoff === "string" ? config.poll.backoff.trim() : String(config.poll.backoff).trim();
+          if (backoff !== "" && !isBackoff(backoff)) {
+            errors.push({
+              path: `${path}.${configKey}.poll.backoff`,
+              message:
+                `\`wait.poll.backoff\` must be one of ${BACKOFFS.join(", ")} (got ${JSON.stringify(config.poll.backoff)}); ` +
+                "`parsePoll` rejects an unrecognised backoff at dispatch while the compiler would silently default " +
+                "it — colliding the malformed graph's digest with a valid default-poll graph — so reject it here " +
+                "at the semantic boundary rather than letting a malformed proposal stage and be marked dispatched",
+              code: "invalid-backoff",
+            });
+          }
         }
         // A wait probe's `credentialEnv` names a DECLARED env-contract KEY (the secret is read from the
         // ambient env at execution time, never carried here) — but `parseProbe` only enforces that

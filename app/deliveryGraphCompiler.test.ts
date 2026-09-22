@@ -1667,6 +1667,29 @@ test("#778 redactProbeTargetForDisplay redacts a command-like probe kind smuggle
   assert(pr.documentation.includes("Target: o/r#42"), "a structured probe kind still shows its target");
 });
 
+test("#778 redactProbeTargetForDisplay redacts a STRUCTURED kind smuggled behind an XML-invalid control char (`pr\\x01`) — the runtime rejects the raw kind, so its arbitrary target must not take the verbatim structured-target path (thread :81)", async () => {
+  // `validateDeliveryGraph` only requires a non-empty `wait.kind` (the probe-kind ENUM is owned by
+  // `readiness.ts`, not re-enforced at the graph boundary), so `kind: "pr\x01"` compiles. At runtime
+  // `parseProbe` keys on `str(raw.kind).trim()` = `"pr\x01"`, which is NOT a known probe kind, so it is
+  // REJECTED and never runs. The display must classify on that SAME trimmed-raw kind: before the fix it
+  // XML-stripped the kind first (`"pr\x01"` → `"pr"`), took the structured `redactConnectorValue` path,
+  // and leaked a non-URL secret-bearing target verbatim into the staged BPMN documentation.
+  const smuggled = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "pr\u0001", target: "run --token=SUPER_SECRET_PR_SMUGGLE", poll: { everyMs: 1000 } },
+  });
+  assert(
+    !smuggled.documentation.includes("SUPER_SECRET_PR_SMUGGLE"),
+    "a control-char-smuggled structured kind's target must never reach the doc",
+  );
+  assert(smuggled.documentation.includes("Target: <redacted>"), "a control-char-smuggled structured kind is redacted");
+
+  // A genuine `pr` kind still shows its structured (credential-free) target verbatim — no over-redaction.
+  const pr = nodeDisplay({ id: "p", kind: "wait", wait: { kind: "pr", target: "o/r#42", poll: { everyMs: 1000 } } });
+  assert(pr.documentation.includes("Target: o/r#42"), "a genuine structured probe kind still shows its target");
+});
+
 test("#778 describeProbeMatch drops an authored match value equal to its kind's runtime default so an equivalent graph does not fork the digest (thread :1267)", async () => {
   // `matchPr`/`matchEpic`/`matchGithubCheck`/`matchCommand` default `prState`/`epicState`/`conclusion`/
   // `exitCode` to `merged`/`merged`/`success`/`0`, so authoring that value is IDENTICAL to omitting it.
