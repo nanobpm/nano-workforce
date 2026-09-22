@@ -202,33 +202,12 @@ export interface StageOutcome {
  * retire. */
 export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal): Promise<StageOutcome> {
   const table = deliveryGraphProposals(data);
-  const existing = await table.get(row.digest);
   // Capture the same-logical-key staged siblings that exist BEFORE this stage writes (excluding our own
   // digest) — the supersede reconcile below normally flips them all to `superseded`; we re-read them
   // after to report exactly which digests this stage retired.
   const priorSameKey = (await table.find({ status: "staged" })).filter(
     (r) => r.logical_key === row.logical_key && r.digest !== row.digest && isLiveStaged(r),
   );
-  const toWrite = existing
-    ? buildProposalRow({
-        digest: row.digest,
-        logicalKey: row.logical_key,
-        title: row.title,
-        graphJson: row.graph,
-        preview: JSON.parse(row.preview),
-        nodeCount: row.node_count,
-        humanNodeCount: row.human_node_count,
-        sideEffectCount: row.side_effect_count,
-        sideEffecting: row.side_effecting === 1,
-        // Re-stage: if the existing row is STILL LIVE, preserve its original stage time so the TTL
-        // stays anchored to the first stage. But if it has already aged out of its TTL (or was
-        // dispatched/superseded long ago), reusing the stale `created_at` would yield a past
-        // `expires_at`, leaving the "re-staged" row immediately non-dispatchable (`getStagedProposal`
-        // rejects it as expired) while the preview claims it is staged. In that case re-anchor the TTL
-        // to now (omit `createdAt`) so a re-proposed digest is genuinely live again.
-        createdAt: isProposalExpired(existing.expires_at) ? undefined : existing.created_at,
-      })
-    : row;
   // Persist the write, its strictly-monotonic stage sequence, AND the supersede reconcile as ONE
   // transaction (issue #778 review — threads deliveryGraphProposals.ts:237/:239). Two properties matter:
   //   • `stage_seq` is assigned ATOMICALLY inside the write itself — `MAX(stage_seq)+1` in the
@@ -242,11 +221,12 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
   // `MAX(stage_seq)` reads the pre-write table via the `stage_seq` index (migration 114), an O(1)
   // reverse-index seek rather than the full-history scan a bare aggregate over the retained terminal rows
   // would cost.
-  const w = toWrite;
+  const at = now();
+  const atExpiry = proposalExpiry(at);
   const nextSeq = `(SELECT COALESCE(MAX("stage_seq"), 0) + 1 FROM "delivery_graph_proposals")`;
   await data.open().tx(async (t) => {
-    // Single idempotent UPSERT rather than a read-`existing`-then-branch INSERT/UPDATE: `existing` was
-    // read BEFORE this transaction, so two concurrent FIRST stages of the same digest both saw `null` and
+    // Single idempotent UPSERT rather than a read-`existing`-then-branch INSERT/UPDATE: reading the row
+    // BEFORE the transaction meant two concurrent FIRST stages of the same digest both saw `null` and
     // would both take an INSERT — the second hitting a primary-key conflict that fails the stage and drops
     // its reconciliation. `ON CONFLICT("digest") DO UPDATE` collapses the raced insert into an in-place
     // update instead, so a same-digest stage is idempotent regardless of arrival order (issue #778 review —
@@ -254,9 +234,23 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
     // (`MAX(stage_seq)+1`, materialised once as `excluded."stage_seq"` so the insert and the on-conflict
     // update use the exact same value), preserving the strictly-monotonic ordering the supersede reconcile
     // below tie-breaks on.
+    //
+    // The TTL anchor (`created_at`) and horizon (`expires_at`) are ALSO derived inside this atomic write,
+    // from the row as it exists AT WRITE TIME — NOT from a pre-transaction `table.get` snapshot (issue #778
+    // review — thread deliveryGraphProposals.ts:247). A pre-read snapshot is a TOCTOU: a concurrent re-stage
+    // can commit a fresh TTL between the read and this write, and the stale caller — committing LAST, so it
+    // wins the newest `stage_seq` — would overwrite that fresh horizon with the one it computed from the OLD
+    // `created_at`, restoring an already-expired `expires_at` on the newest row and leaving the proposal
+    // non-dispatchable. On a fresh INSERT the caller's `created_at`/`expires_at` stand (first stage anchors
+    // the TTL). On a CONFLICT the `CASE` re-reads the CURRENT committed row: if it is still LIVE
+    // (`expires_at` in the future) the original anchor and horizon are PRESERVED (an idempotent re-stage
+    // keeps the TTL pinned to the first stage); once it has aged out (past, blank, or NULL `expires_at`,
+    // matching `isProposalExpired`'s fail-closed rule) the TTL is RE-ANCHORED to now so a re-proposed digest
+    // is genuinely live again. All timestamps are ISO-8601 UTC, so the lexical `>` comparison is a valid
+    // chronological test.
     await t.exec(
-      `INSERT INTO "delivery_graph_proposals" ("digest", "logical_key", "title", "graph", "preview", "node_count", "human_node_count", "side_effect_count", "side_effecting", "status", "created_at", "updated_at", "expires_at", "stage_seq") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeq}) ON CONFLICT("digest") DO UPDATE SET "logical_key" = excluded."logical_key", "title" = excluded."title", "graph" = excluded."graph", "preview" = excluded."preview", "node_count" = excluded."node_count", "human_node_count" = excluded."human_node_count", "side_effect_count" = excluded."side_effect_count", "side_effecting" = excluded."side_effecting", "status" = excluded."status", "created_at" = excluded."created_at", "updated_at" = excluded."updated_at", "expires_at" = excluded."expires_at", "stage_seq" = excluded."stage_seq"`,
-      [w.digest, w.logical_key, w.title, w.graph, w.preview, w.node_count, w.human_node_count, w.side_effect_count, w.side_effecting, w.status, w.created_at, w.updated_at, w.expires_at],
+      `INSERT INTO "delivery_graph_proposals" ("digest", "logical_key", "title", "graph", "preview", "node_count", "human_node_count", "side_effect_count", "side_effecting", "status", "created_at", "updated_at", "expires_at", "stage_seq") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeq}) ON CONFLICT("digest") DO UPDATE SET "logical_key" = excluded."logical_key", "title" = excluded."title", "graph" = excluded."graph", "preview" = excluded."preview", "node_count" = excluded."node_count", "human_node_count" = excluded."human_node_count", "side_effect_count" = excluded."side_effect_count", "side_effecting" = excluded."side_effecting", "status" = excluded."status", "created_at" = CASE WHEN "delivery_graph_proposals"."expires_at" > ? THEN "delivery_graph_proposals"."created_at" ELSE ? END, "updated_at" = ?, "expires_at" = CASE WHEN "delivery_graph_proposals"."expires_at" > ? THEN "delivery_graph_proposals"."expires_at" ELSE ? END, "stage_seq" = excluded."stage_seq"`,
+      [row.digest, row.logical_key, row.title, row.graph, row.preview, row.node_count, row.human_node_count, row.side_effect_count, row.side_effecting, row.status, row.created_at, at, row.expires_at, at, at, at, at, atExpiry],
     );
     // Reconcile to EXACTLY ONE live proposal per logical graph: supersede every `staged` row for this
     // `logical_key` that has a strictly-NEWER staged sibling (by `updated_at`, with a deterministic
@@ -299,12 +293,13 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
   }
   const siblingsStaged = (await listStagedProposals(data)).filter((r) => r.logical_key !== row.logical_key).length;
 
-  // Re-read the just-written row AFTER the reconcile so `row` reports the ACTUALLY-persisted state, not
-  // the pre-reconcile `toWrite`: a concurrent newer stage of a different digest can flip THIS digest to
-  // `superseded` in the reconcile above, so returning `toWrite` (still `staged`) would report a status
-  // that doesn't match the DB. Fall back to `toWrite` only if the row somehow vanished (it shouldn't —
-  // we just wrote it), keeping the return non-null.
-  const persisted = (await table.get(toWrite.digest)) ?? toWrite;
+  // Re-read the just-written row AFTER the reconcile so the returned row reports the ACTUALLY-persisted
+  // state: a concurrent newer stage of a different digest can flip THIS digest to `superseded` in the
+  // reconcile above, so returning the pre-reconcile input `row` (still `staged`) would report a status
+  // that doesn't match the DB — and the persisted `created_at`/`expires_at`/`stage_seq` are derived inside
+  // the write, not on `row`. Fall back to the input `row` only if the persisted row somehow vanished (it
+  // shouldn't — we just wrote it), keeping the return non-null.
+  const persisted = (await table.get(row.digest)) ?? row;
 
   return { row: persisted, superseded, siblingsStaged };
 }

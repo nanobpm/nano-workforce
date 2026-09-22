@@ -158,6 +158,35 @@ test("stageProposal: a re-stage of an EXPIRED digest RE-ANCHORS the TTL so it is
   });
 });
 
+test("stageProposal: a re-stage derives the TTL from the row COMMITTED at write time, so a stale caller cannot clobber a concurrently re-anchored live proposal back to an expired horizon (issue #778 review — thread :247)", async () => {
+  await withData(async (data) => {
+    const table = deliveryGraphProposals(data);
+    // Model the committed state a CONCURRENT re-stage left behind: digest d1 is LIVE with a FRESH TTL
+    // (`expires_at` far in the future) but its `created_at` anchor is old — exactly the row a rival stage
+    // produced when it re-anchored the TTL. The stale caller below prepared its write from an EARLIER read
+    // and now commits LAST (grabbing the newest `stage_seq`). The pre-transaction snapshot bug recomputed
+    // `expires_at` from the stale `created_at` (`created_at + TTL`, long past), so the last writer resurrected
+    // an EXPIRED horizon over the fresh one and left the newest-`stage_seq` row non-dispatchable. The TTL must
+    // instead be derived from the row as committed AT WRITE TIME, inside the same atomic fence as `stage_seq`.
+    const seed = row({ digest: "d1", createdAt: "2020-01-01T00:00:00.000Z" });
+    seed.expires_at = "2999-01-01T00:00:00.000Z"; // fresh TTL a concurrent re-anchor committed
+    seed.stage_seq = 1;
+    await table.insert(seed);
+
+    await stageProposal(data, row({ digest: "d1", createdAt: "2020-01-01T00:00:00.000Z" }));
+
+    const after = await table.get("d1");
+    assert(after, "the re-staged row must still exist");
+    assert(
+      !isProposalExpired(after?.expires_at),
+      "a re-stage must not clobber a live proposal's fresh TTL with an expired horizon recomputed from a stale created_at snapshot",
+    );
+    const live = await getStagedProposal(data, "d1");
+    assert(live, "the re-staged live proposal remains dispatchable");
+    assertEquals(live?.status, "staged");
+  });
+});
+
 test("stageProposal: a new digest for the SAME logical key supersedes the prior staged proposal", async () => {
   await withData(async (data) => {
     await stageProposal(data, row({ digest: "d1" }));
