@@ -1044,6 +1044,17 @@ test("#778 redactConnectorValue: a WHOLE-value opaque scheme-relative PR ref (`/
   // — a userinfo-less `//host?token=secret` query (the `?` after `//authority` is unambiguously URL syntax):
   const wholeQ = redactConnectorValue("//host?token=secret");
   assert(!wholeQ.includes("token=secret"), `a whole-value scheme-relative URL's query secret must be redacted: ${JSON.stringify(wholeQ)}`);
+  // — a NON-NUMERIC fragment is NOT a PR ref: only `#<digits>` (`parsePrTarget`) is a valid PR handle,
+  //   so `//host#access-token` is an ordinary scheme-relative URL whose fragment can hide a secret and
+  //   MUST be redacted like any other URL fragment — the opaque-PR-ref exception must not swallow it
+  //   (#778 review — thread deliveryGraph.ts:206).
+  const nonNumericFrag = redactConnectorValue("//host#access-token");
+  assert(
+    !nonNumericFrag.includes("access-token"),
+    `a whole-value //host#<non-numeric> fragment is not a PR ref and must be redacted: ${JSON.stringify(nonNumericFrag)}`,
+  );
+  // The numeric PR ref itself still survives (regression guard for the exception's happy path):
+  assertEquals(redactConnectorValue("//host#42"), "//host#42");
 });
 
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {

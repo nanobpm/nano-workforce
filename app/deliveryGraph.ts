@@ -23,7 +23,7 @@ import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
-import { hasEmbeddedCredential, hasEmbeddedUrl, hasSchemeRelativeAuthority, isUrlShaped, redactEmbeddedCredentialUrl, redactEmbeddedSchemeRelativeUrl, redactEmbeddedUrl, redactString } from "./readiness.ts";
+import { hasEmbeddedCredential, hasEmbeddedUrl, hasSchemeRelativeAuthority, isUrlShaped, parsePrTarget, redactEmbeddedCredentialUrl, redactEmbeddedSchemeRelativeUrl, redactEmbeddedUrl, redactString } from "./readiness.ts";
 import { isResolvableRepo } from "./repoEnvelope.ts";
 
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
@@ -192,7 +192,11 @@ export function redactConnectorValue(value: string): string {
   // its `#42` → `#***` — yet the EMBEDDED contract deliberately PRESERVES the same `//host#42` (the
   // embedded redactors leave a userinfo-/query-less `//host#42` untouched). Route it through the embedded
   // path so a whole-value `//host#42` keeps its `#42` exactly like `prefix //host#42`, closing that
-  // whole-value/embedded inconsistency (issue #778 review — thread deliveryGraph.ts:198). An explicit
+  // whole-value/embedded inconsistency (issue #778 review — thread deliveryGraph.ts:198). Only a
+  // NUMERIC `#<digits>` fragment is a valid `parsePrTarget` PR handle — `//host#access-token` is an
+  // ordinary URL fragment that can hide a secret, so the exception REQUIRES `parsePrTarget` to accept
+  // the whole (trimmed) value; a non-numeric fragment falls to the full whole-value redact like any
+  // other URL fragment (issue #778 review — thread deliveryGraph.ts:206). An explicit
   // `scheme://host#42`, a `//user:pass@host#…` credential, or a userinfo-less `//host?token=…` query all
   // still fall to the full whole-value redact.
   // Any non-URL value keeps its meaningful `#`/`?` opaque-token characters, but still has (a) each
@@ -203,7 +207,10 @@ export function redactConnectorValue(value: string): string {
   // PR ref uses a `#<digits>` fragment, never a `//…?…` query), while a userinfo-less opaque `//host#42`
   // (no `?`) keeps its `#42` (issue #778 review — thread deliveryGraph.ts:633).
   const isOpaqueSchemeRelativePrRef =
-    cleaned.trim().startsWith("//") && !hasEmbeddedCredential(cleaned) && !cleaned.includes("?");
+    cleaned.trim().startsWith("//") &&
+    !hasEmbeddedCredential(cleaned) &&
+    !cleaned.includes("?") &&
+    parsePrTarget(cleaned) !== null;
   return isUrlShaped(cleaned) && !isOpaqueSchemeRelativePrRef
     ? redactString(cleaned)
     : redactEmbeddedSchemeRelativeUrl(redactEmbeddedCredentialUrl(redactEmbeddedUrl(cleaned)));

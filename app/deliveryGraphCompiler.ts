@@ -1610,10 +1610,16 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
               // `v` is guaranteed non-null here; `str` is not exported, so inline `String(v).trim()`.
               out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(String(v).trim())}`);
             } else if (matchValueTypeMismatch(k, v)) {
-              // A cross-type twin (`0` vs `"0"` on a numeric field like `exitCode`) parses to a DIFFERENT
-              // runtime match, so it must fork the run key — fingerprint the RAW `v` (type-preserving
-              // `canonicalJson`) to keep the number/string variants distinct.
-              out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(v)}`);
+              // A numeric field (`status`/`exitCode`) coerces through `num()`: a real number is a
+              // distinct runtime match, but EVERY non-number (`"200"`, `" 200 "`, `"foo"`, `true`)
+              // collapses to the SAME `undefined` (unset / any-2xx) match. Fingerprint that CANONICAL
+              // coerced value — a constant `null` unset marker — NOT the raw `v`: otherwise two
+              // runtime-equivalent non-number twins (`"200"` vs `" 200 "`, which also DISPLAY identically)
+              // fork distinct `stableProposalRunKey`s and double-dispatch. The number/string cross-type
+              // twin (`200` vs `"200"`) still forks correctly because the number takes the else-branch and
+              // pushes nothing, while a genuinely different-DISPLAY string (`"foo"`) already forks via
+              // `semanticBpmn` (issue #778 review — thread deliveryGraphCompiler.ts:1616).
+              out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(null)}`);
             } else {
               // A non-redacted field is shown as `redactConnectorValue(String(v).trim())` — `describeProbeMatch`
               // trims a string predicate before display, and `parseMatch` likewise coerces via
@@ -2017,7 +2023,14 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
   // stop (a documented sharp edge — the downstream side-effecting node then runs without the awaited
   // fact). `fail` is rejected earlier at validation (blocked on engine terminate-end, #978), so it
   // never reaches here.
-  const continueOnTimeout = node.wait?.onTimeout === "continue";
+  //
+  // NORMALISE (trim) `onTimeout` before the topology decision — `parseProbe` trims it
+  // (`str(raw.onTimeout).trim()`) and the display/digest path uses `trimmedOrEmpty(p.onTimeout)`, so a
+  // padded `" continue "` runs the SAME `continue` routing at the worker. Comparing the RAW value here
+  // would emit the escalation branch for a `" continue "` the runtime treats as continue — the compiled
+  // topology diverging from the requested (and digested) behaviour (issue #778 review — thread
+  // deliveryGraphCompiler.ts:2012).
+  const continueOnTimeout = trimmedOrEmpty(node.wait?.onTimeout) === "continue";
   // Defect A: read-only probe diagnostics seeded onto the escalation task so the operator/agent can
   // tell a genuine "not published yet" from a transient false-negative — the probe's last detail, the
   // resolved target/match, and a compact summary of the candidate releases the probe observed.

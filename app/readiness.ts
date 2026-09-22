@@ -419,7 +419,17 @@ export function normalizePoll(poll: ProbePoll | undefined): Required<ProbePoll> 
   const everyMs = typeof everyRaw === "number" && everyRaw >= 1 ? Math.trunc(everyRaw) : DEFAULT_EVERY_MS;
   const timeoutMs =
     typeof timeoutRaw === "number" && timeoutRaw >= 1 ? Math.trunc(timeoutRaw) : DEFAULT_TIMEOUT_MS;
-  return { everyMs: Math.min(everyMs, MAX_EVERY_MS), timeoutMs, backoff: poll?.backoff ?? DEFAULT_BACKOFF };
+  // TRIM `backoff` to match `parseProbe` (`parsePoll` does `str(raw.backoff).trim()`): a padded
+  // `" exponential "` runs as the SAME `exponential` policy, so leaving the whitespace here would make
+  // the compiler's display path (`normalizePoll(p.poll)`) emit a spurious non-default `Poll:` line for a
+  // runtime-default poll — forking `semanticBpmn`/the digest from the omitted-equivalent graph and
+  // letting a re-stage bypass the idempotency fence to duplicate the run (issue #778 review — thread
+  // deliveryGraphCompiler.ts:1414). A whitespace-only / unrecognised value falls back to the default
+  // (the compiler display path takes raw JSON; a genuinely invalid backoff fails loudly later in
+  // `parseProbe`, so defaulting the DISPLAY is safe and keeps the effective-policy render honest).
+  const backoffTrimmed = typeof poll?.backoff === "string" ? poll.backoff.trim() : undefined;
+  const backoff = backoffTrimmed && isBackoff(backoffTrimmed) ? backoffTrimmed : DEFAULT_BACKOFF;
+  return { everyMs: Math.min(everyMs, MAX_EVERY_MS), timeoutMs, backoff };
 }
 
 /** The delay (ms) before the `attempt`-th retry (1-based). Fixed backoff returns `everyMs`;

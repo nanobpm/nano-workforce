@@ -842,6 +842,22 @@ test("a wait node's onTimeout: continue proceeds past the gate with NO escalatio
   );
 });
 
+test("#778 a wait node's onTimeout authored as a padded `\" continue \"` compiles to the SAME topology as the trimmed `\"continue\"` — `parseProbe` trims `onTimeout` before the worker runs, so the padded value routes past the gate with NO escalation task; comparing the raw value would spuriously emit the escalation branch the runtime never takes (thread deliveryGraphCompiler.ts:2012)", async () => {
+  const mk = (onTimeout: string): DeliveryGraph =>
+    JSON.parse(
+      JSON.stringify({
+        name: "g",
+        nodes: [{ id: "soft", kind: "wait", wait: { kind: "pr", target: "acme/repo#1", match: { prState: "merged" }, onTimeout } }],
+        edges: [],
+      }),
+    );
+  const padded = await compileOk(mk(" continue "));
+  const tight = await compileOk(mk("continue"));
+  assertEquals(padded.bpmn, tight.bpmn, "a padded onTimeout `\" continue \"` compiles byte-identically to the trimmed `\"continue\"`");
+  const softEl = elementForNode(padded.bpmn, "soft");
+  assert(!padded.bpmn.includes(`delivery-human-task__${softEl}__esc`), "a padded `continue` still emits no escalation user task");
+});
+
 test("a wait node's onTimeout: fail is rejected at compile with a path-qualified error (blocked on engine terminate-end, #462/#978)", async () => {
   const errors = await compileFail({
     name: "fail not yet supported",
@@ -1155,6 +1171,28 @@ test("#778 a wait `poll` that NORMALISES to the runtime defaults compiles to byt
   assert(whole.bpmn !== omitted.bpmn, "a genuinely non-default poll budget still renders (and forks) distinctly from an omitted poll");
 });
 
+test("#778 a wait `poll.backoff` differing ONLY in surrounding whitespace does not fork the digest — `normalizePoll` trims `backoff` like `parseProbe`, so a padded `\" exponential \"` (the default) renders no `Poll:` line and a padded `\" fixed \"` matches the trimmed `\"fixed\"` (thread deliveryGraphCompiler.ts:1414)", async () => {
+  const mk = (backoff: string): DeliveryGraph =>
+    JSON.parse(
+      JSON.stringify({
+        name: "g",
+        nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" }, poll: { backoff } } }],
+        edges: [],
+      }),
+    );
+  const omitted: DeliveryGraph = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" } } }], edges: [] };
+  const omittedR = await compileOk(omitted);
+  // A padded `" exponential "` IS the default backoff once trimmed, so it must render identically to an
+  // omitted poll (no `Poll:` line) — an untrimmed compare would emit a spurious non-default line.
+  const paddedDefault = await compileOk(mk(" exponential "));
+  assertEquals(paddedDefault.bpmn, omittedR.bpmn, "a padded default backoff renders identically to an omitted poll");
+  // A padded non-default `" fixed "` matches the trimmed `"fixed"` (same effective policy, one digest).
+  const paddedFixed = await compileOk(mk(" fixed "));
+  const tightFixed = await compileOk(mk("fixed"));
+  assertEquals(paddedFixed.bpmn, tightFixed.bpmn, "a padded `\" fixed \"` backoff compiles byte-identically to the trimmed `\"fixed\"`");
+  assert(tightFixed.bpmn !== omittedR.bpmn, "a genuinely non-default `fixed` backoff still renders (and forks) distinctly from an omitted poll");
+});
+
 test("#778 a connector bound-`pr` payload carrying a CREDENTIAL differing ONLY in surrounding whitespace does not fork the invisible-value set — nodeDisplay/runtime trim `pr` before use, so the padded and trimmed twins are the SAME run key (thread deliveryGraphCompiler.ts:1484)", () => {
   // A credential-bearing `pr` makes the payload digest-INVISIBLE (redaction drops content), so the whole
   // payload is fingerprinted as the disambiguator. That fingerprint used the UNTRIMMED payload, so a
@@ -1193,6 +1231,14 @@ test("#778 a github-check `match.conclusion` authored as the NUMBER 1 vs the STR
   assert(
     JSON.stringify(digestInvisibleRawValues(mkStatus(200))) !== JSON.stringify(digestInvisibleRawValues(mkStatus("200"))),
     "a numeric-field cross-type value stays a distinct run key (its runtime meaning genuinely differs)",
+  );
+  // But TWO non-number variants of a numeric field BOTH coerce to `undefined` (unset / any-2xx) — the
+  // SAME runtime match — and display identically, so they must NOT fork the run key. Before the fix the
+  // mismatch branch fingerprinted the RAW value, forking `" 200 "` from `"200"` and double-dispatching.
+  assertEquals(
+    digestInvisibleRawValues(mkStatus(" 200 ")),
+    digestInvisibleRawValues(mkStatus("200")),
+    "two non-number status variants coerce to the same unset match and must share one run key",
   );
 });
 
