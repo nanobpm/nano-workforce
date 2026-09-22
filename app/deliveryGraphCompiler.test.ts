@@ -1138,16 +1138,27 @@ test("#778 a connector `timeout` differing ONLY in case/whitespace compiles to b
   assertEquals(digestInvisibleRawValues(mk("pt1h ")), digestInvisibleRawValues(mk("PT1H")), "no invisible token forks the two timeout variants");
 });
 
-test("#778 a connector bound-`pr` payload differing ONLY in surrounding whitespace compiles to byte-identical BPMN and the SAME invisible-value set — the run-key digest collapses (Fix E, thread deliveryGraphCompiler.ts:1253)", async () => {
-  const mk = (pr: string): DeliveryGraph => ({
+test("#783 a connector bound-`pr` payload differing ONLY in surrounding whitespace FORKS for a GENERIC connector (payload forwarded raw) but COLLAPSES for a CONVERGE target (runtime trims `pr`) — the run-key digest matches runtime dispatch identity (thread deliveryGraphCompiler.ts:1376)", async () => {
+  const mk = (target: string, pr: string): DeliveryGraph => ({
     name: "g",
-    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#releases", payload: { pr } } }],
+    nodes: [{ id: "c", kind: "connector", connector: { target, payload: { pr } } }],
     edges: [],
   });
-  const canonical = await compileOk(mk("owner/repo#1"));
-  const variant = await compileOk(mk("  owner/repo#1  "));
-  assertEquals(variant.bpmn, canonical.bpmn, "whitespace-only pr variants compile to identical BPMN (display trims the bound pr, matching the runtime parse)");
-  assertEquals(digestInvisibleRawValues(mk("  owner/repo#1  ")), digestInvisibleRawValues(mk("owner/repo#1")), "no invisible token forks the two pr variants");
+  // GENERIC (forward-declared) target: the worker forwards `payload` UNCHANGED (no `resolveConvergePr`),
+  // so `{pr:"  x  "}` and `{pr:"x"}` are DISTINCT runtime dispatches and MUST fork the display/digest.
+  const genTight = await compileOk(mk("slack:#releases", "owner/repo#1"));
+  const genPadded = await compileOk(mk("slack:#releases", "  owner/repo#1  "));
+  assert(genPadded.bpmn !== genTight.bpmn, "a generic connector's whitespace-only pr variants compile to DIFFERENT BPMN (payload forwarded raw, so they are distinct runtime dispatches)");
+  // A clean (non-credential) pr is digest-VISIBLE (redaction is a no-op on `{pr}`), so the disambiguator
+  // is the display/semanticBpmn itself — which now forks — not the digest-INVISIBLE raw-value set (that set
+  // is empty here, exercised instead by the credential test below).
+  assert(genPadded.semanticBpmn !== genTight.semanticBpmn, "a generic connector's whitespace-only pr variants fork the semanticBpmn (distinct run identity)");
+  // CONVERGE target: `resolveConvergePr`/`parsePr` trim `pr` before use, so the padded and trimmed twins
+  // drive the SAME dispatch and MUST collapse to one BPMN/digest.
+  const cvgTight = await compileOk(mk("converge-merge", "owner/repo#1"));
+  const cvgPadded = await compileOk(mk("converge-merge", "  owner/repo#1  "));
+  assertEquals(cvgPadded.bpmn, cvgTight.bpmn, "a converge target's whitespace-only pr variants compile to identical BPMN (display trims the bound pr, matching the runtime parse)");
+  assertEquals(digestInvisibleRawValues(mk("converge-merge", "  owner/repo#1  ")), digestInvisibleRawValues(mk("converge-merge", "owner/repo#1")), "no invisible token forks the two converge pr variants");
 });
 
 test("#778 a wait `poll` that NORMALISES to the runtime defaults compiles to byte-identical BPMN as an OMITTED poll — the display renders the CANONICAL effective policy (`normalizePoll`), not the authored fields, so a runtime-equivalent re-stage shares one digest instead of bypassing the idempotency fence (thread deliveryGraphCompiler.ts:1414)", async () => {
@@ -1193,23 +1204,31 @@ test("#778 a wait `poll.backoff` differing ONLY in surrounding whitespace does n
   assert(tightFixed.bpmn !== omittedR.bpmn, "a genuinely non-default `fixed` backoff still renders (and forks) distinctly from an omitted poll");
 });
 
-test("#778 a connector bound-`pr` payload carrying a CREDENTIAL differing ONLY in surrounding whitespace does not fork the invisible-value set — nodeDisplay/runtime trim `pr` before use, so the padded and trimmed twins are the SAME run key (thread deliveryGraphCompiler.ts:1484)", () => {
+test("#783 a connector bound-`pr` payload carrying a CREDENTIAL differing ONLY in surrounding whitespace FORKS the invisible-value set for a GENERIC connector — the payload is forwarded raw, so the padded and trimmed twins are DISTINCT run keys (thread deliveryGraphCompiler.ts:1376)", () => {
   // A credential-bearing `pr` makes the payload digest-INVISIBLE (redaction drops content), so the whole
-  // payload is fingerprinted as the disambiguator. That fingerprint used the UNTRIMMED payload, so a
-  // padded `pr` and its trimmed twin — which display + runtime treat identically (`payload.pr.trim()`) —
-  // got DIFFERENT stable run keys, letting a re-stage launch the connector side effect twice. Normalising
-  // `pr` (trim) before the redaction test AND before canonicalising collapses them.
-  const mk = (pr: string): DeliveryGraph => ({
+  // payload is fingerprinted as the disambiguator. For a GENERIC (forward-declared) connector the worker
+  // forwards `payload` UNCHANGED (no `resolveConvergePr`/`parsePr`), so a padded `pr` and its trimmed twin
+  // are DIFFERENT runtime payloads and MUST get DIFFERENT run keys — trimming them here would collapse two
+  // distinct dispatches into one key and let the keyless dispatch fence reuse the wrong payload (issue #783
+  // review). Only a CONVERGE target trims `pr`, so only there do the twins collapse.
+  const mk = (target: string, pr: string): DeliveryGraph => ({
     name: "g",
-    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#releases", payload: { pr } } }],
+    nodes: [{ id: "c", kind: "connector", connector: { target, payload: { pr } } }],
     edges: [],
   });
-  const padded = digestInvisibleRawValues(mk("  //user:pass@host  "));
-  const tight = digestInvisibleRawValues(mk("//user:pass@host"));
-  assertEquals(padded, tight, "a padded credential-bearing pr must not fork the run key from its trimmed twin");
-  // The credential IS invisible, so a payload fingerprint entry is still present (just the trimmed form).
-  assert(tight.some((t) => t.includes("connector.payload")), `the credential-bearing payload is fingerprinted: ${JSON.stringify(tight)}`);
-  assert(!padded.join("").includes("//user:pass@host  "), `the fingerprinted payload carries the trimmed pr, not the padded raw: ${JSON.stringify(padded)}`);
+  const genPadded = digestInvisibleRawValues(mk("slack:#releases", "  //user:pass@host  "));
+  const genTight = digestInvisibleRawValues(mk("slack:#releases", "//user:pass@host"));
+  assert(
+    JSON.stringify(genPadded) !== JSON.stringify(genTight),
+    "a generic connector's padded credential-bearing pr must FORK the run key from its trimmed twin (payload forwarded raw)",
+  );
+  assert(genPadded.some((t) => t.includes("connector.payload")), `the credential-bearing payload is fingerprinted: ${JSON.stringify(genPadded)}`);
+  assert(genPadded.join("").includes("//user:pass@host  "), `the generic fingerprint carries the RAW untrimmed pr: ${JSON.stringify(genPadded)}`);
+  // A CONVERGE target trims `pr` (runtime does too), so its padded/trimmed credential twins still collapse.
+  const cvgPadded = digestInvisibleRawValues(mk("converge-merge", "  //user:pass@host  "));
+  const cvgTight = digestInvisibleRawValues(mk("converge-merge", "//user:pass@host"));
+  assertEquals(cvgPadded, cvgTight, "a converge target's padded credential-bearing pr must not fork the run key from its trimmed twin");
+  assert(!cvgPadded.join("").includes("//user:pass@host  "), `the converge fingerprint carries the trimmed pr, not the padded raw: ${JSON.stringify(cvgPadded)}`);
 });
 
 test("#778 a github-check `match.conclusion` authored as the NUMBER 1 vs the STRING \"1\" does not fork the run key — `parseMatch` coerces every string field through `str().trim()`, so they are the SAME runtime probe; only num()-backed fields (`status`/`exitCode`) stay type-sensitive (thread deliveryGraphCompiler.ts:1251)", () => {
@@ -1333,9 +1352,15 @@ test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw l
   const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "deploy via //user:pa\nss@registry.example.com now" } });
   assert(!agent.documentation.includes("ss@registry") && !agent.documentation.includes("user:pa"), "the newline-split userinfo is redacted");
   assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
-  // Ordinary prose with an unrelated `//` before an email is NOT over-redacted (space bounds the match).
+  // Canonical alignment (#783 review — thread deliveryGraphCompiler.ts:1140): redaction now DERIVES from
+  // the ONE canonical `redactEmbeddedCredential` (`//[^/?#]*@`), which classifies ANY `//<userinfo>@` span
+  // as credential-bearing regardless of intervening words/spaces. So a prose `//b then email admin@…` is
+  // also collapsed to `//***@corp.example` — the SAFE direction: the RAW prompt still reaches the runtime
+  // job input unmodified, only the operator-visible display doc loses the ambiguous span. (This supersedes
+  // the earlier bespoke belt's prose-survival carve-out, a second "what is a credential" impl that drifted.)
   const prose = nodeDisplay({ id: "b", kind: "agent", agent: { jobType: "j", prompt: "compare a//b then email admin@corp.example" } });
-  assert(prose.documentation.includes("admin@corp.example"), "an ordinary email after a bounded `//` survives");
+  assert(!prose.documentation.includes("admin@corp.example"), "a `//…@` span in prose is collapsed by the canonical redactor (safe direction)");
+  assert(prose.documentation.includes("//***@corp.example"), "the `//…@` prose span collapses to the redaction marker");
 });
 
 test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw TAB (tab-safe)", () => {
@@ -1382,15 +1407,17 @@ test("#778 redactFreeText: prose AFTER a `?query`/`#fragment` split across a lin
   assert(frag.includes("confirm the deploy"), `prose past the span boundary survives: ${frag}`);
 });
 
-test("#778 redactFreeText: a non-credential `//` run spanning a break is NOT over-redacted (credential-shaped belt only)", () => {
-  // The belt scan re-redacts only a `//…:…@` userinfo span, not every `//` run. A `//comment` reference
-  // followed by a new-line email `owner@example.com` has no `user:pass@` shape, so the prose survives
-  // intact instead of collapsing to `//***@example.com` (issue #778 review — the earlier `//[^ ]*` scan
-  // mangled it).
+test("#783 redactFreeText: a break-spanning `//<word>@host` span IS redacted by the canonical redactor (safe direction, thread deliveryGraphCompiler.ts:1140)", () => {
+  // Canonical alignment (#783 review): `redactEmbeddedCredential`'s `//[^/?#]*@` class spans the embedded
+  // newline, so a `//comment\nowner@example.com` span is a `//<userinfo>@` shape and collapses to
+  // `//***@example.com`. The earlier bespoke belt tried to distinguish "prose" from "credential" here — a
+  // drifting SECOND classifier — and leaked the wrapped userinfo shape it misjudged. A `//…@` span is
+  // UNAMBIGUOUSLY credential-shaped wherever it sits, so redacting it is the SAFE direction (the RAW prompt
+  // still reaches the runtime job input; only the operator-visible display loses the span).
   const out = redactFreeText("Use //comment\nowner@example.com for context");
-  assert(out.includes("owner@example.com") && out.includes("//comment"), `non-credential prose must survive: ${out}`);
-  assert(!out.includes("//***@"), "a break-spanning email is not mistaken for a credential");
-  // A genuine `user:pass@` userinfo split across the same newline IS still redacted.
+  assert(!out.includes("owner@example.com"), `a break-spanning //...@ span is collapsed by the canonical redactor: ${out}`);
+  assert(out.includes("//***@example.com"), `the span collapses to the redaction marker: ${out}`);
+  // A genuine `user:pass@` userinfo split across the same newline IS still redacted (and its query too).
   const cred = redactFreeText("Use //user:pass\nx@host/x?token=abc for context");
   assert(!cred.includes("token=abc") && !cred.includes("user:pass"), `a real split credential must be redacted: ${cred}`);
 });
@@ -1408,23 +1435,22 @@ test("#778 redactFreeText consumes a `?query` split from its URL by a line break
   assert(!frag.includes("sig=zzz"), `a break-spanning fragment must be redacted: ${frag}`);
 });
 
-test("#778 redactFreeText: a PASSWORDLESS `//<userinfo>@host` bearer token wrapped across a whitespace break right before its `@` (`//token\\n@host`) is redacted, while an ordinary new-line email in prose survives (#778 review — thread deliveryGraphCompiler.ts:1140/:1460)", () => {
-  // The on-one-line passwordless `//token@host` is already caught by the primary `//[^\s]+` pass, but a
-  // userinfo that WRAPPED across a break lands past that pass's whitespace stop, and the belt's
-  // `:`-before-`@` credential test was blind to the colon-less bearer form. Requiring a whitespace char
-  // immediately before the `@` catches the wrapped userinfo while leaving an ordinary new-line email
-  // (a word precedes its `@`) untouched.
+test("#783 redactFreeText: a PASSWORDLESS `//<userinfo>@host` bearer wrapped across a whitespace break before its `@` is redacted, AND a break-spanning prose email `//comment\\nowner@…` is ALSO collapsed by the canonical redactor (safe direction, #783 review — thread deliveryGraphCompiler.ts:1140/:1460)", () => {
+  // The canonical `redactEmbeddedCredential` (`//[^/?#]*@`) spans the embedded break, so BOTH a colon-less
+  // wrapped bearer (`//token\n@host`) and a prose email after a `//comment` reference (`//comment\nowner@…`)
+  // are `//<userinfo>@` shapes that collapse to `//***@`. The earlier bespoke belt tried to keep the prose
+  // email — a drifting second classifier that mislabelled some real credentials — so we now redact any
+  // `//…@` span uniformly (safe direction: RAW prompt still reaches runtime, only the display loses it).
   const out = redactFreeText("use //token\n@host please");
   assert(!out.includes("//token") && !out.includes("token\n@"), `a wrapped passwordless userinfo must be redacted: ${JSON.stringify(out)}`);
   assert(out.includes("//***@"), `the userinfo collapses to the redaction marker: ${JSON.stringify(out)}`);
   // A TAB-wrapped passwordless userinfo is likewise caught.
   const tab = redactFreeText("use //token\t@host please");
   assert(!tab.includes("//token"), `a tab-wrapped passwordless userinfo must be redacted: ${JSON.stringify(tab)}`);
-  // Ordinary prose — a `//comment` reference then a new-line email — still survives (a WORD, not
-  // whitespace, precedes the `@`), preserving the existing protection.
+  // A break-spanning prose email is now ALSO collapsed (canonical alignment, no prose carve-out).
   const prose = redactFreeText("Use //comment\nowner@example.com for context");
-  assert(prose.includes("owner@example.com") && prose.includes("//comment"), `non-credential prose must survive: ${prose}`);
-  assert(!prose.includes("//***@"), "a break-spanning email is not mistaken for a credential");
+  assert(!prose.includes("owner@example.com"), `a //...@ prose span is collapsed by the canonical redactor: ${prose}`);
+  assert(prose.includes("//***@example.com"), "the prose span collapses to the redaction marker");
 });
 
 test("#778 redactFreeText: a `//user:pass@ss@host` userinfo with MULTIPLE raw `@` collapses the WHOLE authority credential, not just the prefix (multi-@ suffix-leak — thread deliveryGraphCompiler.ts:1056)", () => {
@@ -1472,19 +1498,25 @@ test("#778 redactFreeText consumes a `//user:secret pass@host` userinfo split by
   assert(!bounded.documentation.includes("//***@"), `a '/'-bounded lookahead does not fabricate a credential: ${bounded.documentation}`);
 });
 
-test("#778 redactFreeText: a PASSWORDLESS `//<userinfo>@host` bearer token split from its `@host` by a literal SPACE (`//token @host`) is redacted, while ordinary spaced prose (`//comment owner@example.com`) survives (#778 review — thread deliveryGraphCompiler.ts:1108)", () => {
-  // The SPACE bounding a belt span cuts a colon-LESS bearer `//token @host` too, so `//token` escaped
-  // both the belt (`:`-before-`@` blind) and the primary `//[^\s]+` pass, leaking into the display doc.
-  // The belt now bridges the whitespace to an IMMEDIATELY-following `@` (no intervening word) — catching
-  // the wrapped bearer while leaving prose (`//comment owner@…`, a WORD before the `@`) untouched.
+test("#783 redactFreeText: a colon-less bearer `//<userinfo>@host` split from its `@host` by a SPACE or a WORD is redacted, AND a spaced prose email `//comment owner@…` is ALSO collapsed (canonical alignment, #783 review — thread deliveryGraphCompiler.ts:1140/:1108)", () => {
+  // The canonical `redactEmbeddedCredential` (`//[^/?#]*@`) spans intervening spaces AND words up to the
+  // `@`, so `//token @host`, `//token part@host` (WORD between), and even a spaced prose email
+  // `//comment owner@example.com` are all `//<userinfo>@` shapes that collapse to `//***@`. The earlier
+  // bespoke belt's "bridge only across whitespace, keep the WORD-separated form as prose" carve-out was a
+  // drifting second classifier that leaked `//token part@host`; deriving from the ONE canonical redactor
+  // fixes the leak and redacts any `//…@` span uniformly (safe direction).
   const out = redactFreeText("use //token @host please");
   assert(!out.includes("//token ") && out.includes("//***@host"), `a space-split passwordless userinfo must be redacted: ${JSON.stringify(out)}`);
   const multi = redactFreeText("use //token  @host please");
   assert(!multi.includes("//token ") && multi.includes("//***@host"), `a multi-space bridge must redact: ${JSON.stringify(multi)}`);
-  // Ordinary prose: a `//comment` reference followed by a spaced email survives — a WORD (`owner`), not
-  // the `@`, follows the space, so no credential is fabricated.
+  // A WORD between the userinfo and its `@host` (the leak this review fixed) is now redacted too.
+  const word = redactFreeText("publish //token part@host");
+  assert(!word.includes("token part@") && !word.includes("//token part"), `a WORD-split bearer must not leak: ${JSON.stringify(word)}`);
+  assert(word.includes("//***@host"), `the WORD-split userinfo collapses to the marker: ${JSON.stringify(word)}`);
+  // A spaced prose email is now ALSO collapsed (canonical alignment, no prose carve-out).
   const prose = redactFreeText("Use //comment owner@example.com for context");
-  assert(prose.includes("owner@example.com") && prose.includes("//comment"), `non-credential spaced prose must survive: ${prose}`);
+  assert(!prose.includes("owner@example.com"), `a //...@ prose span is collapsed by the canonical redactor: ${prose}`);
+  assert(prose.includes("//***@example.com"), "the prose span collapses to the redaction marker");
 });
 
 test("#778 wait.target digest fingerprint is TRIMMED so a whitespace-only variant shares one staged run key (all kinds)", () => {

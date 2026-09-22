@@ -36,7 +36,7 @@ import type {
   ResolvedDeliveryNode,
 } from "../nano-generated/api-io.d.ts";
 import { TRANSCRIPT_URL_BASE_VAR, TRANSCRIPT_URL_VAR } from "./agentic/transcript-url.ts";
-import { CONVERGE_MERGE_TARGET, CONVERGE_TARGET, MERGE_MAIN_TARGET } from "./convergeTargets.ts";
+import { CONVERGE_MERGE_TARGET, CONVERGE_TARGET, isConvergeTarget, MERGE_MAIN_TARGET } from "./convergeTargets.ts";
 import { DELIVERY_CONNECTOR_TASK_TYPE } from "./deliveryConnector.ts";
 import {
   analyzeExclusiveTopology,
@@ -50,7 +50,7 @@ import {
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
-import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, EMBEDDED_CREDENTIAL_SRC, isProbeKind, normalizePoll, redactString } from "./readiness.ts";
+import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactEmbeddedCredential, redactString } from "./readiness.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
 
@@ -1076,28 +1076,43 @@ export function redactFreeText(value: string): string {
   // `stripXmlInvalidChars` drops the control at render time (issue #778 review — same class as the
   // connector/probe strip-before-classify fix).
   const cleaned = stripXmlInvalidChars(value);
-  // Run the newline-aware BELT pass on the ORIGINAL cleaned text FIRST, then the primary
-  // whitespace-bounded pass. The belt must see the raw text: a `?query`/`#fragment` whose value rode
-  // across a break is defeated if the primary pass has already rewritten the on-line `?token` tail to
-  // `?***`, erasing the marker (issue #778 review — thread deliveryGraphCompiler.ts:1083/:1115). The belt
-  // only touches credential-shaped or query/fragment spans and CONSERVATIVELY redacts a break-spanning
-  // `?query`/`#fragment` through the span (a continuation past the break is indistinguishable from a split
-  // credential); the primary pass then redacts the same-line `scheme://…`/`//…` userinfo+query tokens
-  // `redactString` handles.
-  const belted = redactCredentialSpans(cleaned);
+  // Embedded credential userinfo: DERIVE from the ONE canonical redactor {@link redactEmbeddedCredential}
+  // (`EMBEDDED_CREDENTIAL_SRC` = `//[^/?#]*@`) rather than a bespoke belt heuristic. Its `[^/?#]` class
+  // spans spaces/TABs/newlines up to the LAST `@` before a `/`/`?`/`#`, so EVERY `//<userinfo>@` shape
+  // collapses uniformly to `//***@` — a colon-prefix `//user:pass@`, a colon-LESS bearer separated from
+  // its `@host` by a word or space (`//token part@host`, `//token @host`), a userinfo split by a raw
+  // CR/LF/TAB, and a malformed multi-`@` authority (`//user:pass@ss@host`) — with NO second "what is a
+  // credential" implementation that can drift from the canonical redactor/validator (`hasEmbeddedCredential`)
+  // (issue #783 review — thread deliveryGraphCompiler.ts:1140; the earlier bespoke colon-less bridge
+  // stopped on the first non-whitespace char after the space and leaked `//token part@host`). A `//…@`
+  // span is UNAMBIGUOUSLY a credential wherever it sits, so redacting a prose `//word …@host` too is the
+  // SAFE direction: the RAW prompt still reaches the runtime job input unmodified — only the operator-
+  // visible display doc loses the span. The `[^/?#]` bound also keeps the userinfo from swallowing a `?`
+  // marker (`//host?token=secret@tail` has no userinfo — its `@` rides the query), leaving that tail to
+  // the query/fragment belt below.
+  const credStripped = redactEmbeddedCredential(cleaned);
+  // Query/fragment across a whitespace BREAK: the primary `//[^\s]+` token below stops at the break, so a
+  // `//host/?\nTOKEN=secret` would leave the value visible in the XML-preserved doc. The linear belt walks
+  // each SPACE-bounded `//`-run (crossing an embedded CR/LF/TAB the primary token stopped at) and
+  // CONSERVATIVELY redacts its `?query`/`#fragment` tail through the span's space boundary — a continuation
+  // past the break is indistinguishable from a split value, so we never keep the far side (issue #778
+  // review — thread deliveryGraphCompiler.ts:1115).
+  const belted = redactQueryFragmentSpans(credStripped);
   return belted.replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
 }
 
 /** Linear (backtracking-free) newline-aware belt companion to {@link redactFreeText}'s primary
  * whitespace-bounded pass. Each `//`-run is bounded by a literal SPACE (0x20) — so a single span may
- * cross a CR/LF/TAB *inside* the URL that the primary `//[^\s]+` token stopped at. A span is redacted
- * ONLY when it is credential-shaped (a `:` before an `@`, the `user:pass@` userinfo class) OR it carries
- * a `?query`/`#fragment`; ordinary prose — a `//comment` reference, a break-spanning email
- * `owner@example.com`, a bounded token with no secret — is returned untouched. The scan is a single
- * left-to-right walk using `indexOf` over spans bounded by the next SPACE, with no regex backtracking, so
- * a 20 000-char adversarial prompt cannot trigger catastrophic backtracking (issue #778 review).
- * Deterministic and total. */
-function redactCredentialSpans(text: string): string {
+ * cross a CR/LF/TAB *inside* the URL that the primary `//[^\s]+` token stopped at. Credential userinfo is
+ * already collapsed to `//***@` by the canonical {@link redactEmbeddedCredential} before this runs, so the
+ * belt's SOLE remaining job is a `?query`/`#fragment` tail: it redacts CONSERVATIVELY from the first
+ * `?`/`#` marker through the span's space boundary — a continuation past an embedded break is
+ * indistinguishable from a split value, so the far side is never kept. A span with no `?`/`#` (ordinary
+ * prose — a `//comment` reference, an already-collapsed `//***@host`) is returned untouched. The scan is a
+ * single left-to-right walk using `indexOf`/`charCodeAt` over spans bounded by the next SPACE, with no
+ * regex backtracking, so a 20 000-char adversarial prompt cannot trigger catastrophic backtracking (issue
+ * #778 review). Deterministic and total. */
+function redactQueryFragmentSpans(text: string): string {
   let out = "";
   let i = 0;
   for (;;) {
@@ -1106,99 +1121,18 @@ function redactCredentialSpans(text: string): string {
     out += text.slice(i, start);
     let end = start;
     while (end < text.length && text.charCodeAt(end) !== 0x20 /* SPACE */) end++;
-    // Malformed-userinfo fallback (issue #778 review — deliveryGraphCompiler.ts:1080/1102/1108): the SPACE
-    // that bounds the span above also cuts a userinfo that carries a literal space BEFORE its `@` — a
-    // `user:secret pass@host` (colon-prefix) OR a colon-less bearer `//token @host` — so the span
-    // (`//user:secret` / `//token`) has no `@` and neither branch of `redactCredentialSpan` fires, leaking
-    // the credential tail into the display doc. The bridging rule below extends the span through that `@`.
     const span = text.slice(start, end);
-    // Look PAST the bounding space(s) for a userinfo `@` before a URL boundary (`/ ? #`), extending the
-    // span through it. Two shapes need this, distinguished by whether the span already carries a `:`:
-    //   • Colon-PREFIX userinfo (`//user:secret pass@host`): a literal space sits INSIDE the userinfo, so
-    //     ANY char (incl. a word like `pass`) may bridge the span to the `@` (issue #778 review — :1080).
-    //   • Colon-LESS passwordless bearer (`//token @host`): the belt's `:`-before-`@` test AND the
-    //     primary `//[^\s]+` pass are both blind to it once the space cuts `//token` off from `@host`,
-    //     leaking the token. Bridge it too — but ONLY across whitespace, so the `@` IMMEDIATELY follows
-    //     the break: an ordinary spaced email in prose (`//comment owner@example.com`, where a WORD, not
-    //     the `@`, follows the space) is left intact, matching `redactCredentialSpan`'s prose protection
-    //     (issue #778 review — thread deliveryGraphCompiler.ts:1108).
-    // A raw CR/LF/TAB embedded in the userinfo does NOT stop the scan; only `/ ? #` bound it. The forward
-    // scan is still bounded (stops at the first `/ ? # @` or end-of-text), so a colon-run with no
-    // reachable `@` stops immediately and the walk stays linear.
-    const hasColon = span.indexOf(":") >= 0;
-    if (span.indexOf("@") < 0) {
-      let j = end;
-      let foundAt = -1;
-      while (j < text.length) {
-        const c = text.charCodeAt(j);
-        if (c === 0x2f /* / */ || c === 0x3f /* ? */ || c === 0x23 /* # */) break;
-        if (c === 0x40 /* @ */) {
-          foundAt = j;
-          break;
-        }
-        // Colon-less bearer: only whitespace may bridge the span to the `@`, or we'd swallow prose.
-        if (!hasColon && c !== 0x20 /* SPACE */ && c !== 0x09 /* TAB */ && c !== 0x0a /* LF */ && c !== 0x0d /* CR */) break;
-        j++;
-      }
-      if (foundAt >= 0) {
-        let k = foundAt + 1;
-        while (k < text.length && text.charCodeAt(k) !== 0x20 /* SPACE */) k++;
-        end = k;
-      }
-    }
-    out += redactCredentialSpan(text.slice(start, end));
+    const qMark = span.indexOf("?");
+    const hMark = span.indexOf("#");
+    const qi = qMark < 0 ? hMark : hMark < 0 ? qMark : Math.min(qMark, hMark);
+    // CONSERVATIVE: keep everything up to and including the `?`/`#` marker, then collapse the whole tail
+    // (any continuation past an embedded CR/LF/TAB) to `***`. A value/prose resuming after the break is
+    // INDISTINGUISHABLE from a split-credential continuation, so we never keep the post-break side; the RAW
+    // prompt still reaches the runtime job input unmodified (issue #778 review — thread
+    // deliveryGraphCompiler.ts:1115).
+    out += qi < 0 ? span : `${span.slice(0, qi + 1)}***`;
     i = end;
   }
-}
-
-/** Redact ONE space-bounded `//`-span (which may embed a raw CR/LF/TAB the primary whitespace-bounded
- * token stopped at). Returns the span unchanged unless it is credential-shaped or carries a query/
- * fragment. A `user:pass@` userinfo — even one split across a break inside it — collapses to `//***@`; a
- * `?query`/`#fragment` is redacted CONSERVATIVELY from the marker to the span's space boundary (the whole
- * tail, including any continuation past an embedded break), because a value/prose resuming after the break
- * is indistinguishable from a split-credential continuation (issue #778 review — thread
- * deliveryGraphCompiler.ts:1115). Linear — `indexOf`/`charCodeAt` only, no backtracking. */
-function redactCredentialSpan(span: string): string {
-  const at = span.indexOf("@");
-  const colon = span.indexOf(":");
-  // A PASSWORDLESS `//<userinfo>@host` bearer token whose userinfo WRAPPED across a whitespace break
-  // right before its `@` (`//token\n@host`, `//token\t@host`): the on-one-line form is already redacted
-  // by the primary `//[^\s]+` pass, and the belt's `:`-before-`@` test is blind to the colon-less
-  // bearer form. Requiring a whitespace char IMMEDIATELY before the `@` catches the wrapped userinfo
-  // while leaving an ordinary new-line email in prose (`//comment\nowner@example.com`, where a WORD, not
-  // whitespace, precedes the `@`) untouched — preserving the existing prose protection (issue #778
-  // review — thread deliveryGraphCompiler.ts:1140/:1460). `[^/@]*\s@` is a single-quantifier match, so
-  // the walk stays linear with no catastrophic backtracking.
-  const passwordlessAcrossBreak = /\/\/[^/@]*\s@/.test(span);
-  const credentialShaped = passwordlessAcrossBreak || (colon >= 0 && at >= 0 && colon < at);
-  const hasQueryOrFragment = span.indexOf("?") >= 0 || span.indexOf("#") >= 0;
-  if (!credentialShaped && !hasQueryOrFragment) return span;
-  // Collapse a `user:pass@` userinfo (the `//…:…@` class, which may cross a break OR a literal SPACE
-  // inside it after the malformed-userinfo span extension in `redactCredentialSpans`) to `//***@`. This
-  // reuses the canonical {@link EMBEDDED_CREDENTIAL_SRC} pattern verbatim — DERIVED, not a second copy of
-  // the `//…@` literal — so the belt's userinfo class can never drift from the whole-value redactor /
-  // validator (the drift that let one copy keep an unbounded `[^/]*@` while the other was bounded — issue
-  // #778 review — thread deliveryGraphCompiler.ts:1183). Its `[^/?#]` class spans a space the extended
-  // span pulled in (`//user:secret pass@host`) up to the `@` AND collapses a malformed multi-`@` userinfo
-  // (`//user:pass@ss@host`) through EVERY `@` to the last one before a `/`, while its `?`/`#` exclusion
-  // stops the userinfo crossing a raw query/fragment delimiter — a `?…@tail` query keeps its `?` marker so
-  // the strip below redacts the whole tail instead of leaking it (thread deliveryGraphCompiler.ts:1056/:1183).
-  // Single-quantifier, so still linear.
-  const s = credentialShaped ? span.replace(new RegExp(EMBEDDED_CREDENTIAL_SRC, "g"), "//***@") : span;
-  const qMark = s.indexOf("?");
-  const hMark = s.indexOf("#");
-  const qi = qMark < 0 ? hMark : hMark < 0 ? qMark : Math.min(qMark, hMark);
-  if (qi < 0) return s;
-  // CONSERVATIVE: redact the `?`/`#` marker and EVERYTHING to the span's space boundary — the whole
-  // `?query`/`#fragment` tail, including any continuation past an embedded CR/LF/TAB. A value or prose
-  // that resumes after the break is INDISTINGUISHABLE from a split-credential continuation (`?token=\n
-  // secret` splits the VALUE across the break, so preserving the far side leaks it), so we never keep the
-  // post-break side. This supersedes the earlier break-AWARE branch that preserved trailing prose across a
-  // line break (issue #778 review — thread deliveryGraphCompiler.ts:1115 over the suppressed :1083): the
-  // RAW prompt still reaches the runtime job input unmodified; only the operator-visible display doc loses
-  // the ambiguous tail. Same behaviour {@link redactString} applies to a single-line target. Linear —
-  // `indexOf` only, no backtracking.
-  return `${s.slice(0, qi)}${s[qi]}***`;
 }
 
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
@@ -1368,11 +1302,17 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
       const target = c.target.trim();
       const doc: string[] = [`Connector target: ${redactConnectorValue(target)}`];
       if (trimmedOrEmpty(c.dedupeKey)) doc.push(`Dedupe key: ${redactConnectorValue(trimmedOrEmpty(c.dedupeKey))}`);
-      // TRIM the bound `payload.pr` — `resolveConvergePr`/`parsePr` (`deliveryConnector`/`readiness`) trim
-      // it before matching, so a padded `" impl.pr "` and `"impl.pr"` drive the SAME connector. Rendering
-      // the raw value would fork the `semanticBpmn`/digest from the trimmed-equivalent graph while both
-      // dispatch the identical connector (issue #778 review — thread deliveryGraphCompiler.ts:1253).
-      const boundPr = c.payload && typeof c.payload.pr === "string" ? c.payload.pr.trim() : "";
+      // TRIM the bound `payload.pr` — but ONLY for a CONVERGE target. `resolveConvergePr`/`parsePr`
+      // (`deliveryConnector`/`readiness`) trim `payload.pr` before matching, so for a converge/converge-merge
+      // connector a padded `" impl.pr "` and `"impl.pr"` drive the SAME dispatch and MUST collapse to one
+      // display/digest. A GENERIC (forward-declared) connector forwards `payload` UNCHANGED to its worker
+      // (`workers/delivery-connector/worker.ts` runs `readConvergeInput` only for `isConvergeTarget(target)`),
+      // so `{pr:"  x  "}` and `{pr:"x"}` are DIFFERENT runtime payloads — trimming them for display would
+      // collapse two distinct dispatches into one digest and let the keyless dispatch fence reuse the wrong
+      // payload (issue #783 review — thread deliveryGraphCompiler.ts:1376). So preserve the RAW `pr` unless
+      // this is a converge target.
+      const rawPr = c.payload && typeof c.payload.pr === "string" ? c.payload.pr : "";
+      const boundPr = isConvergeTarget(target) ? rawPr.trim() : rawPr;
       if (boundPr) doc.push(`PR: ${redactConnectorValue(boundPr)}`);
       if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
       // Render the CANONICAL timeout (`isoDuration` — trim + upper-case, else the run default), the SAME
@@ -1549,14 +1489,22 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         // it MUST be gated before that probe), (b) a present-but-empty object or any extra key beyond
         // `pr`, (c) an omitted / non-string / empty `pr`, or (d) a string `pr` whose redaction drops
         // content. The whole raw payload (canonicalised so key order is not spuriously distinguishing)
-        // is the disambiguator — but NORMALISE `pr` (trim) first: `nodeDisplay` and the runtime both read
-        // `payload.pr.trim()` (`resolveConvergePr`/`parsePr`), so a padded credential-bearing `pr` and its
-        // trimmed twin are ONE runtime identity; fingerprinting the untrimmed payload forked their stable
-        // run key and double-launched the connector side effect (issue #778 review — thread
-        // deliveryGraphCompiler.ts:1484).
+        // is the disambiguator — but NORMALISE `pr` (trim) ONLY for a CONVERGE target: `nodeDisplay` and
+        // the runtime both read `payload.pr.trim()` there (`resolveConvergePr`/`parsePr`), so a padded
+        // credential-bearing `pr` and its trimmed twin are ONE runtime identity and MUST collapse
+        // (fingerprinting the untrimmed payload forked their stable run key and double-launched the
+        // connector side effect — issue #778 review — thread deliveryGraphCompiler.ts:1484). A GENERIC
+        // (forward-declared) connector instead forwards `payload` UNCHANGED to its worker (`readConvergeInput`
+        // in `workers/delivery-connector/worker.ts` runs only for `isConvergeTarget`), so `{pr:"  x  "}` and
+        // `{pr:"x"}` are DISTINCT runtime payloads that MUST stay disambiguated — trimming them here would
+        // collapse two different dispatches into one run key and let the keyless dispatch fence reuse the
+        // wrong payload (issue #783 review — thread deliveryGraphCompiler.ts:1376). So trim only when the
+        // target is a converge target.
         if (c.payload !== undefined && c.payload !== null) {
           const normalisedPayload =
-            isRecord(c.payload) && typeof c.payload.pr === "string" ? { ...c.payload, pr: c.payload.pr.trim() } : c.payload;
+            isConvergeTarget(trimmedOrEmpty(c.target)) && isRecord(c.payload) && typeof c.payload.pr === "string"
+              ? { ...c.payload, pr: c.payload.pr.trim() }
+              : c.payload;
           let invisible = true;
           if (isRecord(normalisedPayload)) {
             const keys = Object.keys(normalisedPayload);
