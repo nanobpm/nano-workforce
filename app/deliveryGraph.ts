@@ -185,15 +185,26 @@ export function redactConnectorValue(value: string): string {
   // anchored check, escapes redaction, then loses that prefix during `escapeXml`/`stripXmlInvalidChars`
   // — surfacing the credential verbatim in the BPMN name/documentation and connector escalation FEEL.
   const cleaned = stripXmlInvalidChars(value);
-  // A whole-value URL gets the full redact (userinfo + query/fragment). Any other value keeps its
-  // meaningful `#`/`?` opaque-token characters, but still has (a) each embedded ABSOLUTE-URL
-  // (`scheme://…`) token redacted in full — its `?query`/`#fragment` IS URL syntax — and (b) each
-  // embedded scheme-relative `//<userinfo>@authority…` credential-URL redacted in full (userinfo AND
-  // `?query`/`#fragment`), and (c) each embedded userinfo-LESS scheme-relative URL that carries a
-  // `?query` (`//host?token=secret`) redacted (its `?` is unambiguously URL syntax — an opaque PR ref
-  // uses a `#<digits>` fragment, never a `//…?…` query), while a userinfo-less opaque `//host#42`
+  // A whole-value URL gets the full redact (userinfo + query/fragment) — EXCEPT a whole-value opaque
+  // scheme-relative PR ref (`//host#42`: no explicit scheme, no `//…@` credential, no `?query`), whose
+  // only URL-ish payload is a MEANINGFUL `#<digits>` fragment (a `parsePrTarget` PR ref). `isUrlShaped`
+  // matches such a ref (scheme-relative `//authority`), so the whole-value branch would `redactString`
+  // its `#42` → `#***` — yet the EMBEDDED contract deliberately PRESERVES the same `//host#42` (the
+  // embedded redactors leave a userinfo-/query-less `//host#42` untouched). Route it through the embedded
+  // path so a whole-value `//host#42` keeps its `#42` exactly like `prefix //host#42`, closing that
+  // whole-value/embedded inconsistency (issue #778 review — thread deliveryGraph.ts:198). An explicit
+  // `scheme://host#42`, a `//user:pass@host#…` credential, or a userinfo-less `//host?token=…` query all
+  // still fall to the full whole-value redact.
+  // Any non-URL value keeps its meaningful `#`/`?` opaque-token characters, but still has (a) each
+  // embedded ABSOLUTE-URL (`scheme://…`) token redacted in full — its `?query`/`#fragment` IS URL syntax
+  // — and (b) each embedded scheme-relative `//<userinfo>@authority…` credential-URL redacted in full
+  // (userinfo AND `?query`/`#fragment`), and (c) each embedded userinfo-LESS scheme-relative URL that
+  // carries a `?query` (`//host?token=secret`) redacted (its `?` is unambiguously URL syntax — an opaque
+  // PR ref uses a `#<digits>` fragment, never a `//…?…` query), while a userinfo-less opaque `//host#42`
   // (no `?`) keeps its `#42` (issue #778 review — thread deliveryGraph.ts:633).
-  return isUrlShaped(cleaned)
+  const isOpaqueSchemeRelativePrRef =
+    cleaned.trim().startsWith("//") && !hasEmbeddedCredential(cleaned) && !cleaned.includes("?");
+  return isUrlShaped(cleaned) && !isOpaqueSchemeRelativePrRef
     ? redactString(cleaned)
     : redactEmbeddedSchemeRelativeUrl(redactEmbeddedCredentialUrl(redactEmbeddedUrl(cleaned)));
 }

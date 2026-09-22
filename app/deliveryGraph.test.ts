@@ -1031,6 +1031,21 @@ test("#778 redactConnectorValue: an embedded USERINFO-LESS SCHEME-RELATIVE URL (
   assertEquals(redactConnectorValue("owner/repo#42"), "owner/repo#42");
 });
 
+test("#778 redactConnectorValue: a WHOLE-value opaque scheme-relative PR ref (`//host#42` — no explicit scheme, no `//…@` credential, no `?query`) keeps its meaningful `#42` exactly like the embedded `prefix //host#42` form; `isUrlShaped` matches the scheme-relative `//authority`, so without the opaque-PR-ref exception the whole-value branch would `redactString` the `#42` → `#***`, an inconsistency with the embedded contract (#778 review — thread deliveryGraph.ts:198)", () => {
+  // Whole-value opaque `//host#42` PR ref survives — matches the embedded `prefix //host#42` contract.
+  assertEquals(redactConnectorValue("//host#42"), "//host#42");
+  // A leading-whitespace opaque ref (isUrlShaped trims before its anchored check) also survives.
+  assertEquals(redactConnectorValue(" //host#42"), " //host#42");
+  // But a whole-value URL that actually hides a credential is STILL fully redacted:
+  // — an explicit `scheme://…#fragment` (fragment IS URL syntax):
+  assertEquals(redactConnectorValue("https://host#42"), "https://host#***");
+  // — a `//user:pass@host#42` userinfo credential (userinfo marks it a URL, so `#` is URL syntax):
+  assertEquals(redactConnectorValue("//user:pass@host#42"), "//***@host#***");
+  // — a userinfo-less `//host?token=secret` query (the `?` after `//authority` is unambiguously URL syntax):
+  const wholeQ = redactConnectorValue("//host?token=secret");
+  assert(!wholeQ.includes("token=secret"), `a whole-value scheme-relative URL's query secret must be redacted: ${JSON.stringify(wholeQ)}`);
+});
+
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
   const errors = validateDeliveryGraph({
     nodes: [
