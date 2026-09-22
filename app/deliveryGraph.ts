@@ -23,7 +23,7 @@ import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
-import { hasEmbeddedCredential, hasEmbeddedUrl, isUrlShaped, redactEmbeddedCredentialUrl, redactEmbeddedUrl, redactString } from "./readiness.ts";
+import { hasEmbeddedCredential, hasEmbeddedUrl, hasSchemeRelativeAuthority, isUrlShaped, redactEmbeddedCredentialUrl, redactEmbeddedSchemeRelativeUrl, redactEmbeddedUrl, redactString } from "./readiness.ts";
 import { isResolvableRepo } from "./repoEnvelope.ts";
 
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
@@ -105,6 +105,7 @@ export type DeliveryGraphErrorCode =
   | "url-shaped-job-type"
   | "credential-in-job-type"
   | "embedded-url-in-job-type"
+  | "scheme-relative-url-in-job-type"
   | "invalid-credential-env"
   | "unbound-pr";
 
@@ -188,8 +189,13 @@ export function redactConnectorValue(value: string): string {
   // meaningful `#`/`?` opaque-token characters, but still has (a) each embedded ABSOLUTE-URL
   // (`scheme://…`) token redacted in full — its `?query`/`#fragment` IS URL syntax — and (b) each
   // embedded scheme-relative `//<userinfo>@authority…` credential-URL redacted in full (userinfo AND
-  // `?query`/`#fragment`), while a userinfo-less opaque `//host#42` keeps its `#42`.
-  return isUrlShaped(cleaned) ? redactString(cleaned) : redactEmbeddedCredentialUrl(redactEmbeddedUrl(cleaned));
+  // `?query`/`#fragment`), and (c) each embedded userinfo-LESS scheme-relative URL that carries a
+  // `?query` (`//host?token=secret`) redacted (its `?` is unambiguously URL syntax — an opaque PR ref
+  // uses a `#<digits>` fragment, never a `//…?…` query), while a userinfo-less opaque `//host#42`
+  // (no `?`) keeps its `#42` (issue #778 review — thread deliveryGraph.ts:633).
+  return isUrlShaped(cleaned)
+    ? redactString(cleaned)
+    : redactEmbeddedSchemeRelativeUrl(redactEmbeddedCredentialUrl(redactEmbeddedUrl(cleaned)));
 }
 
 /** True when `value` contains a whitespace character that XML **attribute-value normalization**
@@ -637,6 +643,41 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "Use a plain job-type token (e.g. `senior:feature`) and carry any endpoint/credential as a " +
               "runtime job variable instead",
             code: "embedded-url-in-job-type",
+          });
+        }
+        // The three checks above catch a whole-value URL (anchored `isUrlShaped`), a `//<userinfo>@`
+        // credential token, and an explicit-scheme `scheme://…` token — but a userinfo-LESS,
+        // schemeless embedded scheme-relative URL slips all three: `senior:feature //host?token=secret`
+        // starts with a plausible token (anchored `isUrlShaped` misses it), has no `//…@`
+        // (`hasEmbeddedCredential` misses it), and no explicit `scheme:` before the `//`
+        // (`hasEmbeddedUrl` misses it), yet its `?token=secret` query rides a `//host` authority and,
+        // since the executable `<zeebe:taskDefinition type=…>` carries the job type VERBATIM, persists in
+        // the compiled BPMN. A worker-routing job type has no legitimate need for `//` at all, so reject
+        // ANY embedded scheme-relative `//` authority token via {@link hasSchemeRelativeAuthority} — the
+        // residual gap the three checks above leave (issue #778 review — thread deliveryGraph.ts:633).
+        // Message redacted via `redactString` (strips `//…@` userinfo AND `?query`/`#fragment`) so the
+        // 400 never echoes a credential — `redactConnectorValue` also now redacts this token, but a
+        // schemeless `//host` bare authority would still surface here, so use the total `redactString`.
+        // Gated behind the three checks above (each of which already REJECTS its shape with a tailored
+        // code) so a value they catch is not double-reported — this fires ONLY for the residual
+        // userinfo-less, schemeless embedded scheme-relative URL they all miss.
+        if (
+          kind === "agent" &&
+          typeof config.jobType === "string" &&
+          !isUrlShaped(config.jobType) &&
+          !hasEmbeddedCredential(config.jobType) &&
+          !hasEmbeddedUrl(config.jobType) &&
+          hasSchemeRelativeAuthority(config.jobType)
+        ) {
+          errors.push({
+            path: `${path}.${configKey}.jobType`,
+            message:
+              `\`agent.jobType\` ${JSON.stringify(redactString(stripXmlInvalidChars(config.jobType)))} embeds a scheme-relative ` +
+              "URL authority (`//…`) — a routing key never contains `//`, and its `?query`/`#fragment` can hide a credential " +
+              "token that, since the executable `<zeebe:taskDefinition type=…>` carries the job type verbatim, would land in the " +
+              "compiled BPMN. Use a plain job-type token (e.g. `senior:feature`) and carry any endpoint/credential as a runtime " +
+              "job variable instead",
+            code: "scheme-relative-url-in-job-type",
           });
         }
         // S5 trust boundary: `validateDeliveryGraph` is the gate before `dispatchDeliveryGraphRun`

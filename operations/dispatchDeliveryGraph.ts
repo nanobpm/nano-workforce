@@ -306,13 +306,15 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
   // graphs (which occupy the SAME digest-keyed proposal row, one re-staged over the other) would
   // short-circuit onto the FIRST graph's still-running run — `dispatched.alreadyRunning` — while the
   // re-staged graph never launched. Consuming the proposal then marks a graph `dispatched` that never
-  // ran. Since we deliberately do NOT persist a second lossless fingerprint (the digest is the one
-  // content identity; issue #778 review — thread dispatchDeliveryGraph.ts:282), we cannot PROVE the
-  // running run is this exact secret-bearing graph, so refuse the ambiguous short-circuit (409) and
-  // leave the proposal staged rather than falsely consume it. A distinct key per graph (or the keyless
-  // stable-key path) dispatches it unambiguously.
+  // ran. The run row now persists a LOSSLESS identity fingerprint (migration 113), and the dispatch core
+  // reports `identityConfirmed` — true when the running run's fingerprint MATCHES this graph's, i.e. a
+  // legitimate SAME-payload retry (a lost response / operator double-click of the identical proposal).
+  // So refuse ONLY the genuinely ambiguous CROSS-graph case (`!identityConfirmed`, which also covers a
+  // NULL pre-migration fingerprint we cannot prove); a same-payload retry falls through and consumes the
+  // proposal, preserving the idempotency contract rather than 409-ing an identical retry (issue #778
+  // review — thread dispatchDeliveryGraph.ts:332).
   const explicitIdempotencyKey = typeof idempotencyKey === "string" && idempotencyKey.trim() !== "";
-  if (dispatched.alreadyRunning && explicitIdempotencyKey && validateDeliveryGraph(graph).length === 0) {
+  if (dispatched.alreadyRunning && explicitIdempotencyKey && !dispatched.identityConfirmed && validateDeliveryGraph(graph).length === 0) {
     // biome-ignore lint/plugin: validated staged graph narrowed to its contract after validateDeliveryGraph
     const typedGraph = graph as DeliveryGraph;
     if (graphCarriesRedactedSecrets(typedGraph)) {

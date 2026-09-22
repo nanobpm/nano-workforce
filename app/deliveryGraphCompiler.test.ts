@@ -1134,6 +1134,27 @@ test("#778 a connector bound-`pr` payload differing ONLY in surrounding whitespa
   assertEquals(digestInvisibleRawValues(mk("  owner/repo#1  ")), digestInvisibleRawValues(mk("owner/repo#1")), "no invisible token forks the two pr variants");
 });
 
+test("#778 a wait `poll` that NORMALISES to the runtime defaults compiles to byte-identical BPMN as an OMITTED poll — the display renders the CANONICAL effective policy (`normalizePoll`), not the authored fields, so a runtime-equivalent re-stage shares one digest instead of bypassing the idempotency fence (thread deliveryGraphCompiler.ts:1414)", async () => {
+  const mk = (poll?: Record<string, unknown>): DeliveryGraph => ({
+    name: "g",
+    nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" }, ...(poll ? { poll } : {}) } }],
+    edges: [],
+  });
+  const omitted = await compileOk(mk());
+  // `everyMs:0` falls back to DEFAULT_EVERY_MS, `timeoutMs:0` to DEFAULT_TIMEOUT_MS, and an explicit
+  // `backoff:"exponential"` IS the default — so this poll runs identically to an omitted one.
+  const defaulted = await compileOk(mk({ everyMs: 0, timeoutMs: 0, backoff: "exponential" }));
+  assertEquals(defaulted.bpmn, omitted.bpmn, "a poll normalising entirely to the defaults renders identically to an omitted poll (no `Poll:` line forks the digest)");
+
+  // A NON-default poll still renders — the canonical effective (truncated/clamped) values, so two
+  // authored encodings of the same effective budget still collapse, but a genuinely different budget
+  // forks as it should.
+  const fractional = await compileOk(mk({ everyMs: 60000.9, timeoutMs: 3600000 }));
+  const whole = await compileOk(mk({ everyMs: 60000, timeoutMs: 3600000 }));
+  assertEquals(fractional.bpmn, whole.bpmn, "a fractional everyMs truncates to the same effective value, so the two encodings share one digest");
+  assert(whole.bpmn !== omitted.bpmn, "a genuinely non-default poll budget still renders (and forks) distinctly from an omitted poll");
+});
+
 test("#778 a connector bound-`pr` payload carrying a CREDENTIAL differing ONLY in surrounding whitespace does not fork the invisible-value set — nodeDisplay/runtime trim `pr` before use, so the padded and trimmed twins are the SAME run key (thread deliveryGraphCompiler.ts:1484)", () => {
   // A credential-bearing `pr` makes the payload digest-INVISIBLE (redaction drops content), so the whole
   // payload is fingerprinted as the disambiguator. That fingerprint used the UNTRIMMED payload, so a

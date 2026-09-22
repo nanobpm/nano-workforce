@@ -11,16 +11,19 @@
 // idempotency short-circuit, so a double-click or a re-dispatch never double-launches a graph's side
 // effects.
 
+import { createHash } from "node:crypto";
 import type { AppApi } from "@nanobpm/urban";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
-import { validateDeliveryGraph } from "./deliveryGraph.ts";
-import { compileDeliveryGraph, graphCarriesRedactedSecrets } from "./deliveryGraphCompiler.ts";
+import { canonicalJson, validateDeliveryGraph } from "./deliveryGraph.ts";
+import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets } from "./deliveryGraphCompiler.ts";
 import {
   buildDeliveryGraphRunRow,
   buildHumanLabels,
   claimRunForLaunch,
   computeRunKey,
   DELIVERY_PHASE,
+  type DeliveryGraphRunIdentity,
+  deliveryGraphRunIdentities,
   deliveryGraphRuns,
 } from "./deliveryGraphRun.ts";
 import type { DeliveryRunTimeouts } from "./deliveryRunner.ts";
@@ -37,10 +40,46 @@ export type DispatchDeliveryGraphResult =
       digest: string;
       sideEffecting: boolean;
       alreadyRunning: boolean;
+      /** Whether the returned run is PROVABLY this exact graph. Always true for a fresh launch. For an
+       *  `alreadyRunning` short-circuit it is true iff the running row's persisted lossless
+       *  {@link deliveryGraphIdentityFingerprint} matches the incoming graph's — i.e. a same-payload
+       *  retry, not a credential-different graph re-staged under the same explicit `idempotencyKey` (and
+       *  false for a pre-migration-113 row whose fingerprint is NULL, an unprovable identity). The
+       *  dispatch door refuses a secret-bearing short-circuit only when this is false (issue #778 review
+       *  — thread dispatchDeliveryGraph.ts:332). */
+      identityConfirmed: boolean;
       processInstanceKey?: string;
       processDefinitionId?: string;
     }
   | { ok: false; errors: { path: string; message: string }[] };
+
+/** The LOSSLESS content-identity fingerprint of a graph — `sha256(digest \0
+ * canonicalJson(digestInvisibleRawValues(graph)))`. The `digest` is content-addressed over the REDACTED
+ * `semanticBpmn`, so it alone collapses secret-differing graphs onto one identity; folding in
+ * {@link digestInvisibleRawValues} (the exact raw content the digest CANNOT see) restores a FULL identity
+ * that distinguishes them — the SAME `(digest, invisible-values)` pair `stableProposalRunKey` keys the
+ * keyless run key on. Persisted on the run row so an explicit-`idempotencyKey` short-circuit can prove
+ * the running run is THIS exact graph (issue #778 review — thread dispatchDeliveryGraph.ts:332). */
+export function deliveryGraphIdentityFingerprint(graph: DeliveryGraph, digest: string): string {
+  const invisible = canonicalJson(digestInvisibleRawValues(graph));
+  return createHash("sha256").update(`${digest}\u0000${invisible}`).digest("hex");
+}
+
+/** Persist a run's lossless identity fingerprint (upsert on `run_key`). A relaunch off a persisted row
+ * under an explicit `idempotencyKey` may carry a DIFFERENT graph, so a PRIMARY-KEY fence collision folds
+ * into an UPDATE that overwrites the stored fingerprint rather than surfacing — the same intended
+ * outcome as the insert branch (mirrors `DurableResumeRegistry.recordEnrolment`). */
+async function upsertRunIdentity(
+  identities: ReturnType<typeof deliveryGraphRunIdentities>,
+  row: DeliveryGraphRunIdentity,
+): Promise<void> {
+  try {
+    await identities.insert(row);
+  } catch (err) {
+    if (!(err instanceof Error) || !/UNIQUE constraint failed/i.test(err.message)) throw err;
+    await identities.update(row.run_key, { graph_fingerprint: row.graph_fingerprint });
+  }
+}
 
 /** Dispatch a delivery graph as a running engine-native process — the operator action. Re-validates
  * and re-compiles the (already-staged) graph to derive its content digest + run-row shape, then
@@ -122,6 +161,19 @@ export async function dispatchDeliveryGraphRun(
   const graphName = typeof typedGraph.name === "string" && typedGraph.name.trim() !== "" ? typedGraph.name.trim() : "";
   const title = explicitTitle || graphName || runKey;
   const runs = deliveryGraphRuns(app.data);
+  const identities = deliveryGraphRunIdentities(app.data);
+  // The lossless identity of THIS graph — persisted at launch in the `delivery_graph_run_identity` side
+  // table, compared on a short-circuit so the door can distinguish a same-payload retry from a
+  // credential-different graph re-staged under the same explicit key (issue #778 review — thread
+  // dispatchDeliveryGraph.ts:332).
+  const graphFingerprint = deliveryGraphIdentityFingerprint(typedGraph, digest);
+  // Whether the run at `runKey` is PROVABLY this exact graph: a stored identity row that MATCHES ours. A
+  // MISSING row (a run launched before this table existed, or a not-yet-stamped concurrent claim) is
+  // unprovable → false, so the door refuses a secret-bearing short-circuit (the safe pre-existing 409).
+  const identityConfirmed = async (): Promise<boolean> => {
+    const identity = await identities.get(runKey);
+    return identity !== undefined && identity.graph_fingerprint === graphFingerprint;
+  };
 
   // Idempotency short-circuit — a re-dispatch onto a still-running run does NOT double-launch.
   const existing = await runs.get(runKey);
@@ -134,6 +186,7 @@ export async function dispatchDeliveryGraphRun(
       digest: existing.digest,
       sideEffecting: existing.side_effecting === 1,
       alreadyRunning: true,
+      identityConfirmed: await identityConfirmed(),
       processInstanceKey: existing.process_key ?? undefined,
       processDefinitionId: existing.process_definition_id ?? undefined,
     };
@@ -165,10 +218,15 @@ export async function dispatchDeliveryGraphRun(
       digest: won?.digest ?? digest,
       sideEffecting: won ? won.side_effecting === 1 : sideEffecting,
       alreadyRunning: true,
+      identityConfirmed: await identityConfirmed(),
       processInstanceKey: won?.process_key ?? undefined,
       processDefinitionId: won?.process_definition_id ?? undefined,
     };
   }
+  // The claim is ours — persist THIS run's lossless identity so a later same-key short-circuit can prove
+  // the running run is this exact graph. Upsert: a relaunch off a persisted (e.g. failed) row under an
+  // explicit key may carry a different graph, so overwrite the stored fingerprint.
+  await upsertRunIdentity(identities, { run_key: runKey, graph_fingerprint: graphFingerprint, created_at: claim.created_at });
   if (existing) {
     const { run_key, created_at, ...patch } = claim;
     await runs.update(runKey, patch);
@@ -232,6 +290,7 @@ export async function dispatchDeliveryGraphRun(
     digest,
     sideEffecting,
     alreadyRunning: false,
+    identityConfirmed: true,
     processInstanceKey: launched.handle.processInstanceKey,
     processDefinitionId: launched.handle.processDefinitionId,
   };

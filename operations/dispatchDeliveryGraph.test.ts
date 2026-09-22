@@ -234,6 +234,50 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
   });
 
+  test("a SAME-payload retry of a secret-bearing graph under the SAME idempotencyKey (a lost response / double-click) → 202 short-circuit, the proposal IS consumed and NO second run launches — the persisted identity fingerprint PROVES the running run is this exact graph, so the idempotency contract holds instead of a spurious 409 (issue #778 review — thread dispatchDeliveryGraph.ts:332)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    let agentFired = 0;
+    await app.engine.registerWorker("senior:demo", async () => {
+      agentFired++;
+      return {};
+    });
+
+    // Stage + dispatch a SECRET-BEARING graph (SIDE_EFFECTING carries redacted-away secret material —
+    // the same graph the cross-graph 409 case above refuses) under an explicit idempotencyKey. It
+    // launches and parks on its human node, so its run stays `running`.
+    const first = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SIDE_EFFECTING });
+    const dispatched = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: first.body.digest, idempotencyKey: "retry-key", repoless: true },
+    });
+    assert.equal(dispatched.status, 202);
+    await app.settle();
+    assert.equal(agentFired, 1, "the side effect fired exactly once on the first dispatch");
+    assert.equal((await deliveryGraphProposals(app.db).get(first.body.digest))?.status, "dispatched");
+
+    // Re-stage the IDENTICAL graph (byte-for-byte the same → same digest) and re-dispatch under the
+    // SAME key — the caller retrying a lost/duplicated request. The running run's persisted fingerprint
+    // matches this graph, so the door short-circuits onto it (202, alreadyRunning) and CONSUMES the
+    // re-staged proposal — it does NOT 409 as a cross-graph collision would.
+    const restaged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SIDE_EFFECTING });
+    assert.equal(restaged.body.digest, first.body.digest);
+    assert.equal((await deliveryGraphProposals(app.db).get(restaged.body.digest))?.status, "staged");
+    const retry = await api.call<{ ok: boolean; status: string; alreadyRunning?: boolean }>("dispatchDeliveryGraph", {
+      body: { digest: restaged.body.digest, idempotencyKey: "retry-key", repoless: true },
+    });
+    assert.equal(retry.status, 202);
+    assert.equal(retry.body.ok, true);
+    assert.equal(retry.body.alreadyRunning, true);
+    await app.settle();
+    // The retry short-circuited onto the existing run — the side effect did NOT fire a second time and
+    // no second run launched.
+    assert.equal(agentFired, 1, "a same-payload retry does not re-fire the side effect");
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+    // The re-staged proposal was consumed (marked dispatched), not left lingering.
+    assert.equal((await deliveryGraphProposals(app.db).get(restaged.body.digest))?.status, "dispatched");
+  });
+
   test("a proposal whose stored graph is corrupt JSON → 400 AND the proposal is retired (expired), never lingering staged", async () => {
     const app = await boot();
     assert.ok(app.api);

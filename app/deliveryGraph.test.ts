@@ -996,6 +996,41 @@ test("embedded-url-in-job-type: a plausible token with an embedded USERINFO-LESS
   );
 });
 
+test("scheme-relative-url-in-job-type: a plausible token with an embedded USERINFO-LESS SCHEME-RELATIVE URL (`senior:feature //host?token=secret`) is REJECTED — it slips past the anchored url-shape check, `hasEmbeddedCredential` (no `//…@`) AND `hasEmbeddedUrl` (no explicit `scheme://`), yet its `//authority?query` would land verbatim in `<zeebe:taskDefinition type=…>`; message redacted (#778 review — thread deliveryGraph.ts:633)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //evil.example/route?token=secret" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "scheme-relative-url-in-job-type");
+  assert(!err.message.includes("token=secret"), `the scheme-relative-url-in-job-type message must redact the query secret, got: ${err.message}`);
+  // Exactly one error class fires — the residual check is gated behind the three prior url checks so a
+  // token is never double-reported.
+  assertEquals(errors.length, 1, `expected exactly one error, got ${JSON.stringify(errors)}`);
+  // A plain routing token with no embedded scheme-relative URL is untouched.
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] }).filter(
+      (e) => e.code === "scheme-relative-url-in-job-type",
+    ),
+    [],
+  );
+  // An opaque `owner/repo#42` PR ref (a `//`-less identifier) is not a URL and is not rejected.
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:review owner/repo#42" } }], edges: [] }).filter(
+      (e) => e.code === "scheme-relative-url-in-job-type",
+    ),
+    [],
+  );
+});
+
+test("#778 redactConnectorValue: an embedded USERINFO-LESS SCHEME-RELATIVE URL (`prefix //host/path?token=secret`, no explicit scheme, no `//…@` credential) has its `?query` secret redacted — the `?` after a `//authority` is unambiguously URL syntax — while an opaque `//host#42` PR ref (no `?`) keeps its meaningful `#42` (#778 review — thread deliveryGraph.ts:633)", () => {
+  const q = redactConnectorValue("prefix //host/path?token=secret");
+  assert(!q.includes("token=secret"), `a scheme-relative URL's query secret must be redacted: ${JSON.stringify(q)}`);
+  // A userinfo-LESS opaque `//host#42` PR ref (no `?`) is preserved — nothing sensitive there.
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+  assertEquals(redactConnectorValue("slack:#releases"), "slack:#releases");
+  assertEquals(redactConnectorValue("owner/repo#42"), "owner/repo#42");
+});
+
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
   const errors = validateDeliveryGraph({
     nodes: [

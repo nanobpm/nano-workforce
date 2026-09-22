@@ -98,6 +98,24 @@ export const DELIVERY_PHASE = {
 export const deliveryGraphRuns = (data: DataLayer) =>
   data.table<DeliveryGraphRun>("delivery_graph_runs", "run_key");
 
+/** One row of the `delivery_graph_run_identity` SIDE table (migration 113) — the run's LOSSLESS
+ * content-identity fingerprint, kept OFF the heavily-projected `delivery_graph_runs` base row so no
+ * drift-guarded read-model/compat view has to carry it. Keyed by `run_key`. */
+export interface DeliveryGraphRunIdentity {
+  run_key: string;
+  /** `sha256(digest \0 canonicalJson(digestInvisibleRawValues(graph)))`, captured at launch — the same
+   *  lossless identity `stableProposalRunKey` folds into the keyless run key. An explicit-`idempotencyKey`
+   *  short-circuit compares this to prove the running run is THIS exact graph (a same-payload retry) vs. a
+   *  credential-different graph re-staged under the same key. */
+  graph_fingerprint: string;
+  created_at: string;
+}
+
+/** The `delivery_graph_run_identity` side-table accessor — the run's lossless identity fingerprint,
+ * keyed by `run_key` (issue #778 review — thread dispatchDeliveryGraph.ts:332). */
+export const deliveryGraphRunIdentities = (data: DataLayer) =>
+  data.table<DeliveryGraphRunIdentity>("delivery_graph_run_identity", "run_key");
+
 /** Atomically claim a run for LAUNCH — the at-most-once dispatch fence. Returns `true` iff THIS caller
  * won the claim and must proceed to `runDeliveryGraph`; `false` iff a concurrent submit already claimed
  * it (the caller must short-circuit as `alreadyRunning` instead of double-launching). Two fences, one

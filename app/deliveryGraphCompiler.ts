@@ -50,7 +50,7 @@ import {
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
-import { DEFAULT_ON_TIMEOUT, isProbeKind, redactString } from "./readiness.ts";
+import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactString } from "./readiness.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
 
@@ -1407,10 +1407,22 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
       const onTimeout = trimmedOrEmpty(p.onTimeout);
       if (onTimeout && onTimeout !== DEFAULT_ON_TIMEOUT) doc.push(`On timeout: ${onTimeout}`);
       if (p.poll) {
+        // Render the CANONICAL EFFECTIVE poll policy — the SAME `normalizePoll` the runtime applies —
+        // NOT the authored fields, so two runtime-EQUIVALENT graphs share one `semanticBpmn`/digest
+        // instead of forking the content address on an encoding difference the runtime collapses. The
+        // runtime `normalizePoll` (a) falls a sub-1ms / non-numeric `everyMs`/`timeoutMs` back to its
+        // default, (b) truncates a fractional value, (c) clamps `everyMs` to `MAX_EVERY_MS`, and (d)
+        // defaults an omitted `backoff` to `exponential`. So `poll:{everyMs:0, backoff:"exponential"}`
+        // runs IDENTICALLY to an omitted/default poll, yet rendering the raw `every 0ms, exponential
+        // backoff` forked the digest — letting a re-stage bypass the idempotency fence and duplicate the
+        // run (issue #778 review — thread deliveryGraphCompiler.ts:1414). SUPPRESS each field that equals
+        // its effective default (matching the omitted-poll rendering, which shows no line at all), so a
+        // graph whose poll normalises entirely to the defaults renders identically to one with no poll.
+        const effective = normalizePoll(p.poll);
         const budget: string[] = [];
-        if (typeof p.poll.everyMs === "number") budget.push(`every ${p.poll.everyMs}ms`);
-        if (typeof p.poll.timeoutMs === "number") budget.push(`timeout ${p.poll.timeoutMs}ms`);
-        if (trimmedOrEmpty(p.poll.backoff)) budget.push(`${trimmedOrEmpty(p.poll.backoff)} backoff`);
+        if (effective.everyMs !== DEFAULT_EVERY_MS) budget.push(`every ${effective.everyMs}ms`);
+        if (effective.timeoutMs !== DEFAULT_TIMEOUT_MS) budget.push(`timeout ${effective.timeoutMs}ms`);
+        if (effective.backoff !== DEFAULT_BACKOFF) budget.push(`${effective.backoff} backoff`);
         if (budget.length > 0) doc.push(`Poll: ${budget.join(", ")}`);
       }
       if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);

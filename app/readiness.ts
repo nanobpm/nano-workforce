@@ -1287,6 +1287,47 @@ export function redactEmbeddedUrl(s: string): string {
   return s.replace(new RegExp(EMBEDDED_SCHEME_URL_SRC, "gi"), (m) => redactString(m));
 }
 
+/** The ONE canonical embedded SCHEME-RELATIVE URL token that carries a `?query`: a userinfo-LESS
+ * `//authority…?query…` run (bounded by the next literal space). Distinct from the userinfo-bearing
+ * {@link EMBEDDED_CREDENTIAL_URL_SRC} (which the `@` marks a URL) and the explicit-scheme
+ * {@link EMBEDDED_SCHEME_URL_SRC}: a `senior:feature //host?token=secret` embedded after a non-URL prefix
+ * has NO userinfo `@` and NO explicit `scheme:`, so the anchored {@link isUrlShaped} whole-value check,
+ * {@link redactEmbeddedCredentialUrl}, and {@link redactEmbeddedUrl} ALL miss it — leaking the
+ * `?token=secret` tail (issue #778 review — thread deliveryGraph.ts:633). A scheme-relative `//authority`
+ * whose `?` is present is UNAMBIGUOUSLY URL syntax — an opaque ref (`owner/repo#42`, `//host#42`) uses a
+ * `#<digits>` fragment (`parsePrTarget`), never a `//…?…` query — so its query is safe to strip while a
+ * userinfo-less opaque `//host#42` (no `?`) is left to keep its meaningful `#42`. The token runs to the
+ * next literal SPACE (`[^ ]*`), NOT the wider `\s` class, so it CROSSES an XML-valid internal TAB/LF/CR
+ * and still redacts a `?query` secret sitting past it. `[^ ]*` before/after the literal `?` anchor keeps
+ * the match linear with no catastrophic backtracking. */
+const EMBEDDED_SCHEME_RELATIVE_URL_SRC = "\\/\\/[^ ]*\\?[^ ]*";
+
+/** Redact each embedded SCHEME-RELATIVE URL (`//authority…?query…`, no userinfo, no explicit scheme)
+ * token IN PLACE via {@link redactString} — stripping its `?query`/`#fragment` — while leaving a
+ * userinfo-less opaque `//host#42` PR ref (no `?`) untouched. Lets {@link redactConnectorValue} catch a
+ * query secret riding a scheme-relative URL after a non-URL prefix (`prefix //host?token=secret`) that
+ * the anchored {@link isUrlShaped} check, {@link redactEmbeddedCredentialUrl}, and {@link redactEmbeddedUrl}
+ * all miss (issue #778 review — thread deliveryGraph.ts:633). Deterministic and total. */
+export function redactEmbeddedSchemeRelativeUrl(s: string): string {
+  return s.replace(new RegExp(EMBEDDED_SCHEME_RELATIVE_URL_SRC, "g"), (m) => redactString(m));
+}
+
+/** The canonical scheme-relative `//` authority marker — the `//` that opens an authority in ANY URL
+ * form (absolute `scheme://`, scheme-relative `//`, credential `//user@`). A worker-routing job type
+ * never legitimately contains it. */
+const SCHEME_RELATIVE_AUTHORITY_SRC = "\\/\\/";
+
+/** True when `value` embeds a scheme-relative `//authority` token (see {@link SCHEME_RELATIVE_AUTHORITY_SRC}).
+ * A plain worker-routing job type / opaque id NEVER contains `//` — so a match (whether it carries
+ * userinfo, an explicit scheme, a `?query`, a `#fragment`, or nothing) is illegitimate in an
+ * `agent.jobType` and must be rejected, closing the userinfo-less scheme-relative gap
+ * (`senior:feature //host?token=secret`) that {@link hasEmbeddedCredential} (needs `@`),
+ * {@link hasEmbeddedUrl} (needs an explicit scheme), and the anchored {@link isUrlShaped} (whole-value
+ * only) all miss (issue #778 review — thread deliveryGraph.ts:633). */
+export function hasSchemeRelativeAuthority(value: string): boolean {
+  return new RegExp(SCHEME_RELATIVE_AUTHORITY_SRC).test(value);
+}
+
 /** True when `value` embeds a `//<userinfo>@host` credential token (see {@link EMBEDDED_CREDENTIAL_SRC};
  * the userinfo colon is optional, so a passwordless `//token@host` bearer token also matches).
  * A plain worker-routing job type / opaque id never contains one, so a match is a credential leak to reject. */
