@@ -126,6 +126,26 @@ test("#778 dispatchDeliveryGraphRun: a post-claim identity-write failure flips t
   assertEquals(started.length, 0);
 });
 
+test("#778 dispatchDeliveryGraphRun: a still-running run whose identity row is MISSING (null, pre-migration) short-circuits with identityConfirmed:false instead of throwing (thread deliveryGraphDispatch.ts:175)", async () => {
+  const { app, started } = makeApp();
+  const first = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
+  assert(first.ok);
+  if (!first.ok) return;
+  assertEquals(first.status, "running");
+  // Simulate a run launched BEFORE the identity side-table existed: drop its identity row so
+  // `identities.get(runKey)` resolves to null (the test table — like the real `table.get()` — returns
+  // null, NOT undefined, for a missing row).
+  await app.data.table("delivery_graph_run_identity", "run_key").delete(first.runKey);
+  // A second same-key dispatch hits the already-running short-circuit; the null identity row must not
+  // throw while building the response — it is unprovable, so identityConfirmed is false.
+  const second = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
+  assert(second.ok);
+  if (!second.ok) return;
+  assertEquals(second.alreadyRunning, true);
+  assertEquals(second.identityConfirmed, false);
+  assertEquals(started.length, 1); // no double launch
+});
+
 test("dispatchDeliveryGraphRun: a side-effecting graph dispatches with NO approval token — the operator seam IS the approval", async () => {
   const { app, started, runs } = makeApp();
   const res = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });

@@ -1349,6 +1349,19 @@ test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw T
   assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
 });
 
+test("#778 redactFreeText: a credential span whose `?query` carries a literal `@` does NOT let the belt userinfo class cross the delimiter and leak the tail (thread deliveryGraphCompiler.ts:1183)", () => {
+  // A `//user:secret pass@host?x=y@tail` span — the literal SPACE in the userinfo forces the belt (the
+  // primary `//[^\s]+` token stops at the space, so the belt owns the whole span). An unbounded `[^/]*@`
+  // belt userinfo class consumed the `?` marker (`…?x=y@` → `//***@`), so the follow-on query strip found
+  // no `?` and left `tail` visible. Bounding the class before `?`/`#` keeps the `?` in place so the whole
+  // `?query` (incl. the `@tail`) is redacted (issue #778 review).
+  const out = redactFreeText("run //user:secret pass@host?x=y@tail now");
+  assert(!out.includes("tail"), `the query tail past the @ must not leak: ${out}`);
+  assert(!out.includes("secret") && !out.includes("x=y"), `userinfo + query both redacted: ${out}`);
+  assert(out.includes("//***@"), `the userinfo collapses to //***@: ${out}`);
+  assert(out.includes("?***"), `the query collapses to the marker: ${out}`);
+});
+
 test("#778 redactFreeText: prose AFTER a `?query`/`#fragment` split across a line break is CONSERVATIVELY redacted, not preserved (thread :1115 supersedes :1083)", () => {
   // A `?token=VALUE` whose VALUE rides across a newline (`?token=\nsecret`) is a SPLIT credential: the
   // far side of the break is the secret's continuation, indistinguishable from ordinary prose resuming

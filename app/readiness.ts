@@ -1177,33 +1177,42 @@ export function redactTarget(probe: ReadinessProbe): string {
  * ({@link hasEmbeddedCredential}, used by `validateDeliveryGraph` to REJECT a credential-bearing
  * `agent.jobType`). Keeping ONE source string means the "what counts as an embedded credential" rule
  * can never drift between the two — the redactor must strip exactly what the validator rejects, or a
- * credential the validator misses would be echoed un-redacted. The userinfo class is `[^/]` (NOT
- * `[^/@\s]`, and NOT the earlier `[^/@]`): it deliberately spans WHITESPACE up to the `@`, so a
+ * credential the validator misses would be echoed un-redacted. The userinfo class is `[^/?#]` (NOT
+ * `[^/@\s]`, and NOT the earlier `[^/@]`/`[^/]`): it deliberately spans WHITESPACE up to the `@`, so a
  * malformed-but-operator-authored `//user:secret pass@host` (a literal space in the userinfo) is
  * caught, not left to leak verbatim into the executable `<zeebe:taskDefinition type=…>` / compiled BPMN
  * (issue #778 review — thread deliveryGraph.ts:570). The userinfo colon is DELIBERATELY OPTIONAL
- * (`[^/]*@`, not `[^/]*:[^/]*@`):
+ * (`[^/?#]*@`, not `[^/?#]*:[^/?#]*@`):
  * a passwordless, username-only `//token@host` is a bearer/OAuth token riding the userinfo and MUST be
  * caught too — a plain worker-routing job type never contains a `//…@` span at all (with or without a
  * colon), so requiring a colon would only re-open a real leak for no legitimate gain (issue #778 review
- * — thread readiness.ts:1170). `[^/]*@` is a single-quantifier match — linear, no catastrophic
+ * — thread readiness.ts:1170). `[^/?#]*@` is a single-quantifier match — linear, no catastrophic
  * backtracking.
  *
- * The userinfo class is `[^/]` (NOT `[^/@]`): per RFC 3986 the userinfo runs to the LAST `@` before the
+ * The userinfo class is `[^/?#]` (NOT `[^/@]`): per RFC 3986 the userinfo runs to the LAST `@` before the
  * authority's path, so a malformed-but-accepted multi-`@` value (`//user:pass@ss@host`) must collapse
  * through EVERY `@` up to the path — an earlier `[^/@]*@` stopped at the FIRST `@`, rewriting only
  * `//user:pass@` and leaking the `ss@host` suffix into the display artifact (issue #778 review — thread
- * readiness.ts:1175). `[^/]` still excludes `/` (so it never crosses into the path), and the trailing
- * `@` is anchored greedily to the last one before a `/`; `[^/]*@` remains a single-quantifier match, so
- * it is linear with no catastrophic backtracking. */
-const EMBEDDED_CREDENTIAL_SRC = "\\/\\/[^/]*@";
+ * readiness.ts:1175).
+ *
+ * The class also EXCLUDES `?` and `#` (NOT the earlier `[^/]`): per RFC 3986 a raw `?`/`#` starts the
+ * query/fragment and so ENDS the authority — a `//host?token=secret@tail` carries its `@` INSIDE the
+ * query, with no userinfo at all. An unbounded `[^/]*@` greedily consumed the `?` marker
+ * (`//host?token=secret@` → `//***@`), so the follow-on `?query`/`#fragment` strip in {@link redactString}
+ * found no marker and left `tail` visible. Bounding the userinfo before `?`/`#` keeps the marker in
+ * place so the whole query/fragment (incl. any `@tail`) is redacted, while a genuine `//user:pass@host?…`
+ * still collapses its userinfo AND has its query stripped (issue #778 review — thread readiness.ts:1199).
+ * `[^/?#]` still excludes `/` (so it never crosses into the path), and the trailing `@` is anchored
+ * greedily to the last one before a `/`/`?`/`#`; `[^/?#]*@` remains a single-quantifier match, so it is
+ * linear with no catastrophic backtracking. */
+export const EMBEDDED_CREDENTIAL_SRC = "\\/\\/[^/?#]*@";
 
 /** Strip credential-bearing pieces from a free-form target string for logging: any `user:pass@`
  * userinfo and any `?query`/`#fragment` (a token often rides the query). The query/fragment strip uses
  * `[\s\S]*` (NOT `.*$`, which cannot cross a line break) so an embedded CR/LF after the `?`/`#` — e.g.
  * `https://host/?token=secret\nnext` — cannot leave the token un-redacted; everything from the first
  * `?`/`#` to end-of-string is consumed regardless of intervening newlines. The userinfo class is
- * `[^/]` (NOT `[^/@\s]`, NOT the earlier `[^/@ ]`/`[^/@ \t]`, and NOT `[^/@]`): ANY character smuggled
+ * `[^/?#]` (NOT `[^/@\s]`, NOT the earlier `[^/@ ]`/`[^/@ \t]`/`[^/@]`, and NOT the later `[^/]`): ANY character smuggled
  * INSIDE the
  * userinfo up to the `@` — a raw CR/LF (`https://user:pa\nss@host`), an embedded TAB
  * (`https://user:pa\tss@host`), a literal SPACE (`https://user:secret pass@host`, a malformed but
@@ -1213,7 +1222,12 @@ const EMBEDDED_CREDENTIAL_SRC = "\\/\\/[^/]*@";
  * at the FIRST `@` (leaking a multi-`@` suffix), but both let a credential escape into an
  * operator-visible display artifact; since the RAW value
  * still reaches runtime unmodified and only the DISPLAY doc is affected, redacting more (through the
- * last `@` before the path) is the safe direction (issue #778 review). `[^/]*@` remains a
+ * last `@` before the path) is the safe direction (issue #778 review). The `?`/`#` exclusion is the
+ * INVERSE correction: a `[^/]` userinfo crossed a raw query/fragment delimiter — a `?token=…@tail` query
+ * (no userinfo; the `@` rides the query) collapsed to `//***@tail`, consuming the `?` marker so the
+ * follow-on `?query`/`#fragment` strip below found nothing and LEAKED `tail`. Bounding the userinfo at
+ * `?`/`#` keeps the marker so the query strip redacts the whole tail (issue #778 review — thread
+ * readiness.ts:1199). `[^/?#]*@` remains a
  * single-quantifier match, so it is
  * linear with no catastrophic backtracking. Callers that surface the result in a display artifact must
  * first pass it through `stripXmlInvalidChars` so an XML-forbidden control (e.g. U+000B) inside the
@@ -1249,9 +1263,14 @@ export function redactEmbeddedCredential(s: string): string {
  * strip leaks the `?token=secret` tail (issue #778 review — thread deliveryGraph.ts:188). Requiring the
  * `@` keeps genuine opaque `//host#42` refs (no userinfo) untouched. The token runs to the next literal
  * SPACE (`[^ ]*`), NOT the wider `\s` class, so it CROSSES an XML-valid internal TAB/LF/CR and still
- * redacts a `?query` secret sitting past it. `[^/]*@` and `[^ ]*` are separated by the literal `@`
+ * redacts a `?query` secret sitting past it. The userinfo class is `[^/?#]` (NOT the earlier `[^/]`):
+ * bounding it before a raw `?`/`#` stops the userinfo span crossing the query/fragment delimiter — a
+ * `//host?token=secret@tail` (no userinfo; the `@` rides the query) no longer collapses to `//***@tail`
+ * (leaking `tail`); it instead falls through to {@link redactEmbeddedSchemeRelativeUrl}, which strips the
+ * whole `?query` (issue #778 review — thread readiness.ts:1199, mirroring the {@link EMBEDDED_CREDENTIAL_SRC}
+ * fix). `[^/?#]*@` and `[^ ]*` are separated by the literal `@`
  * anchor, so the match stays linear with no catastrophic backtracking. */
-const EMBEDDED_CREDENTIAL_URL_SRC = "\\/\\/[^/]*@[^ ]*";
+const EMBEDDED_CREDENTIAL_URL_SRC = "\\/\\/[^/?#]*@[^ ]*";
 
 /** Redact each embedded SCHEME-RELATIVE credential-URL (`//<userinfo>@authority…`) token IN PLACE via
  * {@link redactString} — stripping its `//user:pass@` userinfo AND any `?query`/`#fragment` — while

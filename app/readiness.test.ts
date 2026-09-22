@@ -931,6 +931,21 @@ test("redactString: userinfo carrying MULTIPLE raw `@` collapses the WHOLE autho
   assertStringIncludes(r, "//***@host");
 });
 
+test("redactString: a `?query`/`#fragment` value containing a literal `@` does NOT let the userinfo span cross the delimiter and leak the tail (#778 review — thread readiness.ts:1199)", () => {
+  // `//host?token=secret@tail` has NO userinfo — the `@` sits INSIDE the query. An unbounded `[^/]*@`
+  // userinfo class consumed the `?` marker (`//host?token=secret@` → `//***@`), so the follow-on
+  // query strip found no `?` and left `tail` visible. Bounding the userinfo class before `?`/`#`
+  // (`[^/?#]*@`) keeps the `?` in place so the whole `?query` (incl. the `@tail`) is redacted.
+  const r = redactString("https://host?token=secret@tail");
+  assert(!r.includes("tail"), `the query tail past the @ must not leak: ${r}`);
+  assert(!r.includes("secret"), "the query token is redacted");
+  assertEquals(r, "https://host?***");
+  // A GENUINE userinfo credential still collapses AND its query is still stripped.
+  const c = redactString("https://user:pass@host?token=s3cr3t@x");
+  assert(!c.includes("user:pass") && !c.includes("s3cr3t"), `userinfo + query both redacted: ${c}`);
+  assertEquals(c, "https://***@host?***");
+});
+
 test("redactTarget: a command target is never logged — only the kind + a fixed placeholder", () => {
   const ct = redactTarget(parseProbe({ kind: "command", target: "curl -H 'Authorization: Bearer s3cr3t' https://h/p" }));
   assertEquals(ct, "command:<redacted>");

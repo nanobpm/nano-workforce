@@ -50,7 +50,7 @@ import {
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
-import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactString } from "./readiness.ts";
+import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, EMBEDDED_CREDENTIAL_SRC, isProbeKind, normalizePoll, redactString } from "./readiness.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
 
@@ -1174,13 +1174,17 @@ function redactCredentialSpan(span: string): string {
   const hasQueryOrFragment = span.indexOf("?") >= 0 || span.indexOf("#") >= 0;
   if (!credentialShaped && !hasQueryOrFragment) return span;
   // Collapse a `user:pass@` userinfo (the `//…:…@` class, which may cross a break OR a literal SPACE
-  // inside it after the malformed-userinfo span extension in `redactCredentialSpans`) to `//***@`. The
-  // class is `[^/]` (not `[^/@ ]`, and not `[^/@]`) so a space the extended span pulled in
-  // (`//user:secret pass@host`) is consumed up to the `@` AND a malformed multi-`@` userinfo
-  // (`//user:pass@ss@host`) collapses through EVERY `@` to the last one before a `/` — matching
-  // {@link EMBEDDED_CREDENTIAL_SRC} so the belt never leaks a suffix the whole-value redactor strips
-  // (issue #778 review — thread deliveryGraphCompiler.ts:1056). Single-quantifier, so still linear.
-  const s = credentialShaped ? span.replace(/\/\/[^/]*@/g, "//***@") : span;
+  // inside it after the malformed-userinfo span extension in `redactCredentialSpans`) to `//***@`. This
+  // reuses the canonical {@link EMBEDDED_CREDENTIAL_SRC} pattern verbatim — DERIVED, not a second copy of
+  // the `//…@` literal — so the belt's userinfo class can never drift from the whole-value redactor /
+  // validator (the drift that let one copy keep an unbounded `[^/]*@` while the other was bounded — issue
+  // #778 review — thread deliveryGraphCompiler.ts:1183). Its `[^/?#]` class spans a space the extended
+  // span pulled in (`//user:secret pass@host`) up to the `@` AND collapses a malformed multi-`@` userinfo
+  // (`//user:pass@ss@host`) through EVERY `@` to the last one before a `/`, while its `?`/`#` exclusion
+  // stops the userinfo crossing a raw query/fragment delimiter — a `?…@tail` query keeps its `?` marker so
+  // the strip below redacts the whole tail instead of leaking it (thread deliveryGraphCompiler.ts:1056/:1183).
+  // Single-quantifier, so still linear.
+  const s = credentialShaped ? span.replace(new RegExp(EMBEDDED_CREDENTIAL_SRC, "g"), "//***@") : span;
   const qMark = s.indexOf("?");
   const hMark = s.indexOf("#");
   const qi = qMark < 0 ? hMark : hMark < 0 ? qMark : Math.min(qMark, hMark);

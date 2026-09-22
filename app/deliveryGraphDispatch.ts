@@ -172,7 +172,12 @@ export async function dispatchDeliveryGraphRun(
   // unprovable → false, so the door refuses a secret-bearing short-circuit (the safe pre-existing 409).
   const identityConfirmed = async (): Promise<boolean> => {
     const identity = await identities.get(runKey);
-    return identity !== undefined && identity.graph_fingerprint === graphFingerprint;
+    // `table.get()` resolves to `null` (NOT `undefined`) for a MISSING row — a run launched before this
+    // side table existed, or a not-yet-stamped concurrent claim. A bare `!== undefined` admits that
+    // `null` and then throws on `.graph_fingerprint`; `!= null` treats both absences as unprovable →
+    // false, so the door reaches the safe pre-existing 409 instead of an incident (issue #778 review —
+    // thread deliveryGraphDispatch.ts:175).
+    return identity != null && identity.graph_fingerprint === graphFingerprint;
   };
 
   // Idempotency short-circuit — a re-dispatch onto a still-running run does NOT double-launch.
