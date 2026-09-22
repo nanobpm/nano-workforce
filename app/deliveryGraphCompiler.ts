@@ -1237,6 +1237,16 @@ function matchFieldIsEffectiveDefault(kind: string, key: string, value: unknown)
   if (typeof def.value === "number") return typeof value === "number" && value === def.value;
   return typeof value === "string" && value.trim() === def.value;
 }
+/** True when `value` is a string whose runtime-normalized (trimmed) form is EMPTY — `parseMatch`
+ * (`app/readiness.ts`) reads every string predicate through `str(v).trim() || undefined`, so a `""` or
+ * whitespace-only value coerces to `undefined`, i.e. it is runtime-equivalent to OMITTING the field.
+ * Rendering it anyway (e.g. `bodyIncludes=<redacted>` for a redacted field, or `version=` for a plain
+ * one) would fork `semanticBpmn`/the run key from the omitted-equivalent graph and double-dispatch, so
+ * {@link describeProbeMatch} drops it (issue #778 review — thread deliveryGraphCompiler.ts:1254). Numbers/
+ * booleans are never "empty" and pass through untouched. */
+function matchValueRuntimeEmpty(value: unknown): boolean {
+  return typeof value === "string" && value.trim() === "";
+}
 function describeProbeMatch(kind: string, match: Extract<DeliveryNode, { kind: "wait" }>["wait"]["match"]): string {
   if (match === undefined || match === null) return "";
   // Render the NORMALISED (trimmed) string value — `parseMatch` (`readiness.ts`) trims each string
@@ -1246,9 +1256,11 @@ function describeProbeMatch(kind: string, match: Extract<DeliveryNode, { kind: "
   // deliveryGraphCompiler.ts:1206). Non-string values (numbers/booleans) are shown as-is. A field whose
   // authored value equals its kind's runtime DEFAULT ({@link matchFieldIsEffectiveDefault}) is DROPPED —
   // writing e.g. `prState:"merged"` explicitly is identical to omitting it, so surfacing it would fork the
-  // digest from the omitted-equivalent graph and double-dispatch (issue #778 review — thread :1267).
+  // digest from the omitted-equivalent graph and double-dispatch (issue #778 review — thread :1267). A
+  // string predicate whose trimmed value is EMPTY ({@link matchValueRuntimeEmpty}) is likewise DROPPED —
+  // `parseMatch` coerces it to `undefined`, so it too is omitted-equivalent (issue #778 review — thread :1254).
   return Object.entries(match)
-    .filter(([k, v]) => v !== undefined && v !== null && DECLARED_MATCH_FIELDS.has(k) && !matchFieldIsEffectiveDefault(kind, k, v))
+    .filter(([k, v]) => v !== undefined && v !== null && DECLARED_MATCH_FIELDS.has(k) && !matchValueRuntimeEmpty(v) && !matchFieldIsEffectiveDefault(kind, k, v))
     .sort(([a], [b]) => byCodeUnit(a, b))
     .map(([k, v]) => `${k}=${REDACTED_MATCH_FIELDS.has(k) ? "<redacted>" : redactConnectorValue(typeof v === "string" ? v.trim() : String(v))}`)
     .join(", ");
@@ -1552,6 +1564,14 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         if (p.match) {
           for (const [k, v] of Object.entries(p.match)) {
             if (v === undefined || v === null) continue;
+            // A string predicate whose trimmed value is EMPTY is runtime-unset — `parseMatch` coerces a
+            // string field through `str(v).trim() || undefined` and a numeric field through `num(v)` (a
+            // non-number → undefined), so `""`/`"   "` is omitted-equivalent on EITHER. `describeProbeMatch`
+            // now drops it from the display (same digest as the omitted graph), so the run-key fingerprint
+            // MUST drop it too — otherwise an empty variant pushes a token the omitted graph does not, forking
+            // `stableProposalRunKey` under a shared digest and letting a keyless re-stage double-dispatch
+            // (issue #778 review — thread deliveryGraphCompiler.ts:1254).
+            if (matchValueRuntimeEmpty(v)) continue;
             // `verifyCommand`/`bodyIncludes`/`stdoutIncludes` are shown only as `<redacted>`; every other
             // match value is shown as `redactConnectorValue(String(v))`, which (a) XML-1.0 sanitisation
             // (`escapeXml`) later STRIPS invalid characters from — so `"1\x01"` and `"1"` share a digest —

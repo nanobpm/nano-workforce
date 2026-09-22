@@ -325,6 +325,48 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
   });
 
+  test("a KEYLESS short-circuit onto a running graph whose run key equals the shared digest (an earlier explicit `idempotencyKey === digest`), re-dispatched from a redacted-twin that SHARES the digest → 409; the proposal is NOT consumed. The ambiguous-identity refusal must gate EVERY `alreadyRunning && !identityConfirmed`, not only explicit-key requests — a keyless faithful-digest dispatch collides on the digest run key just the same (thread dispatchDeliveryGraph.ts:325)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+
+    // Graph 1 CARRIES a redacted-away credential — its digest is over the REDACTED display, NOT a faithful
+    // identity. Dispatch it under an explicit `idempotencyKey` set to its OWN digest, so the run is keyed
+    // by the digest itself and parks running, stamping graph 1's LOSSLESS fingerprint.
+    const secretPrompt = "click done: https://user:pass@host";
+    const SECRET = { name: "manual gate", nodes: [{ id: "ack", kind: "human", human: { prompt: secretPrompt } }] };
+    // Graph 2 is authored LITERALLY as the redacted form — redaction is a no-op on it, so
+    // `graphCarriesRedactedSecrets` is FALSE. Because it is faithful, a KEYLESS dispatch leaves the run key
+    // undefined and the core falls back to the digest — which it SHARES with graph 1, colliding onto that
+    // still-running secret run even though NO explicit key was supplied.
+    const redactedTwin = { name: "manual gate", nodes: [{ id: "ack", kind: "human", human: { prompt: redactFreeText(secretPrompt) } }] };
+
+    const g1 = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SECRET });
+    const first = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: g1.body.digest, idempotencyKey: g1.body.digest, repoless: true },
+    });
+    assert.equal(first.status, 202);
+    await app.settle();
+    assert.equal((await deliveryGraphProposals(app.db).get(g1.body.digest))?.status, "dispatched");
+
+    // Re-stage the twin at the SAME digest and dispatch it WITHOUT a key. It short-circuits onto the
+    // running secret run (same digest run key), but that run is a different graph → identityConfirmed is
+    // false. The refusal must fire despite the request being keyless; otherwise the twin is marked
+    // `dispatched` while it never launched.
+    const twin = await api.call<{ digest: string }>("compileDeliveryGraph", { body: redactedTwin });
+    assert.equal(twin.body.digest, g1.body.digest);
+    assert.equal((await deliveryGraphProposals(app.db).get(twin.body.digest))?.status, "staged");
+    const second = await api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: twin.body.digest, repoless: true },
+    });
+    assert.equal(second.status, 409);
+    assert.equal(second.body.ok, false);
+    await app.settle();
+    // The twin proposal is still staged — nothing new launched.
+    assert.equal((await deliveryGraphProposals(app.db).get(twin.body.digest))?.status, "staged");
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+  });
+
   test("a proposal whose stored graph is corrupt JSON → 400 AND the proposal is retired (expired), never lingering staged", async () => {
     const app = await boot();
     assert.ok(app.api);

@@ -1763,6 +1763,33 @@ test("#778 describeProbeMatch drops an authored match value equal to its kind's 
   }
 });
 
+test("#778 describeProbeMatch drops an authored match string predicate whose runtime-normalized (trimmed) value is EMPTY so an equivalent graph does not fork the digest — `parseMatch` coerces `\"\"`/`\"   \"` to `undefined` (omitted), so rendering it would fork `semanticBpmn`/the run key from the omitted-equivalent graph → a double dispatch (thread deliveryGraphCompiler.ts:1254)", async () => {
+  // A blank/whitespace string predicate is runtime-equivalent to OMITTING it: `parseMatch`
+  // (`app/readiness.ts`) normalizes every string field with `str(v).trim() || undefined`. Both a REDACTED
+  // field (`bodyIncludes` → rendered `<redacted>`) and a plain field (`capabilityRef` → rendered raw) must
+  // collapse to the omitted graph.
+  const cases: { kind: string; target: string; field: string; nonEmpty: string }[] = [
+    { kind: "http", target: "https://api.example.com/health", field: "bodyIncludes", nonEmpty: "ok" },
+    { kind: "capability", target: "@nanobpm/urban", field: "capabilityRef", nonEmpty: "cap:x" },
+  ];
+  for (const c of cases) {
+    const blank = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, match: { [c.field]: "   " }, poll: { everyMs: 1000 } } }], edges: [] };
+    const omitted = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, poll: { everyMs: 1000 } } }], edges: [] };
+    const a = await compileOk(blank);
+    const b = await compileOk(omitted);
+    assertEquals(a.semanticBpmn, b.semanticBpmn, `${c.kind}: a whitespace-only \`${c.field}\` must render identically to omitting it`);
+    assert(!a.bpmn.includes(`${c.field}=`), `${c.kind}: a blank \`${c.field}\` is dropped from the doc`);
+    // A NON-empty value still renders (and forks the digest) — the drop is empty-only.
+    const nonEmpty = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, match: { [c.field]: c.nonEmpty }, poll: { everyMs: 1000 } } }], edges: [] };
+    const n = await compileOk(nonEmpty);
+    assert(n.semanticBpmn !== b.semanticBpmn, `${c.kind}: a non-empty \`${c.field}\` genuinely forks the digest`);
+  }
+  // Direct unit-level assertion on the display, independent of the compile pipeline: a blank redacted
+  // predicate must NOT surface a `<redacted>` marker (it is omitted, not present-but-hidden).
+  const disp = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://api.example.com/health", match: { status: 200, bodyIncludes: "   " } } });
+  assert(!disp.documentation.includes("bodyIncludes"), "nodeDisplay drops a whitespace-only redacted predicate rather than rendering `bodyIncludes=<redacted>`");
+});
+
 test("#778 nodeDisplay drops an explicit `onTimeout: escalate` (the effective default) so it renders identically to omitting it and does not fork the digest (thread :1398)", async () => {
   // `parseProbe` defaults an omitted `onTimeout` to `escalate` and `waitBodyLines` only changes topology
   // for `continue`, so an EXPLICIT `escalate` is behaviourally identical to omitting it. Rendering the

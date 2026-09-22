@@ -321,9 +321,18 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
   // of which side carries the redacted value; a same-payload retry (`identityConfirmed`) falls through and
   // consumes the proposal, preserving the idempotency contract rather than 409-ing an identical retry
   // (issue #778 review — thread dispatchDeliveryGraph.ts:332).
-  const explicitIdempotencyKey = typeof idempotencyKey === "string" && idempotencyKey.trim() !== "";
-  if (dispatched.alreadyRunning && explicitIdempotencyKey && !dispatched.identityConfirmed) {
-    app.log.warn("dispatch-delivery-graph refused: explicit idempotencyKey short-circuit cannot prove the running run is this graph", {
+  //
+  // The gate must fire for a KEYLESS request too, not only an explicit `idempotencyKey`. A faithful-digest
+  // graph (no redacted secret) dispatched WITHOUT a key leaves `dispatchRunKey` undefined, so the core
+  // falls back to the DIGEST as the run key — which a redacted twin SHARES with an earlier run that was
+  // itself keyed by that digest (e.g. an explicit `idempotencyKey === digest`). The keyless twin then
+  // short-circuits onto that different graph's run with `identityConfirmed === false`, so scoping the
+  // refusal to explicit-key requests would mark the twin `dispatched` though it never ran. `identityConfirmed`
+  // is derived from the running run's persisted fingerprint, NOT from whether a key was supplied, so a
+  // legitimate keyless same-payload retry still confirms and falls through — only a genuinely unprovable
+  // short-circuit is refused (issue #778 review — thread dispatchDeliveryGraph.ts:325).
+  if (dispatched.alreadyRunning && !dispatched.identityConfirmed) {
+    app.log.warn("dispatch-delivery-graph refused: already-running short-circuit cannot prove the running run is this graph", {
       digest,
       runKey: dispatched.runKey,
     });
@@ -332,7 +341,7 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
       body: {
         ok: false,
         error:
-          `idempotencyKey is already bound to a running delivery graph whose identity fingerprint does not match this graph, ` +
+          `this graph short-circuited onto an already-running delivery graph whose identity fingerprint does not match it, ` +
           `so its content-addressed digest (${digest}) cannot prove the running run is this exact graph; the staged proposal was NOT ` +
           "dispatched — re-dispatch with a distinct idempotencyKey per graph (or none, to use the lossless server-side key)",
       },
