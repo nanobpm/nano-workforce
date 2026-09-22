@@ -23,7 +23,7 @@ import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
-import { hasEmbeddedCredential, isUrlShaped, redactEmbeddedCredential, redactEmbeddedUrl, redactString } from "./readiness.ts";
+import { hasEmbeddedCredential, hasEmbeddedUrl, isUrlShaped, redactEmbeddedCredentialUrl, redactEmbeddedUrl, redactString } from "./readiness.ts";
 import { isResolvableRepo } from "./repoEnvelope.ts";
 
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
@@ -104,6 +104,7 @@ export type DeliveryGraphErrorCode =
   | "invalid-job-type"
   | "url-shaped-job-type"
   | "credential-in-job-type"
+  | "embedded-url-in-job-type"
   | "invalid-credential-env"
   | "unbound-pr";
 
@@ -163,9 +164,11 @@ export function hasXmlInvalidChars(value: string): boolean {
  * prefix in a free-form value that later parsers accept (`parsePrTarget` takes any prefix before
  * `#<digits>`, so `prefix //user:pass@host#42`), which the anchored {@link isUrlShaped} check misses.
  * Because a `//<userinfo>@` span is UNAMBIGUOUSLY a credential wherever it sits (an opaque id never
- * contains one), strip it regardless of position via {@link redactEmbeddedCredential} — while still
- * gating the `?`/`#` strip on URL-shape, where `#`/`?` are URL syntax rather than a meaningful opaque
- * token character (issue #778 review — thread deliveryGraph.ts:162/566). An embedded ABSOLUTE URL
+ * contains one), a scheme-relative `//<userinfo>@authority…` run is treated as an embedded URL and
+ * redacted in FULL — userinfo AND its `?query`/`#fragment` — via {@link redactEmbeddedCredentialUrl},
+ * since userinfo marks the run a URL whose `?`/`#` ARE URL syntax rather than a meaningful opaque token
+ * character; an opaque `//host#42` (no userinfo) keeps its `#42` (issue #778 review — threads
+ * deliveryGraph.ts:162/566, :188). An embedded ABSOLUTE URL
  * (an explicit `scheme://…` token) after a non-URL prefix (`prefix https://host/path?token=secret`)
  * likewise hides a `?query`/`#fragment` token the anchored whole-value {@link isUrlShaped} check
  * misses; its `?`/`#` ARE URL syntax (explicit scheme), so redact that token in full via
@@ -183,9 +186,10 @@ export function redactConnectorValue(value: string): string {
   const cleaned = stripXmlInvalidChars(value);
   // A whole-value URL gets the full redact (userinfo + query/fragment). Any other value keeps its
   // meaningful `#`/`?` opaque-token characters, but still has (a) each embedded ABSOLUTE-URL
-  // (`scheme://…`) token redacted in full — its `?query`/`#fragment` IS URL syntax — and (b) any bare
-  // scheme-relative `//<userinfo>@` credential stripped, wherever it sits.
-  return isUrlShaped(cleaned) ? redactString(cleaned) : redactEmbeddedCredential(redactEmbeddedUrl(cleaned));
+  // (`scheme://…`) token redacted in full — its `?query`/`#fragment` IS URL syntax — and (b) each
+  // embedded scheme-relative `//<userinfo>@authority…` credential-URL redacted in full (userinfo AND
+  // `?query`/`#fragment`), while a userinfo-less opaque `//host#42` keeps its `#42`.
+  return isUrlShaped(cleaned) ? redactString(cleaned) : redactEmbeddedCredentialUrl(redactEmbeddedUrl(cleaned));
 }
 
 /** True when `value` contains a whitespace character that XML **attribute-value normalization**
@@ -610,6 +614,29 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "leaking the credential into the compiled BPMN. Use a plain job-type token and carry any " +
               "endpoint/credential as a runtime job variable instead",
             code: "credential-in-job-type",
+          });
+        }
+        // The two checks above catch a WHOLE-value URL (anchored `isUrlShaped`) and a `//<userinfo>@`
+        // credential token, but a userinfo-LESS embedded absolute URL slips both: `senior:feature
+        // https://host/path?token=secret` starts with a plausible token (so the anchored check misses it)
+        // and has no `//…@` (so `hasEmbeddedCredential` misses it), yet its `?token=secret` query rides an
+        // explicit-scheme URL and, since the executable `<zeebe:taskDefinition type=…>` carries `jobType`
+        // VERBATIM, persists in the compiled BPMN even though `nodeDisplay` redacts the operator-visible
+        // descriptor. Reject ANY embedded absolute-URL token (a routing key never contains one) at this
+        // same trust boundary via {@link hasEmbeddedUrl} — the SAME `scheme://…` span the display redactor
+        // ({@link redactEmbeddedUrl}) strips (issue #778 review — thread deliveryGraph.ts:602). Message
+        // redacted.
+        if (kind === "agent" && typeof config.jobType === "string" && hasEmbeddedUrl(config.jobType)) {
+          errors.push({
+            path: `${path}.${configKey}.jobType`,
+            message:
+              `\`agent.jobType\` ${JSON.stringify(redactConnectorValue(config.jobType))} embeds an absolute URL ` +
+              "(`scheme://…`) whose `?query`/`#fragment` can hide a credential token that a plain " +
+              "worker-routing job type never contains and that, since the executable " +
+              "`<zeebe:taskDefinition type=…>` carries the job type verbatim, would land in the compiled BPMN. " +
+              "Use a plain job-type token (e.g. `senior:feature`) and carry any endpoint/credential as a " +
+              "runtime job variable instead",
+            code: "embedded-url-in-job-type",
           });
         }
         // S5 trust boundary: `validateDeliveryGraph` is the gate before `dispatchDeliveryGraphRun`

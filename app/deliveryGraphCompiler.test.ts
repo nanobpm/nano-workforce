@@ -1185,6 +1185,27 @@ test("#778 a REDACTED match field (`verifyCommand`) authored as the NUMBER 1 vs 
   );
 });
 
+test("#778 a NON-redacted `wait.match` string predicate (`capabilityRef`) differing ONLY in surrounding whitespace does not fork the run key — `parseMatch`/`describeProbeMatch` trim it before use, so the padded and trimmed twins are the SAME runtime probe and must share one staged run key (thread deliveryGraphCompiler.ts:1591)", () => {
+  // Before the fix the non-redacted branch compared/fingerprinted the UNTRIMMED `String(v)`, so a
+  // credential-bearing predicate padded with whitespace (`" //user:pass@host#1 "`) forked the stable run
+  // key from its trimmed twin — letting a keyless re-stage double-dispatch an identical graph.
+  const mk = (capabilityRef: string): DeliveryGraph =>
+    JSON.parse(
+      JSON.stringify({ name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "@nanobpm/urban", match: { capabilityRef } } }], edges: [] }),
+    );
+  assertEquals(
+    digestInvisibleRawValues(mk("  //user:pass@host#1  ")),
+    digestInvisibleRawValues(mk("//user:pass@host#1")),
+    "a padded non-redacted string predicate must not fork the run key from its trimmed twin",
+  );
+  // The credential is still fingerprinted (it IS digest-invisible after display redaction), just at its
+  // trimmed value — so a genuinely different credential still forks.
+  assert(
+    JSON.stringify(digestInvisibleRawValues(mk("//user:pass@host#1"))) !== JSON.stringify(digestInvisibleRawValues(mk("//user:pass@host#2"))),
+    "a genuinely different credential predicate still forks the run key",
+  );
+});
+
 test("#778 nodeDisplay redacts a connector value whose URL is prefixed by an XML-invalid control char (strip-before-classify)", () => {
   // A control char (U+0001) that XML 1.0 forbids gets stripped by `escapeXml`/`stripXmlInvalidChars` at
   // render time. If classification/redaction ran on the RAW value, the anchored `^(scheme:)?//` check

@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { deliveryGraphProposals } from "../app/deliveryGraphProposals.ts";
 import { deliveryGraphRuns } from "../app/deliveryGraphRun.ts";
-import { stableProposalRunKey } from "./dispatchDeliveryGraph.ts";
+import { isEquivalentReStage, stableProposalRunKey } from "./dispatchDeliveryGraph.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
 const GITHUB_ENV: Record<string, string> = { NANO_PR_GITHUB_TRANSPORT: "token", GITHUB_TOKEN: "" };
@@ -86,6 +86,19 @@ test("stableProposalRunKey: node-ORDER of digest-invisible content does not fork
     edges: [],
   };
   assert.equal(stableProposalRunKey(D, ab), stableProposalRunKey(D, ba), "a top-level node reorder must not fork the run-key");
+});
+
+test("isEquivalentReStage: only a live staged row whose RAW graph JSON is byte-identical to the launched graph is an equivalent re-stage — a credential-different re-stage (same digest) is NOT, and a retired/consumed row (null) is NOT (issue #778 review — thread dispatchDeliveryGraph.ts:320)", () => {
+  const launched = JSON.stringify({ name: "g", nodes: [{ id: "n", kind: "connector", connector: { target: "//user:pass@host" } }], edges: [] });
+  // A byte-identical re-stage IS equivalent — the door consumes the duplicate at its bumped revision.
+  assert.equal(isEquivalentReStage({ graph: launched }, launched), true);
+  // A credential-different re-stage shares the redacted digest but its RAW graph differs, so it is a
+  // newer, never-launched revision the door must leave `staged`.
+  const credDifferent = JSON.stringify({ name: "g", nodes: [{ id: "n", kind: "connector", connector: { target: "//other:secret@host" } }], edges: [] });
+  assert.equal(isEquivalentReStage({ graph: credDifferent }, launched), false);
+  // No live staged row (consumed/dismissed/superseded/expired) → not equivalent, nothing to consume.
+  assert.equal(isEquivalentReStage(null, launched), false);
+  assert.equal(isEquivalentReStage(undefined, launched), false);
 });
 
 describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest", () => {

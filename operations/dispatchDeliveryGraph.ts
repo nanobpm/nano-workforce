@@ -55,6 +55,21 @@ export function stableProposalRunKey(digest: string, graph: DeliveryGraph): stri
   return `staged-${createHash("sha256").update(`${digest}\u0000${fingerprint}`).digest("hex").slice(0, 16)}`;
 }
 
+/** After the terminal `markProposalDispatched` no-oped — the digest row left the `stage_seq` this dispatch
+ * snapshotted between its `getStagedProposal` load and its mark — decide whether the still-`staged` row is
+ * an EQUIVALENT re-stage of the graph we just launched: a BYTE-IDENTICAL graph re-staged into the same
+ * digest row in that window (which bumps `stage_seq`). It is equivalent iff a live staged row is still
+ * present AND its raw graph JSON is byte-identical to the launched one. We compare the LOSSLESS raw
+ * `proposal.graph` (not the lossy semantic `digest`, which collapses credential-different graphs onto one
+ * key), so a genuinely different (e.g. credential-different) re-stage is NOT mistaken for equivalent. When
+ * true the door consumes the duplicate at its current revision — otherwise it would linger as an
+ * undismissable `staged` row every future dispatch short-circuits onto the already-running run without
+ * consuming; when false the row is a newer, never-launched revision the door must leave `staged` (issue
+ * #778 review — thread dispatchDeliveryGraph.ts:320). */
+export function isEquivalentReStage(reloaded: { graph: string } | null | undefined, launchedGraphJson: string): boolean {
+  return !!reloaded && reloaded.graph === launchedGraphJson;
+}
+
 /** Door-level cap on a duration override, mirroring the `maxLength: 64` on these fields in `openapi.yaml`.
  * Re-enforced here so a syntactically-valid-but-oversized duration is still rejected when the edge
  * validator is bypassed (internal calls/tests), keeping seeded process variables and error/log output bounded. */
@@ -319,11 +334,34 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
   }
   const marked = await markProposalDispatched(app.data, digest, stageSeq);
   if (!marked) {
-    // The row left the `staged` revision we snapshotted between our load and this flip — a concurrent
-    // dispatch consumed it, or a re-stage overwrote it with a newer graph (bumping stage_seq), or a
-    // dismiss/supersede/expiry retired it. The run we launched still stands; we intentionally skip the
-    // mark so a newer, never-launched revision is not clobbered to `dispatched` (issue #778 review).
-    app.log.warn("dispatch-delivery-graph: staged revision changed before consume; mark skipped", { digest, stageSeq });
+    // The row left the `staged` revision we snapshotted between our load and this flip. Distinguish the
+    // two reasons it moved, because they need OPPOSITE handling:
+    //   (a) an EQUIVALENT re-stage bumped `stage_seq` on a BYTE-IDENTICAL graph in our window — the run
+    //       we launched IS that graph, so the still-`staged` row is a duplicate of what we just
+    //       dispatched. Leaving it `staged` wedges an undismissable proposal that every future dispatch
+    //       short-circuits onto our already-running run without ever consuming (issue #778 review — thread
+    //       dispatchDeliveryGraph.ts:320). Consume it at its CURRENT revision.
+    //   (b) a re-stage overwrote it with a DIFFERENT (credential-different) graph, or a
+    //       dispatch/dismiss/supersede/expiry retired it — a newer, never-launched revision we must NOT
+    //       clobber to `dispatched`.
+    // Re-load and let `isEquivalentReStage` compare the LOSSLESS raw graph JSON (not the lossy digest,
+    // which collapses credential-different graphs): byte-identical ⇒ equivalent re-stage (a), else (b).
+    const restaged = await getStagedProposal(app.data, digest);
+    if (isEquivalentReStage(restaged, proposal.graph)) {
+      const consumed = await markProposalDispatched(app.data, digest, restaged?.stage_seq);
+      app.log.warn("dispatch-delivery-graph: equivalent re-stage consumed at bumped revision", {
+        digest,
+        stageSeq,
+        restagedSeq: restaged?.stage_seq,
+        consumed,
+      });
+    } else {
+      // A concurrent dispatch consumed it, or a re-stage overwrote it with a newer graph (bumping
+      // stage_seq), or a dismiss/supersede/expiry retired it. The run we launched still stands; we
+      // intentionally skip the mark so a newer, never-launched revision is not clobbered to `dispatched`
+      // (issue #778 review).
+      app.log.warn("dispatch-delivery-graph: staged revision changed before consume; mark skipped", { digest, stageSeq });
+    }
   }
 
   const outBody: DeliveryGraphTextResult = {

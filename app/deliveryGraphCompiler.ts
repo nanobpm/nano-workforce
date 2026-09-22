@@ -1587,8 +1587,22 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
               // server-derived run key (issue #778 review — threads :1363 / deliveryGraphCompiler.ts:1251).
               // `v` is guaranteed non-null here; `str` is not exported, so inline `String(v).trim()`.
               out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(String(v).trim())}`);
-            } else if (hasXmlInvalidChars(String(v)) || redactConnectorValue(String(v)) !== String(v) || matchValueTypeMismatch(k, v)) {
+            } else if (matchValueTypeMismatch(k, v)) {
+              // A cross-type twin (`0` vs `"0"` on a numeric field like `exitCode`) parses to a DIFFERENT
+              // runtime match, so it must fork the run key — fingerprint the RAW `v` (type-preserving
+              // `canonicalJson`) to keep the number/string variants distinct.
               out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(v)}`);
+            } else {
+              // A non-redacted field is shown as `redactConnectorValue(String(v).trim())` — `describeProbeMatch`
+              // trims a string predicate before display, and `parseMatch` likewise coerces via
+              // `str(v).trim()` — so fingerprint the SAME trimmed form. Comparing/fingerprinting the RAW
+              // `String(v)` instead forks the run key for a whitespace-only variant (`" //user:pass@host#1 "`
+              // vs its trimmed twin) that parses to the ONE runtime match, so a keyless re-stage double-
+              // dispatches an identical graph (issue #778 review — thread deliveryGraphCompiler.ts:1591).
+              const tv = typeof v === "string" ? v.trim() : v;
+              if (hasXmlInvalidChars(String(tv)) || redactConnectorValue(String(tv)) !== String(tv)) {
+                out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(tv)}`);
+              }
             }
           }
         }

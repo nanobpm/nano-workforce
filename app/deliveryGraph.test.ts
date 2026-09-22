@@ -883,14 +883,19 @@ test("credential-in-job-type: a PASSWORDLESS userinfo token (`senior:feature //t
   assert(!err.message.includes("tok3n"), `the credential-in-job-type message must redact the passwordless token, got: ${err.message}`);
 });
 
-test("#778 redactConnectorValue: an EMBEDDED `//user:pass@host` credential after a non-URL prefix (a `parsePrTarget` value like `prefix //user:pass@host#42`) is redacted, not echoed verbatim, while the meaningful `#42` PR ref and opaque `#`/`?` tokens survive (#778 review — thread deliveryGraph.ts:162/566)", () => {
+test("#778 redactConnectorValue: an EMBEDDED `//user:pass@host` credential after a non-URL prefix (a `parsePrTarget` value like `prefix //user:pass@host#42`) is redacted, not echoed verbatim; a userinfo-bearing authority is a URL so its `#fragment`/`?query` is redacted too (round-7 strengthening — thread deliveryGraph.ts:188), while an OPAQUE `//host#42` (no userinfo) keeps its `#42` (#778 review — thread deliveryGraph.ts:162/566)", () => {
   const out = redactConnectorValue("prefix //user:pass@host#42");
   assert(!out.includes("user:pass"), `an embedded credential must be redacted even without a URL prefix: ${out}`);
   assert(out.includes("//***@host"), `the userinfo collapses to the redaction marker: ${out}`);
-  assert(out.includes("#42"), `the meaningful PR ref must survive (opaque-token behaviour): ${out}`);
+  // A userinfo-bearing `//…@` authority IS a URL, so its `#fragment` is redacted (round 7, Finding A) —
+  // an opaque PR ref never carries userinfo, so nothing meaningful is lost. The opaque `//host#42` case
+  // (no userinfo) that keeps its `#42` is asserted separately below.
+  assert(!out.includes("#42"), `a userinfo-bearing URL's fragment is redacted (safe direction): ${out}`);
   // A passwordless `//token@host` bearer token embedded after a prefix is redacted too.
   const bearer = redactConnectorValue("route //tok3n@host now");
   assert(!bearer.includes("tok3n") && bearer.includes("//***@host"), `a passwordless embedded token must be redacted: ${bearer}`);
+  // An OPAQUE scheme-relative `//host#42` (no userinfo) keeps its meaningful `#42` PR ref.
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
   // Opaque identifiers where `#`/`?`/`@` are MEANINGFUL and carry no embedded `//…@` are shown verbatim.
   assertEquals(redactConnectorValue("slack:#releases"), "slack:#releases");
   assertEquals(redactConnectorValue("owner/repo#42"), "owner/repo#42");
@@ -948,6 +953,47 @@ test("#778 redactConnectorValue: an embedded absolute-URL whose scheme is separa
   }
   // A scheme-relative `//host#42` PR ref (no explicit scheme) still keeps its meaningful `#42`.
   assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+});
+
+test("#778 redactConnectorValue: a scheme-RELATIVE credential URL (`//user:pass@host/path?token=secret`) embedded after a non-URL prefix has its userinfo AND `?query`/`#fragment` secret redacted — userinfo marks it a URL, so its `?`/`#` are URL syntax, while an opaque `//host#42` (no userinfo) keeps its `#42` (#778 review — thread deliveryGraph.ts:188)", () => {
+  // Before the fix the non-URL branch used the userinfo-ONLY `redactEmbeddedCredential`, which collapsed
+  // `//user:pass@` to `//***@` but LEFT the trailing `?token=secret` query — leaking it into the display.
+  const q = redactConnectorValue("prefix //user:pass@host/path?token=secret");
+  assert(!q.includes("token=secret"), `a scheme-relative credential URL's query secret must be redacted: ${JSON.stringify(q)}`);
+  assert(!q.includes("user:pass"), `the scheme-relative userinfo must be redacted: ${JSON.stringify(q)}`);
+  // A fragment on a scheme-relative credential URL is redacted the same way.
+  const frag = redactConnectorValue("go //tok3n@host/p#sig=zzz");
+  assert(!frag.includes("sig=zzz") && !frag.includes("tok3n"), `a scheme-relative credential URL's fragment secret must be redacted: ${JSON.stringify(frag)}`);
+  // A query/fragment after an XML-valid internal TAB is still crossed (bounded by a literal SPACE).
+  const tab = redactConnectorValue("prefix //user:pa\tss@host?token=secret");
+  assert(!tab.includes("token=secret") && !tab.includes("user:pa"), `a scheme-relative credential URL split by a TAB must still redact its query: ${JSON.stringify(tab)}`);
+  // A userinfo-LESS opaque `//host#42` PR ref keeps its meaningful `#42` — no userinfo ⇒ not a URL.
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+  assertEquals(redactConnectorValue("slack:#releases"), "slack:#releases");
+  assertEquals(redactConnectorValue("owner/repo#42"), "owner/repo#42");
+});
+
+test("embedded-url-in-job-type: a plausible token with an embedded USERINFO-LESS absolute URL (`senior:feature https://host/path?token=secret`) is REJECTED — it passes the anchored url-shape check AND `hasEmbeddedCredential` (no `//…@`), yet its `?query` would land verbatim in `<zeebe:taskDefinition type=…>`; message redacted (#778 review — thread deliveryGraph.ts:602)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature https://evil.example/route?token=secret" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "embedded-url-in-job-type");
+  assert(!err.message.includes("token=secret"), `the embedded-url-in-job-type message must redact the query secret, got: ${err.message}`);
+  // A plain routing token with no embedded URL is untouched.
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] }).filter(
+      (e) => e.code === "embedded-url-in-job-type",
+    ),
+    [],
+  );
+  // An opaque `owner/repo#42`-style token (no `scheme://`) is not a URL and is not rejected.
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:review owner/repo#42" } }], edges: [] }).filter(
+      (e) => e.code === "embedded-url-in-job-type",
+    ),
+    [],
+  );
 });
 
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {

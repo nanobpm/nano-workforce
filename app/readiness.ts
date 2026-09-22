@@ -1223,6 +1223,32 @@ export function redactEmbeddedCredential(s: string): string {
   return s.replace(new RegExp(EMBEDDED_CREDENTIAL_SRC, "g"), "//***@");
 }
 
+/** The ONE canonical embedded SCHEME-RELATIVE credential-URL token: a `//<userinfo>@authority…` run
+ * (bounded by the next literal space) whose `//` carries userinfo. The `@` UNAMBIGUOUSLY marks the run a
+ * URL — an opaque ref (`//host#42`, `slack:#releases`, `owner/repo#42`) never carries `//user@` — so its
+ * `?query`/`#fragment` IS URL syntax and may hide a token, exactly like an explicit-scheme
+ * {@link EMBEDDED_SCHEME_URL_SRC}. Distinct from the userinfo-ONLY {@link EMBEDDED_CREDENTIAL_SRC}, which
+ * strips just the `//user:pass@` span and (correctly, for an opaque `//host#42`) LEAVES the tail: a
+ * userinfo-bearing `//user:pass@host?token=secret` embedded after a non-URL prefix is scheme-relative,
+ * so the anchored whole-value {@link isUrlShaped} check misses it (non-URL prefix) and the userinfo-only
+ * strip leaks the `?token=secret` tail (issue #778 review — thread deliveryGraph.ts:188). Requiring the
+ * `@` keeps genuine opaque `//host#42` refs (no userinfo) untouched. The token runs to the next literal
+ * SPACE (`[^ ]*`), NOT the wider `\s` class, so it CROSSES an XML-valid internal TAB/LF/CR and still
+ * redacts a `?query` secret sitting past it. `[^/]*@` and `[^ ]*` are separated by the literal `@`
+ * anchor, so the match stays linear with no catastrophic backtracking. */
+const EMBEDDED_CREDENTIAL_URL_SRC = "\\/\\/[^/]*@[^ ]*";
+
+/** Redact each embedded SCHEME-RELATIVE credential-URL (`//<userinfo>@authority…`) token IN PLACE via
+ * {@link redactString} — stripping its `//user:pass@` userinfo AND any `?query`/`#fragment` — while
+ * leaving opaque `//host#42` refs (no userinfo) untouched. Lets {@link redactConnectorValue} catch a
+ * query/fragment secret riding a credential-bearing scheme-relative URL after a non-URL prefix
+ * (`prefix //user:pass@host?token=secret`) that the anchored {@link isUrlShaped} whole-value check AND
+ * the userinfo-only {@link redactEmbeddedCredential} both miss (issue #778 review — thread
+ * deliveryGraph.ts:188). Deterministic and total. */
+export function redactEmbeddedCredentialUrl(s: string): string {
+  return s.replace(new RegExp(EMBEDDED_CREDENTIAL_URL_SRC, "g"), (m) => redactString(m));
+}
+
 /** The ONE canonical embedded ABSOLUTE-URL token: an EXPLICIT-scheme `scheme://authority…` run bounded
  * by whitespace. Deliberately requires an explicit `scheme:` before the `//` (NOT the scheme-relative
  * `//authority` {@link isUrlShaped} also accepts): an absolute URL's `?query`/`#fragment` are
@@ -1261,6 +1287,17 @@ export function redactEmbeddedUrl(s: string): string {
  * A plain worker-routing job type / opaque id never contains one, so a match is a credential leak to reject. */
 export function hasEmbeddedCredential(value: string): boolean {
   return new RegExp(EMBEDDED_CREDENTIAL_SRC).test(value);
+}
+
+/** True when `value` embeds an absolute-URL token (`scheme://authority…`; see
+ * {@link EMBEDDED_SCHEME_URL_SRC}). A plain worker-routing job type / opaque id never contains one, so a
+ * match is a URL whose `?query`/`#fragment` can hide a token and which — since the executable
+ * `<zeebe:taskDefinition type=…>` carries the job type VERBATIM — would leak into the compiled BPMN.
+ * Distinct from {@link hasEmbeddedCredential}: that catches only a `//<userinfo>@` credential span and
+ * misses a userinfo-less `senior:feature https://host?token=secret` (issue #778 review — thread
+ * deliveryGraph.ts:602). */
+export function hasEmbeddedUrl(value: string): boolean {
+  return new RegExp(EMBEDDED_SCHEME_URL_SRC, "i").test(value);
 }
 
 /** The ONE canonical "is this value a URL?" classifier — a `scheme://authority` OR scheme-relative
