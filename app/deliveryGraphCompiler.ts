@@ -50,7 +50,7 @@ import {
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
-import { isProbeKind, redactString } from "./readiness.ts";
+import { DEFAULT_ON_TIMEOUT, isProbeKind, redactString } from "./readiness.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
 
@@ -1395,7 +1395,17 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
       // get DISTINCT digests instead of colliding — the content-address stays a faithful identity and
       // keyless dispatch cannot reuse the wrong credential's running instance (issue #778 review).
       if (trimmedOrEmpty(p.credentialEnv)) doc.push(`Credential env: ${trimmedOrEmpty(p.credentialEnv)}`);
-      if (trimmedOrEmpty(p.onTimeout)) doc.push(`On timeout: ${trimmedOrEmpty(p.onTimeout)}`);
+      // `parseProbe` defaults an OMITTED `onTimeout` to `escalate` ({@link DEFAULT_ON_TIMEOUT}) and
+      // `waitBodyLines` only changes topology for `continue`, so an EXPLICIT `escalate` is behaviourally
+      // identical to omitting it. Surfacing it in the doc would fork `semanticBpmn`/the content digest
+      // from the omitted-equivalent graph (which `digestInvisibleRawValues` does NOT fingerprint —
+      // `trimmedOrEmpty("")` == its display, so it is not pushed), giving two runtime-identical encodings
+      // DISTINCT run keys that dispatch TWICE instead of colliding. DROP the effective default after
+      // trimming, exactly as {@link matchFieldIsEffectiveDefault} does for default match fields — emit the
+      // line only for a non-default (`continue`) routing (issue #778 review — thread
+      // deliveryGraphCompiler.ts:1398).
+      const onTimeout = trimmedOrEmpty(p.onTimeout);
+      if (onTimeout && onTimeout !== DEFAULT_ON_TIMEOUT) doc.push(`On timeout: ${onTimeout}`);
       if (p.poll) {
         const budget: string[] = [];
         if (typeof p.poll.everyMs === "number") budget.push(`every ${p.poll.everyMs}ms`);

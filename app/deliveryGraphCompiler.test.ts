@@ -1628,6 +1628,34 @@ test("#778 describeProbeMatch drops an authored match value equal to its kind's 
   }
 });
 
+test("#778 nodeDisplay drops an explicit `onTimeout: escalate` (the effective default) so it renders identically to omitting it and does not fork the digest (thread :1398)", async () => {
+  // `parseProbe` defaults an omitted `onTimeout` to `escalate` and `waitBodyLines` only changes topology
+  // for `continue`, so an EXPLICIT `escalate` is behaviourally identical to omitting it. Rendering the
+  // line only for the explicit form would fork `semanticBpmn`/the digest from the omitted-equivalent
+  // graph → a double dispatch. Explicit-default and omitted must compile to the SAME `semanticBpmn`.
+  const explicit = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "o/r#1", match: { prState: "merged" }, onTimeout: "escalate", poll: { everyMs: 1000 } } }], edges: [] };
+  const omitted = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "o/r#1", match: { prState: "merged" }, poll: { everyMs: 1000 } } }], edges: [] };
+  const a = await compileOk(explicit);
+  const b = await compileOk(omitted);
+  assertEquals(a.semanticBpmn, b.semanticBpmn, "an explicit `onTimeout: escalate` must render identically to omitting it");
+  assert(!a.bpmn.includes("On timeout:"), "the defaulted `escalate` is dropped from the doc");
+  // A NON-default `continue` still renders (and forks the digest) — the drop is default-only.
+  const cont = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "o/r#1", match: { prState: "merged" }, onTimeout: "continue", poll: { everyMs: 1000 } } }], edges: [] };
+  const n = await compileOk(cont);
+  assert(n.bpmn.includes("On timeout: continue"), "a non-default `continue` still renders");
+  assert(n.semanticBpmn !== b.semanticBpmn, "a non-default `continue` genuinely forks the digest");
+  // Directly assert the display too (unit-level, independent of the compile pipeline).
+  assert(
+    !nodeDisplay({ id: "w", kind: "wait", wait: { kind: "pr", target: "o/r#1", match: { prState: "merged" }, onTimeout: "escalate" } }).documentation.includes("On timeout:"),
+    "nodeDisplay drops an explicit-default onTimeout",
+  );
+  assert(
+    nodeDisplay({ id: "w", kind: "wait", wait: { kind: "pr", target: "o/r#1", match: { prState: "merged" }, onTimeout: "continue" } }).documentation.includes("On timeout: continue"),
+    "nodeDisplay keeps a non-default onTimeout",
+  );
+});
+
+
 test("#778 digestInvisibleRawValues fingerprints an XML-invalid `agent`/`connector` timeout so two runtime-different graphs do not collide (thread :1251)", () => {
   // The node `timeout` is displayed as `trimmedOrEmpty(timeout)` then XML-sanitised at serialisation, but
   // the RAW value drives the runtime SLA — so `PT1H` and `PT1H\x01` share a digest while the runtime SLA

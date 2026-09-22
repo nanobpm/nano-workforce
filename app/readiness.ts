@@ -63,6 +63,11 @@ export type Backoff = "fixed" | "exponential";
 // is added here without a matching vocabulary entry (AGENTS.md: no drift surfaces).
 export const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check", "capability", "pr", "epic"];
 export const ON_TIMEOUTS: readonly OnTimeout[] = ["escalate", "fail", "continue"];
+// The DEFAULT `onTimeout` an omitted value takes — the single source of truth `parseProbe` fills in and
+// the compiler's display drops as an effective default (writing it explicitly is behaviourally identical
+// to omitting it, so surfacing it would fork `semanticBpmn`/the digest from the omitted-equivalent
+// graph; issue #778 review — thread deliveryGraphCompiler.ts:1398).
+export const DEFAULT_ON_TIMEOUT: OnTimeout = "escalate";
 export const BACKOFFS: readonly Backoff[] = ["fixed", "exponential"];
 export const PR_CONDITIONS: readonly PrCondition[] = ["ready", "merged", "mergeable", "checks-green"];
 export const EPIC_CONDITIONS: readonly EpicCondition[] = ["merged", "done"];
@@ -237,7 +242,7 @@ export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean
   if (onTimeoutRaw !== "" && !isOnTimeout(onTimeoutRaw)) {
     throw new Error(`readiness probe: invalid onTimeout '${onTimeoutRaw}' (expected ${ON_TIMEOUTS.join(", ")})`);
   }
-  const onTimeout: OnTimeout = onTimeoutRaw === "" ? "escalate" : onTimeoutRaw;
+  const onTimeout: OnTimeout = onTimeoutRaw === "" ? DEFAULT_ON_TIMEOUT : onTimeoutRaw;
 
   const match = isRecord(raw.match) ? parseMatch(raw.match) : undefined;
   // A capability edge whose ref or package is blank can never resolve — fail loudly here rather than
