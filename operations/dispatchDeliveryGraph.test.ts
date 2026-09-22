@@ -13,6 +13,7 @@ import { join, resolve } from "node:path";
 import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { redactFreeText } from "../app/deliveryGraphCompiler.ts";
 import { deliveryGraphProposals } from "../app/deliveryGraphProposals.ts";
 import { deliveryGraphRuns } from "../app/deliveryGraphRun.ts";
 import { isEquivalentReStage, stableProposalRunKey } from "./dispatchDeliveryGraph.ts";
@@ -276,6 +277,52 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
     // The re-staged proposal was consumed (marked dispatched), not left lingering.
     assert.equal((await deliveryGraphProposals(app.db).get(restaged.body.digest))?.status, "dispatched");
+  });
+
+  test("an explicit idempotencyKey short-circuit onto a running SECRET-BEARING run, re-dispatched from a graph authored AS the redacted form (graphCarriesRedactedSecrets === false) that SHARES the digest → 409; the proposal is NOT consumed (the refusal must not be gated on the INCOMING graph's redaction side — identity is unprovable whenever !identityConfirmed) (thread dispatchDeliveryGraph.ts:320)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+
+    // Graph 1 CARRIES a redacted-away credential in its human prompt — its content-addressed digest is
+    // over the REDACTED display, so it is NOT a faithful identity. It parks on its human node and stays
+    // running under an explicit idempotencyKey.
+    const secretPrompt = "click done: https://user:pass@host";
+    const SECRET = { name: "manual gate", nodes: [{ id: "ack", kind: "human", human: { prompt: secretPrompt } }] };
+    // Graph 2 is authored LITERALLY as the redacted form of graph 1's prompt. Redaction is a no-op on it,
+    // so `graphCarriesRedactedSecrets` is FALSE, yet it SHARES graph 1's digest (both digest over the same
+    // redacted display). It is a DIFFERENT graph from the running secret-bearing run.
+    const redactedTwin = { name: "manual gate", nodes: [{ id: "ack", kind: "human", human: { prompt: redactFreeText(secretPrompt) } }] };
+
+    // Stage + dispatch the SECRET-bearing graph FIRST (before the twin re-stages over its same-digest
+    // row) under an explicit key — it launches and parks (running), stamping its LOSSLESS fingerprint.
+    const g1 = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SECRET });
+    const first = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: g1.body.digest, idempotencyKey: "shared-key", repoless: true },
+    });
+    assert.equal(first.status, 202);
+    await app.settle();
+    assert.equal((await deliveryGraphProposals(app.db).get(g1.body.digest))?.status, "dispatched");
+
+    // Now re-stage the redacted-twin at the SAME digest (a DIFFERENT graph re-staged over the consumed
+    // row) and dispatch it under the SAME key. It short-circuits onto the still-running SECRET run — but
+    // that run is a different graph, so its persisted fingerprint does NOT match (identityConfirmed ===
+    // false). The digest COLLISION is the crux: the twin shares graph 1's digest yet carries no redacted
+    // secret. The refusal must fire even though the INCOMING graph carries no redacted secret; otherwise
+    // the twin's proposal is marked `dispatched` while it never launched.
+    const twin = await api.call<{ digest: string }>("compileDeliveryGraph", { body: redactedTwin });
+    assert.equal(twin.body.digest, g1.body.digest);
+    assert.equal((await deliveryGraphProposals(app.db).get(twin.body.digest))?.status, "staged");
+    const second = await api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: twin.body.digest, idempotencyKey: "shared-key", repoless: true },
+    });
+    assert.equal(second.status, 409);
+    assert.equal(second.body.ok, false);
+    await app.settle();
+    // The twin proposal is still staged — it was never launched (the running run is the secret graph).
+    assert.equal((await deliveryGraphProposals(app.db).get(twin.body.digest))?.status, "staged");
+    // Only the single secret run exists — the twin dispatch launched nothing.
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
   });
 
   test("a proposal whose stored graph is corrupt JSON → 400 AND the proposal is retired (expired), never lingering staged", async () => {
