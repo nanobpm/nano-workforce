@@ -18,7 +18,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
-import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
+import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, redactFreeText } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -568,7 +568,14 @@ function buildNodeInput(
         // form can render its "now do X" prompt, name the parked node, and label/hide its emit field
         // (issue #499 — the generic form otherwise renders contextless). `emits` stays the single
         // source of truth: the compiled ioMapping derives the emit label/mode from it in FEEL.
-        prompt: node.human?.prompt ?? "",
+        // REDACT the prompt: this seeds `nodeInputs.<el>.prompt`, rendered in the delivery-human form's
+        // read-only `prompt` textarea (`delivery-human-{ack,publish}.form`) to whoever opens the task —
+        // a DISPLAY surface, not a functional value (the functional outputs are the emit/resolvedArtifact
+        // fields). So it gets the SAME embedded-credential redaction the operator-facing compile PREVIEW
+        // already applies (buildHumanNodes), closing the runtime leak where a credential-bearing
+        // instruction would expose its secret in the parked task's form (issue #778 review — thread
+        // deliveryGraphCompiler.ts:826). `redactFreeText` is a no-op for a credential-free prompt.
+        prompt: redactFreeText(node.human?.prompt ?? ""),
         nodeId: node.id ?? ctx.element,
         emits: Array.isArray(node.emits) ? node.emits.map((f) => ({ ...f })) : [],
       };

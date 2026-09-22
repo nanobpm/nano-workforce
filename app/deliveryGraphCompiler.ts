@@ -819,9 +819,11 @@ function buildHumanNodes(nodes: readonly DeliveryNode[]): DeliveryHumanStop[] {
     // `nodeDisplay` renders with: this projection is persisted into the staged proposal `preview` and
     // rendered verbatim on the Delivery Graphs page (and denormalised into the run's parked-node
     // labels), so a URL credential in a human prompt (`//user:pass@…`) must be stripped here too — else
-    // it leaks unredacted through the preview even though the BPMN display path redacts it. The RAW
-    // prompt still reaches the runtime user task via the compiled BPMN `nodeInputs`, unmodified (issue
-    // #778 review). `redactFreeText` is a no-op for a credential-free prompt.
+    // it leaks unredacted through the preview even though the BPMN display path redacts it. The runtime
+    // user-task prompt seeded via the compiled BPMN `nodeInputs` (`deliveryRunner.buildNodeInput`,
+    // `case "human"`) is ALSO redacted the same way — it renders in the parked task's read-only form
+    // field, another display surface — so no leak path remains (issue #778 review). `redactFreeText` is
+    // a no-op for a credential-free prompt.
     const withPrompt =
       typeof node.human?.prompt === "string" ? { ...stop, prompt: redactFreeText(node.human.prompt) } : stop;
     // The `formKey` is an opaque identifier a modeler/explorer reads verbatim off the staged proposal

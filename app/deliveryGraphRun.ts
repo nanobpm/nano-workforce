@@ -138,7 +138,9 @@ export const deliveryGraphRunIdentities = (data: DataLayer) =>
  * the row briefly visible as `running` while still pointing at the OLD instance key, so the
  * `process_key`-keyed instance-tracking reconciler / poller could act on (and mis-reconcile against)
  * the stale instance before the winner's follow-up metadata write lands. Clearing them atomically with
- * the flip means a claimed `running` row can never be observed with a stale instance key. */
+ * the flip means a claimed `running` row can never be observed with a stale instance key. A winning
+ * relaunch also DELETES the run's prior `delivery_graph_run_identity` side-row in the same transaction,
+ * for the same reason — see the inline note (issue #778 review). */
 export async function claimRunForLaunch(
   data: DataLayer,
   existing: boolean,
@@ -153,9 +155,8 @@ export async function claimRunForLaunch(
       return false;
     }
   }
-  const res = await data
-    .open()
-    .exec(
+  const res = await data.open().tx(async (t) => {
+    const flip = await t.exec(
       `UPDATE "delivery_graph_runs" SET "status" = ?, "process_key" = ?, "process_definition_id" = ?, "phase" = ?, "phase_node_id" = ?, "updated_at" = ? WHERE "run_key" = ? AND "status" <> 'running'`,
       [
         claim.status,
@@ -167,7 +168,21 @@ export async function claimRunForLaunch(
         claim.run_key,
       ],
     );
-  return res.changed === 1;
+    if (flip.changed !== 1) return false;
+    // Invalidate the PRIOR run's lossless identity fingerprint IN THE SAME transaction as the flip, so a
+    // claimed `running` row can never be observed alongside the previous run's stale `graph_fingerprint`.
+    // dispatch's `identityConfirmed` short-circuit reads this side-row to prove an already-running run is
+    // THIS exact graph (a same-payload retry) vs. a credential-different graph re-staged under the same
+    // key; between this flip and the winner's post-launch re-stamp (`upsertRunIdentity`) the prior row
+    // would otherwise still match a relaunch that shares only the digest, WRONGLY confirming identity for
+    // a different-credential run. Deleting it here makes the fingerprint UNPROVABLE (missing →
+    // identityConfirmed:false, the safe pre-existing 409) throughout that window, atomically with the
+    // status flip — the same "no stale side-state observable on a claimed row" invariant the instance-key
+    // clear above enforces (issue #778 review — thread deliveryGraphDispatch.ts:180).
+    await t.exec(`DELETE FROM "delivery_graph_run_identity" WHERE "run_key" = ?`, [claim.run_key]);
+    return true;
+  });
+  return res;
 }
 
 /** The idempotency key for a submitted graph: a caller-supplied `idempotencyKey` (trimmed) when
