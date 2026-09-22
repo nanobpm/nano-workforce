@@ -11,7 +11,9 @@ import {
   bindHumanEmits,
   DELIVERY_HUMAN_ELEMENT,
   deliveryHumanContextQuestion,
+  deliveryHumanContextUrl,
   deriveHumanCategory,
+  firstHttpUrl,
   GENERIC_HUMAN_FORM,
   HUMAN_ACK_FORM,
   HUMAN_PUBLISH_FORM,
@@ -322,8 +324,32 @@ test("deliveryHumanContextQuestion: derives the node instruction from human_labe
   );
 });
 
-test("deliveryHumanContextQuestion: falls back to a static message when no label is stored", () => {
-  // A parked human step must never render a blank Decision context — an untracked/absent label still
+test("firstHttpUrl: extracts the first http(s) URL and trims trailing prose punctuation (#813)", () => {
+  assertEquals(firstHttpUrl("see https://github.com/o/r/pull/5 for details"), "https://github.com/o/r/pull/5");
+  // Trailing sentence punctuation / closing bracket is stripped so the link resolves.
+  assertEquals(firstHttpUrl("Review the PR (https://github.com/o/r/pull/5)."), "https://github.com/o/r/pull/5");
+  assertEquals(firstHttpUrl("http://example.test/a,"), "http://example.test/a");
+  // First wins when several are present.
+  assertEquals(firstHttpUrl("a https://one.test b https://two.test"), "https://one.test");
+  // No URL / non-string → null (preserves today's linkless behaviour).
+  assertEquals(firstHttpUrl("merge the PR opened by adopt-console"), null);
+  assertEquals(firstHttpUrl(undefined), null);
+});
+
+test("deliveryHumanContextUrl: lifts a prompt-embedded URL onto the task link (base + __esc twin), else null (#813)", () => {
+  const labels = {
+    "delivery-human-task__n7": "Review the adopt PR at https://github.com/nanobpm/nano-ide/pull/42 and merge it.",
+    "delivery-human-task__n8": "Confirm CI is green, then merge — no link here.",
+  };
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__n7"), "https://github.com/nanobpm/nano-ide/pull/42");
+  // The bounded-timeout twin resolves the same node instruction.
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__n7__esc"), "https://github.com/nanobpm/nano-ide/pull/42");
+  // A node whose instruction names no URL yields null (the linkless default).
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__n8"), null);
+  assertEquals(deliveryHumanContextUrl(undefined, "delivery-human-task__n1"), null);
+});
+
+test("deliveryHumanContextQuestion: falls back to a static message when no label is stored", () => {  // A parked human step must never render a blank Decision context — an untracked/absent label still
   // yields actionable guidance rather than null (which would leave the panel empty, issue #772).
   assertEquals(
     deliveryHumanContextQuestion({}, "delivery-human-task__n1"),

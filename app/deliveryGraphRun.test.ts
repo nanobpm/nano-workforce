@@ -201,7 +201,7 @@ test("computeRunKey: a non-blank caller key wins; a blank/absent key falls back 
 });
 
 // ── buildHumanLabels / parseHumanLabels ───────────────────────────────────────
-test("buildHumanLabels: maps each human node's compiled user-task element id → its instruction label", async () => {
+test("buildHumanLabels: maps each human node's compiled user-task element id → its FULL instruction", async () => {
   const graph = {
     nodes: [
       { id: "open-b", kind: "agent", agent: { jobType: "j" } },
@@ -216,7 +216,9 @@ test("buildHumanLabels: maps each human node's compiled user-task element id →
   const labels = buildHumanLabels(compiled);
   const publishEl = compiled.resolved.nodes.find((n) => n.id === "publish")?.element ?? "";
   const ackEl = compiled.resolved.nodes.find((n) => n.id === "ack")?.element ?? "";
-  assertEquals(labels[humanTaskElementId(publishEl)], "run the manual OTP publish"); // first line only
+  // The FULL prompt is stored (issue #813) — not a clamped first line — so the Tasks "Decision
+  // context" can show the whole instruction. The phase pill clamps this at display (deriveDeliveryPhase).
+  assertEquals(labels[humanTaskElementId(publishEl)], "run the manual OTP publish\nsecond line");
   assertEquals(labels[humanTaskElementId(ackEl)], "ack"); // fallback to node id
 });
 
@@ -262,6 +264,16 @@ test("deriveDeliveryPhase: ACTIVE with an open human task → parked on that nod
   assertEquals(p.status, "running");
   assertEquals(p.phase, "Parked on human node: manual OTP publish");
   assertEquals(p.phase_node_id, el);
+});
+
+test("deriveDeliveryPhase: clamps a long/multi-line stored instruction to a first-line phase pill (#813)", () => {
+  const el = humanTaskElementId("n2");
+  const full = `Review the console dependency-adopt PR opened by adopt-console (bumps the ranges).\nSecond line.`;
+  const p = deriveDeliveryPhase("ACTIVE", [{ elementId: el }], { [el]: full });
+  // Full instruction is stored for the Decision context, but the phase pill shows only the clamped
+  // first line (77 chars + …), never the second line.
+  assertEquals(p.phase, "Parked on human node: Review the console dependency-adopt PR opened by adopt-console (bumps the ran…");
+  assert(!p.phase.includes("Second line"));
 });
 
 test("deriveDeliveryPhase: a parked node with no stored label falls back to the element id", () => {

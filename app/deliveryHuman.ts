@@ -83,6 +83,33 @@ export function deliveryHumanContextQuestion(
   return label || "A scheduled delivery-graph step is waiting to be completed.";
 }
 
+/** The clickable link for a parked delivery-graph `human` node's Tasks-inbox row (issue #813): the
+ *  first `http(s)` URL embedded in the node's stored instruction, or `null` when it names none. The
+ *  Tasks page renders the "Decision context" as PLAIN, non-clickable text (a `detail.fields` entry),
+ *  and links only through the http(s)-gated `subject_url` `linkField` — so an author who wants the
+ *  operator to have a clickable link (e.g. the PR to review) writes the URL into the node prompt and
+ *  this lifts it onto `subject_url`. Uses the SAME exact-then-`__esc`-stripped lookup as the context
+ *  question so the twin escalation task resolves to its real node's instruction. Returns `null` (not a
+ *  fabricated link) when no URL is present, preserving today's linkless behaviour. */
+export function deliveryHumanContextUrl(
+  humanLabels: Record<string, string> | undefined,
+  elementId: string,
+): string | null {
+  const labels = humanLabels ?? {};
+  const base = elementId.replace(/__esc$/, "");
+  const instruction = labels[elementId] ?? labels[base] ?? "";
+  return firstHttpUrl(instruction);
+}
+
+/** Extract the first `http(s)` URL from free text, trimming trailing sentence punctuation/brackets a
+ *  prose author commonly appends (`).,;` etc.) so the link resolves. Returns `null` when none. */
+export function firstHttpUrl(text: string | undefined | null): string | null {
+  if (typeof text !== "string") return null;
+  const match = text.match(/https?:\/\/[^\s<>"'`]+/);
+  if (!match) return null;
+  return match[0].replace(/[).,;:!?'"\]}>]+$/, "") || null;
+}
+
 /** The GENERIC fallback form (Decision 4, step 3): captures ONE typed value into the node's single
  *  declared emitted fact, so a human node with no explicit/category form can STILL emit downstream. */
 export const GENERIC_HUMAN_FORM = "delivery-human-generic";
