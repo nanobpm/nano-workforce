@@ -9,9 +9,17 @@ import {
   DEFAULT_REVIEW_NUDGE_MINUTES,
   DEFAULT_REVIEW_WAIT_TIMEOUT,
   isoDurationToMs,
+  isReviewStale,
   MAX_REVIEW_NUDGE_MINUTES,
   reviewWaitTimeout,
 } from "./reviewWait.ts";
+
+test("DEFAULT_REVIEW_WAIT_TIMEOUT: pins the user-visible default to PT30M", () => {
+  // A direct regression guard on the literal default — the fallback-based assertions below compare
+  // against DEFAULT_REVIEW_WAIT_TIMEOUT itself, so they would still pass if it were accidentally
+  // reverted to PT20M. This anchors the intended value so that change is caught.
+  assertEquals(DEFAULT_REVIEW_WAIT_TIMEOUT, "PT30M");
+});
 
 test("reviewWaitTimeout: blank / absent / malformed → default", () => {
   assertEquals(reviewWaitTimeout(undefined), DEFAULT_REVIEW_WAIT_TIMEOUT);
@@ -87,4 +95,36 @@ test("clampNudgeMinutes: above the ceiling is clamped, not rejected", () => {
 
 test("clampNudgeMinutes: an oversized fallback is itself clamped to the ceiling", () => {
   assertEquals(clampNudgeMinutes("", MAX_REVIEW_NUDGE_MINUTES + 50), MAX_REVIEW_NUDGE_MINUTES);
+});
+
+// ── isReviewStale (issue #799) ───────────────────────────────────────────────
+
+test("isReviewStale: differing review commit_id and HEAD sha is stale", () => {
+  assertEquals(isReviewStale("aaa1111", "bbb2222"), true);
+});
+
+test("isReviewStale: matching review commit_id and HEAD sha is NOT stale", () => {
+  assertEquals(isReviewStale("aaa1111", "aaa1111"), false);
+});
+
+test("isReviewStale: surrounding whitespace is ignored in the comparison", () => {
+  assertEquals(isReviewStale("  aaa1111 ", "aaa1111"), false);
+  assertEquals(isReviewStale("aaa1111", " bbb2222  "), true);
+});
+
+test("isReviewStale: a missing review commit_id fails safe to NOT stale", () => {
+  assertEquals(isReviewStale(null, "bbb2222"), false);
+  assertEquals(isReviewStale(undefined, "bbb2222"), false);
+  assertEquals(isReviewStale("", "bbb2222"), false);
+  assertEquals(isReviewStale("   ", "bbb2222"), false);
+});
+
+test("isReviewStale: a missing HEAD sha fails safe to NOT stale", () => {
+  assertEquals(isReviewStale("aaa1111", null), false);
+  assertEquals(isReviewStale("aaa1111", undefined), false);
+  assertEquals(isReviewStale("aaa1111", ""), false);
+});
+
+test("isReviewStale: both missing is NOT stale", () => {
+  assertEquals(isReviewStale(null, null), false);
 });

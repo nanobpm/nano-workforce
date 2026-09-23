@@ -30,14 +30,23 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     await featureRuns(app.data).update(featureKey, { status: "opened", updated_at: new Date().toISOString() });
     return {};
   }
-  // `convergeOnly` is the inverse of auto-merge: converge-only stops at `converged`; auto-merge lets
-  // the merge-loop drive the merge. `submitPr` is idempotent on the PR key.
-  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, !autoMerge, featureKey);
+  // Write `converging` BEFORE enrolling the PR (issue #808 / PR #809 review). The old order —
+  // `submitPr` then the status write — left an `opened` + `converge=1` + `pr_key` window spanning an
+  // ALREADY-SUBMITTED, live PR: a terminate/crash in that gap stranded a row whose PR was live while
+  // `pollFeatureDelivery`'s handoff edge (edge 3) read the FEATURE instance state alone and wrongly
+  // folded it to `abandoned`. Flipping to `converging` first shrinks the interrupted-handoff window to
+  // the (now converging-owned) gap BEFORE `submitPr`, which `pollFeatureDelivery`'s converging edge
+  // (edge 1) heals by re-enrolling when the PR row is still missing (idempotent, mirroring the
+  // promotion-PR re-enroll in `pollPromotion`). The reorder is safe: `submitPr` is idempotent on the PR
+  // key (it early-returns `alreadyRunning` for a non-terminal PR), and a `converging` row is owned by
+  // edge (1), never by the handoff edge. `convergeOnly` is the inverse of auto-merge: converge-only
+  // stops at `converged`; auto-merge lets the merge-loop drive the merge.
   await featureRuns(app.data).update(featureKey, {
     status: "converging",
     pr_key: parsed.prKey,
     updated_at: new Date().toISOString(),
   });
+  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, !autoMerge, featureKey);
   app.log.info("converge-feature: enrolled PR into convergence loop", {
     featureKey,
     prKey: parsed.prKey,

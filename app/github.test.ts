@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError, listPrsForHead, type Mergeability, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, type GhReview, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -40,6 +40,51 @@ async function withTokenTransport<T>(pages: number[], fn: () => Promise<T>): Pro
   }
 }
 
+function reviewFetch(pages: GhReview[][], requests: string[]) {
+  return (url: string | URL | Request): Promise<Response> => {
+    const u = new URL(String(url));
+    requests.push(u.toString());
+    const page = Number(u.searchParams.get("page") ?? "1");
+    const headers = new Headers();
+    if (page < pages.length) {
+      headers.set(
+        "link",
+        `<https://api.github.com/repos/o/r/pulls/1/reviews?per_page=100&page=${page + 1}>; rel="next", ` +
+          `<https://api.github.com/repos/o/r/pulls/1/reviews?per_page=100&page=${pages.length}>; rel="last"`,
+      );
+    }
+    return Promise.resolve(new Response(JSON.stringify(pages[page - 1] ?? []), { status: 200, headers }));
+  };
+}
+
+async function withTokenFetch<T>(fetchImpl: typeof fetch, fn: () => Promise<T>): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = fetchImpl;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+}
+
+test("fetchPrReviews: returns the newest review when it is beyond page one", async () => {
+  const requests: string[] = [];
+  const pages = [
+    Array.from({ length: 100 }, (_, i) => ({ id: i + 1, state: "COMMENTED" })),
+    [{ id: 101, state: "APPROVED", submitted_at: "2026-09-15T12:00:00Z" }],
+  ];
+  const reviews = await withTokenFetch(reviewFetch(pages, requests) as typeof fetch, () =>
+    fetchPrReviews("o/r", 1, "tok"),
+  );
+  assertEquals(reviews?.length, 101);
+  assertEquals(reviews?.[reviews.length - 1]?.id, 101);
+  assertEquals(requests.length, 2, "the final page must be fetched after page one");
+});
+
 test("fetchPrFiles: returns the complete list for a sub-cap PR (short final page)", async () => {
   const files = await withTokenTransport([100, 42], () => fetchPrFiles("o/r", 1, "tok"));
   assertEquals(files?.length, 142);
@@ -55,6 +100,70 @@ test("fetchPrFiles: throws when the cap genuinely truncates (full last page + ne
   // 6 pages available but only 5 fetched → the 5th page still advertises `rel="next"`.
   await assertRejects(
     () => withTokenTransport([100, 100, 100, 100, 100, 100], () => fetchPrFiles("o/r", 3, "tok")),
+    Error,
+    "truncated",
+  );
+});
+
+// ── fetchPrReviews token-transport paging (issue #799) ──────────────────────────────────────────
+// The poller picks the NEWEST review by id, so `fetchPrReviews` must page the FULL (oldest→newest)
+// list — reading only the first `per_page=100` page would surface the oldest 100 and miss the
+// genuinely newest review on a >100-review convergence loop. The token transport mirrors
+// `fetchPrFiles`: it fails CLOSED (throws) when the paging cap genuinely truncates rather than
+// returning a partial list the poller would treat as complete.
+
+// A fake `fetch` that serves `pages` of review batches; each page N (1-based) returns `pages[N-1]`
+// reviews (with ascending ids), setting `Link: rel="next"` whenever a later page exists.
+function stubReviewFetch(pages: number[]) {
+  return (url: string | URL | Request): Promise<Response> => {
+    const u = new URL(String(url));
+    const page = Number(u.searchParams.get("page") ?? "1");
+    const count = pages[page - 1] ?? 0;
+    const start = pages.slice(0, page - 1).reduce((a, b) => a + b, 0);
+    const body = Array.from({ length: count }, (_, i) => ({
+      id: start + i + 1,
+      state: "COMMENTED",
+      submitted_at: "2026-01-01T00:00:00Z",
+    }));
+    const headers = new Headers();
+    if (page < pages.length) {
+      headers.set("link", `<https://api.github.com/next?page=${page + 1}>; rel="next"`);
+    }
+    return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers }));
+  };
+}
+
+async function withReviewTransport<T>(pages: number[], fn: () => Promise<T>): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = stubReviewFetch(pages) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+}
+
+test("fetchPrReviews: pages the full list beyond the first 100 (newest review is seen)", async () => {
+  const reviews = await withReviewTransport([100, 37], () => fetchPrReviews("o/r", 1, "tok"));
+  assertEquals(reviews?.length, 137);
+  // The genuinely newest review (highest id) is on the SECOND page — it must be present.
+  assertEquals(reviews?.[reviews.length - 1]?.id, 137);
+});
+
+test("fetchPrReviews: no token → null (idle, not a throw)", async () => {
+  const reviews = await withReviewTransport([100], () => fetchPrReviews("o/r", 2, ""));
+  assertEquals(reviews, null);
+});
+
+test("fetchPrReviews: throws when the cap genuinely truncates (full last page + next)", async () => {
+  // MAX_PAGES=20 full pages, and the 20th still advertises `rel="next"` → fail closed.
+  const capped = Array.from({ length: 21 }, () => 100);
+  await assertRejects(
+    () => withReviewTransport(capped, () => fetchPrReviews("o/r", 3, "tok")),
     Error,
     "truncated",
   );
@@ -722,4 +831,128 @@ test("checkConclusions: in-flight runs map to '' for both CheckRun and StatusCon
     "legacy-expected": "",
     "legacy-error": "ERROR",
   });
+});
+
+// ── fetchBranchHead — the atomic branch-ref reader (issue #786) ──────────────
+//
+// The no-progress guard reads the branch ref (git/ref/heads/<branch>), updated ATOMICALLY with the
+// push, rather than the PR object's asynchronously-denormalized head.sha, so a lagging PR projection
+// can never fabricate a stale-but-valid no-advance escalation. Force the token transport and stub
+// `globalThis.fetch` to serve the git-ref endpoint.
+async function withRefFetch<T>(
+  serve: (path: string) => { status: number; body: unknown },
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = ((url: string | URL | Request): Promise<Response> => {
+    const path = new URL(String(url)).pathname.replace(/^\/repos\//, "");
+    const { status, body } = serve(path);
+    return Promise.resolve(new Response(JSON.stringify(body), { status }));
+  }) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+}
+
+test("fetchBranchHead: returns the branch ref's atomic head SHA", async () => {
+  const sha = await withRefFetch(
+    (path) => {
+      assertEquals(path, "o/r/git/ref/heads/feat/x");
+      return { status: 200, body: { object: { sha: "deadbeef" } } };
+    },
+    () => fetchBranchHead("o/r", "feat/x", "tok"),
+  );
+  assertEquals(sha, "deadbeef");
+});
+
+test("fetchBranchHead: a 404 (branch absent) resolves to null, never throws", async () => {
+  const sha = await withRefFetch(
+    () => ({ status: 404, body: { message: "Not Found" } }),
+    () => fetchBranchHead("o/r", "feat/missing", "tok"),
+  );
+  assertEquals(sha, null);
+});
+
+test("fetchBranchHead: no usable transport (token mode, empty token) resolves to null, never throws", async () => {
+  // The documented contract promises `null` when no transport is usable, matching fetchPrHead /
+  // fetchPrBase — a missing token under the token transport must not surface an exception to callers
+  // relying on the Promise<string | null> shape.
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  try {
+    const sha = await fetchBranchHead("o/r", "feat/x", "");
+    assertEquals(sha, null);
+  } finally {
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+});
+
+// ── fetchPrHead — the PR head reader surfaces the head branch's OWNING repo (issue #786) ─────
+//
+// The no-progress head reader resolves the head ref in `headRepo`, so a cross-repo (fork) PR reads
+// the fork's ref, not a same-named branch in the base repo (which would resolve to an unrelated
+// SHA). These assert the transport-level mapping of the source repository through `fetchPrHead`'s
+// REST branch (forced via the token transport), which the handler-level tests — injecting an
+// already-parsed `{ headRepo }` — do not exercise.
+test("fetchPrHead: REST maps head.repo.full_name to the fork's source repository", async () => {
+  const head = await withRefFetch(
+    (path) => {
+      assertEquals(path, "base/repo/pulls/789");
+      return {
+        status: 200,
+        body: {
+          head: { ref: "feat/x", sha: "cafef00d", repo: { full_name: "fork-owner/repo" } },
+          base: { ref: "main" },
+        },
+      };
+    },
+    () => fetchPrHead("base/repo", 789, "tok"),
+  );
+  assertEquals(head, { headRef: "feat/x", headSha: "cafef00d", baseRef: "main", headRepo: "fork-owner/repo" });
+});
+
+test("fetchPrHead: REST fails open to headRepo=null when the head repo is absent (deleted fork)", async () => {
+  const head = await withRefFetch(
+    () => ({
+      status: 200,
+      body: { head: { ref: "feat/x", sha: "cafef00d", repo: null }, base: { ref: "main" } },
+    }),
+    () => fetchPrHead("base/repo", 789, "tok"),
+  );
+  // A null head repo must surface as headRepo=null (the reader then fails open), never the base repo.
+  assertEquals(head?.headRepo, null);
+});
+
+test("fetchPrHead: no usable transport (token mode, empty token) resolves to null, never throws", async () => {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  try {
+    const head = await fetchPrHead("o/r", 1, "");
+    assertEquals(head, null);
+  } finally {
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+});
+
+// A branch name may legally contain `#`, `?`, or spaces. The reader must percent-encode each ref
+// SEGMENT (preserving `/`) before building the API path/URL — otherwise a `#` starts a URL fragment,
+// the path is truncated to the wrong ref, and the no-progress guard fails open (issue #786).
+test("fetchBranchHead: percent-encodes a special-character branch ref (preserving '/')", async () => {
+  const sha = await withRefFetch(
+    (path) => {
+      // The `#` must survive as %23 inside the path, not truncate it into a URL fragment.
+      assertEquals(path, "o/r/git/ref/heads/feat/x%23123");
+      return { status: 200, body: { object: { sha: "cafef00d" } } };
+    },
+    () => fetchBranchHead("o/r", "feat/x#123", "tok"),
+  );
+  assertEquals(sha, "cafef00d");
 });

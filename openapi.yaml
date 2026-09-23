@@ -429,6 +429,7 @@ components:
         - jobKeys
         - live
         - staleMs
+        - harnessStale
       properties:
         instance:
           type: string
@@ -456,6 +457,17 @@ components:
         staleMs:
           type: integer
           description: Milliseconds since the last liveness refresh (0 when fresh).
+        harnessProtocol:
+          type: integer
+          minimum: 0
+          description: The worker-harness protocol version this worker advertised at enrolment (issue #802), when a numeric one is known.
+        harnessStale:
+          type: boolean
+          description: >-
+            Whether this worker's harness is STALE (issue #802) — below the configured minimum protocol
+            or advertising no version at all — so it may silently swallow AgentInstance / transcript /
+            result-envelope artifacts. Surfaced so the operator can drain it. Distinct from the
+            liveness `staleMs` heartbeat grade.
     AgenticSupplyLeaf:
       type: object
       description: The supply for one leaf token — the workers registered under it.
@@ -622,6 +634,16 @@ components:
             sets false) redrives a re-leased round from scratch. Recorded only when `instance` is
             a non-blank string — a missing, empty, or whitespace-only `instance` is echoed back for
             provenance but the flag is not persisted.
+        harnessProtocol:
+          type: integer
+          minimum: 0
+          description: >-
+            The worker-harness protocol version (issue #802) — a non-negative integer declaring which
+            machine-readable artifacts the harness emits (AgentInstance, transcript flush, result
+            envelope). An ENROLMENT attribute, never a routing token. Recorded per instance so the app
+            can flag a stale harness in getAgenticSupply / the registry and — under
+            NANO_AGENTIC_STALE_HARNESS_POLICY=refuse — refuse it agent-job routing. A missing version is
+            treated as stale.
     EnrolledRole:
       type: object
       description: One matched role in an enrolment resolution — provenance for the resolved SERVE set.
@@ -643,6 +665,7 @@ components:
         - roles
         - demandVersion
         - leaseTtl
+        - harnessStale
       properties:
         instance:
           type: string
@@ -655,6 +678,20 @@ components:
             guarantee of durable persistence — recording into the durable-resume registry is
             best-effort (skipped when `instance` is absent/blank, and a registry write hiccup is
             logged without failing enrolment).
+        harnessProtocol:
+          type: integer
+          minimum: 0
+          description: >-
+            Echo of the request's advertised harness protocol version (issue #802). Present only when
+            the request supplied it.
+        harnessStale:
+          type: boolean
+          description: >-
+            Whether this worker's harness is STALE (issue #802) — below the configured minimum protocol
+            (NANO_AGENTIC_MIN_HARNESS_PROTOCOL) or advertising no version at all. Always present. Under
+            NANO_AGENTIC_STALE_HARNESS_POLICY=refuse a stale harness is handed an EMPTY `serve` set so
+            it wins no job leases; under the default `flag` policy `serve` is unchanged and the worker
+            is only flagged for observability/drain.
         serve:
           type: array
           description: The SERVE token set — sorted, de-duplicated leaf tokens the worker may serve.
@@ -812,7 +849,36 @@ components:
         status:
           type: string
           enum: [green, amber, red]
-          description: The overall SLO — worst of the missing-agent signal and the diversity SLO.
+          description: >-
+            The overall SLO — worst of the missing-agent signal and the diversity SLO, and folded to
+            `red` when any enrolled harness is stale (`staleWorkers` non-empty, issue #802), since the
+            board renders only this pill as its overall signal.
+        staleWorkers:
+          type: array
+          description: >-
+            The enrolled workers whose harness is STALE (issue #802) — below the configured minimum
+            protocol or advertising no version at all — so they may silently swallow AgentInstance /
+            transcript / result-envelope artifacts and should be drained. Present (possibly empty) when
+            the app's harness-protocol registry is available.
+          items:
+            $ref: "#/components/schemas/StaleWorker"
+    StaleWorker:
+      type: object
+      description: One enrolled worker flagged as running a stale harness (issue #802).
+      required:
+        - instance
+        - stale
+      properties:
+        instance:
+          type: string
+          description: The worker instance id.
+        harnessProtocol:
+          type: integer
+          minimum: 0
+          description: The advertised harness protocol version, when a numeric one is known (omitted when none was advertised).
+        stale:
+          type: boolean
+          description: Whether the worker's harness is stale (always true for entries in this list).
     AgenticTranscript:
       type: object
       description: One captured agent session's transcript metadata (H3/#146 transcript store). A durable
@@ -1757,11 +1823,13 @@ components:
           type: integer
           minimum: 1
           description: Values above 100 are accepted and clamped to 100 by the delegate.
+        autoMerge:
+          type: boolean
+          description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
         convergeOnly:
           type: boolean
-          description: When true, run convergence only and stop at `converged` — the PR is never
-            handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A
-            per-request review-only override; defaults to false (the global auto-merge default applies).
+          deprecated: true
+          description: "Deprecated negative alias. If `autoMerge` is omitted, `true` means `autoMerge: false`; `false` means `autoMerge: true` (still gated by `NANO_PR_AUTO_MERGE`). Prefer `autoMerge`."
     ConvergenceStartByUrl:
       type: object
       additionalProperties: false
@@ -1779,11 +1847,13 @@ components:
           type: integer
           minimum: 1
           description: Values above 100 are accepted and clamped to 100 by the delegate.
+        autoMerge:
+          type: boolean
+          description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
         convergeOnly:
           type: boolean
-          description: When true, run convergence only and stop at `converged` — the PR is never
-            handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A
-            per-request review-only override; defaults to false (the global auto-merge default applies).
+          deprecated: true
+          description: "Deprecated negative alias. If `autoMerge` is omitted, `true` means `autoMerge: false`; `false` means `autoMerge: true` (still gated by `NANO_PR_AUTO_MERGE`). Prefer `autoMerge`."
     PlanStart:
       description: The start-plan-fanout request body. Names the target issue by EXACTLY ONE of
         `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a REQUIRED
@@ -2112,8 +2182,9 @@ components:
                   pattern: '^(?![/.-])(?!.*[/.]$)(?!.*\.\.)(?!.*//)(?!.*/\.)(?!.*\.lock(?:/|$))[A-Za-z0-9._/-]+$'
                   description: >-
                     OPTIONAL per-node base branch this agent node branches off (#739) — the `ref` the
-                    harness checks out in the isolated clone (the pre-PR shape: the agent cuts its own
-                    `feat/<node.id>` branch off this base). Absent → the run-level dispatch `baseBranch`
+                    harness checks out in the isolated clone (the pre-PR shape: the harness cuts the
+                    deterministic `feat/<node.id>` branch off this base itself, per #776, so a forgetful
+                    agent can never be left committing on the base branch). Absent → the run-level dispatch `baseBranch`
                     (else the node's repository default branch). A value that is not a plausible git
                     branch name is rejected at submit; the pattern mirrors the authoritative server-side
                     gate (`isPlausibleBranchName`, app/baseBranch.ts).
@@ -3368,8 +3439,8 @@ components:
         autoMerge:
           type: boolean
           description: >-
-            When true (and `converge` is true), drive the merge-loop after convergence — mirrors
-            `convergeOnly`/`NANO_PR_AUTO_MERGE` inverted. When false the run stops at `converged`.
+            When true (and `converge` is true), drive the merge-loop after convergence only when
+            `NANO_PR_AUTO_MERGE` is enabled. When false the run stops at `converged`.
             Moot when `converge` is false.
         confirmDefaultBase:
           type: boolean
@@ -3992,6 +4063,10 @@ paths:
                 durableResume:
                   type: boolean
                   description: "Whether this worker's harness advertises durable-resume (issue #325, ADR 0062 Slice 5/5) — an ENROLMENT attribute, never a routing token. Recorded per instance so the app emits the world-restore marker only to a fleet with a participant; a harness that omits it (or sets false) redrives a re-leased round from scratch. Recorded only when `instance` is a non-blank string — a missing, empty, or whitespace-only `instance` is echoed back for provenance but the flag is not persisted."
+                harnessProtocol:
+                  type: integer
+                  minimum: 0
+                  description: 'The worker-harness protocol version (issue #802) — a non-negative integer declaring which machine-readable artifacts the harness emits (AgentInstance, transcript flush, result envelope). An ENROLMENT attribute, never a routing token. Recorded per instance so the app can flag a stale harness in getAgenticSupply / the registry and — under NANO_AGENTIC_STALE_HARNESS_POLICY=refuse — refuse it agent-job routing. A missing version is treated as stale.'
               # END generated:mcp-body
       responses:
         "200":
@@ -4502,9 +4577,13 @@ paths:
                       type: integer
                       minimum: 1
                       description: Values above 100 are accepted and clamped to 100 by the delegate.
+                    autoMerge:
+                      type: boolean
+                      description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
                     convergeOnly:
                       type: boolean
-                      description: When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A per-request review-only override; defaults to false (the global auto-merge default applies).
+                      deprecated: true
+                      description: 'Deprecated negative alias. If `autoMerge` is omitted, `true` means `autoMerge: false`; `false` means `autoMerge: true` (still gated by `NANO_PR_AUTO_MERGE`). Prefer `autoMerge`.'
                 - type: object
                   additionalProperties: false
                   required:
@@ -4521,9 +4600,13 @@ paths:
                       type: integer
                       minimum: 1
                       description: Values above 100 are accepted and clamped to 100 by the delegate.
+                    autoMerge:
+                      type: boolean
+                      description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
                     convergeOnly:
                       type: boolean
-                      description: When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A per-request review-only override; defaults to false (the global auto-merge default applies).
+                      deprecated: true
+                      description: 'Deprecated negative alias. If `autoMerge` is omitted, `true` means `autoMerge: false`; `false` means `autoMerge: true` (still gated by `NANO_PR_AUTO_MERGE`). Prefer `autoMerge`.'
               type: object
               # END generated:mcp-body
       responses:
@@ -5005,7 +5088,7 @@ paths:
                                 type: string
                                 maxLength: 255
                                 pattern: ^(?![/.-])(?!.*[/.]$)(?!.*\.\.)(?!.*//)(?!.*/\.)(?!.*\.lock(?:/|$))[A-Za-z0-9._/-]+$
-                                description: "OPTIONAL per-node base branch this agent node branches off (#739) — the `ref` the harness checks out in the isolated clone (the pre-PR shape: the agent cuts its own `feat/<node.id>` branch off this base). Absent → the run-level dispatch `baseBranch` (else the node's repository default branch). A value that is not a plausible git branch name is rejected at submit; the pattern mirrors the authoritative server-side gate (`isPlausibleBranchName`, app/baseBranch.ts)."
+                                description: "OPTIONAL per-node base branch this agent node branches off (#739) — the `ref` the harness checks out in the isolated clone (the pre-PR shape: the harness cuts the deterministic `feat/<node.id>` branch off this base itself, per #776, so a forgetful agent can never be left committing on the base branch). Absent → the run-level dispatch `baseBranch` (else the node's repository default branch). A value that is not a plausible git branch name is rejected at submit; the pattern mirrors the authoritative server-side gate (`isPlausibleBranchName`, app/baseBranch.ts)."
                               converge:
                                 type: boolean
                                 description: 'OPTIONAL first-class CONVERGE policy (ADR 0006 §3 / S5) — a DECLARED, compiler- validated completion-policy flag on this cell node. It declares that the node''s opened PR is to be driven through the review-convergence loop to green as an edge-gated completion policy; this slice adds and validates the flag, with the delivery-graph execution wiring that consumes it landing in a follow-up slice. It supersedes (in intent) the emergent `feature.bpmn` `gw-converge` gateway and the "un-draft + merge #B" prompt prose a delivery-graph `agent` node used to smuggle. Converge and merge are SEPARABLE phases; a node may converge without merging (stop at green and gate the landing behind a downstream node).'
@@ -5738,9 +5821,9 @@ paths:
                           type: string
                           enum: [real, forward-declared]
                           description: real ⇒ dispatches a real side effect; forward-declared ⇒ a no-op stub.
-                        convergeOnlyDefault:
+                        autoMergeDefault:
                           type: boolean
-                          description: The default `convergeOnly` for a real converge target.
+                          description: The default `autoMerge` for a real converge target.
                         summary:
                           type: string
                           description: What the target does.
@@ -5801,7 +5884,7 @@ paths:
                       optionalFields: [dedupeKey, payload]
                       sideEffecting: true
                       mayEmit: true
-                      summary: "An automated outbound action; payload for a converge target is { pr, convergeOnly?, dependsOn? }."
+                      summary: "An automated outbound action; payload for a converge target is { pr, autoMerge?, dependsOn? }."
                   factTypes: [string, number, boolean, artifact, version, url, pr]
                   guardScalarTypes: [string, number, boolean]
                   waitProbeKinds:
@@ -5822,15 +5905,15 @@ paths:
                   connectorTargets:
                     - target: converge
                       status: real
-                      convergeOnlyDefault: true
+                      autoMergeDefault: false
                       summary: "Converge-only: drive review convergence and stop at converged."
                     - target: converge-merge
                       status: real
-                      convergeOnlyDefault: false
+                      autoMergeDefault: true
                       summary: "Unit-level land: converge AND merge onto the PR's own base branch."
                     - target: merge-main
                       status: real
-                      convergeOnlyDefault: false
+                      autoMergeDefault: true
                       summary: "Graph-level top-level land onto main (two-level merge)."
                     - target: "<any other target>"
                       status: forward-declared
@@ -6097,7 +6180,7 @@ paths:
                       description: When true, hand the opened PR to the convergence loop (review rounds) as a follow-on step. When false (default) the run ends at "PR raised, not reviewed".
                     autoMerge:
                       type: boolean
-                      description: When true (and `converge` is true), drive the merge-loop after convergence — mirrors `convergeOnly`/`NANO_PR_AUTO_MERGE` inverted. When false the run stops at `converged`. Moot when `converge` is false.
+                      description: When true (and `converge` is true), drive the merge-loop after convergence only when `NANO_PR_AUTO_MERGE` is enabled. When false the run stops at `converged`. Moot when `converge` is false.
                     confirmDefaultBase:
                       type: boolean
                       description: Acknowledge that `baseBranch` is the repository default branch (the PR would target it directly). See `PlanStartByIssue.confirmDefaultBase`.

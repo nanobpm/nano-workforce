@@ -99,21 +99,36 @@ known at submit time, carried as a process variable and stored on the DB row.
 │         │
 │         ▼
 │    <gateway: status>
-│      ├── converged  → [Mark converged] → (end: converged)
-│      │
-│      ├── addressed  → [Record round] → <event-based gateway: review ready or timeout?>
-│      │                     ├── readiness-ready (msg catch, key = prKey) → round++ ─┐
-│      │                     └── =reviewWaitTimeout (timer catch)                     │
-│      │                          → [Escalate: review stalled] (blocked)              │
-│      │                          → [Wait: wait-answer userTask] ─────────────────────┤
-│      │                                                                             │
-│      └── needs_input     [Record escalation]                       │               │
-│          or blocked  →   (kind = question | blocker)               │               │
-│                          → [Wait: wait-answer userTask]            │               │
-│                          → [record-answer: pr.answer-escalation]   │               │
-│                          → set answer ──────────────────────────────┤               │
-│                                                                    │               │
-└────────────────────────────────────────────────────────────────────┴───────────────┘
+│      ├── converged  → [Check review comments] (pr.converge-gate; ++ackRetryRound on ack-only block)
+│      │                   → <gateway: comments addressed?>
+│      │                       ├── addressed → [Scope classifier] → … → [Mark converged] → (end)
+│      │                       ├── review stale (#799) → [Record round] (re-solicit fresh review) ┐
+│      │                       └── unaddressed → <gateway: auto-ack within budget?>               │
+│      │                            ├── convergeAckOnly and ackRetryRound ≤ ackRetryMax           │
+│      │                            │      → re-dispatch review-round (round unchanged) ───────────┤
+│      │                            └── unresolved thread / budget exhausted                      │
+│      │                                 → [Escalate: unaddressed comments] (blocked)             │
+│      │                                 → [Wait: wait-answer userTask] ────────────────────────────┤
+│      │                                                                                          │
+│      ├── addressed  → [Record round] → [Check progress] (did the PR head advance?)              │
+│      │                   ├── progressed → <guard: round ≥ maxRounds → escalate "not converged"> │
+│      │                   │                   → <event-based gateway: review ready or timeout?>   │
+│      │                   │      ├── readiness-ready (msg catch, key = prKey) → round++ ─┐        │
+│      │                   │      └── =reviewWaitTimeout (timer catch)                     │        │
+│      │                   │           → [Escalate: review stalled] (blocked)             │        │
+│      │                   │           → [Wait: wait-answer userTask] ────────────────────┤        │
+│      │                   └── no progress → <husk? no commit AND no terminal instance>   │        │
+│      │                          ├── husk & retries < MAX → re-enter [Review round] (bypasses the round-cap guard) │
+│      │                          └── no-advance / husk cap → [Escalate: no progress]      │       │
+│      │                                     → [Wait: wait-answer userTask] ───────────────────┤   │
+│      │                                                                             │            │
+│      └── needs_input     [Record escalation]                       │               │            │
+│          or blocked  →   (kind = question | blocker)               │               │            │
+│                          → [Wait: wait-answer userTask]            │               │            │
+│                          → [record-answer: pr.answer-escalation]   │               │            │
+│                          → set answer ──────────────────────────────┤               │            │
+│                                                                    │               │            │
+└────────────────────────────────────────────────────────────────────┴───────────────┴────────────┘
 
 Both `needs_input` (the agent has a question) and `blocked` (the agent is stuck
 on something external — auth, a failing push, a missing secret) route to the
@@ -124,16 +139,64 @@ step, then retry the same round with the human's `answer`. They differ only by e
 which the UI uses to label the card. Neither ends the run — a human always gets
 a chance to unblock and resume.
 
-Guard: before each Review round, if round > MAX_ROUNDS → force an escalation
-("not converged after N rounds") so a human decides, rather than looping forever.
+**Durable adjudication auto-resume (issue #806).** A human's answer to a `wait-answer`
+is remembered durably, keyed by `(PR, canonical question fingerprint)` — the
+`record-answer` step persists it (`pr_adjudications`), and before the poller surfaces a
+*new* `wait-answer` it checks for a settled adjudication of the **same** question. On a
+match it auto-resumes the round with the recorded answer through the canonical
+`completeUserTaskAttributed` door — attributed to the original adjudicator, marked
+`auto_applied` and recorded reversible so a human can still override — instead of
+re-parking a human on an already-settled question (PR #800 saw the same design question
+escalate at round 2 and again at round 13). This is the one exception to "every
+`needs_input`/`blocked` parks `wait-answer`": a question with an existing adjudication for
+this PR resumes without a fresh human park. A *materially different* question still
+escalates, resolution failure fails open to the human, and re-submitting the PR
+(`submitPr`) invalidates its adjudications so a fresh run re-decides. Only the convergence
+loop feeds and reads this memory — a merge-loop answer (same `pr.answer-escalation` step)
+is tagged `answerContext = "merge"` and never recorded as a convergence adjudication.
+
+Guard: after progress classification, a **progressing** round with round ≥
+MAX_ROUNDS forces an escalation ("not converged after N rounds") so a human
+decides rather than looping forever. The guard sits *after* `check-progress`
+(not before), so a husk auto-retry — which does not consume a round — bypasses
+the cap and is re-tried onto a healthy worker even on the final configured round.
+The **stale-review re-solicitation** path (below) likewise bypasses the cap: its
+`f_guardMax` arm is gated on `round ≥ maxRounds and reviewStale != true`, so a
+stale review received on the final configured round re-solicits a fresh review
+instead of escalating (the review-wait timeout remains the backstop).
 ```
 
 Notes:
+- **Convergence comment-gate + stale-review re-solicitation (issue #799).** The
+  agent's self-reported `converged` does not finalize directly: it first runs the
+  deterministic `pr.converge-gate` (`check-converge` → `gw-converge-gate`). That
+  gate **blocks** convergence (`convergeBlocked = true`) while any review thread
+  is unresolved or any suppressed advisory lacks a resolved `nano-ack:` thread.
+  A block whose *sole* outstanding items are unresolved `nano-ack:` threads is
+  classified **ack-only** and does **not** immediately escalate to a human:
+  within the `ackRetryMax` budget the bounded auto-ack retry re-dispatches
+  `review-round` (round unchanged) to finish the acknowledgements; only a
+  substantive unresolved thread — or an exhausted ack-retry budget — escalates
+  ("unaddressed comments"). Otherwise the gate proceeds to the scope
+  classifier and finalizes. A third arm handles a **stale review** — one whose
+  `commit_id` predates the PR's current HEAD (its advisories describe code the
+  head has moved past, e.g. an advisory already fixed in a later commit). Rather
+  than block/escalate on the obsolete body, the gate signals `reviewStale = true`
+  and `f_convergeStale` re-enters `persist-round` → `check-progress` (which parks
+  the PR in `waiting_review`, the single writer), so the poller re-solicits a
+  fresh review of the current HEAD. The head is read via the shared
+  branch-ref-preferring reader (`makeDefaultReadHead`, atomic with the push, #786)
+  in BOTH the gate and the poller so they agree on the current head. `reviewStale`
+  is written only by the gate and cleared on BOTH loop re-entry paths — by the
+  `wait-review` catch when a fresh review lands, and by `record-answer` when a
+  human resumes after the review-stall timer — so the marker cannot leak into a
+  later round. Because a stale review is not a failure to converge, this path
+  bypasses the round cap (see the Guard above).
 - On `addressed`, the loop parks at an **event-based gateway** that races the
   canonical `readiness-ready` wait-gate message (ADR 0001 §2; correlated by the
   poller when a fresh review lands)
   against a `=reviewWaitTimeout` timer (seeded at submit from
-  `NANO_PR_REVIEW_WAIT_TIMEOUT`, default `PT20M`). Whichever fires first
+  `NANO_PR_REVIEW_WAIT_TIMEOUT`, default `PT30M`). Whichever fires first
   withdraws the other — the message arm advances `round`, the timer arm escalates
   a **stalled review** (`blocked`) so a human decides rather than the instance
   hanging forever. Because `persist-round` already recorded this `round` as
@@ -149,6 +212,93 @@ Notes:
   backstop when even repeated nudges fail.
 - On `needs_input`, the same `round` is retried after the answer (the answer is
   added to the agent's context; the round number does not advance).
+- On `converged`, the run does **not** finalize blindly: it first runs the
+  deterministic **converge gate** (`pr.converge-gate`, `Check review comments`),
+  which re-reads GitHub and re-blocks (`convergeBlocked=true`) while **any
+  substantive** review thread is unresolved or **any** suppressed advisory lacks a
+  resolved `nano-ack:` thread. An unresolved `nano-ack:` **ack thread** is **never
+  dropped** from the gate — it is a genuinely-open GitHub thread, so it still
+  **blocks** convergence — but a block whose only open threads are unresolved acks
+  is classified **ack-only**: a partially-completed acknowledgement the bounded
+  auto-ack retry can finish (post-and-resolve), not a code-review finding, so it
+  stays on the recoverable path instead of escalating. (An ack thread is one whose
+  *root* comment carries a canonical `nano-ack: <path> :: <text>` marker; a
+  substantive reviewer finding never does, so it escalates. Because an unresolved
+  ack still blocks either way, this classification is **fail-closed**: even a
+  mislabelled root cannot finalize the gate with an open thread — worst case it
+  routes to the bounded ack-retry, which cannot ack a non-advisory and so escalates
+  to a human on exhaustion.)
+  A block whose SOLE cause is unacknowledged suppressed
+  advisories or unresolved ack threads (no unresolved *substantive* thread) is
+  flagged **ack-only**
+  (`convergeAckOnly=true`) and is routine + recoverable: rather than pulling a
+  human in first, the loop makes a **bounded auto-ack re-dispatch** of
+  `review-round` — up to `ackRetryMax` times, advancing `ackRetryRound` on each
+  ack-only block (seeded from `NANO_PR_MAX_ACK_RETRIES`). It escalates to the human
+  `wait-answer` only when the block is **not** ack-only (an unresolved inline
+  thread), or the budget is exhausted. Both counters are process variables.
+- **Contested advisory → human is via the agent's `needs_input`, not a decline
+  (#787 / #796).** A resolved `Declined, false positive. nano-ack: …` thread is a
+  *considered agent adjudication* and, by design (#787), keeps the advisory
+  acknowledged so the gate **converges** — a stateless gate cannot re-block a
+  decline without re-introducing the #787 per-round-escalation livelock. The
+  "genuinely contested advisory surfaces to a human" path of #796 is reached when
+  the (re-dispatched) agent cannot decide and returns **`needs_input`** — that
+  routes through the normal status-escalation arm to `wait-answer`. Decline =
+  agent-adjudicated → converge; `needs_input` = agent defers → human.
+- **No-progress guard + husk classification (issue #786).** Before the review
+  wait, an `addressed` round passes through `pr.progress-check`
+  (`workers/progress-check/worker.ts`, mirrored by `app/roundProgress.ts`): it
+  reads the PR's current head SHA (the branch ref, atomic with the push) and
+  compares it to the **round-entry head** — the head captured by `pr.capture-head`
+  immediately BEFORE `review-round` ran this round, published as the
+  `roundEntryHead` process variable. `pr.capture-head` sits on EVERY entry into
+  `review-round` (the first round from `Start`, a review-loop re-enter, a
+  human-answer resume, and a husk auto-retry), so within any round there is always
+  a baseline captured against the agent's own starting point — closing the
+  no-baseline gap where a FIRST addressed round had no prior-round head to compare
+  against (and either waved a first-round husk through as progress, or risked
+  mis-escalating a straggler push). If `roundEntryHead` is absent — an older
+  in-flight instance whose flow predates `capture-head`, or a capture read that
+  failed open (it publishes the empty string as its "unknown" sentinel) —
+  progress-check falls back to the head persisted from the previous round
+  (`last_round_head`). A round whose head DID advance past the round-entry baseline
+  is real progress and continues to the review-wait gateway. A round whose head did
+  NOT advance pushed no commit, so re-requesting a review would loop on
+  byte-identical code; `gw-progress` routes it to `gw-husk`, which SPLITS it on a
+  corroboration correlated to the COMPLETING `review-round` element-instance (NOT
+  an aggregate terminal count — a same-round human-answered resume is classified on
+  its own fresh attempt):
+    - a **husk** — no commit AND the completing `review-round` attempt is
+      NON-TERMINAL (the producer harness died mid-run, leaving a stuck instance) —
+      is auto-re-run onto a healthy worker up to `MAX_HUSK_RETRIES` (2) before
+      escalating; and
+    - a **no-advance** — the completing attempt ran to a terminal instance but
+      nothing was pushed — (and a husk that exhausts its retries) escalates to the
+      human `wait-answer` task.
+  The agent-instance read is AVAILABILITY-AWARE via a **two-tier probe** and fails
+  SAFE (ADR 0056). `review-round` is an external-agent service task, so a job that
+  husks BEFORE it ever registers an AgentInstance leaves the scoped `review-round`
+  search EMPTY — indistinguishable, on that query alone, from an engine that has no
+  AgentInstance projection at all. The probe therefore resolves an empty
+  `review-round` search against a SECOND, process-wide read:
+    - if the process-wide read also finds NO instance, the **channel is absent**
+      (an engine with no AgentInstance projection) — UNKNOWN, treated as no-advance,
+      never an auto-retry that could duplicate genuinely-completed work;
+    - if the process-wide read finds ANOTHER instance (from `classify-scope`, an
+      earlier round, etc.), the **channel is PRESENT** but this round registered
+      nothing — a genuine **pre-registration husk**, so it is classified as a husk
+      and auto-retried.
+  A head that cannot be read fails OPEN (continue), so a transient GitHub hiccup
+  never fabricates a no-progress escalation. Two supporting invariants keep an
+  auto-retry clean: `pr.persist-round`
+  records a round IDEMPOTENTLY on `(pr_key, round_no, process_instance_key)` — a husk
+  retry (same process instance) updates its row in place, while a resubmission that
+  re-opens the PR at round 1 in a NEW process instance inserts a fresh row and so
+  never clobbers a prior run's durable round history (migration 102) — and the guard flips the PR back to
+  the running `converging` status before a retry re-enters `review-round` so the
+  poller does not solicit a spurious review against the still-running round. The
+  round cap and the review-wait timeout remain the outer safety nets.
 
 
 ## 5. Agent job contract (`senior:pr-review`)
@@ -357,6 +507,41 @@ the app, which deploys on boot), and the next agent job of that type picks it up
 > (`$AGENT_RESULT_FILE` / `::nano:result::`), and no task may still carry the retired
 > baked `io.nanobpm.agentTask.task.prompt` header.
 
+> **`<zeebe:agentDefinition agentType="external" />` is the ONE agentic-task signal.**
+> Every hand-authored `senior:*` agent service task in `resources/processes` carries this
+> engine-native AgentTask marker
+> (issue #745) alongside its `<zeebe:taskDefinition>`, and it is the **single
+> convention** the worker harness `--auto` reconciliation scans to discover agentic
+> tasks — replacing the legacy `linkName="prompt"` / header dual signal so the app and
+> harness converge on one signal (issue #779, harness jwulf/c8ctl-plugin-nano#235). The
+> marker is CI-enforced over the deployed `resources/` process models
+> (`agentTaskTypesMissingExternalMarker`,
+> `agent-marker.test.ts`), so no prompt-bearing agent task in those models relies on
+> prompt-link-only discovery. (The delivery-graph compiler's GENERATED agent BPMN —
+> deployed at run time by `runDeliveryGraph`, not authored under `resources/` — is a
+> separate deployed path NOT covered by this static guard; whether its generated cells
+> should also carry the marker/opt-out convention is tracked separately under issue #745,
+> not #779.) To **exclude** a task from `--auto` — one that must be served only by a
+> worker that explicitly subscribes (`--job-type <type>` / a profile capability) — add
+> the inert opt-out property inside its `extensionElements`, nested in the
+> `<zeebe:properties>` wrapper the models and engine expect (as
+> `resources/processes/feature.bpmn:57-63` does — a bare `<zeebe:property>` placed
+> directly under `<bpmn:extensionElements>` is NOT the accepted shape):
+>
+> ```xml
+> <bpmn:extensionElements>
+>   <zeebe:properties>
+>     <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" />
+>   </zeebe:properties>
+> </bpmn:extensionElements>
+> ```
+>
+> Absence (or any value other than `"false"`) auto-subscribes as normal — opt-out is
+> explicit and fail-safe. The property is inert to the engine (no migration, no
+> behaviour change). It is a registered contract (`agentTask.autoSubscribe` in
+> `app/contracts.ts`), read by the ONE helper `agentTaskTypesOptedOutOfAuto`
+> (`app/agentic/vocab/job-types.ts`) and guarded by `auto-subscribe.test.ts`.
+
 Per-instance dynamic context still rides **`appendPrompt`** (unchanged): an ioMapping
 sets a job-local `appendPrompt` string (a plan's rejection findings, a feature task's
 brief, the failing-check list) which the agent harness concatenates **verbatim** onto
@@ -397,10 +582,10 @@ same `prKey`, sharing the datasource and poller. It merges the PR, honouring
 merge-queue branches and cross-PR dependencies, and reuses the review stage's
 escalation machinery for anything it can't resolve autonomously.
 
-A per-submit `convergeOnly: true` on the `start/convergence-loop` request pins that PR
-to review-only regardless of the global default: `pr.finalize` reads the flag off the
-instance and rests the PR at `converged` without starting `merge-loop`. The flag only
-ever narrows (it never forces the merge stage on when `NANO_PR_AUTO_MERGE` is off).
+A per-submit `autoMerge` setting on the `start/convergence-loop` request is the preferred
+positive control: `false` pins that PR to review-only regardless of the global default, while
+`true` enables the merge-loop after convergence only when `NANO_PR_AUTO_MERGE` is on. No per-submit
+setting forces the merge stage on when the global toggle is off.
 
 Flow:
 
@@ -506,10 +691,10 @@ queries skip (`merging`), so a slow pass can't double-signal.
 | `NANO_PR_POLL_MS` | 60000 | poll interval |
 | `NANO_PR_MAX_ROUNDS` | 20 | default round cap (per-submit `maxRounds` override, clamped 1–100) |
 | `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`x-hook-secret`) for guarded operations (e.g. `/app/api/agent`, `/app/api/version`, `/app/api/status`) |
-| `NANO_PR_AUTO_MERGE` | 1 | run the merge stage after convergence (`0` = review-only; per-submit `convergeOnly: true` override) |
+| `NANO_PR_AUTO_MERGE` | 1 | run the merge stage after convergence (`0` = review-only; per-submit `autoMerge: false` override) |
 | `NANO_PR_MERGE_METHOD` | squash | `squash` \| `merge` \| `rebase` |
 | `NANO_PR_MERGE_ADMIN` | 0 | pass `--admin` on merge |
-| `NANO_PR_REVIEW_WAIT_TIMEOUT` | PT20M | ISO-8601 wait before a stalled review escalates (timer arm of the `wait-review` event-based gateway); malformed → default |
+| `NANO_PR_REVIEW_WAIT_TIMEOUT` | PT30M | ISO-8601 wait before a stalled review escalates (timer arm of the `wait-review` event-based gateway); malformed → default |
 | `NANO_PR_REVIEW_NUDGE_MINUTES` | 5 | cooldown between poller Copilot re-request nudges per PR (clamped 1–1440) |
 
 ## 13. Planning fan-out (`plan-fanout.bpmn`) — issue #14

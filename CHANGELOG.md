@@ -1,3 +1,99 @@
+## [0.190.0](https://github.com/nanobpm/nano-workforce/compare/v0.189.3...v0.190.0) (2026-09-21)
+
+### Features
+
+* **ui:** make Convergence auto-merge opt-in ([#752](https://github.com/nanobpm/nano-workforce/issues/752)) ([db18b17](https://github.com/nanobpm/nano-workforce/commit/db18b17ceadc1cccd48e50a12c98d867f657f3d5)), closes [#751](https://github.com/nanobpm/nano-workforce/issues/751)
+
+## [0.189.3](https://github.com/nanobpm/nano-workforce/compare/v0.189.2...v0.189.3) (2026-09-20)
+
+### Bug Fixes
+
+* **feature:** reconcile a COMPLETED feature-run engine instance to terminal (raise-only runs wedge in Active) ([#809](https://github.com/nanobpm/nano-workforce/issues/809)) ([39add8c](https://github.com/nanobpm/nano-workforce/commit/39add8c81f419ef41c7c4596adb1f5ad05c80e5a)), closes [#624](https://github.com/nanobpm/nano-workforce/issues/624) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#808](https://github.com/nanobpm/nano-workforce/issues/808) [#3](https://github.com/nanobpm/nano-workforce/issues/3) [704/#497](https://github.com/704/nano-workforce/issues/497) [503/#704](https://github.com/503/nano-workforce/issues/704) [#810](https://github.com/nanobpm/nano-workforce/issues/810) [#810](https://github.com/nanobpm/nano-workforce/issues/810) [#806](https://github.com/nanobpm/nano-workforce/issues/806)
+
+## [0.189.2](https://github.com/nanobpm/nano-workforce/compare/v0.189.1...v0.189.2) (2026-09-18)
+
+### Bug Fixes
+
+* **poller:** fetch newest GitHub reviews ([#797](https://github.com/nanobpm/nano-workforce/issues/797)) ([c488410](https://github.com/nanobpm/nano-workforce/commit/c488410645d1df55ca5121448364c8f89ed4a7a6)), closes [#793](https://github.com/nanobpm/nano-workforce/issues/793)
+
+## [0.189.1](https://github.com/nanobpm/nano-workforce/compare/v0.189.0...v0.189.1) (2026-09-17)
+
+### Bug Fixes
+
+* **convergence:** persist wait-answer human adjudications so an already-answered question does not re-escalate ([#807](https://github.com/nanobpm/nano-workforce/issues/807)) ([9dfeacd](https://github.com/nanobpm/nano-workforce/commit/9dfeacd4c4dffdbb8da02acf1beb5ea5d62aa1ea)), closes [#800](https://github.com/nanobpm/nano-workforce/issues/800) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#256](https://github.com/nanobpm/nano-workforce/issues/256) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806) [#806](https://github.com/nanobpm/nano-workforce/issues/806)
+
+## [0.189.0](https://github.com/nanobpm/nano-workforce/compare/v0.188.1...v0.189.0) (2026-09-17)
+
+### Features
+
+* **agentic:** gate stale worker harnesses via persisted protocol ([#804](https://github.com/nanobpm/nano-workforce/issues/804)) ([e5ba2c3](https://github.com/nanobpm/nano-workforce/commit/e5ba2c39e0f76a2654099c54e37e0d3a97f20473)), closes [#802](https://github.com/nanobpm/nano-workforce/issues/802) [#802](https://github.com/nanobpm/nano-workforce/issues/802) [#802](https://github.com/nanobpm/nano-workforce/issues/802) [#802](https://github.com/nanobpm/nano-workforce/issues/802) [#802](https://github.com/nanobpm/nano-workforce/issues/802) [#802](https://github.com/nanobpm/nano-workforce/issues/802)
+
+## [0.188.1](https://github.com/nanobpm/nano-workforce/compare/v0.188.0...v0.188.1) (2026-09-17)
+
+### Bug Fixes
+
+* **feature:** reconcile the implement-step result from GitHub before escalating ([#805](https://github.com/nanobpm/nano-workforce/issues/805)) ([7099c31](https://github.com/nanobpm/nano-workforce/commit/7099c31793a6dd4543fddd2494615b166241d302)), closes [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#801](https://github.com/nanobpm/nano-workforce/issues/801)
+
+## [0.188.0](https://github.com/nanobpm/nano-workforce/compare/v0.187.6...v0.188.0) (2026-09-17)
+
+### Features
+
+* **convergence:** bounded agent auto-ack before human escalation on ack-only converge blocks ([#800](https://github.com/nanobpm/nano-workforce/issues/800)) ([be0f7a2](https://github.com/nanobpm/nano-workforce/commit/be0f7a2f04ef768a2acdfdf229131e7158834026)), closes [#789](https://github.com/nanobpm/nano-workforce/issues/789) [Magikcraft/nano-bpm#1199](https://github.com/Magikcraft/nano-bpm/issues/1199) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#787](https://github.com/nanobpm/nano-workforce/issues/787) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [787/#796](https://github.com/787/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [787/#796](https://github.com/787/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796) [#796](https://github.com/nanobpm/nano-workforce/issues/796)
+
+## [0.187.6](https://github.com/nanobpm/nano-workforce/compare/v0.187.5...v0.187.6) (2026-09-16)
+
+### Bug Fixes
+
+* **convergence:** re-solicit on a stale Copilot review instead of re-escalating ([#799](https://github.com/nanobpm/nano-workforce/issues/799)) ([#803](https://github.com/nanobpm/nano-workforce/issues/803)) ([58a99b6](https://github.com/nanobpm/nano-workforce/commit/58a99b6024af6cef37f724f9d50cf6151a6f061c)), closes [#789](https://github.com/nanobpm/nano-workforce/issues/789)
+
+## [0.187.5](https://github.com/nanobpm/nano-workforce/compare/v0.187.4...v0.187.5) (2026-09-15)
+
+### Bug Fixes
+
+* **convergence:** classify husked review rounds and bound-retry the no-progress loop ([#789](https://github.com/nanobpm/nano-workforce/issues/789)) ([faebcdc](https://github.com/nanobpm/nano-workforce/commit/faebcdcaca017fab8d7436a50e3dc09354dc3022)), closes [jwulf/c8ctl-plugin-nano#230](https://github.com/jwulf/c8ctl-plugin-nano/issues/230) [#786](https://github.com/nanobpm/nano-workforce/issues/786) [#786](https://github.com/nanobpm/nano-workforce/issues/786)
+
+## [0.187.4](https://github.com/nanobpm/nano-workforce/compare/v0.187.3...v0.187.4) (2026-09-14)
+
+### Bug Fixes
+
+* raise default review-wait timeout to PT30M ([#792](https://github.com/nanobpm/nano-workforce/issues/792)) ([042573d](https://github.com/nanobpm/nano-workforce/commit/042573dc5e691dc97efebc12da6a63f2cf398c2a)), closes [#783](https://github.com/nanobpm/nano-workforce/issues/783) [#791](https://github.com/nanobpm/nano-workforce/issues/791)
+
+## [0.187.3](https://github.com/nanobpm/nano-workforce/compare/v0.187.2...v0.187.3) (2026-09-14)
+
+### Bug Fixes
+
+* pr-escalation Tasks form no longer renders a blank question field ([#785](https://github.com/nanobpm/nano-workforce/issues/785)) ([eb6bc0e](https://github.com/nanobpm/nano-workforce/commit/eb6bc0e9a677effed0e4d93a3c37033f7819d943)), closes [#767](https://github.com/nanobpm/nano-workforce/issues/767)
+
+## [0.187.2](https://github.com/nanobpm/nano-workforce/compare/v0.187.1...v0.187.2) (2026-09-13)
+
+### Bug Fixes
+
+* **convergence:** key suppressed-advisory acks on line-stable identity ([#788](https://github.com/nanobpm/nano-workforce/issues/788)) ([9b9d124](https://github.com/nanobpm/nano-workforce/commit/9b9d1241dbd725cfe9b8ac88f5a9f5b949dc4fc4)), closes [#787](https://github.com/nanobpm/nano-workforce/issues/787) [#787](https://github.com/nanobpm/nano-workforce/issues/787) [pre-#787](https://github.com/nanobpm/pre-/issues/787) [#787](https://github.com/nanobpm/nano-workforce/issues/787)
+
+## [0.187.1](https://github.com/nanobpm/nano-workforce/compare/v0.187.0...v0.187.1) (2026-09-12)
+
+### Bug Fixes
+
+* **delivery-graph:** emit a deterministic branch.create so agent cells never commit on the base branch ([#781](https://github.com/nanobpm/nano-workforce/issues/781)) ([56f6488](https://github.com/nanobpm/nano-workforce/commit/56f6488344b439a5ac12f5069567facd9519bf66)), closes [#776](https://github.com/nanobpm/nano-workforce/issues/776) [pre-#776](https://github.com/nanobpm/pre-/issues/776) [#776](https://github.com/nanobpm/nano-workforce/issues/776)
+
+## [0.187.0](https://github.com/nanobpm/nano-workforce/compare/v0.186.4...v0.187.0) (2026-09-12)
+
+### Features
+
+* **agentic:** autoSubscribe opt-out marker + single agentDefinition-external convention ([#782](https://github.com/nanobpm/nano-workforce/issues/782)) ([6a0c616](https://github.com/nanobpm/nano-workforce/commit/6a0c616158db7e83ab2479d66677dd652c12f886)), closes [jwulf/c8ctl-plugin-nano#235](https://github.com/jwulf/c8ctl-plugin-nano/issues/235) [#779](https://github.com/nanobpm/nano-workforce/issues/779) [#745](https://github.com/nanobpm/nano-workforce/issues/745)
+
+## [0.186.4](https://github.com/nanobpm/nano-workforce/compare/v0.186.3...v0.186.4) (2026-09-12)
+
+### Bug Fixes
+
+* **agentic:** allow c8ctl GitHub auth for repository provisioning ([#784](https://github.com/nanobpm/nano-workforce/issues/784)) ([323bb05](https://github.com/nanobpm/nano-workforce/commit/323bb05060e63ca57082d42e3bf9c91f63abaa0a)), closes [#770](https://github.com/nanobpm/nano-workforce/issues/770) [#770](https://github.com/nanobpm/nano-workforce/issues/770) [#770](https://github.com/nanobpm/nano-workforce/issues/770)
+
+## [0.186.3](https://github.com/nanobpm/nano-workforce/compare/v0.186.2...v0.186.3) (2026-09-12)
+
+### Bug Fixes
+
+* **app:** redirect standalone /console routes to the engine console ([#780](https://github.com/nanobpm/nano-workforce/issues/780)) ([103e967](https://github.com/nanobpm/nano-workforce/commit/103e967b95191bb04239b5c6a2195913e50b8b9b)), closes [#771](https://github.com/nanobpm/nano-workforce/issues/771)
+
 ## [0.186.2](https://github.com/nanobpm/nano-workforce/compare/v0.186.1...v0.186.2) (2026-09-11)
 
 ### Bug Fixes

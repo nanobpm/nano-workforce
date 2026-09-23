@@ -68,3 +68,147 @@ export function routeProgress(
   if (!previousHead || !currentHead) return "continue";
   return currentHead === previousHead ? "escalate" : "continue";
 }
+
+// ── Husk classification & bounded self-heal (issue #786) ─────────────────────
+//
+// A no-advance `addressed` round is not one failure mode but two, and they warrant different
+// handling:
+//
+//  • `husk` — the agent job completed reporting `addressed`, but the COMPLETING attempt minted NO
+//    durable work: no commit was pushed AND the round's completing `review-round` agent-instance did
+//    not reach a terminal state — either it registered a non-terminal instance, or it husked before
+//    registering any instance at all (the producer harness died mid-run, so the round is a phantom —
+//    jwulf/c8ctl-plugin-nano#230/#229). The verdict is scoped to the completing attempt via the
+//    attempt watermark (Copilot #789), so an EARLIER attempt's terminal instance neither masks nor
+//    fabricates this one. This is a transient worker/harness defect, not a real design impasse, so it
+//    is *resumable onto a healthy worker*: re-run the SAME round rather than parking a human. Bounded
+//    by {@link MAX_HUSK_RETRIES} so a persistently-husking worker still escalates instead of looping
+//    forever.
+//
+//  • `no-advance` — the agent DID run to a terminal agent-instance but pushed no commit (it genuinely
+//    believes nothing was needed, or is wrong about the code). Re-running would loop on identical
+//    reasoning, so this escalates to a human immediately, exactly as before.
+//
+// The head-diff (`routeProgress`) still TRIGGERS the no-progress path; the agent-instance
+// corroboration only SPLITS it into husk vs. no-advance so the auto-heal and the escalation message
+// are accurate.
+
+/** Why a no-advance `addressed` round made no progress — see the block comment above. */
+export type NoProgressReason = "husk" | "no-advance";
+
+/** How many times a husked round is auto-re-run onto a (hopefully healthy) worker before the loop
+ * gives up and escalates to a human. The bound is what keeps the self-heal from looping forever on a
+ * persistently-husking worker. */
+export const MAX_HUSK_RETRIES = 2;
+
+/** The full decision for a recorded round: whether it progressed, the running husk-retry count to
+ * carry forward, and — when it did NOT progress — whether to auto-retry the same round (`huskRetry`),
+ * the classified `reason`, and (when escalating) the human-facing `question`. This is the single
+ * source of truth the `pr.progress-check` worker returns and `gw-progress`/`gw-husk` route on. */
+export interface ProgressDecision {
+  readonly progressed: boolean;
+  readonly huskRetries: number;
+  readonly huskRetry?: boolean;
+  readonly reason?: NoProgressReason;
+  readonly question?: string;
+}
+
+/** Coerce an externally-supplied husk-retry counter (a process variable that is null/blank on the
+ * first husk, and could be any shape after a variable regression) to a non-negative integer. */
+function normalizeRetries(value: number | null | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return 0;
+  return Math.floor(value);
+}
+
+/** Build the human-facing escalation question for a no-progress round, tuned to its {@link
+ * NoProgressReason} so the human sees "the agent produced no durable work (a husk)" rather than the
+ * generic "no commit was pushed" when that is what actually happened. */
+export function noProgressQuestion(
+  round: number,
+  reason: NoProgressReason,
+  huskRetriesExhausted: boolean,
+): string {
+  if (reason === "husk") {
+    const tail = huskRetriesExhausted
+      ? ` and re-running the round ${MAX_HUSK_RETRIES} time(s) did not help (the worker keeps husking)`
+      : "";
+    return (
+      `Round ${round} reported the review comments were addressed, but the agent produced no ` +
+      `durable work — no commit was pushed and the COMPLETING review attempt recorded no terminal ` +
+      `agent-instance (a husked round; the worker likely died mid-run)${tail}. A human must decide ` +
+      `how to proceed (reply to resume the loop).`
+    );
+  }
+  return (
+    `Round ${round} reported the review comments were addressed, but the PR head did not advance ` +
+    `(no commit was pushed), so another review round would loop on identical code. A human must ` +
+    `decide how to proceed (reply to resume the loop).`
+  );
+}
+
+/** The canonical no-progress decision, mirroring {@link routeProgress} for the head-diff trigger and
+ * then splitting a no-advance round into a bounded husk auto-retry vs. an immediate escalation.
+ *
+ *  • A round that progressed (head advanced, or a legitimately non-addressed status, or an
+ *    unreadable head that fails OPEN, or a no-baseline addressed round) returns `{ progressed: true,
+ *    huskRetries: 0 }` — real progress RESETS the husk counter so a later, unrelated husk starts
+ *    fresh. A first-addressed-round husk is no longer a special case here: `pr.capture-head` records
+ *    the round's entry head into `roundEntryHead` BEFORE `review-round` runs, so within-round there
+ *    is always a baseline and a husk that pushed nothing takes the no-advance/husk split below.
+ *  • A husked round under the retry cap returns `{ progressed: false, huskRetry: true,
+ *    huskRetries: n+1 }` — `gw-husk` re-enters `review-round` (the SAME round) to try a healthy
+ *    worker.
+ *  • A husked round at the cap, or any `no-advance` round, returns `{ progressed: false,
+ *    huskRetry: false, huskRetries: 0, question }` — `gw-husk` routes to the human escalation. The
+ *    counter resets so a human-answered resume gets fresh retries.
+ *
+ * `agentWorkObserved` is the agent-instance corroboration for the COMPLETING `review-round`
+ * element-instance (see {@link decideProgress}'s reader in workers/progress-check): `true` when the
+ * newest correlated `review-round` instance is TERMINAL (→ `no-advance`); `false` — a SUCCESSFUL,
+ * positively-corroborated read whose newest correlated instance is NON-terminal (the completing
+ * attempt husked) → `husk`; and `null`/`undefined` — an UNKNOWN read (the engine channel was
+ * unavailable/absent — e.g. an empty instance list on the read-as-absence testkit — or the read
+ * threw) → `no-advance`, never an auto-retry, so a transient or absent AgentInstance read can never
+ * duplicate genuinely-completed agent work. Only a positively-corroborated non-terminal completing
+ * instance is a husk; an absent/empty read is UNKNOWN, not a husk. */
+export function decideProgress(
+  status: string | null | undefined,
+  previousHead: string | null | undefined,
+  currentHead: string | null | undefined,
+  round: number,
+  agentWorkObserved: boolean | null | undefined,
+  currentHuskRetries: number | null | undefined,
+  maxHuskRetries: number = MAX_HUSK_RETRIES,
+): ProgressDecision {
+  if (routeProgress(status, previousHead, currentHead) === "continue") {
+    // Fail-open: the head advanced (real progress → RESET the husk counter), a legitimately
+    // non-addressed status, an unreadable current head, OR a no-baseline addressed round. The
+    // no-baseline case is now handled structurally UPSTREAM: `pr.capture-head` records the round's
+    // entry head into `roundEntryHead` BEFORE `review-round` runs, so the baseline is always present
+    // within the round — a first-addressed-round husk leaves `currentHead === roundEntryHead` and
+    // takes the `escalate` path below (split into husk vs. no-advance), while a real push advances
+    // the head and legitimately continues. The old no-baseline husk special-case (which had to guess
+    // from `agentWorkObserved` alone, with the opposing risk of mis-escalating a straggler push) is
+    // therefore gone: with a within-round baseline there is no no-baseline case left to special-case.
+    return { progressed: true, huskRetries: 0 };
+  }
+  // Only a POSITIVELY-corroborated husk (`false` — a successful AgentInstance search whose NEWEST
+  // correlated `review-round` instance is NON-terminal, i.e. the completing attempt died mid-run) is
+  // one we may auto-retry. `true` (that newest correlated instance is TERMINAL) is a real no-advance;
+  // and an UNKNOWN read (`null`/`undefined` — an empty/absent instance list or a thrown read, i.e.
+  // the engine channel was unavailable) must NOT auto-retry, since re-running could duplicate agent
+  // work that actually did run. So an unknown read fails safe to `no-advance` (escalate to a human),
+  // exactly as the pre-#786 loop did — only a corroborated non-terminal completing instance is husk.
+  const reason: NoProgressReason = agentWorkObserved === false ? "husk" : "no-advance";
+  const retries = normalizeRetries(currentHuskRetries);
+  if (reason === "husk" && retries < maxHuskRetries) {
+    return { progressed: false, huskRetry: true, huskRetries: retries + 1, reason };
+  }
+  return {
+    progressed: false,
+    huskRetry: false,
+    huskRetries: 0,
+    reason,
+    question: noProgressQuestion(round, reason, reason === "husk" && retries >= maxHuskRetries),
+  };
+}

@@ -51,6 +51,7 @@ function workerRow(doc: DocumentLike, worker: SupplyWorkerView, options: RenderS
   row.setAttribute("data-worker", worker.instance);
   row.setAttribute("data-liveness", worker.liveness);
   row.setAttribute("data-stream", worker.stream);
+  row.setAttribute("data-harness-stale", String(worker.harnessStale));
 
   const nameCell = el(doc, "td", "cockpit-td cockpit-supply-name");
   nameCell.appendChild(dot(doc, worker.liveness));
@@ -81,6 +82,20 @@ function workerRow(doc: DocumentLike, worker: SupplyWorkerView, options: RenderS
       drill.addEventListener("click", () => onDrill(worker.stream));
     }
     nameCell.appendChild(drill);
+  }
+  // A stale harness silently swallows machine-readable artifacts (issue #802) — surface it as a
+  // distinct badge so the operator can drain/upgrade the worker. Separate from the liveness dot,
+  // which grades heartbeat recency, not harness capability.
+  if (worker.harnessStale) {
+    const badge = el(
+      doc,
+      "span",
+      "cockpit-supply-harness-stale",
+      worker.harnessProtocol === undefined ? "stale harness" : `stale harness (v${worker.harnessProtocol})`,
+    );
+    badge.setAttribute("data-harness-stale", "true");
+    badge.setAttribute("title", "Harness protocol below the configured minimum (or none advertised); jobs may dead-end.");
+    nameCell.appendChild(badge);
   }
   row.appendChild(nameCell);
 

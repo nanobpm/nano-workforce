@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
+import { settleFully } from "./support/time.ts";
 import { pollUserTasks } from "../app/service.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -66,6 +67,7 @@ interface PrRow {
 describe("single-issue feature run (#172 — feature.bpmn)", () => {
   const savedEnv = new Map<string, string | undefined>();
   let restoreGithub: (() => void) | undefined;
+  const githubState = admitGithubState("owner/repo", "main");
 
   before(() => {
     for (const [k, v] of Object.entries(GITHUB_ENV_OVERRIDES)) {
@@ -74,7 +76,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
     }
     // ADR 0003: `startFeature` + the `pr.ensure-base-branch` head task pass through base admission,
     // which reads/creates the base ref. Pin the hermetic `token` transport + fetch stub.
-    restoreGithub = installAdmitGithub(admitGithubState("owner/repo", "main"));
+    restoreGithub = installAdmitGithub(githubState);
   });
 
   after(() => {
@@ -103,7 +105,11 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
       const featureKey = "owner/repo#7";
       const started = await app.api?.call("startFeature", { body: { issue: featureKey, ...startBody } });
       assert.equal(started?.status, 202, "startFeature accepted the issue");
-      await app.settle();
+      // Fixpoint (not a single tick): the `converge` hand-off enrolls the opened PR via `submitPr`,
+      // whose nested `createInstance` re-entrantly runs the new `capture-head` host task (#786) and
+      // leaves `pr.converge-feature`'s own completion undrained until a later settle — see
+      // `settleFully`.
+      await settleFully(app);
       const run = await app.db
         .table<FeatureRow>("feature_runs", "feature_key")
         .findOne({ feature_key: featureKey });
@@ -323,6 +329,49 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
     } finally {
       await app.stop();
       rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  test("reconcile before escalate: a no-status result with an open PR on the branch adopts & converges (issue #801)", async () => {
+    // The #796/#801 defect: a harness returns NO machine-readable status but has pushed the branch and
+    // opened a green PR. Instead of dead-ending at a human, the cell's reconcile step observes the open
+    // PR on `feat/<task.id>` (= `feat/issue-7`), adopts it (status=opened, prKey), and converges.
+    githubState.openPrs.set("feat/issue-7", { number: 801, base: "epic/e2e" });
+    try {
+      await withApp(
+        { "senior:feature": () => ({ summary: "opened a PR but reported no status" }) },
+        { baseBranch: "epic/e2e", converge: true },
+        async ({ app, featureKey }) => {
+          const flows = takenFlows(app);
+          assert.ok(
+            flows.includes("ic_reconcile_gw->ic_end"),
+            `the adopted PR routed straight to the cell's done end (flows: ${flows.join(", ")})`,
+          );
+          assert.ok(
+            !flows.includes("ic_reconcile_gw->record-escalation"),
+            "the run did NOT escalate to a human",
+          );
+          assert.ok(
+            flows.includes("gw-converge->converge"),
+            `the adopted PR was handed to the convergence loop (flows: ${flows.join(", ")})`,
+          );
+          const run = await featureRow(app, featureKey);
+          assert.equal(run.status, "converging", "the reconciled run settled at converging");
+          assert.equal(run.pr_key, "owner/repo#801", "the adopted PR key is recorded on the run");
+          const prs = await app.db.table<PrRow>("pull_requests", "pr_key").find({ pr_key: "owner/repo#801" });
+          assert.equal(prs.length, 1, "the adopted PR was enrolled into the convergence loop (submitPr)");
+
+          // A native user-task escalation was never parked — the machine-recoverable outcome was
+          // reconciled without pulling in a person.
+          const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: run.process_key! });
+          assert.ok(
+            !tasks.some((t) => t.elementId === "escalation"),
+            "no human-escalation task was created for the adopted run",
+          );
+        },
+      );
+    } finally {
+      githubState.openPrs.delete("feat/issue-7");
     }
   });
 

@@ -141,7 +141,7 @@ test("escalate REQUEST → Tasks-inbox row → operator ALLOW via the completion
   assertEquals(result.completion.elementId, "acp-permission");
   assertEquals(completed.length, 1);
   assertEquals(completed[0].userTaskKey, "ut-perm-1");
-  assertEquals(completed[0].variables, { optionId: "allow", allowed: true });
+  assertEquals(completed[0].variables, { optionId: "allow", allowed: true, completedUserTaskKey: "ut-perm-1", completedCompletionId: 1 });
   assertEquals(stores.task_completions.rows.length, 1);
   assertEquals(stores.task_completions.rows[0].actor_kind, "human");
 
@@ -173,7 +173,7 @@ test("escalate REQUEST → operator DENY via the completion door → RESOLUTION 
   });
 
   assertEquals(result.completion.ok, true);
-  assertEquals(completed[0].variables, { optionId: "deny", allowed: false });
+  assertEquals(completed[0].variables, { optionId: "deny", allowed: false, completedUserTaskKey: "ut-perm-2", completedCompletionId: 1 });
   assertEquals(frames.length, 1);
   const resolution = decodeResolution(frames[0]);
   assertEquals(resolution.callId, "job-deny");

@@ -69,12 +69,18 @@ function gateway(db: DatabaseSync, name: string, pk: string) {
  * that decorates `table` on the returned source sees its decoration inside the transaction too. */
 type MemDataSource = {
   table: (name: string, pk?: string) => ReturnType<typeof gateway>;
+  query<T = unknown>(sql: string, params?: unknown[]): Promise<T[]>;
   tx<T>(fn: (t: MemDataSource) => Promise<T>): Promise<T>;
 };
 
 function openDataSource(db: DatabaseSync): MemDataSource {
   const ds: MemDataSource = {
     table: (name, pk = "id") => gateway(db, name, pk),
+    // The row-returning raw-SQL surface (mirrors the runtime `DataSource.query`) so tests exercise a
+    // handler's bounded `WHERE … IN (…)` reads against genuine SQLite rather than a mock.
+    async query<T = unknown>(sql: string, params: unknown[] = []): Promise<T[]> {
+      return db.prepare(sql).all(...params.map(coerce)) as T[];
+    },
     async tx(fn) {
       db.exec("BEGIN");
       try {

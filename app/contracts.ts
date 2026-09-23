@@ -132,6 +132,14 @@ export const ENV_CONTRACTS = {
     semantics: "Maximum transient base/head-moved merge-race retries per PR before escalating.",
     default: "5",
   },
+  NANO_PR_MAX_ACK_RETRIES: {
+    category: "env",
+    name: "NANO_PR_MAX_ACK_RETRIES",
+    owner: "app/service.ts",
+    semantics:
+      "Maximum bounded review-round re-dispatches the convergence loop makes to auto-ack unacked suppressed advisories before escalating to a human (#796); 0 escalates on the first ack-only block.",
+    default: "2",
+  },
   NANO_PR_MAX_MERGE_STALL_ROUNDS: {
     category: "env",
     name: "NANO_PR_MAX_MERGE_STALL_ROUNDS",
@@ -145,6 +153,7 @@ export const ENV_CONTRACTS = {
     name: "NANO_PR_REVIEW_WAIT_TIMEOUT",
     owner: "app/service.ts",
     semantics: "How long to wait for a review before nudging/escalating (FEEL/ISO-8601 duration).",
+    default: "PT30M",
   },
   NANO_PR_REVIEW_NUDGE_MINUTES: {
     category: "env",
@@ -223,6 +232,22 @@ export const ENV_CONTRACTS = {
     owner: "main.ts",
     semantics:
       "Feature flag for the agentic supply endpoint; a value of 0/off/false/no disables it (enabled when unset).",
+  },
+  NANO_AGENTIC_MIN_HARNESS_PROTOCOL: {
+    category: "env",
+    name: "NANO_AGENTIC_MIN_HARNESS_PROTOCOL",
+    owner: "app/harnessProtocol.ts",
+    semantics:
+      "Minimum worker-harness protocol version a worker must advertise at enrolment to be considered healthy (issue #802). A worker advertising a version below this — or advertising NO version at all (absent = stale) — is flagged stale in getAgenticSupply / the registry and, under NANO_AGENTIC_STALE_HARNESS_POLICY=refuse, is refused agent-job routing. Non-integer/blank degrades to the default.",
+    default: "1",
+  },
+  NANO_AGENTIC_STALE_HARNESS_POLICY: {
+    category: "env",
+    name: "NANO_AGENTIC_STALE_HARNESS_POLICY",
+    owner: "app/harnessProtocol.ts",
+    semantics:
+      "How the app treats a stale worker harness (issue #802): 'flag' (default) only marks it stale for observability/drain; 'refuse' additionally withholds its SERVE tokens at enrol so it wins no job leases. Anything other than the exact token 'refuse' is treated as 'flag' so a typo never silently drains the fleet.",
+    default: "flag",
   },
   NANO_WORKFORCE_GIT_SHA: {
     category: "env",
@@ -399,9 +424,9 @@ export const WIRE_CONTRACTS = {
     name: "io.nanobpm.agentTask.repository",
     owner: "app/repoEnvelope.ts",
     semantics:
-      "Repo-provisioning envelope the app emits as a `createInstance` process variable (`repoEnvelopeVars`, app/repoEnvelope.ts) and the c8ctl worker harness consumes to provision an isolated clone — instead of the agent inheriting the worker's launch dir (issue #684). `ref` is the branch checked out: the PR HEAD branch on the PR-based paths (review-round / fix-ci / rebase), or — on the PRE-PR implementation path (feature.bpmn / plan-fanout's `implement-cell`, issue #684; the delivery-graph runner's agent cells, issue #686) — the BASE branch, off which the harness cuts a new feature branch named by the optional `branch.create` (the deterministic `feat/<task.id>`, emitted only for a single-task feature run; the epic seed AND the delivery-graph run-root seed omit it so each fan-out slice's agent branches per node/MI child). Beyond `{provider,url,ref}`, it carries clone-shaping fields for large monorepos (issue #287): `singleBranch:true` + `filter:\"blob:none\"` (a branch-scoped, blobless partial clone — trees fetched up-front, blobs lazily, no `--depth 1` so the merge-base/3-dot diff stays valid) and an optional `baseRef` (the PR base branch, emitted only when resolvable, so the harness fetches its tip and keeps `origin/<base>` reachable) and a `cloneTimeoutMs` (from `NANO_PR_CLONE_TIMEOUT_MS`, default 600000 = 10 min) that raises the harness's 120s default so a large monorepo's blobless single-branch clone provisions instead of dying at 120s (issue #694). World-restore (issue #324, ADR 0062 Slice 4/5): an optional `sha` — the last durable push-checkpoint — is emitted so a REPLACEMENT activation on a fresh worktree reconstructs the tree to the EXACT pushed SHA (inverting the round's `git push` into `git fetch && git checkout <sha>`), omitted when the PR has no checkpoint yet. The field is named `sha` because that is the field the c8ctl harness's `provisionRepo` reads to drive the checkout — an earlier `commitSha` key was a silent no-op (issue #695). Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91).",
+      "Repo-provisioning envelope the app emits as a `createInstance` process variable (`repoEnvelopeVars`, app/repoEnvelope.ts) and the c8ctl worker harness consumes to provision an isolated clone — instead of the agent inheriting the worker's launch dir (issue #684). `ref` is the branch checked out: the PR HEAD branch on the PR-based paths (review-round / fix-ci / rebase), or — on the PRE-PR implementation path (feature.bpmn / plan-fanout's `implement-cell`, issue #684; the delivery-graph runner's agent cells, issue #686) — the BASE branch, off which the harness cuts a new feature branch named by the optional `branch.create` (the deterministic `feat/<task.id>`, emitted for a single-task feature run AND — per issue #776 — the deterministic `feat/<node.id>` for each single-instance delivery-graph agent cell, injected per-cell by `agentNodeRepoEnvelope`/`app/deliveryRunner.ts` so a forgetful agent can never be left committing on the base branch and stranding its run on a non-ff push; the epic plan-fanout seed still omits it because its MI children each cut a per-child `feat/<task.id>` the app can't name at compile time, so those agents branch themselves). Beyond `{provider,url,ref}`, it carries clone-shaping fields for large monorepos (issue #287): `singleBranch:true` + `filter:\"blob:none\"` (a branch-scoped, blobless partial clone — trees fetched up-front, blobs lazily, no `--depth 1` so the merge-base/3-dot diff stays valid) and an optional `baseRef` (the PR base branch, emitted only when resolvable, so the harness fetches its tip and keeps `origin/<base>` reachable) and a `cloneTimeoutMs` (from `NANO_PR_CLONE_TIMEOUT_MS`, default 600000 = 10 min) that raises the harness's 120s default so a large monorepo's blobless single-branch clone provisions instead of dying at 120s (issue #694). World-restore (issue #324, ADR 0062 Slice 4/5): an optional `sha` — the last durable push-checkpoint — is emitted so a REPLACEMENT activation on a fresh worktree reconstructs the tree to the EXACT pushed SHA (inverting the round's `git push` into `git fetch && git checkout <sha>`), omitted when the PR has no checkpoint yet. The field is named `sha` because that is the field the c8ctl harness's `provisionRepo` reads to drive the checkout — an earlier `commitSha` key was a silent no-op (issue #695). Alongside the `repository` slice the envelope carries a sibling `task.allowPr: true` (issue #770): c8ctl-plugin-nano (≥1.60.2) only resolves the git credential (GITHUB_TOKEN, or the `gh` default) for repo provisioning behind that flag, so every repo-backed envelope sets it or the clone dies with `unable to get password from user`; the repoless path emits no envelope and so no `task`. Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91, branch-cut guard jwulf/c8ctl-plugin-nano#231).",
     shape:
-      '{ provider: "github", url: string, ref: string, singleBranch: true, filter: "blob:none", cloneTimeoutMs: number, baseRef?: string, sha?: string, branch?: { create: string } }',
+      'io.nanobpm.agentTask: { repository: { provider: "github", url: string, ref?: string, singleBranch: true, filter: "blob:none", cloneTimeoutMs: number, baseRef?: string, sha?: string, branch?: { create: string } }, task: { allowPr: true } }',
   },
   "epicSet.submit": {
     category: "wire",
@@ -494,6 +519,14 @@ export const WIRE_CONTRACTS = {
       "The engine-native AgentTask marker (issue #745, umbrella #746 — Camunda 8.10 parity). Every `senior:*` agent service task carries `<zeebe:agentDefinition agentType=\"external\" />` INSIDE its `<bpmn:extensionElements>`, COEXISTING with the existing `<zeebe:taskDefinition type=\"senior:*\"/>` dispatch verb (the verb stays, per #464). The marker makes the element eligible for engine-native AgentInstance minting by the worker harness (jwulf/c8ctl-plugin-nano#194): the harness mints Create/Update/Complete AgentInstance/AgentHistory records against the pinned engine (`@nanobpm/engine-wasm` 0.8.6, broker REST, SDK) while the element still emits its NORMAL `senior:*` job. `agentType=\"external\"` means the agent runs OUTSIDE the engine (a remote fleet worker), not an engine-embedded model call. This is the PRODUCER half; the durable AgentInstance/AgentHistory it mints is read back by the Cockpit historical view via `searchAgentInstanceHistory` (the CONSUMER half — see the `agentTask.historyRead` contract; the read path landed on `@nanobpm/urban`'s EngineClient in urban 0.93 / nanobpm/nano-ide#563). It is authored in the hand-written BPMN semantic model, NOT the generated `<bpmndi:…>` DI, and survives `npm run layout` untouched. Add the marker to a NEW `senior:*` agent task — never a second/synonym marker element.",
     shape: '<zeebe:agentDefinition agentType="external" /> (sibling of <zeebe:taskDefinition> in a senior:* service task\'s extensionElements)',
   },
+  "agentTask.autoSubscribe": {
+    category: "wire",
+    name: "agentTask.autoSubscribe",
+    owner: "resources/processes/*.bpmn",
+    semantics:
+      "The `--auto` opt-OUT marker (issue #779, harness jwulf/c8ctl-plugin-nano#235). The ONE agentic-task signal the harness `--auto` reconciliation scans is `<zeebe:agentDefinition agentType=\"external\" />` (the `agentTask.agentDefinition` marker) — it replaces the legacy `linkName=\"prompt\"` / header dual signal so both sides converge on a single convention. This marker is the escape hatch: a `<zeebe:property name=\"io.nanobpm.agentTask.autoSubscribe\" value=\"false\" />` INSIDE an agent task's `<bpmn:extensionElements>` declares the task is EXCLUDED from `--auto` auto-discovery and is served ONLY by a worker that explicitly subscribes (`--job-type <type>` / a profile capability). Absence of the marker (or any value other than the literal string `\"false\"`) means the task auto-subscribes as normal — opt-out is explicit and fail-safe. The `zeebe:property` is INERT to the engine (no runtime/behaviour change, no migration). Authored in the hand-written BPMN semantic model, NOT the generated `<bpmndi:…>` DI, and survives `npm run layout` untouched. The scan helper `agentTaskTypesOptedOutOfAuto(xml)` in app/agentic/vocab/job-types.ts is the ONE reader of this marker (mirrors `agentTaskTypesMissingExternalMarker`); a CI guard asserts its shape/placement. Use THIS one marker to opt a task out — never a second/synonym opt-out property.",
+    shape: '<zeebe:properties><zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" /></zeebe:properties> (the <zeebe:property> nested in a <zeebe:properties> wrapper inside a senior:* agent service task\'s <bpmn:extensionElements> — a bare <zeebe:property> directly under extensionElements is NOT the accepted shape; see SPEC.md)',
+  },
   "agentTask.historyRead": {
     category: "wire",
     name: "agentTask.historyRead",
@@ -544,6 +577,14 @@ export const TYPE_CONTRACTS = {
     semantics:
       "The `durable-resume` ENROLMENT GATE (issue #325, ADR 0062 Slice 5/5, the INTEGRATION slice). `durable-resume` is a worker attribute declared at enrolment (ADR 0056 §7 — capability gates enrolment, NEVER the routing token `network.role#seat`), recorded per worker instance in `worker_durable_resume` (migration 052). The enrol door (`operations/enrolAgenticWorker.ts`) records it via `recordEnrolment`; `app/service.ts` consults `fleetSupportsDurableResume` before emitting the world-restore `commitSha` (the `io.nanobpm.agentTask.repository` envelope) so a re-leased `senior:pr-review` round RESUMES only on a participating fleet and gracefully DEGRADES (redriven from scratch) otherwise. Consume this ONE module for the durable-resume gate — do not re-declare a synonym or read the flag off a second store.",
     module: "app/durableResume.ts",
+  },
+  HarnessProtocolRegistry: {
+    category: "type",
+    name: "HarnessProtocolRegistry",
+    owner: "app/harnessProtocol.ts",
+    semantics:
+      "The durable registry of per-worker advertised harness protocol version (issue #802), over `worker_harness_protocol` (migration 107) through the RAD `Table<T>` surface — mirroring {@link DurableResumeRegistry}. `harness-protocol` is a worker ATTRIBUTE advertised at enrolment (ADR 0056 §7 — capability gates enrolment, NEVER the routing token `network.role#seat`), recorded per worker instance by `recordEnrolment` from the enrol door (`operations/enrolAgenticWorker.ts`); a MISSING version is first-class STALE. It is the ONE shared source consumed by enrolment (record), supply (`getAgenticSupply` staleness verdict) and registry reporting (`computeRegistryReport` → `staleWorkers`, which folds a non-empty stale set into the overall red drain signal). The bounded `protocolsFor(instances)` read scopes to the live presence keys via a single `WHERE instance IN (…)` query — never an N+1 per-worker `findOne`. Consume this ONE module for the harness-protocol gate — do not re-declare a synonym or read the version off a second store.",
+    module: "app/harnessProtocol.ts",
   },
 } as const satisfies Record<string, TypeContract>;
 

@@ -4,8 +4,9 @@
 // `addressed` row for this `round`. Re-inserting a `rounds` row there would record one round as
 // both `addressed` and `blocked`, making round history/UI ambiguous. The stalled arm therefore
 // passes `recordRound=false`, which must suppress the round insert while still opening the
-// escalation. The agent-raised / max-rounds arms omit the flag (no prior round row) and must
-// still record the round.
+// escalation. After #786/#789 the max-rounds arm ALSO runs after `persist-round` (the round-cap
+// guard moved downstream of progress classification) and likewise passes `recordRound=false`; an
+// agent-raised arm with no prior round row omits the flag and must still record the round.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import handler from "../workers/persist-escalation/worker.ts";
@@ -49,9 +50,9 @@ test("stalled arm (recordRound=false) does not insert a duplicate rounds row", a
   assertEquals((out as any).escalationId, 42);
 });
 
-test("escalation arm without the flag still records the round", async () => {
+test("an agent-raised arm without the flag still records the round", async () => {
   const { app, inserts } = fakeApp();
-  const job = { variables: { prKey: "o/r#1", round: 3, status: "blocked", question: "max rounds" } };
+  const job = { variables: { prKey: "o/r#1", round: 3, status: "blocked", question: "needs input" } };
   await handler(job as any, app as any);
   assertEquals(inserts.rounds.length, 1);
   assertEquals((inserts.rounds[0] as any).round_no, 3);
@@ -183,14 +184,15 @@ test("persist-escalation heals from the prKey when repo/prNumber are absent", as
 
 // #333 — the control-flow escalation arms (no-progress / review-stalled / unaddressed-comments /
 // max-rounds) each set an explicit `status="blocked"` + a concrete `question` via `zeebe:input`
-// (recordRound=false for the three that run after `persist-round`). They now route through
+// (recordRound=false on every arm that runs after `persist-round` — which, after #786/#789 moved the
+// round-cap guard downstream of progress classification, now INCLUDES max-rounds). They route through
 // `gw-escalated`, which branches on the worker's `escalated` output. This pins the contract that
 // gateway depends on: a control-flow arm with a real question OPENS an escalation and returns
 // `escalated:true` + the (trimmed) question, so gw-escalated parks a wait carrying that question —
 // never a dead wait with a null question (the #333 defect).
 test("a control-flow arm with a concrete question opens an escalation gw-escalated can park", async () => {
   const { app, inserts } = fakeApp();
-  const question = "No review arrived within the review-wait timeout (PT20M). A human must decide how to proceed.";
+  const question = "No review arrived within the review-wait timeout (PT30M). A human must decide how to proceed.";
   const job = { variables: { prKey: "o/r#5", round: 2, status: "blocked", question, recordRound: false } };
   const out = await handler(job as any, app as any);
   assertEquals((out as any).escalated, true, "a real control-flow escalation reports escalated:true");

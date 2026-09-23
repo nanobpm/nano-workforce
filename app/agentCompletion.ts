@@ -21,7 +21,8 @@
 // an escalation user task" — the agent path is an extension of it, not a parallel copy.
 
 import { readFileSync } from "node:fs";
-import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import type { DataLayer, EngineClient, GatewayDataSource } from "@nanobpm/urban";
+import { invalidateAdjudication, invalidateAdjudicationByCompletion } from "./adjudications.ts";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT } from "./userTasks.ts";
@@ -51,6 +52,13 @@ export interface TaskCompletion {
   variables_json: string;
   /** 1 when a human may still override this completion (agent completions). */
   reversible: number;
+  /** 1 when this completion is a machine AUTO-APPLY of a prior durable adjudication (issue #806), not
+   *  a first-hand submission — recorded reversible so a human can always override the replayed answer. */
+  auto_applied: number;
+  /** The `pr_adjudications.id` this completion replayed, when it is an auto-apply (issue #806). NULL for
+   *  a first-hand submission. `revertAgentCompletion` invalidates this exact adjudication on revert so
+   *  the override is not silently re-applied by the next poller pass. */
+  source_adjudication_id: number | null;
   /** 1 once a human has reverted/overridden it. */
   reverted: number;
   reverted_by: string | null;
@@ -269,14 +277,22 @@ export function validateEscalationVariables(
   return null;
 }
 
-/** The canonical attributed completer. Records an attribution row in `task_completions` (reversible
- *  iff the actor is an agent) and THEN completes the user task with the exact typed `variables` — so
- *  the ledger row can never be lost by a resume that fires before the write. If the engine
- *  completion throws (a failed/rejected completion, or a lost race), the just-written row is rolled
- *  back so the ledger never claims a completion that did not happen, and the error is re-raised so
- *  the caller can retry. Returns the new completion id. This is the ONE host-side implementation of
- *  "complete an escalation user task"; both the agent path and the human out-of-band answer paths
- *  route through it. */
+/** The canonical attributed completer. Records an attribution row in `task_completions` and THEN
+ *  completes the user task with the exact typed `variables` — so the ledger row can never be lost by a
+ *  resume that fires before the write. If the engine completion throws (a failed/rejected completion,
+ *  or a lost race), the just-written row is rolled back so the ledger never claims a completion that
+ *  did not happen, and the error is re-raised so the caller can retry. Returns the new completion id.
+ *  This is the ONE host-side implementation of "complete an escalation user task"; the agent path, the
+ *  human out-of-band answer path, AND the auto-apply replay all route through it.
+ *
+ *  Reversibility of the recorded row: a FIRST-HAND completion is reversible IFF the actor is an agent —
+ *  a human's first-hand answer is the authority and is NOT reversible. `opts.autoApplied` OVERRIDES
+ *  that: an auto-applied REPLAY of a prior durable adjudication (issue #806) is ALWAYS recorded
+ *  reversible (and flagged `auto_applied`) even when it preserves a prior HUMAN adjudicator's
+ *  attribution, so a machine re-application is never an unchallengeable human authority and an operator
+ *  may override it. `opts.sourceAdjudicationId` links such a replay back to the adjudication it
+ *  re-applied (persisted only when `autoApplied`) so a later revert can invalidate it. Callers must
+ *  therefore NOT infer irreversibility from a `human` attribution alone — check `auto_applied`. */
 export async function completeUserTaskAttributed(
   data: DataLayer,
   engine: EngineClient,
@@ -287,6 +303,7 @@ export async function completeUserTaskAttributed(
     variables: Record<string, unknown>;
   },
   actor: Actor,
+  opts?: { autoApplied?: boolean; sourceAdjudicationId?: number },
 ): Promise<{ completionId: number }> {
   // Normalize + validate the attribution keys upfront so the ledger can never record a row with
   // blank attribution or whitespace-mismatched keys.
@@ -295,7 +312,12 @@ export async function completeUserTaskAttributed(
   const actorId = actor.id.trim();
   if (!actorId) throw new Error("actor id is required");
 
-  const reversible = actor.kind === "agent";
+  // An AUTO-APPLIED replay of a prior durable adjudication (issue #806) is always human-overridable,
+  // regardless of the original actor kind — a machine re-application must never be an unchallengeable
+  // authority, so it is recorded `reversible` (and marked `auto_applied`) even when attributed to a
+  // prior HUMAN adjudicator.
+  const autoApplied = opts?.autoApplied === true;
+  const reversible = autoApplied || actor.kind === "agent";
   const id = await taskCompletions(data).insert({
     user_task_key: userTaskKey,
     process_instance_key: target.processInstanceKey ?? null,
@@ -304,6 +326,10 @@ export async function completeUserTaskAttributed(
     actor_id: actorId,
     variables_json: JSON.stringify(target.variables ?? {}),
     reversible: reversible ? 1 : 0,
+    auto_applied: autoApplied ? 1 : 0,
+    // Link an auto-apply back to the durable adjudication it replayed (issue #806) so a later revert can
+    // invalidate it. NULL for a first-hand submission; ignored (NULL) unless this is an auto-apply.
+    source_adjudication_id: autoApplied ? (opts?.sourceAdjudicationId ?? null) : null,
     reverted: 0,
     reverted_by: null,
     reverted_note: null,
@@ -312,7 +338,23 @@ export async function completeUserTaskAttributed(
   });
   const completionId = Number(id);
   try {
-    await engine.completeUserTask(userTaskKey, target.variables);
+    // Carry the completed user-task's identity forward on the resumed token (Copilot review of #806).
+    // `pr.answer-escalation` (record-answer) reconciles the durable adjudication AFTER this completion
+    // resumes the token; a convergence-loop instance is REUSED across rounds, so correlating the
+    // winning completion by process-instance + answer alone is ambiguous — an older round's completion,
+    // or a delayed higher-id same-answer row, can share both. Stamping the exact `userTaskKey` here lets
+    // that step require an EXACT ledger match against THIS wait-answer's completion (and fail open to a
+    // null adjudicator when the identity is absent) rather than attribute to an unrelated row. Reserved,
+    // additive keys — consumed only by record-answer; every other escalation flow simply never reads them.
+    // Injected only into the resumed token's variables, NOT the ledger row's `variables_json` above, so
+    // the recorded completion payload (and the answer correlation over it) is unchanged.
+    //
+    // Also stamp the EXACT ledger id of THIS completion (`completedCompletionId`). The engine resumes
+    // the token with exactly ONE completion's variables — the winner's — so its ledger id uniquely
+    // identifies the winning racer even when both racers submitted the IDENTICAL answer (answer
+    // correlation alone cannot separate two same-answer rows on the same `user_task_key`; the higher-id
+    // one may be the loser — Copilot review of #806). record-answer selects that exact row by id.
+    await engine.completeUserTask(userTaskKey, { ...target.variables, completedUserTaskKey: userTaskKey, completedCompletionId: completionId });
   } catch (err) {
     // The completion did not take — roll the attribution row back so the ledger reflects only
     // completions that actually happened, and let the caller retry. The rollback is best-effort:
@@ -355,19 +397,28 @@ export interface AgentCompleteResult {
  *  completer passes the wider `HUMAN_COMPLETABLE_ELEMENTS` (which also admits `feature-blocked`).
  *  Queries `openUserTasks` (lifecycle-state `CREATED` only), NOT `searchUserTasks` (which returns
  *  tasks in ANY state) — a looping instance keeps COMPLETED/CANCELED tasks whose key could otherwise
- *  match and drive a doomed re-completion (a thrown 5xx) instead of the intended 404-style no-op. */
+ *  match and drive a doomed re-completion (a thrown 5xx) instead of the intended 404-style no-op.
+ *
+ *  When the CALLER already knows the task's owning `processInstanceKey` (the convergence poller does —
+ *  it just discovered the task in its sweep), pass it so the resolve scans that ONE instance instead of
+ *  every open user task engine-wide. The auto-apply resume runs this once per already-adjudicated PR in
+ *  a single poll pass, so an unfiltered global scan there is O(N²) work/REST load across the fleet
+ *  (Copilot review of #806); a `processInstanceKey`-filtered scan makes it O(N). The filter never
+ *  changes the outcome — the task lives in exactly that instance — and a miss still fails open (the
+ *  one-off human/agent doors, which hold only a bare key, omit it and keep the engine-wide scan). */
 async function resolveEscalationTask(
   engine: EngineClient,
   userTaskKey: string,
   allowed: ReadonlySet<string> = ESCALATION_TASK_ELEMENTS,
-): Promise<{ ok: true; elementId: string } | { ok: false; reason: string }> {
-  const open = await engine.openUserTasks();
+  processInstanceKey?: string,
+): Promise<{ ok: true; elementId: string; processInstanceKey: string | null } | { ok: false; reason: string }> {
+  const open = await (processInstanceKey ? engine.openUserTasks({ processInstanceKey }) : engine.openUserTasks());
   const match = open.find((t) => t.userTaskKey === userTaskKey);
   if (!match) return { ok: false, reason: "no open completable task" };
   if (!match.elementId || !isCompletableElement(match.elementId, allowed)) {
     return { ok: false, reason: "not a completable task" };
   }
-  return { ok: true, elementId: match.elementId };
+  return { ok: true, elementId: match.elementId, processInstanceKey: match.processInstanceKey ?? null };
 }
 
 /** Whether an open task's `elementId` is completable through the given `allowed` surface. Exact-set
@@ -406,7 +457,7 @@ export async function completeEscalationAsAgent(
   const { completionId } = await completeUserTaskAttributed(
     data,
     engine,
-    { userTaskKey, elementId: resolved.elementId, variables: input.variables },
+    { userTaskKey, processInstanceKey: resolved.processInstanceKey, elementId: resolved.elementId, variables: input.variables },
     { kind: "agent", id: agentId },
   );
   return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };
@@ -439,8 +490,45 @@ export async function completeEscalationAsHuman(
   const { completionId } = await completeUserTaskAttributed(
     data,
     engine,
-    { userTaskKey, elementId: resolved.elementId, variables: input.variables },
+    { userTaskKey, processInstanceKey: resolved.processInstanceKey, elementId: resolved.elementId, variables: input.variables },
     { kind: "human", id: operatorId },
+  );
+  return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };
+}
+
+/** AUTO-APPLY a prior durable adjudication to a re-derived escalation (issue #806). The convergence
+ *  poller calls this to resume an already-answered `wait-answer` with the recorded answer instead of
+ *  re-parking a human — through the SAME canonical `completeUserTaskAttributed` door, so there is no
+ *  parallel completion path. Unlike `completeEscalationAsHuman` it records the completion `auto_applied`
+ *  (a machine replay, distinguishable from a first-hand submission in the ledger) and PRESERVES the
+ *  prior adjudicator's attribution kind (`human`/`agent`), so replaying an agent-settled decision can
+ *  never launder it into an irreversible human authority (Copilot review of #806). Auto-applied
+ *  completions are always recorded reversible, so a human may override the replayed answer. A key with
+ *  no matching open escalation task is a 404-style no-op. Pass the poller-known `processInstanceKey` so
+ *  the resolve scans that one instance instead of an engine-wide `openUserTasks()` — the resume runs
+ *  once per already-adjudicated PR per poll pass, so a global scan there is O(N²) (Copilot review of #806). */
+export async function completeEscalationAutoApplied(
+  data: DataLayer,
+  engine: EngineClient,
+  input: { userTaskKey: string; variables: Record<string, unknown>; actor: Actor; adjudicationId?: number; processInstanceKey?: string },
+): Promise<AgentCompleteResult> {
+  const userTaskKey = input.userTaskKey.trim();
+  if (!userTaskKey) return { ok: false, reason: "userTaskKey is required" };
+  const actorId = input.actor.id.trim();
+  if (!actorId) return { ok: false, reason: "actor id is required" };
+
+  const resolved = await resolveEscalationTask(engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS, input.processInstanceKey?.trim() || undefined);
+  if (!resolved.ok) return resolved;
+
+  const invalid = validateEscalationVariables(resolved.elementId, input.variables);
+  if (invalid) return { ok: false, reason: invalid };
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey, processInstanceKey: resolved.processInstanceKey, elementId: resolved.elementId, variables: input.variables },
+    { kind: input.actor.kind, id: actorId },
+    { autoApplied: true, sourceAdjudicationId: input.adjudicationId },
   );
   return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };
 }
@@ -471,11 +559,63 @@ export async function revertAgentCompletion(
   if (!reverterId) return { ok: false, reason: "reverter id is required" };
 
   const correction = typeof note === "string" ? note.trim() : "";
-  await taskCompletions(data).update(completionId, {
-    reverted: 1,
-    reverted_by: reverterId,
-    reverted_note: correction || null,
-    reverted_at: now(),
-  });
+  // TOMBSTONE the durable adjudication(s) this completion produced AND flip the ledger `reverted` flag
+  // in ONE transaction (issue #806 review — atomicity). These are two writes; committing them
+  // atomically is what makes the revert safe against BOTH a crash mid-revert AND a concurrent revive:
+  //   • Retry-safety: if either write throws, the whole transaction rolls back, so a retry sees an
+  //     un-reverted, un-tombstoned row and re-runs cleanly — it never trips the `row.reverted` guard
+  //     above with a still-live adjudication (an unrecoverable override).
+  //   • Revive-race safety: `record-answer` is at-least-once, so a redelivered `record-answer` for this
+  //     completion can run concurrently with this revert. Were the tombstone and the `reverted` flip
+  //     SEPARATE writes, that redelivery could observe the intermediate state (`invalidated_at` set but
+  //     `reverted` still 0), enter {@link reviveTombstonedDecision}, and clear the operator's tombstone —
+  //     resurrecting the reverted decision. Inside a transaction the intermediate state is never visible
+  //     to another connection: the concurrent revive observes EITHER neither write (adjudication live →
+  //     not revivable) OR both (`reverted = 1` → its revive guard fails). Marking the ledger reverted
+  //     alone would NOT stop the replay — the convergence poller matches the unchanged `pr_adjudications`
+  //     row and re-applies the overridden answer on the next derived task, silently undoing this revert.
+  //
+  // Two disjoint links must be severed, and each no-ops when inapplicable:
+  //   • auto-applied replay — this completion replayed an EXISTING decision (`auto_applied=1`,
+  //     `source_adjudication_id` set); invalidate that decision by id.
+  //   • first-hand agent answer — this completion is the agent's own answer to a `wait-answer`
+  //     (`auto_applied=0`, no `source_adjudication_id`) that RECORDED a decision linked back by
+  //     `source_completion_id`; invalidate by completion id. Without this the reverted first-hand
+  //     answer stays live and the poller re-auto-applies it.
+  //
+  // The by-completion tombstone covers the record-THEN-revert ordering (the decision row already
+  // exists, so the tombstone finds and invalidates it). The MIRROR ordering — a revert that lands
+  // BEFORE the downstream `record-answer` job has inserted the row — is closed on the WRITE side:
+  // `recordAdjudication`/`healBlankProvenance` fence their INSERT/UPDATE on the source completion NOT
+  // being reverted ({@link notRevertedGuard}), so once we commit `reverted` below a late record-answer
+  // affects zero rows and cannot create a live decision linked to this reverted completion (issue #806
+  // review, Copilot). SQLite serialises the two writes, so whichever commits first the other observes.
+  // The `row.reverted` guard above is a READ from before this transaction, so it cannot serialise two
+  // concurrent reverts of the SAME completion: both snapshots observe `reverted = 0`, both pass the
+  // guard, and a blind `update(completionId, …)` would let the SECOND commit overwrite the FIRST's
+  // `reverted_by`/`reverted_note`/`reverted_at`, laundering the audit trail and violating the documented
+  // "a completion can only be reverted once" invariant (issue #806 review, Copilot). Fence the ledger
+  // flip on `reverted = 0` inside the transaction so exactly one revert wins: SQLite serialises the two
+  // transactions, so the loser's guarded UPDATE changes ZERO rows. On that zero-row loss we throw to roll
+  // back the WHOLE transaction — including this revert's tombstones — leaving the winner's revert and its
+  // tombstones as the sole durable state, and report the loss as the same idempotent `already reverted`.
+  const src = data.open();
+  const alreadyReverted = Symbol("already-reverted");
+  try {
+    await src.tx(async (t: GatewayDataSource) => {
+      if (row.auto_applied && row.source_adjudication_id != null) {
+        await invalidateAdjudication(data, row.source_adjudication_id, t);
+      }
+      await invalidateAdjudicationByCompletion(data, completionId, t);
+      const res = await t.exec(
+        `UPDATE "task_completions" SET "reverted" = 1, "reverted_by" = ?, "reverted_note" = ?, "reverted_at" = ? WHERE "id" = ? AND "reverted" = 0`,
+        [reverterId, correction || null, now(), completionId],
+      );
+      if (res.changed === 0) throw alreadyReverted;
+    });
+  } catch (err) {
+    if (err === alreadyReverted) return { ok: false, reason: "completion already reverted" };
+    throw err;
+  }
   return { ok: true, completionId };
 }

@@ -16,6 +16,10 @@ export interface AdmitGithubState {
   branches: Map<string, string>; // branch → head sha
   creates: { ref: string; sha: string }[];
   resets: string[]; // any PATCH/force-update on an existing ref (must stay empty)
+  /** Open PRs keyed by head branch (issue #801): the implement-cell reconcile step lists PRs for a
+   *  head via `listPrsForHead`. Empty by default → the pulls listing returns `[]` (no adoptable PR),
+   *  so suites that don't opt in keep exactly today's escalate behaviour. */
+  openPrs: Map<string, { number: number; base?: string }>;
 }
 
 /** Build a fresh admit-github state with the default branch pre-seeded with a HEAD sha so an
@@ -30,6 +34,7 @@ export function admitGithubState(
     branches: new Map([[defaultBranch, "0".repeat(40)]]),
     creates: [],
     resets: [],
+    openPrs: new Map(),
   };
 }
 
@@ -71,6 +76,24 @@ function admitFetch(state: AdmitGithubState) {
     if (method === "PATCH" && path.startsWith(`/repos/${state.repo}/git/refs/heads/`)) {
       state.resets.push(decodeURIComponent(path.split("/git/refs/heads/")[1] ?? ""));
       return Promise.resolve(json({ ok: true }));
+    }
+    // GET /repos/{repo}/pulls?state=…&head=owner:branch → the open PRs for a head branch, as read by
+    // `listPrsForHead` (the implement-cell reconcile step, issue #801). Default empty state → `[]`.
+    if (method === "GET" && path === `/repos/${state.repo}/pulls`) {
+      const head = u.searchParams.get("head") ?? "";
+      const branch = head.includes(":") ? head.slice(head.indexOf(":") + 1) : head;
+      const hit = state.openPrs.get(branch);
+      if (!hit) return Promise.resolve(json([]));
+      return Promise.resolve(
+        json([
+          {
+            number: hit.number,
+            html_url: `https://github.com/${state.repo}/pull/${hit.number}`,
+            state: "open",
+            base: { ref: hit.base ?? state.defaultBranch },
+          },
+        ]),
+      );
     }
     // Any other endpoint is a best-effort read the sealed transport used to skip → 404 (null).
     return Promise.resolve(new Response("Not Found", { status: 404 }));

@@ -1,0 +1,28 @@
+-- Scope pr.persist-round's idempotent upsert to the process instance that wrote the row (issue #786).
+--
+-- The idempotent `(pr_key, round_no)` upsert in pr.persist-round exists so a husk auto-retry — which
+-- re-enters `review-round` WITHOUT advancing the round counter, in the SAME convergence process
+-- instance — updates its round-record row in place instead of manufacturing a duplicate history row.
+-- Round ownership was previously INFERRED from `status` (reuse any non-`needs_input`/`blocked` row),
+-- but status is not identity: `submitPr` re-opens a previously converged/abandoned/merged PR at
+-- `current_round = 1` WITHOUT deleting `rounds` history, so a fresh convergence run (a NEW process
+-- instance) at round 1 would find the prior run's `addressed`/`waiting`/`converged` round-1 row and
+-- overwrite its summary/transcript/worker/timestamps — destroying the canonical history across
+-- resubmissions.
+--
+-- Persist the writing process instance's key so the upsert can reuse ONLY a row THIS run wrote: a
+-- husk retry (same `process_instance_key`) updates in place; a resubmission (a different key) inserts
+-- a fresh row, leaving every prior run's history intact. Additive and nullable — pre-#786 rows and
+-- rows written by an engine that does not surface the key read back NULL for this column.
+--
+-- Upgrade behaviour of those NULL rows (persist-round's reuse predicate):
+--   * A KEYED engine job (the normal production case) reuses a row ONLY when its key equals the
+--     current `process_instance_key`, so a NULL-key row NEVER matches and is never reused. The
+--     status-only heuristic applies ONLY to a KEYLESS job (testkit/synthetic, no process key).
+--   * Consequently a husk auto-retry that straddles this deploy — its first attempt wrote a NULL-key
+--     row before the migration, its retry runs after with a concrete key — will not reuse that
+--     earlier row and instead inserts a fresh round-record row. That lost idempotency is INTENTIONAL
+--     and self-healing: it touches only a run whose husk-retry brackets the deploy, costs at worst
+--     one duplicate history row for that single round, and never corrupts data or history.
+-- Additive and nullable, so it is safe to apply forward over any earlier schema and re-runs are no-ops.
+ALTER TABLE rounds ADD COLUMN process_instance_key TEXT;

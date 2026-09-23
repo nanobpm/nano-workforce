@@ -105,6 +105,10 @@ const handler: AppJobHandler<In> = async (job, app) => {
       worker,
       started_at: now,
       ended_at: now,
+      // Stamp the writing run's identity (issue #786) so the round-record row carries the same
+      // run-identity column pr.persist-round scopes its idempotent upsert by. A pr.persist-round
+      // resume for this same numeric round then reuses ONLY its own row, never this escalation row.
+      process_instance_key: job.processInstanceKey != null ? String(job.processInstanceKey) : null,
     });
   }
   const escalationId = await app.data.table("escalations", "id").insert({

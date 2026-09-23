@@ -38,9 +38,16 @@ export interface SupplyWorkerReport {
   readonly live: boolean;
   /** How long since the worker's last liveness refresh, in ms. */
   readonly staleMs: number;
+  /**
+   * Whether the worker's HARNESS is stale — its advertised harness protocol is below the configured
+   * minimum, or it advertised none at all (issue #802). Distinct from {@link Liveness} `"stale"`,
+   * which grades heartbeat recency. A stale harness silently swallows machine-readable artifacts
+   * (AgentInstance / transcript / result envelope), so its jobs dead-end at human escalations.
+   */
+  readonly harnessStale?: boolean;
+  /** The harness protocol version the worker advertised at enrolment, if any (issue #802). */
+  readonly harnessProtocol?: number;
 }
-
-/** The supply registered under one leaf token. */
 export interface SupplyLeafReport {
   readonly token: string;
   readonly workers: readonly SupplyWorkerReport[];
@@ -128,6 +135,10 @@ export interface SupplyWorkerView {
   readonly liveness: Liveness;
   /** How long since the last liveness refresh, in ms. */
   readonly staleMs: number;
+  /** Whether the worker's harness protocol is stale (below minimum / absent) — issue #802. */
+  readonly harnessStale: boolean;
+  /** The advertised harness protocol version, if any (issue #802). */
+  readonly harnessProtocol?: number;
 }
 
 /** One leaf-token section in the renderable supply view. */
@@ -212,6 +223,12 @@ function workerView(
     correlations,
     liveness: liveness(worker, staleAfterMs),
     staleMs: worker.staleMs,
+    // Fail loud: a report without a harness verdict (an older/cached response) has no trustworthy
+    // protocol assessment, so keep the worker visible as STALE until the server supplies a healthy one
+    // — mirrors the server's `harness?.stale ?? true` (issue #802). Defaulting to `false` here would
+    // let a cached response hide exactly the workers this surface is meant to expose.
+    harnessStale: worker.harnessStale ?? true,
+    ...(worker.harnessProtocol !== undefined ? { harnessProtocol: worker.harnessProtocol } : {}),
   };
 }
 

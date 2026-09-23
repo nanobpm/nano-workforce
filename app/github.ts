@@ -11,6 +11,8 @@
 // The poller is app-side host glue (main.ts), so host-specific subprocess I/O is allowed here.
 // Cross-runtime: runs under Node (`node:child_process`).
 
+import { createHash } from "node:crypto";
+
 // Type-only import (erased at runtime, so no runtime cycle with mergeProtocol.ts, which imports
 // `fetchRepoFile` from here): `classifyMergeability` reads a repo's declared required checks to gate
 // a merge independently of GitHub branch protection.
@@ -21,6 +23,10 @@ export interface GhReview {
   id: number;
   state: string;
   submitted_at?: string;
+  /** The commit SHA the review was submitted against (GitHub's `commit_id`). Used to detect a
+   * review that predates the PR's current HEAD — a STALE review whose advisories are about code the
+   * head has since moved past (issue #799). Absent on data GitHub did not carry a `commit_id` for. */
+  commit_id?: string | null;
 }
 
 export type GithubTransport = "gh" | "token" | "auto";
@@ -59,7 +65,12 @@ function isGhAvailable(): Promise<boolean> {
 }
 
 /** Fetch the reviews for one PR via the configured transport. Throws on transport failure so
- * the caller can log-and-continue; returns `null` when no transport is usable (idle). */
+ * the caller can log-and-continue; returns `null` when no transport is usable (idle). Pages the
+ * FULL (oldest→newest) reviews list — the poller picks the newest fresh review by id, so reading
+ * only the first `per_page=100` page would, on a >100-review convergence loop, surface the OLDEST
+ * 100 and miss the genuinely newest review (repeatedly nudging while a current-head review sits on a
+ * later page, or classifying an old review as stale). This mirrors {@link fetchLatestCopilotReview}'s
+ * paging so both readers agree on which review is newest. */
 export async function fetchPrReviews(
   repo: string,
   number: number | string,
@@ -69,17 +80,43 @@ export async function fetchPrReviews(
   const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
   const path = `repos/${repo}/pulls/${number}/reviews?per_page=100`;
   if (useGh) {
-    const out = await runGh(["api", path, "-H", "Accept: application/vnd.github+json"]);
+    // `--paginate --slurp` walks EVERY page of the (oldest→newest) reviews array, so a >100-review
+    // convergence loop still surfaces the genuinely newest review rather than the oldest 100. Plain
+    // `--paginate` concatenates one JSON array PER PAGE (multiple documents) which `JSON.parse`
+    // cannot read; `--slurp` wraps the pages in an outer array we flatten one level (mirrors
+    // {@link githubReleasesCommand}/{@link parseReleases}).
+    const out = await runGh([
+      "api", "--paginate", "--slurp", path, "-H", "Accept: application/vnd.github+json",
+    ]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    return JSON.parse(out) as GhReview[];
+    return (JSON.parse(out) as GhReview[][]).flat();
   }
   if (!token) return null; // token mode with no token → poller idles
-  const r = await fetch(`https://api.github.com/${path}`, {
-    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
-  });
-  if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  return (await r.json()) as GhReview[];
+  // Page the token transport the same way; 20×100 reviews is far past any real convergence loop, and
+  // a genuinely deeper history we can't reach is unverifiable → fail CLOSED (throw) rather than
+  // return a partial list the poller would treat as complete (selecting an older review, re-nudging).
+  const reviews: GhReview[] = [];
+  const MAX_PAGES = 20;
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const r = await fetch(`https://api.github.com/${path}&page=${page}`, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+    });
+    if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const batch = (await r.json()) as GhReview[];
+    reviews.push(...batch);
+    // A short final page means we've read every review — the list is complete.
+    if (batch.length < 100) return reviews;
+    // A full page on the last allowed page is only truncated if GitHub says there's more; trust the
+    // `Link` header's `rel="next"` (mirrors {@link fetchPrFiles}) so an exact multiple of 100 isn't a
+    // false positive, and throw when the cap genuinely truncates rather than under-reading history.
+    if (page === MAX_PAGES && /<[^>]*>;\s*rel="next"/.test(r.headers.get("link") ?? "")) {
+      throw new Error(
+        `github pr reviews truncated: ${repo}#${number} exceeds ${MAX_PAGES * 100}-review paging cap`,
+      );
+    }
+  }
+  return reviews;
 }
 
 // ── Review-comment convergence gate (don't converge with unaddressed comments) ──────────────
@@ -90,9 +127,23 @@ export async function fetchPrReviews(
 //   • SUPPRESSED / low-confidence advisories — Copilot folds these into the review BODY under a
 //     "Suppressed comments (N)" block; they are NOT threads, cannot be resolved, and are re-listed
 //     every round. To make "acknowledged" trackable, the review-round agent must post a RESOLVED
-//     review thread carrying a `nano-ack: <path>:<line>` marker (the exact key from Copilot's
-//     `**path:line**` header) for each advisory it applies or declines. The gate then treats an
-//     advisory as addressed iff a resolved thread carries its ack marker.
+//     review thread carrying a `nano-ack:` marker for each advisory it applies or declines. The gate
+//     then treats an advisory as addressed iff a resolved thread carries a matching ack marker.
+//
+// The ack key must be LINE-STABLE. Keying it on `path:line` (issue #787) livelocks a DECLINED
+// advisory: Copilot re-emits a declined advisory every round, but any unrelated edit in the PR
+// shifts its line, so Copilot re-anchors it to a new line. A prior-round `nano-ack: path:OLD` no
+// longer matches the re-emitted `path:NEW`, the gate sees a freshly "unacknowledged" advisory, and
+// escalates to a human every round. The fix keys acknowledgement on a line-independent identity —
+// `<path>#<fingerprint>` of the advisory's PROSE — so a drifted line still matches. The resolved
+// ack thread is itself the durable store: its marker text survives across rounds regardless of the
+// line, so a decline stays acknowledged without the agent re-acking each round. The new marker is
+// `nano-ack: <path> :: <verbatim advisory text>`. This line-stable prose key is the SOLE ack
+// identity. A bare `nano-ack: <path>:<line>` form is NOT honoured: keyed only on `path:line`, it is
+// blind to the advisory's prose, so a resolved legacy ack for advisory A at a line would silently
+// acknowledge a genuinely NEW advisory B re-emitted at that same line — a false-OPEN this gate exists
+// to prevent. (Issue #787 introduces the ack mechanism itself in this change, so there is no pre-#787
+// legacy-ack corpus to protect by honouring the prose-blind form.)
 
 /** One PR review thread, narrowed to what the convergence gate needs. */
 export interface ReviewThread {
@@ -101,40 +152,198 @@ export interface ReviewThread {
   bodies: string[];
 }
 
-/** The `nano-ack:` acknowledgement marker the review-round agent stamps into the resolved thread
- * it opens per suppressed advisory. The captured group is the advisory key (`path:line`). */
-const ACK_MARKER = /nano-ack:\s*([^\s)>*]+:\d+)/gi;
+/** A suppressed / low-confidence Copilot advisory parsed out of a review body. Its `key` is the
+ * line-stable identity (survives a line drift); `label` is the human-facing `path:line` shown in
+ * block reasons. */
+export interface SuppressedAdvisory {
+  path: string;
+  line: number;
+  /** The advisory prose (first non-empty line after the header), used for the stable fingerprint. */
+  text: string;
+  /** Line-stable identity: `<path>#<fingerprint>` of the normalized prose. Survives line drift. */
+  key: string;
+  /** Human-facing `path:line` label for block-reason messages. */
+  label: string;
+}
 
-/** Parse the `path:line` keys of Copilot's suppressed / low-confidence advisories out of a review
- * body. Copilot renders them under a `<summary>Suppressed comments (N)</summary>` block, each as a
- * bold `**path:line**` header. Returns the de-duplicated keys (empty when there is no such block). */
-export function parseSuppressedAdvisories(reviewBody: string | null | undefined): string[] {
+/** Any `nano-ack:` marker — captures the rest of the marker's line (path + optional `:: text`). */
+const ACK_MARKER = /nano-ack:\s*([^\n\r]+)/gi;
+/** The ONLY honoured ack form: line-stable `<path> :: <advisory text>`. The delimiter is ` :: ` with
+ * REQUIRED surrounding whitespace (matching the canonical marker the agent authors), so a bare `::`
+ * inside a valid GitHub path (e.g. `src/a::b.ts`) is NOT mistaken for the separator — the path group
+ * parses non-greedily up to the first *whitespace-delimited* ` :: `, so a path containing spaces
+ * (e.g. `docs/my file.md`) is still honoured. A bare `<path>:<line>` marker is intentionally not
+ * parsed: keyed only on `path:line`, it is blind to the advisory prose and would false-OPEN a new
+ * advisory re-emitted at a previously-acked line. */
+const NEW_ACK = /^(.+?)\s+::\s+(.+)$/s;
+
+/** Normalize advisory prose to a line-/format-independent form before fingerprinting: strip a
+ * leading markdown bullet, NFC-normalize, lowercase, and collapse runs of WHITESPACE to a single
+ * space. Punctuation is PRESERVED, NOT collapsed: the prompt requires the agent to copy the
+ * advisory's first line VERBATIM, so whitespace/case tolerance is all that is needed to absorb
+ * trivial markdown/whitespace reflow. Collapsing every non-word run into a space (as an earlier
+ * revision did) instead ALIASES genuinely-distinct advisories whose prose differs only by
+ * punctuation-vs-space — e.g. `Use foo() here` vs `Use foo here`, or `foo/bar` vs `foo bar` — so a
+ * resolved ack for advisory A would silently acknowledge a DIFFERENT advisory B that normalizes to
+ * the same key: a false-OPEN this gate exists to prevent. Preserving punctuation errs toward a
+ * stricter match, which is fail-CLOSED: a benign punctuation mismatch merely re-escalates to a
+ * human, and never converges an unacknowledged advisory.
+ *
+ * NFC — canonical composition — is used deliberately in preference to NFKC. NFKC additionally folds
+ * COMPATIBILITY variants (full-width `！` → ASCII `!`, ligatures, super/subscripts, …), which would
+ * ALIAS genuinely-distinct advisories such as `Use foo！` and `Use foo!` to one key — the very
+ * false-OPEN this fingerprint exists to prevent, and a contradiction with "punctuation is
+ * preserved". NFC only unifies sequences that are canonically equivalent (visually and semantically
+ * identical, e.g. a precomposed `é` vs `e`+combining-acute), so verbatim copies still match while
+ * distinct compatibility forms stay distinct (fail-CLOSED). Unicode letters/digits are preserved
+ * rather than stripped, so non-ASCII-only prose still yields a non-empty, distinct key.
+ *
+ * The leading-bullet strip keeps the ADVISORY side (Copilot renders suppressed prose as `* …`, which
+ * `parseSuppressedAdvisories` also strips for display) and the ACK side SYMMETRIC: the prompt tells
+ * the agent to copy the advisory's first line verbatim, so an ack marker legitimately carries the
+ * `* ` bullet — without stripping it here the ack key would differ from the advisory key and the
+ * gate would never converge (fail-CLOSED livelock). Applying it in this shared canonicaliser is the
+ * SINGLE source of truth for both sides.
+ *
+ * The bullet marker REQUIRES trailing whitespace (`[-*]\s+`): a genuine markdown bullet is always
+ * `- ` / `* ` followed by a space, so `-foo` / `*foo` (leading punctuation, no separator) is NOT a
+ * bullet and its leading char is PRESERVED. A greedy `\s*` there would strip the `-`/`*` off such
+ * prose too, collapsing distinct first lines like `-foo` and `foo` to one key — a false-ACK
+ * (false-OPEN) where acking one silently satisfies the other. */
+function normalizeAdvisoryText(text: string): string {
+  return text
+    .normalize("NFC")
+    .replace(/^\s*[-*]\s+/u, "")
+    .toLowerCase()
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+/** COLLISION-RESISTANT fingerprint of a string → 32-hex-char (128-bit) digest, the leading half of
+ * a SHA-256 hash. Deterministic and dependency-free (Node's built-in `node:crypto`, no npm dep).
+ *
+ * The gate treats an advisory whose key `<path>#<fingerprint>` matches a resolved ack as addressed,
+ * so a *collision* would let a NEWER, unacknowledged advisory on the same path pass without its own
+ * ack — a false-OPEN that violates the gate's no-false-open guarantee. The former 32-bit FNV-1a
+ * digest was cheap to collide (birthday bound ~2^16); a 128-bit SHA-256 slice makes an accidental
+ * collision (~2^-64 for realistic advisory counts) infeasible. The digest is INTERNAL to the key —
+ * it never appears in a human-authored `nano-ack:` marker (those carry the verbatim prose, which is
+ * re-fingerprinted at read time), so widening it neither lengthens any marker nor breaks a
+ * previously-issued one: both the advisory side and the ack side recompute with this same function. */
+function fingerprint(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex").slice(0, 32);
+}
+
+/** The line-stable acknowledgement key for an advisory: `<path>#<fingerprint(normalized prose)>`.
+ * Exported so the review-round agent's contract and tests share one canonical implementation. */
+export function advisoryStableKey(path: string, text: string): string {
+  return `${path.trim()}#${fingerprint(normalizeAdvisoryText(text))}`;
+}
+
+/** The line-stable fingerprint of a convergence escalation QUESTION (issue #806): the SAME canonical
+ * `normalizeAdvisoryText` + `fingerprint` digest advisory acks key on, applied to the escalation's
+ * question text. Reuses the ONE normaliser/fingerprint pair (no second implementation) so a durable
+ * wait-answer adjudication keyed by `(prKey, questionFingerprint)` is byte/semantic-stable the exact
+ * disciplined way an advisory ack is — only a semantically-identical, already-answered question is
+ * suppressed; a materially different question keys differently and still escalates. */
+export function questionFingerprint(text: string): string {
+  return fingerprint(normalizeAdvisoryText(text));
+}
+
+/** Parse Copilot's suppressed / low-confidence advisories out of a review body. Copilot renders them
+ * under a `<summary>Suppressed comments (N)</summary>` block, each as a bold `**path:line**` header
+ * followed by the advisory prose. Returns de-duplicated advisories (empty when there is no block). */
+export function parseSuppressedAdvisories(reviewBody: string | null | undefined): SuppressedAdvisory[] {
   const body = reviewBody ?? "";
   const idx = body.search(/Suppressed comments\s*\(/i);
   if (idx < 0) return [];
   // Scan only from the "Suppressed comments" marker onward so a `**path:line**` elsewhere in the
   // overview prose can never be mistaken for an advisory.
   const region = body.slice(idx);
-  const keys = new Set<string>();
-  const re = /\*\*([^*]+?:\d+)\*\*/g;
+  const lines = region.split(/\r?\n/);
+  const headerRe = /\*\*([^*]+?):(\d+)\*\*/;
+  const out: SuppressedAdvisory[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    const h = headerRe.exec(lines[i]);
+    if (!h) continue;
+    const path = h[1].trim();
+    const line = Number(h[2]);
+    const label = `${path}:${line}`;
+    // The advisory prose is the first non-empty line after the header (up to the next header). A
+    // single bullet is the common shape; strip a leading markdown bullet marker for the display
+    // `text`. (Keying is bullet-insensitive regardless: `normalizeAdvisoryText` strips a leading
+    // bullet too, so the ack side — which copies the bulleted first line verbatim — keys the same.)
+    let text = "";
+    for (let j = i + 1; j < lines.length; j++) {
+      if (headerRe.test(lines[j])) break;
+      const t = lines[j].replace(/^\s*[-*]\s+/, "").trim();
+      if (t) {
+        text = t;
+        break;
+      }
+    }
+    const key = advisoryStableKey(path, text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ path, line, text, key, label });
+  }
+  return out;
+}
+
+/** The line-stable advisory keys carried by a SINGLE comment body's canonical `nano-ack: <path> ::
+ * <text>` markers. This is the SOLE recognizer of an acknowledgement, shared by `isAckThread` and
+ * `parseAckedAdvisories` so "is this an ack?" has ONE canonical implementation (derivation over
+ * duplication — no drift between the two consumers). The bare `nano-ack: <path>:<line>` form yields
+ * NOTHING here: `NEW_ACK` requires the ` :: <text>` prose (a bare `path:line` is prose-blind and
+ * would false-OPEN a new advisory re-emitted at a previously-acked line). */
+function canonicalAckKeys(body: string): string[] {
+  const keys: string[] = [];
+  ACK_MARKER.lastIndex = 0;
   let m: RegExpExecArray | null;
   // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
-  while ((m = re.exec(region)) !== null) keys.add(m[1].trim());
-  return [...keys];
+  while ((m = ACK_MARKER.exec(body)) !== null) {
+    const nw = NEW_ACK.exec(m[1].trim());
+    if (nw) keys.push(advisoryStableKey(nw[1], nw[2]));
+  }
+  return keys;
+}
+
+/** True when a review thread is a DEDICATED `nano-ack:` acknowledgement thread — one whose ROOT
+ * comment (`bodies[0]`, the thread-opening comment) carries a valid canonical `nano-ack: <path> ::
+ * <text>` marker — rather than a substantive code-review thread. This is a CLASSIFICATION only: the
+ * converge gate never DROPS an unresolved thread on the strength of this predicate. An unresolved ack
+ * thread still BLOCKS convergence (it is a genuinely-open GitHub thread); the classification only
+ * routes that block onto the recoverable ack-only path — a partially-completed acknowledgement the
+ * bounded #796 auto-ack retry can finish (post-and-resolve) — instead of escalating a human. A
+ * substantive unresolved thread escalates to a human.
+ *
+ * Because the gate BLOCKS either way, this predicate is FAIL-CLOSED even under a false positive:
+ *   1. Only the canonical prose-keyed form counts (via `canonicalAckKeys`); the retired bare
+ *      `nano-ack: <path>:<line>` form does NOT — matching `parseAckedAdvisories`.
+ *   2. Only the ROOT comment is inspected — a reviewer's substantive finding is ALWAYS its thread's
+ *      root and (canonical-form) never carries this marker, so a substantive thread that merely
+ *      quotes or replies `nano-ack:` in a later comment is not mis-classified.
+ *   3. Even if a root DID quote the canonical marker mid-prose and were mis-labelled an ack, the
+ *      thread is NOT excluded — it still blocks (as ack-only), and the bounded auto-ack retry cannot
+ *      ack a non-advisory, so it escalates to a human on exhaustion. Marker presence never finalizes
+ *      the gate with an open thread (the fail-OPEN this design forecloses). */
+export function isAckThread(thread: ReviewThread): boolean {
+  const root = thread.bodies[0];
+  return root !== undefined && canonicalAckKeys(root).length > 0;
 }
 
 /** Extract the acknowledged advisory keys from a set of review threads (only RESOLVED threads
- * count — an open ack thread is not yet an acknowledgement). */
+ * count — an open ack thread is not yet an acknowledgement). Returns line-stable keys (`<path>#<fp>`)
+ * parsed from the `nano-ack: <path> :: <text>` form ONLY (via the shared `canonicalAckKeys`). A bare
+ * `nano-ack: <path>:<line>` marker is intentionally NOT honoured: its `path:line` key is blind to the
+ * advisory prose and would false-OPEN a genuinely new advisory re-emitted at a previously-acked line.
+ * The gate treats an advisory as acked iff its stable key appears here. */
 export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
   const acked = new Set<string>();
   for (const t of threads) {
     if (!t.isResolved) continue;
-    for (const body of t.bodies) {
-      ACK_MARKER.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
-      while ((m = ACK_MARKER.exec(body)) !== null) acked.add(m[1].trim());
-    }
+    for (const body of t.bodies) for (const k of canonicalAckKeys(body)) acked.add(k);
   }
   return [...acked];
 }
@@ -149,36 +358,73 @@ export function pickLatestCopilotReviewBody(
   reviews: { user?: { login?: string }; body?: string }[],
   truncated: boolean,
 ): string | null {
+  const picked = pickLatestCopilotReview(reviews, truncated);
+  return picked === null ? null : picked.body;
+}
+
+/** Pick the newest Copilot review — body AND the commit SHA it was submitted against — from a
+ * reviews list (GitHub returns them oldest→newest). Semantics mirror {@link pickLatestCopilotReviewBody}
+ * exactly: `truncated = true` fails CLOSED (`null`, unverifiable); a verified-complete read with no
+ * Copilot review returns `{ body: "", commitId: null }` (a verified "no advisories"). The `commitId`
+ * lets a caller detect a review that predates the PR's current HEAD — a STALE review whose advisories
+ * are about code the head has since moved past (issue #799). Pure; unit-tested. */
+export function pickLatestCopilotReview(
+  reviews: { user?: { login?: string }; body?: string; commit_id?: string | null }[],
+  truncated: boolean,
+): { body: string; commitId: string | null } | null {
   if (truncated) return null;
   const copilot = reviews.filter((rv) => isCopilot(rv.user?.login));
-  return copilot[copilot.length - 1]?.body ?? "";
+  const latest = copilot[copilot.length - 1];
+  return { body: latest?.body ?? "", commitId: latest?.commit_id ?? null };
 }
 
 /** Fetch the latest Copilot review body for a PR (the newest review authored by the automated
  * Copilot reviewer). Returns `null` ONLY when no transport is usable (unverifiable → the worker
  * fails closed); returns `""` when transport is usable but the PR has no Copilot review yet (a
  * verified "no suppressed advisories"). Throws on a genuine transport failure. This split keeps
- * `null` from conflating "unverifiable" with "empty" and fail-OPENing the advisory dimension. */
+ * `null` from conflating "unverifiable" with "empty" and fail-OPENing the advisory dimension.
+ * Thin wrapper over {@link fetchLatestCopilotReview} (the single fetch implementation). */
 export async function fetchLatestCopilotReviewBody(
   repo: string,
   number: number | string,
   token: string,
 ): Promise<string | null> {
+  const picked = await fetchLatestCopilotReview(repo, number, token);
+  return picked === null ? null : picked.body;
+}
+
+/** Fetch the latest Copilot review — body AND the commit SHA it was submitted against — for a PR.
+ * Same null/`""`-vs-unverifiable semantics as {@link fetchLatestCopilotReviewBody} (which delegates
+ * here): `null` ONLY when no transport is usable (unverifiable → fail closed); a verified read with
+ * no Copilot review yet returns `{ body: "", commitId: null }`. The `commitId` lets the convergence
+ * gate detect a review that predates the PR's current HEAD — a STALE review whose advisories are
+ * about code the head has since moved past (issue #799) — and re-solicit a fresh review rather than
+ * block/escalate against the obsolete body. Throws on a genuine transport failure. */
+export async function fetchLatestCopilotReview(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<{ body: string; commitId: string | null } | null> {
   const mode = githubTransport();
   const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
   const basePath = `repos/${repo}/pulls/${number}/reviews?per_page=100`;
   interface Review {
     user?: { login?: string };
     body?: string;
+    commit_id?: string | null;
   }
   if (useGh) {
-    // `--paginate` merges EVERY page of the (oldest→newest) reviews array, so a >100-review
+    // `--paginate --slurp` walks EVERY page of the (oldest→newest) reviews array, so a >100-review
     // convergence loop still surfaces the genuinely newest Copilot review rather than the oldest
-    // 100 — reading only the first page here would fail-OPEN the advisory dimension.
-    const out = await runGh(["api", "--paginate", basePath, "-H", "Accept: application/vnd.github+json"]);
+    // 100 — reading only the first page here would fail-OPEN the advisory dimension. Plain
+    // `--paginate` concatenates one JSON array PER PAGE (multiple documents) which `JSON.parse`
+    // cannot read; `--slurp` wraps the pages in an outer array we flatten one level.
+    const out = await runGh([
+      "api", "--paginate", "--slurp", basePath, "-H", "Accept: application/vnd.github+json",
+    ]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const reviews = JSON.parse(out) as Review[];
-    return pickLatestCopilotReviewBody(reviews, false);
+    const reviews = (JSON.parse(out) as Review[][]).flat();
+    return pickLatestCopilotReview(reviews, false);
   }
   if (!token) return null;
   // Page the token transport the same way; 20×100 reviews is far past any real convergence loop, and
@@ -194,14 +440,14 @@ export async function fetchLatestCopilotReviewBody(
     const batch = (await r.json()) as Review[];
     reviews.push(...batch);
     // A short page means we've read every review — the list is complete.
-    if (batch.length < 100) return pickLatestCopilotReviewBody(reviews, false);
+    if (batch.length < 100) return pickLatestCopilotReview(reviews, false);
     // A full page on the last allowed page is only truncated if GitHub says there's more; trust the
     // `Link` header's `rel="next"` so an exact multiple of 100 isn't a false positive.
     if (page === MAX_PAGES && /<[^>]*>;\s*rel="next"/.test(r.headers.get("link") ?? "")) {
-      return pickLatestCopilotReviewBody(reviews, true);
+      return pickLatestCopilotReview(reviews, true);
     }
   }
-  return pickLatestCopilotReviewBody(reviews, false);
+  return pickLatestCopilotReview(reviews, false);
 }
 
 /** Raw GraphQL response shape for the review-threads query. */
@@ -937,17 +1183,25 @@ export async function fetchPrFiles(
   return paths;
 }
 
-/** The PR head ref/sha for D3's trial-merge gate. `null` when no transport is usable. */
+/** The PR head ref/sha for D3's trial-merge gate. `null` when no transport is usable. `headRepo` is
+ * the head branch's OWNING repository as `owner/repo` — the FORK for a cross-repo PR, else the base
+ * repo — so a caller that resolves the head ref (e.g. the no-progress head reader, #786) queries the
+ * repository the head branch actually lives in, not the base repo (where a same-named branch would
+ * resolve to an unrelated SHA). `null` when the head repository cannot be resolved (e.g. a deleted
+ * fork). */
 export async function fetchPrHead(
   repo: string,
   number: number | string,
   token: string,
-): Promise<{ headRef: string | null; headSha: string | null; baseRef: string | null } | null> {
+): Promise<{ headRef: string | null; headSha: string | null; baseRef: string | null; headRepo: string | null } | null> {
   if (await useGh()) {
-    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "headRefName,headRefOid,baseRefName"]);
+    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "headRefName,headRefOid,baseRefName,headRepository,headRepositoryOwner"]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const j = JSON.parse(out) as { headRefName?: string | null; headRefOid?: string | null; baseRefName?: string | null };
-    return { headRef: j.headRefName ?? null, headSha: j.headRefOid ?? null, baseRef: j.baseRefName ?? null };
+    const j = JSON.parse(out) as { headRefName?: string | null; headRefOid?: string | null; baseRefName?: string | null; headRepository?: { name?: string | null } | null; headRepositoryOwner?: { login?: string | null } | null };
+    const owner = j.headRepositoryOwner?.login;
+    const name = j.headRepository?.name;
+    const headRepo = owner && name ? `${owner}/${name}` : null;
+    return { headRef: j.headRefName ?? null, headSha: j.headRefOid ?? null, baseRef: j.baseRefName ?? null, headRepo };
   }
   if (!token) return null;
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
@@ -955,8 +1209,29 @@ export async function fetchPrHead(
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const j = (await r.json()) as { head?: { ref?: string | null; sha?: string | null }; base?: { ref?: string | null } };
-  return { headRef: j.head?.ref ?? null, headSha: j.head?.sha ?? null, baseRef: j.base?.ref ?? null };
+  const j = (await r.json()) as { head?: { ref?: string | null; sha?: string | null; repo?: { full_name?: string | null } | null }; base?: { ref?: string | null } };
+  return { headRef: j.head?.ref ?? null, headSha: j.head?.sha ?? null, baseRef: j.base?.ref ?? null, headRepo: j.head?.repo?.full_name ?? null };
+}
+
+/** The head commit SHA of `branch` on `repo`, read from the git-ref endpoint
+ * (`git/ref/heads/<branch>`) — the ref that GitHub updates ATOMICALLY with the push, unlike a PR
+ * object's `head.sha`, which is an asynchronously-denormalized projection that can briefly report a
+ * stale-but-valid SHA after a push. The no-progress guard (#786) reads this in preference to the PR
+ * head so a lagging PR denormalization can never fabricate a no-advance escalation. `null` when the
+ * branch does not exist (a 404) or no transport is usable; throws only on a genuine transport
+ * failure. */
+export async function fetchBranchHead(
+  repo: string,
+  branch: string,
+  token: string,
+): Promise<string | null> {
+  // Honor the documented no-transport contract at this public boundary, exactly like the sibling
+  // readers `fetchPrHead`/`fetchPrBase`: with no `gh` CLI and no token there is no usable transport,
+  // which is the idle "unknown" case → `null`, NOT an exception. The internal `branchHeadSha` still
+  // throws in that case for `ensureBaseBranch`'s callers, which treat a missing transport as a hard
+  // failure; this wrapper's `Promise<string | null>` contract promises `null` instead.
+  if (!(await useGh()) && !token) return null;
+  return branchHeadSha(repo, branch, token);
 }
 
 /** The PR's current base branch ref — the branch this PR would land *into*. `null` when no
@@ -1353,7 +1628,13 @@ function isEpicBranch(branch: string): boolean {
 /** Resolve the head commit SHA of `branch` on `repo`, or `null` when the branch does not exist
  * (a 404 from the git-ref endpoint). Throws only on a genuine transport failure. */
 async function branchHeadSha(repo: string, branch: string, token: string): Promise<string | null> {
-  const apiPath = `repos/${repo}/git/ref/heads/${branch}`;
+  // Percent-encode each ref SEGMENT (git permits `#`, `?`, spaces, etc. in a branch name) while
+  // preserving the `/` separators that git uses for hierarchical refs (`feat/x`). Interpolating the
+  // raw name would, in the direct `fetch` URL, let a `#` start a fragment (and `?` a query) — the
+  // path is truncated, the wrong ref (or a 404) is read, and the no-progress guard fails open. gh
+  // api receives the same already-encoded path.
+  const encodedBranch = branch.split("/").map(encodeURIComponent).join("/");
+  const apiPath = `repos/${repo}/git/ref/heads/${encodedBranch}`;
   if (await useGh()) {
     try {
       const out = await runGh(["api", apiPath]);

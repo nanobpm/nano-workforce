@@ -12,7 +12,7 @@
 
 /** Default review-wait timeout (ISO-8601 duration): how long the loop waits for a fresh review
  * before the timer arm of the event-based gateway fires and it escalates to a human. */
-export const DEFAULT_REVIEW_WAIT_TIMEOUT = "PT20M";
+export const DEFAULT_REVIEW_WAIT_TIMEOUT = "PT30M";
 
 // A pragmatic ISO-8601 duration matcher: requires a leading `P`, at least one component, and a
 // `T` before any time components (with at least one time component after it). Good enough to
@@ -92,4 +92,25 @@ export function clampNudgeMinutes(
   const i = Math.trunc(n);
   if (i < 1) return safeFallback;
   return Math.min(i, MAX_REVIEW_NUDGE_MINUTES);
+}
+
+/** Is the latest Copilot review STALE relative to the PR's current HEAD? (issue #799)
+ *
+ * A review is stale when it was submitted against a commit the head has since moved past — its
+ * advisories describe code that no longer exists, so the convergence gate must NOT block/escalate
+ * against it and the poller must NOT unpark the loop on it; instead a fresh review of the current
+ * HEAD must be solicited and gated on. Staleness is a plain SHA inequality.
+ *
+ * Fails SAFE to "not stale" when either SHA is unknown (`null`/`undefined`/blank): GitHub did not
+ * carry a `commit_id` for the review, or the head could not be read. Without both SHAs we cannot
+ * prove the review predates the head, so we must not fabricate a stale verdict that would loop the
+ * loop re-soliciting forever — the review-wait timeout and the round cap remain the safety nets. */
+export function isReviewStale(
+  reviewCommitId: string | null | undefined,
+  headSha: string | null | undefined,
+): boolean {
+  const rev = (reviewCommitId ?? "").trim();
+  const head = (headSha ?? "").trim();
+  if (rev === "" || head === "") return false;
+  return rev !== head;
 }

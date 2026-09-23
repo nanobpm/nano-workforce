@@ -9,7 +9,8 @@
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
-import { escalationFormId } from "./agentCompletion.ts";
+import { matchAdjudication, prAdjudications, resetAdjudications } from "./adjudications.ts";
+import { completeEscalationAutoApplied, escalationFormId } from "./agentCompletion.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
 import {
   CAPS_RESOLVED_MESSAGE,
@@ -26,6 +27,7 @@ import {
   CONFORMANCE_ESCALATION_ELEMENT,
   conformanceEscalationQuestion,
 } from "./conformance.ts";
+import { makeDefaultReadHead } from "./currentHead.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
@@ -33,13 +35,14 @@ import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deli
 import { deliveryHumanContextQuestion, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
-import { deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
+import { deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun } from "./feature.ts";
 import {
   classifyMergeability,
   classifyPrLiveness,
   coalesceTitle,
   ensureFreshHeadRun,
   ensurePromotionPr,
+  fetchBranchHead,
   fetchDefaultBranch,
   fetchPrHead,
   fetchPrMeta,
@@ -85,13 +88,14 @@ import {
   readinessPollEvery,
   readinessTimeout,
 } from "./readiness.ts";
+import { ENGINE_TERMINAL_STATES } from "./reconcile.ts";
 // The repository-provisioning envelope builder lives in its own module (app/repoEnvelope.ts) so the
 // PRE-PR implementation dispatch (`feature.ts`/`plan.ts`) can reuse the ONE canonical implementation
 // without a `plan.ts ↔ service.ts` import cycle (issue #684). Imported for the PR-based callers
 // (submitPr/startMerge) and re-exported below so the long-standing `import { repoEnvelopeVars } from
 // "./service.ts"` call sites (and its tests) keep resolving.
 import { repoEnvelopeVars } from "./repoEnvelope.ts";
-import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
+import { clampNudgeMinutes, isReviewStale, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
   buildUserTaskRow,
@@ -156,6 +160,20 @@ export const MAX_REBASE_ROUNDS = clampCiFixBudget(process.env.NANO_PR_MAX_REBASE
  * seconds-to-minutes instead. Default 5; set `NANO_PR_MAX_MERGE_RETRIES=0` to disable transient
  * retry (a race escalates immediately). Reuses the CI-fix budget clamp (allows 0 = disable). */
 export const MAX_MERGE_RETRIES = clampCiFixBudget(process.env.NANO_PR_MAX_MERGE_RETRIES, 5);
+
+/** How many times the convergence loop will re-dispatch the `senior:pr-review` (review-round) agent
+ * to auto-ack unacked suppressed advisories before escalating to a human. When the converge-gate
+ * blocks SOLELY on unacknowledged suppressed advisories (no unresolved inline threads), the block is
+ * recoverable: re-running the review-round agent posts the missing `nano-ack:` threads and converges,
+ * so the loop tries that — bounded — before parking the human `wait-answer` (issue #796). A resolved
+ * `Declined … nano-ack:` advisory is an acknowledgement and CONVERGES (issue #787), so a decline does
+ * not escalate; only the agent returning `needs_input` (a genuinely contested advisory it cannot
+ * decide) or `blocked` (an external blocker it reports with a question — the `gw-status` arm at
+ * `convergence-loop.bpmn:442-443` routes both to `wait-answer`), or this budget being exhausted,
+ * escalates. Default 2; set
+ * `NANO_PR_MAX_ACK_RETRIES=0` to escalate on the first ack-only block. Reuses the CI-fix budget clamp
+ * (allows 0 = disable, ceiling-capped). */
+export const MAX_ACK_RETRIES = clampCiFixBudget(process.env.NANO_PR_MAX_ACK_RETRIES, 2);
 
 /** How many times the mergeable-wait timeout backstop (`merge-stall-probe`) will re-derive
  * mergeability from ground truth and re-arm the merge stage before giving up and escalating to a
@@ -284,6 +302,23 @@ export interface PullRequest {
   // review for this PR, so the nudge is throttled to one attempt per REVIEW_NUDGE_MS window.
   // NULL means never nudged.
   last_nudge_at: string | null;
+  // No-progress head baseline (033_pr_round_head.sql, issue #786): the PR head SHA observed at the
+  // last recorded round, written by pr.progress-check to detect an addressed round that pushed no
+  // commit. Scoped to the current convergence run — cleared on re-open so a resubmission starts from
+  // a clean slate. NULL before the first round is recorded.
+  last_round_head: string | null;
+  // At-least-once idempotency for pr.progress-check (103_pr_progress_idempotency.sql): the engine
+  // job key that produced the last committed progress decision, and that decision's serialized
+  // `PrProgressCheckOut`. On a lost-ack redelivery the guard recognizes its own job key and replays
+  // the recorded outcome instead of recomputing against the already-advanced `last_round_head`.
+  last_progress_job_key: string | null;
+  last_progress_result: string | null;
+  // Attempt watermark for pr.progress-check husk correlation (103; Copilot PR #789): the greatest
+  // `review-round` AgentInstance key an earlier progress-check already accounted for. Lets the next
+  // round tell a freshly-registered attempt from a historical one, so a current attempt that husks
+  // BEFORE registering its AgentInstance is classified as a husk instead of masked by a prior round's
+  // terminal instance. Cleared on re-open with the rest of the per-run state. NULL before any read.
+  last_progress_agent_watermark: string | null;
   // Merge-protocol liveness (012_merge_protocol_attempt.sql): head commit last nudged by the
   // frugal-CI fresh-head-run remedy. A rebase changes the head and therefore permits a new nudge.
   fresh_head_run_head: string | null;
@@ -500,7 +535,16 @@ export async function submitPr(
   // it `alreadyRunning` forever (the #497 phantom). Route the idempotency gate through the derived view
   // so a cancelled PR is correctly seen terminal and RESUBMITTABLE.
   const trackedExisting = existing ? await prsTracking(data).get(parsed.prKey) : undefined;
-  if (trackedExisting && !TERMINAL_STATUSES.includes(trackedExisting.derived_status)) {
+  // Phantom-enrollment guard (#704/#497, PR #809 review): a non-terminal row is "already running" ONLY
+  // if an engine instance was actually dispatched — i.e. it holds a `process_key`. `submitPr` INSERTS
+  // the `pull_requests` row (`status='converging'`, `process_key` NULL) BEFORE `createInstance` and
+  // writes `process_key` only AFTER it returns (below), so a create-instance failure/crash in that
+  // window strands a `converging` row with NO `process_key` and NO live instance. Classifying it off
+  // the derived status alone would wedge it `alreadyRunning` forever (and `pollFeatureDelivery` edge (1)
+  // would skip it as non-terminal, never re-enrolling). Treat a keyless non-terminal row as
+  // RESUBMITTABLE — fall through and re-enroll, exactly as `startFeature`'s intake guard (feature.ts)
+  // treats a keyless `running` feature row. A terminal row (any `process_key`) already falls through.
+  if (trackedExisting && existing?.process_key != null && !TERMINAL_STATUSES.includes(trackedExisting.derived_status)) {
     return { prKey: parsed.prKey, alreadyRunning: true };
   }
 
@@ -552,6 +596,14 @@ export async function submitPr(
     for (const e of await escs(data).find({ pr_key: parsed.prKey, status: "open" })) {
       await escs(data).update(e.id, { status: "stale" });
     }
+    // A fresh convergence run must ALSO start with a clean durable adjudication memory (issue #806,
+    // Copilot review): the auto-resume replays a prior `(PR, question)` answer forever, so a re-opened
+    // PR whose question recurs would silently auto-apply the stale decision and an operator could never
+    // force a fresh one. This PR's adjudications are invalidated on reopen — but the reset is deferred
+    // to AFTER `process_key` is advanced to the new instance (see below), NOT here: clearing the memory
+    // while `process_key` still names the OLD instance leaves a window where a delayed old-instance
+    // answer job still passes the worker's staleness gate and reinserts its adjudication into the fresh
+    // run (Copilot review of #806). Advancing the run identity FIRST, then clearing, fences that job.
     // Re-open a previously converged/abandoned/merged PR for a fresh convergence run.
     await table.update(parsed.prKey, {
       status: "converging",
@@ -565,6 +617,24 @@ export async function submitPr(
       waiting_since: null,
       last_review_id: null,
       last_nudge_at: null,
+      // Clear the no-progress head baseline: it is scoped to the PRIOR convergence run, and a fresh
+      // run at round 1 must compare its first addressed round against a clean slate. Leaving a stale
+      // `last_round_head` lets a resubmission whose branch changed read `currentHead !== previousHead`
+      // on its first husked round, mis-route it as progress, and bypass the bounded husk retry (#786).
+      last_round_head: null,
+      // Clear the attempt watermark too: it is scoped to the prior convergence run's `review-round`
+      // instances (Copilot #789). A fresh run mints new, higher-keyed instances so a carried-over
+      // watermark would still be below them, but clearing keeps the per-run husk-correlation state
+      // unambiguous and self-contained.
+      last_progress_agent_watermark: null,
+      // Clear the at-least-once REPLAY stamp too (Copilot PR #789). The idempotency guard replays a
+      // recorded outcome whenever a redelivered job key matches this row; if the stamp survived a
+      // re-open, an OLD `pr.progress-check` delivery redelivered after the NEW convergence instance
+      // starts would still match its job key here and replay a stale escalation/progress effect into
+      // the fresh run. Clearing it makes the new run treat any such straggler as an unknown key (a
+      // normal, freshly-computed decision) rather than replaying the prior run's outcome.
+      last_progress_job_key: null,
+      last_progress_result: null,
       outcome: null,
       converged_at: null,
       merged_at: null,
@@ -607,6 +677,11 @@ export async function submitPr(
       round: 1,
       maxRounds: clampRounds(maxRounds, MAX_ROUNDS),
       reviewWaitTimeout: REVIEW_WAIT_TIMEOUT,
+      // Bounded agent auto-ack (issue #796): the convergence loop re-dispatches the review-round
+      // agent up to `ackRetryMax` times to ack suppressed advisories when the converge-gate blocks
+      // solely on unacked ones, before escalating to a human. `ackRetryRound` counts those passes.
+      ackRetryRound: 0,
+      ackRetryMax: MAX_ACK_RETRIES,
       // Lineage (issue #245): carry the origin identity onto the convergence instance so every
       // descendant (and any message it correlates) is stitched back to the originating request.
       // A human/webhook PR that is its own root carries its own `pr_key` (never NULL — see above).
@@ -626,8 +701,44 @@ export async function submitPr(
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
-  if (processKey != null) {
-    await table.update(parsed.prKey, { process_key: processKey });
+  // The `process_key` advance and the adjudication reset below are the two writes that MAKE the new
+  // run authoritative. If EITHER throws, the newly created instance is already live but the reopen is
+  // only half-committed — and a retry would short-circuit at the `alreadyRunning` idempotency gate
+  // (the new instance is ACTIVE, so `derived_status` is non-terminal), never re-running the reset. A
+  // failed reset would then leave the fresh run replaying STALE adjudication memory indefinitely
+  // (Copilot review). So roll the just-created run back on failure: terminate it and rethrow, so the
+  // submission is NOT treated as started. Terminating flips the PR's derived tracking status to a
+  // terminal edge (`abandoned`) via the `instanceTracking` reconciler, making the PR resubmittable so
+  // a retry re-creates a fresh instance and re-runs the reset cleanly — no orphaned run auto-applies
+  // stale decisions in the meantime.
+  try {
+    if (processKey != null) {
+      await table.update(parsed.prKey, { process_key: processKey });
+    }
+    // Invalidate this PR's durable adjudication memory for the fresh run (issue #806, Copilot review) —
+    // deferred to HERE, after `process_key` is advanced to the new instance above, so the reset happens
+    // UNDER the new run identity. On reopen (`existing`), any delayed old-instance answer job is now
+    // rejected by the worker's staleness gate (its `processInstanceKey` no longer matches the advanced
+    // `process_key`), so it cannot reinsert a stale adjudication after the reset; and the worker reads
+    // `process_key` as late as possible so it observes this advance. The insert-if-absent record then
+    // re-learns the operator's new answer for the new run. Runs unconditionally (even if `processKey` is
+    // null: the memory must still be clean for the fresh run). The wipe is a SINGLE atomic `DELETE`
+    // (`resetAdjudications`), never a row-by-row loop, so a crash mid-reset cannot leave a partially
+    // cleared memory (Copilot review of #806).
+    if (existing) {
+      await resetAdjudications(data, parsed.prKey);
+    }
+  } catch (err) {
+    if (processInstanceKey != null) {
+      try {
+        await engine.cancelInstance({ processInstanceKey: String(processInstanceKey) });
+      } catch (cancelErr) {
+        // Best-effort: a failed rollback-cancel leaves the instance for the abandon/reconcile poller
+        // to reap, but must not mask the original error that the caller needs to see and retry on.
+        console.warn(`[submit] ${parsed.prKey} rollback-cancel of ${processInstanceKey} failed: ${cancelErr}`);
+      }
+    }
+    throw err;
   }
   return { prKey: parsed.prKey, processKey };
 }
@@ -798,7 +909,12 @@ export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
  * fresh-review detection + Copilot nudge below stay here because review freshness is inherently
  * STATEFUL (keyed off `last_review_id`/`waiting_since`), which the stateless probe matchers cannot
  * subsume — the poller owns the forward-progress guarantee, the gate owns the bounded wait. */
-async function pollReviews(data: DataLayer, engine: EngineClient, token: string) {
+// The poller's PR current-head reader — the SAME branch-ref-preferring reader the converge-gate and
+// progress-check bind (#786/#799), so the poller's stale-review detection sees the exact head those
+// steps do. Fails OPEN to `null` (unreadable head → not stale, per `isReviewStale`).
+const readCurrentHead = makeDefaultReadHead({ fetchPrHead, fetchBranchHead });
+
+export async function pollReviews(data: DataLayer, engine: EngineClient, token: string) {
   const waiting = await prs(data).find({ status: "waiting_review" });
   for (const pr of waiting) {
     const { repo, number, pr_key: prKey } = pr;
@@ -816,6 +932,34 @@ async function pollReviews(data: DataLayer, engine: EngineClient, token: string)
         // No fresh review yet. Copilot won't re-review a round with no new commit and dismisses
         // re-requests, so actively (re-)solicit the next review — throttled to one attempt per
         // REVIEW_NUDGE_MS window. The process's timer arm is the backstop if this never lands.
+        await maybeRerequestReview(data, pr, token);
+        continue;
+      }
+      // #799 (FM2): only resume the loop on a review of the CURRENT head. If the PR HEAD has
+      // advanced past the commit the newest review was submitted against, that review is STALE — its
+      // advisories describe code the head has moved past (e.g. an advisory the agent already fixed in
+      // a later commit). Publishing `readiness-ready` on it would resume the loop on obsolete
+      // findings and, at the converge-gate, re-escalate a human on an already-fixed advisory (PR
+      // #789). Treat a stale review like "no fresh review": (re-)solicit a fresh review of the
+      // current head and wait — without bumping `last_review_id`, so the next HEAD-current review is
+      // still detected. The head read fails OPEN (null → not stale), so a transport hiccup never
+      // strands a genuine review; the review-wait timer remains the backstop.
+      //
+      // Read the head via the SHARED branch-ref-preferring reader (`makeDefaultReadHead`, #786) — the
+      // exact reader the converge-gate uses — NOT `fetchPrHead(...).headSha` directly: the PR object's
+      // `head.sha` is an asynchronously-denormalized projection that can still equal `fresh.commit_id`
+      // right after a push, which would make the poller advance `last_review_id` on a stale review the
+      // gate would then classify stale, wedging the loop. Using the atomic branch ref makes the poller
+      // detect the same stale-head case the gate does.
+      // Read the head with the SAME per-call token the review fetch above uses (#799) — NOT the
+      // env-token default `makeDefaultReadHead` would otherwise fall back to. A caller that supplies
+      // a `token` without also setting GITHUB_TOKEN would otherwise get a `null` head here, which
+      // `isReviewStale` treats as not-stale (fails OPEN) and would advance `last_review_id` /
+      // publish readiness on a genuinely stale review. Passing `token` keeps both reads on one
+      // credential so the stale guard sees the real head.
+      const headSha = await readCurrentHead(repo, number, token).catch(() => null);
+      if (isReviewStale(fresh.commit_id, headSha)) {
+        console.log(`[poller] review ${fresh.id} is stale (predates HEAD) -> re-soliciting ${prKey}`);
         await maybeRerequestReview(data, pr, token);
         continue;
       }
@@ -2160,19 +2304,69 @@ export async function pollPromotion(data: DataLayer, engine: EngineClient, token
   }
 }
 
-/** Reconcile each in-flight FEATURE run against its handed-off PR (fix: Feature history stuck at
- * `converging`). A feature run ends its own process with `status = converging` and its PR's live
- * outcome (merged / converged / abandoned) thereafter lives only on the `pull_requests` row keyed
- * by `pr_key` — so the Feature history grid, which reads `feature_runs`, showed `converging` forever.
- * This is the `feature_runs` twin of `pollDelivery` (which does the same for epic `plans`): for each
- * run currently `converging` with a `pr_key`, project the PR's status onto `feature_runs.status`
- * (advancing it to the matching terminal outcome once the PR settles) + a human `delivery_label`.
- * Never touches a run that isn't `converging` — additive/derived only, idempotent, best-effort. */
-export async function pollFeatureDelivery(data: DataLayer) {
+/** Reconcile each in-flight FEATURE run against ENGINE truth (fix: Feature history stuck at
+ * `converging`; issue #808: raise-only runs wedge in Active). Two idempotent, best-effort edges over
+ * the canonical feature reconciliation — no parallel reconciler:
+ *
+ * 1. CONVERGING → terminal (from its handed-off PR). A feature run ends its own process with
+ *    `status = converging` and its PR's live outcome (merged / converged / abandoned) thereafter lives
+ *    only on the `pull_requests` row keyed by `pr_key` — so the Feature history grid, which reads
+ *    `feature_runs`, showed `converging` forever. The `feature_runs` twin of `pollDelivery`: for each
+ *    run currently `converging` with a `pr_key`, project the PR's status onto `feature_runs.status`
+ *    (advancing it to the matching terminal outcome once the PR settles) + a human `delivery_label`.
+ *
+ * 2. COMPLETED → terminal (from the engine instance; issue #808). A raise-only / normally-completing
+ *    run ends its process with the non-terminal base `status = running` and is NEVER handed to a PR
+ *    loop, so neither edge (1) nor `instanceTracking`'s TERMINATED → `abandoned` edge folds it — it
+ *    would wedge in Active forever ("poller owns liveness; never leave a run on a status no pass
+ *    scans"). This owns the COMPLETED → terminal fold for such runs, mirroring the taskless-plan pass
+ *    ({@link pollTasklessPlanTermination}, #624) and {@link pollDeliveryGraphPhase}. Scoped to
+ *    `running` — the only non-terminal, non-parked status that can reach COMPLETED (`escalated` /
+ *    `awaiting_operator` keep the instance ALIVE at a user task, owned by their own edges) — so a
+ *    `converging` run is untouched by this fold. Liveness is read off the ADR-0065 derived tracking
+ *    VIEW (`derived_status`), so a run TERMINATED out of band (folding `derived_status` → `abandoned`)
+ *    is left to the `onTerminated` edge and never re-queried every pass. Writes only on a real
+ *    COMPLETED read (idempotent — a pass over a still-active or already-terminal run is a no-op).
+ *
+ * 3. MID-HANDOFF `opened` → terminal (PR #809 review / escalation 162). `record-feature` writes base
+ *    `status = opened` for a converge-REQUESTED run too, BEFORE `gw-converge` hands it to
+ *    `converge-feature` (which flips it to `converging` and enrolls the PR via `submitPr`). That
+ *    transient `opened` + `converge=1` + `pr_key` window is NOT dismissable (`featureReadModel` excludes
+ *    it so a premature ack can't drag a still-converging run to History), yet `opened` is no
+ *    `instanceTracking` activeStatus and neither edge (1) nor (2) scans it — so a row stranded there has
+ *    no owner. This owns that liveness, deciding PR-FIRST (never off the FEATURE instance state alone —
+ *    that was the drift surface): the `pull_requests` row keyed by `pr_key` is the single source of truth
+ *    for whether `submitPr` enrollment happened. If a PR row EXISTS, enrollment succeeded and the PR is a
+ *    live/settled SEPARATE process whose outcome edge (1) owns — fold `opened` → `converging`/terminal via
+ *    the same `deriveFeatureDelivery`, NEVER `abandoned` (it is structurally impossible for this edge to
+ *    abandon an enrolled PR). ONLY when NO PR row exists (enrollment never happened) is the engine probed:
+ *    a mid-handoff row can then only be stranded if its instance died before `submitPr`, so a KNOWN
+ *    terminal (or genuinely absent) instance means the handoff was interrupted — fold to the terminal
+ *    `abandoned` (mirroring `onTerminated`). That probe applies the reconcile-probe tri-state
+ *    (app/reconcile.ts): ACTIVE is left for `converge-feature`, and an instance whose snapshot carries an
+ *    empty/unknown state is SPARED (never folded off a wire shape we misread). A key edge (2) folded THIS
+ *    pass is skipped (it is already terminalized, not stranded). Read off the derived tracking VIEW so an
+ *    out-of-band fold is not re-queried; scoped to `converge=1 AND pr_key` (a raise-only or keyless
+ *    `opened` is genuinely terminal, owned by its own dismissable edge). */
+export async function pollFeatureDelivery(
+  data: DataLayer,
+  // Full `EngineClient`: edge (1) re-enrolls a converging run whose PR row is still missing via
+  // `submitPr` (which needs `createInstance`), not just the `searchProcessInstances` the fold edges use.
+  engine: EngineClient,
+) {
   // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
   // Read the ADR-0065 derived edge (`derived_status`) so a terminated run reads `abandoned`.
   const statusByPrKey = new Map<string, string>();
-  for (const pr of await prsTracking(data).all()) statusByPrKey.set(pr.pr_key, pr.derived_status);
+  // Also index each tracked PR row so edge (1) can distinguish a NEVER-enrolled PR (no row) from a
+  // PARTIALLY-enrolled one (row present, but `submitPr` crashed after the row insert and before
+  // `createInstance` returned, so `process_key` is NULL and no instance exists — #704/#497 phantom).
+  // Keep the whole row (not just the key) so the terminal-status classification below reads the
+  // ADR-0065 `.derived_status`, satisfying the derive-only-reader class guard (#503/#704).
+  const prRowByKey = new Map<string, TrackedPullRequest>();
+  for (const pr of await prsTracking(data).all()) {
+    statusByPrKey.set(pr.pr_key, pr.derived_status);
+    prRowByKey.set(pr.pr_key, pr);
+  }
   // Only `converging` runs are ever reconciled — query them via the `feature_runs(status)` index
   // (db/migrations/028) instead of scanning all history, so this pass stays O(in-flight), not
   // O(total runs), as the table grows.
@@ -2180,6 +2374,27 @@ export async function pollFeatureDelivery(data: DataLayer) {
     if (!run.pr_key) continue;
     try {
       const prStatus = statusByPrKey.get(run.pr_key) ?? null;
+      const trackedPr = prRowByKey.get(run.pr_key) ?? null;
+      // RE-ENROLL a converging run whose PR is not actually live, in EITHER of two shapes (PR #809
+      // review):
+      //   (a) NO `pull_requests` row (`prStatus === null`) — since `converge-feature` writes
+      //       `converging` BEFORE `submitPr`, a terminate/crash in that gap (or an old submit failure /
+      //       store desync) leaves a converging row whose PR was never enrolled; and
+      //   (b) a PARTIALLY-enrolled row — present but with NO `process_key` and a non-terminal status:
+      //       `submitPr` inserts the row before `createInstance`, so a create-instance failure/crash
+      //       after the insert leaves a `converging` PR row with `process_key` NULL and no instance
+      //       (#704/#497 phantom). `prStatus` is non-null there, so the (a) check alone would skip it and
+      //       it would wedge `converging` forever with no PR process.
+      // Both heal via the SAME idempotent `submitPr`: it is idempotent on the PR key (a redundant call
+      // on an already-live PR early-returns `alreadyRunning`), and now treats a keyless non-terminal row
+      // as resubmittable, so it re-creates the instance and installs `process_key`. `convergeOnly`
+      // mirrors `converge-feature` — the inverse of the run's `auto_merge` flag.
+      const partiallyEnrolled =
+        trackedPr != null && trackedPr.process_key == null && !TERMINAL_STATUSES.includes(trackedPr.derived_status);
+      if (prStatus === null || partiallyEnrolled) {
+        const parsed = parsePr(run.pr_key);
+        if (parsed) await submitPr(data, engine, parsed, [], MAX_ROUNDS, run.auto_merge !== 1, run.feature_key);
+      }
       const { status, label } = deriveFeatureDelivery(prStatus);
       if (run.status !== status || run.delivery_label !== label) {
         await featureRuns(data).update(run.feature_key, {
@@ -2190,6 +2405,92 @@ export async function pollFeatureDelivery(data: DataLayer) {
       }
     } catch (err) {
       console.error(`[poller] feature delivery ${run.feature_key}: ${err}`);
+    }
+  }
+  // Edge (2): COMPLETED → terminal for a normally-completing `running` run (issue #808). Read the
+  // derived tracking VIEW so a base-`running` row whose instance TERMINATED out of band (derived
+  // `abandoned`) is skipped here (the `onTerminated` edge owns it) and never re-queried the engine.
+  // Feature keys this edge folds this pass are tracked in `foldedByCompletion` so edge (3) — which
+  // re-reads the DB and would otherwise see a row edge (2) just moved to `opened` in the SAME pass —
+  // leaves them alone (PR #809 review): edge (2) has already assigned such a row its terminal outcome.
+  const foldedByCompletion = new Set<string>();
+  for (const run of await featureRunsTracking(data).find({ status: "running" })) {
+    if (!run.process_key) continue;
+    if (run.derived_status !== "running") continue;
+    const processKey = run.process_key;
+    try {
+      const snapshots = await engine.searchProcessInstances({ processInstanceKeys: [processKey] });
+      const state = snapshots.find((s) => String(s.processInstanceKey) === processKey)?.state ?? null;
+      if (state !== "COMPLETED") continue;
+      const { status, label } = deriveFeatureCompletion(run);
+      // Guarded CAS (not a blind update-by-key): a concurrent `startFeature` may have re-seeded this
+      // same row to a fresh `running` incarnation (new `process_key`) in the window since the engine
+      // read above — the guard makes such a lost race a no-op instead of clobbering the new run.
+      if (await foldCompletedFeatureRun(data, run.feature_key, processKey, status, label)) {
+        foldedByCompletion.add(run.feature_key);
+      }
+    } catch (err) {
+      console.error(`[poller] feature completion ${run.feature_key}: ${err}`);
+    }
+  }
+  // Edge (3): mid-handoff `opened` → `abandoned` for a run whose instance died before convergence (PR
+  // #809 review, issue #808 follow-up). `record-feature` writes base `status="opened"` for a
+  // converge-REQUESTED run TOO, BEFORE `gw-converge` hands it to `converge-feature` (which flips it to
+  // `converging`). That transient `opened` + `converge=1` + non-null `pr_key` window is deliberately
+  // NOT dismissable (`featureReadModel` excludes it, so a premature ack can't drag a still-converging
+  // run to History) — but `opened` is not an `instanceTracking` activeStatus (nano.app.json), and
+  // neither the converging edge (1) nor the running edge (2) scans it, so an instance TERMINATED in
+  // that window would strand the row in Active FOREVER with `ack_open=0` and no reconciler. This edge
+  // owns that liveness: a mid-handoff row can only LEAVE `opened` by writing `converging` (a clean
+  // handoff) — so if its instance is a KNOWN terminal (or genuinely absent) while the row still reads
+  // `opened`, the handoff was interrupted (out-of-band terminate / crash) and the run is folded to the
+  // terminal `abandoned` (the same edge `instanceTracking.onTerminated` applies to a tracked run's
+  // out-of-band termination). The snapshot is read with the SAME tri-state as the reconcile probe
+  // (app/reconcile.ts): a still-ACTIVE instance is left untouched (`converge-feature` will advance it),
+  // and an instance present with an empty/unknown/newly-introduced state is SPARED, never folded off a
+  // wire shape we misread. A row edge (2) folded to `opened` in THIS pass is skipped (`foldedByCompletion`)
+  // — it is already terminalized, not a stranded handoff. Read the derived tracking VIEW so a row
+  // already folded `abandoned` out of band is skipped and never re-queried. Guarded CAS on the OLD
+  // `process_key` + `status='opened'`, so a concurrent `startFeature` re-seed is a no-op, never a
+  // clobber. Scoped to `converge=1 AND pr_key` — a raise-only (`converge=0`) or keyless (`pr_key IS
+  // NULL`) `opened` is genuinely terminal and owned by its own dismissable edge, so it is never queried here.
+  for (const run of await featureRunsTracking(data).find({ status: "opened" })) {
+    if (!run.process_key || !run.pr_key || run.converge !== 1) continue;
+    if (run.derived_status !== "opened") continue;
+    // Edge (2) may have folded a COMPLETED `running` run to `opened` in THIS pass (thread 1): that row
+    // is already terminalized by its own derivation, not a stranded mid-handoff — never re-fold it here.
+    if (foldedByCompletion.has(run.feature_key)) continue;
+    const processKey = run.process_key;
+    try {
+      // PR-DERIVED liveness FIRST (PR #809 review / escalation 162 decision 2): a `pull_requests` row
+      // keyed by `pr_key` is the single source of truth for "did `submitPr` enrollment actually happen".
+      // If one EXISTS, `converge-feature` already enrolled the PR — it is a live/settled SEPARATE process
+      // whose outcome edge (1) owns — so the handoff was NOT interrupted regardless of the FEATURE
+      // instance's engine state. Project the PR's derived outcome onto the row (fold `opened` →
+      // `converging`/terminal via the SAME `deriveFeatureDelivery` edge (1) uses) and NEVER abandon it.
+      // This makes it structurally impossible for the handoff edge to abandon an enrolled PR — inferring
+      // "interrupted" from the FEATURE instance state alone was the drift surface. The engine probe below
+      // is reached ONLY when no PR row exists (enrollment never happened), the genuine interrupted handoff.
+      const prStatus = statusByPrKey.get(run.pr_key) ?? null;
+      if (prStatus !== null) {
+        const { status, label } = deriveFeatureDelivery(prStatus);
+        await foldCompletedFeatureRun(data, run.feature_key, processKey, status, label, "opened");
+        continue;
+      }
+      const snapshots = await engine.searchProcessInstances({ processInstanceKeys: [processKey] });
+      const match = snapshots.find((s) => String(s.processInstanceKey) === processKey);
+      // Interpret the snapshot with the SAME tri-state semantics as the reconcile engine-probe
+      // (app/reconcile.ts): ACTIVE → still mid-handoff; a KNOWN terminal state or a genuinely-absent
+      // instance → the handoff was interrupted (fold); an instance present with an empty/unknown/
+      // newly-introduced state → a partial answer this app cannot interpret, so spare the row rather
+      // than fold a possibly still-live run to `abandoned` off a wire shape we misread (thread 3).
+      const state = match ? String(match.state ?? "").trim().toUpperCase() : null;
+      if (state === "ACTIVE") continue; // still mid-handoff — converge-feature will advance it
+      if (state !== null && !ENGINE_TERMINAL_STATES.has(state)) continue; // unknown/empty → spare
+      // state === null (engine answered, instance absent) OR a known terminal → interrupted handoff.
+      await foldCompletedFeatureRun(data, run.feature_key, processKey, "abandoned", "handoff interrupted", "opened");
+    } catch (err) {
+      console.error(`[poller] feature handoff ${run.feature_key}: ${err}`);
     }
   }
 }
@@ -2750,12 +3051,67 @@ export async function pollUserTasks(
   // Desired set, deduped by completable key (a task is open at most once; guard a page overlap / a
   // subject seen under two statuses mid-pass).
   const desiredByKey = new Map<string, UserTaskRow>();
+  // Keys auto-resumed from a durable adjudication this pass (issue #806). The reduced-capability scan
+  // visits each instance twice (direct + callActivity hierarchy), and both queries snapshot the task
+  // BEFORE the resume removes it, so the second visit would otherwise re-attempt a now-gone completion
+  // and fall through to projecting the very row we just retired. Recording the key keeps the resume
+  // one-shot and out of the inbox.
+  const resumedByKey = new Set<string>();
   const project = async (elementId: string | undefined, userTaskKey: string, processInstanceKey: string, rootProcessInstanceKey: string, formKey: string) => {
     if (!elementId) return;
     const rowKey = userTaskKey.trim();
-    if (!rowKey || desiredByKey.has(rowKey)) return;
+    if (!rowKey || desiredByKey.has(rowKey) || resumedByKey.has(rowKey)) return;
     const ctx = await contextFor(elementId, userTaskKey, processInstanceKey, rootProcessInstanceKey, formKey);
     if (!ctx) return;
+    // Durable adjudication auto-resume (issue #806): before surfacing a NEW convergence `wait-answer`
+    // to a human, check whether THIS PR already has a settled adjudication for the SAME question
+    // (canonical `questionFingerprint`). If it does, resume the loop with the recorded answer through
+    // the canonical `completeUserTaskAttributed` door — attributed to the prior adjudicator and marked
+    // `auto_applied` (a machine replay, reversible so a human can still override) so it is never
+    // laundered into a first-hand irreversible human authority (Copilot review of #806) — instead of
+    // re-parking a human on an already-answered question (PR #800 / proc 46310: the same design
+    // question escalated at round 2 and again at round 13). Scoped to the review loop's `wait-answer`
+    // on a real PR key; on any resolution failure the task still projects, so an un-resumable question
+    // always reaches a human (fail-open to the human).
+    if (elementId === PR_WAIT_ANSWER_ELEMENT && ctx.subjectType === "pr" && ctx.question && parsePr(ctx.subjectKey)) {
+      try {
+        // The adjudication LOOKUP lives inside this fail-open `try` (not just the resume) so a transient
+        // `pr_adjudications.find` error never rejects `project` and aborts `pollUserTasks` mid-pass — the
+        // task still projects and the question always reaches a human (SPEC: adjudication-resolution
+        // failures fail open to the human).
+        const adjudication = matchAdjudication(await prAdjudications(data).find({ pr_key: ctx.subjectKey }), ctx.question);
+        // Only auto-resume when the prior adjudicator's provenance is KNOWN. A settled row with a blank
+        // `adjudicated_by` (completed out of band, so `latestAdjudicator` returned no actor) must NOT be
+        // manufactured into a synthetic `human` actor — that would audit an unknown-provenance replay as
+        // a first-hand human decision. Fail open to a fresh human task instead (Copilot review of #806).
+        const adjudicatedBy = adjudication?.adjudicated_by?.trim();
+        if (adjudication && adjudicatedBy) {
+          const resumed = await completeEscalationAutoApplied(data, engine, {
+            userTaskKey: rowKey,
+            // The sweep already discovered this task's owning instance — hand it to the resolve so the
+            // auto-apply scans that ONE instance, not every open user task engine-wide (issue #806
+            // Copilot review: an unfiltered per-task scan makes a single poll pass O(N²) across N
+            // already-adjudicated PRs). `contextFor`/the sweep report the task's direct instance, so the
+            // filtered scan finds exactly this task; a miss still fails open to the human.
+            processInstanceKey,
+            variables: { answer: adjudication.answer },
+            actor: {
+              kind: adjudication.adjudicated_kind === "agent" ? "agent" : "human",
+              id: adjudicatedBy,
+            },
+            // Link the auto-apply back to the replayed adjudication (issue #806) so a human revert of the
+            // resulting completion invalidates this exact decision instead of it being silently re-applied.
+            adjudicationId: adjudication.id,
+          });
+          if (resumed.ok) {
+            resumedByKey.add(rowKey);
+            return;
+          }
+        }
+      } catch (err) {
+        console.error(`[poller] adjudication auto-resume (${ctx.subjectKey}): ${err}`);
+      }
+    }
     const row = buildUserTaskRow(ctx, at);
     if (row) desiredByKey.set(rowKey, row);
   };
@@ -2913,7 +3269,7 @@ export async function pollOnce(
   await pollMerges(data, engine, token);
   await pollWaitGate(data);
   await pollPromotion(data, engine, token);
-  await pollFeatureDelivery(data);
+  await pollFeatureDelivery(data, engine);
   await pollLineage(data);
   await pollUserTasks(data, engine, engineRest);
   await pollEpicPhase(data, engine, engineRest);

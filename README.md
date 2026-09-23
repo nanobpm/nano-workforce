@@ -285,9 +285,10 @@ branch before escalating (`NANO_PR_MAX_CI_FIX_ROUNDS`, default 3). Conflicts, an
 exhausted budget, or an agent that can't fix the build escalate to a human; answer in
 the UI and the process re-arms and retries.
 
-A single submission can pin **review-only** regardless of the global default by
-passing `convergeOnly: true` on the `start/convergence-loop` request — the PR stops at
-`converged` and is never handed to `merge-loop`, even with `NANO_PR_AUTO_MERGE` on.
+A single submission can choose its merge behavior explicitly with the positive
+`autoMerge` field on the `start/convergence-loop` request: `false` stops at
+`converged` regardless of the global default, while `true` enables the merge-loop
+after convergence only when `NANO_PR_AUTO_MERGE` is enabled.
 
 ### Fleet mode: hand it an issue (plan → implement → converge)
 
@@ -356,11 +357,12 @@ agent at that URL to author, compile, and submit a graph unaided. See
 | `NANO_PR_POLL_MS` | `60000` | review-ready poll interval |
 | `NANO_PR_MAX_ROUNDS` | `20` | default cap: escalate after N rounds (per-submit override via the form / the `maxRounds` field on `start/convergence-loop`; clamped 1–100) |
 | `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`x-hook-secret`) for guarded operations (e.g. `GET /app/api/agent`, `/app/api/version`, `/app/api/status`); unset = open |
-| `NANO_PR_AUTO_MERGE` | `1` | after convergence, run the merge stage; `0` = stop at `converged` (review-only). Per-submit override via the `convergeOnly` field on `start/convergence-loop` (`true` forces review-only for that PR) |
+| `NANO_PR_AUTO_MERGE` | `1` | after convergence, run the merge stage; `0` = stop at `converged` (review-only). Per-submit override via the positive `autoMerge` field on `start/convergence-loop` |
 | `NANO_PR_MERGE_METHOD` | `squash` | merge method: `squash`, `merge`, or `rebase` |
 | `NANO_PR_MERGE_ADMIN` | `0` | pass `--admin` to override failing non-required checks (use with care) |
 | `NANO_PR_MAX_CI_FIX_ROUNDS` | `3` | max `senior:fix-ci` attempts to green a `blocked` PR before escalating; `0` disables (escalate immediately), clamped 0–20 |
-| `NANO_PR_REVIEW_WAIT_TIMEOUT` | `PT20M` | ISO-8601 duration the loop waits for a fresh review before escalating a stalled review (timer arm of the `wait-review` gateway) |
+| `NANO_PR_MAX_ACK_RETRIES` | `2` | max bounded review-round re-dispatches to recover an ack-only converge block — unacknowledged suppressed advisories and/or unresolved canonical `nano-ack:` threads (`app/convergeGate.ts` `ackOnly`) — before escalating to a human (#796); `0` escalates on the first ack-only block, clamped 0–20 |
+| `NANO_PR_REVIEW_WAIT_TIMEOUT` | `PT30M` | ISO-8601 duration the loop waits for a fresh review before escalating a stalled review (timer arm of the `wait-review` gateway) |
 | `NANO_PR_REVIEW_NUDGE_MINUTES` | `5` | cooldown between the poller's automatic reviewer re-request nudges for one waiting PR (clamped 1–1440) |
 | `NANO_WORKFORCE_BASE_URL` | `http://localhost:3000` | externally-reachable base URL for the capability hooks (`/app/api/hooks/*`). Must resolve from **wherever the agent runs** — set it to the app's LAN address (or console-proxy URL) for a remote fleet. See [Fleet networking](#fleet-networking-remote-workers) |
 | `NANO_AGENTIC_SECRET` | — | enables **secure mode** for the agentic visibility channel (`/agentic`): every peer must present the **same** `NANO_AGENTIC_SECRET` value (set the identical env var on the server and every worker box — Tab A → Slot A). Unset = on-by-default **LOCAL mode** — the well-known token is honoured from **any origin** (open on the trusted LAN, matching the engine's posture); exposure is governed by the server bind address, not a shared secret. Also accepts `NANO_PR_WEBHOOK_SECRET` |

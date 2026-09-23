@@ -1,6 +1,10 @@
 // pr.persist-round — records a completed round (an `addressed` round where the agent pushed
-// changes, or a `waiting` round where there was nothing to triage yet) and parks the PR in
-// `waiting_review` so the poller starts watching for / soliciting the next review.
+// changes, or a `waiting` round where there was nothing to triage yet) and advances the PR's
+// `current_round`. It does NOT park the PR in `waiting_review`: that transition is owned by the
+// downstream pr.progress-check step, the single writer of the post-round wait status. persist-round
+// runs BEFORE the husk decision, so parking here would momentarily expose a husk-retry round (which
+// re-enters review-round WITHOUT waiting for a review) to the poller's `waiting_review` scan and let
+// it solicit a spurious Copilot review before progress-check flips the row back (#786).
 //
 // Data access goes through the injected app datasource gateway (`app.data.table<T>`), the RAD
 // `Table<T>` surface — `rounds.insert(...)` / `pull_requests.update(...)`, not hand-written SQL.
@@ -107,20 +111,82 @@ const handler: AppJobHandler<In> = async (job, app) => {
     });
   }
 
-  await app.data.table("rounds", "id").insert({
-    pr_key: prKey,
-    round_no: round,
+  // Idempotent round record (issue #786): a husk auto-retry re-enters `review-round` WITHOUT
+  // advancing the round counter, so the SAME `(pr_key, round_no)` reaches this worker more than once.
+  // The `rounds` table has no UNIQUE(pr_key, round_no), so an unconditional insert would manufacture
+  // a DUPLICATE history row per retry — the durable round history is the SoT the cockpit and the
+  // no-progress guard read, so a duplicate row corrupts both. Upsert on `(pr_key, round_no)`:
+  // update the existing round-record row in place, else insert. Application-level (no
+  // migration/UNIQUE) so it heals installs that already carry pre-#786 duplicates rather than
+  // crashing on a new constraint.
+  //
+  // But the upsert MUST reuse only a row THIS run's `pr.persist-round` wrote — identity, not a
+  // status heuristic. Two ways a stale-but-status-eligible row can share `(pr_key, round_no)`:
+  //   • An escalation row: on a `needs_input`/`blocked` escalation, `pr.persist-escalation` inserts
+  //     a `rounds` row (status `needs_input`/`blocked`) for the SAME `(pr_key, round_no)`, and the
+  //     human-answered resume re-enters that numeric round → back here. Reusing it would overwrite
+  //     the escalation to `addressed`, ERASING the escalation attempt from the durable history.
+  //   • A prior RUN's row: `submitPr` re-opens a previously converged/abandoned/merged PR at
+  //     `current_round = 1` WITHOUT deleting `rounds` history, so a fresh convergence run (a NEW
+  //     process instance) at round 1 finds the prior run's `addressed`/`waiting`/`converged` round-1
+  //     row. Reusing it (its status is not a human-hold) would clobber another run's canonical
+  //     history — the resubmission drift the reviewer flagged.
+  // The idempotency target is precisely "the row a husk auto-retry of THIS process instance wrote",
+  // and a husk retry re-enters `review-round` in the SAME process instance while a resubmission is a
+  // NEW one. So scope reuse by the writing `process_instance_key` (persisted below) AND exclude
+  // human-hold rows: reuse a row only when it carries the current instance's key and a non-hold
+  // status; otherwise insert a fresh row so every prior run's history — and every escalation — is
+  // preserved. `job.processInstanceKey` is always present for an engine job; when it is absent (a
+  // testkit/synthetic job) we fall back to the status-only heuristic so idempotency still holds
+  // within that single run.
+  const roundsTbl = app.data.table<{
+    id: number;
+    pr_key: string;
+    round_no: number;
+    status: string;
+    summary?: string;
+    transcript: string | null;
+    worker?: string;
+    started_at: string;
+    ended_at: string;
+    process_instance_key?: string | null;
+  }>("rounds", "id");
+  const HUMAN_HOLD_STATUSES = new Set(["needs_input", "blocked"]);
+  const processInstanceKey = job.processInstanceKey != null ? String(job.processInstanceKey) : null;
+  const matching = await roundsTbl.find({ pr_key: prKey, round_no: round });
+  // Reuse only a round-record row written by THIS run (matching process instance, when known) and
+  // never an escalation (human-hold) row; of those, the newest (greatest id).
+  const reusable = matching
+    .filter((r) => !HUMAN_HOLD_STATUSES.has(r.status))
+    .filter((r) => processInstanceKey === null || r.process_instance_key === processInstanceKey)
+    .reduce<{ id: number } | null>((newest, r) => (newest && newest.id >= r.id ? newest : r), null);
+  const roundRow = {
     status,
     summary,
     transcript: transcriptOf(job.variables),
     worker: workerOf(job.variables),
-    started_at: now,
     ended_at: now,
-  });
+  };
+  if (reusable) {
+    await roundsTbl.update(reusable.id, roundRow);
+  } else {
+    await roundsTbl.insert({
+      pr_key: prKey,
+      round_no: round,
+      started_at: now,
+      process_instance_key: processInstanceKey,
+      ...roundRow,
+    });
+  }
+  // Advance the round pointer only; the PARK into `waiting_review` is owned by pr.progress-check,
+  // the single writer of the post-round wait status. persist-round must NOT park here — it runs
+  // BEFORE the husk decision, so writing `waiting_review` now would expose a husk-retry round (which
+  // re-enters review-round WITHOUT waiting for a review) to the poller's `waiting_review` scan for
+  // the window until progress-check resolves the outcome, letting the poller fire a spurious Copilot
+  // re-request (#786). Leaving the row on its running `converging` status until progress-check
+  // decides closes that window; only the genuine review-wait park sets `waiting_review`.
   await app.data.table("pull_requests", "pr_key").update(prKey, {
-    status: "waiting_review",
     current_round: round,
-    waiting_since: now,
     updated_at: now,
   });
 
