@@ -4,7 +4,7 @@ Status: **Proposed.**
 Date: 2026-08-22.
 
 > **Scope note.** This is a **nano-workforce-local** ADR — it governs how *this app* represents a
-> unit of delivery work internally. Platform-wide ADRs live in `Magikcraft/nano-bpm/docs/adr`
+> unit of delivery work internally. Platform-wide ADRs live in `nanobpm/nano-bpm/docs/adr`
 > (referenced by number + repo). nano-workforce's own series continues here after ADR 0005.
 
 Relates to:

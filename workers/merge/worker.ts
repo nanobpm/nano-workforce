@@ -6,7 +6,7 @@
 //   • blocked — GitHub refused (conflict / failing gate / perms) → escalate to a human, who
 //               resolves it and replies to retry (the process re-arms and re-polls).
 // HOW it lands is governed by the target repo's published merge protocol (#43): a `mergify-queue`
-// repo (e.g. Magikcraft/nano-bpm, auto-merge OFF) is landed by posting `@mergifyio queue` and
+// repo (e.g. nanobpm/nano-bpm, auto-merge OFF) is landed by posting `@mergifyio queue` and
 // waiting for the queue, NOT a direct `gh pr merge` — which that repo refuses. The actual gh/API
 // calls live in app/github.ts; this worker records the attempt in the `merges` audit table and
 // shapes the escalation payload on a block.

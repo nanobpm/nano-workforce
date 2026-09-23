@@ -2,7 +2,7 @@
 //
 // Merlin's merge stage was repo-blind: it ran a plain `gh pr merge` and, on refusal, escalated to
 // a human. That breaks on any repo with a frugal-CI + on-demand-queue posture — e.g.
-// `Magikcraft/nano-bpm`, where auto-merge is OFF, CI runs only on `opened` (review-fix pushes do
+// `nanobpm/nano-bpm`, where auto-merge is OFF, CI runs only on `opened` (review-fix pushes do
 // NOT re-run it), and the documented way to land is: produce a fresh head run (`gh pr ready` /
 // close+reopen) → wait for it to go green → `@mergifyio queue`. See that repo's
 // `AGENTS.md → ## Merging PRs`.

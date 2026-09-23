@@ -5,7 +5,7 @@ Date: 2026-08-20.
 
 > **Scope note.** This is a **nano-workforce-local** ADR — it governs how *this app* runs
 > heterogeneous cross-repo delivery work that mixes automated and human steps. Platform-wide ADRs live
-> in `Magikcraft/nano-bpm/docs/adr` (referenced by number + repo, e.g. "nano-bpm ADR 0051").
+> in `nanobpm/nano-bpm/docs/adr` (referenced by number + repo, e.g. "nano-bpm ADR 0051").
 > nano-workforce's own series continues here after ADR 0004.
 
 Relates to:

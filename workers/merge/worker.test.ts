@@ -80,8 +80,8 @@ test("pr.merge short-circuits an already-merged PR without re-running the land p
     const out = (await handler(
       {
         variables: {
-          prKey: "Magikcraft/nano-bpm#723",
-          repo: "Magikcraft/nano-bpm",
+          prKey: "nanobpm/nano-bpm#723",
+          repo: "nanobpm/nano-bpm",
           prNumber: 723,
         },
       } as any,
