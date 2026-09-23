@@ -10,6 +10,7 @@ import {
   DELIVERY_NODE_KINDS,
   type DeliveryGraphError,
   type DeliveryGraphErrorCode,
+  redactConnectorValue,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 
@@ -644,6 +645,452 @@ test("S7 guard-type-mismatch: an `equals` whose type differs from the fact's dec
     ],
   });
   hasCode(errors, "guard-type-mismatch");
+});
+
+test("S7 guard-invalid-equals: a string `equals` carrying an XML-1.0-invalid character is rejected, not silently rewritten into a different FEEL guard (#778 review)", () => {
+  // A string `equals` is baked VERBATIM into the compiled `<bpmn:conditionExpression>` FEEL literal.
+  // An XML-1.0-forbidden character (here U+FFFE) cannot be entity-escaped, so the compiler's
+  // display-text sanitiser would STRIP it — turning the guard `bump_result = "a\uFFFEb"` into
+  // `bump_result = "ab"` and routing the split down the wrong edge. It must be rejected at validation
+  // instead of silently mutating executable FEEL.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.result", equals: "a\uFFFEb" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  hasCode(errors, "guard-invalid-equals");
+});
+
+test("S7 guard-invalid-equals: a clean string `equals` (no XML-invalid characters) passes validation", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [
+        { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+        { id: "a", kind: "agent", agent: { jobType: "j" } },
+        { id: "b", kind: "agent", agent: { jobType: "j" } },
+      ],
+      edges: [
+        { from: "bump", to: "a", when: "bump.result", equals: "breaking" },
+        { from: "bump", to: "b", default: true },
+      ],
+    }).filter((e) => e.code === "guard-invalid-equals"),
+    [],
+  );
+});
+
+test("invalid-job-type: an `agent.jobType` carrying an XML-1.0-invalid character is rejected, not silently rewritten into a different executable worker type (#778 review)", () => {
+  // `agent.jobType` is emitted VERBATIM as the executable `<zeebe:taskDefinition type=…>` (and mirrored
+  // into `resolved.calledElement`). An XML-1.0-forbidden character (here a C0 control) cannot be
+  // entity-escaped, so the compiler's attribute sanitiser would STRIP it — deploying `senior:feature`
+  // for an authored `senior:\u0001feature` and routing the cell to the WRONG worker. It must be
+  // rejected at validation rather than silently mutated.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:\u0001feature" } }],
+    edges: [],
+  });
+  hasCode(errors, "invalid-job-type");
+});
+
+test("invalid-job-type: an `agent.jobType` carrying attribute whitespace (LF) is rejected — XML attribute-value normalization would fold it to a space, deploying a different worker type (#778 review)", () => {
+  // A literal TAB/LF/CR is a valid XML `Char` (so the invalid-char strip does NOT catch it), but XML
+  // attribute-value normalization rewrites it to a single space when emitted as `type="…"`. An authored
+  // `senior:\nfeature` would deploy as `senior: feature` — a DIFFERENT worker type — so it must be
+  // rejected at validation, not silently normalized.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:\nfeature" } }],
+    edges: [],
+  });
+  hasCode(errors, "invalid-job-type");
+});
+
+test("invalid-job-type: a clean `agent.jobType` (no XML-invalid characters, no attribute whitespace) passes validation", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature" } }],
+      edges: [],
+    }).filter((e) => e.code === "invalid-job-type"),
+    [],
+  );
+});
+
+test("invalid-job-type: the rejection message REDACTS a credential embedded in the (URL-shaped, XML-invalid) job type — a 400 never echoes a secret (#778 review)", () => {
+  // A job type that is BOTH URL-shaped (userinfo credential) AND carries an XML-1.0-invalid control char
+  // trips `invalid-job-type`. The message interpolates the value through `redactConnectorValue`, so the
+  // embedded `user:pass` must NOT survive into the error a text-ingress caller sees.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "//user:pass@host\u0001/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "invalid-job-type");
+  assert(!err.message.includes("user:pass"), `the invalid-job-type message must redact the credential, got: ${err.message}`);
+});
+
+test("url-shaped-job-type: a URL-shaped `agent.jobType` is REJECTED at the semantic boundary — it is baked verbatim into the executable `<zeebe:taskDefinition type=…>`, so an embedded credential would leak into the compiled BPMN the preview door returns (#778 review)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "https://user:pass@evil.example/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "url-shaped-job-type");
+  assert(!err.message.includes("user:pass"), `the url-shaped-job-type message must redact the credential, got: ${err.message}`);
+});
+
+test("url-shaped-job-type: a scheme-relative `//host` job type is rejected too; a plain routing token passes", () => {
+  assert(
+    hasCode(
+      validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "//user:pass@host/x" } }], edges: [] }),
+      "url-shaped-job-type",
+    ) !== undefined,
+  );
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] }).filter(
+      (e) => e.code === "url-shaped-job-type",
+    ),
+    [],
+  );
+});
+
+test("credential-in-job-type: a plausible token with an EMBEDDED credential-bearing URL (`senior:feature //user:pass@host`, past the anchored url-shape and TAB/LF/CR checks) is REJECTED, message redacted (#778 review — thread deliveryGraph.ts:550)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //user:pass@evil.example/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "credential-in-job-type");
+  assert(!err.message.includes("user:pass"), `the credential-in-job-type message must redact the credential, got: ${err.message}`);
+  // A plain routing token with no embedded credential is untouched.
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] }).filter(
+      (e) => e.code === "credential-in-job-type",
+    ),
+    [],
+  );
+});
+
+test("invalid-job-type: a NON-url-shaped token that both embeds a credential AND carries an XML-invalid char (`senior:feature //user:pass@host\\x01`) redacts the credential in the message — `redactConnectorValue` would have echoed it verbatim (#778 review — thread deliveryGraph.ts:532)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature //user:pass@evil.example\u0001/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "invalid-job-type");
+  assert(!err.message.includes("user:pass"), `the invalid-job-type message must redact the EMBEDDED credential, got: ${err.message}`);
+});
+
+test("credential-in-job-type: a literal SPACE inside the userinfo (`senior:feature //user:secret pass@host`) is caught — the whitespace-tolerant `//…@` span matches the display redactor, message redacted (#778 review — thread deliveryGraph.ts:570)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //user:secret pass@evil.example/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "credential-in-job-type");
+  assert(!err.message.includes("secret pass"), `the credential-in-job-type message must redact the space-bearing credential, got: ${err.message}`);
+});
+
+test("invalid-credential-env: a `wait.credentialEnv` that is not a DECLARED env-contract key is rejected at the semantic boundary — a raw secret can never reach the compiled BPMN the preview door returns (#778 review)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      {
+        id: "g",
+        kind: "wait",
+        wait: { kind: "pr", target: "acme/repo#1", match: { prState: "merged" }, credentialEnv: "sk-an-actual-secret-value" },
+      },
+    ],
+    edges: [],
+  });
+  hasCode(errors, "invalid-credential-env");
+});
+
+test("invalid-credential-env: a DECLARED env-contract key on an `http` probe passes (the secret is read from the ambient env at execution time, never carried here)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [
+        {
+          id: "g",
+          kind: "wait",
+          wait: { kind: "http", target: "https://acme.example/health", credentialEnv: "GITHUB_TOKEN" },
+        },
+      ],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+});
+
+test("invalid-credential-env: a well-formed `credentialEnv` key on a NON-`http` probe kind is rejected at the semantic boundary — `parseProbe` supports it only for `http`, so reject here rather than stage-then-throw at dispatch (#778 review, thread deliveryGraph.ts:474)", () => {
+  for (const kind of ["pr", "command", "npm", "github-check", "capability", "epic"] as const) {
+    const errors = validateDeliveryGraph({
+      nodes: [
+        {
+          id: "g",
+          kind: "wait",
+          wait: { kind, target: "acme/repo#1", credentialEnv: "GITHUB_TOKEN" },
+        },
+      ],
+      edges: [],
+    });
+    hasCode(errors, "invalid-credential-env");
+  }
+});
+
+test("invalid-credential-env: a padded-but-valid `credentialEnv` on `http` passes — validation trims like `parseProbe` does, so it agrees with execution (#778 review, suppressed advisory deliveryGraph.ts:466)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: "http", target: "https://x/health", credentialEnv: "  GITHUB_TOKEN  " } }],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+  // A whitespace-only credentialEnv is treated as ABSENT (parseProbe reads `.trim() || undefined`), so it
+  // is neither rejected nor carried — no error.
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: "http", target: "https://x/health", credentialEnv: "   " } }],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+});
+
+test("invalid-credential-env: a non-string `credentialEnv` (e.g. 123) is rejected at the semantic boundary — it can never name an env key and `parseProbe` throws at dispatch, so reject rather than stage-then-throw (#778 review, suppressed advisory deliveryGraph.ts:473)", () => {
+  for (const bad of [123, true, { k: "v" }, ["GITHUB_TOKEN"]]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: "http", target: "https://x/health", credentialEnv: bad } }],
+      edges: [],
+    });
+    hasCode(errors, "invalid-credential-env");
+  }
+});
+
+test("invalid-credential-env: a padded probe `kind` (\" http \") still accepts a `credentialEnv` — the http-only check trims `kind` like `parseProbe` does, so a valid padded-kind http probe is not false-rejected (#778 review — thread deliveryGraph.ts:488)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: " http ", target: "https://x/health", credentialEnv: "GITHUB_TOKEN" } }],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+});
+
+test("invalid-backoff: an invalid `poll.backoff` (e.g. `linear`) is rejected at the semantic boundary — `normalizePoll` would silently default it to `exponential`, colliding its digest with a valid default-poll graph so a malformed proposal is marked dispatched instead of rejected; reject it before defaulting (#778 review, thread readiness.ts:432)", () => {
+  // `parseProbe`→`parsePoll` throws on `backoff: "linear"` at DISPATCH, but the compiler's display/digest
+  // path calls `normalizePoll` on the RAW graph, which maps every unrecognised backoff to `exponential`.
+  // With the doc suppressing a default backoff and `digestInvisibleRawValues` only fingerprinting
+  // XML-strip differences (`"linear"` is XML-clean), the malformed graph shares the omitted-poll graph's
+  // digest/key — letting keyless dispatch short-circuit onto a valid run and mark the malformed proposal
+  // dispatched. Reject it here (mirroring `parsePoll`'s canonical `isBackoff` guard) so it fails loudly
+  // at the preview/stage door, exactly like the `credentialEnv`/`onTimeout` semantic-boundary checks.
+  for (const backoff of ["linear", "LINEAR", "expo", "fixed ", "bogus"]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: "pr", target: "acme/repo#1", poll: { everyMs: 1000, backoff } } }],
+      edges: [],
+    });
+    // `"fixed "` (padded) is VALID — `parsePoll` trims before `isBackoff`, so validation must trim too
+    // and accept it (agreement with execution), while genuinely invalid values are rejected.
+    if (backoff.trim() === "fixed") {
+      assertEquals(errors.filter((e) => e.code === "invalid-backoff"), [], `padded-but-valid backoff ${JSON.stringify(backoff)} must pass`);
+    } else {
+      hasCode(errors, "invalid-backoff");
+    }
+  }
+});
+
+test("invalid-backoff: a valid or omitted `poll.backoff` passes — `fixed`/`exponential`/omitted are accepted, agreeing with `parsePoll` (#778 review, thread readiness.ts:432)", () => {
+  for (const poll of [{ everyMs: 1000 }, { everyMs: 1000, backoff: "fixed" }, { everyMs: 1000, backoff: "exponential" }, { everyMs: 1000, backoff: "" }]) {
+    assertEquals(
+      validateDeliveryGraph({
+        nodes: [{ id: "g", kind: "wait", wait: { kind: "pr", target: "acme/repo#1", poll } }],
+        edges: [],
+      }).filter((e) => e.code === "invalid-backoff"),
+      [],
+      `backoff ${JSON.stringify(poll)} must pass`,
+    );
+  }
+});
+
+test("credential-in-job-type: a PASSWORDLESS userinfo token (`senior:feature //token@host`, no colon) is REJECTED — a bearer/OAuth token riding the userinfo is a credential too, and a routing key never contains `//…@` at all (#778 review push-back — thread readiness.ts:1170)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //tok3n@host" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "credential-in-job-type");
+  assert(!err.message.includes("tok3n"), `the credential-in-job-type message must redact the passwordless token, got: ${err.message}`);
+});
+
+test("#778 redactConnectorValue: an EMBEDDED `//user:pass@host` credential after a non-URL prefix (a `parsePrTarget` value like `prefix //user:pass@host#42`) is redacted, not echoed verbatim; a userinfo-bearing authority is a URL so its `#fragment`/`?query` is redacted too (round-7 strengthening — thread deliveryGraph.ts:188), while an OPAQUE `//host#42` (no userinfo) keeps its `#42` (#778 review — thread deliveryGraph.ts:162/566)", () => {
+  const out = redactConnectorValue("prefix //user:pass@host#42");
+  assert(!out.includes("user:pass"), `an embedded credential must be redacted even without a URL prefix: ${out}`);
+  assert(out.includes("//***@host"), `the userinfo collapses to the redaction marker: ${out}`);
+  // A userinfo-bearing `//…@` authority IS a URL, so its `#fragment` is redacted (round 7, Finding A) —
+  // an opaque PR ref never carries userinfo, so nothing meaningful is lost. The opaque `//host#42` case
+  // (no userinfo) that keeps its `#42` is asserted separately below.
+  assert(!out.includes("#42"), `a userinfo-bearing URL's fragment is redacted (safe direction): ${out}`);
+  // A passwordless `//token@host` bearer token embedded after a prefix is redacted too.
+  const bearer = redactConnectorValue("route //tok3n@host now");
+  assert(!bearer.includes("tok3n") && bearer.includes("//***@host"), `a passwordless embedded token must be redacted: ${bearer}`);
+  // An OPAQUE scheme-relative `//host#42` (no userinfo) keeps its meaningful `#42` PR ref.
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+  // Opaque identifiers where `#`/`?`/`@` are MEANINGFUL and carry no embedded `//…@` are shown verbatim.
+  assertEquals(redactConnectorValue("slack:#releases"), "slack:#releases");
+  assertEquals(redactConnectorValue("owner/repo#42"), "owner/repo#42");
+  assertEquals(redactConnectorValue("pkg@1.2.3"), "pkg@1.2.3");
+});
+
+test("#778 redactConnectorValue: an EMBEDDED absolute-URL token (explicit `scheme://…`) after a non-URL prefix (`prefix https://host/path?token=secret`) has its `?query`/`#fragment` secret redacted, while a scheme-relative `//host#42` PR ref and opaque `#`/`?` identifiers survive (#778 review — thread deliveryGraph.ts:181)", () => {
+  const q = redactConnectorValue("prefix https://host/path?token=secret");
+  assert(!q.includes("token=secret"), `an embedded absolute-URL query secret must be redacted: ${q}`);
+  assert(q.includes("https://host/path?***"), `the query collapses to the redaction marker: ${q}`);
+  const frag = redactConnectorValue("see https://host/p#sig=zzz");
+  assert(!frag.includes("sig=zzz") && frag.includes("#***"), `an embedded absolute-URL fragment secret must be redacted: ${frag}`);
+  // userinfo AND query of an embedded absolute URL are both redacted.
+  const both = redactConnectorValue("go https://user:pass@host/p?token=x");
+  assert(
+    !both.includes("user:pass") && !both.includes("token=x") && both.includes("https://***@host/p?***"),
+    `embedded absolute-URL userinfo + query are both redacted: ${both}`,
+  );
+  // A scheme-RELATIVE `//host#42` (no explicit scheme) keeps its meaningful opaque `#42` PR ref — the
+  // `?`/`#` there are opaque-token characters, not URL syntax (parsePrTarget behaviour, unchanged).
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+  assertEquals(redactConnectorValue("slack:#releases"), "slack:#releases");
+  assertEquals(redactConnectorValue("owner/repo#42"), "owner/repo#42");
+});
+
+test("#778 redactConnectorValue: an embedded absolute-URL token whose userinfo or path carries an XML-valid TAB/LF/CR (`prefix https://user:pa\\tss@host/path?token=secret`) still has its `?query`/`#fragment` secret redacted — the embedded-URL scan is bounded by a literal SPACE, so it crosses the internal whitespace the primary `[^\\s]+` token stopped at (#778 review — thread deliveryGraph.ts:188)", () => {
+  // The embedded-URL redactor used `[^\s]+`, which stops at an XML-valid TAB/LF/CR the value may still
+  // carry after `stripXmlInvalidChars`. So `https://user:pa\tss@host/path?token=secret` matched only up
+  // to the TAB; the credential pass then collapsed `//user:pa\tss@` to `//***@` but left the trailing
+  // `?token=secret` un-rescanned, leaking the query into the connector display. Bounding the token by a
+  // literal SPACE (like the free-text belt) makes the whole URL — userinfo AND query — one span.
+  const tabUserinfo = redactConnectorValue("prefix https://user:pa\tss@host/path?token=secret");
+  assert(!tabUserinfo.includes("token=secret"), `an embedded-URL query after an internal-TAB userinfo must be redacted: ${JSON.stringify(tabUserinfo)}`);
+  assert(!tabUserinfo.includes("user:pa"), `the split userinfo must be redacted: ${JSON.stringify(tabUserinfo)}`);
+  // Same leak without userinfo: whitespace inside the path/query must not truncate the scan.
+  const tabPath = redactConnectorValue("prefix https://host/pa\tth?token=secret");
+  assert(!tabPath.includes("token=secret"), `an embedded-URL query after an internal-TAB path must be redacted: ${JSON.stringify(tabPath)}`);
+  // A newline inside the embedded URL is crossed the same way.
+  const lf = redactConnectorValue("see https://host/p\n#sig=zzz");
+  assert(!lf.includes("sig=zzz"), `an embedded-URL fragment after an internal newline must be redacted: ${JSON.stringify(lf)}`);
+  // The scheme-relative `//host#42` PR ref (no explicit scheme) still keeps its meaningful `#42`.
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+});
+
+test("#778 redactConnectorValue: an embedded absolute-URL whose scheme is separated from the `//` authority by XML-valid whitespace (`prefix https:\\t//user:pass@host?token=secret`) still has its userinfo AND `?query` secret redacted — the embedded-URL token now allows `scheme:\\s*//`, aligned with `isUrlShaped` (#778 review — thread readiness.ts:1239)", () => {
+  // The value is not whole-value URL-shaped (a non-URL prefix precedes it), so the anchored `isUrlShaped`
+  // check misses it and it falls to the embedded-URL scan. Before the fix that scan required a contiguous
+  // `://`, so `https:\t//user:pass@host?token=secret` was not matched as an absolute URL; the userinfo-only
+  // fallback then stripped `//…@` but LEFT the `?token=secret` query in the connector/probe display.
+  for (const ws of ["\t", "\n", "\r", " "]) {
+    const v = `prefix https:${ws}//user:pass@host?token=secret`;
+    const out = redactConnectorValue(v);
+    assert(!out.includes("token=secret"), `an embedded-URL query after a scheme${JSON.stringify(ws)}// gap must be redacted: ${JSON.stringify(out)}`);
+    assert(!out.includes("user:pass"), `the userinfo after a scheme${JSON.stringify(ws)}// gap must be redacted: ${JSON.stringify(out)}`);
+  }
+  // A scheme-relative `//host#42` PR ref (no explicit scheme) still keeps its meaningful `#42`.
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+});
+
+test("#778 redactConnectorValue: a scheme-RELATIVE credential URL (`//user:pass@host/path?token=secret`) embedded after a non-URL prefix has its userinfo AND `?query`/`#fragment` secret redacted — userinfo marks it a URL, so its `?`/`#` are URL syntax, while an opaque `//host#42` (no userinfo) keeps its `#42` (#778 review — thread deliveryGraph.ts:188)", () => {
+  // Before the fix the non-URL branch used the userinfo-ONLY `redactEmbeddedCredential`, which collapsed
+  // `//user:pass@` to `//***@` but LEFT the trailing `?token=secret` query — leaking it into the display.
+  const q = redactConnectorValue("prefix //user:pass@host/path?token=secret");
+  assert(!q.includes("token=secret"), `a scheme-relative credential URL's query secret must be redacted: ${JSON.stringify(q)}`);
+  assert(!q.includes("user:pass"), `the scheme-relative userinfo must be redacted: ${JSON.stringify(q)}`);
+  // A fragment on a scheme-relative credential URL is redacted the same way.
+  const frag = redactConnectorValue("go //tok3n@host/p#sig=zzz");
+  assert(!frag.includes("sig=zzz") && !frag.includes("tok3n"), `a scheme-relative credential URL's fragment secret must be redacted: ${JSON.stringify(frag)}`);
+  // A query/fragment after an XML-valid internal TAB is still crossed (bounded by a literal SPACE).
+  const tab = redactConnectorValue("prefix //user:pa\tss@host?token=secret");
+  assert(!tab.includes("token=secret") && !tab.includes("user:pa"), `a scheme-relative credential URL split by a TAB must still redact its query: ${JSON.stringify(tab)}`);
+  // A userinfo-LESS opaque `//host#42` PR ref keeps its meaningful `#42` — no userinfo ⇒ not a URL.
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+  assertEquals(redactConnectorValue("slack:#releases"), "slack:#releases");
+  assertEquals(redactConnectorValue("owner/repo#42"), "owner/repo#42");
+});
+
+test("embedded-url-in-job-type: a plausible token with an embedded USERINFO-LESS absolute URL (`senior:feature https://host/path?token=secret`) is REJECTED — it passes the anchored url-shape check AND `hasEmbeddedCredential` (no `//…@`), yet its `?query` would land verbatim in `<zeebe:taskDefinition type=…>`; message redacted (#778 review — thread deliveryGraph.ts:602)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature https://evil.example/route?token=secret" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "embedded-url-in-job-type");
+  assert(!err.message.includes("token=secret"), `the embedded-url-in-job-type message must redact the query secret, got: ${err.message}`);
+  // A plain routing token with no embedded URL is untouched.
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] }).filter(
+      (e) => e.code === "embedded-url-in-job-type",
+    ),
+    [],
+  );
+  // An opaque `owner/repo#42`-style token (no `scheme://`) is not a URL and is not rejected.
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:review owner/repo#42" } }], edges: [] }).filter(
+      (e) => e.code === "embedded-url-in-job-type",
+    ),
+    [],
+  );
+});
+
+test("scheme-relative-url-in-job-type: a plausible token with an embedded USERINFO-LESS SCHEME-RELATIVE URL (`senior:feature //host?token=secret`) is REJECTED — it slips past the anchored url-shape check, `hasEmbeddedCredential` (no `//…@`) AND `hasEmbeddedUrl` (no explicit `scheme://`), yet its `//authority?query` would land verbatim in `<zeebe:taskDefinition type=…>`; message redacted (#778 review — thread deliveryGraph.ts:633)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //evil.example/route?token=secret" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "scheme-relative-url-in-job-type");
+  assert(!err.message.includes("token=secret"), `the scheme-relative-url-in-job-type message must redact the query secret, got: ${err.message}`);
+  // Exactly one error class fires — the residual check is gated behind the three prior url checks so a
+  // token is never double-reported.
+  assertEquals(errors.length, 1, `expected exactly one error, got ${JSON.stringify(errors)}`);
+  // A plain routing token with no embedded scheme-relative URL is untouched.
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] }).filter(
+      (e) => e.code === "scheme-relative-url-in-job-type",
+    ),
+    [],
+  );
+  // An opaque `owner/repo#42` PR ref (a `//`-less identifier) is not a URL and is not rejected.
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:review owner/repo#42" } }], edges: [] }).filter(
+      (e) => e.code === "scheme-relative-url-in-job-type",
+    ),
+    [],
+  );
+});
+
+test("#778 redactConnectorValue: an embedded USERINFO-LESS SCHEME-RELATIVE URL (`prefix //host/path?token=secret`, no explicit scheme, no `//…@` credential) has its `?query` secret redacted — the `?` after a `//authority` is unambiguously URL syntax — while an opaque `//host#42` PR ref (no `?`) keeps its meaningful `#42` (#778 review — thread deliveryGraph.ts:633)", () => {
+  const q = redactConnectorValue("prefix //host/path?token=secret");
+  assert(!q.includes("token=secret"), `a scheme-relative URL's query secret must be redacted: ${JSON.stringify(q)}`);
+  // A userinfo-LESS opaque `//host#42` PR ref (no `?`) is preserved — nothing sensitive there.
+  assertEquals(redactConnectorValue("prefix //host#42"), "prefix //host#42");
+  assertEquals(redactConnectorValue("slack:#releases"), "slack:#releases");
+  assertEquals(redactConnectorValue("owner/repo#42"), "owner/repo#42");
+});
+
+test("#778 redactConnectorValue: a WHOLE-value opaque scheme-relative PR ref (`//host#42` — no explicit scheme, no `//…@` credential, no `?query`) keeps its meaningful `#42` exactly like the embedded `prefix //host#42` form; `isUrlShaped` matches the scheme-relative `//authority`, so without the opaque-PR-ref exception the whole-value branch would `redactString` the `#42` → `#***`, an inconsistency with the embedded contract (#778 review — thread deliveryGraph.ts:198)", () => {
+  // Whole-value opaque `//host#42` PR ref survives — matches the embedded `prefix //host#42` contract.
+  assertEquals(redactConnectorValue("//host#42"), "//host#42");
+  // A leading-whitespace opaque ref (isUrlShaped trims before its anchored check) also survives.
+  assertEquals(redactConnectorValue(" //host#42"), " //host#42");
+  // But a whole-value URL that actually hides a credential is STILL fully redacted:
+  // — an explicit `scheme://…#fragment` (fragment IS URL syntax):
+  assertEquals(redactConnectorValue("https://host#42"), "https://host#***");
+  // — a `//user:pass@host#42` userinfo credential (userinfo marks it a URL, so `#` is URL syntax):
+  assertEquals(redactConnectorValue("//user:pass@host#42"), "//***@host#***");
+  // — a userinfo-less `//host?token=secret` query (the `?` after `//authority` is unambiguously URL syntax):
+  const wholeQ = redactConnectorValue("//host?token=secret");
+  assert(!wholeQ.includes("token=secret"), `a whole-value scheme-relative URL's query secret must be redacted: ${JSON.stringify(wholeQ)}`);
+  // — a NON-NUMERIC fragment is NOT a PR ref: only `#<digits>` (`parsePrTarget`) is a valid PR handle,
+  //   so `//host#access-token` is an ordinary scheme-relative URL whose fragment can hide a secret and
+  //   MUST be redacted like any other URL fragment — the opaque-PR-ref exception must not swallow it
+  //   (#778 review — thread deliveryGraph.ts:206).
+  const nonNumericFrag = redactConnectorValue("//host#access-token");
+  assert(
+    !nonNumericFrag.includes("access-token"),
+    `a whole-value //host#<non-numeric> fragment is not a PR ref and must be redacted: ${JSON.stringify(nonNumericFrag)}`,
+  );
+  // The numeric PR ref itself still survives (regression guard for the exception's happy path):
+  assertEquals(redactConnectorValue("//host#42"), "//host#42");
 });
 
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {

@@ -63,6 +63,11 @@ export type Backoff = "fixed" | "exponential";
 // is added here without a matching vocabulary entry (AGENTS.md: no drift surfaces).
 export const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check", "capability", "pr", "epic"];
 export const ON_TIMEOUTS: readonly OnTimeout[] = ["escalate", "fail", "continue"];
+// The DEFAULT `onTimeout` an omitted value takes — the single source of truth `parseProbe` fills in and
+// the compiler's display drops as an effective default (writing it explicitly is behaviourally identical
+// to omitting it, so surfacing it would fork `semanticBpmn`/the digest from the omitted-equivalent
+// graph; issue #778 review — thread deliveryGraphCompiler.ts:1398).
+export const DEFAULT_ON_TIMEOUT: OnTimeout = "escalate";
 export const BACKOFFS: readonly Backoff[] = ["fixed", "exponential"];
 export const PR_CONDITIONS: readonly PrCondition[] = ["ready", "merged", "mergeable", "checks-green"];
 export const EPIC_CONDITIONS: readonly EpicCondition[] = ["merged", "done"];
@@ -237,7 +242,7 @@ export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean
   if (onTimeoutRaw !== "" && !isOnTimeout(onTimeoutRaw)) {
     throw new Error(`readiness probe: invalid onTimeout '${onTimeoutRaw}' (expected ${ON_TIMEOUTS.join(", ")})`);
   }
-  const onTimeout: OnTimeout = onTimeoutRaw === "" ? "escalate" : onTimeoutRaw;
+  const onTimeout: OnTimeout = onTimeoutRaw === "" ? DEFAULT_ON_TIMEOUT : onTimeoutRaw;
 
   const match = isRecord(raw.match) ? parseMatch(raw.match) : undefined;
   // A capability edge whose ref or package is blank can never resolve — fail loudly here rather than
@@ -307,7 +312,7 @@ export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean
 
 // Membership guards that narrow a validated string to its union without a type assertion (the
 // `no-unsafe-type-assertion` gate bans `as`).
-function isProbeKind(v: string): v is ProbeKind {
+export function isProbeKind(v: string): v is ProbeKind {
   for (const k of PROBE_KINDS) if (k === v) return true;
   return false;
 }
@@ -318,7 +323,7 @@ function isOnTimeout(v: string): v is OnTimeout {
 
 // `isBackoff` narrows a validated string to its union without a type assertion (the
 // `no-unsafe-type-assertion` gate bans `as`).
-function isBackoff(v: string): v is Backoff {
+export function isBackoff(v: string): v is Backoff {
   for (const b of BACKOFFS) if (b === v) return true;
   return false;
 }
@@ -414,7 +419,17 @@ export function normalizePoll(poll: ProbePoll | undefined): Required<ProbePoll> 
   const everyMs = typeof everyRaw === "number" && everyRaw >= 1 ? Math.trunc(everyRaw) : DEFAULT_EVERY_MS;
   const timeoutMs =
     typeof timeoutRaw === "number" && timeoutRaw >= 1 ? Math.trunc(timeoutRaw) : DEFAULT_TIMEOUT_MS;
-  return { everyMs: Math.min(everyMs, MAX_EVERY_MS), timeoutMs, backoff: poll?.backoff ?? DEFAULT_BACKOFF };
+  // TRIM `backoff` to match `parseProbe` (`parsePoll` does `str(raw.backoff).trim()`): a padded
+  // `" exponential "` runs as the SAME `exponential` policy, so leaving the whitespace here would make
+  // the compiler's display path (`normalizePoll(p.poll)`) emit a spurious non-default `Poll:` line for a
+  // runtime-default poll — forking `semanticBpmn`/the digest from the omitted-equivalent graph and
+  // letting a re-stage bypass the idempotency fence to duplicate the run (issue #778 review — thread
+  // deliveryGraphCompiler.ts:1414). A whitespace-only / unrecognised value falls back to the default
+  // (the compiler display path takes raw JSON; a genuinely invalid backoff fails loudly later in
+  // `parseProbe`, so defaulting the DISPLAY is safe and keeps the effective-policy render honest).
+  const backoffTrimmed = typeof poll?.backoff === "string" ? poll.backoff.trim() : undefined;
+  const backoff = backoffTrimmed && isBackoff(backoffTrimmed) ? backoffTrimmed : DEFAULT_BACKOFF;
+  return { everyMs: Math.min(everyMs, MAX_EVERY_MS), timeoutMs, backoff };
 }
 
 /** The delay (ms) before the `attempt`-th retry (1-based). Fixed backoff returns `everyMs`;
@@ -1157,10 +1172,221 @@ export function redactTarget(probe: ReadinessProbe): string {
   return `${probe.kind}:${redactString(probe.target)}`;
 }
 
+/** The ONE canonical embedded-`//<userinfo>@` credential-userinfo span, shared by the redactor
+ * ({@link redactString}, which REWRITES the span to `//***@`) and the semantic reject path
+ * ({@link hasEmbeddedCredential}, used by `validateDeliveryGraph` to REJECT a credential-bearing
+ * `agent.jobType`). Keeping ONE source string means the "what counts as an embedded credential" rule
+ * can never drift between the two — the redactor must strip exactly what the validator rejects, or a
+ * credential the validator misses would be echoed un-redacted. The userinfo class is `[^/?#]` (NOT
+ * `[^/@\s]`, and NOT the earlier `[^/@]`/`[^/]`): it deliberately spans WHITESPACE up to the `@`, so a
+ * malformed-but-operator-authored `//user:secret pass@host` (a literal space in the userinfo) is
+ * caught, not left to leak verbatim into the executable `<zeebe:taskDefinition type=…>` / compiled BPMN
+ * (issue #778 review — thread deliveryGraph.ts:570). The userinfo colon is DELIBERATELY OPTIONAL
+ * (`[^/?#]*@`, not `[^/?#]*:[^/?#]*@`):
+ * a passwordless, username-only `//token@host` is a bearer/OAuth token riding the userinfo and MUST be
+ * caught too — a plain worker-routing job type never contains a `//…@` span at all (with or without a
+ * colon), so requiring a colon would only re-open a real leak for no legitimate gain (issue #778 review
+ * — thread readiness.ts:1170). `[^/?#]*@` is a single-quantifier match — linear, no catastrophic
+ * backtracking.
+ *
+ * The userinfo class is `[^/?#]` (NOT `[^/@]`): per RFC 3986 the userinfo runs to the LAST `@` before the
+ * authority's path, so a malformed-but-accepted multi-`@` value (`//user:pass@ss@host`) must collapse
+ * through EVERY `@` up to the path — an earlier `[^/@]*@` stopped at the FIRST `@`, rewriting only
+ * `//user:pass@` and leaking the `ss@host` suffix into the display artifact (issue #778 review — thread
+ * readiness.ts:1175).
+ *
+ * The class also EXCLUDES `?` and `#` (NOT the earlier `[^/]`): per RFC 3986 a raw `?`/`#` starts the
+ * query/fragment and so ENDS the authority — a `//host?token=secret@tail` carries its `@` INSIDE the
+ * query, with no userinfo at all. An unbounded `[^/]*@` greedily consumed the `?` marker
+ * (`//host?token=secret@` → `//***@`), so the follow-on `?query`/`#fragment` strip in {@link redactString}
+ * found no marker and left `tail` visible. Bounding the userinfo before `?`/`#` keeps the marker in
+ * place so the whole query/fragment (incl. any `@tail`) is redacted, while a genuine `//user:pass@host?…`
+ * still collapses its userinfo AND has its query stripped (issue #778 review — thread readiness.ts:1199).
+ * `[^/?#]` still excludes `/` (so it never crosses into the path), and the trailing `@` is anchored
+ * greedily to the last one before a `/`/`?`/`#`; `[^/?#]*@` remains a single-quantifier match, so it is
+ * linear with no catastrophic backtracking. */
+export const EMBEDDED_CREDENTIAL_SRC = "\\/\\/[^/?#]*@";
+
 /** Strip credential-bearing pieces from a free-form target string for logging: any `user:pass@`
- * userinfo and any `?query`/`#fragment` (a token often rides the query). */
+ * userinfo and any `?query`/`#fragment` (a token often rides the query). The query/fragment strip uses
+ * `[\s\S]*` (NOT `.*$`, which cannot cross a line break) so an embedded CR/LF after the `?`/`#` — e.g.
+ * `https://host/?token=secret\nnext` — cannot leave the token un-redacted; everything from the first
+ * `?`/`#` to end-of-string is consumed regardless of intervening newlines. The userinfo class is
+ * `[^/?#]` (NOT `[^/@\s]`, NOT the earlier `[^/@ ]`/`[^/@ \t]`/`[^/@]`, and NOT the later `[^/]`): ANY character smuggled
+ * INSIDE the
+ * userinfo up to the `@` — a raw CR/LF (`https://user:pa\nss@host`), an embedded TAB
+ * (`https://user:pa\tss@host`), a literal SPACE (`https://user:secret pass@host`, a malformed but
+ * operator-authored value), OR an extra raw `@` (`https://user:pass@ss@host`, whose userinfo per RFC
+ * 3986 runs to the LAST `@`) — must not break the `//…@` match and leave the credential tail visible.
+ * An earlier `[^/@ ]` bounded the userinfo at a SPACE to avoid over-matching prose, and `[^/@]` stopped
+ * at the FIRST `@` (leaking a multi-`@` suffix), but both let a credential escape into an
+ * operator-visible display artifact; since the RAW value
+ * still reaches runtime unmodified and only the DISPLAY doc is affected, redacting more (through the
+ * last `@` before the path) is the safe direction (issue #778 review). The `?`/`#` exclusion is the
+ * INVERSE correction: a `[^/]` userinfo crossed a raw query/fragment delimiter — a `?token=…@tail` query
+ * (no userinfo; the `@` rides the query) collapsed to `//***@tail`, consuming the `?` marker so the
+ * follow-on `?query`/`#fragment` strip below found nothing and LEAKED `tail`. Bounding the userinfo at
+ * `?`/`#` keeps the marker so the query strip redacts the whole tail (issue #778 review — thread
+ * readiness.ts:1199). `[^/?#]*@` remains a
+ * single-quantifier match, so it is
+ * linear with no catastrophic backtracking. Callers that surface the result in a display artifact must
+ * first pass it through `stripXmlInvalidChars` so an XML-forbidden control (e.g. U+000B) inside the
+ * userinfo cannot split the `//…@` match and be re-joined at render. */
 export function redactString(s: string): string {
-  return s
-    .replace(/\/\/[^/@\s]*@/g, "//***@")
-    .replace(/[?#].*$/, (m) => `${m[0]}***`);
+  return redactEmbeddedCredential(s).replace(/[?#][\s\S]*$/, (m) => `${m[0]}***`);
+}
+
+/** Strip ONLY the embedded `//<userinfo>@` credential span(s) from a string, collapsing each to
+ * `//***@` and leaving everything else (including any `?query`/`#fragment`, which may be a MEANINGFUL
+ * opaque-token character rather than URL syntax) untouched. Shares the ONE canonical
+ * {@link EMBEDDED_CREDENTIAL_SRC} span so "what counts as an embedded credential" can never drift from
+ * the redactor ({@link redactString}) or the validator ({@link hasEmbeddedCredential}). A `//<userinfo>@`
+ * span is UNAMBIGUOUSLY a credential wherever it sits — a plain opaque identifier
+ * (`slack:#releases`, `owner/repo#42`, `pkg@version`) never contains one — so it is safe to strip
+ * regardless of the value's URL-shape or the span's position, which is why {@link redactConnectorValue}
+ * runs it on a NON-URL-shaped free-form value (a probe target / PR ref) whose credential rides AFTER a
+ * prefix (`prefix //user:pass@host#42`) that the anchored {@link isUrlShaped} check would miss (issue
+ * #778 review — thread deliveryGraph.ts:162/566). `[^/]*@` is a single-quantifier match — linear, no
+ * catastrophic backtracking. */
+export function redactEmbeddedCredential(s: string): string {
+  return s.replace(new RegExp(EMBEDDED_CREDENTIAL_SRC, "g"), "//***@");
+}
+
+/** The ONE canonical embedded SCHEME-RELATIVE credential-URL token: a `//<userinfo>@authority…` run
+ * (bounded by the next literal space) whose `//` carries userinfo. The `@` UNAMBIGUOUSLY marks the run a
+ * URL — an opaque ref (`//host#42`, `slack:#releases`, `owner/repo#42`) never carries `//user@` — so its
+ * `?query`/`#fragment` IS URL syntax and may hide a token, exactly like an explicit-scheme
+ * {@link EMBEDDED_SCHEME_URL_SRC}. Distinct from the userinfo-ONLY {@link EMBEDDED_CREDENTIAL_SRC}, which
+ * strips just the `//user:pass@` span and (correctly, for an opaque `//host#42`) LEAVES the tail: a
+ * userinfo-bearing `//user:pass@host?token=secret` embedded after a non-URL prefix is scheme-relative,
+ * so the anchored whole-value {@link isUrlShaped} check misses it (non-URL prefix) and the userinfo-only
+ * strip leaks the `?token=secret` tail (issue #778 review — thread deliveryGraph.ts:188). Requiring the
+ * `@` keeps genuine opaque `//host#42` refs (no userinfo) untouched. The token runs to the next literal
+ * SPACE (`[^ ]*`), NOT the wider `\s` class, so it CROSSES an XML-valid internal TAB/LF/CR and still
+ * redacts a `?query` secret sitting past it. The userinfo class is `[^/?#]` (NOT the earlier `[^/]`):
+ * bounding it before a raw `?`/`#` stops the userinfo span crossing the query/fragment delimiter — a
+ * `//host?token=secret@tail` (no userinfo; the `@` rides the query) no longer collapses to `//***@tail`
+ * (leaking `tail`); it instead falls through to {@link redactEmbeddedSchemeRelativeUrl}, which strips the
+ * whole `?query` (issue #778 review — thread readiness.ts:1199, mirroring the {@link EMBEDDED_CREDENTIAL_SRC}
+ * fix). `[^/?#]*@` and `[^ ]*` are separated by the literal `@`
+ * anchor, so the match stays linear with no catastrophic backtracking. */
+const EMBEDDED_CREDENTIAL_URL_SRC = "\\/\\/[^/?#]*@[^ ]*";
+
+/** Redact each embedded SCHEME-RELATIVE credential-URL (`//<userinfo>@authority…`) token IN PLACE via
+ * {@link redactString} — stripping its `//user:pass@` userinfo AND any `?query`/`#fragment` — while
+ * leaving opaque `//host#42` refs (no userinfo) untouched. Lets {@link redactConnectorValue} catch a
+ * query/fragment secret riding a credential-bearing scheme-relative URL after a non-URL prefix
+ * (`prefix //user:pass@host?token=secret`) that the anchored {@link isUrlShaped} whole-value check AND
+ * the userinfo-only {@link redactEmbeddedCredential} both miss (issue #778 review — thread
+ * deliveryGraph.ts:188). Deterministic and total. */
+export function redactEmbeddedCredentialUrl(s: string): string {
+  return s.replace(new RegExp(EMBEDDED_CREDENTIAL_URL_SRC, "g"), (m) => redactString(m));
+}
+
+/** The ONE canonical embedded ABSOLUTE-URL token: an EXPLICIT-scheme `scheme://authority…` run bounded
+ * by whitespace. Deliberately requires an explicit `scheme:` before the `//` (NOT the scheme-relative
+ * `//authority` {@link isUrlShaped} also accepts): an absolute URL's `?query`/`#fragment` are
+ * UNAMBIGUOUSLY URL syntax and may hide a token, so they are safe to strip; a scheme-relative
+ * `//host#42` (or an opaque `slack:#releases`, `owner/repo#42`) instead carries a MEANINGFUL opaque
+ * `#`/`?` (a `parsePrTarget` PR ref) that must survive, so it is left to the userinfo-only
+ * {@link redactEmbeddedCredential}. The scheme may be followed by XML-attribute whitespace
+ * (`\s*` — TAB/LF/CR/space) BEFORE the `//` authority, exactly like {@link isUrlShaped}: those are valid
+ * XML `Char`s that `stripXmlInvalidChars` does NOT remove, so an embedded `scheme<whitespace>//authority`
+ * after a non-URL prefix (`prefix https:\t//user:pass@host?token=secret`) is not whole-value URL-shaped,
+ * escapes the anchored {@link isUrlShaped} check, and — without this `\s*` — was missed here too, leaving
+ * the fallback {@link redactEmbeddedCredential} to strip only the `//…@` userinfo and LEAK the
+ * `?token=secret` tail. Keeping this token's `scheme:` + `\s*` + `//` shape aligned with `isUrlShaped`
+ * closes that gap (issue #778 review — thread readiness.ts:1239). The token then runs to the next literal
+ * (`[^ ]+`), NOT the wider `\s` class, so it CROSSES an XML-valid internal TAB/LF/CR (0x09/0x0A/0x0D —
+ * the only whitespace `stripXmlInvalidChars` keeps) and still redacts a `?query`/`#fragment` secret
+ * sitting past it (`https://host/pa\tth?token=secret`); a `\s`-bounded token stopped at that internal
+ * whitespace and leaked the tail (#778 review — thread deliveryGraph.ts:188). Over-redacting across an
+ * internal newline is the safe direction. `\s*` and `[^ ]+` are separated by the literal `:`/`//`
+ * anchors, so the match stays linear with no catastrophic backtracking. */
+const EMBEDDED_SCHEME_URL_SRC = "[a-z][a-z0-9+.-]*:\\s*\\/\\/[^ ]+";
+
+/** Redact each embedded ABSOLUTE-URL (explicit `scheme://…`) token in a free-form value IN PLACE via
+ * {@link redactString} — stripping that token's `user:pass@` userinfo AND `?query`/`#fragment` — while
+ * leaving surrounding prose and any scheme-relative/opaque `//…`/`#`/`?` run untouched (those are
+ * handled, credential-only, by {@link redactEmbeddedCredential}). Lets {@link redactConnectorValue}
+ * catch a query/fragment secret riding an embedded absolute URL after a non-URL prefix
+ * (`prefix https://host/path?token=secret`) that the anchored {@link isUrlShaped} whole-value check
+ * misses (issue #778 review — thread deliveryGraph.ts:181). Deterministic and total. */
+export function redactEmbeddedUrl(s: string): string {
+  return s.replace(new RegExp(EMBEDDED_SCHEME_URL_SRC, "gi"), (m) => redactString(m));
+}
+
+/** The ONE canonical embedded SCHEME-RELATIVE URL token that carries a `?query`: a userinfo-LESS
+ * `//authority…?query…` run (bounded by the next literal space). Distinct from the userinfo-bearing
+ * {@link EMBEDDED_CREDENTIAL_URL_SRC} (which the `@` marks a URL) and the explicit-scheme
+ * {@link EMBEDDED_SCHEME_URL_SRC}: a `senior:feature //host?token=secret` embedded after a non-URL prefix
+ * has NO userinfo `@` and NO explicit `scheme:`, so the anchored {@link isUrlShaped} whole-value check,
+ * {@link redactEmbeddedCredentialUrl}, and {@link redactEmbeddedUrl} ALL miss it — leaking the
+ * `?token=secret` tail (issue #778 review — thread deliveryGraph.ts:633). A scheme-relative `//authority`
+ * whose `?` is present is UNAMBIGUOUSLY URL syntax — an opaque ref (`owner/repo#42`, `//host#42`) uses a
+ * `#<digits>` fragment (`parsePrTarget`), never a `//…?…` query — so its query is safe to strip while a
+ * userinfo-less opaque `//host#42` (no `?`) is left to keep its meaningful `#42`. The token runs to the
+ * next literal SPACE (`[^ ]*`), NOT the wider `\s` class, so it CROSSES an XML-valid internal TAB/LF/CR
+ * and still redacts a `?query` secret sitting past it. `[^ ]*` before/after the literal `?` anchor keeps
+ * the match linear with no catastrophic backtracking. */
+const EMBEDDED_SCHEME_RELATIVE_URL_SRC = "\\/\\/[^ ]*\\?[^ ]*";
+
+/** Redact each embedded SCHEME-RELATIVE URL (`//authority…?query…`, no userinfo, no explicit scheme)
+ * token IN PLACE via {@link redactString} — stripping its `?query`/`#fragment` — while leaving a
+ * userinfo-less opaque `//host#42` PR ref (no `?`) untouched. Lets {@link redactConnectorValue} catch a
+ * query secret riding a scheme-relative URL after a non-URL prefix (`prefix //host?token=secret`) that
+ * the anchored {@link isUrlShaped} check, {@link redactEmbeddedCredentialUrl}, and {@link redactEmbeddedUrl}
+ * all miss (issue #778 review — thread deliveryGraph.ts:633). Deterministic and total. */
+export function redactEmbeddedSchemeRelativeUrl(s: string): string {
+  return s.replace(new RegExp(EMBEDDED_SCHEME_RELATIVE_URL_SRC, "g"), (m) => redactString(m));
+}
+
+/** The canonical scheme-relative `//` authority marker — the `//` that opens an authority in ANY URL
+ * form (absolute `scheme://`, scheme-relative `//`, credential `//user@`). A worker-routing job type
+ * never legitimately contains it. */
+const SCHEME_RELATIVE_AUTHORITY_SRC = "\\/\\/";
+
+/** True when `value` embeds a scheme-relative `//authority` token (see {@link SCHEME_RELATIVE_AUTHORITY_SRC}).
+ * A plain worker-routing job type / opaque id NEVER contains `//` — so a match (whether it carries
+ * userinfo, an explicit scheme, a `?query`, a `#fragment`, or nothing) is illegitimate in an
+ * `agent.jobType` and must be rejected, closing the userinfo-less scheme-relative gap
+ * (`senior:feature //host?token=secret`) that {@link hasEmbeddedCredential} (needs `@`),
+ * {@link hasEmbeddedUrl} (needs an explicit scheme), and the anchored {@link isUrlShaped} (whole-value
+ * only) all miss (issue #778 review — thread deliveryGraph.ts:633). */
+export function hasSchemeRelativeAuthority(value: string): boolean {
+  return new RegExp(SCHEME_RELATIVE_AUTHORITY_SRC).test(value);
+}
+
+/** True when `value` embeds a `//<userinfo>@host` credential token (see {@link EMBEDDED_CREDENTIAL_SRC};
+ * the userinfo colon is optional, so a passwordless `//token@host` bearer token also matches).
+ * A plain worker-routing job type / opaque id never contains one, so a match is a credential leak to reject. */
+export function hasEmbeddedCredential(value: string): boolean {
+  return new RegExp(EMBEDDED_CREDENTIAL_SRC).test(value);
+}
+
+/** True when `value` embeds an absolute-URL token (`scheme://authority…`; see
+ * {@link EMBEDDED_SCHEME_URL_SRC}). A plain worker-routing job type / opaque id never contains one, so a
+ * match is a URL whose `?query`/`#fragment` can hide a token and which — since the executable
+ * `<zeebe:taskDefinition type=…>` carries the job type VERBATIM — would leak into the compiled BPMN.
+ * Distinct from {@link hasEmbeddedCredential}: that catches only a `//<userinfo>@` credential span and
+ * misses a userinfo-less `senior:feature https://host?token=secret` (issue #778 review — thread
+ * deliveryGraph.ts:602). */
+export function hasEmbeddedUrl(value: string): boolean {
+  return new RegExp(EMBEDDED_SCHEME_URL_SRC, "i").test(value);
+}
+
+/** The ONE canonical "is this value a URL?" classifier — a `scheme://authority` OR scheme-relative
+ * `//authority` form, either of which can hide a credential in userinfo/query/fragment. It is the single
+ * source of truth for URL-shape detection shared by the connector/jobType display redactor
+ * ({@link redactString} callers in the compiler) AND the semantic validation boundary
+ * (`validateDeliveryGraph`), so the "what counts as credential-bearing/URL-shaped" rule can never drift
+ * between the redact path and the reject path (issue #778 review — thread deliveryGraphCompiler.ts:1606).
+ * Classify on the TRIMMED value so leading whitespace (` //user:pass@host` — the OpenAPI edge caps
+ * length but does not trim) cannot bypass the anchored check. The scheme may be followed by
+ * XML-attribute whitespace (TAB/LF/CR/space) before the `//` authority: those characters are valid XML
+ * `Char`s that `stripXmlInvalidChars` does NOT remove, so `https:\t//user:pass@host` must still classify
+ * as URL-shaped or its credential escapes redaction as "not a URL" (issue #778 review — thread
+ * readiness.ts:1191). Deterministic and total. */
+export function isUrlShaped(value: string): boolean {
+  return /^([a-z][a-z0-9+.-]*:\s*)?\/\//i.test(value.trim());
 }

@@ -26,6 +26,7 @@
 import type { DataLayer, ProcessInstanceState } from "@nanobpm/urban";
 import type { CompileDeliveryGraphResult } from "../nano-generated/api-io.d.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
+import { redactFreeText } from "./deliveryGraphCompiler.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
 
 const now = () => new Date().toISOString();
@@ -97,6 +98,24 @@ export const DELIVERY_PHASE = {
 export const deliveryGraphRuns = (data: DataLayer) =>
   data.table<DeliveryGraphRun>("delivery_graph_runs", "run_key");
 
+/** One row of the `delivery_graph_run_identity` SIDE table (migration 113) — the run's LOSSLESS
+ * content-identity fingerprint, kept OFF the heavily-projected `delivery_graph_runs` base row so no
+ * drift-guarded read-model/compat view has to carry it. Keyed by `run_key`. */
+export interface DeliveryGraphRunIdentity {
+  run_key: string;
+  /** `sha256(digest \0 canonicalJson(digestInvisibleRawValues(graph)))`, captured at launch — the same
+   *  lossless identity `stableProposalRunKey` folds into the keyless run key. An explicit-`idempotencyKey`
+   *  short-circuit compares this to prove the running run is THIS exact graph (a same-payload retry) vs. a
+   *  credential-different graph re-staged under the same key. */
+  graph_fingerprint: string;
+  created_at: string;
+}
+
+/** The `delivery_graph_run_identity` side-table accessor — the run's lossless identity fingerprint,
+ * keyed by `run_key` (issue #778 review — thread dispatchDeliveryGraph.ts:332). */
+export const deliveryGraphRunIdentities = (data: DataLayer) =>
+  data.table<DeliveryGraphRunIdentity>("delivery_graph_run_identity", "run_key");
+
 /** Atomically claim a run for LAUNCH — the at-most-once dispatch fence. Returns `true` iff THIS caller
  * won the claim and must proceed to `runDeliveryGraph`; `false` iff a concurrent submit already claimed
  * it (the caller must short-circuit as `alreadyRunning` instead of double-launching). Two fences, one
@@ -119,7 +138,9 @@ export const deliveryGraphRuns = (data: DataLayer) =>
  * the row briefly visible as `running` while still pointing at the OLD instance key, so the
  * `process_key`-keyed instance-tracking reconciler / poller could act on (and mis-reconcile against)
  * the stale instance before the winner's follow-up metadata write lands. Clearing them atomically with
- * the flip means a claimed `running` row can never be observed with a stale instance key. */
+ * the flip means a claimed `running` row can never be observed with a stale instance key. A winning
+ * relaunch also DELETES the run's prior `delivery_graph_run_identity` side-row in the same transaction,
+ * for the same reason — see the inline note (issue #778 review). */
 export async function claimRunForLaunch(
   data: DataLayer,
   existing: boolean,
@@ -134,9 +155,8 @@ export async function claimRunForLaunch(
       return false;
     }
   }
-  const res = await data
-    .open()
-    .exec(
+  const res = await data.open().tx(async (t) => {
+    const flip = await t.exec(
       `UPDATE "delivery_graph_runs" SET "status" = ?, "process_key" = ?, "process_definition_id" = ?, "phase" = ?, "phase_node_id" = ?, "updated_at" = ? WHERE "run_key" = ? AND "status" <> 'running'`,
       [
         claim.status,
@@ -148,7 +168,21 @@ export async function claimRunForLaunch(
         claim.run_key,
       ],
     );
-  return res.changed === 1;
+    if (flip.changed !== 1) return false;
+    // Invalidate the PRIOR run's lossless identity fingerprint IN THE SAME transaction as the flip, so a
+    // claimed `running` row can never be observed alongside the previous run's stale `graph_fingerprint`.
+    // dispatch's `identityConfirmed` short-circuit reads this side-row to prove an already-running run is
+    // THIS exact graph (a same-payload retry) vs. a credential-different graph re-staged under the same
+    // key; between this flip and the winner's post-launch re-stamp (`upsertRunIdentity`) the prior row
+    // would otherwise still match a relaunch that shares only the digest, WRONGLY confirming identity for
+    // a different-credential run. Deleting it here makes the fingerprint UNPROVABLE (missing →
+    // identityConfirmed:false, the safe pre-existing 409) throughout that window, atomically with the
+    // status flip — the same "no stale side-state observable on a claimed row" invariant the instance-key
+    // clear above enforces (issue #778 review — thread deliveryGraphDispatch.ts:180).
+    await t.exec(`DELETE FROM "delivery_graph_run_identity" WHERE "run_key" = ?`, [claim.run_key]);
+    return true;
+  });
+  return res;
 }
 
 /** The idempotency key for a submitted graph: a caller-supplied `idempotencyKey` (trimmed) when
@@ -181,7 +215,13 @@ export function buildHumanLabels(compiled: CompileDeliveryGraphResult): Record<s
   for (const stop of compiled.humanNodes) {
     const element = elementByNodeId.get(stop.nodeId);
     if (element === undefined) continue;
-    labels[humanTaskElementId(element)] = firstLine(stop.prompt) || stop.nodeId;
+    // Redact the prompt with the SAME display-safe helper `nodeDisplay` uses BEFORE stamping it: this
+    // label is denormalised into the run row's `human_labels` and surfaced to the operator as the parked
+    // task's Decision context in the Tasks inbox, so a URL credential in a human prompt (`//user:pass@…`)
+    // must be stripped here too — else it is persisted and shown unredacted even though the BPMN display
+    // path redacts it. The RAW prompt still reaches the runtime user task unmodified (issue #778 review).
+    const safePrompt = typeof stop.prompt === "string" ? redactFreeText(stop.prompt) : "";
+    labels[humanTaskElementId(element)] = firstLine(safePrompt) || stop.nodeId;
   }
   return labels;
 }

@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
 import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
@@ -19,6 +19,7 @@ import {
   computeRunKey,
   deriveDeliveryPhase,
   DELIVERY_PHASE,
+  deliveryGraphRunIdentities,
   deliveryGraphRuns,
   humanTaskElementId,
   parseHumanLabels,
@@ -104,6 +105,25 @@ test("claimRunForLaunch: re-running a terminal row clears the PRIOR instance key
     assertEquals(row?.process_definition_id, null);
     assertEquals(row?.phase_node_id, null);
     assertEquals(row?.phase, DELIVERY_PHASE.RUNNING);
+  });
+});
+
+test("claimRunForLaunch: winning a re-run claim ATOMICALLY invalidates the prior run's identity side-row — a concurrent loser's short-circuit read sees a MISSING (unprovable) fingerprint, not the stale prior one (issue #778 review — thread deliveryGraphDispatch.ts:180)", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    const identities = deliveryGraphRunIdentities(data);
+    // A terminal prior run still carrying its stamped lossless identity fingerprint.
+    await runs.insert({ ...claimRow("running"), status: "failed" });
+    await identities.insert({ run_key: "rk", graph_fingerprint: "PRIOR-FP", created_at: "2020-01-01T00:00:00.000Z" });
+    // The winner re-runs (conceptually a DIFFERENT graph that shares the digest-derived run_key but not
+    // the credential-sensitive fingerprint). The CAS flips the row to running…
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), true);
+    // …and the stale identity row must be GONE the instant the row is `running`. Otherwise a racing loser
+    // reading between this flip and the winner's post-launch `upsertRunIdentity` re-stamp would read
+    // "PRIOR-FP" and, if that matched ITS graph, wrongly confirm identity for a credential-different run.
+    // Missing → dispatch's identityConfirmed is false (the safe 409) throughout the window.
+    const after = await identities.get("rk");
+    assert(after == null, `the stale identity row must be gone, got: ${JSON.stringify(after)}`);
   });
 });
 
@@ -200,12 +220,32 @@ test("buildHumanLabels: maps each human node's compiled user-task element id →
   assertEquals(labels[humanTaskElementId(ackEl)], "ack"); // fallback to node id
 });
 
+test("buildHumanLabels: redacts a credential-bearing human prompt before it lands in human_labels (issue #778 review)", async () => {
+  const graph = {
+    nodes: [
+      { id: "publish", kind: "human", human: { prompt: "deploy via https://user:s3cr3t@registry.example.com then confirm" } },
+    ],
+    edges: [],
+  };
+  const compiled = await compileDeliveryGraph(graph);
+  assertEquals(compiled.ok, true);
+  if (!compiled.ok) return;
+  const labels = buildHumanLabels(compiled);
+  const publishEl = compiled.resolved.nodes.find((n) => n.id === "publish")?.element ?? "";
+  const label = labels[humanTaskElementId(publishEl)];
+  assert(!label.includes("s3cr3t") && !label.includes("user:s3cr3t"), "the credential must not survive into the denormalised inbox label");
+  assertStringIncludes(label, "//***@");
+});
+
 test("parseHumanLabels: round-trips a stored map and tolerates null/blank/corrupt", () => {
-  assertEquals(parseHumanLabels(JSON.stringify({ a: "x" })), { a: "x" });
   assertEquals(parseHumanLabels(null), {});
   assertEquals(parseHumanLabels(""), {});
   assertEquals(parseHumanLabels("  "), {});
   assertEquals(parseHumanLabels("{not json"), {});
+  assertEquals(parseHumanLabels(JSON.stringify({ n1: "manual OTP publish", n2: "confirm deploy" })), {
+    n1: "manual OTP publish",
+    n2: "confirm deploy",
+  }); // round-trips a valid string→string map
   assertEquals(parseHumanLabels(JSON.stringify(["a"])), {}); // non-object
   assertEquals(parseHumanLabels(JSON.stringify({ a: 1, b: "y" })), { b: "y" }); // drops non-string values
 });

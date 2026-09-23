@@ -6,15 +6,27 @@
 // graph's side effects. These tests drive it against an in-memory app/data/engine faithful to the run
 // aggregate's PRIMARY KEY fence and the guarded raw UPDATE the claim issues.
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 import { dispatchDeliveryGraphRun } from "./deliveryGraphDispatch.ts";
 import { noopLog } from "../test/log.ts";
 
-function makeApp() {
+function makeApp(opts: { failIdentityWrite?: boolean } = {}) {
   const tables = new Map<string, Record<string, unknown>[]>();
   const started: { processDefinitionId: string }[] = [];
   const table = (name: string, key: string) => {
+    if (opts.failIdentityWrite && name === "delivery_graph_run_identity") {
+      // Simulate a transient side-table write error (e.g. a SQLite `disk I/O error`) — NOT a UNIQUE
+      // collision, so `upsertRunIdentity` rethrows it rather than folding it into an UPDATE.
+      return {
+        get: () => Promise.resolve(null),
+        find: () => Promise.resolve([]),
+        all: () => Promise.resolve([]),
+        insert: () => Promise.reject(new Error("disk I/O error")),
+        update: () => Promise.reject(new Error("disk I/O error")),
+        delete: () => Promise.resolve(),
+      };
+    }
     const rows =
       tables.get(name) ??
       (() => {
@@ -101,6 +113,39 @@ test("dispatchDeliveryGraphRun: a human-only graph launches straight away (runni
   assertEquals(runs()[0].status, "running");
 });
 
+test("#778 dispatchDeliveryGraphRun: a post-claim identity-write failure flips the claimed run to `failed`, not a stranded null-process_key `running` — so a phantom run never short-circuits a later dispatch (thread deliveryGraphDispatch.ts:229)", async () => {
+  const { app, started, runs } = makeApp({ failIdentityWrite: true });
+  // The identity side-table write throws AFTER the durable `running` claim; dispatch must propagate it.
+  await assertRejects(() => dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true }), Error, "disk I/O error");
+  // The claimed row was flipped to `failed` (never left `running` with a null process key), so a later
+  // same-key dispatch does NOT short-circuit onto a phantom run — it can retry cleanly.
+  assertEquals(runs().length, 1);
+  assertEquals(runs()[0].status, "failed");
+  assertEquals(runs()[0].process_key ?? null, null);
+  // The side effect never launched.
+  assertEquals(started.length, 0);
+});
+
+test("#778 dispatchDeliveryGraphRun: a still-running run whose identity row is MISSING (null, pre-migration) short-circuits with identityConfirmed:false instead of throwing (thread deliveryGraphDispatch.ts:175)", async () => {
+  const { app, started } = makeApp();
+  const first = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
+  assert(first.ok);
+  if (!first.ok) return;
+  assertEquals(first.status, "running");
+  // Simulate a run launched BEFORE the identity side-table existed: drop its identity row so
+  // `identities.get(runKey)` resolves to null (the test table — like the real `table.get()` — returns
+  // null, NOT undefined, for a missing row).
+  await app.data.table("delivery_graph_run_identity", "run_key").delete(first.runKey);
+  // A second same-key dispatch hits the already-running short-circuit; the null identity row must not
+  // throw while building the response — it is unprovable, so identityConfirmed is false.
+  const second = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
+  assert(second.ok);
+  if (!second.ok) return;
+  assertEquals(second.alreadyRunning, true);
+  assertEquals(second.identityConfirmed, false);
+  assertEquals(started.length, 1); // no double launch
+});
+
 test("dispatchDeliveryGraphRun: a side-effecting graph dispatches with NO approval token — the operator seam IS the approval", async () => {
   const { app, started, runs } = makeApp();
   const res = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
@@ -130,6 +175,35 @@ test("dispatchDeliveryGraphRun: an explicit idempotency key forces a distinct ru
   assertEquals(started.length, 2);
 });
 
+test("#778 dispatchDeliveryGraphRun: a recompiled digest that drifts from `expectedDigest` is REFUSED before any launch — no run, no engine instance (thread :1605)", async () => {
+  // A staged proposal is keyed by its stage-time digest. If the compiler ships a digest-affecting change
+  // (this PR adds labels/`<bpmn:documentation>`), the stored graph recompiles to a DIFFERENT digest. The
+  // door hands the stage-time digest as `expectedDigest`; a mismatch must refuse cleanly BEFORE the
+  // durable launch claim, so we never strand a live run against a proposal left `staged`.
+  const { app, started, runs } = makeApp();
+  const res = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true, expectedDigest: "sha256-stale-address" });
+  assertEquals(res.ok, false);
+  if (res.ok) return;
+  assert(res.errors.some((e) => e.path === "digest"), "the refusal is a digest-address error");
+  assertEquals(started.length, 0); // nothing launched
+  assertEquals(runs().length, 0); // no run row claimed
+});
+
+test("#778 dispatchDeliveryGraphRun: a matching `expectedDigest` dispatches normally (the same-compiler no-op path)", async () => {
+  // Compute the graph's true digest first, then pass it as `expectedDigest` — the normal deterministic
+  // recompile matches, so the address check is a no-op and the run launches.
+  const { app, started } = makeApp();
+  const probe = await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { repoless: true });
+  assert(probe.ok);
+  if (!probe.ok) return;
+  const { app: app2, started: started2 } = makeApp();
+  const res = await dispatchDeliveryGraphRun(app2, HUMAN_ONLY, { repoless: true, expectedDigest: probe.digest });
+  assertEquals(res.ok, true);
+  if (!res.ok) return;
+  assertEquals(res.status, "running");
+  assertEquals(started2.length, 1);
+});
+
 test("dispatchDeliveryGraphRun: a malformed graph → ok:false with path-qualified errors, nothing launched", async () => {
   const { app, started } = makeApp();
   const res = await dispatchDeliveryGraphRun(app, { name: "empty", nodes: [] });
@@ -140,4 +214,46 @@ test("dispatchDeliveryGraphRun: a malformed graph → ok:false with path-qualifi
     assert(typeof e.path === "string" && typeof e.message === "string");
   }
   assertEquals(started.length, 0);
+});
+
+// Option C (issue #778): a graph carrying redacted-away credential material has a LOSSY content digest
+// (a sibling differing only in the secret would collide), so a keyless dispatch — which defaults the
+// run identity to that digest — is refused; an explicit `idempotencyKey` disambiguates it.
+const SECRET_BEARING = {
+  name: "deploy with a secret",
+  nodes: [{ id: "deploy", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:s3cr3t@host.example/repo" } }],
+};
+
+test("dispatchDeliveryGraphRun: a secret-bearing graph dispatched KEYLESS is refused, points at idempotencyKey, launches nothing", async () => {
+  const { app, started, runs } = makeApp();
+  const res = await dispatchDeliveryGraphRun(app, SECRET_BEARING, { repoless: true });
+  assertEquals(res.ok, false);
+  if (res.ok) return;
+  assertEquals(res.errors.length, 1);
+  assertEquals(res.errors[0].path, "idempotencyKey");
+  assert(res.errors[0].message.includes("idempotencyKey"));
+  assertEquals(started.length, 0);
+  assertEquals(runs().length, 0); // nothing claimed
+});
+
+test("dispatchDeliveryGraphRun: the SAME secret-bearing graph WITH an explicit idempotencyKey launches", async () => {
+  const { app, started, runs } = makeApp();
+  const res = await dispatchDeliveryGraphRun(app, SECRET_BEARING, { runKey: "deploy-2024-06-a", repoless: true });
+  assertEquals(res.ok, true);
+  if (!res.ok) return;
+  assertEquals(res.status, "running");
+  assertEquals(res.runKey, "deploy-2024-06-a");
+  assertEquals(started.length, 1);
+  assertEquals(runs()[0].run_key, "deploy-2024-06-a");
+});
+
+test("dispatchDeliveryGraphRun: two credential-differing secret graphs with DISTINCT keys get distinct runs (no collision)", async () => {
+  const { app, started, runs } = makeApp();
+  const graphA = { name: "deploy", nodes: [{ id: "d", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:AAA@host.example/repo" } }] };
+  const graphB = { name: "deploy", nodes: [{ id: "d", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:BBB@host.example/repo" } }] };
+  const a = await dispatchDeliveryGraphRun(app, graphA, { runKey: "run-a", repoless: true });
+  const b = await dispatchDeliveryGraphRun(app, graphB, { runKey: "run-b", repoless: true });
+  assert(a.ok && b.ok);
+  assertEquals(started.length, 2);
+  assertEquals(new Set(runs().map((r) => r.run_key)).size, 2);
 });

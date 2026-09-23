@@ -36,16 +36,73 @@ import type {
   ResolvedDeliveryNode,
 } from "../nano-generated/api-io.d.ts";
 import { TRANSCRIPT_URL_BASE_VAR, TRANSCRIPT_URL_VAR } from "./agentic/transcript-url.ts";
+import { CONVERGE_MERGE_TARGET, CONVERGE_TARGET, isConvergeTarget, MERGE_MAIN_TARGET } from "./convergeTargets.ts";
 import { DELIVERY_CONNECTOR_TASK_TYPE } from "./deliveryConnector.ts";
 import {
   analyzeExclusiveTopology,
+  canonicalJson,
   type DeliveryGraphError,
   deliveryNodeFacts,
+  hasXmlInvalidChars,
+  redactConnectorValue,
   resolveDeliveryFrom,
+  stripXmlInvalidChars,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
+import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactEmbeddedCredential, redactString } from "./readiness.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
+import { isoDuration } from "./reviewWait.ts";
+
+/** A display-safe rendering of a `wait` probe's target for user-visible BPMN name/documentation
+ * (issue #778 review): a `command` target is an arbitrary shell snippet that can embed a secret, so it
+ * is never surfaced — only a fixed placeholder; an `http` target can carry a credential in its
+ * `user:pass@` userinfo or `?query`/`#fragment`, so it goes through the same {@link redactString} log
+ * redaction. A structured, non-credential identifier (`owner/repo#42`, `pkg@version`, `owner/repo@ref`,
+ * a `<node>.<fact>` ref) is shown VERBATIM — but because the graph validator only requires a non-empty
+ * target (and `parsePrTarget` accepts any prefix before `#<digits>`), a URL-SHAPED value smuggled into
+ * one of those kinds is still routed through the same URL-only {@link redactConnectorValue}, so a
+ * `//user:pass@host/repo#42` has its credential stripped while a legitimate `#`/`@` in a structured ref
+ * (which is not URL-shaped) is left untouched. The RAW target is retained only in runtime variables (the
+ * probe config + the escalation diagnostics), never in the deployed documentation the explorer/modeler
+ * shows. */
+function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait" }>["wait"]): string {
+  // NORMALIZE the kind first — `parseProbe` (`readiness.ts`) trims `wait.kind` before the worker keys
+  // on it, and the semantic validator only requires a non-empty string, so an internal/direct graph
+  // with `kind: " command "` runs as a COMMAND probe at runtime. Comparing the RAW (padded) kind here
+  // would miss that, route its arbitrary shell target through the URL-only `redactConnectorValue`, and
+  // leak it into the deployed BPMN documentation instead of `<redacted>` (issue #778 review — thread
+  // deliveryGraphCompiler.ts:70). Classify on the TRIMMED-RAW kind — the SAME `str(raw.kind).trim()`
+  // the runtime `parseProbe` keys on — and do NOT `stripXmlInvalidChars` it first: an XML-invalid char
+  // is not whitespace `parseProbe` trims, so a control-char-smuggled kind (`kind: "command\x01"`,
+  // `kind: "pr\x01"`) is REJECTED at runtime and never runs. Stripping the char before classifying
+  // would sanitise `"pr\x01"` toward a genuine `pr`, take the verbatim structured-target path, and leak
+  // an arbitrary secret-bearing target into the staged BPMN documentation for a probe that can never run
+  // (issue #778 review — thread deliveryGraphCompiler.ts:81, over :78). Any kind that is not an exact
+  // recognised `isProbeKind` after trimming falls to the unconditional `<redacted>` below.
+  const kind = probe.kind.trim();
+  if (kind === "command") return "<redacted>";
+  // TRIM the target first — `parseProbe` (`readiness.ts`) trims `target` for EVERY kind before the worker
+  // keys on it, so a padded ` owner/repo#1 ` and `owner/repo#1` are the SAME runtime probe. Rendering the
+  // raw (padded) value would leave the whitespace in `nodeDisplay`/`semanticBpmn`, forking the graph digest
+  // (and run key) from the trimmed-equivalent graph even though both probe the same value (issue #778
+  // review — thread deliveryGraphCompiler.ts:75).
+  const target = probe.target.trim();
+  // `stripXmlInvalidChars` BEFORE `redactString`: an XML-forbidden control (e.g. `\x0B`) hidden inside
+  // the `user:pass@` userinfo would otherwise split `redactString`'s `//…@` match, escape redaction, and
+  // be re-joined into a live credential once the renderer strips that control (issue #778 review).
+  if (kind === "http") return redactString(stripXmlInvalidChars(target));
+  // A kind that is not a recognised {@link isProbeKind} is MALFORMED — `parseProbe` rejects it at
+  // dispatch so it never runs, but the compiler still renders its target into the STAGED BPMN
+  // documentation/preview at compile time. That target could be an arbitrary command-like/secret-bearing
+  // snippet smuggled under a not-quite-known kind (`kind:"command\x01"`, `kind:"pr\x01"`, `kind:"cmd"`),
+  // so routing it through the URL-only `redactConnectorValue` would leak it verbatim. Redact it
+  // unconditionally, exactly like a `command` target — only a genuinely structured kind (`pr`/`epic`/
+  // `npm`/`github-check`/`capability`) shows its target (issue #778 review — thread
+  // deliveryGraphCompiler.ts:81, over :78).
+  if (!isProbeKind(kind)) return "<redacted>";
+  return redactConnectorValue(target);
+}
 
 /** The task-header key that carries an `agent` node's DECLARED per-node repository spec (#739) into the
  * compiled BPMN. It is a DIGEST-STABLE, env-free marker — pure graph content — so two graphs differing
@@ -132,9 +189,22 @@ export function assertNever(value: never, context: string): never {
   throw new Error(`${context}: unreachable — non-allowlisted delivery node kind ${JSON.stringify(value)}`);
 }
 
-/** Escape a string for use as XML text / attribute content. Deterministic and total. */
+/** XML 1.0's `Char` production forbids, anywhere in a document: the C0 control characters (except tab
+ * `#x9`, LF `#xA`, CR `#xD`), the noncharacters U+FFFE/U+FFFF, and unpaired UTF-16 surrogates — none can
+ * be represented by an entity, so any of them in an element `name`/`documentation` makes
+ * `layoutBpmn`/deployment reject the whole semantic BPMN. The character-class filter is
+ * {@link stripXmlInvalidChars}, canonical in `./deliveryGraph.ts` so the validator (which REJECTS such a
+ * character in executable FEEL) and this compiler (which strips it from DISPLAY text) share one
+ * definition. User-authored display strings (a node's free-form `prompt`, a probe `target`, an emit
+ * name) only impose length limits at the OpenAPI edge, so such a character can reach the renderer — and
+ * a code-unit truncation elsewhere can even manufacture a lone surrogate from a valid astral character.
+ * Strip all of these before emitting any XML text / attribute content (VALID astral pairs are
+ * preserved) — dropping an unrepresentable character is the only well-formed rendering. */
+
+/** Escape a string for use as XML text / attribute content, first stripping XML-1.0-forbidden control
+ * characters (see {@link stripXmlInvalidChars}). Deterministic and total. */
 function escapeXml(value: string): string {
-  return value
+  return stripXmlInvalidChars(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -148,7 +218,7 @@ function escapeXml(value: string): string {
  * literal survives to the engine. Safe because the compiler grafts DI onto its own semantic XML without
  * re-serializing it, so these text nodes are never round-tripped/normalized. Deterministic and total. */
 function escapeXmlText(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return stripXmlInvalidChars(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /** Render a `name=value` XML attribute, choosing the delimiter so FEEL string literals survive the
@@ -159,16 +229,27 @@ function escapeXmlText(value: string): string {
  * escaping) is used. Deterministic. */
 function attr(name: string, value: string): string {
   if (value.includes('"')) {
-    const inner = value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/'/g, "&apos;");
+    const inner = stripXmlInvalidChars(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/'/g, "&apos;");
     return `${name}='${inner}'`;
   }
   return `${name}="${escapeXml(value)}"`;
 }
 
-/** Escape a string for use inside a mermaid quoted label. Mermaid uses `#` HTML-entity escapes; a
- * double quote inside a `"…"` label must become `#quot;` so the label stays well-formed. */
+/** Escape a string for use inside a mermaid quoted label. First strips XML-1.0-forbidden control
+ * characters (see {@link stripXmlInvalidChars}) — the same free-form node labels feed the Mermaid path,
+ * so a stray control char (e.g. `\x01` in a prompt) would otherwise make the preview unparsable. Mermaid
+ * then uses `#` HTML-entity escapes: `&`, `<`, `>` and `"` are encoded (`#amp;`/`#lt;`/`#gt;`/`#quot;`)
+ * so free-form prompt/target text can't be interpreted as markup and make a label render wrong or vanish
+ * (`&` is encoded FIRST so its `#amp;` isn't re-encoded). Any line break — LF **or** a bare/`\r\n` CR
+ * (a valid char `stripXmlInvalidChars` preserves) — is folded to a space, since a raw break inside the
+ * line-oriented Mermaid source would make the preview unparsable. */
 function escapeMermaid(value: string): string {
-  return value.replace(/"/g, "#quot;").replace(/\n/g, " ");
+  return stripXmlInvalidChars(value)
+    .replace(/&/g, "#amp;")
+    .replace(/</g, "#lt;")
+    .replace(/>/g, "#gt;")
+    .replace(/"/g, "#quot;")
+    .replace(/\r\n?|\n/g, " ");
 }
 
 /** A node's typed emits, normalised to a stable array (absent → `[]`). */
@@ -711,15 +792,51 @@ function delegateTarget(node: DeliveryNode, element: string): string {
   }
 }
 
+/** Redact any credential-bearing URL inside each emit's free-form `description` for the operator-facing
+ * preview projection, mirroring the `redactFreeText(trimmedOrEmpty(description))` the BPMN label embeds
+ * (`nodeDisplay`). Returns fresh `DeliveryFact` copies (never mutates the source), so the RAW descriptions
+ * on the runtime path are untouched (issue #778 review). */
+function redactEmitsForPreview(facts: readonly DeliveryFact[]): DeliveryFact[] {
+  return facts.map((f) =>
+    typeof f.description === "string" ? { ...f, description: redactFreeText(f.description) } : { ...f },
+  );
+}
+
 /** Extract the human STOP-points (sorted by id) — where the graph pauses for a person/agent, with the
  * instruction, optional attached form, and the typed facts the node will emit. */
 function buildHumanNodes(nodes: readonly DeliveryNode[]): DeliveryHumanStop[] {
   const stops: DeliveryHumanStop[] = [];
   for (const node of nodes) {
     if (node.kind !== "human") continue;
-    const stop: DeliveryHumanStop = { nodeId: node.id, emits: normaliseEmits(node) };
-    const withPrompt = node.human?.prompt !== undefined ? { ...stop, prompt: node.human.prompt } : stop;
-    stops.push(node.human?.formKey !== undefined ? { ...withPrompt, formKey: node.human.formKey } : withPrompt);
+    // Redact a credential-bearing URL inside each emit's free-form `description` at its SOURCE, the SAME
+    // way `nodeDisplay` embeds it (`redactFreeText(trimmedOrEmpty(description))`): `humanNodes[]` — emits
+    // included — is persisted into the staged proposal `preview` and rendered on the Delivery Graphs page
+    // (and denormalised into parked-node labels), so a `//user:pass@…` in a fact description would leak
+    // unredacted through this operator-facing projection even though the BPMN label path redacts it. The
+    // RAW descriptions still reach the runtime `appendPrompt` (`renderEmitContract`) unmodified (#778).
+    const stop: DeliveryHumanStop = { nodeId: node.id, emits: redactEmitsForPreview(normaliseEmits(node)) };
+    // Redact the operator-facing preview `prompt` at its SOURCE with the SAME display-safe helper
+    // `nodeDisplay` renders with: this projection is persisted into the staged proposal `preview` and
+    // rendered verbatim on the Delivery Graphs page (and denormalised into the run's parked-node
+    // labels), so a URL credential in a human prompt (`//user:pass@…`) must be stripped here too — else
+    // it leaks unredacted through the preview even though the BPMN display path redacts it. The runtime
+    // user-task prompt seeded via the compiled BPMN `nodeInputs` (`deliveryRunner.buildNodeInput`,
+    // `case "human"`) is ALSO redacted the same way — it renders in the parked task's read-only form
+    // field, another display surface — so no leak path remains (issue #778 review). `redactFreeText` is
+    // a no-op for a credential-free prompt.
+    const withPrompt =
+      typeof node.human?.prompt === "string" ? { ...stop, prompt: redactFreeText(node.human.prompt) } : stop;
+    // The `formKey` is an opaque identifier a modeler/explorer reads verbatim off the staged proposal
+    // preview + Delivery Graphs page (and denormalised into parked-node labels), so a credential-bearing
+    // formKey (`//user:pass@…`) must be stripped here with the SAME `redactConnectorValue` the BPMN
+    // `Form:` documentation (nodeDisplay) and the digest-invisible traversal use — else it leaks
+    // unredacted through the preview. The RAW formKey still drives runtime form resolution
+    // (`deliveryHuman.ts` reads `node.human.formKey` directly), unmodified (issue #778 review).
+    stops.push(
+      typeof node.human?.formKey === "string"
+        ? { ...withPrompt, formKey: redactConnectorValue(node.human.formKey) }
+        : withPrompt,
+    );
   }
   return stops;
 }
@@ -734,16 +851,28 @@ function buildSideEffects(nodes: readonly DeliveryNode[]): DeliverySideEffect[] 
       effects.push({
         nodeId: node.id,
         kind: "agent",
-        description: `runs agent job \`${node.agent.jobType}\``,
+        // Redact a credential-bearing `jobType` at its SOURCE with the display-safe helper `nodeDisplay`
+        // uses — this side-effect projection is persisted into the staged proposal preview, an
+        // operator-visible surface, so a URL-shaped jobType carrying a secret must not echo verbatim here
+        // any more than in the node label/documentation (issue #778 review — thread :1202).
+        description: `runs agent job \`${redactConnectorValue(node.agent.jobType)}\``,
       });
     } else if (node.kind === "connector") {
+      // Redact the operator-facing `target`/`dedupeKey` at their SOURCE with the SAME display-safe
+      // helper `nodeDisplay` renders with: this projection is persisted into the staged proposal
+      // `preview` and rendered on the Delivery Graphs page, so a URL credential in a connector target
+      // or dedupe key (`//user:pass@…`) must be stripped here too — else it leaks unredacted through
+      // the preview even though the BPMN display path redacts it. The RAW values still reach the
+      // runtime connector via the compiled BPMN `nodeInputs`, unmodified (issue #778 review).
       const effect: DeliverySideEffect = {
         nodeId: node.id,
         kind: "connector",
-        description: `invokes connector target \`${node.connector.target}\``,
+        description: `invokes connector target \`${redactConnectorValue(node.connector.target)}\``,
       };
       effects.push(
-        node.connector.dedupeKey !== undefined ? { ...effect, dedupeKey: node.connector.dedupeKey } : effect,
+        typeof node.connector.dedupeKey === "string"
+          ? { ...effect, dedupeKey: redactConnectorValue(node.connector.dedupeKey) }
+          : effect,
       );
     }
   }
@@ -886,6 +1015,633 @@ function renderBpmn(
   return `${lines.filter((l) => l.length > 0).join("\n")}\n`;
 }
 
+/** The first non-empty line of a (possibly multi-line) string, trimmed and length-capped for use as a
+ * concise element label. Returns `""` for a blank/undefined input; a line longer than `cap` is
+ * truncated with an ellipsis. Truncation is by Unicode CODE POINT (`Array.from`), not UTF-16 code unit,
+ * so slicing never splits an astral character (emoji etc.) into an unpaired surrogate — an unpaired
+ * surrogate survives {@link stripXmlInvalidChars} and would make the emitted BPMN not well-formed.
+ * The first-non-empty test is on each line's SANITIZED content ({@link stripXmlInvalidChars}), so a line
+ * that is ONLY XML-forbidden control characters (which the renderer strips to nothing) is skipped rather
+ * than selected — otherwise a prompt of only `\x01` would be chosen and render as a blank ` · <id>`
+ * label instead of falling back to the job type / `Human decision`. The RAW (unsanitised) line is
+ * returned for mixed text — the renderer sanitises it (issue #778 review). Deterministic. */
+function firstLine(value: string | undefined | null, cap = 72): string {
+  if (typeof value !== "string") return "";
+  const line = value.split(/\r?\n/).map((l) => l.trim()).find((l) => stripXmlInvalidChars(l).trim().length > 0) ?? "";
+  const points = Array.from(line);
+  return points.length > cap ? `${Array.from(points.slice(0, cap - 1)).join("").trimEnd()}…` : line;
+}
+
+/** Trim an optional value to a non-blank string, or `""` when absent/blank. */
+function trimmedOrEmpty(value: unknown): string {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : "";
+}
+
+/** The runtime-effective node `timeout` fingerprint: the SAME normalisation the runtime applies
+ * (`isoDuration` in `deliveryRunner` — trim + upper-case a valid ISO-8601 duration, else fall back to
+ * the run-level default). A valid duration collapses whitespace/case variants that drive the identical
+ * SLA (`"PT1H"`/`"PT1H "`/`"pt1h"` → `"PT1H"`); a malformed one (including an XML-invalid-char variant
+ * like `"PT1H\x01"`) collapses to the `""` fallback sentinel — genuinely different from a valid value.
+ * A non-string stays as-is so the caller's `typeof raw === "string"` guard skips an absent timeout
+ * (issue #778 review — thread :1307). */
+function normaliseNodeTimeout(value: string | undefined | null): string | undefined | null {
+  return typeof value === "string" ? isoDuration(value, "") : value;
+}
+
+/** A runtime plain-object narrowing used where a statically-typed field may LIE at runtime because no
+ * validator constrained its shape — notably a connector `payload`, whose schema is a forward-declared
+ * `additionalProperties:true` stub the semantic validator does NOT shape-check (issue #778 review). A
+ * bare primitive (`42`) or an array is NOT a record, so callers must gate on this before an `in`/`Object.keys`
+ * probe that would otherwise THROW on a primitive. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** URL-only credential redaction relocated to the low-level graph module ({@link redactConnectorValue}
+ * in `deliveryGraph.ts`) so the DISPLAY path here and `validateDeliveryGraph`'s reject/error path share
+ * ONE redactor — no drift surface (issue #778 review). */
+
+/** Redact credential-bearing pieces of any URL embedded in FREE-FORM prose (a node's authored
+ * `prompt`), IN PLACE. Unlike {@link redactString} — tuned for a single opaque target string, where it
+ * truncates from the first `?`/`#` to end-of-string — this finds each URL-shaped token *within*
+ * surrounding prose (`scheme://…` or a scheme-relative `//…`) and strips only that token's
+ * `user:pass@` userinfo and `?query`/`#fragment` via `redactString`, leaving the prose (and ordinary
+ * punctuation such as a `?` ending a sentence) intact. Applied to the DISPLAY name/documentation only —
+ * a prompt is up to 20 000 chars of arbitrary text that can embed a bearer token or private URL, and
+ * the deployed `<bpmn:documentation>`/name is visible to modeler/explorer readers; the RAW prompt still
+ * reaches the runtime job input (`appendPrompt`/`prompt`) unmodified (issue #778 review). Deterministic
+ * and total. */
+export function redactFreeText(value: string): string {
+  // Strip XML-invalid display characters BEFORE tokenizing/redacting so every scan runs on the exact
+  // string the renderer emits. Otherwise a control char embedded in a URL (`//us\x0Ber:pass@…`) breaks
+  // the `//[^\s]+` token match, escapes redaction, then reconstructs the credential once `escapeXml`/
+  // `stripXmlInvalidChars` drops the control at render time (issue #778 review — same class as the
+  // connector/probe strip-before-classify fix).
+  const cleaned = stripXmlInvalidChars(value);
+  // Embedded credential userinfo: DERIVE from the ONE canonical redactor {@link redactEmbeddedCredential}
+  // (`EMBEDDED_CREDENTIAL_SRC` = `//[^/?#]*@`) rather than a bespoke belt heuristic. Its `[^/?#]` class
+  // spans spaces/TABs/newlines up to the LAST `@` before a `/`/`?`/`#`, so EVERY `//<userinfo>@` shape
+  // collapses uniformly to `//***@` — a colon-prefix `//user:pass@`, a colon-LESS bearer separated from
+  // its `@host` by a word or space (`//token part@host`, `//token @host`), a userinfo split by a raw
+  // CR/LF/TAB, and a malformed multi-`@` authority (`//user:pass@ss@host`) — with NO second "what is a
+  // credential" implementation that can drift from the canonical redactor/validator (`hasEmbeddedCredential`)
+  // (issue #783 review — thread deliveryGraphCompiler.ts:1140; the earlier bespoke colon-less bridge
+  // stopped on the first non-whitespace char after the space and leaked `//token part@host`). A `//…@`
+  // span is UNAMBIGUOUSLY a credential wherever it sits, so redacting a prose `//word …@host` too is the
+  // SAFE direction: the RAW prompt still reaches the runtime job input unmodified — only the operator-
+  // visible display doc loses the span. The `[^/?#]` bound also keeps the userinfo from swallowing a `?`
+  // marker (`//host?token=secret@tail` has no userinfo — its `@` rides the query), leaving that tail to
+  // the query/fragment belt below.
+  const credStripped = redactEmbeddedCredential(cleaned);
+  // Query/fragment across a whitespace BREAK: the primary `//[^\s]+` token below stops at the break, so a
+  // `//host/?\nTOKEN=secret` would leave the value visible in the XML-preserved doc. The linear belt walks
+  // each SPACE-bounded `//`-run (crossing an embedded CR/LF/TAB the primary token stopped at) and
+  // CONSERVATIVELY redacts its `?query`/`#fragment` tail through the span's space boundary — a continuation
+  // past the break is indistinguishable from a split value, so we never keep the far side (issue #778
+  // review — thread deliveryGraphCompiler.ts:1115).
+  const belted = redactQueryFragmentSpans(credStripped);
+  return belted.replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
+}
+
+/** Linear (backtracking-free) newline-aware belt companion to {@link redactFreeText}'s primary
+ * whitespace-bounded pass. Each `//`-run is bounded by a literal SPACE (0x20) — so a single span may
+ * cross a CR/LF/TAB *inside* the URL that the primary `//[^\s]+` token stopped at. Credential userinfo is
+ * already collapsed to `//***@` by the canonical {@link redactEmbeddedCredential} before this runs, so the
+ * belt's SOLE remaining job is a `?query`/`#fragment` tail: it redacts CONSERVATIVELY from the first
+ * `?`/`#` marker through the span's space boundary — a continuation past an embedded break is
+ * indistinguishable from a split value, so the far side is never kept. A span with no `?`/`#` (ordinary
+ * prose — a `//comment` reference, an already-collapsed `//***@host`) is returned untouched. The scan is a
+ * single left-to-right walk using `indexOf`/`charCodeAt` over spans bounded by the next SPACE, with no
+ * regex backtracking, so a 20 000-char adversarial prompt cannot trigger catastrophic backtracking (issue
+ * #778 review). Deterministic and total. */
+function redactQueryFragmentSpans(text: string): string {
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const start = text.indexOf("//", i);
+    if (start < 0) return out + text.slice(i);
+    out += text.slice(i, start);
+    let end = start;
+    while (end < text.length && text.charCodeAt(end) !== 0x20 /* SPACE */) end++;
+    const span = text.slice(start, end);
+    const qMark = span.indexOf("?");
+    const hMark = span.indexOf("#");
+    const qi = qMark < 0 ? hMark : hMark < 0 ? qMark : Math.min(qMark, hMark);
+    // CONSERVATIVE: keep everything up to and including the `?`/`#` marker, then collapse the whole tail
+    // (any continuation past an embedded CR/LF/TAB) to `***`. A value/prose resuming after the break is
+    // INDISTINGUISHABLE from a split-credential continuation, so we never keep the post-break side; the RAW
+    // prompt still reaches the runtime job input unmodified (issue #778 review — thread
+    // deliveryGraphCompiler.ts:1115).
+    out += qi < 0 ? span : `${span.slice(0, qi + 1)}***`;
+    i = end;
+  }
+}
+
+/** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
+ * (`convergeTargets.ts`) maps to intent-revealing phrases; any other (forward-declared) target is shown
+ * through {@link redactConnectorValue} — an opaque identifier (`slack:#releases`) survives unchanged, but
+ * a credential-bearing URL (`//user:pass@…`, `?token=…`) has its secret components stripped so it is
+ * never persisted into user-visible BPMN documentation/modeler. Deterministic. */
+function humanizeConnectorTarget(target: string): string {
+  switch (target) {
+    case CONVERGE_TARGET:
+      return "Converge PR (review only)";
+    case CONVERGE_MERGE_TARGET:
+      return "Converge & merge PR";
+    case MERGE_MAIN_TARGET:
+      return "Merge to main";
+    default:
+      return `Connector: ${redactConnectorValue(target)}`;
+  }
+}
+
+/** Render a probe's `match` predicate as a compact `k=v, k=v` description (declared fields only).
+ * Three fields are FREE-FORM, user-supplied secret-bearing values — `verifyCommand` (an arbitrary shell
+ * command the capability probe runs at the gate boundary) and `bodyIncludes`/`stdoutIncludes` (arbitrary
+ * response-body / stdout substrings that can carry response tokens) — so they are never surfaced in the
+ * user-visible name/documentation; only a fixed `<redacted>` placeholder appears while the raw value
+ * survives in the runtime probe config. Every other declared field is a structured/enumerable predicate,
+ * but not all are safe to interpolate verbatim — a free-form string predicate (`capabilityRef`,
+ * `package`, `checkName`, …) can carry a credential-bearing URL (`//user:pass@host#274`, which
+ * `parseProbe` accepts for its trailing id), so each is run through {@link redactConnectorValue} (a
+ * URL-only redactor: an ordinary `status=200`/`checkName=build` passes through untouched, a URL has its
+ * credential stripped). The raw value still survives in the runtime probe config; any value the display
+ * redacts is fingerprinted by `digestInvisibleRawValues` so the digest/run-key stays faithful. Fields are
+ * emitted in a STABLE code-unit key order (not the caller's JSON insertion order) so two semantically
+ * identical graphs render byte-identically — preserving the compiler's determinism/digest guarantee.
+ * (Issue #778 review.) */
+const REDACTED_MATCH_FIELDS: ReadonlySet<string> = new Set(["verifyCommand", "bodyIncludes", "stdoutIncludes"]);
+/** The DECLARED `ProbeMatch` fields (app/readiness.ts). `validateDeliveryGraph` does NOT reject an
+ * unknown extra `wait.match` key, so a text-ingress graph can smuggle an arbitrary attacker-named key
+ * whose value would otherwise be rendered VERBATIM into the user-visible preview/documentation here (a
+ * credential-leak channel — an unknown key bypasses the `REDACTED_MATCH_FIELDS` set entirely). Only these
+ * declared, enumerable predicate fields are rendered; any other key is dropped from the display (the raw
+ * value still survives untouched in the runtime probe config). Keep in sync with `ProbeMatch`. */
+const DECLARED_MATCH_FIELDS: ReadonlySet<string> = new Set([
+  "status",
+  "bodyIncludes",
+  "exitCode",
+  "stdoutIncludes",
+  "version",
+  "conclusion",
+  "checkName",
+  "capabilityRef",
+  "package",
+  "verifyCommand",
+  "prState",
+  "epicState",
+]);
+
+/** The declared `wait.match` fields `parseMatch` (`app/readiness.ts`) reads through `num()` — a value of
+ * any OTHER type coerces to `undefined` (the predicate is treated as UNSET). Every other declared field is
+ * read through `str(v).trim()`, so a numeric `conclusion:1` and a string `conclusion:"1"` coerce to the
+ * SAME probe value (`"1"`) and parse IDENTICALLY. `describeProbeMatch` renders `String(v)`, so both also
+ * render `conclusion=1` — genuinely one identity, NOT a fork. Only a `num()`-backed field forks
+ * invisibly: a numeric `status:200` and a string `status:"200"` render IDENTICALLY (`status=200`) yet
+ * parse DIFFERENTLY (`200` vs. unset/any-2xx). `matchValueTypeMismatch` flags EXACTLY that numeric-field
+ * cross-type case so it is fingerprinted; a string-field cross-type value is runtime-equivalent and must
+ * NOT be flagged, or two identical graphs fork their stable run key and double-dispatch (issue #778
+ * review — thread deliveryGraphCompiler.ts:1251). */
+const NUMERIC_MATCH_FIELDS: ReadonlySet<string> = new Set(["status", "exitCode"]);
+function matchValueTypeMismatch(key: string, value: unknown): boolean {
+  // ONLY `num()`-backed fields are type-sensitive: a non-number coerces to "unset" (any-2xx), a
+  // runtime-distinct meaning that renders identically. Every string field runs through `str(v).trim()`,
+  // so a number and its string twin are the SAME probe — never a fork. Unknown keys are `parseMatch`-inert.
+  return NUMERIC_MATCH_FIELDS.has(key) && typeof value !== "number";
+}
+/** The per-kind `match` field whose AUTHORED value equals the runtime matcher's DEFAULT — i.e. writing
+ * it explicitly is behaviourally identical to OMITTING it. `matchPr` defaults `prState` to `"merged"`,
+ * `matchEpic` defaults `epicState` to `"merged"`, `matchGithubCheck` defaults `conclusion` to
+ * `"success"`, and `matchCommand` defaults `exitCode` to `0` (`readiness.ts`). Rendering an authored
+ * default into the display doc forks `semanticBpmn`/the digest from the omitted-but-equivalent graph, so
+ * two runtime-identical encodings get DISTINCT digests/run keys and dispatch TWICE instead of colliding
+ * as `alreadyRunning`. {@link describeProbeMatch} drops a field equal to its kind's default so the two
+ * collapse (issue #778 review — thread deliveryGraphCompiler.ts:1267). Only the fields whose matcher
+ * reads a SCALAR default belong here: `http`'s `status` default is "any 2xx" (not a value), and `npm`'s
+ * `version` default is the target's own `pkg@version` (not a constant), so neither has an
+ * omitted-equivalent scalar. */
+const EFFECTIVE_MATCH_DEFAULT: ReadonlyMap<string, { field: string; value: string | number }> = new Map([
+  ["pr", { field: "prState", value: "merged" }],
+  ["epic", { field: "epicState", value: "merged" }],
+  ["github-check", { field: "conclusion", value: "success" }],
+  ["command", { field: "exitCode", value: 0 }],
+]);
+/** True when `[key,value]` is `kind`'s defaulted match field carrying exactly the runtime default — so
+ * rendering it would spuriously fork the digest from the omitted-equivalent graph. String defaults are
+ * compared trimmed (the matcher/`parseMatch` trim), numeric defaults by strict number equality (a
+ * type-mismatched `"0"`/`"5"` is NOT collapsed here — {@link matchValueTypeMismatch} already fingerprints
+ * it as digest-invisible). */
+function matchFieldIsEffectiveDefault(kind: string, key: string, value: unknown): boolean {
+  const def = EFFECTIVE_MATCH_DEFAULT.get(kind);
+  if (!def || def.field !== key) return false;
+  if (typeof def.value === "number") return typeof value === "number" && value === def.value;
+  return typeof value === "string" && value.trim() === def.value;
+}
+/** True when `value` is a string whose runtime-normalized (trimmed) form is EMPTY — `parseMatch`
+ * (`app/readiness.ts`) reads every string predicate through `str(v).trim() || undefined`, so a `""` or
+ * whitespace-only value coerces to `undefined`, i.e. it is runtime-equivalent to OMITTING the field.
+ * Rendering it anyway (e.g. `bodyIncludes=<redacted>` for a redacted field, or `version=` for a plain
+ * one) would fork `semanticBpmn`/the run key from the omitted-equivalent graph and double-dispatch, so
+ * {@link describeProbeMatch} drops it (issue #778 review — thread deliveryGraphCompiler.ts:1254). Numbers/
+ * booleans are never "empty" and pass through untouched. */
+function matchValueRuntimeEmpty(value: unknown): boolean {
+  return typeof value === "string" && value.trim() === "";
+}
+function describeProbeMatch(kind: string, match: Extract<DeliveryNode, { kind: "wait" }>["wait"]["match"]): string {
+  if (match === undefined || match === null) return "";
+  // Render the NORMALISED (trimmed) string value — `parseMatch` (`readiness.ts`) trims each string
+  // predicate before the worker uses it, so a padded `version:" 1.2.3 "` and `"1.2.3"` probe the same
+  // value. Rendering the raw value would leave the whitespace in `semanticBpmn`, forking the digest/run
+  // key from the trimmed-equivalent graph while both run the identical match (issue #778 review — thread
+  // deliveryGraphCompiler.ts:1206). Non-string values (numbers/booleans) are shown as-is. A field whose
+  // authored value equals its kind's runtime DEFAULT ({@link matchFieldIsEffectiveDefault}) is DROPPED —
+  // writing e.g. `prState:"merged"` explicitly is identical to omitting it, so surfacing it would fork the
+  // digest from the omitted-equivalent graph and double-dispatch (issue #778 review — thread :1267). A
+  // string predicate whose trimmed value is EMPTY ({@link matchValueRuntimeEmpty}) is likewise DROPPED —
+  // `parseMatch` coerces it to `undefined`, so it too is omitted-equivalent (issue #778 review — thread :1254).
+  return Object.entries(match)
+    .filter(([k, v]) => v !== undefined && v !== null && DECLARED_MATCH_FIELDS.has(k) && !matchValueRuntimeEmpty(v) && !matchFieldIsEffectiveDefault(kind, k, v))
+    .sort(([a], [b]) => byCodeUnit(a, b))
+    .map(([k, v]) => `${k}=${REDACTED_MATCH_FIELDS.has(k) ? "<redacted>" : redactConnectorValue(typeof v === "string" ? v.trim() : String(v))}`)
+    .join(", ");
+}
+
+/** The SINGLE source of a compiled node's human-readable display (issue #778): a concise `name` label
+ * derived from the node's typed config — with the node `id` retained as a stable ` · <id>` suffix for
+ * correlation (edges/logs/DI reference ids) — plus a longer `documentation` string rendered as the
+ * flow element's `<bpmn:documentation>` child. BOTH the subProcess wrapper and its inner task read
+ * their name from here (they must NOT compute names independently — derivation over duplication).
+ * Deterministic and total over the closed kind union. */
+export function nodeDisplay(node: DeliveryNode): { name: string; documentation: string } {
+  const id = node.id;
+  const emitsLabel = normaliseEmits(node)
+    // Include a display-safe (URL-credential-redacted) `description`: the runtime `appendPrompt`
+    // (`renderEmitContract`) embeds each fact's `description`, so two graphs differing ONLY in an emit
+    // description dispatch DIFFERENT instructions — omitting it here would collapse them to one
+    // `semanticBpmn`/digest and let keyless dispatch reuse the wrong prompt. A credential-bearing
+    // description is redacted (and additionally flagged lossy by {@link graphCarriesRedactedSecrets})
+    // (issue #778 review). */
+    .map((e) => {
+      const desc = redactFreeText(trimmedOrEmpty(e.description));
+      return `${e.name} (${e.type})${desc ? ` — ${desc}` : ""}`;
+    })
+    .join(", ");
+  const withId = (label: string): string => `${label} · ${id}`;
+  switch (node.kind) {
+    case "agent": {
+      const a = node.agent;
+      const policy = a.merge ? "converge+merge" : a.converge ? "converge" : "";
+      const base = firstLine(typeof a.prompt === "string" ? redactFreeText(a.prompt) : a.prompt) || redactConnectorValue(a.jobType);
+      const label = policy ? `${base} & ${policy}` : base;
+      const doc: string[] = [`Agent job: ${redactConnectorValue(a.jobType)}`];
+      const repo = trimmedOrEmpty(a.repository);
+      const branch = trimmedOrEmpty(a.baseBranch);
+      if (repo || branch) doc.push(`Target: ${repo || "(run repo)"}${branch ? `@${branch}` : ""}`);
+      if (policy) doc.push(`Policy: ${policy}`);
+      if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
+      const agentTimeout = normaliseNodeTimeout(a.timeout);
+      if (agentTimeout) doc.push(`Timeout: ${agentTimeout}`);
+      const prompt = trimmedOrEmpty(a.prompt);
+      if (prompt) doc.push(`Prompt: ${redactFreeText(prompt)}`);
+      return { name: withId(label), documentation: doc.join("\n") };
+    }
+    case "connector": {
+      const c = node.connector;
+      // TRIM the target — the connector worker (`workers/delivery-connector/worker.ts`) trims `vars.target`
+      // before matching the reserved converge/merge vocabulary AND before dispatch, so a padded
+      // `" converge-merge "` executes as `converge-merge`. Humanising/redacting the RAW value would miss
+      // the reserved-target switch (rendering the generic `Connector: converge-merge` instead of the
+      // descriptive `Converge & merge PR`) and fork the `semanticBpmn`/digest from the trimmed-equivalent
+      // graph that dispatches identically (issue #778 review — thread deliveryGraphCompiler.ts:1277).
+      const target = c.target.trim();
+      const doc: string[] = [`Connector target: ${redactConnectorValue(target)}`];
+      if (trimmedOrEmpty(c.dedupeKey)) doc.push(`Dedupe key: ${redactConnectorValue(trimmedOrEmpty(c.dedupeKey))}`);
+      // TRIM the bound `payload.pr` — but ONLY for a CONVERGE target. `resolveConvergePr`/`parsePr`
+      // (`deliveryConnector`/`readiness`) trim `payload.pr` before matching, so for a converge/converge-merge
+      // connector a padded `" impl.pr "` and `"impl.pr"` drive the SAME dispatch and MUST collapse to one
+      // display/digest. A GENERIC (forward-declared) connector forwards `payload` UNCHANGED to its worker
+      // (`workers/delivery-connector/worker.ts` runs `readConvergeInput` only for `isConvergeTarget(target)`),
+      // so `{pr:"  x  "}` and `{pr:"x"}` are DIFFERENT runtime payloads — trimming them for display would
+      // collapse two distinct dispatches into one digest and let the keyless dispatch fence reuse the wrong
+      // payload (issue #783 review — thread deliveryGraphCompiler.ts:1376). So preserve the RAW `pr` unless
+      // this is a converge target.
+      const rawPr = c.payload && typeof c.payload.pr === "string" ? c.payload.pr : "";
+      const boundPr = isConvergeTarget(target) ? rawPr.trim() : rawPr;
+      if (boundPr) doc.push(`PR: ${redactConnectorValue(boundPr)}`);
+      if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
+      // Render the CANONICAL timeout (`isoDuration` — trim + upper-case, else the run default), the SAME
+      // normalisation the runtime applies, so `pt1h`/`PT1H`/`PT1H ` collapse to one `semanticBpmn`/digest
+      // instead of forking the run key on authored casing/whitespace (issue #778 review — thread
+      // deliveryGraphCompiler.ts:1243).
+      const connectorTimeout = normaliseNodeTimeout(c.timeout);
+      if (connectorTimeout) doc.push(`Timeout: ${connectorTimeout}`);
+      return { name: withId(humanizeConnectorTarget(target)), documentation: doc.join("\n") };
+    }
+    case "wait": {
+      const p = node.wait;
+      // NORMALISE the kind — `parseProbe` trims `wait.kind` before the worker runs the probe, and
+      // `digestInvisibleRawValues` fingerprints the trimmed kind, but the label/documentation must trim it
+      // too: a padded `" http "` runs the SAME probe as `"http"`, so rendering the raw kind would fork the
+      // `semanticBpmn`/digest+name and let a re-stage bypass the idempotency fence and duplicate the run
+      // (issue #778 review — thread deliveryGraphCompiler.ts:1296). `redactProbeTargetForDisplay` already
+      // trims the kind internally for its command/http branch decision.
+      const kind = p.kind.trim();
+      const safeTarget = redactProbeTargetForDisplay(p);
+      const doc: string[] = [`Readiness probe: ${kind}`, `Target: ${safeTarget}`];
+      const match = describeProbeMatch(kind, p.match);
+      if (match) doc.push(`Match: ${match}`);
+      // `credentialEnv` names a DECLARED env-contract key (validated `isEnvKey`, never a secret value —
+      // the secret is read from the ambient env at execution time), yet it is carried raw into the
+      // runtime probe config where it selects the HTTP Authorization credential. Surfacing its safe
+      // env-key NAME here makes it part of `semanticBpmn`, so two graphs differing only in `credentialEnv`
+      // get DISTINCT digests instead of colliding — the content-address stays a faithful identity and
+      // keyless dispatch cannot reuse the wrong credential's running instance (issue #778 review).
+      if (trimmedOrEmpty(p.credentialEnv)) doc.push(`Credential env: ${trimmedOrEmpty(p.credentialEnv)}`);
+      // `parseProbe` defaults an OMITTED `onTimeout` to `escalate` ({@link DEFAULT_ON_TIMEOUT}) and
+      // `waitBodyLines` only changes topology for `continue`, so an EXPLICIT `escalate` is behaviourally
+      // identical to omitting it. Surfacing it in the doc would fork `semanticBpmn`/the content digest
+      // from the omitted-equivalent graph (which `digestInvisibleRawValues` does NOT fingerprint —
+      // `trimmedOrEmpty("")` == its display, so it is not pushed), giving two runtime-identical encodings
+      // DISTINCT run keys that dispatch TWICE instead of colliding. DROP the effective default after
+      // trimming, exactly as {@link matchFieldIsEffectiveDefault} does for default match fields — emit the
+      // line only for a non-default (`continue`) routing (issue #778 review — thread
+      // deliveryGraphCompiler.ts:1398).
+      const onTimeout = trimmedOrEmpty(p.onTimeout);
+      if (onTimeout && onTimeout !== DEFAULT_ON_TIMEOUT) doc.push(`On timeout: ${onTimeout}`);
+      if (p.poll) {
+        // Render the CANONICAL EFFECTIVE poll policy — the SAME `normalizePoll` the runtime applies —
+        // NOT the authored fields, so two runtime-EQUIVALENT graphs share one `semanticBpmn`/digest
+        // instead of forking the content address on an encoding difference the runtime collapses. The
+        // runtime `normalizePoll` (a) falls a sub-1ms / non-numeric `everyMs`/`timeoutMs` back to its
+        // default, (b) truncates a fractional value, (c) clamps `everyMs` to `MAX_EVERY_MS`, and (d)
+        // defaults an omitted `backoff` to `exponential`. So `poll:{everyMs:0, backoff:"exponential"}`
+        // runs IDENTICALLY to an omitted/default poll, yet rendering the raw `every 0ms, exponential
+        // backoff` forked the digest — letting a re-stage bypass the idempotency fence and duplicate the
+        // run (issue #778 review — thread deliveryGraphCompiler.ts:1414). SUPPRESS each field that equals
+        // its effective default (matching the omitted-poll rendering, which shows no line at all), so a
+        // graph whose poll normalises entirely to the defaults renders identically to one with no poll.
+        const effective = normalizePoll(p.poll);
+        const budget: string[] = [];
+        if (effective.everyMs !== DEFAULT_EVERY_MS) budget.push(`every ${effective.everyMs}ms`);
+        if (effective.timeoutMs !== DEFAULT_TIMEOUT_MS) budget.push(`timeout ${effective.timeoutMs}ms`);
+        if (effective.backoff !== DEFAULT_BACKOFF) budget.push(`${effective.backoff} backoff`);
+        if (budget.length > 0) doc.push(`Poll: ${budget.join(", ")}`);
+      }
+      if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
+      return { name: withId(`Wait: ${kind} ${safeTarget}`), documentation: doc.join("\n") };
+    }
+    case "human": {
+      const h = node.human;
+      const base = firstLine(typeof h?.prompt === "string" ? redactFreeText(h.prompt) : h?.prompt) || "Human decision";
+      const doc: string[] = [];
+      const prompt = trimmedOrEmpty(h?.prompt);
+      doc.push(prompt ? `Prompt: ${redactFreeText(prompt)}` : "Human decision step");
+      if (trimmedOrEmpty(h?.formKey)) doc.push(`Form: ${redactConnectorValue(trimmedOrEmpty(h?.formKey))}`);
+      if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
+      return { name: withId(base), documentation: doc.join("\n") };
+    }
+    default:
+      return assertNever(node, "nodeDisplay");
+  }
+}
+
+/** The raw field values a graph carries that the redacted `semanticBpmn` DROPS or COLLAPSES — i.e. the
+ * content that reaches the runtime `nodeInputs` but is NOT faithfully represented in the digest, so two
+ * graphs differing ONLY here compile to IDENTICAL `semanticBpmn` → identical digest (issue #778 review,
+ * issue #716 content-address). Each entry is namespaced `nodeId\0field\0rawValue` so it also captures
+ * WHICH node/field differs. This ONE traversal is the single source of truth for BOTH:
+ *   • {@link graphCarriesRedactedSecrets} — non-empty ⇒ the digest is not a faithful identity, so a
+ *     keyless dispatch must be disambiguated (Option C), and
+ *   • the dispatch run-key ({@link stableProposalRunKey}) — which fingerprints this list ALONGSIDE the
+ *     semantic digest, so credential-differing graphs get distinct run-keys while the digest collapses
+ *     every compiler-normalised default/reorder (no per-field enumeration to drift).
+ * Digest-invisible content is: `user:pass@`/`?query`/`#fragment` URL credentials redacted from a
+ * `target`/`prompt`/`dedupeKey`/`formKey`/emit-`description`; a `command`-probe `target`, the free-form
+ * `verifyCommand`/`bodyIncludes`/`stdoutIncludes` match secrets (all shown only as `<redacted>`); a
+ * non-redacted `match` value whose raw form loses characters to XML-1.0 sanitisation
+ * ({@link hasXmlInvalidChars}) at serialisation; and the free-form connector `payload` (only a safe
+ * `pr` string is surfaced). Deterministic; reuses the SAME redaction helpers `nodeDisplay` renders
+ * with, so the set can never drift from what is actually stripped. */
+export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
+  const out: string[] = [];
+  // `raw` is digest-invisible when a present string does NOT match the EXACT `display` form `nodeDisplay`
+  // embeds in `semanticBpmn` — apply the SAME normalisation (`trimmedOrEmpty`/redaction) the display does,
+  // or a difference the display collapses (redaction OR trimmed whitespace) escapes while still reaching
+  // the runtime raw.
+  const push = (nodeId: string, field: string, raw: string | undefined | null, display: string | undefined | null): void => {
+    if (typeof raw === "string" && raw !== display) out.push(`${nodeId}\u0000${field}\u0000${raw}`);
+  };
+  for (const node of graph.nodes) {
+    const id = node.id;
+    // Emit `description` is embedded in `emitsLabel` as `redactFreeText(trimmedOrEmpty(description))`
+    // (see `nodeDisplay`) AND in the runtime `appendPrompt` (`renderEmitContract`) raw, so a
+    // credential-bearing description whose redaction drops content is digest-invisible.
+    for (const fact of normaliseEmits(node)) {
+      push(id, `emit.${fact.name}.description`, fact.description, redactFreeText(trimmedOrEmpty(fact.description)));
+    }
+    switch (node.kind) {
+      case "agent":
+        // Display embeds `redactFreeText(trimmedOrEmpty(prompt))`; the RAW, untrimmed prompt reaches the
+        // runtime (`buildNodeInput`), so a leading/trailing-whitespace-only difference is invisible too.
+        push(id, "agent.prompt", node.agent.prompt, redactFreeText(trimmedOrEmpty(node.agent.prompt)));
+        // `jobType` is a required non-empty string but only shape-validated, so it can smuggle a
+        // credential-bearing URL (`//user:pass@host`). The display now redacts it through the SAME
+        // `redactConnectorValue` (URL-only) rule, so a redacted jobType whose raw form the digest cannot
+        // see reaches the worker verbatim (`cfg("jobType")`) — fingerprint the raw whenever it differs
+        // from the redacted display (issue #778 review — thread :1202). An ordinary `senior:feature`
+        // is not URL-shaped, so display == raw and nothing is pushed.
+        push(id, "agent.jobType", node.agent.jobType, redactConnectorValue(node.agent.jobType));
+        // The node `timeout` is embedded in the display doc as `trimmedOrEmpty(timeout)` then XML-
+        // serialised (`escapeXml` STRIPS XML-1.0-invalid chars), yet the runtime reads it through
+        // `isoDuration(timeout, nodeTimeout)` (deliveryRunner) — which TRIMS + upper-cases a valid value
+        // and falls back to the run default on a malformed one. So `"PT1H"`, `"PT1H "`, and `"pt1h"` all
+        // drive the SAME runtime SLA and must NOT be distinguished (else a whitespace-only OR case-only
+        // re-stage launches a second run), while `"PT1H\x01"` (invalid ⇒ falls back) genuinely differs.
+        // Fingerprint the ISO-normalised raw timeout AND compare it against the ISO-normalised form of what
+        // the digest actually sees (the XML-sanitised trimmed display value) — normalising BOTH sides, so a
+        // lowercase `"pt1h"` (digest sees `"pt1h"`, runtime canonicalises to `"PT1H"`) is NOT falsely marked
+        // digest-invisible, while an XML-invalid variant (digest sees `"PT1H"` after the strip but the raw
+        // falls back to the default) still is (issue #778 review — thread :1331, over :1307/:1251).
+        push(id, "agent.timeout", normaliseNodeTimeout(node.agent.timeout), normaliseNodeTimeout(stripXmlInvalidChars(trimmedOrEmpty(node.agent.timeout))));
+        break;
+      case "human":
+        push(id, "human.prompt", node.human?.prompt, redactFreeText(trimmedOrEmpty(node.human?.prompt)));
+        // Runtime form resolution TRIMS an explicit formKey (`resolveHumanForm` in `deliveryHuman.ts`),
+        // so a whitespace-only formKey variant has identical compiled form + runtime behaviour. Fingerprint
+        // the NORMALISED (trimmed) value — the same value form resolution keys on — so a leading/trailing-
+        // whitespace difference does NOT falsely mark the node digest-invisible and re-launch the whole
+        // graph; only a genuine redaction difference (a real credential) survives (issue #778 review).
+        push(id, "human.formKey", trimmedOrEmpty(node.human?.formKey), redactConnectorValue(trimmedOrEmpty(node.human?.formKey)));
+        break;
+      case "connector": {
+        const c = node.connector;
+        // The connector worker TRIMS `vars.target` before reserved-vocab matching AND dispatch, so a
+        // whitespace-padded target has identical routing + runtime behaviour. Fingerprint the NORMALISED
+        // (trimmed) value the worker keys on — matching the trimmed display — so a padding-only difference
+        // does not fork the digest-invisible fingerprint (which would force an idempotencyKey and
+        // double-launch a graph the runtime treats identically), while a real credential difference in the
+        // trimmed value still survives (issue #778 review — thread deliveryGraphCompiler.ts:1277).
+        push(id, "connector.target", trimmedOrEmpty(c.target), redactConnectorValue(trimmedOrEmpty(c.target)));
+        // The connector worker TRIMS the authored dedupeKey (`connectorDedupeKey` in `deliveryConnector.ts`,
+        // the SINGLE dedupe-key derivation site), so a whitespace-only variant has identical dedupe identity
+        // + runtime behaviour. Fingerprint the NORMALISED (trimmed) value the worker keys on, so a trimmed-
+        // whitespace difference does NOT falsely mark the node digest-invisible (which would force an
+        // idempotencyKey and double-launch a graph the runtime treats identically); only a genuine redaction
+        // difference (a real credential) survives (issue #778 review).
+        push(id, "connector.dedupeKey", trimmedOrEmpty(c.dedupeKey), redactConnectorValue(trimmedOrEmpty(c.dedupeKey)));
+        // The connector `timeout` is digest-invisible the same way an agent's is: displayed as
+        // `trimmedOrEmpty(timeout)` then XML-sanitised, but read through `isoDuration(timeout, nodeTimeout)`
+        // into the runtime SLA. Fingerprint the ISO-normalised value, compared with the ISO-normalised form
+        // of the XML-sanitised display value (normalise BOTH sides) so a whitespace- OR case-only variant
+        // collapses while an invalid one stays disambiguated (issue #778 review — thread :1331, over :1307).
+        push(id, "connector.timeout", normaliseNodeTimeout(c.timeout), normaliseNodeTimeout(stripXmlInvalidChars(trimmedOrEmpty(c.timeout))));
+        // The free-form connector `payload` survives raw into runtime `nodeInputs`, but `nodeDisplay`
+        // surfaces at most a single NON-EMPTY string `payload.pr` (redacted). So the display FAITHFULLY
+        // represents the payload ONLY when it is exactly `{ pr: <non-empty string> }` whose redaction is
+        // a no-op; EVERY other shape leaves content the digest cannot see and is therefore invisible:
+        // (a) a non-plain-object payload (a bare `42`/array — on which `"pr" in payload` would THROW, so
+        // it MUST be gated before that probe), (b) a present-but-empty object or any extra key beyond
+        // `pr`, (c) an omitted / non-string / empty `pr`, or (d) a string `pr` whose redaction drops
+        // content. The whole raw payload (canonicalised so key order is not spuriously distinguishing)
+        // is the disambiguator — but NORMALISE `pr` (trim) ONLY for a CONVERGE target: `nodeDisplay` and
+        // the runtime both read `payload.pr.trim()` there (`resolveConvergePr`/`parsePr`), so a padded
+        // credential-bearing `pr` and its trimmed twin are ONE runtime identity and MUST collapse
+        // (fingerprinting the untrimmed payload forked their stable run key and double-launched the
+        // connector side effect — issue #778 review — thread deliveryGraphCompiler.ts:1484). A GENERIC
+        // (forward-declared) connector instead forwards `payload` UNCHANGED to its worker (`readConvergeInput`
+        // in `workers/delivery-connector/worker.ts` runs only for `isConvergeTarget`), so `{pr:"  x  "}` and
+        // `{pr:"x"}` are DISTINCT runtime payloads that MUST stay disambiguated — trimming them here would
+        // collapse two different dispatches into one run key and let the keyless dispatch fence reuse the
+        // wrong payload (issue #783 review — thread deliveryGraphCompiler.ts:1376). So trim only when the
+        // target is a converge target.
+        if (c.payload !== undefined && c.payload !== null) {
+          const normalisedPayload =
+            isConvergeTarget(trimmedOrEmpty(c.target)) && isRecord(c.payload) && typeof c.payload.pr === "string"
+              ? { ...c.payload, pr: c.payload.pr.trim() }
+              : c.payload;
+          let invisible = true;
+          if (isRecord(normalisedPayload)) {
+            const keys = Object.keys(normalisedPayload);
+            const pr = normalisedPayload.pr;
+            invisible = keys.length !== 1 || keys[0] !== "pr" || typeof pr !== "string" || pr === "" || pr !== redactConnectorValue(pr);
+          }
+          if (invisible) out.push(`${id}\u0000connector.payload\u0000${canonicalJson(normalisedPayload)}`);
+        }
+        break;
+      }
+      case "wait": {
+        const p = node.wait;
+        // `parseProbe` (`readiness.ts`) TRIMS `target` for EVERY kind before the worker keys on it, so a
+        // leading/trailing-whitespace-only variant (` run-task ` vs `run-task`) is the SAME runtime probe.
+        // For a `command` probe the display is a constant `<redacted>`, so without trimming the fingerprint
+        // the digest would fork on that whitespace — a distinct staged run key for an identical runtime
+        // probe, bypassing the idempotency fence. Fingerprint the TRIMMED target (all kinds) so it matches
+        // the runtime-normalised value (issue #778 review — thread :1372).
+        push(id, "wait.target", p.target.trim(), redactProbeTargetForDisplay(p));
+        // `credentialEnv` names a DECLARED env-contract key, shown in the doc as `trimmedOrEmpty(...)` then
+        // XML-sanitised at serialisation, while the runtime `parseProbe` reads it as `.trim()`. A value
+        // carrying an XML-invalid char (`"GITHUB_TOKEN\x01"`) sanitises to the SAME display as valid
+        // `"GITHUB_TOKEN"`, so without a fingerprint the malformed graph shares the valid graph's digest and
+        // `graphCarriesRedactedSecrets` stays false — letting keyless dispatch short-circuit the malformed
+        // proposal onto the valid running instance (and mark it dispatched) even though `parseProbe` would
+        // reject the raw value. Fingerprint the trimmed raw against its XML-sanitised form so a whitespace-
+        // only variant collapses (runtime trims) while an invalid-char one stays disambiguated (issue #778
+        // review — thread :1355).
+        push(id, "wait.credentialEnv", trimmedOrEmpty(p.credentialEnv), stripXmlInvalidChars(trimmedOrEmpty(p.credentialEnv)));
+        // `kind`/`onTimeout`/`poll.backoff` are shown verbatim in the doc (`Readiness probe: <kind>`,
+        // `On timeout: <onTimeout>`, `<backoff> backoff`) then XML-sanitised at serialisation, while the
+        // runtime `parseProbe` reads their RAW values. Exactly like `credentialEnv` above, a value carrying
+        // an XML-invalid char (`"http\x01"`) sanitises to the SAME display as the valid form, so without a
+        // fingerprint the malformed probe shares a valid graph's digest and `graphCarriesRedactedSecrets`
+        // stays false — letting keyless dispatch short-circuit the malformed proposal onto the valid
+        // running instance (and mark it dispatched) even though `parseProbe` would reject the raw value.
+        // Fingerprint each trimmed raw against its XML-sanitised form so a whitespace-only variant collapses
+        // (runtime trims) while an invalid-char one stays disambiguated (issue #778 review — thread :1366,
+        // same class as the credentialEnv :1355 fingerprint above).
+        push(id, "wait.kind", trimmedOrEmpty(p.kind), stripXmlInvalidChars(trimmedOrEmpty(p.kind)));
+        push(id, "wait.onTimeout", trimmedOrEmpty(p.onTimeout), stripXmlInvalidChars(trimmedOrEmpty(p.onTimeout)));
+        push(id, "wait.poll.backoff", trimmedOrEmpty(p.poll?.backoff), stripXmlInvalidChars(trimmedOrEmpty(p.poll?.backoff)));
+        if (p.match) {
+          for (const [k, v] of Object.entries(p.match)) {
+            if (v === undefined || v === null) continue;
+            // A string predicate whose trimmed value is EMPTY is runtime-unset — `parseMatch` coerces a
+            // string field through `str(v).trim() || undefined` and a numeric field through `num(v)` (a
+            // non-number → undefined), so `""`/`"   "` is omitted-equivalent on EITHER. `describeProbeMatch`
+            // now drops it from the display (same digest as the omitted graph), so the run-key fingerprint
+            // MUST drop it too — otherwise an empty variant pushes a token the omitted graph does not, forking
+            // `stableProposalRunKey` under a shared digest and letting a keyless re-stage double-dispatch
+            // (issue #778 review — thread deliveryGraphCompiler.ts:1254).
+            if (matchValueRuntimeEmpty(v)) continue;
+            // `verifyCommand`/`bodyIncludes`/`stdoutIncludes` are shown only as `<redacted>`; every other
+            // match value is shown as `redactConnectorValue(String(v))`, which (a) XML-1.0 sanitisation
+            // (`escapeXml`) later STRIPS invalid characters from — so `"1\x01"` and `"1"` share a digest —
+            // AND (b) URL-redacts a credential-bearing free-form predicate (`capabilityRef`/`package`/
+            // `checkName`) so `//user:pass@host#274` no longer surfaces the secret in the display. Either
+            // transform leaves content the digest cannot see while the raw probe config differs; both cases
+            // are digest-invisible and the raw value is the disambiguator (issue #778 review — thread :1169).
+            if (REDACTED_MATCH_FIELDS.has(k)) {
+              // A redacted field is ALWAYS invisible (display is `<redacted>`). `parseMatch` coerces these
+              // free-form predicates through `str(v).trim()`, so fingerprint the SAME coercion — a
+              // whitespace-only variant AND a number/string cross-type twin (`1` vs `"1"`) both collapse to
+              // the one runtime match (an internal invalid char still distinguishes) instead of forking the
+              // server-derived run key (issue #778 review — threads :1363 / deliveryGraphCompiler.ts:1251).
+              // `v` is guaranteed non-null here; `str` is not exported, so inline `String(v).trim()`.
+              out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(String(v).trim())}`);
+            } else if (matchValueTypeMismatch(k, v)) {
+              // A numeric field (`status`/`exitCode`) coerces through `num()`: a real number is a
+              // distinct runtime match, but EVERY non-number (`"200"`, `" 200 "`, `"foo"`, `true`)
+              // collapses to the SAME `undefined` (unset / any-2xx) match. Fingerprint that CANONICAL
+              // coerced value — a constant `null` unset marker — NOT the raw `v`: otherwise two
+              // runtime-equivalent non-number twins (`"200"` vs `" 200 "`, which also DISPLAY identically)
+              // fork distinct `stableProposalRunKey`s and double-dispatch. The number/string cross-type
+              // twin (`200` vs `"200"`) still forks correctly because the number takes the else-branch and
+              // pushes nothing, while a genuinely different-DISPLAY string (`"foo"`) already forks via
+              // `semanticBpmn` (issue #778 review — thread deliveryGraphCompiler.ts:1616).
+              out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(null)}`);
+            } else {
+              // A non-redacted field is shown as `redactConnectorValue(String(v).trim())` — `describeProbeMatch`
+              // trims a string predicate before display, and `parseMatch` likewise coerces via
+              // `str(v).trim()` — so fingerprint the SAME trimmed form. Comparing/fingerprinting the RAW
+              // `String(v)` instead forks the run key for a whitespace-only variant (`" //user:pass@host#1 "`
+              // vs its trimmed twin) that parses to the ONE runtime match, so a keyless re-stage double-
+              // dispatches an identical graph (issue #778 review — thread deliveryGraphCompiler.ts:1591).
+              const tv = typeof v === "string" ? v.trim() : v;
+              if (hasXmlInvalidChars(String(tv)) || redactConnectorValue(String(tv)) !== String(tv)) {
+                out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(tv)}`);
+              }
+            }
+          }
+        }
+        break;
+      }
+      default:
+        return assertNever(node, "digestInvisibleRawValues");
+    }
+  }
+  // Canonicalise the order so this list is a content IDENTITY, not an ENCODING one. Each entry is fully
+  // self-identifying (`nodeId\0field\0raw`), so its position in `graph.nodes` iteration order carries no
+  // information — but the run-key fingerprint (`stableProposalRunKey`) canonicalises this array with
+  // `canonicalJson`, which PRESERVES array order. The compiler SORTS nodes before emitting `semanticBpmn`,
+  // so two graphs differing ONLY in top-level node order share one digest; without this sort their
+  // invisible-value lists would differ in order alone, yielding DISTINCT run-keys that double-launch the
+  // same logical graph instead of short-circuiting as `alreadyRunning`. Sort by code unit (locale-
+  // independent) so the fingerprint is reorder-invariant, matching the digest's node-reorder collapse
+  // (issue #778 review). Sorting cannot drop or merge entries, so the emptiness check
+  // (`graphCarriesRedactedSecrets`) and the credential-disambiguation are unaffected.
+  out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return out;
+}
+
+/** Whether a graph's raw content carries values that redaction/normalisation DROPS from `semanticBpmn`
+ * (issue #778 review — Option C): non-empty {@link digestInvisibleRawValues}. Two graphs differing ONLY
+ * in such a value compile to IDENTICAL `semanticBpmn` → identical digest, so the digest is NOT a faithful
+ * fingerprint for them; a dispatch must then REQUIRE an explicit `idempotencyKey` (or the stable
+ * server-side run-key) to disambiguate, instead of silently collapsing the second onto the first's
+ * still-running instance. `false` ⇒ the digest is a complete identity and no key is required. */
+export function graphCarriesRedactedSecrets(graph: DeliveryGraph): boolean {
+  return digestInvisibleRawValues(graph).length > 0;
+}
+
 /** Render one node as an EMBEDDED `bpmn:subProcess` — the engine-native delegation unit (Decision 2).
  * Call activities are a no-op on the pinned WASM engine (the child is never instantiated), so — like
  * `plan-fanout`'s `readiness-preflight` — every node inlines a subProcess that shares the parent
@@ -904,15 +1660,25 @@ function renderNodeElement(
   requiredEmits: ReadonlySet<string>,
 ): string {
   const el = w.element;
-  const name = escapeXml(`${w.node.kind}: ${w.node.id}`);
+  const display = nodeDisplay(w.node);
+  const name = escapeXml(display.name);
   const flowRefs = [
     ...incoming.map((id) => `      <bpmn:incoming>${id}</bpmn:incoming>`),
     ...outgoing.map((id) => `      <bpmn:outgoing>${id}</bpmn:outgoing>`),
   ];
   const io = ioMappingLines(w, boundInputs);
-  const inner = innerBodyLines(w, requiredEmits);
+  const inner = innerBodyLines(w, requiredEmits, display.name);
+  // `<bpmn:documentation>` is the BPMN-native per-node description (a tooltip/details panel in the
+  // explorer/modeler). It is a SEMANTIC child, so it survives the `layoutBpmn` DI graft untouched
+  // (unlike a hand-edited DI block). Schema-wise it must be the flow element's FIRST child (before
+  // `<extensionElements>`/`<incoming>`), so it slots ahead of the flow refs and io. Omitted when empty.
+  const documentation =
+    display.documentation.trim() !== ""
+      ? [`      <bpmn:documentation>${escapeXml(display.documentation)}</bpmn:documentation>`]
+      : [];
   const lines = [
     `    <bpmn:subProcess id="${el}" name="${name}">`,
+    ...documentation,
     ...flowRefs,
     "      <bpmn:extensionElements>",
     ...io,
@@ -956,7 +1722,13 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       // target (a real `owner/repo#N` is never `<node>.<fact>`-shaped) can't match a bound ref, so it
       // passes through unchanged. Guarded (`is defined`) so an as-yet-unobserved fact keeps the
       // authored value rather than raising a FEEL error.
-      const boundTarget = boundInputs.find((b) => `${b.fromNode}.${b.fact}` === node.wait.target);
+      // TRIM the target before the bind match — `parseProbe` (`readiness.ts`) trims `wait.target` before
+      // the worker keys on it, and the display/digest render the trimmed form (`p.target.trim()`,
+      // deliveryGraphCompiler.ts:1476). Matching the RAW `node.wait.target` here let a padded fact
+      // reference (`" open.pr "`) render/digest like the trimmed ref yet SKIP this binding, leaving the
+      // runtime with the literal `open.pr` the wait can never resolve (issue #778 review — thread
+      // deliveryGraphCompiler.ts:1476). Mirrors the connector's `payload.pr.trim()` normalisation.
+      const boundTarget = boundInputs.find((b) => `${b.fromNode}.${b.fact}` === node.wait.target.trim());
       if (boundTarget) {
         const varName = `${boundTarget.producerElement}_${boundTarget.fact}`;
         const probeRef = cfg("probe").slice(1);
@@ -1032,7 +1804,7 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
  * the S3 scheduled user-task + generic form + SLA. Each is a single-entry / single-exit subgraph with
  * a bounded timeout that escalates onto a human-completable user task (or, for `human`, records an
  * escalated outcome). */
-function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>): string[] {
+function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displayName: string): string[] {
   const el = w.element;
   const node = w.node;
   switch (node.kind) {
@@ -1042,14 +1814,23 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>): stri
       // as a required data dependency. A broken producer (returns `in_progress`, or omits a required
       // emit) escalates AT this node instead of threading an incomplete result onward.
       const contractGate = { requiredEmits: normaliseEmits(node).filter((f) => requiredEmits.has(f.name)) };
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], node.agent.jobType, contractGate, agentRepoSpecHeaderLines(node));
+      // The executable `<zeebe:taskDefinition type=…>` MUST carry the raw `jobType` verbatim for worker
+      // routing (validateDeliveryGraph rejects a URL-shaped/credential-bearing jobType, so it can never
+      // be a leak here), but the `descriptor` is embedded by `serviceBodyLines` into the operator-visible
+      // timeout / producer-contract escalation FEEL `prompt` — so it takes the SAME display redaction
+      // `nodeDisplay` applies, never the raw value (issue #778 review — thread deliveryGraphCompiler.ts:1606).
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName);
     }
     case "connector":
-      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${node.connector.target}`);
+      // TRIM the target before building the escalation descriptor — `nodeDisplay` and the connector
+      // worker both key on the trimmed value, so an untrimmed `" converge-merge "` would fork the
+      // `semanticBpmn`/digest from the trimmed-equivalent graph that dispatches identically (issue #778
+      // review — thread deliveryGraphCompiler.ts:1741).
+      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target.trim())}`, undefined, [], displayName);
     case "wait":
-      return waitBodyLines(el, node);
+      return waitBodyLines(el, node, displayName);
     case "human":
-      return humanBodyLines(el, node.id);
+      return humanBodyLines(el, displayName);
     default:
       return assertNever(node, "innerBodyLines");
   }
@@ -1129,6 +1910,7 @@ function serviceBodyLines(
   descriptor: string,
   contractGate?: { requiredEmits: readonly DeliveryFact[] },
   taskHeaders: readonly string[] = [],
+  taskName: string = nodeId,
 ): string[] {
   const esc = escalationTaskElement(el);
   const taskExt = [
@@ -1149,10 +1931,11 @@ function serviceBodyLines(
       "nodeTimeout",
       "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
     ),
+    { displayName: taskName },
   );
   const head = [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
-    `      <bpmn:serviceTask id="${el}_task" name="${escapeXml(nodeId)}">`,
+    `      <bpmn:serviceTask id="${el}_task" name="${escapeXml(taskName)}">`,
     ...taskExt,
     `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
     `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
@@ -1188,7 +1971,7 @@ function serviceBodyLines(
     // Resumable when the producer owes a required emit: a human/agent supplies the missing fact, which
     // the subProcess output ioMapping then publishes as `<el>_<fact>` (agent emit source = fact name),
     // so the downstream consumer late-binds a real value instead of the null that poisoned it (#731).
-    emits.length > 0 ? { resume: { kind: "agent" as const, emits } } : undefined,
+    { ...(emits.length > 0 ? { resume: { kind: "agent" as const, emits } } : {}), displayName: taskName },
   );
   return [
     ...head,
@@ -1212,8 +1995,9 @@ function serviceBodyLines(
 /** `wait` body: `start → pr.readiness-probe (poll) → ready? → end`, escalating on not-ready or on the
  * `=probeTimeout` engine bound. The probe polls its OWN target, so an unrelated upstream event can
  * never flip it to ready (#274/S2 concurrency-correctness); the `pr` kind (S2) binds `mergedSha`. */
-function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>): string[] {
+function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>, displayName: string): string[] {
   const nodeId = node.id;
+  const name = escapeXml(displayName);
   const esc = escalationTaskElement(el);
   const emits = normaliseEmits(node);
   // `onTimeout` routing (#462): `escalate` (default) parks the not-ready-at-boundary token on a
@@ -1221,7 +2005,14 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
   // stop (a documented sharp edge — the downstream side-effecting node then runs without the awaited
   // fact). `fail` is rejected earlier at validation (blocked on engine terminate-end, #978), so it
   // never reaches here.
-  const continueOnTimeout = node.wait?.onTimeout === "continue";
+  //
+  // NORMALISE (trim) `onTimeout` before the topology decision — `parseProbe` trims it
+  // (`str(raw.onTimeout).trim()`) and the display/digest path uses `trimmedOrEmpty(p.onTimeout)`, so a
+  // padded `" continue "` runs the SAME `continue` routing at the worker. Comparing the RAW value here
+  // would emit the escalation branch for a `" continue "` the runtime treats as continue — the compiled
+  // topology diverging from the requested (and digested) behaviour (issue #778 review — thread
+  // deliveryGraphCompiler.ts:2012).
+  const continueOnTimeout = trimmedOrEmpty(node.wait?.onTimeout) === "continue";
   // Defect A: read-only probe diagnostics seeded onto the escalation task so the operator/agent can
   // tell a genuine "not published yet" from a transient false-negative — the probe's last detail, the
   // resolved target/match, and a compact summary of the candidate releases the probe observed.
@@ -1233,7 +2024,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
   ];
   return [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
-    `      <bpmn:subProcess id="${el}_probeLoop" name="Probe readiness loop: ${escapeXml(nodeId)}">`,
+    `      <bpmn:subProcess id="${el}_probeLoop" name="Probe readiness loop: ${name}">`,
     "        <bpmn:extensionElements>",
     "          <zeebe:ioMapping>",
     '            <zeebe:output source="=ready" target="ready" />',
@@ -1247,7 +2038,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
     `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
     `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
     `        <bpmn:startEvent id="${el}_loopStart"><bpmn:outgoing>${el}_li0</bpmn:outgoing></bpmn:startEvent>`,
-    `        <bpmn:serviceTask id="${el}_task" name="Probe readiness: ${escapeXml(nodeId)}">`,
+    `        <bpmn:serviceTask id="${el}_task" name="Probe readiness: ${name}">`,
     "          <bpmn:extensionElements>",
     `            <zeebe:taskDefinition type="${DELEGATE_TASK_TYPE.wait}" />`,
     "            <zeebe:properties>",
@@ -1280,7 +2071,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
     `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
     `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probeTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
     "      </bpmn:boundaryEvent>",
-    `      <bpmn:serviceTask id="${el}_lastAttempt" name="Probe readiness at boundary: ${escapeXml(nodeId)}">`,
+    `      <bpmn:serviceTask id="${el}_lastAttempt" name="Probe readiness at boundary: ${name}">`,
     "        <bpmn:extensionElements>",
     `          <zeebe:taskDefinition type="${DELEGATE_TASK_TYPE.wait}" />`,
     "          <zeebe:properties>",
@@ -1307,7 +2098,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
           [`${el}_i4`],
           `${el}_i5`,
           waitEscalationContextFeel(nodeId),
-          { resume: { kind: node.kind, emits }, diagnosticInputs },
+          { resume: { kind: node.kind, emits }, diagnosticInputs, displayName },
         )),
     // On `continue`, the not-ready-at-boundary branch (`_i4`) proceeds straight to the node end (no
     // human stop, no `_i5` escalation-return flow); on `escalate` it parks on the escalation task,
@@ -1328,13 +2119,13 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
  * — the subProcess ioMapping then publishes it as the node's fact); on SLA expiry the node records an
  * `escalated` outcome and settles (bounded — the graph cannot silently wedge). Mirrors the standalone
  * `delivery-human.bpmn` shape, reusing the S3 form + emit-var contract (`deliveryHuman.ts`). */
-function humanBodyLines(el: string, nodeId: string): string[] {
+function humanBodyLines(el: string, displayName: string): string[] {
   const task = humanTaskElement(el);
   const assignee =
     '=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != "") then escalationAssignee else null';
   return [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
-    `      <bpmn:userTask id="${task}" name="Delivery: human step — ${escapeXml(nodeId)}">`,
+    `      <bpmn:userTask id="${task}" name="Delivery: human step — ${escapeXml(displayName)}">`,
     "        <bpmn:extensionElements>",
     `          <zeebe:formDefinition formId="${GENERIC_HUMAN_FORM}" />`,
     "          <zeebe:userTask />",
@@ -1389,6 +2180,7 @@ function escalationTaskLines(
   opts?: {
     resume?: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[] };
     diagnosticInputs?: readonly { source: string; target: string }[];
+    displayName?: string;
   },
 ): string[] {
   const emits = opts?.resume?.emits ?? [];
@@ -1424,8 +2216,12 @@ function escalationTaskLines(
       );
     }
   }
+  // The escalation user task shows the node's DESCRIPTIVE display name (issue #778 review) so a
+  // timed-out / contract-broken node is legible in the explorer/inbox instead of an opaque bare id;
+  // `nodeId` is still threaded as the `nodeId` input above for runtime correlation.
+  const escLabel = trimmedOrEmpty(opts?.displayName) || nodeId;
   return [
-    `      <bpmn:userTask id="${esc}" name="Escalate: ${escapeXml(nodeId)}">`,
+    `      <bpmn:userTask id="${esc}" name="Escalate: ${escapeXml(escLabel)}">`,
     "        <bpmn:extensionElements>",
     `          <zeebe:formDefinition formId="${GENERIC_HUMAN_FORM}" />`,
     "          <zeebe:userTask />",
@@ -1472,9 +2268,10 @@ function flow(id: string, source: string, target: string): string {
   return `      <bpmn:sequenceFlow id="${id}" sourceRef="${source}" targetRef="${target}" />`;
 }
 
-/** Render a human-readable mermaid `flowchart` of the resolved graph — one node per box labelled
- * `<kind>: <id>`, one arrow per edge (labelled with the referenced fact when qualified). Deterministic
- * (nodes/edges already sorted). */
+/** Render a human-readable mermaid `flowchart` of the resolved graph — one box per node labelled with
+ * the SAME descriptive {@link nodeDisplay} name the compiled BPMN uses (issue #778: one display source,
+ * no `kind: id` drift between the diagram and the deployed model), one arrow per edge (labelled with the
+ * referenced fact when qualified). Deterministic (nodes/edges already sorted). */
 function renderMermaid(
   graph: DeliveryGraph,
   wirings: readonly NodeWiring[],
@@ -1484,7 +2281,7 @@ function renderMermaid(
   const lines: string[] = ["flowchart TD"];
   if (graph.name !== undefined) lines.push(`  %% ${escapeMermaid(graph.name)}`);
   for (const w of wirings) {
-    lines.push(`  ${w.element}["${escapeMermaid(`${w.node.kind}: ${w.node.id}`)}"]`);
+    lines.push(`  ${w.element}["${escapeMermaid(nodeDisplay(w.node).name)}"]`);
   }
   for (const edge of edges) {
     const from = mustGet(elementById, edge.fromNode);

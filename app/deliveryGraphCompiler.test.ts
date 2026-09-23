@@ -13,7 +13,8 @@
 //   • humanNodes[] and sideEffects[] extraction.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
+import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
+import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText } from "./deliveryGraphCompiler.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
 async function compileOk(graph: unknown) {
@@ -279,9 +280,11 @@ const CAP_GATE = {
 };
 
 /** The subProcess element id the compiler assigned to a node (elements are positional `n<k>`, not the
- * node id). Located via the subProcess `name="<kind>: <nodeId>"`. */
+ * node id). Located via the subProcess `name="… · <nodeId>"` — the node id is retained as a stable
+ * ` · ` suffix on the descriptive label (issue #778). */
 function elementForNode(bpmn: string, nodeId: string): string {
-  const m = bpmn.match(new RegExp(`<bpmn:subProcess id="([^"]+)" name="[^"]*: ${nodeId}"`));
+  const escaped = nodeId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = bpmn.match(new RegExp(`<bpmn:subProcess id="([^"]+)" name="[^"]* · ${escaped}"`));
   assert(m, `a subProcess for node ${nodeId} exists`);
   return m![1];
 }
@@ -448,6 +451,48 @@ test("humanNodes: extracts prompt/formKey/emits; a click-done node emits nothing
   assertEquals(ack?.prompt, undefined);
 });
 
+test("#778 humanNodes: a credential-bearing formKey is redacted in the preview projection (raw only reaches runtime form resolution)", async () => {
+  // `humanNodes[]` is persisted into the staged proposal `preview` and rendered verbatim on the Delivery
+  // Graphs page, so a credential in a human `formKey` (`//user:pass@…`) must be stripped here with the
+  // SAME helper the BPMN `Form:` doc uses — else it leaks unredacted through the preview. The RAW formKey
+  // still drives runtime form resolution (`deliveryHuman` reads `node.human.formKey` directly).
+  const r = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "//user:pass@forms.example.com/approve?token=abc" } }],
+    edges: [],
+  });
+  const h = r.humanNodes.find((n) => n.nodeId === "h");
+  assert(h?.formKey !== undefined && !h.formKey.includes("user:pass") && !h.formKey.includes("token=abc"), `credential stripped from preview formKey: ${h?.formKey}`);
+  // An ordinary opaque form id is preserved verbatim.
+  const plain = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "deploy-approval" } }], edges: [] });
+  assertEquals(plain.humanNodes.find((n) => n.nodeId === "h")?.formKey, "deploy-approval");
+});
+
+test("#778 humanNodes: a credential-bearing emit `description` is redacted in the preview projection (raw only reaches runtime)", async () => {
+  // `humanNodes[].emits` is persisted into the staged proposal `preview` and rendered on the Delivery
+  // Graphs page, so a `//user:pass@…` URL in a free-form fact `description` must be stripped here with the
+  // SAME `redactFreeText` the BPMN emit label uses — else it leaks unredacted through the preview even
+  // though the label path redacts it. The RAW description still reaches the runtime `appendPrompt` (#778).
+  const r = await compileOk({
+    nodes: [
+      {
+        id: "h",
+        kind: "human",
+        human: { prompt: "approve" },
+        emits: [{ name: "pr", type: "pr", description: "post to //user:pass@host/x?token=abc when done" }],
+      },
+    ],
+    edges: [],
+  });
+  const desc = r.humanNodes.find((n) => n.nodeId === "h")?.emits.find((e) => e.name === "pr")?.description;
+  assert(desc !== undefined && !desc.includes("user:pass") && !desc.includes("token=abc"), `credential stripped from preview emit description: ${desc}`);
+  // An ordinary (credential-free) description is preserved verbatim.
+  const plain = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve" }, emits: [{ name: "pr", type: "pr", description: "the merged PR ref" }] }],
+    edges: [],
+  });
+  assertEquals(plain.humanNodes.find((n) => n.nodeId === "h")?.emits.find((e) => e.name === "pr")?.description, "the merged PR ref");
+});
+
 test("sideEffects: agent + connector only; connector carries its dedupeKey", async () => {
   const r = await compileOk(RELEASE_RUNBOOK);
   const agent = r.sideEffects.find((s) => s.nodeId === "open-b");
@@ -532,6 +577,30 @@ test("a wait node with a LITERAL pr target compiles the probe unchanged (no spur
   const r = await compileOk(graph);
   assert(!/context put/.test(r.bpmn), "a literal target is not wrapped in a context put rewrite");
   assert(/source="=nodeInputs\.[^"]+\.probe" target="probe"/.test(r.bpmn), "the probe is seeded directly from nodeInputs");
+});
+
+test("a wait node whose fact-reference target is PADDED still late-binds via context put (target is trimmed before the bind match)", async () => {
+  // Regression (#778 review, thread deliveryGraphCompiler.ts:1476): `parseProbe` trims `wait.target`
+  // before the worker uses it, and the display/digest render the trimmed form — but the compiler's
+  // late-bind match compared `node.wait.target` VERBATIM, so a padded `" open.pr "` rendered/digested
+  // like the trimmed ref yet skipped the `context put` binding, leaving the runtime with the literal
+  // `open.pr` (which the wait can never resolve). Trimming the target before the match keeps display,
+  // digest, and the executable model in agreement.
+  const graph = {
+    name: "padded fact-ref target",
+    nodes: [
+      {
+        id: "open",
+        kind: "agent",
+        agent: { jobType: "senior:feature", prompt: "Implement and open a PR." },
+        emits: [{ name: "pr", type: "pr" }],
+      },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: " open.pr ", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "open.pr", to: "merged" }],
+  };
+  const r = await compileOk(graph);
+  assert(/context put\([^)]*\.probe, "target",/.test(r.bpmn), "the padded fact-ref target is late-bound via context put");
 });
 
 test("resolved edges carry the resolved fromNode and the referenced fact", async () => {
@@ -773,6 +842,22 @@ test("a wait node's onTimeout: continue proceeds past the gate with NO escalatio
   );
 });
 
+test("#778 a wait node's onTimeout authored as a padded `\" continue \"` compiles to the SAME topology as the trimmed `\"continue\"` — `parseProbe` trims `onTimeout` before the worker runs, so the padded value routes past the gate with NO escalation task; comparing the raw value would spuriously emit the escalation branch the runtime never takes (thread deliveryGraphCompiler.ts:2012)", async () => {
+  const mk = (onTimeout: string): DeliveryGraph =>
+    JSON.parse(
+      JSON.stringify({
+        name: "g",
+        nodes: [{ id: "soft", kind: "wait", wait: { kind: "pr", target: "acme/repo#1", match: { prState: "merged" }, onTimeout } }],
+        edges: [],
+      }),
+    );
+  const padded = await compileOk(mk(" continue "));
+  const tight = await compileOk(mk("continue"));
+  assertEquals(padded.bpmn, tight.bpmn, "a padded onTimeout `\" continue \"` compiles byte-identically to the trimmed `\"continue\"`");
+  const softEl = elementForNode(padded.bpmn, "soft");
+  assert(!padded.bpmn.includes(`delivery-human-task__${softEl}__esc`), "a padded `continue` still emits no escalation user task");
+});
+
 test("a wait node's onTimeout: fail is rejected at compile with a path-qualified error (blocked on engine terminate-end, #462/#978)", async () => {
   const errors = await compileFail({
     name: "fail not yet supported",
@@ -873,4 +958,1381 @@ test("#731 routing-only emits stay optional: a fact referenced ONLY by an edge `
   assert(esc.includes('="none"') && esc.includes('target="emitMode"'), "a status-only contract escalation keeps its emit field hidden");
   // The guarded split that routes `result` downstream is untouched (default branch preserved).
   assert(r.bpmn.includes('=classify_result = "breaking"') || r.bpmn.includes(`${el}_result = "breaking"`), "the routing guard on the emitted fact is preserved");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Issue #778: descriptive compiled node names + `<bpmn:documentation>`. Every compiled node renders a
+// human-readable name derived from its typed config (not the bare id/kind), with the node id retained
+// as a ` · <id>` suffix, and carries a `<bpmn:documentation>` describing what it does. ONE `nodeDisplay`
+// helper is the single source for both the label and the documentation (derivation over duplication).
+
+test("#778 nodeDisplay derives a descriptive label + documentation per kind, with the node id as a suffix", () => {
+  const agent = nodeDisplay({
+    id: "impl",
+    kind: "agent",
+    agent: { jobType: "senior:feature", prompt: "Implement the change and open a PR.", converge: true, merge: true, repository: "o/r", baseBranch: "main" },
+    emits: [{ name: "pr", type: "pr" }],
+  });
+  assertEquals(agent.name, "Implement the change and open a PR. & converge+merge · impl");
+  assert(agent.documentation.includes("Agent job: senior:feature"), "agent doc names the job type");
+  assert(agent.documentation.includes("Target: o/r@main"), "agent doc names the repo@branch");
+  assert(agent.documentation.includes("Policy: converge+merge"), "agent doc names the land policy");
+  assert(agent.documentation.includes("Emits: pr (pr)"), "agent doc lists emits");
+
+  const connector = nodeDisplay({
+    id: "land",
+    kind: "connector",
+    connector: { target: "converge-merge", dedupeKey: "land-1", payload: { pr: "o/r#42" } },
+  });
+  assertEquals(connector.name, "Converge & merge PR · land");
+  assert(connector.documentation.includes("Connector target: converge-merge"), "connector doc names the raw target");
+  assert(connector.documentation.includes("Dedupe key: land-1"), "connector doc names the dedupe key");
+  assert(connector.documentation.includes("PR: o/r#42"), "connector doc names the bound PR");
+
+  const wait = nodeDisplay({
+    id: "gate",
+    kind: "wait",
+    wait: { kind: "github-check", target: "o/r@main", match: { conclusion: "neutral" }, poll: { everyMs: 60000, timeoutMs: 3600000 } },
+  });
+  assertEquals(wait.name, "Wait: github-check o/r@main · gate");
+  assert(wait.documentation.includes("Readiness probe: github-check"), "wait doc names the probe kind");
+  assert(wait.documentation.includes("Match: conclusion=neutral"), "wait doc names the match criteria");
+  assert(wait.documentation.includes("Poll: every 60000ms, timeout 3600000ms"), "wait doc names the poll budget");
+
+  const human = nodeDisplay({ id: "otp", kind: "human", human: { prompt: "Run the manual OTP publish", formKey: "publish-form" } });
+  assertEquals(human.name, "Run the manual OTP publish · otp");
+  assert(human.documentation.includes("Form: publish-form"), "human doc names the attached form");
+
+  // Degenerate fallbacks: an agent with no prompt falls back to the job type; a bare human to a default.
+  assertEquals(nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j" } }).name, "j · a");
+  assertEquals(nodeDisplay({ id: "h", kind: "human" }).name, "Human decision · h");
+});
+
+test("#778 nodeDisplay TRIMS a padded reserved connector target — the worker trims before reserved-vocab matching, so `\" converge-merge \"` must render the descriptive label + collapse to the trimmed digest, not the generic `Connector:` fallback (thread deliveryGraphCompiler.ts:1277)", () => {
+  const padded = nodeDisplay({
+    id: "land",
+    kind: "connector",
+    connector: { target: " converge-merge ", dedupeKey: "land-1", payload: { pr: "o/r#42" } },
+  });
+  assertEquals(padded.name, "Converge & merge PR · land");
+  assert(padded.documentation.includes("Connector target: converge-merge"), "the padded reserved target is trimmed in the doc");
+  assert(!padded.documentation.includes(" converge-merge "), "no padded target survives into the doc");
+});
+
+test("#778 the compiled subProcess carries the descriptive name + a `<bpmn:documentation>` first child", async () => {
+  const graph = {
+    name: "descriptive",
+    nodes: [
+      { id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "Implement #567 and open a PR.", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "land", kind: "connector", connector: { target: "converge-merge", dedupeKey: "land-1", payload: { pr: "impl.pr" } } },
+      { id: "gate", kind: "wait", wait: { kind: "pr", target: "impl.pr", match: { prState: "merged" } } },
+    ],
+    edges: [
+      { from: "impl.pr", to: "land" },
+      { from: "land", to: "gate" },
+      { from: "impl.pr", to: "gate" },
+    ],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "impl");
+  // The subProcess wrapper is named from the typed config (not `agent: impl`) and the id is a suffix.
+  assert(
+    r.bpmn.includes(`<bpmn:subProcess id="${el}" name="Implement #567 and open a PR. &amp; converge+merge · impl">`),
+    "the agent subProcess wrapper carries the descriptive name",
+  );
+  // The bare `agent: impl` / `wait: gate` naming is gone.
+  assert(!r.bpmn.includes('name="agent: impl"'), "no bare kind:id subProcess name remains");
+  // `<bpmn:documentation>` is the FIRST child of the subProcess (before `<bpmn:incoming>`), and describes it.
+  const wrapperOpen = r.bpmn.indexOf(`<bpmn:subProcess id="${el}" `);
+  const beforeFlowRefs = r.bpmn.slice(wrapperOpen, r.bpmn.indexOf("<bpmn:incoming>", wrapperOpen));
+  assert(beforeFlowRefs.includes("<bpmn:documentation>"), "the documentation precedes the flow refs (first child)");
+  assert(!beforeFlowRefs.includes("<bpmn:extensionElements>"), "the documentation precedes extensionElements");
+  assert(r.bpmn.includes("<bpmn:documentation>Agent job: senior:feature"), "the documentation describes the node");
+  // The inner service task is named from the SAME nodeDisplay source (not the bare node id).
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${el}_task" name="Implement #567 and open a PR. &amp; converge+merge · impl">`), "the inner task shares the descriptive name");
+  // Every node kind carries a documentation child.
+  const waitEl = elementForNode(r.bpmn, "gate");
+  assert(r.bpmn.includes(`<bpmn:subProcess id="${waitEl}" name="Wait: pr impl.pr · gate">`), "the wait wrapper carries the descriptive name");
+});
+
+test("#778 nodeDisplay redacts a wait probe whose `kind` is PADDED (` command `) — the runtime trims the kind so it runs as a command probe; the display must trim too and route its arbitrary shell target to <redacted>, not leak it (thread deliveryGraphCompiler.ts:70)", async () => {
+  // `kind: " command "` passes the validator (non-empty string) and the worker trims it to `command`, so
+  // it runs as a COMMAND probe. A raw-kind compare here would miss that and send the shell snippet through
+  // the URL-only redactor, leaking it into the compiled BPMN documentation. Compile through the real path
+  // (unknown-typed input, so no cast is needed for the padded kind) and assert the secret never surfaces.
+  const r = await compileOk({
+    name: "padded-kind",
+    nodes: [{ id: "g", kind: "wait", wait: { kind: " command ", target: "curl -H 'Authorization: SUPER_SECRET' https://api.example.com" } }],
+    edges: [],
+  });
+  assert(!r.semanticBpmn.includes("SUPER_SECRET"), "a padded-kind command probe's shell target must not leak into the compiled BPMN");
+  assert(r.semanticBpmn.includes("&lt;redacted&gt;"), "a padded-kind command probe's target must render as <redacted>");
+});
+
+test("#778 nodeDisplay redacts a wait probe's credential-bearing target in the name + documentation", () => {
+  // A `command` target is an arbitrary shell snippet that can embed a secret — it is never surfaced.
+  const cmd = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "command", target: "curl -H 'Authorization: Bearer SUPER_SECRET' https://api.example.com" },
+  });
+  assertEquals(cmd.name, "Wait: command <redacted> · g");
+  assert(cmd.documentation.includes("Target: <redacted>"), "command target is redacted in the doc");
+  assert(!cmd.name.includes("SUPER_SECRET") && !cmd.documentation.includes("SUPER_SECRET"), "no secret leaks");
+
+  // An HTTP target's `user:pass@` userinfo and `?query` (where a token often rides) are stripped.
+  const http = nodeDisplay({
+    id: "h",
+    kind: "wait",
+    wait: { kind: "http", target: "https://user:s3cr3t@example.com/health?token=abc123" },
+  });
+  assert(!http.name.includes("s3cr3t") && !http.name.includes("abc123"), "http name drops userinfo + query secret");
+  assert(
+    !http.documentation.includes("s3cr3t") && !http.documentation.includes("abc123"),
+    "http doc drops userinfo + query secret",
+  );
+  assert(http.documentation.includes("Target: https://***@example.com/health?***"), "http target rendered redacted");
+});
+
+test("#778 nodeDisplay redacts a URL-SHAPED non-http probe target (smuggled credential) while leaving a legitimate structured ref verbatim", () => {
+  // The graph validator only requires a non-empty `target`, and `parsePrTarget` accepts any prefix
+  // before `#<digits>` — so a URL-shaped value can reach a `pr`/`capability` target. It must still be
+  // URL-redacted in the display path, while an ordinary `owner/repo#42` (whose `#`/`@` are meaningful,
+  // not a URL) stays verbatim.
+  const smuggled = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "pr", target: "//user:pass@example.com/repo#42", match: { prState: "merged" } },
+  });
+  assert(!smuggled.name.includes("user:pass") && !smuggled.documentation.includes("user:pass"), "smuggled userinfo is redacted");
+  assert(smuggled.documentation.includes("Target: //***@example.com/repo#***"), "URL-shaped pr target rendered redacted");
+
+  const clean = nodeDisplay({
+    id: "g2",
+    kind: "wait",
+    wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" } },
+  });
+  assertEquals(clean.name, "Wait: pr owner/repo#42 · g2");
+  assert(clean.documentation.includes("Target: owner/repo#42"), "legitimate structured pr ref is verbatim");
+});
+
+test("#778 nodeDisplay redacts a connector value even when a leading space would bypass the anchored URL check (trim classification)", () => {
+  const c = nodeDisplay({
+    id: "n",
+    kind: "connector",
+    connector: { target: " //user:pass@hooks.example.com?token=abc123" },
+  });
+  assert(!c.documentation.includes("user:pass") && !c.documentation.includes("abc123"), "leading-space URL still has its credential stripped");
+  assert(c.documentation.includes("***@hooks.example.com?***"), "whitespace-prefixed connector target rendered redacted");
+});
+
+test("#778 a connector `timeout` differing ONLY in case/whitespace compiles to byte-identical BPMN and the SAME invisible-value set — the run-key digest collapses instead of forking on authored casing (Fix D, thread deliveryGraphCompiler.ts:1243)", async () => {
+  const mk = (timeout: string): DeliveryGraph => ({
+    name: "g",
+    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#releases", timeout } }],
+    edges: [],
+  });
+  const canonical = await compileOk(mk("PT1H"));
+  const variant = await compileOk(mk("pt1h "));
+  assertEquals(variant.bpmn, canonical.bpmn, "case/whitespace-only timeout variants compile to identical BPMN (display renders the isoDuration-normalised value)");
+  assertEquals(digestInvisibleRawValues(mk("pt1h ")), digestInvisibleRawValues(mk("PT1H")), "no invisible token forks the two timeout variants");
+});
+
+test("#783 a connector bound-`pr` payload differing ONLY in surrounding whitespace FORKS for a GENERIC connector (payload forwarded raw) but COLLAPSES for a CONVERGE target (runtime trims `pr`) — the run-key digest matches runtime dispatch identity (thread deliveryGraphCompiler.ts:1376)", async () => {
+  const mk = (target: string, pr: string): DeliveryGraph => ({
+    name: "g",
+    nodes: [{ id: "c", kind: "connector", connector: { target, payload: { pr } } }],
+    edges: [],
+  });
+  // GENERIC (forward-declared) target: the worker forwards `payload` UNCHANGED (no `resolveConvergePr`),
+  // so `{pr:"  x  "}` and `{pr:"x"}` are DISTINCT runtime dispatches and MUST fork the display/digest.
+  const genTight = await compileOk(mk("slack:#releases", "owner/repo#1"));
+  const genPadded = await compileOk(mk("slack:#releases", "  owner/repo#1  "));
+  assert(genPadded.bpmn !== genTight.bpmn, "a generic connector's whitespace-only pr variants compile to DIFFERENT BPMN (payload forwarded raw, so they are distinct runtime dispatches)");
+  // A clean (non-credential) pr is digest-VISIBLE (redaction is a no-op on `{pr}`), so the disambiguator
+  // is the display/semanticBpmn itself — which now forks — not the digest-INVISIBLE raw-value set (that set
+  // is empty here, exercised instead by the credential test below).
+  assert(genPadded.semanticBpmn !== genTight.semanticBpmn, "a generic connector's whitespace-only pr variants fork the semanticBpmn (distinct run identity)");
+  // CONVERGE target: `resolveConvergePr`/`parsePr` trim `pr` before use, so the padded and trimmed twins
+  // drive the SAME dispatch and MUST collapse to one BPMN/digest.
+  const cvgTight = await compileOk(mk("converge-merge", "owner/repo#1"));
+  const cvgPadded = await compileOk(mk("converge-merge", "  owner/repo#1  "));
+  assertEquals(cvgPadded.bpmn, cvgTight.bpmn, "a converge target's whitespace-only pr variants compile to identical BPMN (display trims the bound pr, matching the runtime parse)");
+  assertEquals(digestInvisibleRawValues(mk("converge-merge", "  owner/repo#1  ")), digestInvisibleRawValues(mk("converge-merge", "owner/repo#1")), "no invisible token forks the two converge pr variants");
+});
+
+test("#778 a wait `poll` that NORMALISES to the runtime defaults compiles to byte-identical BPMN as an OMITTED poll — the display renders the CANONICAL effective policy (`normalizePoll`), not the authored fields, so a runtime-equivalent re-stage shares one digest instead of bypassing the idempotency fence (thread deliveryGraphCompiler.ts:1414)", async () => {
+  const mk = (poll?: Record<string, unknown>): DeliveryGraph => ({
+    name: "g",
+    nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" }, ...(poll ? { poll } : {}) } }],
+    edges: [],
+  });
+  const omitted = await compileOk(mk());
+  // `everyMs:0` falls back to DEFAULT_EVERY_MS, `timeoutMs:0` to DEFAULT_TIMEOUT_MS, and an explicit
+  // `backoff:"exponential"` IS the default — so this poll runs identically to an omitted one.
+  const defaulted = await compileOk(mk({ everyMs: 0, timeoutMs: 0, backoff: "exponential" }));
+  assertEquals(defaulted.bpmn, omitted.bpmn, "a poll normalising entirely to the defaults renders identically to an omitted poll (no `Poll:` line forks the digest)");
+
+  // A NON-default poll still renders — the canonical effective (truncated/clamped) values, so two
+  // authored encodings of the same effective budget still collapse, but a genuinely different budget
+  // forks as it should.
+  const fractional = await compileOk(mk({ everyMs: 60000.9, timeoutMs: 3600000 }));
+  const whole = await compileOk(mk({ everyMs: 60000, timeoutMs: 3600000 }));
+  assertEquals(fractional.bpmn, whole.bpmn, "a fractional everyMs truncates to the same effective value, so the two encodings share one digest");
+  assert(whole.bpmn !== omitted.bpmn, "a genuinely non-default poll budget still renders (and forks) distinctly from an omitted poll");
+});
+
+test("#778 a wait `poll.backoff` differing ONLY in surrounding whitespace does not fork the digest — `normalizePoll` trims `backoff` like `parseProbe`, so a padded `\" exponential \"` (the default) renders no `Poll:` line and a padded `\" fixed \"` matches the trimmed `\"fixed\"` (thread deliveryGraphCompiler.ts:1414)", async () => {
+  const mk = (backoff: string): DeliveryGraph =>
+    JSON.parse(
+      JSON.stringify({
+        name: "g",
+        nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" }, poll: { backoff } } }],
+        edges: [],
+      }),
+    );
+  const omitted: DeliveryGraph = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" } } }], edges: [] };
+  const omittedR = await compileOk(omitted);
+  // A padded `" exponential "` IS the default backoff once trimmed, so it must render identically to an
+  // omitted poll (no `Poll:` line) — an untrimmed compare would emit a spurious non-default line.
+  const paddedDefault = await compileOk(mk(" exponential "));
+  assertEquals(paddedDefault.bpmn, omittedR.bpmn, "a padded default backoff renders identically to an omitted poll");
+  // A padded non-default `" fixed "` matches the trimmed `"fixed"` (same effective policy, one digest).
+  const paddedFixed = await compileOk(mk(" fixed "));
+  const tightFixed = await compileOk(mk("fixed"));
+  assertEquals(paddedFixed.bpmn, tightFixed.bpmn, "a padded `\" fixed \"` backoff compiles byte-identically to the trimmed `\"fixed\"`");
+  assert(tightFixed.bpmn !== omittedR.bpmn, "a genuinely non-default `fixed` backoff still renders (and forks) distinctly from an omitted poll");
+});
+
+test("#783 a connector bound-`pr` payload carrying a CREDENTIAL differing ONLY in surrounding whitespace FORKS the invisible-value set for a GENERIC connector — the payload is forwarded raw, so the padded and trimmed twins are DISTINCT run keys (thread deliveryGraphCompiler.ts:1376)", () => {
+  // A credential-bearing `pr` makes the payload digest-INVISIBLE (redaction drops content), so the whole
+  // payload is fingerprinted as the disambiguator. For a GENERIC (forward-declared) connector the worker
+  // forwards `payload` UNCHANGED (no `resolveConvergePr`/`parsePr`), so a padded `pr` and its trimmed twin
+  // are DIFFERENT runtime payloads and MUST get DIFFERENT run keys — trimming them here would collapse two
+  // distinct dispatches into one key and let the keyless dispatch fence reuse the wrong payload (issue #783
+  // review). Only a CONVERGE target trims `pr`, so only there do the twins collapse.
+  const mk = (target: string, pr: string): DeliveryGraph => ({
+    name: "g",
+    nodes: [{ id: "c", kind: "connector", connector: { target, payload: { pr } } }],
+    edges: [],
+  });
+  const genPadded = digestInvisibleRawValues(mk("slack:#releases", "  //user:pass@host  "));
+  const genTight = digestInvisibleRawValues(mk("slack:#releases", "//user:pass@host"));
+  assert(
+    JSON.stringify(genPadded) !== JSON.stringify(genTight),
+    "a generic connector's padded credential-bearing pr must FORK the run key from its trimmed twin (payload forwarded raw)",
+  );
+  assert(genPadded.some((t) => t.includes("connector.payload")), `the credential-bearing payload is fingerprinted: ${JSON.stringify(genPadded)}`);
+  assert(genPadded.join("").includes("//user:pass@host  "), `the generic fingerprint carries the RAW untrimmed pr: ${JSON.stringify(genPadded)}`);
+  // A CONVERGE target trims `pr` (runtime does too), so its padded/trimmed credential twins still collapse.
+  const cvgPadded = digestInvisibleRawValues(mk("converge-merge", "  //user:pass@host  "));
+  const cvgTight = digestInvisibleRawValues(mk("converge-merge", "//user:pass@host"));
+  assertEquals(cvgPadded, cvgTight, "a converge target's padded credential-bearing pr must not fork the run key from its trimmed twin");
+  assert(!cvgPadded.join("").includes("//user:pass@host  "), `the converge fingerprint carries the trimmed pr, not the padded raw: ${JSON.stringify(cvgPadded)}`);
+});
+
+test("#778 a github-check `match.conclusion` authored as the NUMBER 1 vs the STRING \"1\" does not fork the run key — `parseMatch` coerces every string field through `str().trim()`, so they are the SAME runtime probe; only num()-backed fields (`status`/`exitCode`) stay type-sensitive (thread deliveryGraphCompiler.ts:1251)", () => {
+  // `matchValueTypeMismatch` flagged EVERY non-string value on a declared string field as a digest-invisible
+  // fork, but `parseMatch` runs those fields through `str(v).trim()`, so `conclusion: 1` and `conclusion: "1"`
+  // probe identically and render identically — flagging one forked the stable run key of equivalent graphs.
+  // A JSON round-trip injects the runtime cross-type value the untyped ingress produces.
+  const mkConclusion = (conclusion: string | number): DeliveryGraph =>
+    JSON.parse(JSON.stringify({ name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "github-check", target: "o/r@main", match: { conclusion } } }], edges: [] }));
+  assertEquals(
+    digestInvisibleRawValues(mkConclusion(1)),
+    digestInvisibleRawValues(mkConclusion("1")),
+    "a string-field match value coerces uniformly, so a number and its string twin share one run key",
+  );
+  // A num()-backed field STAYS type-sensitive: `status: 200` (probes 200) and `status: "200"` (coerces to
+  // undefined = any-2xx) are runtime-DIFFERENT yet render identically, so they MUST still be disambiguated.
+  const mkStatus = (status: string | number): DeliveryGraph =>
+    JSON.parse(JSON.stringify({ name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://x/health", match: { status } } }], edges: [] }));
+  assert(
+    JSON.stringify(digestInvisibleRawValues(mkStatus(200))) !== JSON.stringify(digestInvisibleRawValues(mkStatus("200"))),
+    "a numeric-field cross-type value stays a distinct run key (its runtime meaning genuinely differs)",
+  );
+  // But TWO non-number variants of a numeric field BOTH coerce to `undefined` (unset / any-2xx) — the
+  // SAME runtime match — and display identically, so they must NOT fork the run key. Before the fix the
+  // mismatch branch fingerprinted the RAW value, forking `" 200 "` from `"200"` and double-dispatching.
+  assertEquals(
+    digestInvisibleRawValues(mkStatus(" 200 ")),
+    digestInvisibleRawValues(mkStatus("200")),
+    "two non-number status variants coerce to the same unset match and must share one run key",
+  );
+});
+
+test("#778 a REDACTED match field (`verifyCommand`) authored as the NUMBER 1 vs the STRING \"1\" does not fork the run key — its display is a constant `<redacted>`, so the fingerprint must use the SAME `str().trim()` runtime coercion (thread deliveryGraphCompiler.ts:1251, same class)", () => {
+  const mk = (verifyCommand: string | number): DeliveryGraph =>
+    JSON.parse(JSON.stringify({ name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "@nanobpm/urban", match: { package: "@nanobpm/urban", capabilityRef: "#1", verifyCommand } } }], edges: [] }));
+  assertEquals(
+    digestInvisibleRawValues(mk(1)),
+    digestInvisibleRawValues(mk("1")),
+    "a redacted string field coerces uniformly, so a number and its string twin share one run key",
+  );
+});
+
+test("#778 a NON-redacted `wait.match` string predicate (`capabilityRef`) differing ONLY in surrounding whitespace does not fork the run key — `parseMatch`/`describeProbeMatch` trim it before use, so the padded and trimmed twins are the SAME runtime probe and must share one staged run key (thread deliveryGraphCompiler.ts:1591)", () => {
+  // Before the fix the non-redacted branch compared/fingerprinted the UNTRIMMED `String(v)`, so a
+  // credential-bearing predicate padded with whitespace (`" //user:pass@host#1 "`) forked the stable run
+  // key from its trimmed twin — letting a keyless re-stage double-dispatch an identical graph.
+  const mk = (capabilityRef: string): DeliveryGraph =>
+    JSON.parse(
+      JSON.stringify({ name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "@nanobpm/urban", match: { capabilityRef } } }], edges: [] }),
+    );
+  assertEquals(
+    digestInvisibleRawValues(mk("  //user:pass@host#1  ")),
+    digestInvisibleRawValues(mk("//user:pass@host#1")),
+    "a padded non-redacted string predicate must not fork the run key from its trimmed twin",
+  );
+  // The credential is still fingerprinted (it IS digest-invisible after display redaction), just at its
+  // trimmed value — so a genuinely different credential still forks.
+  assert(
+    JSON.stringify(digestInvisibleRawValues(mk("//user:pass@host#1"))) !== JSON.stringify(digestInvisibleRawValues(mk("//user:pass@host#2"))),
+    "a genuinely different credential predicate still forks the run key",
+  );
+});
+
+test("#778 nodeDisplay redacts a connector value whose URL is prefixed by an XML-invalid control char (strip-before-classify)", () => {
+  // A control char (U+0001) that XML 1.0 forbids gets stripped by `escapeXml`/`stripXmlInvalidChars` at
+  // render time. If classification/redaction ran on the RAW value, the anchored `^(scheme:)?//` check
+  // would miss the URL (it starts with the control char), leaving the credential to surface once the
+  // prefix is dropped. Stripping before classifying closes that bypass.
+  const c = nodeDisplay({
+    id: "n",
+    kind: "connector",
+    connector: { target: "\u0001//user:pass@hooks.example.com?token=abc123" },
+  });
+  assert(!c.documentation.includes("user:pass") && !c.documentation.includes("abc123"), "control-char-prefixed URL still has its credential stripped");
+  assert(c.documentation.includes("***@hooks.example.com?***"), "control-char-prefixed connector target rendered redacted");
+});
+
+test("#778 nodeDisplay redacts a credential-bearing URL embedded in an agent/human prompt (in place, prose intact) — the raw prompt only reaches the runtime job input", () => {
+  const agent = nodeDisplay({
+    id: "impl",
+    kind: "agent",
+    agent: { jobType: "senior:feature", prompt: "Fetch https://user:pass@api.example.com/data?token=abc123 then open a PR. Ready?" },
+  });
+  assert(!agent.name.includes("user:pass") && !agent.name.includes("abc123"), "agent name drops the embedded URL credential");
+  assert(!agent.documentation.includes("user:pass") && !agent.documentation.includes("abc123"), "agent doc drops the embedded URL credential");
+  // The prose around the URL — including a legitimate trailing `?` — survives (redaction is in place,
+  // NOT a truncation from the first `?` to end-of-string).
+  assert(agent.documentation.includes("then open a PR. Ready?"), "prose after the URL (and a sentence `?`) is preserved");
+
+  const human = nodeDisplay({ id: "otp", kind: "human", human: { prompt: "Publish using //deploy:s3cr3t@registry.example.com" } });
+  assert(!human.name.includes("s3cr3t") && !human.documentation.includes("s3cr3t"), "human prompt drops the embedded credential");
+});
+
+test("#778 an XML-forbidden control INSIDE a credential-bearing URL cannot survive redaction in any display path (strip-before-redact)", async () => {
+  // The control (`\x0B`, XML-1.0-forbidden) splits `redactString`'s `//user:pass@` / `//[^\s]+` match, so
+  // redacting the RAW value would miss the userinfo; the renderer then strips the control, re-joining a
+  // live credential. Every display path must sanitise BEFORE redacting. Cover the three that redact URLs.
+  // (a) http wait probe → `redactString(stripXmlInvalidChars(target))`.
+  const wait = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "//us\u000Ber:p4ss@api.example.com/health?token=abc123", match: { status: 200 } } });
+  assert(!wait.documentation.includes("p4ss") && !wait.documentation.includes("abc123"), "http probe target drops the split credential");
+  assert(!/[\u000B]/.test(wait.documentation), "no raw control char remains in the probe display");
+  // (b) free-form agent prompt → `redactFreeText` (strip-before-tokenize).
+  const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "curl //us\u000Ber:p4ss@api.example.com/d?token=abc123 then report" } });
+  assert(!agent.documentation.includes("p4ss") && !agent.documentation.includes("abc123"), "agent prompt drops the split credential");
+  // (c) end-to-end: the compiled BPMN never carries the reconstructed secret.
+  const r = await compileOk({ name: "split-cred", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "//us\u000Ber:p4ss@api.example.com/health?token=abc123", match: { status: 200 } } }], edges: [] });
+  assert(!r.bpmn.includes("p4ss") && !r.bpmn.includes("abc123"), "no split credential is reconstructed into the compiled BPMN");
+});
+
+test("#778 redactString consumes the query/fragment across an embedded line break (newline-safe)", () => {
+  // `[?#].*$` cannot cross a `\n`, so a target whose query is followed by another line kept the token.
+  const wait = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://host/api?token=s3cr3t\nX-Extra: leak", match: { status: 200 } } });
+  assert(!wait.documentation.includes("s3cr3t"), "the token before the line break is redacted");
+  assert(wait.documentation.includes("?***"), "the query is redacted through the line break");
+});
+
+test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw line break (newline-safe)", () => {
+  // A CR/LF smuggled INSIDE the userinfo stops the whitespace-delimited `//[^\s]+` token, so a plain
+  // scan left `ss@host` visible in the display doc (XML preserves the break). The whole-string userinfo
+  // re-scan must strip it while a space/tab still bounds ordinary prose.
+  const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "deploy via //user:pa\nss@registry.example.com now" } });
+  assert(!agent.documentation.includes("ss@registry") && !agent.documentation.includes("user:pa"), "the newline-split userinfo is redacted");
+  assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
+  // Canonical alignment (#783 review — thread deliveryGraphCompiler.ts:1140): redaction now DERIVES from
+  // the ONE canonical `redactEmbeddedCredential` (`//[^/?#]*@`), which classifies ANY `//<userinfo>@` span
+  // as credential-bearing regardless of intervening words/spaces. So a prose `//b then email admin@…` is
+  // also collapsed to `//***@corp.example` — the SAFE direction: the RAW prompt still reaches the runtime
+  // job input unmodified, only the operator-visible display doc loses the ambiguous span. (This supersedes
+  // the earlier bespoke belt's prose-survival carve-out, a second "what is a credential" impl that drifted.)
+  const prose = nodeDisplay({ id: "b", kind: "agent", agent: { jobType: "j", prompt: "compare a//b then email admin@corp.example" } });
+  assert(!prose.documentation.includes("admin@corp.example"), "a `//…@` span in prose is collapsed by the canonical redactor (safe direction)");
+  assert(prose.documentation.includes("//***@corp.example"), "the `//…@` prose span collapses to the redaction marker");
+});
+
+test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw TAB (tab-safe)", () => {
+  // A TAB is a VALID XML character `stripXmlInvalidChars` does not remove, so the whitespace-delimited
+  // `//[^\s]+` token splits `//user:pa\tss@host` before the `@`, leaking `ss@host` into the display doc
+  // (XML preserves the TAB). The credential-shaped belt scan (`//…:…@`, space-bounded so it may cross the
+  // tab inside the userinfo) strips the tab-split userinfo — and its `?token=…` tail (issue #778).
+  const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "deploy via //user:pa\tss@registry.example.com/p?token=s3cr3t now" } });
+  assert(!agent.documentation.includes("ss@registry") && !agent.documentation.includes("user:pa"), "the tab-split userinfo is redacted");
+  assert(!agent.documentation.includes("s3cr3t"), "the query token is redacted");
+  assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
+});
+
+test("#778 redactFreeText: a credential span whose `?query` carries a literal `@` does NOT let the belt userinfo class cross the delimiter and leak the tail (thread deliveryGraphCompiler.ts:1183)", () => {
+  // A `//user:secret pass@host?x=y@tail` span — the literal SPACE in the userinfo forces the belt (the
+  // primary `//[^\s]+` token stops at the space, so the belt owns the whole span). An unbounded `[^/]*@`
+  // belt userinfo class consumed the `?` marker (`…?x=y@` → `//***@`), so the follow-on query strip found
+  // no `?` and left `tail` visible. Bounding the class before `?`/`#` keeps the `?` in place so the whole
+  // `?query` (incl. the `@tail`) is redacted (issue #778 review).
+  const out = redactFreeText("run //user:secret pass@host?x=y@tail now");
+  assert(!out.includes("tail"), `the query tail past the @ must not leak: ${out}`);
+  assert(!out.includes("secret") && !out.includes("x=y"), `userinfo + query both redacted: ${out}`);
+  assert(out.includes("//***@"), `the userinfo collapses to //***@: ${out}`);
+  assert(out.includes("?***"), `the query collapses to the marker: ${out}`);
+});
+
+test("#778 redactFreeText: prose AFTER a `?query`/`#fragment` split across a line break is CONSERVATIVELY redacted, not preserved (thread :1115 supersedes :1083)", () => {
+  // A `?token=VALUE` whose VALUE rides across a newline (`?token=\nsecret`) is a SPLIT credential: the
+  // far side of the break is the secret's continuation, indistinguishable from ordinary prose resuming
+  // after the URL. Round-18 preserved that tail (suppressed advisory :1083); the higher-confidence
+  // inline finding :1115 showed preservation leaks the split value, so the belt now redacts the whole
+  // `?query`/`#fragment` tail through the span's space boundary — trailing continuation included. The RAW
+  // prompt still reaches the runtime job input intact; only the operator-visible display doc loses the
+  // ambiguous tail (issue #778 review).
+  const out = redactFreeText("fetch //host/api?token=s3cr3t\nthen review the results please");
+  assert(!out.includes("s3cr3t"), `the query token is redacted: ${out}`);
+  assert(out.includes("?***"), `the query collapses to the marker: ${out}`);
+  assert(!out.includes("then"), `the same-span continuation after the break is redacted away, not kept: ${out}`);
+  // Prose beyond the span's SPACE boundary (a genuinely separate word) is untouched.
+  assert(out.includes("review the results please"), `prose past the span boundary survives: ${out}`);
+  // A `#fragment` split the same way is likewise redacted through the span.
+  const frag = redactFreeText("open //host/p#sig=zzz\nand confirm the deploy");
+  assert(!frag.includes("sig=zzz") && !frag.includes("and"), `fragment + in-span continuation redacted: ${frag}`);
+  assert(frag.includes("confirm the deploy"), `prose past the span boundary survives: ${frag}`);
+});
+
+test("#783 redactFreeText: a break-spanning `//<word>@host` span IS redacted by the canonical redactor (safe direction, thread deliveryGraphCompiler.ts:1140)", () => {
+  // Canonical alignment (#783 review): `redactEmbeddedCredential`'s `//[^/?#]*@` class spans the embedded
+  // newline, so a `//comment\nowner@example.com` span is a `//<userinfo>@` shape and collapses to
+  // `//***@example.com`. The earlier bespoke belt tried to distinguish "prose" from "credential" here — a
+  // drifting SECOND classifier — and leaked the wrapped userinfo shape it misjudged. A `//…@` span is
+  // UNAMBIGUOUSLY credential-shaped wherever it sits, so redacting it is the SAFE direction (the RAW prompt
+  // still reaches the runtime job input; only the operator-visible display loses the span).
+  const out = redactFreeText("Use //comment\nowner@example.com for context");
+  assert(!out.includes("owner@example.com"), `a break-spanning //...@ span is collapsed by the canonical redactor: ${out}`);
+  assert(out.includes("//***@example.com"), `the span collapses to the redaction marker: ${out}`);
+  // A genuine `user:pass@` userinfo split across the same newline IS still redacted (and its query too).
+  const cred = redactFreeText("Use //user:pass\nx@host/x?token=abc for context");
+  assert(!cred.includes("token=abc") && !cred.includes("user:pass"), `a real split credential must be redacted: ${cred}`);
+});
+
+test("#778 redactFreeText consumes a `?query` split from its URL by a line break (query-across-break)", () => {
+  // The whitespace-delimited `//[^\s]+` primary token STOPS at the break, so a `//host/?` followed by a
+  // new-line `TOKEN=secret` left the secret visible in the XML-preserved display doc even though it is the
+  // URL's query. The linear belt (space-bounded, so it crosses the break) redacts the whole `?…` tail
+  // (issue #778 review — the credential-shaped-`@`-only belt regex was blind to a query with no userinfo).
+  const out = redactFreeText("see //host/?\nTOKEN=secret now");
+  assert(!out.includes("TOKEN=secret"), `a break-spanning query token must be redacted: ${out}`);
+  assert(out.includes("?***"), `the query collapses to the redaction marker: ${out}`);
+  // A bare `#fragment` split the same way is likewise redacted.
+  const frag = redactFreeText("open //host/#\nsig=zzz please");
+  assert(!frag.includes("sig=zzz"), `a break-spanning fragment must be redacted: ${frag}`);
+});
+
+test("#783 redactFreeText: a PASSWORDLESS `//<userinfo>@host` bearer wrapped across a whitespace break before its `@` is redacted, AND a break-spanning prose email `//comment\\nowner@…` is ALSO collapsed by the canonical redactor (safe direction, #783 review — thread deliveryGraphCompiler.ts:1140/:1460)", () => {
+  // The canonical `redactEmbeddedCredential` (`//[^/?#]*@`) spans the embedded break, so BOTH a colon-less
+  // wrapped bearer (`//token\n@host`) and a prose email after a `//comment` reference (`//comment\nowner@…`)
+  // are `//<userinfo>@` shapes that collapse to `//***@`. The earlier bespoke belt tried to keep the prose
+  // email — a drifting second classifier that mislabelled some real credentials — so we now redact any
+  // `//…@` span uniformly (safe direction: RAW prompt still reaches runtime, only the display loses it).
+  const out = redactFreeText("use //token\n@host please");
+  assert(!out.includes("//token") && !out.includes("token\n@"), `a wrapped passwordless userinfo must be redacted: ${JSON.stringify(out)}`);
+  assert(out.includes("//***@"), `the userinfo collapses to the redaction marker: ${JSON.stringify(out)}`);
+  // A TAB-wrapped passwordless userinfo is likewise caught.
+  const tab = redactFreeText("use //token\t@host please");
+  assert(!tab.includes("//token"), `a tab-wrapped passwordless userinfo must be redacted: ${JSON.stringify(tab)}`);
+  // A break-spanning prose email is now ALSO collapsed (canonical alignment, no prose carve-out).
+  const prose = redactFreeText("Use //comment\nowner@example.com for context");
+  assert(!prose.includes("owner@example.com"), `a //...@ prose span is collapsed by the canonical redactor: ${prose}`);
+  assert(prose.includes("//***@example.com"), "the prose span collapses to the redaction marker");
+});
+
+test("#778 redactFreeText: a `//user:pass@ss@host` userinfo with MULTIPLE raw `@` collapses the WHOLE authority credential, not just the prefix (multi-@ suffix-leak — thread deliveryGraphCompiler.ts:1056)", () => {
+  // The belt's `redactCredentialSpan` rewrite regex stopped at the FIRST `@`, so an embedded
+  // `//user:pass@ss@host` in prose left `ss@host` — the userinfo suffix — visible in the display doc.
+  // The class is now `[^/]` so the span reaches the LAST `@` before the path and the whole credential
+  // authority collapses to `//***@`.
+  const out = redactFreeText("clone //user:pass@ss@host/repo now");
+  assert(!out.includes("ss@host"), `the multi-@ userinfo suffix must not leak: ${JSON.stringify(out)}`);
+  assert(!out.includes("user:pass"), "the userinfo prefix is redacted");
+  assert(out.includes("//***@host"), `the whole authority credential collapses to the marker: ${JSON.stringify(out)}`);
+});
+
+test("#778 redactFreeText is linear on an adversarial `//…:…` prompt (no catastrophic backtracking)", () => {
+  // The old `/\/\/[^ @]*:[^ @]*@[^ ]*/g` belt regex backtracked quadratically on a long run of `//…:…`
+  // segments that never reach an `@`. The linear span scanner walks each `//`-run once, so a 20 000-char
+  // adversarial prompt completes near-instantly. Guard the class with a generous wall-clock bound.
+  const adversarial = `deploy ${"//a:".repeat(5000)} then done`;
+  const t0 = Date.now();
+  const out = redactFreeText(adversarial);
+  assert(Date.now() - t0 < 1000, "redactFreeText must not exhibit catastrophic backtracking");
+  // A run with no `@`, no `?`, no `#` is not credential-shaped, so it is left intact (not over-redacted).
+  assert(out.includes("//a:"), "a non-credential `//…:` run is not redacted");
+});
+
+test("#778 redactFreeText consumes a `//user:secret pass@host` userinfo split by a literal SPACE (space-safe belt)", () => {
+  // The SPACE that bounds a belt span also cuts a `user:secret pass@host` userinfo carrying a literal
+  // space BEFORE its `@`, so the span (`//user:secret`) has a `:` but no `@` and escaped redaction —
+  // leaking `user:secret` into the display doc. The belt now looks PAST the space for the userinfo `@`
+  // before any URL/line boundary and extends the span through it (issue #778 review — thread
+  // deliveryGraphCompiler.ts:1080).
+  const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "deploy via //user:secret pass@registry.example.com/p?token=s3cr3t now" } });
+  assert(!agent.documentation.includes("user:secret") && !agent.documentation.includes("secret pass"), `the space-split userinfo is redacted: ${agent.documentation}`);
+  assert(!agent.documentation.includes("s3cr3t"), "the query token is redacted");
+  assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
+  // A `//foo:bar` prose run with NO reachable `@` (the space-bounded lookahead hits end-of-prose, not an
+  // `@`) is NOT over-redacted.
+  const prose = nodeDisplay({ id: "b", kind: "agent", agent: { jobType: "j", prompt: "ratio //foo:bar then continue" } });
+  assert(prose.documentation.includes("//foo:bar"), `a colon run with no reachable @ survives: ${prose.documentation}`);
+  assert(!prose.documentation.includes("//***@"), `no credential is fabricated from a bare colon run: ${prose.documentation}`);
+  // A `//user:pass` prefix whose lookahead hits a `/` boundary (a new path segment) before any `@` is not
+  // extended — the colon run is left intact rather than collapsed to a phantom `//***@`.
+  const bounded = nodeDisplay({ id: "c", kind: "agent", agent: { jobType: "j", prompt: "cmp //user:pass /next then done" } });
+  assert(bounded.documentation.includes("//user:pass"), `a '/'-bounded lookahead leaves the colon run intact: ${bounded.documentation}`);
+  assert(!bounded.documentation.includes("//***@"), `a '/'-bounded lookahead does not fabricate a credential: ${bounded.documentation}`);
+});
+
+test("#783 redactFreeText: a colon-less bearer `//<userinfo>@host` split from its `@host` by a SPACE or a WORD is redacted, AND a spaced prose email `//comment owner@…` is ALSO collapsed (canonical alignment, #783 review — thread deliveryGraphCompiler.ts:1140/:1108)", () => {
+  // The canonical `redactEmbeddedCredential` (`//[^/?#]*@`) spans intervening spaces AND words up to the
+  // `@`, so `//token @host`, `//token part@host` (WORD between), and even a spaced prose email
+  // `//comment owner@example.com` are all `//<userinfo>@` shapes that collapse to `//***@`. The earlier
+  // bespoke belt's "bridge only across whitespace, keep the WORD-separated form as prose" carve-out was a
+  // drifting second classifier that leaked `//token part@host`; deriving from the ONE canonical redactor
+  // fixes the leak and redacts any `//…@` span uniformly (safe direction).
+  const out = redactFreeText("use //token @host please");
+  assert(!out.includes("//token ") && out.includes("//***@host"), `a space-split passwordless userinfo must be redacted: ${JSON.stringify(out)}`);
+  const multi = redactFreeText("use //token  @host please");
+  assert(!multi.includes("//token ") && multi.includes("//***@host"), `a multi-space bridge must redact: ${JSON.stringify(multi)}`);
+  // A WORD between the userinfo and its `@host` (the leak this review fixed) is now redacted too.
+  const word = redactFreeText("publish //token part@host");
+  assert(!word.includes("token part@") && !word.includes("//token part"), `a WORD-split bearer must not leak: ${JSON.stringify(word)}`);
+  assert(word.includes("//***@host"), `the WORD-split userinfo collapses to the marker: ${JSON.stringify(word)}`);
+  // A spaced prose email is now ALSO collapsed (canonical alignment, no prose carve-out).
+  const prose = redactFreeText("Use //comment owner@example.com for context");
+  assert(!prose.includes("owner@example.com"), `a //...@ prose span is collapsed by the canonical redactor: ${prose}`);
+  assert(prose.includes("//***@example.com"), "the prose span collapses to the redaction marker");
+});
+
+test("#778 wait.target digest fingerprint is TRIMMED so a whitespace-only variant shares one staged run key (all kinds)", () => {
+  // `parseProbe` trims `target` for every kind before the worker keys on it, so ` run-task ` and
+  // `run-task` are the SAME runtime probe. A `command` probe's display is a constant `<redacted>`, so
+  // the untrimmed raw was the sole digest disambiguator — forking the staged run key on pure whitespace
+  // and bypassing the idempotency fence. The fingerprint is now `target.trim()` (issue #778 review —
+  // thread deliveryGraphCompiler.ts:1372).
+  const mk = (target: string): DeliveryGraph => ({ nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target } }], edges: [] });
+  const padded = digestInvisibleRawValues(mk("  run-task  ")).filter((t) => t.includes("wait.target"));
+  const tight = digestInvisibleRawValues(mk("run-task")).filter((t) => t.includes("wait.target"));
+  assertEquals(padded, tight);
+  assert(tight.length === 1 && tight[0].endsWith("run-task"), `the fingerprint is the trimmed target: ${tight[0]}`);
+});
+
+test("#778 agent.jobType validation error quotes the offending value with JSON.stringify (control-char-safe)", async () => {
+  // A jobType carrying a raw control char (here a TAB) was interpolated between literal double quotes in
+  // the error message, so the control survived verbatim into the rendered error. `JSON.stringify` escapes
+  // it (and matches every other jobType/emit error in the validator) (issue #778 review).
+  const errors = await compileFail({ nodes: [{ id: "n", kind: "agent", agent: { jobType: "bad\ttype" } }], edges: [] });
+  const msg = errors.map((e) => e.message).join("\n");
+  assert(msg.includes('"bad\\ttype"'), `the error quotes the value via JSON.stringify: ${msg}`);
+  assert(!msg.includes("bad\ttype"), "the raw TAB does not survive into the error message");
+});
+
+test("#778 nodeDisplay surfaces a wait probe's credentialEnv key NAME so a credential-differing graph gets a DISTINCT digest (not a collision)", () => {
+  // `credentialEnv` names a validated env-contract KEY (never a secret) but selects which credential a
+  // probe uses at runtime; omitting it from the display let two otherwise-identical graphs collapse to
+  // one content-address. Surfacing the key name makes the digest faithful.
+  const withCred = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://api.example.com/health", credentialEnv: "PROD_API_TOKEN", match: { status: 200 } } });
+  const otherCred = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://api.example.com/health", credentialEnv: "STAGING_API_TOKEN", match: { status: 200 } } });
+  const noCred = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://api.example.com/health", match: { status: 200 } } });
+  assert(withCred.documentation.includes("Credential env: PROD_API_TOKEN"), "the env-key name is surfaced in the display doc");
+  assert(withCred.documentation !== otherCred.documentation, "two graphs differing only in credentialEnv render distinctly (distinct digest)");
+  assert(withCred.documentation !== noCred.documentation, "presence of credentialEnv changes the display (distinct digest)");
+});
+
+
+test("#778 firstLine falls back to the job type / decision label when a prompt is only XML-forbidden control chars", () => {
+  // A prompt of only `\x01` would otherwise be selected and render as a blank ` · <id>` label. firstLine
+  // now skips a line whose SANITISED content is empty, so the fallback (`jobType` / `Human decision`) wins.
+  const agent = nodeDisplay({ id: "n", kind: "agent", agent: { jobType: "senior:build", prompt: "\u0001\u0007" } });
+  assert(agent.name.startsWith("senior:build · "), "an all-control-char prompt falls back to the job type label");
+  const human = nodeDisplay({ id: "h", kind: "human", human: { prompt: "\u0001" } });
+  assert(human.name.startsWith("Human decision · "), "an all-control-char human prompt falls back to `Human decision`");
+});
+
+test("#778 the wait + human inner tasks carry the descriptive display name (not the bare id)", async () => {
+  const graph = {
+    name: "inner names",
+    nodes: [
+      { id: "gate", kind: "wait", wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" } } },
+      { id: "otp", kind: "human", human: { prompt: "Run the manual OTP publish", formKey: "publish-form" } },
+    ],
+    edges: [{ from: "gate", to: "otp" }],
+  };
+  const r = await compileOk(graph);
+  const waitEl = elementForNode(r.bpmn, "gate");
+  // All three wait inner elements (loop, probe, boundary retry) now use the descriptive display name.
+  assert(r.bpmn.includes(`<bpmn:subProcess id="${waitEl}_probeLoop" name="Probe readiness loop: Wait: pr owner/repo#42 · gate">`), "probe loop uses the display name");
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${waitEl}_task" name="Probe readiness: Wait: pr owner/repo#42 · gate">`), "probe task uses the display name");
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${waitEl}_lastAttempt" name="Probe readiness at boundary: Wait: pr owner/repo#42 · gate">`), "boundary probe uses the display name");
+  // The old bare `...: <id>` inner names are gone.
+  assert(!r.bpmn.includes('name="Probe readiness: gate"'), "no bare probe id name remains");
+  // The human user task uses the descriptive display name too.
+  const humanEl = `delivery-human-task__${humanTaskSubEl(r.bpmn)}`;
+  assert(r.bpmn.includes(`<bpmn:userTask id="${humanEl}" name="Delivery: human step — Run the manual OTP publish · otp">`), "the human user task uses the display name");
+  assert(!r.bpmn.includes('name="Delivery: human step — otp"'), "no bare human id name remains");
+});
+
+test("#778 nodeDisplay redacts a capability probe's verifyCommand (arbitrary shell) in name + documentation", () => {
+  const cap = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: {
+      kind: "capability",
+      target: "github-releases:owner/repo",
+      match: { package: "@scope/pkg", capabilityRef: "owner/repo#7", verifyCommand: "curl -H \"Authorization: Bearer $SECRET\" x" },
+    },
+  });
+  assert(cap.documentation.includes("verifyCommand=<redacted>"), "verifyCommand is redacted in the doc");
+  assert(!cap.documentation.includes("$SECRET"), "the raw shell command never reaches the doc");
+  // Non-secret match fields stay verbatim.
+  assert(cap.documentation.includes("package=@scope/pkg"), "structured match fields stay verbatim");
+});
+
+test("#778 the mermaid diagram reuses the descriptive nodeDisplay name (not the bare `kind: id`)", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
+  // One display source: the diagram box carries the same descriptive label the BPMN uses.
+  assert(r.diagram.includes("Wait: pr owner/repo#42 · watch-b"), "wait box uses the descriptive display name");
+  assert(!/"wait: watch-b"/i.test(r.diagram), "no bare `kind: id` box label remains");
+});
+
+test("#778 a bounded node's escalation task carries the descriptive display name (nodeId kept for correlation)", async () => {
+  const graph = {
+    name: "escalation names",
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "Implement the widget" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const esc = escBlockForNode(r.bpmn, "impl");
+  assert(esc.includes('name="Escalate: Implement the widget · impl"'), "escalation task uses the descriptive display name");
+  assert(!esc.includes('name="Escalate: impl"'), "no bare-id escalation name remains");
+  // nodeId is still threaded for runtime correlation.
+  assert(esc.includes('target="nodeId"'), "nodeId is retained as an input for correlation");
+});
+
+test("#778 XML-1.0-forbidden control characters are stripped from user-authored display strings", () => {
+  const display = nodeDisplay({ id: "n", kind: "agent", agent: { jobType: "j", prompt: "do\u0001 the\u0007 thing" } });
+  // `redactFreeText` (the display path for agent/human prompts) strips XML-1.0-forbidden control chars
+  // BEFORE tokenizing, so the name carries the SANITISED text — never a raw control char (which would
+  // make layoutBpmn/deploy reject the model, and could otherwise reconstruct a split-redaction secret).
+  assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(display.name), "nodeDisplay emits no raw control char");
+  assert(display.name.includes("do the thing"), "the sanitised prompt text is preserved as the label");
+});
+
+test("#778 the compiled BPMN never emits an XML-1.0-forbidden control character", async () => {
+  const graph = {
+    name: "control\u0001 chars",
+    nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt: "line one\u0007 with a bell\u0000 and null" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting the sanitiser removed them.
+  assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(r.bpmn), "no forbidden control char survives into the compiled BPMN");
+});
+
+test("#778 nodeDisplay redacts free-form probe match fields (bodyIncludes/stdoutIncludes) that can carry response tokens", () => {
+  const http = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "http", target: "https://api.example.com/health", match: { status: 200, bodyIncludes: "session=SUPER_SECRET_TOKEN" } },
+  });
+  assert(http.documentation.includes("bodyIncludes=<redacted>"), "bodyIncludes is redacted");
+  assert(!http.documentation.includes("SUPER_SECRET_TOKEN"), "the raw body substring never reaches the doc");
+  assert(http.documentation.includes("status=200"), "structured match fields stay verbatim");
+
+  const cmd = nodeDisplay({
+    id: "c",
+    kind: "wait",
+    wait: { kind: "command", target: "check.sh", match: { exitCode: 1, stdoutIncludes: "apikey=SUPER_SECRET_STDOUT" } },
+  });
+  assert(cmd.documentation.includes("stdoutIncludes=<redacted>"), "stdoutIncludes is redacted");
+  assert(!cmd.documentation.includes("SUPER_SECRET_STDOUT"), "the raw stdout substring never reaches the doc");
+  assert(cmd.documentation.includes("exitCode=1"), "structured match fields stay verbatim");
+});
+
+test("#778 describeProbeMatch DROPS an undeclared `wait.match` key so a text-ingress graph cannot leak a secret through an attacker-named field (thread :1121)", async () => {
+  // `validateDeliveryGraph` does NOT reject an unknown extra `wait.match` key, so a graph submitted as
+  // text can smuggle an attacker-named field whose value the display would otherwise render VERBATIM
+  // (an unknown key bypasses `REDACTED_MATCH_FIELDS`). Only the declared `ProbeMatch` fields are shown.
+  const graph = {
+    name: "g",
+    nodes: [
+      {
+        id: "w",
+        kind: "wait",
+        wait: { kind: "command", target: "check.sh", match: { exitCode: 1, "x-smuggled": "LEAK_SECRET_VALUE" } },
+      },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  assert(!r.bpmn.includes("LEAK_SECRET_VALUE"), "an undeclared match key's value never reaches the compiled documentation");
+  assert(!r.bpmn.includes("x-smuggled"), "the undeclared match key itself is dropped from the display");
+  assert(r.bpmn.includes("exitCode=1"), "a declared match field still renders verbatim");
+});
+
+test("#778 redactProbeTargetForDisplay redacts a command-like probe kind smuggled behind an XML-invalid control char (thread :78)", async () => {
+  // `validateDeliveryGraph` only requires a non-empty `wait.kind`, so `kind: "command\x01"` compiles.
+  // The raw kind is not `=== "command"`, so before the fix its arbitrary shell target took the URL-only
+  // `redactConnectorValue` display path and leaked into the staged BPMN documentation. It must be
+  // recognised as a command (the control char sanitises away) and its target shown only as `<redacted>`.
+  const display = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "command\u0001", target: "curl -H 'Authorization: Bearer sk-SUPER_SECRET'", poll: { everyMs: 1000 } },
+  });
+  assert(!display.documentation.includes("sk-SUPER_SECRET"), "a command-like kind's shell target never reaches the doc");
+  assert(display.documentation.includes("Target: <redacted>"), "a control-char-smuggled command kind is redacted");
+
+  // An entirely unrecognised (malformed) kind also redacts its target rather than leaking it verbatim.
+  const unknown = nodeDisplay({
+    id: "h",
+    kind: "wait",
+    wait: { kind: "cmd", target: "run --token=SUPER_SECRET_UNKNOWN", poll: { everyMs: 1000 } },
+  });
+  assert(!unknown.documentation.includes("SUPER_SECRET_UNKNOWN"), "an unrecognised kind's target never reaches the doc");
+  assert(unknown.documentation.includes("Target: <redacted>"), "an unrecognised probe kind is redacted");
+
+  // A genuine structured kind still shows its (credential-free) target verbatim — no over-redaction.
+  const pr = nodeDisplay({ id: "p", kind: "wait", wait: { kind: "pr", target: "o/r#42", poll: { everyMs: 1000 } } });
+  assert(pr.documentation.includes("Target: o/r#42"), "a structured probe kind still shows its target");
+});
+
+test("#778 redactProbeTargetForDisplay redacts a STRUCTURED kind smuggled behind an XML-invalid control char (`pr\\x01`) — the runtime rejects the raw kind, so its arbitrary target must not take the verbatim structured-target path (thread :81)", async () => {
+  // `validateDeliveryGraph` only requires a non-empty `wait.kind` (the probe-kind ENUM is owned by
+  // `readiness.ts`, not re-enforced at the graph boundary), so `kind: "pr\x01"` compiles. At runtime
+  // `parseProbe` keys on `str(raw.kind).trim()` = `"pr\x01"`, which is NOT a known probe kind, so it is
+  // REJECTED and never runs. The display must classify on that SAME trimmed-raw kind: before the fix it
+  // XML-stripped the kind first (`"pr\x01"` → `"pr"`), took the structured `redactConnectorValue` path,
+  // and leaked a non-URL secret-bearing target verbatim into the staged BPMN documentation.
+  const smuggled = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "pr\u0001", target: "run --token=SUPER_SECRET_PR_SMUGGLE", poll: { everyMs: 1000 } },
+  });
+  assert(
+    !smuggled.documentation.includes("SUPER_SECRET_PR_SMUGGLE"),
+    "a control-char-smuggled structured kind's target must never reach the doc",
+  );
+  assert(smuggled.documentation.includes("Target: <redacted>"), "a control-char-smuggled structured kind is redacted");
+
+  // A genuine `pr` kind still shows its structured (credential-free) target verbatim — no over-redaction.
+  const pr = nodeDisplay({ id: "p", kind: "wait", wait: { kind: "pr", target: "o/r#42", poll: { everyMs: 1000 } } });
+  assert(pr.documentation.includes("Target: o/r#42"), "a genuine structured probe kind still shows its target");
+});
+
+test("#778 describeProbeMatch drops an authored match value equal to its kind's runtime default so an equivalent graph does not fork the digest (thread :1267)", async () => {
+  // `matchPr`/`matchEpic`/`matchGithubCheck`/`matchCommand` default `prState`/`epicState`/`conclusion`/
+  // `exitCode` to `merged`/`merged`/`success`/`0`, so authoring that value is IDENTICAL to omitting it.
+  // Rendering it would fork `semanticBpmn`/the digest from the omitted-equivalent graph → a double
+  // dispatch. The explicit-default and the omitted graph must compile to the SAME `semanticBpmn`.
+  const cases: { kind: string; target: string; field: string; def: string | number; nonDefault: string }[] = [
+    { kind: "pr", target: "o/r#1", field: "prState", def: "merged", nonDefault: "open" },
+    { kind: "epic", target: "o/r#1", field: "epicState", def: "merged", nonDefault: "settled" },
+    { kind: "github-check", target: "o/r@main", field: "conclusion", def: "success", nonDefault: "neutral" },
+    { kind: "command", target: "check.sh", field: "exitCode", def: 0, nonDefault: "7" },
+  ];
+  for (const c of cases) {
+    const withDefault = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, match: { [c.field]: c.def }, poll: { everyMs: 1000 } } }], edges: [] };
+    const omitted = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, poll: { everyMs: 1000 } } }], edges: [] };
+    const a = await compileOk(withDefault);
+    const b = await compileOk(omitted);
+    assertEquals(a.semanticBpmn, b.semanticBpmn, `${c.kind}: an authored default \`${c.field}\` must render identically to omitting it`);
+    assert(!a.bpmn.includes(`${c.field}=`), `${c.kind}: the defaulted \`${c.field}\` is dropped from the doc`);
+    // A NON-default value still renders (and forks the digest) — the drop is default-only.
+    const nonDef = c.field === "exitCode"
+      ? { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, match: { [c.field]: Number(c.nonDefault) }, poll: { everyMs: 1000 } } }], edges: [] }
+      : { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, match: { [c.field]: c.nonDefault }, poll: { everyMs: 1000 } } }], edges: [] };
+    const n = await compileOk(nonDef);
+    assert(n.bpmn.includes(`${c.field}=${c.nonDefault}`), `${c.kind}: a non-default \`${c.field}\` still renders`);
+    assert(n.semanticBpmn !== b.semanticBpmn, `${c.kind}: a non-default \`${c.field}\` genuinely forks the digest`);
+  }
+});
+
+test("#778 describeProbeMatch drops an authored match string predicate whose runtime-normalized (trimmed) value is EMPTY so an equivalent graph does not fork the digest — `parseMatch` coerces `\"\"`/`\"   \"` to `undefined` (omitted), so rendering it would fork `semanticBpmn`/the run key from the omitted-equivalent graph → a double dispatch (thread deliveryGraphCompiler.ts:1254)", async () => {
+  // A blank/whitespace string predicate is runtime-equivalent to OMITTING it: `parseMatch`
+  // (`app/readiness.ts`) normalizes every string field with `str(v).trim() || undefined`. Both a REDACTED
+  // field (`bodyIncludes` → rendered `<redacted>`) and a plain field (`capabilityRef` → rendered raw) must
+  // collapse to the omitted graph.
+  const cases: { kind: string; target: string; field: string; nonEmpty: string }[] = [
+    { kind: "http", target: "https://api.example.com/health", field: "bodyIncludes", nonEmpty: "ok" },
+    { kind: "capability", target: "@nanobpm/urban", field: "capabilityRef", nonEmpty: "cap:x" },
+  ];
+  for (const c of cases) {
+    const blank = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, match: { [c.field]: "   " }, poll: { everyMs: 1000 } } }], edges: [] };
+    const omitted = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, poll: { everyMs: 1000 } } }], edges: [] };
+    const a = await compileOk(blank);
+    const b = await compileOk(omitted);
+    assertEquals(a.semanticBpmn, b.semanticBpmn, `${c.kind}: a whitespace-only \`${c.field}\` must render identically to omitting it`);
+    assert(!a.bpmn.includes(`${c.field}=`), `${c.kind}: a blank \`${c.field}\` is dropped from the doc`);
+    // A NON-empty value still renders (and forks the digest) — the drop is empty-only.
+    const nonEmpty = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: c.kind, target: c.target, match: { [c.field]: c.nonEmpty }, poll: { everyMs: 1000 } } }], edges: [] };
+    const n = await compileOk(nonEmpty);
+    assert(n.semanticBpmn !== b.semanticBpmn, `${c.kind}: a non-empty \`${c.field}\` genuinely forks the digest`);
+  }
+  // Direct unit-level assertion on the display, independent of the compile pipeline: a blank redacted
+  // predicate must NOT surface a `<redacted>` marker (it is omitted, not present-but-hidden).
+  const disp = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://api.example.com/health", match: { status: 200, bodyIncludes: "   " } } });
+  assert(!disp.documentation.includes("bodyIncludes"), "nodeDisplay drops a whitespace-only redacted predicate rather than rendering `bodyIncludes=<redacted>`");
+});
+
+test("#778 nodeDisplay drops an explicit `onTimeout: escalate` (the effective default) so it renders identically to omitting it and does not fork the digest (thread :1398)", async () => {
+  // `parseProbe` defaults an omitted `onTimeout` to `escalate` and `waitBodyLines` only changes topology
+  // for `continue`, so an EXPLICIT `escalate` is behaviourally identical to omitting it. Rendering the
+  // line only for the explicit form would fork `semanticBpmn`/the digest from the omitted-equivalent
+  // graph → a double dispatch. Explicit-default and omitted must compile to the SAME `semanticBpmn`.
+  const explicit = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "o/r#1", match: { prState: "merged" }, onTimeout: "escalate", poll: { everyMs: 1000 } } }], edges: [] };
+  const omitted = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "o/r#1", match: { prState: "merged" }, poll: { everyMs: 1000 } } }], edges: [] };
+  const a = await compileOk(explicit);
+  const b = await compileOk(omitted);
+  assertEquals(a.semanticBpmn, b.semanticBpmn, "an explicit `onTimeout: escalate` must render identically to omitting it");
+  assert(!a.bpmn.includes("On timeout:"), "the defaulted `escalate` is dropped from the doc");
+  // A NON-default `continue` still renders (and forks the digest) — the drop is default-only.
+  const cont = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "pr", target: "o/r#1", match: { prState: "merged" }, onTimeout: "continue", poll: { everyMs: 1000 } } }], edges: [] };
+  const n = await compileOk(cont);
+  assert(n.bpmn.includes("On timeout: continue"), "a non-default `continue` still renders");
+  assert(n.semanticBpmn !== b.semanticBpmn, "a non-default `continue` genuinely forks the digest");
+  // Directly assert the display too (unit-level, independent of the compile pipeline).
+  assert(
+    !nodeDisplay({ id: "w", kind: "wait", wait: { kind: "pr", target: "o/r#1", match: { prState: "merged" }, onTimeout: "escalate" } }).documentation.includes("On timeout:"),
+    "nodeDisplay drops an explicit-default onTimeout",
+  );
+  assert(
+    nodeDisplay({ id: "w", kind: "wait", wait: { kind: "pr", target: "o/r#1", match: { prState: "merged" }, onTimeout: "continue" } }).documentation.includes("On timeout: continue"),
+    "nodeDisplay keeps a non-default onTimeout",
+  );
+});
+
+
+test("#778 digestInvisibleRawValues fingerprints an XML-invalid `agent`/`connector` timeout so two runtime-different graphs do not collide (thread :1251)", () => {
+  // The node `timeout` is displayed as `trimmedOrEmpty(timeout)` then XML-sanitised at serialisation, but
+  // the RAW value drives the runtime SLA — so `PT1H` and `PT1H\x01` share a digest while the runtime SLA
+  // differs (an invalid duration silently falls back to the run default). The raw must be fingerprinted.
+  const clean = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "p", timeout: "PT1H" } }], edges: [] };
+  const dirty = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "p", timeout: "PT1H\x01" } }], edges: [] };
+  const invisible = digestInvisibleRawValues(dirty);
+  assert(invisible.some((e) => e.includes("agent.timeout")), "an XML-invalid agent timeout is flagged digest-invisible");
+  // The clean timeout is fully digest-visible → not flagged.
+  assert(!digestInvisibleRawValues(clean).some((e) => e.includes("agent.timeout")), "a clean timeout is not spuriously flagged");
+  // Same for a connector timeout.
+  const dirtyConn = { name: "g", nodes: [{ id: "c", kind: "connector", connector: { target: "converge-merge", timeout: "PT2H\x01" } }], edges: [] };
+  assert(digestInvisibleRawValues(dirtyConn).some((e) => e.includes("connector.timeout")), "an XML-invalid connector timeout is flagged digest-invisible");
+});
+
+test("#778 digestInvisibleRawValues collapses a whitespace-only timeout variant (`PT1H` vs `PT1H `) so it does not spuriously fork the run-key (thread :1307)", () => {
+  // `isoDuration` TRIMS the timeout before it becomes the runtime `nodeTimeout`, and the display doc shows
+  // `trimmedOrEmpty(timeout)` — so `PT1H` and `PT1H ` have the SAME semantic BPMN/digest AND the same SLA.
+  // Fingerprinting the RAW string forked them (one pushed `"PT1H "`, the other nothing), so a
+  // whitespace-only re-stage got a different run key and launched a second run. Fingerprinting the
+  // NORMALISED value collapses them (issue #778 review).
+  const canon = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "PT1H" } }], edges: [] };
+  const trailingWs = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "PT1H " } }], edges: [] };
+  assertEquals(
+    JSON.stringify(digestInvisibleRawValues(canon)),
+    JSON.stringify(digestInvisibleRawValues(trailingWs)),
+    "a trailing-whitespace timeout produces the identical fingerprint set (no spurious fork)",
+  );
+  assert(!digestInvisibleRawValues(canon).some((e) => e.includes("agent.timeout")), "a valid canonical timeout is not fingerprinted at all");
+  // A genuinely-invalid duration DOES still fork from a valid one — it falls back to a different SLA.
+  const invalid = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "PT1H\x01" } }], edges: [] };
+  assert(
+    JSON.stringify(digestInvisibleRawValues(invalid)) !== JSON.stringify(digestInvisibleRawValues(canon)),
+    "an invalid timeout (distinct runtime SLA) is still disambiguated from a valid one",
+  );
+});
+
+test("#778 digestInvisibleRawValues collapses a CASE-only timeout variant (`pt1h` vs `PT1H`) — the runtime ISO-normalises BOTH, so it must not spuriously fork the run-key (thread :1331)", () => {
+  // `isoDuration` upper-cases a valid timeout before it becomes the runtime `nodeTimeout`, so `pt1h` and
+  // `PT1H` drive the IDENTICAL runtime SLA and identical semantic BPMN. The fix normalises BOTH the raw
+  // fingerprint AND the digest-visible display value; without normalising the display side, `pt1h` (digest
+  // sees `pt1h`, runtime canonicalises to `PT1H`) was falsely flagged digest-invisible, forcing an
+  // idempotency key and double-launching a graph the runtime treats identically.
+  const lower = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "pt1h" } }], edges: [] };
+  const upper = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "PT1H" } }], edges: [] };
+  assert(!digestInvisibleRawValues(lower).some((e) => e.includes("agent.timeout")), "a case-only timeout variant is not falsely flagged digest-invisible");
+  assertEquals(
+    JSON.stringify(digestInvisibleRawValues(lower)),
+    JSON.stringify(digestInvisibleRawValues(upper)),
+    "a case-only timeout produces the identical fingerprint set (no spurious fork)",
+  );
+  // The same for a connector timeout.
+  const lowerConn = { name: "g", nodes: [{ id: "c", kind: "connector", connector: { target: "converge-merge", timeout: "pt2h" } }], edges: [] };
+  const upperConn = { name: "g", nodes: [{ id: "c", kind: "connector", connector: { target: "converge-merge", timeout: "PT2H" } }], edges: [] };
+  assertEquals(
+    JSON.stringify(digestInvisibleRawValues(lowerConn)),
+    JSON.stringify(digestInvisibleRawValues(upperConn)),
+    "a case-only connector timeout collapses too",
+  );
+});
+
+test("#778 compileDeliveryGraph REJECTS a URL-shaped agent `jobType` at the validation boundary — a credential embedded in the executable job type never reaches the compiled BPMN, and the compile error is redacted (#778 review)", async () => {
+  const errors = await compileFail({
+    name: "g",
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "//user:pass@evil.example/route", prompt: "p" } }],
+    edges: [],
+  });
+  const joined = JSON.stringify(errors);
+  assert(joined.includes("URL-shaped"), `rejected as URL-shaped: ${joined}`);
+  assert(!joined.includes("user:pass"), `no compile error echoes the embedded credential: ${joined}`);
+});
+
+test("#778 nodeDisplay + digestInvisibleRawValues redact a credential-bearing agent `jobType` (thread :1202)", () => {
+  // `jobType` is emitted verbatim into the agent node's display label and (as of #778) the compiled BPMN,
+  // so a URL-shaped jobType carrying a credential must be redacted the SAME way a connector target is —
+  // and the redacted-away raw fingerprinted so a secret-differing jobType is not digest-collapsed.
+  const secret = "//user:s3cr3t@host/?token=abc";
+  const d = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: secret } });
+  const rendered = `${d.name}\n${d.documentation}`;
+  assert(!rendered.includes("s3cr3t") && !rendered.includes("token=abc"), `the credential is redacted from the display: ${rendered}`);
+  assert(rendered.includes("***"), `the display carries the redaction marker: ${rendered}`);
+  const graph = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: secret } }], edges: [] };
+  assert(digestInvisibleRawValues(graph).some((e) => e.includes("agent.jobType")), "the redacted-away jobType is fingerprinted digest-invisible");
+  // An ordinary `senior:feature` jobType (not URL-shaped) is untouched and not fingerprinted.
+  const ordinary = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] };
+  assert(nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }).documentation.includes("senior:feature"), "a normal jobType renders verbatim");
+  assert(!digestInvisibleRawValues(ordinary).some((e) => e.includes("agent.jobType")), "a normal jobType is not spuriously fingerprinted");
+});
+
+test("#778 digestInvisibleRawValues fingerprints an XML-invalid `wait.credentialEnv` so a malformed env key does not collide with a valid one (suppressed advisory :1355)", () => {
+  const clean = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://x", credentialEnv: "GITHUB_TOKEN" } }], edges: [] };
+  const dirty = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://x", credentialEnv: "GITHUB_TOKEN\x01" } }], edges: [] };
+  assert(!digestInvisibleRawValues(clean).some((e) => e.includes("wait.credentialEnv")), "a clean credentialEnv is not fingerprinted");
+  assert(digestInvisibleRawValues(dirty).some((e) => e.includes("wait.credentialEnv")), "an XML-invalid credentialEnv is fingerprinted digest-invisible");
+  // The two graphs (identical display/digest) therefore produce DIFFERENT invisible-value sets.
+  assert(
+    JSON.stringify(digestInvisibleRawValues(clean)) !== JSON.stringify(digestInvisibleRawValues(dirty)),
+    "the malformed credentialEnv graph is disambiguated from the valid one",
+  );
+});
+
+test("#778 digestInvisibleRawValues fingerprints an XML-invalid `wait.kind`/`onTimeout`/`poll.backoff` so a malformed probe does not collide with a valid one (thread :1366)", () => {
+  const clean = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://x", onTimeout: "escalate", poll: { backoff: "linear" } } }], edges: [] };
+  for (const [field, dirtyWait] of [
+    ["wait.kind", { kind: "http\x01", target: "https://x" }],
+    ["wait.onTimeout", { kind: "http", target: "https://x", onTimeout: "escalate\x01" }],
+    ["wait.poll.backoff", { kind: "http", target: "https://x", poll: { backoff: "linear\x01" } }],
+  ] as const) {
+    const dirty = { name: "g", nodes: [{ id: "w", kind: "wait", wait: dirtyWait }], edges: [] };
+    assert(digestInvisibleRawValues(dirty).some((e) => e.includes(field)), `an XML-invalid ${field} is fingerprinted digest-invisible`);
+  }
+  // A clean probe's enum fields are never fingerprinted (display == raw), so a valid graph is not forked.
+  assert(!digestInvisibleRawValues(clean).some((e) => e.includes("wait.kind") || e.includes("wait.onTimeout") || e.includes("wait.poll.backoff")), "clean probe enum fields are not spuriously fingerprinted");
+});
+
+test("#778 describeProbeMatch + digestInvisibleRawValues redact a credential-bearing `capabilityRef` match field (thread :1169)", () => {
+  // `capabilityRef` (and `package`/`checkName`) are free-form string predicates `parseProbe` accepts for a
+  // trailing id, so a URL-shaped value can smuggle a credential into the operator-visible display. It must
+  // be redacted the SAME URL-only way a connector target is, and the redacted-away raw fingerprinted so a
+  // secret-differing probe is not digest-collapsed.
+  const secret = "//user:s3cr3t@host#274";
+  const d = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { capabilityRef: secret } } });
+  const rendered = `${d.name}\n${d.documentation}`;
+  assert(!rendered.includes("s3cr3t"), `the credential is redacted from the match display: ${rendered}`);
+  assert(rendered.includes("***"), `the display carries the redaction marker: ${rendered}`);
+  const graph = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { capabilityRef: secret } } }], edges: [] };
+  assert(digestInvisibleRawValues(graph).some((e) => e.includes("wait.match.capabilityRef")), "the redacted-away capabilityRef is fingerprinted digest-invisible");
+  // An ordinary (non-URL) capabilityRef is untouched and not fingerprinted.
+  const ordinary = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { capabilityRef: "owner/repo#7" } } }], edges: [] };
+  assert(nodeDisplay({ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { capabilityRef: "owner/repo#7" } } }).documentation.includes("owner/repo#7"), "an ordinary capabilityRef renders verbatim");
+  assert(!digestInvisibleRawValues(ordinary).some((e) => e.includes("wait.match.capabilityRef")), "an ordinary capabilityRef is not spuriously fingerprinted");
+});
+
+test("#778 digestInvisibleRawValues collapses a whitespace-only redacted-match variant (`verifyCommand`) — parseMatch trims it (suppressed advisory :1363)", () => {
+  const canon = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { verifyCommand: "curl x" } } }], edges: [] };
+  const trailingWs = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { verifyCommand: "curl x " } } }], edges: [] };
+  // The redacted field is ALWAYS fingerprinted (display is `<redacted>`), but the trimmed value is used,
+  // so a trailing-whitespace variant produces the IDENTICAL fingerprint set (no spurious run-key fork).
+  assert(digestInvisibleRawValues(canon).some((e) => e.includes("wait.match.verifyCommand")), "a redacted match field is fingerprinted");
+  assertEquals(
+    JSON.stringify(digestInvisibleRawValues(canon)),
+    JSON.stringify(digestInvisibleRawValues(trailingWs)),
+    "a whitespace-only difference in a trimmed redacted match field does not fork the fingerprint",
+  );
+  // An internal invalid char still distinguishes (runtime carries it).
+  const invalid = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { verifyCommand: "curl\x01x" } } }], edges: [] };
+  assert(
+    JSON.stringify(digestInvisibleRawValues(invalid)) !== JSON.stringify(digestInvisibleRawValues(canon)),
+    "an internal invalid char in a redacted match field is still disambiguated",
+  );
+});
+
+test("#778 describeProbeMatch renders match fields in a stable order regardless of JSON insertion order (byte-determinism)", () => {
+  const a = nodeDisplay({ id: "g", kind: "wait", wait: { kind: "http", target: "https://x", match: { status: 200, version: "1.2.3" } } });
+  const b = nodeDisplay({ id: "g", kind: "wait", wait: { kind: "http", target: "https://x", match: { version: "1.2.3", status: 200 } } });
+  assertEquals(a.documentation, b.documentation);
+  // The stable order is code-unit ascending on the key ("status" < "version").
+  const match = a.documentation.split("\n").find((l) => l.startsWith("Match: "));
+  assertEquals(match, "Match: status=200, version=1.2.3");
+});
+
+test("#778 nodeDisplay redacts a credential-bearing connector target + dedupeKey (forward-declared / free-form values)", () => {
+  const c = nodeDisplay({
+    id: "call",
+    kind: "connector",
+    connector: { target: "https://user:p4ss@hooks.example.com/deploy?token=abc123", dedupeKey: "https://k:s3cr3t@idem.example.com/key?sig=zzz" },
+  });
+  assert(!c.name.includes("p4ss") && !c.name.includes("abc123"), "connector name drops userinfo + query secret");
+  assert(!c.documentation.includes("p4ss") && !c.documentation.includes("abc123"), "connector doc target drops userinfo + query secret");
+  assert(!c.documentation.includes("s3cr3t") && !c.documentation.includes("zzz"), "connector doc dedupeKey drops userinfo + query secret");
+  assert(c.documentation.includes("Connector target: https://***@hooks.example.com/deploy?***"), "connector target rendered redacted");
+  assert(c.documentation.includes("Dedupe key: https://***@idem.example.com/key?***"), "connector dedupeKey rendered redacted");
+});
+
+test("#778 nodeDisplay preserves an OPAQUE (non-URL) connector target/dedupeKey/payload.pr verbatim — `#`/`?` are not URL redaction points", () => {
+  // A forward-declared connector identifier such as `slack:#releases` is NOT a `scheme://authority`
+  // URL, so blind redactString would mangle its meaningful `#`/`?` (e.g. `slack:#releases` →
+  // `slack:#***`). Only real URLs are redacted; opaque identifiers and `owner/repo#42`/`<node>.pr`
+  // PR references survive verbatim.
+  const c = nodeDisplay({
+    id: "call",
+    kind: "connector",
+    connector: { target: "slack:#releases?thread=42", dedupeKey: "idem#deploy?v=1", payload: { pr: "owner/repo#42" } },
+  });
+  assert(c.name.includes("Connector: slack:#releases?thread=42"), "opaque target name is verbatim (not mangled)");
+  assert(c.documentation.includes("Connector target: slack:#releases?thread=42"), "opaque target doc is verbatim");
+  assert(c.documentation.includes("Dedupe key: idem#deploy?v=1"), "opaque dedupeKey is verbatim");
+  assert(c.documentation.includes("PR: owner/repo#42"), "an `owner/repo#42` PR reference is preserved verbatim");
+});
+
+test("#778 nodeDisplay redacts a credential-bearing connector payload.pr (canonical URL) but preserves a clean PR URL/`<node>.pr` ref", () => {
+  const cred = nodeDisplay({
+    id: "land",
+    kind: "connector",
+    connector: { target: "converge-merge", payload: { pr: "https://user:tok3n@github.com/o/r/pull/42?access=sekret" } },
+  });
+  assert(!cred.documentation.includes("tok3n") && !cred.documentation.includes("sekret"), "credential-bearing PR URL has userinfo + query stripped");
+  const ref = nodeDisplay({
+    id: "land2",
+    kind: "connector",
+    connector: { target: "converge-merge", payload: { pr: "impl.pr" } },
+  });
+  assert(ref.documentation.includes("PR: impl.pr"), "a `<node>.pr` fact reference is preserved verbatim");
+});
+
+test("#778 nodeDisplay redacts a PROTOCOL-RELATIVE (`//user:pass@…`) connector target/dedupeKey — a scheme is optional (#778 review)", () => {
+  // `redactString` redacts a scheme-relative `//user:pass@host?token=…` form, but the URL detector
+  // that gates it once required a `scheme://` prefix, so a protocol-relative target slipped through
+  // VERBATIM into the compiled name/documentation, leaking its credential. The detector now accepts an
+  // OPTIONAL scheme before the `//authority`.
+  const c = nodeDisplay({
+    id: "call",
+    kind: "connector",
+    connector: { target: "//user:p4ss@hooks.example.com/deploy?token=abc123", dedupeKey: "//s3cr3t@idem.example.com/key?sig=zzz" },
+  });
+  assert(!c.name.includes("p4ss") && !c.name.includes("abc123"), "protocol-relative connector name drops userinfo + query secret");
+  assert(!c.documentation.includes("p4ss") && !c.documentation.includes("abc123"), "protocol-relative connector doc target drops secret");
+  assert(!c.documentation.includes("s3cr3t") && !c.documentation.includes("zzz"), "protocol-relative dedupeKey drops secret");
+  assert(c.documentation.includes("Connector target: //***@hooks.example.com/deploy?***"), "protocol-relative target rendered redacted");
+  assert(c.documentation.includes("Dedupe key: //***@idem.example.com/key?***"), "protocol-relative dedupeKey rendered redacted");
+});
+
+test("#778 the connector timeout-escalation FEEL descriptor redacts a credential-bearing target (#778 review)", async () => {
+  // The connector node's escalation-context descriptor (`connector → <target>`) is baked as a
+  // compile-time FEEL string literal into the timeout escalation task. A raw credential-bearing target
+  // there would persist the secret in the generated BPMN even though nodeDisplay redacts it — the
+  // descriptor must use the same URL-only redaction.
+  const graph = {
+    name: "connector escalation redaction",
+    nodes: [{ id: "call", kind: "connector", connector: { target: "https://user:p4ss@hooks.example.com/deploy?token=abc123" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  assert(!r.bpmn.includes("p4ss") && !r.bpmn.includes("abc123"), "no connector credential leaks into the compiled BPMN escalation context");
+  assert(r.bpmn.includes("connector → https://***@hooks.example.com/deploy?***"), "the escalation descriptor renders the redacted target");
+});
+
+test("#778 the compiled connector inner task carries the descriptive display name (distinct connector arg path)", async () => {
+  const graph = {
+    name: "connector inner name",
+    nodes: [{ id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "o/r#42" }, dedupeKey: "land-1" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "land");
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${el}_task" name="Converge &amp; merge PR · land">`), "the connector inner task shares the descriptive display name");
+  assert(!r.bpmn.includes('name="connector: land"'), "no bare kind:id connector task name remains");
+});
+
+test("#778 firstLine truncates by code point so an astral character never leaves an unpaired surrogate in the BPMN", async () => {
+  // 70 ASCII + an emoji straddling the cap-1 (71) boundary + trailing text: a code-unit slice(0,71)
+  // would cut the surrogate pair, leaving a lone high surrogate that stripXmlInvalidChars does NOT remove.
+  const prompt = `${"a".repeat(70)}😀 trailing detail that pushes past the seventy-two character cap`;
+  const graph = { name: "surrogate", nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+  const r = await compileOk(graph);
+  const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert(!loneSurrogate.test(r.bpmn), "no unpaired surrogate survives into the compiled BPMN");
+  // Positive check: `stripXmlInvalidChars` would silently drop a lone surrogate left by a buggy UTF-16
+  // `slice`, so the no-lone-surrogate assertion alone can't catch a code-UNIT truncation. Assert the
+  // label truncated by CODE POINT — the 70 ASCII run, the intact emoji pair, then the ellipsis.
+  assert(r.bpmn.includes(`${"a".repeat(70)}😀…`), "truncation keeps whole code points: 70 ASCII + the intact emoji + ellipsis");
+});
+
+test("#778 the mermaid diagram strips XML-1.0-forbidden control characters from node labels", async () => {
+  const graph = {
+    name: "mermaid\u0001 controls",
+    nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt: "preview\u0001 label\u0007 with controls" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting the mermaid sanitiser removed them.
+  assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(r.diagram), "no forbidden control char survives into the mermaid diagram");
+});
+
+test("#778 the mermaid diagram encodes markup chars and folds bare CR line breaks in free-form labels", async () => {
+  const graph = {
+    name: "mermaid markup",
+    // `<`/`>`/`&` would render as markup (label vanishes/mangles); a bare `\r` (valid, so kept by
+    // stripXmlInvalidChars) injects a raw break into the line-oriented Mermaid source.
+    nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt: "a<b> & first\rsecond" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const label = r.diagram.split("\n").find((l) => /^\s+\S+\["/.test(l) && l.includes("first"));
+  assert(label !== undefined, "the node label line is present");
+  assert(!/[<>]/.test(label ?? ""), "no raw < or > survives into the mermaid label");
+  assert((label ?? "").includes("#lt;b#gt;") && (label ?? "").includes("#amp;"), "markup chars are Mermaid-entity encoded");
+  assert(!/\r/.test(label ?? ""), "the bare CR is folded to a space, not a raw break");
+  assert((label ?? "").includes("first second"), "the CR-separated words are joined by a space");
+});
+
+test("#778 stripXmlInvalidChars-guarded output drops U+FFFE/U+FFFF noncharacters and directly-injected unpaired surrogates while keeping valid astral pairs", async () => {
+  // A prompt carrying a noncharacter, a lone high surrogate, a lone low surrogate, AND a valid emoji
+  // pair: the renderer must drop the first three (XML-1.0 `Char` forbids them) but keep the pair.
+  const prompt = "keep\uFFFE me\uFFFF here \uD83D lone-high \uDE00 lone-low but this pair 😀 stays";
+  const graph = { name: "noncharacters", nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+  const r = await compileOk(graph);
+  assert(!/[\uFFFE\uFFFF]/.test(r.bpmn), "no U+FFFE/U+FFFF noncharacter survives into the compiled BPMN");
+  const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert(!loneSurrogate.test(r.bpmn), "no unpaired surrogate survives into the compiled BPMN");
+  assert(r.bpmn.includes("😀"), "a valid astral pair is preserved");
+});
+
+test("#778 graphCarriesRedactedSecrets: false for a graph whose display fields are fully digest-represented", () => {
+  const plain = {
+    name: "plain",
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "senior:feature", prompt: "implement nanobpm/nano-ide#42" } },
+      { id: "h", kind: "human", human: { prompt: "click done" } },
+      { id: "w", kind: "wait", wait: { kind: "epic", target: "nanobpm/nano-ide#488" } },
+      { id: "c", kind: "connector", connector: { target: "slack:#releases", payload: { pr: "o/r#1" } } },
+    ],
+    edges: [],
+  };
+  assertEquals(graphCarriesRedactedSecrets(plain), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when a node carries redacted-away secret material", () => {
+  const urlInPrompt = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "push to https://u:p@host/x" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(urlInPrompt), true);
+
+  const commandWait = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target: "run-the-secret.sh" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(commandWait), true);
+
+  const matchSecret = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target: "x", match: { stdoutIncludes: "TOKEN=abc" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(matchSecret), true);
+
+  const payloadKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "o/r#1", secretHeader: "Bearer z" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(payloadKey), true);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when a prompt differs from its display form only by trimmed whitespace", () => {
+  // The display embeds `redactFreeText(trimmedOrEmpty(prompt))`, but the RAW untrimmed prompt reaches
+  // the runtime — so `"  run this"` and `"run this"` share one digest yet dispatch different prompts.
+  const leadingWs = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "   run this" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(leadingWs), true);
+  const humanWs = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "click done  " } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(humanWs), true);
+  // The trimmed twin is faithfully represented → not lossy.
+  const trimmed = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "run this" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(trimmed), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: a wait.match value of the WRONG type forks the digest — numeric status:200 vs string status:\"200\" render identically yet parse differently (#778 review — thread :1495)", () => {
+  // `parseMatch` reads `status` via `num()`, so a string "200" coerces to undefined (any-2xx) while the
+  // number 200 means exactly-200 — same `status=200` display, different runtime. The string variant is a
+  // digest-invisible fork and must be fingerprinted; the correctly-typed numeric form is a faithful
+  // identity and must NOT be (keyless dispatch of a normal graph stays unaffected).
+  const numeric = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/health", match: { status: 200 } } }], edges: [] };
+  const stringy = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/health", match: { status: "200" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(numeric), false);
+  assertEquals(graphCarriesRedactedSecrets(stringy), true);
+  // The raw type is the disambiguator, so the two never share a stable run-key fingerprint.
+  assertEquals(digestInvisibleRawValues(numeric).length, 0);
+  assertEquals(digestInvisibleRawValues(stringy).length, 1);
+  // Same class for a numeric-typed string on `exitCode` (also `num()`-read).
+  const exitStr = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target: "x", match: { exitCode: "0" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(exitStr), true);
+  // ...but a NON-string on a string-typed field (`conclusion`) does NOT fork: `parseMatch` coerces it
+  // through `str(v).trim()`, so `conclusion: 1` and `conclusion: "1"` are ONE runtime probe (and render
+  // identically) — flagging it forked the stable run key of equivalent graphs (#778 review — thread
+  // deliveryGraphCompiler.ts:1251).
+  const concNum = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "github-check", target: "acme/repo#1", match: { conclusion: 1 } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(concNum), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: an UNKNOWN wait.match key is runtime-inert (parseMatch ignores it) so it is NOT a digest fork — push-back on fingerprinting it (#778 review — thread :1495)", () => {
+  // `parseMatch` reads only the DECLARED predicate fields; an unknown key never reaches the worker's
+  // predicate, so two graphs differing only by it run identically and correctly share one digest.
+  // Fingerprinting it would wrongly force an idempotencyKey onto a behaviourally-identical graph.
+  const withUnknown = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/health", match: { status: 200, bogus: "whatever" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(withUnknown), false);
+});
+
+test("#778 wait display: a padded probe `kind` (\" http \") renders trimmed in name+doc, so it shares the trimmed twin's digest and is NOT digest-invisible (runtime `parseProbe` trims) (#778 review — thread :1495/:1296)", async () => {
+  const mk = (k: string) => ({ name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: k, target: "https://h/health" } }], edges: [] });
+  const padded = await compileOk(mk(" http "));
+  const plain = await compileOk(mk("http"));
+  assertEquals(padded.digest, plain.digest);
+  assertEquals(graphCarriesRedactedSecrets(mk(" http ")), false);
+});
+
+test("#778 connector escalation descriptor: a padded connector `target` (\" converge-merge \") renders TRIMMED in the compiled BPMN, so it shares the trimmed twin's digest (runtime connector worker + `nodeDisplay` both trim) (#778 review — thread deliveryGraphCompiler.ts:1741)", async () => {
+  const mk = (t: string) => ({
+    name: "n",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:feature", prompt: "Open a PR." } },
+      { id: "land", kind: "connector", connector: { target: t, payload: { pr: "acme/repo#1" } } },
+    ],
+    edges: [{ from: "open", to: "land" }],
+  });
+  const padded = await compileOk(mk(" converge-merge "));
+  const plain = await compileOk(mk("converge-merge"));
+  // The escalation descriptor (`connector → …`) embedded in the compiled BPMN must trim the target, or a
+  // whitespace-only variant forks the digest from the trimmed-equivalent graph the runtime dispatches
+  // identically (issue #778 review — thread deliveryGraphCompiler.ts:1741).
+  assertEquals(padded.digest, plain.digest);
+  assert(padded.semanticBpmn.includes("connector → converge-merge"), `the descriptor must embed the trimmed target: ${padded.semanticBpmn.match(/connector →[^<"&]*/)?.[0]}`);
+});
+
+test("#778 graphCarriesRedactedSecrets: whitespace-only dedupeKey/formKey difference is NOT lossy (runtime trims both)", () => {
+  // The connector worker (`connectorDedupeKey`) and human form resolution (`resolveHumanForm`) BOTH trim
+  // these keys, so a leading/trailing-whitespace-only variant has identical runtime identity/behaviour —
+  // the fingerprint keys on the NORMALISED value, so it must NOT be flagged digest-invisible (else a
+  // whitespace twin needlessly requires an idempotencyKey and double-launches an identical graph) (#778).
+  const wsKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", dedupeKey: "  key  " } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(wsKey), false);
+  const cleanKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", dedupeKey: "key" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(cleanKey), false);
+  // The whitespace twin fingerprints IDENTICALLY to its trimmed form — same run-key, so a re-dispatch
+  // short-circuits as `alreadyRunning` instead of relaunching.
+  assertEquals(JSON.stringify(digestInvisibleRawValues(wsKey)), JSON.stringify(digestInvisibleRawValues(cleanKey)));
+  const wsForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "  deploy-approval  " } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(wsForm), false);
+  const cleanForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "deploy-approval" } }], edges: [] };
+  assertEquals(JSON.stringify(digestInvisibleRawValues(wsForm)), JSON.stringify(digestInvisibleRawValues(cleanForm)));
+  // A genuine credential in either key is still redacted-away → lossy (whitespace normalisation does not
+  // hide a real secret).
+  const credKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", dedupeKey: "//user:pass@host/x?token=abc" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(credKey), true);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when payload.pr carries a redacted-away credential, or is a non-string value", () => {
+  // `nodeDisplay` surfaces `payload.pr` redacted; a credential in the raw pr URL is dropped from the
+  // digest but reaches the connector → lossy.
+  const credPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "https://u:p@host/x?token=abc" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(credPr), true);
+  // A non-string pr is never rendered as a string, yet the raw payload still reaches the connector.
+  const nonStringPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: 42 } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(nonStringPr), true);
+  // A faithful string pr (no credential) is fully digest-represented → not lossy.
+  const plainPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "o/r#1" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(plainPr), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: lossy for a present-but-unsurfaced payload — empty object, null/empty pr — without throwing on a non-plain payload", () => {
+  // A present-empty payload `{}` renders NO `PR:` line yet the raw `{}` reaches the connector worker —
+  // the digest cannot see it, so it must be lossy (else a `{}`-payload graph shares a run identity with
+  // a no-payload one) (issue #778 review).
+  const emptyPayload = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: {} } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(emptyPayload), true);
+  // `{ pr: null }` and `{ pr: "" }` likewise surface no `PR:` line but reach the connector raw.
+  const nullPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: null } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(nullPr), true);
+  const emptyStrPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(emptyStrPr), true);
+  // A non-plain-object payload (a bare primitive) must be treated as lossy WITHOUT throwing — `"pr" in 42`
+  // would otherwise crash the predicate and 500 the dispatch (issue #778 review).
+  const primitivePayload = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: 42 } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(primitivePayload), true);
+});
+
+test("#778 nodeDisplay: emit `description` is embedded (redacted) in the label so a description-differing graph is not collapsed", () => {
+  // `renderEmitContract` embeds each fact's `description` in the runtime `appendPrompt`, so two graphs
+  // differing ONLY in an emit description dispatch DIFFERENT instructions — the display must carry a
+  // (redacted) representation or the digest collapses them and keyless dispatch reuses the wrong prompt.
+  const withDesc = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "do it" }, emits: [{ name: "pr", type: "pr", description: "the merged PR ref" }] });
+  assert(withDesc.documentation.includes("Emits: pr (pr) — the merged PR ref"), "emit description appears in the label");
+  const other = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "do it" }, emits: [{ name: "pr", type: "pr", description: "a DIFFERENT description" }] });
+  assert(withDesc.documentation !== other.documentation, "a different emit description yields a different label");
+  // A credential in the description is redacted in the display AND flagged digest-invisible.
+  const credDesc = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "do it" }, emits: [{ name: "pr", type: "pr", description: "post to //user:pass@host/x?token=abc" }] }], edges: [] };
+  const disp = nodeDisplay(credDesc.nodes[0]);
+  assert(!disp.documentation.includes("user:pass") && !disp.documentation.includes("token=abc"), "credential is stripped from the emit-description label");
+  assertEquals(graphCarriesRedactedSecrets(credDesc), true);
+});
+
+test("#778 nodeDisplay: a credential-bearing human `formKey` is redacted in the label and flagged digest-invisible", () => {
+  const credForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "//user:pass@forms.example.com/approve?token=abc" } }], edges: [] };
+  const disp = nodeDisplay(credForm.nodes[0]);
+  assert(!disp.documentation.includes("user:pass") && !disp.documentation.includes("token=abc"), "credential stripped from the formKey label");
+  assertEquals(graphCarriesRedactedSecrets(credForm), true);
+  // An ordinary opaque form id is shown verbatim and is fully digest-represented.
+  const plainForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "deploy-approval" } }], edges: [] };
+  assert(nodeDisplay(plainForm.nodes[0]).documentation.includes("Form: deploy-approval"), "opaque form id shown verbatim");
+  assertEquals(graphCarriesRedactedSecrets(plainForm), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when a non-redacted match value loses characters to XML sanitization", () => {
+  // A non-secret match value is shown as `String(v)`, which XML-1.0 sanitization strips invalid chars
+  // from at serialization — so `"1\u0001"` and `"1"` would share a digest while the raw probe configs
+  // differ. That sanitization loss must be flagged digest-invisible (issue #778 review).
+  const sanitized = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/x", match: { version: "1\u0001" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(sanitized), true);
+  // The clean twin (no invalid chars) is faithfully represented → not lossy.
+  const clean = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/x", match: { version: "1" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(clean), false);
+  // The two differ in their digest-invisible values, so their dispatch fingerprints diverge.
+  assert(JSON.stringify(digestInvisibleRawValues(sanitized)) !== JSON.stringify(digestInvisibleRawValues(clean)), "sanitization-lossy value contributes a distinct fingerprint");
+});
+
+test("#778 digestInvisibleRawValues: emits a canonical (node-order-independent) list so the run-key fingerprint is reorder-invariant", () => {
+  // The compiler sorts nodes before `semanticBpmn`, so a top-level node reorder shares one digest. This
+  // list — which the run-key fingerprints — must therefore be reorder-invariant too, else a re-stage in a
+  // different node encoding forks the run-key and double-launches (issue #778 review). Entries are
+  // code-unit sorted at the source, so two node orderings yield an IDENTICAL list.
+  const ab = { name: "n", nodes: [{ id: "a", kind: "connector", connector: { target: "//user:pass@host" } }, { id: "b", kind: "connector", connector: { target: "//other:secret@host" } }], edges: [] };
+  const ba = { name: "n", nodes: [{ id: "b", kind: "connector", connector: { target: "//other:secret@host" } }, { id: "a", kind: "connector", connector: { target: "//user:pass@host" } }], edges: [] };
+  assertEquals(JSON.stringify(digestInvisibleRawValues(ab)), JSON.stringify(digestInvisibleRawValues(ba)));
+});
+
+test("#778 redactFreeText: a userinfo with a literal SPACE then a NEWLINE before the `@` is still redacted (thread deliveryGraphCompiler.ts:1102)", () => {
+  // The SPACE cuts the primary span at `//user:secret`, and the malformed-userinfo fallback must NOT
+  // stop at the following CR/LF — it has to reach the `@` so the credential + `?token` tail collapse.
+  const out = redactFreeText("push to //user:secret pass\n@host/repo?token=s3cr3t now");
+  assert(!out.includes("token=s3cr3t"), `the query token must not survive: ${out}`);
+  assert(!out.includes("secret pass"), `the space+newline userinfo must not survive: ${out}`);
+});
+
+test("#778 redactFreeText: redacts a URL query/fragment orphaned across a smuggled newline", () => {
+  // The whitespace-delimited URL token stops at the CR/LF, so the `?token=…` tail on the far side must
+  // still be stripped by the newline-spanning belt-and-braces (issue #778 review).
+  const out = redactFreeText("see //user:pa\nss@host/path?token=secret for details");
+  assert(!out.includes("user:pa") && !out.includes("token=secret"), `credential must not survive: ${out}`);
+  // Ordinary prose after a real whitespace break is not over-redacted.
+  const prose = redactFreeText("visit //example.com then\nis this ok? yes");
+  assert(prose.includes("is this ok? yes"), `prose after a whitespace break is intact: ${prose}`);
 });

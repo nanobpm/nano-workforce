@@ -13,8 +13,10 @@ import { join, resolve } from "node:path";
 import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { redactFreeText } from "../app/deliveryGraphCompiler.ts";
 import { deliveryGraphProposals } from "../app/deliveryGraphProposals.ts";
 import { deliveryGraphRuns } from "../app/deliveryGraphRun.ts";
+import { isEquivalentReStage, stableProposalRunKey } from "./dispatchDeliveryGraph.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
 const GITHUB_ENV: Record<string, string> = { NANO_PR_GITHUB_TRANSPORT: "token", GITHUB_TOKEN: "" };
@@ -31,6 +33,74 @@ const SIDE_EFFECTING = {
   ],
   edges: [{ from: "open-b", to: "publish" }],
 };
+
+test("stableProposalRunKey: digest identity + secret disambiguation (issue #778 review)", () => {
+  // The run key is derived from the proposal's semantic `digest` (which the compiler already normalises
+  // — collapsing omitted-vs-default fields and top-level node/edge REORDER) PLUS a fingerprint of the
+  // digest-invisible raw values. So a re-stage of the SAME logical graph in ANY encoding sharing the
+  // digest short-circuits, while a credential-differing graph (same digest, different secret) diverges.
+  const D1 = "sha-aaa";
+  const D2 = "sha-bbb";
+  const credA = {
+    name: "g",
+    nodes: [{ id: "n", kind: "connector", connector: { target: "//user:pass@host" } }],
+    edges: [],
+  };
+  // Same digest + identical graph → same key (a double-click / re-dispatch short-circuits).
+  assert.equal(stableProposalRunKey(D1, credA), stableProposalRunKey(D1, credA));
+  // Same digest but a DIFFERENT redacted-away credential — both redact to the same `//***@host` display
+  // so they SHARE the digest — must yield a DIFFERENT key, else the second dispatch collapses onto the
+  // first's still-running instance.
+  const credB = { name: "g", nodes: [{ id: "n", kind: "connector", connector: { target: "//other:secret@host" } }], edges: [] };
+  assert.notEqual(stableProposalRunKey(D1, credA), stableProposalRunKey(D1, credB));
+  // A genuinely different semantic graph carries a DIFFERENT digest → a different key even with no secrets.
+  const plain = { name: "g", nodes: [{ id: "n", kind: "human", human: { prompt: "x" } }], edges: [] };
+  assert.notEqual(stableProposalRunKey(D1, plain), stableProposalRunKey(D2, plain));
+  // A graph with NO digest-invisible content has an EMPTY fingerprint, so its key is a pure function of
+  // the digest: a re-stage in a DIFFERENT object-key encoding (same digest) short-circuits.
+  const plainReordered = { edges: [], name: "g", nodes: [{ human: { prompt: "x" }, kind: "human", id: "n" }] };
+  assert.equal(stableProposalRunKey(D1, plain), stableProposalRunKey(D1, plainReordered));
+  assert.ok(stableProposalRunKey(D1, credA).startsWith("staged-"), "the key is self-describing");
+});
+
+test("stableProposalRunKey: node-ORDER of digest-invisible content does not fork the key (issue #778 review)", () => {
+  // The compiler SORTS nodes before emitting `semanticBpmn`, so two graphs differing ONLY in top-level
+  // node order share one digest. Their digest-invisible raw values (`digestInvisibleRawValues`) must
+  // therefore fingerprint identically too — else a re-stage of the same logical graph in a different
+  // node encoding forks a DISTINCT run-key and double-launches instead of short-circuiting. The
+  // fingerprint is code-unit sorted at its source, making it reorder-invariant like the digest.
+  const D = "sha-order";
+  const ab = {
+    name: "g",
+    nodes: [
+      { id: "a", kind: "connector", connector: { target: "//user:pass@host" } },
+      { id: "b", kind: "connector", connector: { target: "//other:secret@host" } },
+    ],
+    edges: [],
+  };
+  const ba = {
+    name: "g",
+    nodes: [
+      { id: "b", kind: "connector", connector: { target: "//other:secret@host" } },
+      { id: "a", kind: "connector", connector: { target: "//user:pass@host" } },
+    ],
+    edges: [],
+  };
+  assert.equal(stableProposalRunKey(D, ab), stableProposalRunKey(D, ba), "a top-level node reorder must not fork the run-key");
+});
+
+test("isEquivalentReStage: only a live staged row whose RAW graph JSON is byte-identical to the launched graph is an equivalent re-stage — a credential-different re-stage (same digest) is NOT, and a retired/consumed row (null) is NOT (issue #778 review — thread dispatchDeliveryGraph.ts:320)", () => {
+  const launched = JSON.stringify({ name: "g", nodes: [{ id: "n", kind: "connector", connector: { target: "//user:pass@host" } }], edges: [] });
+  // A byte-identical re-stage IS equivalent — the door consumes the duplicate at its bumped revision.
+  assert.equal(isEquivalentReStage({ graph: launched }, launched), true);
+  // A credential-different re-stage shares the redacted digest but its RAW graph differs, so it is a
+  // newer, never-launched revision the door must leave `staged`.
+  const credDifferent = JSON.stringify({ name: "g", nodes: [{ id: "n", kind: "connector", connector: { target: "//other:secret@host" } }], edges: [] });
+  assert.equal(isEquivalentReStage({ graph: credDifferent }, launched), false);
+  // No live staged row (consumed/dismissed/superseded/expired) → not equivalent, nothing to consume.
+  assert.equal(isEquivalentReStage(null, launched), false);
+  assert.equal(isEquivalentReStage(undefined, launched), false);
+});
 
 describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest", () => {
   const dirs: string[] = [];
@@ -165,6 +235,138 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
   });
 
+  test("a SAME-payload retry of a secret-bearing graph under the SAME idempotencyKey (a lost response / double-click) → 202 short-circuit, the proposal IS consumed and NO second run launches — the persisted identity fingerprint PROVES the running run is this exact graph, so the idempotency contract holds instead of a spurious 409 (issue #778 review — thread dispatchDeliveryGraph.ts:332)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    let agentFired = 0;
+    await app.engine.registerWorker("senior:demo", async () => {
+      agentFired++;
+      return {};
+    });
+
+    // Stage + dispatch a SECRET-BEARING graph (SIDE_EFFECTING carries redacted-away secret material —
+    // the same graph the cross-graph 409 case above refuses) under an explicit idempotencyKey. It
+    // launches and parks on its human node, so its run stays `running`.
+    const first = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SIDE_EFFECTING });
+    const dispatched = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: first.body.digest, idempotencyKey: "retry-key", repoless: true },
+    });
+    assert.equal(dispatched.status, 202);
+    await app.settle();
+    assert.equal(agentFired, 1, "the side effect fired exactly once on the first dispatch");
+    assert.equal((await deliveryGraphProposals(app.db).get(first.body.digest))?.status, "dispatched");
+
+    // Re-stage the IDENTICAL graph (byte-for-byte the same → same digest) and re-dispatch under the
+    // SAME key — the caller retrying a lost/duplicated request. The running run's persisted fingerprint
+    // matches this graph, so the door short-circuits onto it (202, alreadyRunning) and CONSUMES the
+    // re-staged proposal — it does NOT 409 as a cross-graph collision would.
+    const restaged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SIDE_EFFECTING });
+    assert.equal(restaged.body.digest, first.body.digest);
+    assert.equal((await deliveryGraphProposals(app.db).get(restaged.body.digest))?.status, "staged");
+    const retry = await api.call<{ ok: boolean; status: string; alreadyRunning?: boolean }>("dispatchDeliveryGraph", {
+      body: { digest: restaged.body.digest, idempotencyKey: "retry-key", repoless: true },
+    });
+    assert.equal(retry.status, 202);
+    assert.equal(retry.body.ok, true);
+    assert.equal(retry.body.alreadyRunning, true);
+    await app.settle();
+    // The retry short-circuited onto the existing run — the side effect did NOT fire a second time and
+    // no second run launched.
+    assert.equal(agentFired, 1, "a same-payload retry does not re-fire the side effect");
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+    // The re-staged proposal was consumed (marked dispatched), not left lingering.
+    assert.equal((await deliveryGraphProposals(app.db).get(restaged.body.digest))?.status, "dispatched");
+  });
+
+  test("an explicit idempotencyKey short-circuit onto a running SECRET-BEARING run, re-dispatched from a graph authored AS the redacted form (graphCarriesRedactedSecrets === false) that SHARES the digest → 409; the proposal is NOT consumed (the refusal must not be gated on the INCOMING graph's redaction side — identity is unprovable whenever !identityConfirmed) (thread dispatchDeliveryGraph.ts:320)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+
+    // Graph 1 CARRIES a redacted-away credential in its human prompt — its content-addressed digest is
+    // over the REDACTED display, so it is NOT a faithful identity. It parks on its human node and stays
+    // running under an explicit idempotencyKey.
+    const secretPrompt = "click done: https://user:pass@host";
+    const SECRET = { name: "manual gate", nodes: [{ id: "ack", kind: "human", human: { prompt: secretPrompt } }] };
+    // Graph 2 is authored LITERALLY as the redacted form of graph 1's prompt. Redaction is a no-op on it,
+    // so `graphCarriesRedactedSecrets` is FALSE, yet it SHARES graph 1's digest (both digest over the same
+    // redacted display). It is a DIFFERENT graph from the running secret-bearing run.
+    const redactedTwin = { name: "manual gate", nodes: [{ id: "ack", kind: "human", human: { prompt: redactFreeText(secretPrompt) } }] };
+
+    // Stage + dispatch the SECRET-bearing graph FIRST (before the twin re-stages over its same-digest
+    // row) under an explicit key — it launches and parks (running), stamping its LOSSLESS fingerprint.
+    const g1 = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SECRET });
+    const first = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: g1.body.digest, idempotencyKey: "shared-key", repoless: true },
+    });
+    assert.equal(first.status, 202);
+    await app.settle();
+    assert.equal((await deliveryGraphProposals(app.db).get(g1.body.digest))?.status, "dispatched");
+
+    // Now re-stage the redacted-twin at the SAME digest (a DIFFERENT graph re-staged over the consumed
+    // row) and dispatch it under the SAME key. It short-circuits onto the still-running SECRET run — but
+    // that run is a different graph, so its persisted fingerprint does NOT match (identityConfirmed ===
+    // false). The digest COLLISION is the crux: the twin shares graph 1's digest yet carries no redacted
+    // secret. The refusal must fire even though the INCOMING graph carries no redacted secret; otherwise
+    // the twin's proposal is marked `dispatched` while it never launched.
+    const twin = await api.call<{ digest: string }>("compileDeliveryGraph", { body: redactedTwin });
+    assert.equal(twin.body.digest, g1.body.digest);
+    assert.equal((await deliveryGraphProposals(app.db).get(twin.body.digest))?.status, "staged");
+    const second = await api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: twin.body.digest, idempotencyKey: "shared-key", repoless: true },
+    });
+    assert.equal(second.status, 409);
+    assert.equal(second.body.ok, false);
+    await app.settle();
+    // The twin proposal is still staged — it was never launched (the running run is the secret graph).
+    assert.equal((await deliveryGraphProposals(app.db).get(twin.body.digest))?.status, "staged");
+    // Only the single secret run exists — the twin dispatch launched nothing.
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+  });
+
+  test("a KEYLESS short-circuit onto a running graph whose run key equals the shared digest (an earlier explicit `idempotencyKey === digest`), re-dispatched from a redacted-twin that SHARES the digest → 409; the proposal is NOT consumed. The ambiguous-identity refusal must gate EVERY `alreadyRunning && !identityConfirmed`, not only explicit-key requests — a keyless faithful-digest dispatch collides on the digest run key just the same (thread dispatchDeliveryGraph.ts:325)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+
+    // Graph 1 CARRIES a redacted-away credential — its digest is over the REDACTED display, NOT a faithful
+    // identity. Dispatch it under an explicit `idempotencyKey` set to its OWN digest, so the run is keyed
+    // by the digest itself and parks running, stamping graph 1's LOSSLESS fingerprint.
+    const secretPrompt = "click done: https://user:pass@host";
+    const SECRET = { name: "manual gate", nodes: [{ id: "ack", kind: "human", human: { prompt: secretPrompt } }] };
+    // Graph 2 is authored LITERALLY as the redacted form — redaction is a no-op on it, so
+    // `graphCarriesRedactedSecrets` is FALSE. Because it is faithful, a KEYLESS dispatch leaves the run key
+    // undefined and the core falls back to the digest — which it SHARES with graph 1, colliding onto that
+    // still-running secret run even though NO explicit key was supplied.
+    const redactedTwin = { name: "manual gate", nodes: [{ id: "ack", kind: "human", human: { prompt: redactFreeText(secretPrompt) } }] };
+
+    const g1 = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SECRET });
+    const first = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: g1.body.digest, idempotencyKey: g1.body.digest, repoless: true },
+    });
+    assert.equal(first.status, 202);
+    await app.settle();
+    assert.equal((await deliveryGraphProposals(app.db).get(g1.body.digest))?.status, "dispatched");
+
+    // Re-stage the twin at the SAME digest and dispatch it WITHOUT a key. It short-circuits onto the
+    // running secret run (same digest run key), but that run is a different graph → identityConfirmed is
+    // false. The refusal must fire despite the request being keyless; otherwise the twin is marked
+    // `dispatched` while it never launched.
+    const twin = await api.call<{ digest: string }>("compileDeliveryGraph", { body: redactedTwin });
+    assert.equal(twin.body.digest, g1.body.digest);
+    assert.equal((await deliveryGraphProposals(app.db).get(twin.body.digest))?.status, "staged");
+    const second = await api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: twin.body.digest, repoless: true },
+    });
+    assert.equal(second.status, 409);
+    assert.equal(second.body.ok, false);
+    await app.settle();
+    // The twin proposal is still staged — nothing new launched.
+    assert.equal((await deliveryGraphProposals(app.db).get(twin.body.digest))?.status, "staged");
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+  });
+
   test("a proposal whose stored graph is corrupt JSON → 400 AND the proposal is retired (expired), never lingering staged", async () => {
     const app = await boot();
     assert.ok(app.api);
@@ -249,6 +451,59 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     await app.settle();
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
     assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
+  });
+
+  test("a SECRET-BEARING staged graph dispatches through the cockpit UI WITHOUT an idempotencyKey — the door supplies a stable server-side key (#778)", async () => {
+    // Regression: Option C's dispatch gate refuses a keyless dispatch of a graph whose digest is lossy,
+    // but the cockpit staged-proposals UI posts no idempotency-key field. The door must therefore derive
+    // a stable server-side key from the stored proposal so these proposals remain launchable.
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const SECRET = { name: "deploy", nodes: [{ id: "d", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:pass@host.example/repo" } }] };
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SECRET });
+    // No idempotencyKey in the body — exactly what the staged UI posts.
+    const res = await api.call<{ ok: boolean; status: string; runKey: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repoless: true },
+    });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.status, "running");
+    assert.ok(res.body.runKey.startsWith("staged-"), `expected a server-side staged- key, got ${res.body.runKey}`);
+    await app.settle();
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
+  });
+
+  test("an explicit idempotencyKey re-used across two SECRET-differing graphs that SHARE a digest is refused at short-circuit → 409; the re-staged proposal is NOT consumed and nothing new launches (#778 review — thread dispatchDeliveryGraph.ts:282)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    // Two graphs differing ONLY in a redacted-away credential redact to the SAME `semanticBpmn`, so they
+    // share ONE content digest and therefore ONE digest-keyed proposal row.
+    const SECRET_A = { name: "deploy", nodes: [{ id: "d", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:AAAsecret@host.example/repo" } }] };
+    const SECRET_B = { name: "deploy", nodes: [{ id: "d", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:BBBsecret@host.example/repo" } }] };
+    const a = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SECRET_A });
+    // Dispatch A under an explicit shared key — it launches and parks (running).
+    const first = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: a.body.digest, idempotencyKey: "shared-key", repoless: true },
+    });
+    assert.equal(first.status, 202);
+    await app.settle();
+    // B re-stages the SAME digest-keyed proposal row (its credential differs, but the digest is identical).
+    const b = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SECRET_B });
+    assert.equal(b.body.digest, a.body.digest, "the two secret-differing graphs must share one redacted digest");
+    // Dispatch B under the SAME shared key — it short-circuits onto A's still-running run. Because the
+    // digest cannot prove the running run is THIS (secret-bearing) graph, B must NOT be consumed: 409.
+    const second = await api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: b.body.digest, idempotencyKey: "shared-key", repoless: true },
+    });
+    assert.equal(second.status, 409);
+    assert.equal(second.body.ok, false);
+    await app.settle();
+    // The proposal is still staged (never falsely consumed) and only A's single run exists.
+    assert.equal((await deliveryGraphProposals(app.db).get(b.body.digest))?.status, "staged");
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
   });
 
   test("a malformed `repository` is rejected at submit → 400, nothing launched (#684/#686)", async () => {

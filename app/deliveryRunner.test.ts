@@ -128,6 +128,27 @@ test("the human node seeds prompt/nodeId/emits; a click-done (no-emit, no-prompt
   assertEquals(ack?.nodeId, "ack");
 });
 
+test("the human node's seeded prompt REDACTS an embedded credential (issue #778 review): the read-only user-task form field never renders a `//user:pass@host` secret", async () => {
+  // The compiler already redacts the human prompt for the operator-facing PREVIEW (buildHumanNodes),
+  // but the runtime user-task seeds `nodeInputs.<el>.prompt` — rendered read-only in the delivery-human
+  // form (`delivery-human-{ack,publish}.form`, key "prompt", `readonly:true`). That display path must be
+  // redacted too, or a credential-bearing instruction leaks its secret to whoever opens the task. The
+  // prompt is DISPLAY-ONLY (the functional outputs are the emit/resolvedArtifact fields), so redacting it
+  // is safe. `redactFreeText` is a no-op for a credential-free prompt, so the plain-prompt tests above
+  // stay green.
+  const graph: DeliveryGraph = {
+    nodes: [
+      { id: "publish", kind: "human", human: { prompt: "clone https://user:s3cr3t@github.com/o/r then run the manual OTP publish" }, emits: [{ name: "resolvedArtifact", type: "artifact" }] },
+    ],
+    edges: [],
+  };
+  const p = await prepareOk(graph);
+  const human = Object.values(p.nodeInputs).find((v) => "escalationSlaTimeout" in (v as Record<string, unknown>)) as Record<string, unknown>;
+  const prompt = String(human.prompt);
+  assert(!prompt.includes("s3cr3t"), `the human-task form prompt must not expose the URL credential, got: ${prompt}`);
+  assert(prompt.includes("***@github.com"), `the credential userinfo is redacted in place, got: ${prompt}`);
+});
+
 test("agent node classifier-emit contract (#506): a declared `emits` threads the emit instruction into appendPrompt; a no-emit node leaves it untouched", async () => {
   // #506: a guarded split (S7) routes on a producer's emitted scalar, published from the engine
   // variable named exactly after the fact. A real `senior:*` agent completes with the Output-contract
