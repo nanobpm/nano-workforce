@@ -2,16 +2,16 @@
 #
 # https://nanobpm.io/install.sh is served as the ACTUAL bytes of THIS repo's
 # install.sh (GitHub Pages can't 301-redirect a `curl … | sh` URL). The site is
-# built in a DIFFERENT repo (Magikcraft/nano-bpm) whose Pages workflow re-fetches
+# built in a DIFFERENT repo (nanobpm/nano-bpm) whose Pages workflow re-fetches
 # install.sh on every deploy — but that deploy only triggers on changes to files
 # in that repo, so an edit here would otherwise not reach the published mirror
 # until the nightly backstop cron. This job pokes that repo's Pages deploy via a
 # `repository_dispatch` (event type `install-sh-updated`) so the mirror refreshes
 # within minutes of merging an install.sh change.
 #
-# Requires a token that can write to Magikcraft/nano-bpm — the default
+# Requires a token that can write to nanobpm/nano-bpm — the default
 # GITHUB_TOKEN is scoped to THIS repo only. Store a fine-grained PAT (or GitHub
-# App token) with `Contents: read and write` on Magikcraft/nano-bpm as the repo
+# App token) with `Contents: read and write` on nanobpm/nano-bpm as the repo
 # secret PAGES_DISPATCH_TOKEN. Absent the secret, the job no-ops (the nightly
 # cron on the site keeps the mirror eventually-consistent).
 name: Refresh nanobpm.io install mirror
@@ -45,10 +45,10 @@ jobs:
             -H 'Accept: application/vnd.github+json' \
             -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
-            https://api.github.com/repos/Magikcraft/nano-bpm/dispatches \
+            https://api.github.com/repos/nanobpm/nano-bpm/dispatches \
             -d '{"event_type":"install-sh-updated"}')
           if [ "$code" != "204" ]; then
-            echo "::error::repository_dispatch to Magikcraft/nano-bpm returned HTTP ${code} (expected 204). Check PAGES_DISPATCH_TOKEN scope (fine-grained PAT: Contents: read & write)."
+            echo "::error::repository_dispatch to nanobpm/nano-bpm returned HTTP ${code} (expected 204). Check PAGES_DISPATCH_TOKEN scope (fine-grained PAT: Contents: read & write)."
             exit 1
           fi
-          echo "dispatched install-sh-updated to Magikcraft/nano-bpm (HTTP 204)"
+          echo "dispatched install-sh-updated to nanobpm/nano-bpm (HTTP 204)"

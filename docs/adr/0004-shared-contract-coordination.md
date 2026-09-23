@@ -5,7 +5,7 @@ Date: 2026-08-14.
 
 > **Scope note.** A **nano-workforce-local** ADR — it governs how *this app* coordinates cross-cutting
 > contracts across parallel/sliced agent work. Platform-wide ADRs live in
-> `Magikcraft/nano-bpm/docs/adr` (referenced by number + repo). Continues nano-workforce's series after
+> `nanobpm/nano-bpm/docs/adr` (referenced by number + repo). Continues nano-workforce's series after
 > ADR 0001–0003.
 
 Relates to:

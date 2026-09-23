@@ -81,7 +81,7 @@ test("pr.merge short-circuits an already-merged PR without re-running the land p
       {
         variables: {
           prKey: "Magikcraft/nano-bpm#723",
-          repo: "Magikcraft/nano-bpm",
+          repo: "nanobpm/nano-bpm",
           prNumber: 723,
         },
       } as any,

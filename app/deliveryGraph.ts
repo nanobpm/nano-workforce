@@ -487,7 +487,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         }
         // A `wait` node's `onTimeout: fail` cannot be honored yet: the compiler would emit a terminate
         // end on the not-ready-at-boundary path, but the engine treats terminate-end events as
-        // parsed-not-executed (Magikcraft/nano-bpm bpmn.rs), so `fail` would silently degrade to a plain
+        // parsed-not-executed (nanobpm/nano-bpm bpmn.rs), so `fail` would silently degrade to a plain
         // end — the "declared knob silently ignored" defect class. Reject it loudly (path-qualified)
         // until engine parity lands (Magikcraft/nano-bpm#978), rather than mis-compile it. `escalate`
         // (default) and `continue` ARE honored.

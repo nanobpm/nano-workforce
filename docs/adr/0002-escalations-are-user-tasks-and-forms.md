@@ -4,7 +4,7 @@ Status: **Proposed.**
 Date: 2026-08-13.
 
 > **Scope note.** This is a **nano-workforce-local** ADR — it governs how *this app's* agent workforce
-> models human (and agent) decision points. Platform-wide ADRs live in `Magikcraft/nano-bpm/docs/adr`
+> models human (and agent) decision points. Platform-wide ADRs live in `nanobpm/nano-bpm/docs/adr`
 > (referenced by number + repo, e.g. "nano-bpm ADR 0026"). nano-workforce's own series continues here
 > after ADR 0001.
 

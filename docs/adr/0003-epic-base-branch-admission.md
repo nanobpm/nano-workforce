@@ -4,7 +4,7 @@ Status: **Proposed.**
 Date: 2026-08-13.
 
 > **Scope note.** A **nano-workforce-local** ADR — it governs how *this app* admits an epic for
-> execution. Platform-wide ADRs live in `Magikcraft/nano-bpm/docs/adr` (referenced by number + repo).
+> execution. Platform-wide ADRs live in `nanobpm/nano-bpm/docs/adr` (referenced by number + repo).
 > Continues nano-workforce's series after ADR 0001 (ADR 0002 is planned but not yet written; see below).
 
 Relates to:

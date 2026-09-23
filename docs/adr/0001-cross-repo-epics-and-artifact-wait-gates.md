@@ -5,7 +5,7 @@ Date: 2026-08-13.
 
 > **Scope note.** This is a **nano-workforce-local** ADR — it governs how *this app's* agent
 > workforce decomposes and integrates epics. The platform-wide ADRs live in
-> `Magikcraft/nano-bpm/docs/adr` (referenced here by their number + repo, e.g. "nano-bpm ADR 0056").
+> `nanobpm/nano-bpm/docs/adr` (referenced here by their number + repo, e.g. "nano-bpm ADR 0056").
 > nano-workforce's own decisions start their own series here at 0001.
 
 Relates to:
