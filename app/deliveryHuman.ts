@@ -83,6 +83,98 @@ export function deliveryHumanContextQuestion(
   return label || "A scheduled delivery-graph step is waiting to be completed.";
 }
 
+/** The clickable link for a parked delivery-graph `human` node's Tasks-inbox row (issue #813): the
+ *  first `http(s)` URL embedded in the node's stored instruction, or `null` when it names none. The
+ *  Tasks page renders the "Decision context" as PLAIN, non-clickable text (a `detail.fields` entry),
+ *  and links only through the http(s)-gated `subject_url` `linkField` — so an author who wants the
+ *  operator to have a clickable link (e.g. the PR to review) writes the URL into the node prompt and
+ *  this lifts it onto `subject_url`. Uses the SAME exact-then-`__esc`-stripped lookup as the context
+ *  question so the twin escalation task resolves to its real node's instruction. Returns `null` (not a
+ *  fabricated link) when no URL is present, preserving today's linkless behaviour. */
+export function deliveryHumanContextUrl(
+  humanLabels: Record<string, string> | undefined,
+  elementId: string,
+): string | null {
+  const labels = humanLabels ?? {};
+  const base = elementId.replace(/__esc$/, "");
+  const instruction = labels[elementId] ?? labels[base] ?? "";
+  const url = firstHttpUrl(instruction);
+  // The stored `human_labels` are display-REDACTED (`redactFreeText` in `buildHumanLabels`): a URL that
+  // carried a credential — `//user:pass@` userinfo, or a `?query`/`#fragment` (which can hide a signed/
+  // authenticating token) — has that component collapsed to the `***` sentinel (`//***@`, `?***`, `#***`).
+  // Lifting such an altered URL onto `subject_url` would publish a DIFFERENT, broken link (a truncated
+  // query changes the referenced resource; a signed URL becomes unusable). We cannot recover the real URL
+  // here — the raw prompt is deliberately NOT stored (issue #778) — so decline to link rather than silently
+  // publishing a redaction-mangled one. A URL with no credential component is untouched by redaction and
+  // links faithfully (issue #813 review). Callers wanting a clickable link should embed a credential-free
+  // URL in the prompt.
+  return url !== null && urlBearsRedactionMarker(url) ? null : url;
+}
+
+/** The `***` sentinel {@link redactFreeText}/`redactString` leaves where it collapsed a URL's credential
+ *  span — `//***@` (userinfo), `?***` (query), `#***` (fragment). Its presence in an extracted URL means
+ *  redaction ALTERED the link, so it must not be published as a `subject_url` (issue #813 review). */
+const URL_REDACTION_MARKER = /\/\/\*\*\*@|[?#]\*\*\*/;
+
+function urlBearsRedactionMarker(url: string): boolean {
+  return URL_REDACTION_MARKER.test(url);
+}
+
+const URL_TRAILING_CLOSERS: Readonly<Record<string, string>> = { ")": "(", "]": "[", "}": "{" };
+
+const URL_TRAILING_PUNCTUATION = ".,;:!?'\"";
+
+/** Trim trailing prose punctuation a URL commonly picks up when embedded in a sentence (`.,;:!?'"` and
+ *  a wrapping `)`/`]`/`}`), WITHOUT corrupting a URL that legitimately ends in a closing bracket. A
+ *  closing bracket is only stripped when it is UNBALANCED within the URL (a prose wrapper, e.g. the `)`
+ *  in "see (https://x/y)"); a balanced pair — e.g. Wikipedia `…/Foo_(disambiguation)` — is part of the
+ *  URL and preserved, so the persisted link isn't truncated into a broken one. Bracket balance is
+ *  tracked in running per-pair counts (seeded by one linear scan, then decremented as trailing closers
+ *  are stripped) so the whole trim is a single O(n) pass — NOT the prior re-`split()`-the-prefix-each-
+ *  step quadratic (issue #813 review). */
+function trimUrlTrailingPunctuation(url: string): string {
+  const opens: Record<string, number> = { "(": 0, "[": 0, "{": 0 };
+  const closes: Record<string, number> = { ")": 0, "]": 0, "}": 0 };
+  for (const ch of url) {
+    if (ch in opens) opens[ch] += 1;
+    else if (ch in closes) closes[ch] += 1;
+  }
+  let end = url.length;
+  while (end > 0) {
+    const ch = url[end - 1];
+    const opener = URL_TRAILING_CLOSERS[ch];
+    if (opener !== undefined) {
+      // `opens`/`closes` reflect url[0:end]; only trailing closers are ever removed below, so they stay
+      // accurate. Balanced (opener count ≥ closer count) → the bracket belongs to the URL; stop.
+      if (opens[opener] >= closes[ch]) break;
+      closes[ch] -= 1;
+      end -= 1;
+      continue;
+    }
+    if (URL_TRAILING_PUNCTUATION.includes(ch)) {
+      end -= 1;
+      continue;
+    }
+    break;
+  }
+  return url.slice(0, end);
+}
+
+/** Extract the first `http(s)` URL from free text, trimming trailing sentence punctuation/brackets a
+ *  prose author commonly appends (`).,;` etc.) so the link resolves — but preserving a bracket that is
+ *  BALANCED within the URL (e.g. Wikipedia `…_(technology)`), so a valid URL is never truncated into a
+ *  broken task link. An apostrophe is a valid URL sub-delimiter (RFC 3986 §2.2), so it is allowed WITHIN
+ *  the URL and only stripped when trailing (a prose quote closer) by `trimUrlTrailingPunctuation` — the
+ *  same way a wrapping `)` is handled — so a link such as `…/It's_a_Wonderful_Life` is not truncated at
+ *  the apostrophe (issue #813 review). The scheme match is case-insensitive (RFC 3986 schemes are
+ *  case-insensitive). Returns `null` when none. */
+export function firstHttpUrl(text: string | undefined | null): string | null {
+  if (typeof text !== "string") return null;
+  const match = text.match(/https?:\/\/[^\s<>"`]+/i);
+  if (!match) return null;
+  return trimUrlTrailingPunctuation(match[0]) || null;
+}
+
 /** The GENERIC fallback form (Decision 4, step 3): captures ONE typed value into the node's single
  *  declared emitted fact, so a human node with no explicit/category form can STILL emit downstream. */
 export const GENERIC_HUMAN_FORM = "delivery-human-generic";

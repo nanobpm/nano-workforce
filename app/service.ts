@@ -32,7 +32,7 @@ import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
 import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
-import { deliveryHumanContextQuestion, isDeliveryHumanElement } from "./deliveryHuman.ts";
+import { deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
 import { deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun } from "./feature.ts";
@@ -3041,11 +3041,16 @@ export async function pollUserTasks(
     // A delivery-graph `human` node's user-task id is inlined per node (`delivery-human-task__<node>`
     // and its `…__esc` twin), so it can't be a static `case` above (issue #772). Fill its "Decision
     // context" from the run's stamped `human_labels` — otherwise the panel is blank and, because this
-    // surface seeds no form variables, the operator has no idea what the run is waiting on.
+    // surface seeds no form variables, the operator has no idea what the run is waiting on. A URL the
+    // author embedded in the node instruction is lifted onto `subject_url` so the row's "Link" column /
+    // detail link is clickable (issue #813); a delivery run carries no other subject URL (`subj.url` is
+    // null), so this is the only link a delivery human task can offer.
+    let deliverySubjectUrl: string | null = null;
     if (question === null && isDeliveryHumanElement(elementId)) {
       question = deliveryHumanContextQuestion(subj?.humanLabels, elementId);
+      deliverySubjectUrl = deliveryHumanContextUrl(subj?.humanLabels, elementId);
     }
-    return { userTaskKey, elementId, subjectType, subjectKey, subjectTitle: subj?.title ?? null, subjectUrl: subj?.url ?? null, question, processKey: processInstanceKey, formKey: resolvedFormKey };
+    return { userTaskKey, elementId, subjectType, subjectKey, subjectTitle: subj?.title ?? null, subjectUrl: subj?.url ?? deliverySubjectUrl, question, processKey: processInstanceKey, formKey: resolvedFormKey };
   };
 
   // Desired set, deduped by completable key (a task is open at most once; guard a page overlap / a

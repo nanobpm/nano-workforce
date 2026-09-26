@@ -695,6 +695,45 @@ test("pollUserTasks: a parked delivery-human node carries its instruction as `qu
   assertEquals(byKey["20412"].question, "Run the manual OTP publish for @nanobpm/urban");
 });
 
+test("pollUserTasks: a delivery-human node lifts an embedded prompt URL onto subject_url (issue #813)", async () => {
+  // A delivery run carries no other subject URL, so the ONLY clickable link a delivery human task can
+  // offer is a URL the author embedded in the node instruction — `deliveryHumanContextUrl` lifts it
+  // onto `subject_url`. Assert the wiring end-to-end (pure-helper tests alone would miss a projection
+  // regression): the base node AND its bounded-timeout `…__esc` twin both resolve the same stored
+  // label to the same link, while a URL-less instruction leaves `subject_url` null.
+  const { data, stores } = memData({
+    delivery_graph_runs: [
+      {
+        run_key: "delivery-graph-403eb22e",
+        process_key: "dg-1",
+        status: "running",
+        title: "release runbook",
+        human_labels: JSON.stringify({
+          "delivery-human-task__n7": "Review the release PR at https://github.com/nanobpm/nano-workforce/pull/814 before publishing.",
+          "delivery-human-task__n8": "Run the manual OTP publish for @nanobpm/urban",
+        }),
+      },
+    ],
+  });
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "20411", elementId: "delivery-human-task__n7", processInstanceKey: "dg-1", state: "CREATED" },
+    // the bounded-timeout escalation twin parks on the `…__esc` id but resolves the same base link
+    { userTaskKey: "20412", elementId: "delivery-human-task__n7__esc", processInstanceKey: "dg-1", state: "CREATED" },
+    // a URL-less instruction leaves the link null (no fabricated link)
+    { userTaskKey: "20413", elementId: "delivery-human-task__n8", processInstanceKey: "dg-1", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(byKey["20411"].subject_url, "https://github.com/nanobpm/nano-workforce/pull/814");
+  assertEquals(byKey["20412"].subject_url, "https://github.com/nanobpm/nano-workforce/pull/814");
+  assertEquals(byKey["20413"].subject_url, null);
+});
+
 test("pollUserTasks: a delivery-human node with no stored label still gets a non-blank Decision context (issue #772)", async () => {
   // An untracked run (or a run whose label wasn't stamped) must not leave the panel blank — a static,
   // node-NEUTRAL fallback still tells the operator a delivery-graph step is waiting. It must read true

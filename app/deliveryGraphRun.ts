@@ -206,9 +206,12 @@ function firstLine(text: string | undefined | null): string {
   return line.length > 80 ? `${line.slice(0, 77)}…` : line;
 }
 
-/** Map each human node's compiled user-task element id → a display label (its instruction's first
- * line, else its author node id), from the S1 compile result. Stamped on the run row at dispatch so
- * the poller renders the parked-node phase without recompiling the graph. */
+/** Map each human node's compiled user-task element id → its FULL instruction, from the S1 compile
+ * result. Stamped on the run row at dispatch so the poller can (a) render the parked-node phase label
+ * — clamped at display by {@link deriveDeliveryPhase} — and (b) surface the WHOLE instruction as the
+ * Tasks-inbox "Decision context" (issue #813). Storing the full prompt (not a clamped first line) is
+ * what lets the operator read the entire instruction, and lets a URL embedded in the prompt reach the
+ * task's clickable link. Falls back to the node id when a human node declares no prompt. */
 export function buildHumanLabels(compiled: CompileDeliveryGraphResult): Record<string, string> {
   const elementByNodeId = new Map(compiled.resolved.nodes.map((n) => [n.id, n.element]));
   const labels: Record<string, string> = {};
@@ -220,8 +223,11 @@ export function buildHumanLabels(compiled: CompileDeliveryGraphResult): Record<s
     // task's Decision context in the Tasks inbox, so a URL credential in a human prompt (`//user:pass@…`)
     // must be stripped here too — else it is persisted and shown unredacted even though the BPMN display
     // path redacts it. The RAW prompt still reaches the runtime user task unmodified (issue #778 review).
-    const safePrompt = typeof stop.prompt === "string" ? redactFreeText(stop.prompt) : "";
-    labels[humanTaskElementId(element)] = firstLine(safePrompt) || stop.nodeId;
+    // The FULL redacted prompt is stored (not a clamped first line) so the Tasks "Decision context" can
+    // show the whole instruction and surface an embedded link; the phase pill clamps it at display via
+    // `firstLine` in `deriveDeliveryPhase` below (issue #813).
+    const safePrompt = typeof stop.prompt === "string" ? redactFreeText(stop.prompt).trim() : "";
+    labels[humanTaskElementId(element)] = safePrompt || stop.nodeId;
   }
   return labels;
 }
@@ -267,7 +273,13 @@ export function deriveDeliveryPhase(
     .filter((id): id is string => typeof id === "string" && isDeliveryHumanElement(id))
     .sort()[0];
   if (parkedOn !== undefined) {
-    const label = humanLabels[parkedOn] ?? parkedOn;
+    // Clamp the compact phase label to the instruction's first line (the full prompt is stored in
+    // `human_labels` for the Tasks "Decision context" — issue #813 — but the phase pill wants a short
+    // one-liner). Use the SAME exact-then-`__esc`-stripped lookup as `deliveryHumanContext*` so a
+    // parked bounded-timeout twin (`…__esc`, whose exact id is never stamped) resolves to its base
+    // node's label instead of showing the raw element id. A missing label falls back to the raw id.
+    const stored = humanLabels[parkedOn] ?? humanLabels[parkedOn.replace(/__esc$/, "")];
+    const label = firstLine(stored) || parkedOn;
     return { status: "running", phase: `Parked on human node: ${label}`, phase_node_id: parkedOn };
   }
   return { status: "running", phase: DELIVERY_PHASE.RUNNING, phase_node_id: null };

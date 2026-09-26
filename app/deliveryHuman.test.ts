@@ -11,7 +11,9 @@ import {
   bindHumanEmits,
   DELIVERY_HUMAN_ELEMENT,
   deliveryHumanContextQuestion,
+  deliveryHumanContextUrl,
   deriveHumanCategory,
+  firstHttpUrl,
   GENERIC_HUMAN_FORM,
   HUMAN_ACK_FORM,
   HUMAN_PUBLISH_FORM,
@@ -21,6 +23,7 @@ import {
   renderHumanEmitBrief,
   resolveHumanForm,
 } from "./deliveryHuman.ts";
+import { redactFreeText } from "./deliveryGraphCompiler.ts";
 import { ESCALATION_TASK_ELEMENTS } from "./agentCompletion.ts";
 import { USER_TASK_KIND_LABELS } from "./userTasks.ts";
 
@@ -322,8 +325,82 @@ test("deliveryHumanContextQuestion: derives the node instruction from human_labe
   );
 });
 
-test("deliveryHumanContextQuestion: falls back to a static message when no label is stored", () => {
-  // A parked human step must never render a blank Decision context — an untracked/absent label still
+test("firstHttpUrl: extracts the first http(s) URL and trims trailing prose punctuation (#813)", () => {
+  assertEquals(firstHttpUrl("see https://github.com/o/r/pull/5 for details"), "https://github.com/o/r/pull/5");
+  // Trailing sentence punctuation / closing bracket is stripped so the link resolves.
+  assertEquals(firstHttpUrl("Review the PR (https://github.com/o/r/pull/5)."), "https://github.com/o/r/pull/5");
+  assertEquals(firstHttpUrl("http://example.test/a,"), "http://example.test/a");
+  // A balanced closing bracket is part of the URL and preserved (not truncated into a broken link).
+  assertEquals(
+    firstHttpUrl("see https://en.wikipedia.org/wiki/Nano_(technology) here"),
+    "https://en.wikipedia.org/wiki/Nano_(technology)",
+  );
+  // A balanced bracket followed by prose punctuation: strip only the punctuation, keep the pair.
+  assertEquals(
+    firstHttpUrl("ref https://en.wikipedia.org/wiki/Nano_(technology)."),
+    "https://en.wikipedia.org/wiki/Nano_(technology)",
+  );
+  // An UNBALANCED wrapping bracket is prose and still stripped.
+  assertEquals(firstHttpUrl("(https://github.com/o/r/pull/9)"), "https://github.com/o/r/pull/9");
+  // Multiple/nested UNBALANCED trailing closers + prose punctuation are all peeled off in one linear
+  // pass (guards the O(n) trim refactor — #813 review), while an inner balanced pair is preserved.
+  assertEquals(
+    firstHttpUrl("(see [https://en.wikipedia.org/wiki/Nano_(technology)])."),
+    "https://en.wikipedia.org/wiki/Nano_(technology)",
+  );
+  assertEquals(firstHttpUrl("look: {[(https://example.test/a)]}"), "https://example.test/a");
+  // An apostrophe is a valid URL sub-delimiter and preserved WITHIN the URL (not truncated at it)…
+  assertEquals(
+    firstHttpUrl("see https://en.wikipedia.org/wiki/It's_a_Wonderful_Life here"),
+    "https://en.wikipedia.org/wiki/It's_a_Wonderful_Life",
+  );
+  // …while a TRAILING apostrophe (a prose quote closer) is still trimmed.
+  assertEquals(firstHttpUrl("the link 'https://example.test/a' works"), "https://example.test/a");
+  // Scheme match is case-insensitive (RFC 3986 schemes are case-insensitive).
+  assertEquals(firstHttpUrl("see HTTPS://github.com/o/r/pull/5 now"), "HTTPS://github.com/o/r/pull/5");
+  assertEquals(firstHttpUrl("Http://example.test/b"), "Http://example.test/b");
+  // First wins when several are present.
+  assertEquals(firstHttpUrl("a https://one.test b https://two.test"), "https://one.test");
+  // No URL / non-string → null (preserves today's linkless behaviour).
+  assertEquals(firstHttpUrl("merge the PR opened by adopt-console"), null);
+  assertEquals(firstHttpUrl(undefined), null);
+});
+
+test("deliveryHumanContextUrl: lifts a prompt-embedded URL onto the task link (base + __esc twin), else null (#813)", () => {
+  const labels = {
+    "delivery-human-task__n7": "Review the adopt PR at https://github.com/nanobpm/nano-ide/pull/42 and merge it.",
+    "delivery-human-task__n8": "Confirm CI is green, then merge — no link here.",
+  };
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__n7"), "https://github.com/nanobpm/nano-ide/pull/42");
+  // The bounded-timeout twin resolves the same node instruction.
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__n7__esc"), "https://github.com/nanobpm/nano-ide/pull/42");
+  // A node whose instruction names no URL yields null (the linkless default).
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__n8"), null);
+  assertEquals(deliveryHumanContextUrl(undefined, "delivery-human-task__n1"), null);
+});
+
+test("deliveryHumanContextUrl: declines to link a redaction-altered URL, links a credential-free one (#814)", () => {
+  // The stored `human_labels` are display-REDACTED via the SAME `redactFreeText` `buildHumanLabels` uses,
+  // so build the labels through it to mirror production exactly.
+  const withQuery = redactFreeText("Review the checks tab at https://example.test/o/r/pull/5?tab=checks now");
+  const withCred = redactFreeText("Open https://user:pass@example.test/o/r/pull/5 to review");
+  const withFragment = redactFreeText("Jump to https://example.test/o/r/pull/5#files section");
+  const clean = redactFreeText("Review the PR at https://example.test/o/r/pull/5 and merge it");
+  const labels = {
+    "delivery-human-task__q": withQuery,
+    "delivery-human-task__c": withCred,
+    "delivery-human-task__f": withFragment,
+    "delivery-human-task__ok": clean,
+  };
+  // A redacted query/userinfo/fragment would publish a DIFFERENT, broken link → decline (null).
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__q"), null);
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__c"), null);
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__f"), null);
+  // A credential-free URL is untouched by redaction and links faithfully.
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__ok"), "https://example.test/o/r/pull/5");
+});
+
+test("deliveryHumanContextQuestion: falls back to a static message when no label is stored", () => {  // A parked human step must never render a blank Decision context — an untracked/absent label still
   // yields actionable guidance rather than null (which would leave the panel empty, issue #772).
   assertEquals(
     deliveryHumanContextQuestion({}, "delivery-human-task__n1"),
