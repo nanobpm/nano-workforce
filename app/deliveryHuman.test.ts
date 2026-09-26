@@ -23,6 +23,7 @@ import {
   renderHumanEmitBrief,
   resolveHumanForm,
 } from "./deliveryHuman.ts";
+import { redactFreeText } from "./deliveryGraphCompiler.ts";
 import { ESCALATION_TASK_ELEMENTS } from "./agentCompletion.ts";
 import { USER_TASK_KIND_LABELS } from "./userTasks.ts";
 
@@ -341,6 +342,13 @@ test("firstHttpUrl: extracts the first http(s) URL and trims trailing prose punc
   );
   // An UNBALANCED wrapping bracket is prose and still stripped.
   assertEquals(firstHttpUrl("(https://github.com/o/r/pull/9)"), "https://github.com/o/r/pull/9");
+  // An apostrophe is a valid URL sub-delimiter and preserved WITHIN the URL (not truncated at it)…
+  assertEquals(
+    firstHttpUrl("see https://en.wikipedia.org/wiki/It's_a_Wonderful_Life here"),
+    "https://en.wikipedia.org/wiki/It's_a_Wonderful_Life",
+  );
+  // …while a TRAILING apostrophe (a prose quote closer) is still trimmed.
+  assertEquals(firstHttpUrl("the link 'https://example.test/a' works"), "https://example.test/a");
   // Scheme match is case-insensitive (RFC 3986 schemes are case-insensitive).
   assertEquals(firstHttpUrl("see HTTPS://github.com/o/r/pull/5 now"), "HTTPS://github.com/o/r/pull/5");
   assertEquals(firstHttpUrl("Http://example.test/b"), "Http://example.test/b");
@@ -362,6 +370,27 @@ test("deliveryHumanContextUrl: lifts a prompt-embedded URL onto the task link (b
   // A node whose instruction names no URL yields null (the linkless default).
   assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__n8"), null);
   assertEquals(deliveryHumanContextUrl(undefined, "delivery-human-task__n1"), null);
+});
+
+test("deliveryHumanContextUrl: declines to link a redaction-altered URL, links a credential-free one (#814)", () => {
+  // The stored `human_labels` are display-REDACTED via the SAME `redactFreeText` `buildHumanLabels` uses,
+  // so build the labels through it to mirror production exactly.
+  const withQuery = redactFreeText("Review the checks tab at https://example.test/o/r/pull/5?tab=checks now");
+  const withCred = redactFreeText("Open https://user:pass@example.test/o/r/pull/5 to review");
+  const withFragment = redactFreeText("Jump to https://example.test/o/r/pull/5#files section");
+  const clean = redactFreeText("Review the PR at https://example.test/o/r/pull/5 and merge it");
+  const labels = {
+    "delivery-human-task__q": withQuery,
+    "delivery-human-task__c": withCred,
+    "delivery-human-task__f": withFragment,
+    "delivery-human-task__ok": clean,
+  };
+  // A redacted query/userinfo/fragment would publish a DIFFERENT, broken link → decline (null).
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__q"), null);
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__c"), null);
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__f"), null);
+  // A credential-free URL is untouched by redaction and links faithfully.
+  assertEquals(deliveryHumanContextUrl(labels, "delivery-human-task__ok"), "https://example.test/o/r/pull/5");
 });
 
 test("deliveryHumanContextQuestion: falls back to a static message when no label is stored", () => {  // A parked human step must never render a blank Decision context — an untracked/absent label still
