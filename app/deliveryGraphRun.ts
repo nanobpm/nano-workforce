@@ -275,8 +275,11 @@ export function deriveDeliveryPhase(
   if (parkedOn !== undefined) {
     // Clamp the compact phase label to the instruction's first line (the full prompt is stored in
     // `human_labels` for the Tasks "Decision context" — issue #813 — but the phase pill wants a short
-    // one-liner). A missing label falls back to the raw element id.
-    const label = firstLine(humanLabels[parkedOn]) || parkedOn;
+    // one-liner). Use the SAME exact-then-`__esc`-stripped lookup as `deliveryHumanContext*` so a
+    // parked bounded-timeout twin (`…__esc`, whose exact id is never stamped) resolves to its base
+    // node's label instead of showing the raw element id. A missing label falls back to the raw id.
+    const stored = humanLabels[parkedOn] ?? humanLabels[parkedOn.replace(/__esc$/, "")];
+    const label = firstLine(stored) || parkedOn;
     return { status: "running", phase: `Parked on human node: ${label}`, phase_node_id: parkedOn };
   }
   return { status: "running", phase: DELIVERY_PHASE.RUNNING, phase_node_id: null };

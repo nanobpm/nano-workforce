@@ -283,6 +283,17 @@ test("deriveDeliveryPhase: a parked node with no stored label falls back to the 
   assertEquals(p.phase_node_id, el);
 });
 
+test("deliveryHuman: a parked bounded-timeout twin (`…__esc`) resolves the base node's stored label in the phase pill (#813)", () => {
+  // The twin's exact `…__esc` id is never stamped into `human_labels` (only the base id is), so the
+  // phase-pill lookup must strip `__esc` — the same fallback the Tasks Decision-context helpers use —
+  // else a parked timeout twin shows the raw element id instead of the instruction's first line.
+  const base = humanTaskElementId("n2");
+  const twin = `${base}__esc`;
+  const p = deriveDeliveryPhase("ACTIVE", [{ elementId: twin }], { [base]: "manual OTP publish" });
+  assertEquals(p.phase, "Parked on human node: manual OTP publish");
+  assertEquals(p.phase_node_id, twin);
+});
+
 test("deriveDeliveryPhase: ACTIVE with only a non-human open task (or none) → a bare Running", () => {
   assertEquals(deriveDeliveryPhase("ACTIVE", [], {}), { status: "running", phase: DELIVERY_PHASE.RUNNING, phase_node_id: null });
   assertEquals(deriveDeliveryPhase("ACTIVE", [{ elementId: "some-service-task" }], {}), {
