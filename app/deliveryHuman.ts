@@ -101,14 +101,45 @@ export function deliveryHumanContextUrl(
   return firstHttpUrl(instruction);
 }
 
+const URL_TRAILING_CLOSERS: Readonly<Record<string, string>> = { ")": "(", "]": "[", "}": "{" };
+
+/** Trim trailing prose punctuation a URL commonly picks up when embedded in a sentence (`.,;:!?'"` and
+ *  a wrapping `)`/`]`/`}`), WITHOUT corrupting a URL that legitimately ends in a closing bracket. A
+ *  closing bracket is only stripped when it is UNBALANCED within the URL (a prose wrapper, e.g. the `)`
+ *  in "see (https://x/y)"); a balanced pair — e.g. Wikipedia `…/Foo_(disambiguation)` — is part of the
+ *  URL and preserved, so the persisted link isn't truncated into a broken one. */
+function trimUrlTrailingPunctuation(url: string): string {
+  let end = url.length;
+  while (end > 0) {
+    const ch = url[end - 1];
+    const opener = URL_TRAILING_CLOSERS[ch];
+    if (opener !== undefined) {
+      const kept = url.slice(0, end);
+      const opens = kept.split(opener).length - 1;
+      const closes = kept.split(ch).length - 1;
+      if (opens >= closes) break; // balanced → the bracket belongs to the URL; stop.
+      end -= 1;
+      continue;
+    }
+    if (".,;:!?'\"".includes(ch)) {
+      end -= 1;
+      continue;
+    }
+    break;
+  }
+  return url.slice(0, end);
+}
+
 /** Extract the first `http(s)` URL from free text, trimming trailing sentence punctuation/brackets a
- *  prose author commonly appends (`).,;` etc.) so the link resolves. The scheme match is
- *  case-insensitive (RFC 3986 schemes are case-insensitive). Returns `null` when none. */
+ *  prose author commonly appends (`).,;` etc.) so the link resolves — but preserving a bracket that is
+ *  BALANCED within the URL (e.g. Wikipedia `…_(technology)`), so a valid URL is never truncated into a
+ *  broken task link. The scheme match is case-insensitive (RFC 3986 schemes are case-insensitive).
+ *  Returns `null` when none. */
 export function firstHttpUrl(text: string | undefined | null): string | null {
   if (typeof text !== "string") return null;
   const match = text.match(/https?:\/\/[^\s<>"'`]+/i);
   if (!match) return null;
-  return match[0].replace(/[).,;:!?'"\]}>]+$/, "") || null;
+  return trimUrlTrailingPunctuation(match[0]) || null;
 }
 
 /** The GENERIC fallback form (Decision 4, step 3): captures ONE typed value into the node's single
