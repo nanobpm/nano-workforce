@@ -122,25 +122,36 @@ function urlBearsRedactionMarker(url: string): boolean {
 
 const URL_TRAILING_CLOSERS: Readonly<Record<string, string>> = { ")": "(", "]": "[", "}": "{" };
 
+const URL_TRAILING_PUNCTUATION = ".,;:!?'\"";
+
 /** Trim trailing prose punctuation a URL commonly picks up when embedded in a sentence (`.,;:!?'"` and
  *  a wrapping `)`/`]`/`}`), WITHOUT corrupting a URL that legitimately ends in a closing bracket. A
  *  closing bracket is only stripped when it is UNBALANCED within the URL (a prose wrapper, e.g. the `)`
  *  in "see (https://x/y)"); a balanced pair — e.g. Wikipedia `…/Foo_(disambiguation)` — is part of the
- *  URL and preserved, so the persisted link isn't truncated into a broken one. */
+ *  URL and preserved, so the persisted link isn't truncated into a broken one. Bracket balance is
+ *  tracked in running per-pair counts (seeded by one linear scan, then decremented as trailing closers
+ *  are stripped) so the whole trim is a single O(n) pass — NOT the prior re-`split()`-the-prefix-each-
+ *  step quadratic (issue #813 review). */
 function trimUrlTrailingPunctuation(url: string): string {
+  const opens: Record<string, number> = { "(": 0, "[": 0, "{": 0 };
+  const closes: Record<string, number> = { ")": 0, "]": 0, "}": 0 };
+  for (const ch of url) {
+    if (ch in opens) opens[ch] += 1;
+    else if (ch in closes) closes[ch] += 1;
+  }
   let end = url.length;
   while (end > 0) {
     const ch = url[end - 1];
     const opener = URL_TRAILING_CLOSERS[ch];
     if (opener !== undefined) {
-      const kept = url.slice(0, end);
-      const opens = kept.split(opener).length - 1;
-      const closes = kept.split(ch).length - 1;
-      if (opens >= closes) break; // balanced → the bracket belongs to the URL; stop.
+      // `opens`/`closes` reflect url[0:end]; only trailing closers are ever removed below, so they stay
+      // accurate. Balanced (opener count ≥ closer count) → the bracket belongs to the URL; stop.
+      if (opens[opener] >= closes[ch]) break;
+      closes[ch] -= 1;
       end -= 1;
       continue;
     }
-    if (".,;:!?'\"".includes(ch)) {
+    if (URL_TRAILING_PUNCTUATION.includes(ch)) {
       end -= 1;
       continue;
     }

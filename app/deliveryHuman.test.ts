@@ -342,6 +342,13 @@ test("firstHttpUrl: extracts the first http(s) URL and trims trailing prose punc
   );
   // An UNBALANCED wrapping bracket is prose and still stripped.
   assertEquals(firstHttpUrl("(https://github.com/o/r/pull/9)"), "https://github.com/o/r/pull/9");
+  // Multiple/nested UNBALANCED trailing closers + prose punctuation are all peeled off in one linear
+  // pass (guards the O(n) trim refactor — #813 review), while an inner balanced pair is preserved.
+  assertEquals(
+    firstHttpUrl("(see [https://en.wikipedia.org/wiki/Nano_(technology)])."),
+    "https://en.wikipedia.org/wiki/Nano_(technology)",
+  );
+  assertEquals(firstHttpUrl("look: {[(https://example.test/a)]}"), "https://example.test/a");
   // An apostrophe is a valid URL sub-delimiter and preserved WITHIN the URL (not truncated at it)…
   assertEquals(
     firstHttpUrl("see https://en.wikipedia.org/wiki/It's_a_Wonderful_Life here"),
