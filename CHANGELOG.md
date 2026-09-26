@@ -1,3 +1,9 @@
+## [0.191.1](https://github.com/nanobpm/nano-workforce/compare/v0.191.0...v0.191.1) (2026-09-26)
+
+### Bug Fixes
+
+* **tasks:** show full delivery human-step context and lift an embedded link ([#814](https://github.com/nanobpm/nano-workforce/issues/814)) ([cca3374](https://github.com/nanobpm/nano-workforce/commit/cca33740607f80816504dd2b5c60b785cb1440c6)), closes [#813](https://github.com/nanobpm/nano-workforce/issues/813) [#fragment](https://github.com/nanobpm/nano-workforce/issues/fragment) [#778](https://github.com/nanobpm/nano-workforce/issues/778) [#813](https://github.com/nanobpm/nano-workforce/issues/813)
+
 ## [0.191.0](https://github.com/nanobpm/nano-workforce/compare/v0.190.0...v0.191.0) (2026-09-23)
 
 ### Features
