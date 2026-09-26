@@ -329,6 +329,9 @@ test("firstHttpUrl: extracts the first http(s) URL and trims trailing prose punc
   // Trailing sentence punctuation / closing bracket is stripped so the link resolves.
   assertEquals(firstHttpUrl("Review the PR (https://github.com/o/r/pull/5)."), "https://github.com/o/r/pull/5");
   assertEquals(firstHttpUrl("http://example.test/a,"), "http://example.test/a");
+  // Scheme match is case-insensitive (RFC 3986 schemes are case-insensitive).
+  assertEquals(firstHttpUrl("see HTTPS://github.com/o/r/pull/5 now"), "HTTPS://github.com/o/r/pull/5");
+  assertEquals(firstHttpUrl("Http://example.test/b"), "Http://example.test/b");
   // First wins when several are present.
   assertEquals(firstHttpUrl("a https://one.test b https://two.test"), "https://one.test");
   // No URL / non-string → null (preserves today's linkless behaviour).

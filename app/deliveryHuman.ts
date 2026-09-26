@@ -102,10 +102,11 @@ export function deliveryHumanContextUrl(
 }
 
 /** Extract the first `http(s)` URL from free text, trimming trailing sentence punctuation/brackets a
- *  prose author commonly appends (`).,;` etc.) so the link resolves. Returns `null` when none. */
+ *  prose author commonly appends (`).,;` etc.) so the link resolves. The scheme match is
+ *  case-insensitive (RFC 3986 schemes are case-insensitive). Returns `null` when none. */
 export function firstHttpUrl(text: string | undefined | null): string | null {
   if (typeof text !== "string") return null;
-  const match = text.match(/https?:\/\/[^\s<>"'`]+/);
+  const match = text.match(/https?:\/\/[^\s<>"'`]+/i);
   if (!match) return null;
   return match[0].replace(/[).,;:!?'"\]}>]+$/, "") || null;
 }
