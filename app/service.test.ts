@@ -992,8 +992,10 @@ test("repoEnvelopeVars emits the push-checkpoint under the harness-read `sha` ke
 
 // Pre-PR provisioning (issue #684): the implementation path has no head branch yet, so it passes
 // `ref = base` + a `branchCreate` so the harness clones the base and cuts the deterministic
-// `feat/<task.id>` feature branch off it. `branch.create` is emitted only for a non-blank branch and
-// is absent on the PR-based paths (which check out an existing head).
+// `feat/<task.id>` feature branch off it. `branch.create` is emitted only for a non-blank branch.
+// The PR-based paths (review-round / fix-ci / rebase) now pass `branchCreate = headRef` too (equal
+// to `ref`) so the harness commits/pushes to the PR head branch instead of cutting a throwaway
+// `nano/agent-work/*` fallback (jwulf/c8ctl-plugin-nano#231); see the PR-path test below.
 test("repoEnvelopeVars emits branch.create only for a non-blank pre-PR branch (#684)", () => {
   const repo = (repoEnvelopeVars("owner/repo", "main", null, null, "feat/issue-7") as any)["io.nanobpm.agentTask"]
     .repository;
@@ -1016,6 +1018,24 @@ test("repoEnvelopeVars emits branch.create only for a non-blank pre-PR branch (#
   }
   // The default (4-arg) PR-based call never emits a branch.create.
   assertEquals("branch" in (repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"].repository, false);
+});
+
+// PR-path provisioning (jwulf/c8ctl-plugin-nano#231): the review-round / fix-ci / rebase call sites
+// pass `branchCreate = headRef` (equal to `ref`, the PR head). Without it the harness's base-branch
+// guard treats the checkout as base-like and cuts a throwaway `nano/agent-work/<base>-<run>` fallback,
+// stranding the round's commits OFF the PR (the head never advances → no-progress escalation). With
+// `ref == create == head` the harness does a no-op `checkout -B <head>` and commits/pushes to the PR
+// head branch itself.
+test("repoEnvelopeVars emits branch.create = head on the PR path (ref == create == head) (#231)", () => {
+  const repo = (repoEnvelopeVars("owner/repo", "feat/issue-12", "main", null, "feat/issue-12") as any)[
+    "io.nanobpm.agentTask"
+  ].repository;
+  assertEquals(repo.ref, "feat/issue-12", "the PR-path envelope checks out the head branch");
+  assertEquals(repo.branch.create, "feat/issue-12", "and asks the harness to work on that same head branch, not a fallback");
+  // Still branch-scoped and blobless, and the base tip stays reachable for the 3-dot diff.
+  assertEquals(repo.singleBranch, true);
+  assertEquals(repo.filter, "blob:none");
+  assertEquals(repo.baseRef, "main");
 });
 
 // Durable-resume enrolment gate (issue #325, ADR 0062 Slice 5/5): `worldRestoreSha` — the seam

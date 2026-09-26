@@ -697,7 +697,14 @@ export async function submitPr(
       // Host-git provisioning (c8ctl): deliver the repository envelope so the `senior:pr-review`
       // harness clones an isolated workspace checked out on the PR head branch. Spread last so an
       // unresolved head (`{}`) leaves the other vars untouched.
-      ...repoEnvelopeVars(parsed.repo, headRef, baseRef, worldSha),
+      //
+      // Pass `headRef` as `branch.create` too (5th arg): on a PR path `ref` is the head branch, but
+      // WITHOUT an explicit `branch.create` the harness's base-branch guard (jwulf/c8ctl-plugin-nano#231)
+      // treats the checkout as base-like and cuts a throwaway `nano/agent-work/<base>-<run>` fallback,
+      // stranding the round's commits OFF the PR (the head never advances → no-progress escalation).
+      // With `ref == create == head` the harness does a no-op `checkout -B <head>` and commits/pushes
+      // to the PR head branch itself. Mirrors the delivery-graph node path (`agentNodeRepoEnvelope`, #776).
+      ...repoEnvelopeVars(parsed.repo, headRef, baseRef, worldSha, headRef),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
@@ -810,8 +817,10 @@ export async function startMerge(
       abandonUrl: abUrl,
       abandonBrief: renderAbandonBrief(abUrl),
       // Host-git provisioning (c8ctl): same repository envelope as the convergence loop, so the
-      // fix-ci/rebase agents operate on an isolated checkout of the PR head branch.
-      ...repoEnvelopeVars(pr.repo, headRef, baseRef, worldSha),
+      // fix-ci/rebase agents operate on an isolated checkout of the PR head branch. `headRef` is
+      // passed as `branch.create` (5th arg) so the harness commits/pushes to the PR head branch
+      // instead of cutting a `nano/agent-work/*` fallback (jwulf/c8ctl-plugin-nano#231); see submitPr.
+      ...repoEnvelopeVars(pr.repo, headRef, baseRef, worldSha, headRef),
     },
   });
   if (processInstanceKey != null) {
