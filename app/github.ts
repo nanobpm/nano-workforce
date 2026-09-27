@@ -1658,6 +1658,89 @@ async function branchHeadSha(repo: string, branch: string, token: string): Promi
   return j.object?.sha ?? null;
 }
 
+/** The ancestry relationship between two commits on `repo`, from GitHub's compare endpoint
+ * (`compare/<base>...<head>`). `status` is GitHub's verdict — `"ahead"` (head strictly descends
+ * base — a fast-forward from base to head is possible), `"behind"`, `"identical"`, or `"diverged"` —
+ * and `aheadBy`/`behindBy` are the commit counts either side of the merge-base. The no-advance
+ * self-heal (#818) uses this to prove a recorded push-checkpoint SHA is a *strict fast-forward*
+ * descendant of the PR head (`status === "ahead"`, `behindBy === 0`, `aheadBy > 0`) before it moves
+ * the head — a diverged/behind checkpoint is NOT safe to fast-forward onto and must escalate instead.
+ * `null` when no transport is usable (idle); throws only on a genuine transport failure. */
+export interface CommitComparison {
+  readonly status: "ahead" | "behind" | "identical" | "diverged";
+  readonly aheadBy: number;
+  readonly behindBy: number;
+}
+
+export async function compareCommits(
+  repo: string,
+  base: string,
+  head: string,
+  token: string,
+): Promise<CommitComparison | null> {
+  // Encode each ref/SHA so a branch name containing git-legal-but-URL-significant characters
+  // (`#`, `?`, spaces) can't truncate the path (same hazard branchHeadSha guards). The `...`
+  // three-dot separator between the two encoded refs is the compare API's own syntax, not a ref char.
+  const enc = (r: string) => r.split("/").map(encodeURIComponent).join("/");
+  const apiPath = `repos/${repo}/compare/${enc(base)}...${enc(head)}`;
+  const parse = (body: string): CommitComparison => {
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const j = JSON.parse(body) as { status?: string; ahead_by?: number; behind_by?: number };
+    const status = j.status === "ahead" || j.status === "behind" || j.status === "identical" || j.status === "diverged" ? j.status : "diverged";
+    return { status, aheadBy: Number(j.ahead_by ?? 0), behindBy: Number(j.behind_by ?? 0) };
+  };
+  if (await useGh()) {
+    const out = await runGh(["api", apiPath, "-H", "Accept: application/vnd.github+json"]);
+    return parse(out);
+  }
+  if (!token) return null;
+  const r = await fetch(`https://api.github.com/${apiPath}`, {
+    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+  });
+  if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  return parse(await r.text());
+}
+
+/** Fast-forward `refs/heads/<branch>` on `repo` to `sha` (a NON-force ref update — GitHub itself
+ * rejects a non-fast-forward with `422`, a hard backstop beneath the caller's own compare check).
+ * Returns `true` when the ref now points at `sha`, `false` when GitHub refused the move as
+ * non-fast-forward (`422`). The no-advance self-heal (#818) uses this to advance a PR head onto a
+ * reachable push-checkpoint SHA that the harness pushed but left off the head. `force` is never set:
+ * the whole point is to move the head ONLY when it is a safe fast-forward, never to rewrite history. */
+export async function updateBranchRef(
+  repo: string,
+  branch: string,
+  sha: string,
+  token: string,
+): Promise<boolean> {
+  const encodedBranch = branch.split("/").map(encodeURIComponent).join("/");
+  const apiPath = `repos/${repo}/git/refs/heads/${encodedBranch}`;
+  const isNonFastForward = (msg: string) => /\b422\b|not a fast forward|fast[- ]forward/i.test(msg);
+  if (await useGh()) {
+    try {
+      await runGh(["api", apiPath, "-X", "PATCH", "-f", `sha=${sha}`, "-F", "force=false"]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isNonFastForward(msg)) return false;
+      throw err;
+    }
+    return true;
+  }
+  if (!token) throw new Error(`no GitHub transport available to update ${apiPath}`);
+  const r = await fetch(`https://api.github.com/${apiPath}`, {
+    method: "PATCH",
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ sha, force: false }),
+  });
+  if (r.ok) return true;
+  if (r.status === 422) return false; // non-fast-forward — refused, as intended
+  throw new Error(`github ${r.status} ${r.statusText}: ${(await r.text()).slice(0, 300)}`.trim());
+}
+
 /** Create `refs/heads/<branch>` pointing at `sha`. Idempotent: a concurrent create / re-plan
  * that already made the ref (GitHub `422 Reference already exists`) is treated as a no-op.
  * Returns `true` when this call actually created the ref, `false` when it lost the race and the

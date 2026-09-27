@@ -17,9 +17,11 @@
 // transient GitHub hiccup can never fabricate a no-progress escalation.
 import type { AgentInstanceSummary, AppApi, AppJobHandler } from "@nanobpm/urban";
 import { type HeadReader, makeDefaultReadHead } from "../../app/currentHead.ts";
-import { fetchBranchHead, fetchPrHead } from "../../app/github.ts";
+import { compareCommits, fetchBranchHead, fetchPrHead, updateBranchRef } from "../../app/github.ts";
 import { decideProgress, isAddressedStatus } from "../../app/roundProgress.ts";
 import { parsePr } from "../../app/service.ts";
+import { WorldStore } from "../../app/world/index.ts";
+import { attemptNoAdvanceSelfHeal, type SelfHealResult } from "../../app/world/selfHeal.ts";
 import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input/output typed off the model data envelopes (`PrProgressCheckIn` / `PrProgressCheckOut` in
@@ -74,6 +76,39 @@ function normalizeAgentWork(raw: boolean | null | AgentWorkObservation | undefin
 export { type HeadReader, makeDefaultReadHead };
 
 const defaultReadHead: HeadReader = makeDefaultReadHead({ fetchPrHead, fetchBranchHead });
+
+/** Attempt the no-advance self-heal (#818): reconcile a recorded push-checkpoint against the PR head
+ * and fast-forward the head onto it when safe. Injectable so tests never touch git/network; the
+ * default binds the real `WorldStore` (over `app.data`) + GitHub transport with the env credential
+ * (the same `process.env.GITHUB_TOKEN` default the head reader uses). See {@link
+ * ../../app/world/selfHeal.ts}. */
+export type SelfHealFn = (
+  app: AppApi,
+  repo: string,
+  prNumber: number,
+  prKey: string,
+  currentHead: string,
+) => Promise<SelfHealResult>;
+
+const defaultSelfHeal: SelfHealFn = (app, repo, prNumber, prKey, currentHead) => {
+  const tok = process.env.GITHUB_TOKEN ?? "";
+  const store = new WorldStore(app.data);
+  return attemptNoAdvanceSelfHeal(
+    {
+      lastCheckpoint: (pk) => store.lastCheckpoint(pk),
+      prHead: async (r, n) => {
+        const h = await fetchPrHead(r, n, tok);
+        return h ? { headRef: h.headRef, headRepo: h.headRepo } : null;
+      },
+      compare: (r, base, head) => compareCommits(r, base, head, tok),
+      advanceHead: (r, branch, sha) => updateBranchRef(r, branch, sha, tok),
+    },
+    repo,
+    prNumber,
+    prKey,
+    currentHead,
+  );
+};
 
 /** An agent-instance is "durable work" for husk purposes once it has reached a terminal state — it
  * carries a `completionDate`, or a terminal lifecycle status. A husked instance never closes (it is
@@ -203,6 +238,7 @@ function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
 export function makeHandler(deps: {
   readHead: HeadReader;
   readAgentWork?: AgentWorkReader;
+  selfHeal?: SelfHealFn;
 }): AppJobHandler<In, Out> {
   return async (job, app) => {
     const { prKey, status, repo, prNumber, round, huskRetries, roundEntryHead } = job.variables;
@@ -386,9 +422,40 @@ export function makeHandler(deps: {
       // once the husk retry has been ruled out, so a husk-retry round never transits `waiting_review`.
       return commit(out, { head: currentHead, status: "waiting_review", agentWatermark });
     }
-    // The remaining outcome (progressed:false, huskRetry:false) escalates to a human; the
-    // persist-escalation-noprogress worker owns the status, so leave it unset — but still advance the
-    // baseline and stamp the idempotency record so a redelivered escalation replays instead of
+
+    // NO-ADVANCE SELF-HEAL (#818, Layer 2). Before escalating to a human, reconcile the round's work
+    // against the remote: a producer harness that provisioned the review shape wrong pushed the fix
+    // to a throwaway fallback branch, so it IS reachable on the remote (recorded as a durable
+    // push-checkpoint via the harness's `worldMarker`) but left the PR head un-advanced. If that
+    // checkpoint SHA STRICTLY fast-forward-descends the current head, advance the head onto it and
+    // continue the loop as real progress instead of parking a human — auto-recovering the exact
+    // divergence that stranded nanobpm/nano-coder#26/#28. `currentHead` is non-null here (a null head
+    // fails OPEN upstream via decideProgress and never reaches this escalation). Every non-heal
+    // outcome (no checkpoint, not a fast-forward, a fork head, an unreadable/refused move) degrades
+    // to escalation exactly as before — the self-heal is purely additive.
+    if (currentHead) {
+      const heal = await (deps.selfHeal ?? defaultSelfHeal)(app, ghRepo, ghNumber, prKey, currentHead).catch(
+        (): SelfHealResult => ({ healed: false }),
+      );
+      if (heal.healed && heal.sha) {
+        app.log.info("no-advance self-heal advanced PR head to a reachable push-checkpoint", {
+          prKey,
+          round: roundNo,
+          from: currentHead,
+          to: heal.sha,
+        });
+        // Advance the baseline to the newly-pushed head and park at wait-review as genuine progress
+        // (husk counter reset), so the poller solicits the next Copilot review against the healed head.
+        return commit(
+          { progressed: true, huskRetries: 0 },
+          { head: heal.sha, status: "waiting_review", agentWatermark },
+        );
+      }
+    }
+
+    // The remaining outcome (progressed:false, huskRetry:false, no self-heal) escalates to a human;
+    // the persist-escalation-noprogress worker owns the status, so leave it unset — but still advance
+    // the baseline and stamp the idempotency record so a redelivered escalation replays instead of
     // recomputing.
     return commit(out, { head: currentHead, agentWatermark });
   };
