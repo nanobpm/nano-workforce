@@ -19,10 +19,12 @@
 // cross-repo fork head, or a refused ref update all yield `{ healed: false }`, so the caller escalates
 // exactly as it did before. It is purely additive to the existing no-advance path.
 
-/** The push-checkpoint reader — the newest durable `{ commitSha }` recorded for a PR, or `null` when
- * the PR has none (nothing was pushed, so there is nothing to reconcile). Backed by
- * {@link ../world/store.ts}'s `WorldStore.lastCheckpoint`; injectable for tests. */
-export type CheckpointReader = (prKey: string) => Promise<{ commitSha: string } | null>;
+/** The push-checkpoint reader — the newest durable `{ commitSha }` recorded for a PR AT A SPECIFIC
+ * ROUND, or `null` when that round pushed nothing (so there is nothing to reconcile). Scoped by
+ * `roundNo` so a heal is anchored to THIS attempt's checkpoint and can never fast-forward the head
+ * onto a stale checkpoint from a prior run / later round (#819). Backed by
+ * {@link ../world/store.ts}'s `WorldStore.lastCheckpointForRound`; injectable for tests. */
+export type CheckpointReader = (prKey: string, roundNo: number) => Promise<{ commitSha: string } | null>;
 
 /** The PR-head reader — the head branch name + repo of a PR, so the self-heal knows WHICH ref to
  * advance and whether it lives in THIS repo (a fork head is unpushable from the base token). Backed
@@ -78,16 +80,19 @@ export interface SelfHealResult {
  *
  * @param currentHead the PR head SHA the no-advance decision was made against (the compare base). It
  *   is non-null at the escalation point — a null/unreadable head fails OPEN upstream (continues) and
- *   never reaches here — so the comparison is always anchored on the real head. */
+ *   never reaches here — so the comparison is always anchored on the real head.
+ * @param roundNo the round being reconciled; the checkpoint lookup is scoped to it so the heal can
+ *   only fast-forward onto THIS round's own pushed SHA, never a stale prior-run/later-round one. */
 export async function attemptNoAdvanceSelfHeal(
   deps: SelfHealDeps,
   repo: string,
   prNumber: number,
   prKey: string,
   currentHead: string,
+  roundNo: number,
 ): Promise<SelfHealResult> {
   try {
-    const checkpoint = await deps.lastCheckpoint(prKey);
+    const checkpoint = await deps.lastCheckpoint(prKey, roundNo);
     if (!checkpoint) return { healed: false, reason: "no-checkpoint" };
     const sha = checkpoint.commitSha;
     // The head is already at the checkpoint — nothing stranded, nothing to move. (A no-advance round
@@ -112,7 +117,19 @@ export async function attemptNoAdvanceSelfHeal(
     // so a mid-check head move can't make us fast-forward onto the wrong baseline.
     const cmp = await deps.compare(repo, currentHead, sha);
     if (!cmp) return { healed: false, reason: "compare-unavailable" };
-    if (cmp.status !== "ahead" || cmp.behindBy !== 0 || cmp.aheadBy <= 0) {
+    // Validate the compare COUNTS before trusting the fast-forward proof: a malformed compare
+    // response can coerce `ahead_by`/`behind_by` to `NaN` (`Number("not-a-number")`), and because
+    // `NaN <= 0` and `NaN !== 0` are BOTH false, a bare `aheadBy <= 0 || behindBy !== 0` gate would
+    // let a `{status:"ahead", behindBy:0, aheadBy:NaN}` response slip through and PATCH the ref onto
+    // an unproven SHA. Require finite INTEGER counts (a strict fast-forward is `behindBy === 0` AND
+    // `aheadBy > 0`); any non-integer count is a corrupt proof and must escalate, not heal.
+    if (
+      cmp.status !== "ahead" ||
+      !Number.isInteger(cmp.aheadBy) ||
+      !Number.isInteger(cmp.behindBy) ||
+      cmp.behindBy !== 0 ||
+      cmp.aheadBy <= 0
+    ) {
       return { healed: false, reason: "not-fast-forward" };
     }
 

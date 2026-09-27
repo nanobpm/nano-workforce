@@ -258,6 +258,21 @@ export class WorldStore {
     return { offset: newest.checkpoint_offset, commitSha: newest.commit_sha, roundNo: newest.round_no };
   }
 
+  /** The newest push-checkpoint recorded FOR A SPECIFIC ROUND of a PR, or `null` when that round
+   * pushed nothing. Unlike {@link lastCheckpoint} (newest across ALL rounds), this proves the
+   * checkpoint belongs to the attempt being reconciled: the no-advance self-heal (#818, #819) must
+   * NOT fast-forward the head onto a stale checkpoint left by a PRIOR run or a LATER round — a
+   * resubmission resets `current_round` while the older run's higher-offset checkpoints survive, so a
+   * newest-across-all-rounds lookup could resurrect that stale work if it happens to descend the
+   * (reset) head. Scoping to `round_no === roundNo` (still newest-by-offset, so a genuine re-push of
+   * the SAME round wins) anchors the heal to THIS round's own pushed SHA. */
+  async lastCheckpointForRound(prKey: string, roundNo: number): Promise<LastCheckpoint | null> {
+    const rows = (await this.#checkpoints().find({ pr_key: prKey })).filter((r) => r.round_no === roundNo);
+    if (rows.length === 0) return null;
+    const newest = rows.reduce((a, b) => (b.checkpoint_offset > a.checkpoint_offset ? b : a));
+    return { offset: newest.checkpoint_offset, commitSha: newest.commit_sha, roundNo: newest.round_no };
+  }
+
   /** The effect tail recorded at a checkpoint offset, in `seq` order — the sequence the restore path
    * fence-replays after checking the working tree out to that checkpoint's SHA. `seq` is the intended
    * order, but it is allocated by a racy read-max-plus-one (`#nextSeqOn`) and the schema has no

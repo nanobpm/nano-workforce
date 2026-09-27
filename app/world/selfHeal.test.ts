@@ -12,6 +12,7 @@ const PR_NUM = 7;
 const PR_KEY = "o/r#7";
 const HEAD = "a".repeat(40);
 const AHEAD = "b".repeat(40);
+const ROUND = 3;
 
 /** Build deps with per-test overrides; every primitive defaults to the happy-path fast-forward. */
 function deps(over: Partial<SelfHealDeps> = {}): SelfHealDeps {
@@ -32,18 +33,19 @@ test("heals: a checkpoint that strictly fast-forwards the head advances it and c
     PR_NUM,
     PR_KEY,
     HEAD,
+    ROUND,
   );
   assertEquals(res, { healed: true, sha: AHEAD });
   assertEquals(calls, [[REPO, "feat/x", AHEAD]], "advances the PR head branch to the checkpoint SHA");
 });
 
 test("does NOT heal when the PR has no recorded checkpoint (nothing was pushed)", async () => {
-  const res = await attemptNoAdvanceSelfHeal(deps({ lastCheckpoint: async () => null }), REPO, PR_NUM, PR_KEY, HEAD);
+  const res = await attemptNoAdvanceSelfHeal(deps({ lastCheckpoint: async () => null }), REPO, PR_NUM, PR_KEY, HEAD, ROUND);
   assertEquals(res, { healed: false, reason: "no-checkpoint" });
 });
 
 test("does NOT heal when the checkpoint already equals the head (nothing stranded)", async () => {
-  const res = await attemptNoAdvanceSelfHeal(deps({ lastCheckpoint: async () => ({ commitSha: HEAD }) }), REPO, PR_NUM, PR_KEY, HEAD);
+  const res = await attemptNoAdvanceSelfHeal(deps({ lastCheckpoint: async () => ({ commitSha: HEAD }) }), REPO, PR_NUM, PR_KEY, HEAD, ROUND);
   assertEquals(res, { healed: false, reason: "already-at-head" });
 });
 
@@ -54,6 +56,7 @@ test("does NOT heal a diverged checkpoint — a non-fast-forward must escalate, 
     PR_NUM,
     PR_KEY,
     HEAD,
+    ROUND,
   );
   assertEquals(res, { healed: false, reason: "not-fast-forward" });
 });
@@ -65,6 +68,7 @@ test("does NOT heal a behind/identical checkpoint (aheadBy 0 or behindBy > 0)", 
     PR_NUM,
     PR_KEY,
     HEAD,
+    ROUND,
   );
   assertEquals(behind, { healed: false, reason: "not-fast-forward" });
   const identical = await attemptNoAdvanceSelfHeal(
@@ -73,6 +77,7 @@ test("does NOT heal a behind/identical checkpoint (aheadBy 0 or behindBy > 0)", 
     PR_NUM,
     PR_KEY,
     HEAD,
+    ROUND,
   );
   assertEquals(identical, { healed: false, reason: "not-fast-forward" });
 });
@@ -84,6 +89,7 @@ test("does NOT heal a cross-repo fork head — the base token cannot move a fork
     PR_NUM,
     PR_KEY,
     HEAD,
+    ROUND,
   );
   assertEquals(res, { healed: false, reason: "fork-head" });
 });
@@ -103,23 +109,24 @@ test("does NOT heal an UNRESOLVED head repo (null) even with a same-named ref �
     PR_NUM,
     PR_KEY,
     HEAD,
+    ROUND,
   );
   assertEquals(res, { healed: false, reason: "fork-head" });
   assertEquals(advanceCalls, []);
 });
 
 test("does NOT heal when the PR head ref is unknown", async () => {
-  const res = await attemptNoAdvanceSelfHeal(deps({ prHead: async () => ({ headRef: null, headRepo: REPO }) }), REPO, PR_NUM, PR_KEY, HEAD);
+  const res = await attemptNoAdvanceSelfHeal(deps({ prHead: async () => ({ headRef: null, headRepo: REPO }) }), REPO, PR_NUM, PR_KEY, HEAD, ROUND);
   assertEquals(res, { healed: false, reason: "no-head-ref" });
 });
 
 test("does NOT heal when the comparison is unavailable (idle transport)", async () => {
-  const res = await attemptNoAdvanceSelfHeal(deps({ compare: async () => null }), REPO, PR_NUM, PR_KEY, HEAD);
+  const res = await attemptNoAdvanceSelfHeal(deps({ compare: async () => null }), REPO, PR_NUM, PR_KEY, HEAD, ROUND);
   assertEquals(res, { healed: false, reason: "compare-unavailable" });
 });
 
 test("does NOT heal (and never crashes) when GitHub refuses the fast-forward ref update", async () => {
-  const res = await attemptNoAdvanceSelfHeal(deps({ advanceHead: async () => false }), REPO, PR_NUM, PR_KEY, HEAD);
+  const res = await attemptNoAdvanceSelfHeal(deps({ advanceHead: async () => false }), REPO, PR_NUM, PR_KEY, HEAD, ROUND);
   assertEquals(res, { healed: false, reason: "advance-refused" });
 });
 
@@ -134,6 +141,7 @@ test("fails safe (never throws) when a dependency rejects — a transient outage
     PR_NUM,
     PR_KEY,
     HEAD,
+    ROUND,
   );
   assertEquals(res, { healed: false });
 });
@@ -149,6 +157,59 @@ test("does not advance the head when the comparison is not a fast-forward", asyn
     PR_NUM,
     PR_KEY,
     HEAD,
+    ROUND,
   );
   assertEquals(advanced, false, "the ref is never moved unless the checkpoint strictly fast-forwards the head");
+});
+
+test("scopes the checkpoint lookup to the CURRENT round — never heals onto a stale prior-run checkpoint (#819)", async () => {
+  // The reader must be asked for THIS round's checkpoint, not the newest across all rounds: a
+  // resubmission/reset can leave an older run's higher-offset checkpoint that would resurrect stale
+  // work if it happened to descend the (reset) head. Prove the roundNo is threaded into the reader.
+  const seen: number[] = [];
+  const res = await attemptNoAdvanceSelfHeal(
+    deps({
+      lastCheckpoint: async (_pk, rn) => {
+        seen.push(rn);
+        return rn === ROUND ? { commitSha: AHEAD } : null;
+      },
+    }),
+    REPO,
+    PR_NUM,
+    PR_KEY,
+    HEAD,
+    ROUND,
+  );
+  assertEquals(seen, [ROUND], "the checkpoint reader is scoped to the round being reconciled");
+  assertEquals(res, { healed: true, sha: AHEAD });
+});
+
+test("does NOT heal on a malformed compare — a non-integer aheadBy/behindBy can't bypass the fast-forward gate", async () => {
+  // A malformed compare response coerces to NaN (`Number("not-a-number")`); since `NaN <= 0` and
+  // `NaN !== 0` are both false, a bare count gate would let `{ahead, behindBy:0, aheadBy:NaN}` PATCH
+  // the ref. Reject any non-integer count as a corrupt proof and escalate instead.
+  let advanced = false;
+  const nanAhead = await attemptNoAdvanceSelfHeal(
+    deps({
+      compare: async () => ({ status: "ahead", aheadBy: Number("not-a-number"), behindBy: 0 }),
+      advanceHead: async () => ((advanced = true), true),
+    }),
+    REPO,
+    PR_NUM,
+    PR_KEY,
+    HEAD,
+    ROUND,
+  );
+  assertEquals(nanAhead, { healed: false, reason: "not-fast-forward" });
+  assertEquals(advanced, false, "a NaN ahead count never reaches the ref mutation");
+  // A non-integer (fractional) count is equally a corrupt proof.
+  const frac = await attemptNoAdvanceSelfHeal(
+    deps({ compare: async () => ({ status: "ahead", aheadBy: 1.5, behindBy: 0 }) }),
+    REPO,
+    PR_NUM,
+    PR_KEY,
+    HEAD,
+    ROUND,
+  );
+  assertEquals(frac, { healed: false, reason: "not-fast-forward" });
 });

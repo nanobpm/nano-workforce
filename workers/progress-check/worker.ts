@@ -88,14 +88,15 @@ export type SelfHealFn = (
   prNumber: number,
   prKey: string,
   currentHead: string,
+  roundNo: number,
 ) => Promise<SelfHealResult>;
 
-const defaultSelfHeal: SelfHealFn = (app, repo, prNumber, prKey, currentHead) => {
+const defaultSelfHeal: SelfHealFn = (app, repo, prNumber, prKey, currentHead, roundNo) => {
   const tok = process.env.GITHUB_TOKEN ?? "";
   const store = new WorldStore(app.data);
   return attemptNoAdvanceSelfHeal(
     {
-      lastCheckpoint: (pk) => store.lastCheckpoint(pk),
+      lastCheckpoint: (pk, rn) => store.lastCheckpointForRound(pk, rn),
       prHead: async (r, n) => {
         const h = await fetchPrHead(r, n, tok);
         return h ? { headRef: h.headRef, headRepo: h.headRepo } : null;
@@ -107,6 +108,7 @@ const defaultSelfHeal: SelfHealFn = (app, repo, prNumber, prKey, currentHead) =>
     prNumber,
     prKey,
     currentHead,
+    roundNo,
   );
 };
 
@@ -447,7 +449,7 @@ export function makeHandler(deps: {
       // the heal when this job no longer owns the row — falling through to the escalation `commit`,
       // which the same fence turns into a harmless ack-without-write.
       if (!(await isSuperseded())) {
-        const heal = await (deps.selfHeal ?? defaultSelfHeal)(app, ghRepo, ghNumber, prKey, currentHead).catch(
+        const heal = await (deps.selfHeal ?? defaultSelfHeal)(app, ghRepo, ghNumber, prKey, currentHead, roundNo).catch(
           (): SelfHealResult => ({ healed: false }),
         );
         if (heal.healed && heal.sha) {

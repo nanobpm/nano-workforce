@@ -218,6 +218,7 @@ async function makeUnderTest(
     prNumber: number,
     prKey: string,
     currentHead: string,
+    roundNo: number,
   ) => Promise<{ healed: boolean; sha?: string; reason?: string }>,
 ) {
   const { makeHandler } = await import("../workers/progress-check/worker.ts");
@@ -333,8 +334,8 @@ test("progress-check: a no-advance round self-heals to a reachable push-checkpoi
   const handler = await makeUnderTest(
     async () => "sha-1",
     async () => true,
-    async (_app, repo, prNumber, prKey, currentHead) => {
-      healArgs = [repo, prNumber, prKey, currentHead];
+    async (_app, repo, prNumber, prKey, currentHead, roundNo) => {
+      healArgs = [repo, prNumber, prKey, currentHead, roundNo];
       return { healed: true, sha: "healed-sha" };
     },
   );
@@ -344,7 +345,11 @@ test("progress-check: a no-advance round self-heals to a reachable push-checkpoi
     app as any,
   );
   assertEquals(out, { progressed: true, huskRetries: 0 }, "a healed round continues as real progress");
-  assertEquals(healArgs, ["o/r", 1, "o/r#1", "sha-1"], "self-heal is called with the repo/number/prKey and the current head as the compare base");
+  assertEquals(
+    healArgs,
+    ["o/r", 1, "o/r#1", "sha-1", 3],
+    "self-heal is called with the repo/number/prKey, the current head as the compare base, and the round being reconciled (#819)",
+  );
   // The healed head becomes the new baseline and the round parks at wait-review (one atomic write).
   assertEquals(updates.length, 1, "the healed head is rebaselined and parked in one atomic write");
   assertEquals(updates[0]!.patch.last_round_head, "healed-sha", "the baseline advances to the healed head");

@@ -33,6 +33,27 @@ test("lastCheckpoint returns the newest push-checkpoint (max offset), or null wh
   assertEquals(last, { offset: 1, commitSha: "sha-b", roundNo: 2 }, "the newest checkpoint wins");
 });
 
+test("lastCheckpointForRound scopes to one round's newest checkpoint (never a stale prior/later round, #819)", async () => {
+  const { data } = memWorldData();
+  const store = new WorldStore(data);
+  assertEquals(await store.lastCheckpointForRound(PR, 1), null, "no checkpoint for the round yet");
+  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-a" });
+  await store.recordCheckpoint({ prKey: PR, roundNo: 2, commitSha: "sha-b" });
+  // A resubmission re-pushes round 1 (a NEW, higher-offset checkpoint for the SAME round number).
+  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-c" });
+  assertEquals(
+    await store.lastCheckpointForRound(PR, 1),
+    { offset: 2, commitSha: "sha-c", roundNo: 1 },
+    "the newest checkpoint FOR ROUND 1 wins — not round 2's higher-offset one",
+  );
+  assertEquals(
+    await store.lastCheckpointForRound(PR, 2),
+    { offset: 1, commitSha: "sha-b", roundNo: 2 },
+    "round 2 resolves to its own checkpoint, not the newest overall",
+  );
+  assertEquals(await store.lastCheckpointForRound(PR, 3), null, "a round that pushed nothing has no checkpoint");
+});
+
 test("recordCheckpoint defaults to a single push effect keyed by the commit SHA", async () => {
   const { data } = memWorldData();
   const store = new WorldStore(data);
