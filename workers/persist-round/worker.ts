@@ -202,6 +202,12 @@ const handler: AppJobHandler<In> = async (job, app) => {
         prKey,
         roundNo: round,
         commitSha: marker.commitSha,
+        // Bind the checkpoint to THIS convergence run (issue #819): the no-advance self-heal scopes
+        // its lookup by `(process_key, round_no)` so it can never fast-forward the head onto a prior
+        // run's stale checkpoint. `processInstanceKey` is this run's instance key — the same value
+        // `submitPr` advances into `pull_requests.process_key` and the self-heal's ownership guard
+        // compares against.
+        processKey: processInstanceKey,
         ...(marker.effects ? { effects: marker.effects } : {}),
       });
     } catch (err) {

@@ -219,6 +219,8 @@ async function makeUnderTest(
     prKey: string,
     currentHead: string,
     roundNo: number,
+    processKey: string | null,
+    stillOwns: () => Promise<boolean>,
   ) => Promise<{ healed: boolean; sha?: string; reason?: string }>,
 ) {
   const { makeHandler } = await import("../workers/progress-check/worker.ts");
@@ -331,15 +333,17 @@ test("progress-check: a no-advance round self-heals to a reachable push-checkpoi
   // descends the head (a producer harness pushed the fix to a fallback branch, off the PR head), so
   // the self-heal advances the head onto it and the loop continues as real progress.
   let healArgs: unknown[] = [];
+  let healStillOwns: (() => Promise<boolean>) | null = null;
   const handler = await makeUnderTest(
     async () => "sha-1",
     async () => true,
-    async (_app, repo, prNumber, prKey, currentHead, roundNo) => {
-      healArgs = [repo, prNumber, prKey, currentHead, roundNo];
+    async (_app, repo, prNumber, prKey, currentHead, roundNo, processKey, stillOwns) => {
+      healArgs = [repo, prNumber, prKey, currentHead, roundNo, processKey];
+      healStillOwns = stillOwns;
       return { healed: true, sha: "healed-sha" };
     },
   );
-  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+  const { app, updates } = fakeApp({ last_round_head: "sha-1", process_key: "pik" });
   const out = await handler(
     { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0 } } as any,
     app as any,
@@ -347,9 +351,11 @@ test("progress-check: a no-advance round self-heals to a reachable push-checkpoi
   assertEquals(out, { progressed: true, huskRetries: 0 }, "a healed round continues as real progress");
   assertEquals(
     healArgs,
-    ["o/r", 1, "o/r#1", "sha-1", 3],
-    "self-heal is called with the repo/number/prKey, the current head as the compare base, and the round being reconciled (#819)",
+    ["o/r", 1, "o/r#1", "sha-1", 3, "pik"],
+    "self-heal is called with the repo/number/prKey, the current head as compare base, the round, and THIS run's process key (#819)",
   );
+  assertEquals(typeof healStillOwns, "function", "a late ownership guard is threaded into the heal (#819)");
+  assertEquals(await (healStillOwns as unknown as () => Promise<boolean>)(), true, "the owning run's guard reports ownership");
   // The healed head becomes the new baseline and the round parks at wait-review (one atomic write).
   assertEquals(updates.length, 1, "the healed head is rebaselined and parked in one atomic write");
   assertEquals(updates[0]!.patch.last_round_head, "healed-sha", "the baseline advances to the healed head");

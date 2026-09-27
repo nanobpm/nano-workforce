@@ -118,5 +118,5 @@ export function memDataFor(migrationFiles: readonly string[]): { data: DataLayer
 
 /** A `DataLayer` stub over a fresh in-memory db with the world schema applied. */
 export function memWorldData(): { data: DataLayer; db: DatabaseSync } {
-  return memDataFor(["049_world_checkpoint.sql"]);
+  return memDataFor(["049_world_checkpoint.sql", "115_world_checkpoint_process_key.sql"]);
 }

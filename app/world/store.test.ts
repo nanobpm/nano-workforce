@@ -33,25 +33,53 @@ test("lastCheckpoint returns the newest push-checkpoint (max offset), or null wh
   assertEquals(last, { offset: 1, commitSha: "sha-b", roundNo: 2 }, "the newest checkpoint wins");
 });
 
-test("lastCheckpointForRound scopes to one round's newest checkpoint (never a stale prior/later round, #819)", async () => {
+test("lastCheckpointForRun scopes to one RUN's round newest checkpoint (never a stale prior-run round, #819)", async () => {
   const { data } = memWorldData();
   const store = new WorldStore(data);
-  assertEquals(await store.lastCheckpointForRound(PR, 1), null, "no checkpoint for the round yet");
-  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-a" });
-  await store.recordCheckpoint({ prKey: PR, roundNo: 2, commitSha: "sha-b" });
-  // A resubmission re-pushes round 1 (a NEW, higher-offset checkpoint for the SAME round number).
-  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-c" });
+  const RUN_A = "1001";
+  const RUN_B = "2002";
+  assertEquals(await store.lastCheckpointForRun(PR, RUN_A, 1), null, "no checkpoint for the run/round yet");
+  // Prior run A pushes round 1 and round 2 checkpoints.
+  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-a", processKey: RUN_A });
+  await store.recordCheckpoint({ prKey: PR, roundNo: 2, commitSha: "sha-b", processKey: RUN_A });
+  // The PR is reopened: a FRESH run B starts at round 1 and re-pushes (a NEW, higher-offset row).
+  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-c", processKey: RUN_B });
   assertEquals(
-    await store.lastCheckpointForRound(PR, 1),
+    await store.lastCheckpointForRun(PR, RUN_B, 1),
     { offset: 2, commitSha: "sha-c", roundNo: 1 },
-    "the newest checkpoint FOR ROUND 1 wins — not round 2's higher-offset one",
+    "run B's round-1 checkpoint wins — never run A's same-numbered round-1 checkpoint",
   );
   assertEquals(
-    await store.lastCheckpointForRound(PR, 2),
-    { offset: 1, commitSha: "sha-b", roundNo: 2 },
-    "round 2 resolves to its own checkpoint, not the newest overall",
+    await store.lastCheckpointForRun(PR, RUN_A, 1),
+    { offset: 0, commitSha: "sha-a", roundNo: 1 },
+    "run A still resolves to its OWN round-1 checkpoint, not run B's",
   );
-  assertEquals(await store.lastCheckpointForRound(PR, 3), null, "a round that pushed nothing has no checkpoint");
+  assertEquals(
+    await store.lastCheckpointForRun(PR, RUN_A, 2),
+    { offset: 1, commitSha: "sha-b", roundNo: 2 },
+    "run A round 2 resolves to its own checkpoint",
+  );
+  // A fresh run at round 1 that has pushed NOTHING never inherits a prior run's checkpoint.
+  assertEquals(
+    await store.lastCheckpointForRun(PR, "3003", 1),
+    null,
+    "a run with no checkpoint of its own can never heal onto a prior run's stale checkpoint",
+  );
+  assertEquals(await store.lastCheckpointForRun(PR, RUN_A, 3), null, "a round that pushed nothing has no checkpoint");
+  // A null process key (a job with no process instance) is un-attributable — it matches nothing.
+  assertEquals(await store.lastCheckpointForRun(PR, null, 1), null, "a null process key can never resolve a checkpoint");
+});
+
+test("lastCheckpointForRun never returns a NULL-process_key (pre-#819 / un-attributable) checkpoint", async () => {
+  const { data } = memWorldData();
+  const store = new WorldStore(data);
+  // A checkpoint recorded without a process key (a legacy row, or a job with no process instance).
+  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-legacy" });
+  assertEquals(
+    await store.lastCheckpointForRun(PR, "1001", 1),
+    null,
+    "an un-attributable checkpoint is never healed onto — it degrades to a safe escalation",
+  );
 });
 
 test("recordCheckpoint defaults to a single push effect keyed by the commit SHA", async () => {

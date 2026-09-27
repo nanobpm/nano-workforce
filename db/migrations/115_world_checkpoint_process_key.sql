@@ -1,0 +1,22 @@
+-- 115_world_checkpoint_process_key.sql — issue #819 (Copilot review): bind a push-checkpoint to the
+-- convergence RUN that produced it, so the no-advance self-heal can prove a checkpoint belongs to the
+-- CURRENT run and never fast-forwards the PR head onto a stale checkpoint left by a PRIOR run.
+--
+-- WHY. The no-advance self-heal (app/world/selfHeal.ts, #818) reconciles a recorded push-checkpoint
+-- against the PR head. #819 scoped that lookup to the current `round_no`, but `round_no` alone does
+-- NOT identify a run: `submitPr` (app/service.ts) resets a reopened PR's `current_round` to 1 while
+-- leaving the prior run's `world_checkpoints` rows in place, so a fresh run at round 1 would still
+-- select the previous run's round-1 checkpoint — and if the branch was reset behind that old SHA the
+-- fast-forward compare passes and the heal resurrects stale work. The convergence instance key
+-- (`pull_requests.process_key`, advanced to the new run on every reopen) is the run generation, so
+-- recording it on each checkpoint lets the self-heal scope by `(process_key, round_no)` — proving the
+-- checkpoint is THIS run's own pushed SHA.
+--
+-- EXPAND (additive) phase: one nullable column, no default, nothing dropped or renamed. `NULL` on the
+-- pre-existing rows (and on any checkpoint recorded by a job without a `processInstanceKey`) is the
+-- SAFE value: the run-scoped lookup requires an EXACT non-null match, so a NULL-keyed checkpoint is
+-- never attributed to a run and can never heal — it degrades to escalation, exactly as an absent
+-- checkpoint does. Numbered after the current highest prefix on origin/main (114). The runner wraps
+-- each file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
+
+ALTER TABLE world_checkpoints ADD COLUMN process_key TEXT;

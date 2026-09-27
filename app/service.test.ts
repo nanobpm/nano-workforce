@@ -1024,7 +1024,7 @@ test("repoEnvelopeVars emits branch.create only for a non-blank pre-PR branch (#
 // so the round redrives from scratch (exactly as today). Proven against a REAL in-memory SQLite db
 // with the world (049) + enrolment (052) schemas applied.
 test("worldRestoreSha is gated on the durable-resume enrolment: participant → SHA, none → null", async () => {
-  const { data } = memDataFor(["049_world_checkpoint.sql", "052_worker_durable_resume.sql"]);
+  const { data } = memDataFor(["049_world_checkpoint.sql", "052_worker_durable_resume.sql", "115_world_checkpoint_process_key.sql"]);
   const PR = "owner/repo#7";
   const sha = "77ee0993cc6ad4493da0f7551212ef16722135db";
   await new WorldStore(data).recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: sha });
@@ -1042,7 +1042,7 @@ test("worldRestoreSha is gated on the durable-resume enrolment: participant → 
 });
 
 test("worldRestoreSha is null when a participant is enrolled but the PR has no checkpoint yet", async () => {
-  const { data } = memDataFor(["049_world_checkpoint.sql", "052_worker_durable_resume.sql"]);
+  const { data } = memDataFor(["049_world_checkpoint.sql", "052_worker_durable_resume.sql", "115_world_checkpoint_process_key.sql"]);
   await new DurableResumeRegistry(data).recordEnrolment("modern-1", true);
   assertEquals(await worldRestoreSha(data, "owner/repo#8"), null, "nothing to reconstruct on a first activation");
 });

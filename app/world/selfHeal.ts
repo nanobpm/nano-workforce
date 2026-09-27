@@ -19,12 +19,18 @@
 // cross-repo fork head, or a refused ref update all yield `{ healed: false }`, so the caller escalates
 // exactly as it did before. It is purely additive to the existing no-advance path.
 
-/** The push-checkpoint reader — the newest durable `{ commitSha }` recorded for a PR AT A SPECIFIC
- * ROUND, or `null` when that round pushed nothing (so there is nothing to reconcile). Scoped by
- * `roundNo` so a heal is anchored to THIS attempt's checkpoint and can never fast-forward the head
- * onto a stale checkpoint from a prior run / later round (#819). Backed by
- * {@link ../world/store.ts}'s `WorldStore.lastCheckpointForRound`; injectable for tests. */
-export type CheckpointReader = (prKey: string, roundNo: number) => Promise<{ commitSha: string } | null>;
+/** The push-checkpoint reader — the newest durable `{ commitSha }` recorded by a SPECIFIC RUN of a PR
+ * AT A SPECIFIC ROUND, or `null` when that run/round pushed nothing (so there is nothing to
+ * reconcile). Scoped by the convergence RUN's `processKey` AND `roundNo` so a heal is anchored to THIS
+ * attempt's own checkpoint and can never fast-forward the head onto a stale checkpoint from a prior
+ * run — `round_no` alone does not identify a run, since a reopen resets `current_round` while the old
+ * run's checkpoints survive (#819). Backed by {@link ../world/store.ts}'s
+ * `WorldStore.lastCheckpointForRun`; injectable for tests. */
+export type CheckpointReader = (
+  prKey: string,
+  processKey: string | null,
+  roundNo: number,
+) => Promise<{ commitSha: string } | null>;
 
 /** The PR-head reader — the head branch name + repo of a PR, so the self-heal knows WHICH ref to
  * advance and whether it lives in THIS repo (a fork head is unpushable from the base token). Backed
@@ -52,6 +58,16 @@ export interface SelfHealDeps {
   readonly prHead: PrHeadReader;
   readonly compare: CommitComparator;
   readonly advanceHead: HeadAdvancer;
+  /** A LATE ownership guard, re-checked immediately BEFORE the (irreversible) ref mutation to close
+   * the check-to-mutation TOCTOU (Copilot review on #819). The worker's pre-call `isSuperseded()`
+   * read is not a fence across the async heal: after it returns, this function still awaits the
+   * checkpoint lookup, PR-head read, and compare before `advanceHead`, and `submitPr` can install a
+   * new `process_key` (a fresh run) in that window. Returns `true` while this run still owns the PR
+   * row; when it returns `false` the heal is abandoned WITHOUT touching the ref, so a superseded
+   * straggler can never PATCH the branch. Optional — omitted (or absent) means "assume ownership"
+   * (the fail-open convention the worker's `isSuperseded` already uses when the identity is unknown),
+   * so a caller with no supersession concept keeps the pure #818 behaviour. */
+  readonly stillOwns?: () => Promise<boolean>;
 }
 
 /** Why a no-advance round did or did not self-heal — `healed` drives the routing (continue vs.
@@ -68,6 +84,7 @@ export interface SelfHealResult {
     | "fork-head"
     | "compare-unavailable"
     | "not-fast-forward"
+    | "superseded"
     | "advance-refused";
 }
 
@@ -81,8 +98,12 @@ export interface SelfHealResult {
  * @param currentHead the PR head SHA the no-advance decision was made against (the compare base). It
  *   is non-null at the escalation point — a null/unreadable head fails OPEN upstream (continues) and
  *   never reaches here — so the comparison is always anchored on the real head.
- * @param roundNo the round being reconciled; the checkpoint lookup is scoped to it so the heal can
- *   only fast-forward onto THIS round's own pushed SHA, never a stale prior-run/later-round one. */
+ * @param roundNo the round being reconciled; the checkpoint lookup is scoped to it (and to
+ *   `processKey`) so the heal can only fast-forward onto THIS run's own pushed SHA, never a stale
+ *   prior-run/later-round one.
+ * @param processKey the convergence RUN (process instance) reconciling the round. Scopes the
+ *   checkpoint lookup to this run so a reopened PR (whose `current_round` reset to 1 while the prior
+ *   run's checkpoints survive) can never select the old run's checkpoint (#819). */
 export async function attemptNoAdvanceSelfHeal(
   deps: SelfHealDeps,
   repo: string,
@@ -90,9 +111,10 @@ export async function attemptNoAdvanceSelfHeal(
   prKey: string,
   currentHead: string,
   roundNo: number,
+  processKey: string | null,
 ): Promise<SelfHealResult> {
   try {
-    const checkpoint = await deps.lastCheckpoint(prKey, roundNo);
+    const checkpoint = await deps.lastCheckpoint(prKey, processKey, roundNo);
     if (!checkpoint) return { healed: false, reason: "no-checkpoint" };
     const sha = checkpoint.commitSha;
     // The head is already at the checkpoint — nothing stranded, nothing to move. (A no-advance round
@@ -132,6 +154,15 @@ export async function attemptNoAdvanceSelfHeal(
     ) {
       return { healed: false, reason: "not-fast-forward" };
     }
+
+    // LATE OWNERSHIP FENCE (Copilot review on #819). Everything above only READ GitHub/DB state; the
+    // ONLY irreversible act is the ref move below. Re-check ownership as late as possible — right
+    // before it — so a run that was superseded DURING the awaits above (a concurrent `submitPr`
+    // installed a new `process_key`) abandons the heal WITHOUT PATCHing the branch, instead of moving
+    // the head and only then being discarded by the downstream `commit` fence (which guards the DB
+    // write, not a ref mutation already made). Absent guard ⇒ assume ownership (the same fail-open the
+    // worker's `isSuperseded` uses when identity is unknown).
+    if (deps.stillOwns && !(await deps.stillOwns())) return { healed: false, reason: "superseded" };
 
     const advanced = await deps.advanceHead(repo, headRef, sha);
     if (!advanced) return { healed: false, reason: "advance-refused" };

@@ -20,6 +20,11 @@ interface WorldCheckpointRow {
   round_no: number;
   checkpoint_offset: number;
   commit_sha: string;
+  /** The convergence RUN (process instance) that recorded this checkpoint — `String(processInstanceKey)`
+   * of the `pr.persist-round` job. NULL on pre-#819 rows or a job without a `processInstanceKey`. The
+   * run-scoped self-heal lookup ({@link WorldStore.lastCheckpointForRun}) requires an EXACT non-null
+   * match, so a NULL-keyed checkpoint is never attributed to a run and can never heal (issue #819). */
+  process_key: string | null;
   created_at: string;
 }
 
@@ -58,6 +63,12 @@ export interface RecordCheckpointInput {
    * a checkpoint records what a round already DID). A pending tail effect (recorded before it is
    * performed, for crash-precise replay) is recorded with `applied: false`. */
   readonly applied?: boolean;
+  /** The convergence RUN (process instance) recording this checkpoint — `String(processInstanceKey)`
+   * of the persist-round job. Persisted so the no-advance self-heal can prove a checkpoint belongs to
+   * THIS run and never fast-forwards the head onto a prior run's stale checkpoint (issue #819).
+   * Omitted/`null` for a job without a process instance (the checkpoint is then un-attributable and
+   * the run-scoped lookup skips it — a safe escalation, not a heal). */
+  readonly processKey?: string | null;
 }
 
 /** A durable store over the `world_checkpoints` + `world_effects` tables. */
@@ -143,6 +154,7 @@ export class WorldStore {
     prKey: string,
     roundNo: number,
     commitSha: string,
+    processKey: string | null,
     now: string,
   ): Promise<number> {
     const offset = await WorldStore.#nextOffsetOn(checkpoints, prKey);
@@ -152,6 +164,7 @@ export class WorldStore {
         round_no: roundNo,
         checkpoint_offset: offset,
         commit_sha: commitSha,
+        process_key: processKey,
         created_at: now,
       });
       return offset;
@@ -188,6 +201,7 @@ export class WorldStore {
    */
   async recordCheckpoint(input: RecordCheckpointInput): Promise<number> {
     const { prKey, roundNo, commitSha } = input;
+    const processKey = input.processKey ?? null;
     const effects: readonly Effect[] = input.effects ?? [{ kind: "push", idempotencyKey: commitSha }];
     const applied = input.applied ?? true;
     const now = new Date().toISOString();
@@ -197,7 +211,7 @@ export class WorldStore {
       const existing = await checkpoints.findOne({ pr_key: prKey, commit_sha: commitSha });
       const offset = existing
         ? existing.checkpoint_offset
-        : await WorldStore.#insertCheckpointFenced(checkpoints, prKey, roundNo, commitSha, now);
+        : await WorldStore.#insertCheckpointFenced(checkpoints, prKey, roundNo, commitSha, processKey, now);
       let seq = await WorldStore.#nextSeqOn(effectsTable, prKey, offset);
       for (const effect of effects) {
         await WorldStore.#appendEffect(effectsTable, prKey, offset, seq++, effect, applied, now);
@@ -258,16 +272,23 @@ export class WorldStore {
     return { offset: newest.checkpoint_offset, commitSha: newest.commit_sha, roundNo: newest.round_no };
   }
 
-  /** The newest push-checkpoint recorded FOR A SPECIFIC ROUND of a PR, or `null` when that round
-   * pushed nothing. Unlike {@link lastCheckpoint} (newest across ALL rounds), this proves the
-   * checkpoint belongs to the attempt being reconciled: the no-advance self-heal (#818, #819) must
-   * NOT fast-forward the head onto a stale checkpoint left by a PRIOR run or a LATER round — a
-   * resubmission resets `current_round` while the older run's higher-offset checkpoints survive, so a
-   * newest-across-all-rounds lookup could resurrect that stale work if it happens to descend the
-   * (reset) head. Scoping to `round_no === roundNo` (still newest-by-offset, so a genuine re-push of
-   * the SAME round wins) anchors the heal to THIS round's own pushed SHA. */
-  async lastCheckpointForRound(prKey: string, roundNo: number): Promise<LastCheckpoint | null> {
-    const rows = (await this.#checkpoints().find({ pr_key: prKey })).filter((r) => r.round_no === roundNo);
+  /** The newest push-checkpoint recorded by a SPECIFIC RUN of a PR at a SPECIFIC ROUND, or `null` when
+   * that run/round pushed nothing. Unlike {@link lastCheckpoint} (newest across ALL runs/rounds), this
+   * proves the checkpoint belongs to the attempt being reconciled: the no-advance self-heal (#818,
+   * #819) must NOT fast-forward the head onto a checkpoint left by a PRIOR run. `round_no` alone does
+   * not identify a run — `submitPr` resets a reopened PR's `current_round` to 1 while the prior run's
+   * checkpoints survive, so a fresh run at round 1 would select the OLD run's round-1 checkpoint and
+   * could resurrect stale work if it descends the (reset) head. Scoping to the convergence RUN's
+   * `process_key` (the instance key advanced on every reopen) AND `round_no` anchors the heal to THIS
+   * run's own pushed SHA. A `null` `processKey` (a job with no process instance) matches NOTHING and
+   * yields `null`, and a checkpoint row with a `NULL` `process_key` (pre-#819, or an un-attributable
+   * record) is likewise never returned — both degrade to a safe escalation, never a heal. Still
+   * newest-by-offset within the match, so a genuine re-push of the same round wins. */
+  async lastCheckpointForRun(prKey: string, processKey: string | null, roundNo: number): Promise<LastCheckpoint | null> {
+    if (processKey == null) return null;
+    const rows = (await this.#checkpoints().find({ pr_key: prKey })).filter(
+      (r) => r.process_key === processKey && r.round_no === roundNo,
+    );
     if (rows.length === 0) return null;
     const newest = rows.reduce((a, b) => (b.checkpoint_offset > a.checkpoint_offset ? b : a));
     return { offset: newest.checkpoint_offset, commitSha: newest.commit_sha, roundNo: newest.round_no };

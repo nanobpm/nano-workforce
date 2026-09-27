@@ -89,26 +89,30 @@ export type SelfHealFn = (
   prKey: string,
   currentHead: string,
   roundNo: number,
+  processKey: string | null,
+  stillOwns: () => Promise<boolean>,
 ) => Promise<SelfHealResult>;
 
-const defaultSelfHeal: SelfHealFn = (app, repo, prNumber, prKey, currentHead, roundNo) => {
+const defaultSelfHeal: SelfHealFn = (app, repo, prNumber, prKey, currentHead, roundNo, processKey, stillOwns) => {
   const tok = process.env.GITHUB_TOKEN ?? "";
   const store = new WorldStore(app.data);
   return attemptNoAdvanceSelfHeal(
     {
-      lastCheckpoint: (pk, rn) => store.lastCheckpointForRound(pk, rn),
+      lastCheckpoint: (pk, run, rn) => store.lastCheckpointForRun(pk, run, rn),
       prHead: async (r, n) => {
         const h = await fetchPrHead(r, n, tok);
         return h ? { headRef: h.headRef, headRepo: h.headRepo } : null;
       },
       compare: (r, base, head) => compareCommits(r, base, head, tok),
       advanceHead: (r, branch, sha) => updateBranchRef(r, branch, sha, tok),
+      stillOwns,
     },
     repo,
     prNumber,
     prKey,
     currentHead,
     roundNo,
+    processKey,
   );
 };
 
@@ -441,17 +445,29 @@ export function makeHandler(deps: {
     // outcome (no checkpoint, not a fast-forward, a fork head, an unreadable/refused move) degrades
     // to escalation exactly as before — the self-heal is purely additive.
     if (currentHead) {
-      // FENCE THE REF MUTATION (Copilot review on #818). The self-heal PATCHes the PR head on
+      // FENCE THE REF MUTATION (Copilot review on #818 / #819). The self-heal PATCHes the PR head on
       // GitHub — an irreversible side effect the atomic `commit` fence below can only guard for the
       // DB write, NOT for a mutation already made. A straggler from a SUPERSEDED instance (its stale
       // checkpoint would resurrect old work on a PR `submitPr` has since reopened under a new
-      // `process_key`) must not move the head, so re-check ownership BEFORE mutating any ref and skip
-      // the heal when this job no longer owns the row — falling through to the escalation `commit`,
-      // which the same fence turns into a harmless ack-without-write.
+      // `process_key`) must not move the head. Two layers guard this: (1) the run-scoped checkpoint
+      // lookup — the self-heal reads `lastCheckpointForRun(prKey, jobProcessKey, roundNo)`, so a fresh
+      // run never even sees the prior run's checkpoint; and (2) a cheap early-out here PLUS a LATE
+      // ownership re-check threaded INTO the heal (`isSuperseded` inverted → `stillOwns`), evaluated
+      // immediately before the ref PATCH, closing the check-to-mutation TOCTOU where a concurrent
+      // `submitPr` supersedes this run DURING the heal's awaits. A skipped/abandoned heal falls
+      // through to the escalation `commit`, which the same fence turns into a harmless ack-without-write.
+      const jobProcessKey = job.processInstanceKey != null ? String(job.processInstanceKey) : null;
       if (!(await isSuperseded())) {
-        const heal = await (deps.selfHeal ?? defaultSelfHeal)(app, ghRepo, ghNumber, prKey, currentHead, roundNo).catch(
-          (): SelfHealResult => ({ healed: false }),
-        );
+        const heal = await (deps.selfHeal ?? defaultSelfHeal)(
+          app,
+          ghRepo,
+          ghNumber,
+          prKey,
+          currentHead,
+          roundNo,
+          jobProcessKey,
+          async () => !(await isSuperseded()),
+        ).catch((): SelfHealResult => ({ healed: false }));
         if (heal.healed && heal.sha) {
           app.log.info("no-advance self-heal advanced PR head to a reachable push-checkpoint", {
             prKey,

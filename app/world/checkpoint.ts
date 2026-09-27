@@ -45,6 +45,10 @@ export interface WorldCheckpointInput {
   /** The round's irreversible effects, in order. Defaults to a single `push` effect keyed by the
    * commit SHA. */
   readonly effects?: readonly Effect[];
+  /** The convergence RUN (process instance) recording this checkpoint — persisted so the no-advance
+   * self-heal can prove the checkpoint belongs to THIS run and never heals onto a prior run's stale
+   * checkpoint (issue #819). `null`/omitted when the recording job has no process instance. */
+  readonly processKey?: string | null;
 }
 
 /** The result of recording a world checkpoint: the shared offset (mind + world commit at it) and the
@@ -73,6 +77,7 @@ export async function recordWorldCheckpoint(
     roundNo: input.roundNo,
     commitSha: input.commitSha,
     effects,
+    processKey: input.processKey ?? null,
   });
   // The JOIN: hand the mind the identical checkpoint the world just persisted, at the same boundary.
   // Advisory — a sink failure must not undo the durable world record (the world is authoritative for
