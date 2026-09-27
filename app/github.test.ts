@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, type GhReview, type Mergeability, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -955,4 +955,126 @@ test("fetchBranchHead: percent-encodes a special-character branch ref (preservin
     () => fetchBranchHead("o/r", "feat/x#123", "tok"),
   );
   assertEquals(sha, "cafef00d");
+});
+
+// ── No-advance self-heal transports (issue #818) ────────────────────────────
+// The self-heal's compare (`compareCommits`) and NON-force ref move (`updateBranchRef`) are
+// safety-critical: a regression in the ahead/behind parsing or the `force:false` / 422-refusal
+// handling silently changes whether a recovery mutates a PR head. These pin the token transport of
+// both — a request-capturing fetch stub so the method/body/path and the refusal branch are covered.
+async function withCapturingFetch<T>(
+  serve: (req: { path: string; method: string; body: unknown }) => { status: number; statusText?: string; body: unknown },
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = ((url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const path = new URL(String(url)).pathname.replace(/^\/repos\//, "");
+    const method = (init?.method ?? "GET").toUpperCase();
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+    const { status, statusText, body: resp } = serve({ path, method, body });
+    return Promise.resolve(new Response(JSON.stringify(resp), { status, statusText }));
+  }) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+}
+
+test("compareCommits: parses an 'ahead' fast-forward response and encodes the compare refs", async () => {
+  const cmp = await withCapturingFetch(
+    ({ path, method }) => {
+      assertEquals(method, "GET");
+      // Each ref segment is percent-encoded (`#` → %23) around the compare API's own `...` separator.
+      assertEquals(path, "o/r/compare/feat/x%23123...deadbeef");
+      return { status: 200, body: { status: "ahead", ahead_by: 3, behind_by: 0 } };
+    },
+    () => compareCommits("o/r", "feat/x#123", "deadbeef", "tok"),
+  );
+  assertEquals(cmp, { status: "ahead", aheadBy: 3, behindBy: 0 });
+});
+
+test("compareCommits: coerces an unknown status to 'diverged' and defaults missing counts to 0", async () => {
+  const cmp = await withCapturingFetch(
+    () => ({ status: 200, body: { status: "wat" } }),
+    () => compareCommits("o/r", "base", "head", "tok"),
+  );
+  assertEquals(cmp, { status: "diverged", aheadBy: 0, behindBy: 0 });
+});
+
+test("compareCommits: no token → null (idle transport, never a throw)", async () => {
+  const cmp = await withCapturingFetch(
+    () => {
+      throw new Error("fetch must not be called without a token");
+    },
+    () => compareCommits("o/r", "base", "head", ""),
+  );
+  assertEquals(cmp, null);
+});
+
+test("compareCommits: a non-2xx transport response throws (an outage is not a silent 'diverged')", async () => {
+  await assertRejects(
+    () =>
+      withCapturingFetch(
+        () => ({ status: 500, statusText: "Server Error", body: {} }),
+        () => compareCommits("o/r", "base", "head", "tok"),
+      ),
+    Error,
+    "500",
+  );
+});
+
+test("updateBranchRef: a successful fast-forward PATCHes force:false and returns true", async () => {
+  let seen: { path: string; method: string; body: unknown } | undefined;
+  const moved = await withCapturingFetch(
+    (req) => {
+      seen = req;
+      return { status: 200, body: { ref: "refs/heads/feat/x", object: { sha: "deadbeef" } } };
+    },
+    () => updateBranchRef("o/r", "feat/x", "deadbeef", "tok"),
+  );
+  assertEquals(moved, true);
+  assertEquals(seen?.method, "PATCH", "the ref move is a PATCH");
+  assertEquals(seen?.path, "o/r/git/refs/heads/feat/x", "targeting the head ref");
+  // The whole point of the self-heal transport: it NEVER force-updates — GitHub must be free to
+  // refuse a non-fast-forward. A regression flipping this to force:true would rewrite history.
+  assertEquals(seen?.body, { sha: "deadbeef", force: false });
+});
+
+test("updateBranchRef: GitHub's 422 non-fast-forward refusal returns false, never throws", async () => {
+  const moved = await withCapturingFetch(
+    () => ({ status: 422, statusText: "Unprocessable Entity", body: { message: "Update is not a fast forward" } }),
+    () => updateBranchRef("o/r", "feat/x", "deadbeef", "tok"),
+  );
+  assertEquals(moved, false, "a refused non-fast-forward is a safe false (→ the caller escalates)");
+});
+
+test("updateBranchRef: a non-422 transport error throws (a real outage is not a silent refusal)", async () => {
+  await assertRejects(
+    () =>
+      withCapturingFetch(
+        () => ({ status: 500, statusText: "Server Error", body: { message: "boom" } }),
+        () => updateBranchRef("o/r", "feat/x", "deadbeef", "tok"),
+      ),
+    Error,
+    "500",
+  );
+});
+
+test("updateBranchRef: no token in token mode throws (no usable transport to move the ref)", async () => {
+  await assertRejects(
+    () =>
+      withCapturingFetch(
+        () => {
+          throw new Error("fetch must not be called without a token");
+        },
+        () => updateBranchRef("o/r", "feat/x", "deadbeef", ""),
+      ),
+    Error,
+    "no GitHub transport available",
+  );
 });

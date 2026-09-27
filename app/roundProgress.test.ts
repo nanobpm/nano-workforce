@@ -385,6 +385,29 @@ test("progress-check: a no-advance round with no recoverable checkpoint still es
   assertStringIncludes(String(out.noProgressQuestion), "PR head did not advance");
 });
 
+test("progress-check: a SUPERSEDED straggler never invokes the self-heal — no stale ref mutation on a reopened PR (#818 fence)", async () => {
+  // A delayed progress-check from an OLD convergence instance can reach the no-advance branch after
+  // `submitPr` reopened the PR under a NEW `process_key`. The commit fence already drops its DB write,
+  // but the self-heal PATCHes the GitHub head — an irreversible side effect. So the worker must
+  // re-check ownership BEFORE the ref mutation and skip the heal entirely when superseded, else a
+  // straggler's stale checkpoint resurrects old work on the reopened PR.
+  let healCalls = 0;
+  const handler = await makeUnderTest(
+    async () => "sha-1",
+    async () => true,
+    async () => (healCalls++, { healed: true, sha: "stale-sha" }),
+  );
+  // The row is owned by a DIFFERENT (newer) instance than this straggler job's processInstanceKey.
+  const { app, updates } = fakeApp({ last_round_head: "sha-1", process_key: "new-pik" });
+  const out = await handler(
+    { processInstanceKey: "old-pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(healCalls, 0, "a superseded straggler must NOT mutate the GitHub head via self-heal");
+  assertEquals(updates.length, 0, "and the commit fence drops its DB write too (ack without persisting)");
+  assertEquals(out.progressed, false, "the straggler still returns its escalation verdict to ack the job");
+});
+
 test("progress-check: an addressed round whose head advanced reports progressed:true and rebaselines", async () => {
   const handler = await makeUnderTest(async () => "sha-2");
   const { app, updates } = fakeApp({ last_round_head: "sha-1" });

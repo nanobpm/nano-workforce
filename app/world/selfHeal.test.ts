@@ -88,6 +88,26 @@ test("does NOT heal a cross-repo fork head — the base token cannot move a fork
   assertEquals(res, { healed: false, reason: "fork-head" });
 });
 
+test("does NOT heal an UNRESOLVED head repo (null) even with a same-named ref — never PATCH the base repo's branch", async () => {
+  // `fetchPrHead` reports `headRepo: null` when it cannot resolve the head's owner/name (e.g. a
+  // deleted fork). A still-present `headRef` can coincide with a same-named branch in the base repo,
+  // so treating `null` as "in the base repo" would advance an UNRELATED branch. It must classify as
+  // an unhealable fork-head and escalate — never move a ref against an unknown head repository.
+  const advanceCalls: string[] = [];
+  const res = await attemptNoAdvanceSelfHeal(
+    deps({
+      prHead: async () => ({ headRef: "feat/x", headRepo: null }),
+      advanceHead: async (_r, b) => (advanceCalls.push(b), true),
+    }),
+    REPO,
+    PR_NUM,
+    PR_KEY,
+    HEAD,
+  );
+  assertEquals(res, { healed: false, reason: "fork-head" });
+  assertEquals(advanceCalls, []);
+});
+
 test("does NOT heal when the PR head ref is unknown", async () => {
   const res = await attemptNoAdvanceSelfHeal(deps({ prHead: async () => ({ headRef: null, headRepo: REPO }) }), REPO, PR_NUM, PR_KEY, HEAD);
   assertEquals(res, { healed: false, reason: "no-head-ref" });
