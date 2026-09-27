@@ -27,9 +27,9 @@ function deps(over: Partial<SelfHealDeps> = {}): SelfHealDeps {
 }
 
 test("heals: a checkpoint that strictly fast-forwards the head advances it and continues", async () => {
-  const calls: Array<[string, string, string]> = [];
+  const calls: Array<[string, string, string, string]> = [];
   const res = await attemptNoAdvanceSelfHeal(
-    deps({ advanceHead: async (r, b, s) => (calls.push([r, b, s]), true) }),
+    deps({ advanceHead: async (r, b, s, expected) => (calls.push([r, b, s, expected]), true) }),
     REPO,
     PR_NUM,
     PR_KEY,
@@ -38,7 +38,11 @@ test("heals: a checkpoint that strictly fast-forwards the head advances it and c
     PROC,
   );
   assertEquals(res, { healed: true, sha: AHEAD });
-  assertEquals(calls, [[REPO, "feat/x", AHEAD]], "advances the PR head branch to the checkpoint SHA");
+  assertEquals(
+    calls,
+    [[REPO, "feat/x", AHEAD, HEAD]],
+    "advances the PR head branch to the checkpoint SHA, compare-and-swapping on the validated head",
+  );
 });
 
 test("does NOT heal when the PR has no recorded checkpoint (nothing was pushed)", async () => {

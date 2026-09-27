@@ -1704,18 +1704,40 @@ export async function compareCommits(
 /** Fast-forward `refs/heads/<branch>` on `repo` to `sha` (a NON-force ref update — GitHub itself
  * rejects a non-fast-forward with `422`, a hard backstop beneath the caller's own compare check).
  * Returns `true` when the ref now points at `sha`, `false` when GitHub refused the move as
- * non-fast-forward (`422`). The no-advance self-heal (#818) uses this to advance a PR head onto a
- * reachable push-checkpoint SHA that the harness pushed but left off the head. `force` is never set:
- * the whole point is to move the head ONLY when it is a safe fast-forward, never to rewrite history. */
+ * non-fast-forward (`422`) — or, when `expectedSha` is given, when the ref no longer points at it
+ * (the compare-and-swap below lost). The no-advance self-heal (#818) uses this to advance a PR head
+ * onto a reachable push-checkpoint SHA that the harness pushed but left off the head. `force` is
+ * never set: the whole point is to move the head ONLY when it is a safe fast-forward, never to
+ * rewrite history.
+ *
+ * `expectedSha` (optional) makes the move a COMPARE-AND-SWAP on the ref's prior value: read the ref
+ * immediately before the PATCH and refuse (`false`) unless it still equals `expectedSha`. The
+ * self-heal passes the exact head SHA its fast-forward proof was computed against (`currentHead`), so
+ * the mutation's precondition is BOUND TO the validated state instead of being trusted from a
+ * separate, earlier ownership read (Copilot review on #819): if a concurrent run advanced/replaced
+ * the head after the proof — a superseded straggler that raced past the late `stillOwns()` guard, or
+ * any other writer — the ref no longer equals `expectedSha` and the straggler PATCHes nothing.
+ * GitHub's ref API exposes no server-side expected-old-value precondition, so this read-verify is the
+ * tightest fence the platform allows; combined with the non-force fast-forward invariant (the head
+ * can only ever move FORWARD, never rewrite) the residual window is bounded and fail-safe. */
 export async function updateBranchRef(
   repo: string,
   branch: string,
   sha: string,
   token: string,
+  expectedSha?: string,
 ): Promise<boolean> {
   const encodedBranch = branch.split("/").map(encodeURIComponent).join("/");
   const apiPath = `repos/${repo}/git/refs/heads/${encodedBranch}`;
   const isNonFastForward = (msg: string) => /\b422\b|not a fast forward|fast[- ]forward/i.test(msg);
+  // COMPARE-AND-SWAP precondition: refuse the move unless the ref still points at the SHA the caller
+  // validated against. Read as late as possible (right before the PATCH) so the window between the
+  // check and the mutation is minimal; a mismatch (or an unreadable/deleted ref → `null`) means the
+  // validated base is gone, so the move is refused rather than applied against unproven state.
+  if (expectedSha !== undefined) {
+    const current = await branchHeadSha(repo, branch, token);
+    if (current !== expectedSha) return false;
+  }
   if (await useGh()) {
     try {
       await runGh(["api", apiPath, "-X", "PATCH", "-f", `sha=${sha}`, "-F", "force=false"]);

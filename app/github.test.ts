@@ -1078,3 +1078,50 @@ test("updateBranchRef: no token in token mode throws (no usable transport to mov
     "no GitHub transport available",
   );
 });
+
+// ── updateBranchRef compare-and-swap (Copilot review on #819) ────────────────
+// When `expectedSha` is given the move is a CAS on the ref's prior value: read the ref right before
+// the PATCH and refuse unless it still equals the validated base, so a head advanced/replaced by a
+// concurrent (superseded) run after the caller's fast-forward proof is never PATCHed.
+test("updateBranchRef: CAS advances when the ref still equals expectedSha (reads then PATCHes)", async () => {
+  const seen: string[] = [];
+  const moved = await withCapturingFetch(
+    (req) => {
+      seen.push(`${req.method} ${req.path}`);
+      if (req.method === "GET") return { status: 200, body: { object: { sha: "basebase" } } };
+      return { status: 200, body: { ref: "refs/heads/feat/x", object: { sha: "deadbeef" } } };
+    },
+    () => updateBranchRef("o/r", "feat/x", "deadbeef", "tok", "basebase"),
+  );
+  assertEquals(moved, true, "the ref still pointed at the validated base, so the fast-forward applied");
+  assertEquals(
+    seen,
+    ["GET o/r/git/ref/heads/feat/x", "PATCH o/r/git/refs/heads/feat/x"],
+    "the CAS reads the ref before mutating it",
+  );
+});
+
+test("updateBranchRef: CAS refuses (false, no PATCH) when the ref has moved off expectedSha", async () => {
+  const methods: string[] = [];
+  const moved = await withCapturingFetch(
+    (req) => {
+      methods.push(req.method);
+      if (req.method === "GET") return { status: 200, body: { object: { sha: "movedmoved" } } };
+      throw new Error("must not PATCH once the compare-and-swap has lost");
+    },
+    () => updateBranchRef("o/r", "feat/x", "deadbeef", "tok", "basebase"),
+  );
+  assertEquals(moved, false, "a ref moved off the validated base refuses the move (→ the caller escalates)");
+  assertEquals(methods, ["GET"], "a lost CAS never issues the PATCH");
+});
+
+test("updateBranchRef: CAS refuses (false) when the ref is absent/unreadable (null)", async () => {
+  const moved = await withCapturingFetch(
+    (req) => {
+      if (req.method === "GET") return { status: 404, statusText: "Not Found", body: { message: "Not Found" } };
+      throw new Error("must not PATCH when the base ref is gone");
+    },
+    () => updateBranchRef("o/r", "feat/x", "deadbeef", "tok", "basebase"),
+  );
+  assertEquals(moved, false, "a deleted/unreadable base ref is not the validated state, so the move is refused");
+});

@@ -104,7 +104,7 @@ const defaultSelfHeal: SelfHealFn = (app, repo, prNumber, prKey, currentHead, ro
         return h ? { headRef: h.headRef, headRepo: h.headRepo } : null;
       },
       compare: (r, base, head) => compareCommits(r, base, head, tok),
-      advanceHead: (r, branch, sha) => updateBranchRef(r, branch, sha, tok),
+      advanceHead: (r, branch, sha, expected) => updateBranchRef(r, branch, sha, tok, expected),
       stillOwns,
     },
     repo,

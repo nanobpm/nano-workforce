@@ -49,9 +49,13 @@ export type CommitComparator = (
 ) => Promise<{ status: "ahead" | "behind" | "identical" | "diverged"; aheadBy: number; behindBy: number } | null>;
 
 /** The fast-forward ref mover — advances the PR head branch to the checkpoint SHA. Backed by
- * `updateBranchRef` (a NON-force update, so GitHub itself refuses a non-fast-forward). Returns
- * `false` when the move was refused. Injectable for tests. */
-export type HeadAdvancer = (repo: string, branch: string, sha: string) => Promise<boolean>;
+ * `updateBranchRef` (a NON-force update, so GitHub itself refuses a non-fast-forward). The 4th
+ * argument is the COMPARE-AND-SWAP precondition: the exact head SHA the fast-forward proof was
+ * computed against (`currentHead`); the mover refuses (`false`) unless the ref still equals it at
+ * mutation time, so a head advanced/replaced by a concurrent (superseded) run after the proof is
+ * never PATCHed. Returns `false` when the move was refused (non-fast-forward OR lost CAS). Injectable
+ * for tests. */
+export type HeadAdvancer = (repo: string, branch: string, sha: string, expectedSha: string) => Promise<boolean>;
 
 export interface SelfHealDeps {
   readonly lastCheckpoint: CheckpointReader;
@@ -85,6 +89,9 @@ export interface SelfHealResult {
     | "compare-unavailable"
     | "not-fast-forward"
     | "superseded"
+    /** The ref move was refused: GitHub rejected the non-fast-forward, OR the compare-and-swap lost
+     * (the head no longer equals the `currentHead` the fast-forward proof was validated against — a
+     * concurrent run moved it). */
     | "advance-refused";
 }
 
@@ -156,15 +163,22 @@ export async function attemptNoAdvanceSelfHeal(
     }
 
     // LATE OWNERSHIP FENCE (Copilot review on #819). Everything above only READ GitHub/DB state; the
-    // ONLY irreversible act is the ref move below. Re-check ownership as late as possible — right
-    // before it — so a run that was superseded DURING the awaits above (a concurrent `submitPr`
-    // installed a new `process_key`) abandons the heal WITHOUT PATCHing the branch, instead of moving
-    // the head and only then being discarded by the downstream `commit` fence (which guards the DB
-    // write, not a ref mutation already made). Absent guard ⇒ assume ownership (the same fail-open the
-    // worker's `isSuperseded` uses when identity is unknown).
+    // ONLY irreversible act is the ref move below. Two guards bind it to THIS run's validated state:
+    // (1) the late `stillOwns()` re-check — right before the move — abandons a run that was superseded
+    // DURING the awaits above (a concurrent `submitPr` installed a new `process_key`), instead of
+    // moving the head and only then being discarded by the downstream `commit` fence (which guards the
+    // DB write, not a ref mutation already made). Absent guard ⇒ assume ownership (the same fail-open
+    // the worker's `isSuperseded` uses when identity is unknown). (2) the move itself is a
+    // COMPARE-AND-SWAP keyed on `currentHead` — the exact base the fast-forward proof was computed
+    // against — so the mutation's precondition is BOUND TO the validated state rather than trusted from
+    // the separate `stillOwns()` read: a straggler that races past (1) still PATCHes nothing unless the
+    // ref is verifiably still at `currentHead` at mutation time. GitHub exposes no server-side
+    // expected-old-value precondition, so the CAS is the tightest fence the platform allows; the
+    // non-force fast-forward invariant makes the bounded residual window fail-safe (head only ever
+    // moves forward onto this run's own reachable checkpoint, never a rewrite).
     if (deps.stillOwns && !(await deps.stillOwns())) return { healed: false, reason: "superseded" };
 
-    const advanced = await deps.advanceHead(repo, headRef, sha);
+    const advanced = await deps.advanceHead(repo, headRef, sha, currentHead);
     if (!advanced) return { healed: false, reason: "advance-refused" };
     return { healed: true, sha };
   } catch {
