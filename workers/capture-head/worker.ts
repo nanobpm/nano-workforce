@@ -23,6 +23,16 @@
 // fresh on every round entry (including husk retries), so it never carries a stale prior-round value.
 // The read fails OPEN to `null` (a transient GitHub hiccup must never fabricate a no-progress verdict);
 // progress-check then falls back to the persisted `last_round_head`.
+//
+// Because this task is the single on-entry join before `review-round`, the model also uses it to RESET
+// the round's OUTPUT variables on entry (issue #822): its `ioMapping` clears `status`, `summary`,
+// `question` (→ null) and `escalated` (→ false) in convergence-loop.bpmn. A `review-round` that returns
+// NO result (a misconfigured worker that exits 0 with empty output, no commits, no push) then can't
+// inherit the PREVIOUS round's `status`/`question` and re-open a word-for-word duplicate of an
+// already-answered escalation; instead it falls through `gw-status`'s addressed default into the
+// no-progress (husk) path. These OUTPUT vars are reset on ENTRY (here) rather than on the review-round's
+// own output — a same-task output-clear would clobber the agent's real verdict — mirroring the merge
+// loop's `arm-merge`, which clears `status` on entry before its agent runs.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { fetchBranchHead, fetchPrHead } from "../../app/github.ts";
 import { parsePr } from "../../app/service.ts";

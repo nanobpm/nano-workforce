@@ -145,6 +145,12 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PrCaptureHeadIn" />
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrCaptureHeadOut" />
         </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:output source="=null" target="status" />
+          <zeebe:output source="=null" target="summary" />
+          <zeebe:output source="=null" target="question" />
+          <zeebe:output source="=false" target="escalated" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_start</bpmn:incoming>
       <bpmn:incoming>f_reviewLoop</bpmn:incoming>
