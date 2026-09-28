@@ -488,3 +488,32 @@ test("family: a rejected takeover REGISTER cannot overwrite another peer's recor
     await hub.close();
   }
 });
+
+test("family: a rejected re-register from the SAME connection cannot clear its own recorded protocol", async () => {
+  const data = memMountData();
+  const { hub, transport } = await mountFamily(data);
+  try {
+    // The worker registers healthily on its connection.
+    const peer = fakeConn("c1", "leafA");
+    transport.connect(peer.conn);
+    await flush();
+    peer.feed(registerFrame("w1", { harnessProtocol: 1 }));
+    await flush();
+    assertEquals((await assessWorkers(data, ["w1"], {})).get("w1")?.stale, false, "recorded healthy");
+
+    // The SAME connection now sends a MALFORMED re-register (a non-object capability). The package
+    // handler rejects it and leaves the prior row in place — so a bare "this connection owns the row"
+    // check would still pass and clobber the healthy protocol with the rejected frame's absent value.
+    // The before/after acceptance check must skip a register that never took effect.
+    const malformed: Frame = { lane: "control", family: "register", seq: 1, payload: { instance: "w1", capability: "garbage" } };
+    peer.feed(malformed);
+    await flush();
+
+    const assessment = await assessWorkers(data, ["w1"], {});
+    assertEquals(assessment.get("w1")?.harnessProtocol, 1, "rejected re-register does not clear the recorded protocol");
+    assertEquals(assessment.get("w1")?.stale, false, "a rejected frame cannot flip a live worker stale");
+  } finally {
+    family.teardown?.();
+    await hub.close();
+  }
+});
