@@ -15,8 +15,12 @@
 // its agent runs. With the round entering on a blank `status`/`question`, a no-result round can no
 // longer inherit the prior round's decision: it falls through `gw-status`'s `f_addressed` default
 // into `persist-round` → `check-progress`, where the unchanged PR head is caught as a no-progress
-// (husk) round — retried within budget, then escalated as "produced nothing", NOT re-asked as an
-// already-answered question.
+// round. `decideProgress` then classifies it on positive evidence (`app/roundProgress.ts`): only a
+// corroborated non-terminal completing `review-round` instance is a husk (auto-retried within the
+// budget); a terminal instance OR an absent/unknown read fails safe to `no-advance` and is escalated
+// immediately as "produced nothing" (never re-running, to avoid duplicating agent work that may have
+// run). Either way the round is routed as no-progress and NOT re-asked as an already-answered
+// question.
 //
 // `answer`/`scopePending` (INPUTS the agent CONSUMES) are cleared on the review-round OUTPUT so the
 // NEXT round can't re-consume them; `status`/`summary`/`question`/`escalated` (OUTPUTS the agent
