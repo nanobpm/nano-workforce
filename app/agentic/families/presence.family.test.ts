@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { AgenticHub } from "@nanobpm/agentic/channel";
 import type {
@@ -515,5 +516,40 @@ test("family: a rejected re-register from the SAME connection cannot clear its o
   } finally {
     family.teardown?.();
     await hub.close();
+  }
+});
+
+test("family: two ACCEPTED same-connection re-registers in one clock tick both record their protocol", async () => {
+  // `lastSeen` is a millisecond timestamp, so two accepted REGISTERs on the same connection that
+  // arrive within one `Date.now()` tick share an identical `lastSeen`. An acceptance check that
+  // inferred "took effect" from a before/after `lastSeen` change would read the second (valid)
+  // re-register as a no-op and never record its protocol — a same-connection protocol upgrade would
+  // silently keep the old value. Freeze the clock so both registers land on the SAME tick and prove
+  // the upgrade is still recorded. (Reproduces the round-3 review finding; red under the old
+  // lastSeen-comparison code, green with the explicit accepted-register signal.)
+  mock.timers.enable({ apis: ["Date"], now: 1_700_000_000_000 });
+  const data = memMountData();
+  const { hub, transport } = await mountFamily(data);
+  try {
+    const peer = fakeConn("c1", "leafA");
+    transport.connect(peer.conn);
+    await flush();
+
+    // First accepted register: protocol 1.
+    peer.feed(registerFrame("w1", { harnessProtocol: 1 }));
+    await flush();
+    assertEquals((await assessWorkers(data, ["w1"], {})).get("w1")?.harnessProtocol, 1, "first protocol recorded");
+
+    // Second accepted re-register from the SAME connection, upgrading to protocol 2 — WITHOUT
+    // advancing the frozen clock, so its `lastSeen` is byte-identical to the first register's.
+    peer.feed(registerFrame("w1", { harnessProtocol: 2 }));
+    await flush();
+
+    const assessment = await assessWorkers(data, ["w1"], {});
+    assertEquals(assessment.get("w1")?.harnessProtocol, 2, "same-tick accepted re-register records its upgraded protocol");
+  } finally {
+    family.teardown?.();
+    await hub.close();
+    mock.timers.reset();
   }
 });

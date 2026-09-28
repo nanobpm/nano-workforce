@@ -24,8 +24,10 @@ import type { AgenticHub, FamilyHandler, HubConnection } from "@nanobpm/agentic/
 import {
   attachPresenceFamily,
   type PresenceFamilyHandle,
+  type PresenceRow,
   PresenceStore,
   type PresenceStoreOptions,
+  type RegisterInput,
   type SqliteDb,
 } from "@nanobpm/agentic/presence";
 import type { Frame, MessageFamily } from "@nanobpm/agentic/protocol";
@@ -296,18 +298,22 @@ function readHarnessProtocol(payload: unknown): number | undefined {
  * table the HTTP `enrolAgenticWorker` door writes and `assessWorkers` reads (derivation over
  * duplication, not a second store). Every other family passes through untouched.
  *
- * The record is gated on the register having actually TAKEN EFFECT, established by a before/after
- * comparison of the durable presence row around the package handler — NOT merely by who owns the row
+ * The record is gated on the register having actually TAKEN EFFECT — NOT merely on who owns the row
  * afterwards. A bare "is the row now owned by this connection?" check is insufficient: a rejected or
  * malformed RE-register from the connection that ALREADY owns the instance leaves the prior row in
  * place, so that check still passes and would record the rejected frame's protocol (often `undefined`)
- * — silently clearing a healthy protocol without any successful enrolment. Instead we snapshot the row
- * first and record only when the register genuinely (re)wrote it: a freshly created row, or an
- * existing one whose owning connection or liveness (`lastSeen`) advanced. That skips every register
- * the package dropped — a malformed payload, or an ownership takeover of an instance bound to a
- * different identity — so neither a foreign peer nor a self-inflicted bad frame can rewrite a worker's
- * recorded protocol. Recording is best-effort: a registry write hiccup is logged and swallowed,
- * exactly like the presence sweep, and never fails the register.
+ * — silently clearing a healthy protocol without any successful enrolment. The package accepts a
+ * register by calling {@link PresenceStore.register} exactly once and rejects it (a malformed payload,
+ * or an ownership takeover of an instance bound to a different identity) by dropping the frame WITHOUT
+ * touching the store. So we wrap `store.register` to bump a per-instance monotonic "accepted
+ * generation" counter and record only when that counter advances across the package handler — an
+ * explicit acceptance signal, not an inferred one. (An earlier before/after `lastSeen` comparison
+ * could FALSE-NEGATIVE two accepted same-connection re-registers that landed within one `Date.now()`
+ * tick — identical millisecond timestamps read as "no change", dropping the second frame's protocol;
+ * a counter never collides.) That skips every register the package dropped, so neither a foreign peer
+ * nor a self-inflicted bad frame can rewrite a worker's recorded protocol. Recording is best-effort: a
+ * registry write hiccup is logged and swallowed, exactly like the presence sweep, and never fails the
+ * register.
  */
 function withHarnessProtocolRecording(
   hub: AgenticHub,
@@ -316,6 +322,16 @@ function withHarnessProtocolRecording(
   log: AgenticContext["log"],
 ): AgenticHub {
   const registry = new HarnessProtocolRegistry(data);
+  // A per-instance count of ACCEPTED registers. The package handler calls store.register only when it
+  // accepts a frame, so bumping this inside a wrapped register makes acceptance observable without a
+  // timestamp comparison that can collide within a single Date.now() tick.
+  const acceptedGeneration = new Map<string, number>();
+  const registerInner = store.register.bind(store);
+  store.register = (input: RegisterInput): PresenceRow => {
+    const row = registerInner(input);
+    acceptedGeneration.set(input.instance, (acceptedGeneration.get(input.instance) ?? 0) + 1);
+    return row;
+  };
   return new Proxy(hub, {
     get(target, prop, receiver) {
       if (prop !== "registerFamilyHandler") {
@@ -329,23 +345,18 @@ function withHarnessProtocolRecording(
         }
         const recording: FamilyHandler<HubConnection> = async (frame: Frame, conn: HubConnection) => {
           const instance = readInstance(frame.payload);
-          // Snapshot the durable row BEFORE the package handler runs so we can tell an ACCEPTED
-          // register (a row the handler created or (re)wrote) from a REJECTED one (a malformed or
-          // ownership-rejected frame the handler drops, leaving the prior row byte-for-byte intact).
-          const before = instance === undefined ? undefined : store.get(instance);
+          // Snapshot the instance's accepted-generation BEFORE the package handler runs so we can tell
+          // an ACCEPTED register (the handler called store.register, advancing the counter) from a
+          // REJECTED one (a malformed or ownership-rejected frame the handler drops without touching
+          // the store, leaving the counter unchanged).
+          const generationBefore = instance === undefined ? 0 : (acceptedGeneration.get(instance) ?? 0);
           await handler(frame, conn);
           if (instance === undefined) return;
-          const after = store.get(instance);
-          // The register took effect only when THIS connection now owns the row AND it was genuinely
-          // (re)written — a fresh row, or one whose owner/liveness advanced. A rejected re-register
-          // from the current owner leaves `after` identical to `before`, so it records nothing and
-          // cannot clear a healthy protocol.
-          if (after?.connectionId !== conn.id) return;
-          const tookEffect =
-            before === undefined ||
-            before.connectionId !== after.connectionId ||
-            before.lastSeen !== after.lastSeen;
-          if (!tookEffect) return;
+          const generationAfter = acceptedGeneration.get(instance) ?? 0;
+          // The register took effect only when the package accepted it — i.e. store.register ran for
+          // this instance and advanced the counter. A rejected re-register leaves it unchanged, so it
+          // records nothing and cannot clear a healthy protocol.
+          if (generationAfter === generationBefore) return;
           try {
             await registry.recordEnrolment(instance, readHarnessProtocol(frame.payload));
           } catch (err) {
