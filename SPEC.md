@@ -300,6 +300,27 @@ Notes:
   poller does not solicit a spurious review against the still-running round. The
   round cap and the review-wait timeout remain the outer safety nets.
 
+- **Stale-output reset on round entry (issue #822).** `pr.capture-head` — the
+  single task every entry into `review-round` routes through first (from `Start`,
+  the review-loop re-enter, the human-answer resume, the husk auto-retry, and the
+  ack-only retry) — additionally CLEARS the round's output variables on entry:
+  `status`, `summary`, and `question` (→ `null`) and `escalated` (→ `false`),
+  mirroring the merge loop's `arm-merge` (which already clears `status` on entry
+  before its agent runs). A `review-round` job taken by a misconfigured worker can
+  exit 0 with no result variables, empty output, and no push; because nothing
+  overwrote them, the PREVIOUS round's `status`/`summary`/`question` would
+  otherwise persist and `gw-status` would re-route on that stale decision —
+  re-opening a word-for-word duplicate of an escalation a human had just answered
+  (the answer never reaching an agent). Resetting on entry makes a no-result round
+  enter on a blank `status`/`question`, so it can no longer inherit the prior
+  round's decision: it falls through `gw-status`'s `f_addressed` default into
+  `persist-round` → `check-progress`, where the unchanged head is caught by the
+  no-progress guard above and classified (husk vs. no-advance) on its own merits.
+  These vars are reset on ENTRY here rather than on `review-round`'s own output
+  because a same-task output-clear would clobber the agent's real verdict;
+  `answer`/`scopePending` (inputs the agent consumes) stay cleared on the
+  review-round output.
+
 
 ## 5. Agent job contract (`senior:pr-review`)
 
