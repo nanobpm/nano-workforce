@@ -131,6 +131,28 @@ test("does NOT heal when the PR head ref is unknown", async () => {
   assertEquals(res, { healed: false, reason: "no-head-ref" });
 });
 
+test("heals a same-repo head whose CASING differs from the caller's spelling (normalized identity, #819)", async () => {
+  // `parsePr` preserves the caller's `owner/repo` spelling while GitHub returns the canonical
+  // `head.repo.full_name`, so a valid same-repo PR can arrive with a different case (`O/R` vs `o/r`).
+  // The identity test is case-insensitive (GitHub owner/repo names are), so this must still heal —
+  // not be misclassified `fork-head` and silently skip every self-heal.
+  const advanceCalls: string[] = [];
+  const res = await attemptNoAdvanceSelfHeal(
+    deps({
+      prHead: async () => ({ headRef: "feat/x", headRepo: REPO.toUpperCase() }),
+      advanceHead: async (_r, b) => (advanceCalls.push(b), true),
+    }),
+    REPO,
+    PR_NUM,
+    PR_KEY,
+    HEAD,
+    ROUND,
+    PROC,
+  );
+  assertEquals(res, { healed: true, sha: AHEAD });
+  assertEquals(advanceCalls, ["feat/x"]);
+});
+
 test("does NOT heal when the comparison is unavailable (idle transport)", async () => {
   const res = await attemptNoAdvanceSelfHeal(deps({ compare: async () => null }), REPO, PR_NUM, PR_KEY, HEAD, ROUND, PROC);
   assertEquals(res, { healed: false, reason: "compare-unavailable" });

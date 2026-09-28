@@ -1685,9 +1685,26 @@ export async function compareCommits(
   const apiPath = `repos/${repo}/compare/${enc(base)}...${enc(head)}`;
   const parse = (body: string): CommitComparison => {
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const j = JSON.parse(body) as { status?: string; ahead_by?: number; behind_by?: number };
+    const j = JSON.parse(body) as { status?: unknown; ahead_by?: unknown; behind_by?: unknown };
     const status = j.status === "ahead" || j.status === "behind" || j.status === "identical" || j.status === "diverged" ? j.status : "diverged";
-    return { status, aheadBy: Number(j.ahead_by ?? 0), behindBy: Number(j.behind_by ?? 0) };
+    // Validate the commit counts at THIS transport boundary rather than lean on the downstream
+    // `Number.isInteger` gate (Copilot review of #819). A bare `Number(j.ahead_by ?? 0)` silently
+    // COERCES a malformed value into a spurious ancestry proof: `Number("1")`/`Number(true)` === `1`,
+    // and `Number.isInteger(1e21)` is `true` for an unsafe magnitude — any of which would pass the
+    // self-heal's `Number.isInteger`/`aheadBy > 0` fast-forward check and PATCH the ref WITHOUT a
+    // genuine GitHub ancestry proof. A MISSING count is a legitimate zero (GitHub omits it), but a
+    // PRESENT value must be a real, non-negative SAFE integer NUMBER; anything else (string, boolean,
+    // float, unsafe magnitude) is a corrupt/tampered response we reject by throwing — `compareCommits`
+    // fails, the self-heal's `catch` degrades to `{ healed: false }`, and the round escalates instead
+    // of fast-forwarding on unproven data.
+    const count = (v: unknown, field: string): number => {
+      if (v === undefined || v === null) return 0;
+      if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) {
+        throw new Error(`github compare returned an invalid ${field}: ${JSON.stringify(v)}`);
+      }
+      return v;
+    };
+    return { status, aheadBy: count(j.ahead_by, "ahead_by"), behindBy: count(j.behind_by, "behind_by") };
   };
   if (await useGh()) {
     const out = await runGh(["api", apiPath, "-H", "Accept: application/vnd.github+json"]);

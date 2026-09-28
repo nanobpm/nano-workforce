@@ -604,44 +604,16 @@ export async function submitPr(
     // while `process_key` still names the OLD instance leaves a window where a delayed old-instance
     // answer job still passes the worker's staleness gate and reinserts its adjudication into the fresh
     // run (Copilot review of #806). Advancing the run identity FIRST, then clearing, fences that job.
-    // Re-open a previously converged/abandoned/merged PR for a fresh convergence run.
-    await table.update(parsed.prKey, {
-      status: "converging",
-      current_round: 1,
-      url: parsed.url,
-      // Coalesce to the key so `pull_requests.title` stays non-blank for the title-led grids
-      // (issue #248): a fresh fetch wins, else the prior title, else the `owner/repo#N` key.
-      // A blank/whitespace title counts as missing (matches the 036 backfill), so an empty
-      // external title never lands as an unlabeled row.
-      title: coalesceTitle(title, existing.title, parsed.prKey),
-      waiting_since: null,
-      last_review_id: null,
-      last_nudge_at: null,
-      // Clear the no-progress head baseline: it is scoped to the PRIOR convergence run, and a fresh
-      // run at round 1 must compare its first addressed round against a clean slate. Leaving a stale
-      // `last_round_head` lets a resubmission whose branch changed read `currentHead !== previousHead`
-      // on its first husked round, mis-route it as progress, and bypass the bounded husk retry (#786).
-      last_round_head: null,
-      // Clear the attempt watermark too: it is scoped to the prior convergence run's `review-round`
-      // instances (Copilot #789). A fresh run mints new, higher-keyed instances so a carried-over
-      // watermark would still be below them, but clearing keeps the per-run husk-correlation state
-      // unambiguous and self-contained.
-      last_progress_agent_watermark: null,
-      // Clear the at-least-once REPLAY stamp too (Copilot PR #789). The idempotency guard replays a
-      // recorded outcome whenever a redelivered job key matches this row; if the stamp survived a
-      // re-open, an OLD `pr.progress-check` delivery redelivered after the NEW convergence instance
-      // starts would still match its job key here and replay a stale escalation/progress effect into
-      // the fresh run. Clearing it makes the new run treat any such straggler as an unknown key (a
-      // normal, freshly-computed decision) rather than replaying the prior run's outcome.
-      last_progress_job_key: null,
-      last_progress_result: null,
-      outcome: null,
-      converged_at: null,
-      merged_at: null,
-      abandon_token: abandonToken,
-      root_request_key: effectiveRoot,
-      updated_at: ts,
-    });
+    // Re-open a previously converged/abandoned/merged PR for a fresh convergence run. The row-reset
+    // that flips the PR to `converging`/round 1 is DEFERRED and applied ATOMICALLY WITH the
+    // `process_key` advance below (after `createInstance`), never here. Flipping the row to the fresh
+    // run's shape while `process_key` still names the OLD (now-superseded) instance opens a window in
+    // which a delayed old-run `pr.progress-check` straggler reads its own key as the CURRENT owner,
+    // passes both `isSuperseded` and the late `stillOwns` guard, and fast-forwards the PR head onto
+    // its own stale checkpoint under the fresh run's identity (Copilot review of #819). Publishing the
+    // new run identity in the SAME write that resets the row eliminates that "converging-but-old-owner"
+    // window: the old generation is invalidated the instant the row becomes the new run's, so no
+    // straggler is ever accepted as owner of a row that already presents as the fresh run.
   } else {
     await table.insert({
       pr_key: parsed.prKey,
@@ -701,18 +673,67 @@ export async function submitPr(
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
-  // The `process_key` advance and the adjudication reset below are the two writes that MAKE the new
-  // run authoritative. If EITHER throws, the newly created instance is already live but the reopen is
-  // only half-committed — and a retry would short-circuit at the `alreadyRunning` idempotency gate
-  // (the new instance is ACTIVE, so `derived_status` is non-terminal), never re-running the reset. A
-  // failed reset would then leave the fresh run replaying STALE adjudication memory indefinitely
-  // (Copilot review). So roll the just-created run back on failure: terminate it and rethrow, so the
-  // submission is NOT treated as started. Terminating flips the PR's derived tracking status to a
-  // terminal edge (`abandoned`) via the `instanceTracking` reconciler, making the PR resubmittable so
-  // a retry re-creates a fresh instance and re-runs the reset cleanly — no orphaned run auto-applies
-  // stale decisions in the meantime.
+  // The reopen row-reset, the `process_key` advance, and the adjudication reset below are the writes
+  // that MAKE the new run authoritative. If ANY throws, the newly created instance is already live but
+  // the reopen is only half-committed — and a retry would short-circuit at the `alreadyRunning`
+  // idempotency gate (the new instance is ACTIVE, so `derived_status` is non-terminal), never
+  // re-running them. A failed reset would then leave the fresh run replaying STALE adjudication memory
+  // indefinitely (Copilot review). So roll the just-created run back on failure: terminate it and
+  // rethrow, so the submission is NOT treated as started. Terminating flips the PR's derived tracking
+  // status to a terminal edge (`abandoned`) via the `instanceTracking` reconciler, making the PR
+  // resubmittable so a retry re-creates a fresh instance and re-runs everything cleanly — no orphaned
+  // run auto-applies stale decisions, and (crucially) the row stays in its OLD terminal shape until
+  // the atomic reopen write lands, so no straggler ever sees a fresh-run row still owned by the old
+  // instance.
   try {
-    if (processKey != null) {
+    if (existing) {
+      // ATOMIC REOPEN (Copilot review of #819): reset the row to the fresh run's shape AND publish the
+      // new run identity (`process_key`) in a SINGLE write, so the row never presents as `converging`
+      // round 1 while still owned by the OLD instance. A delayed old-run straggler is therefore never
+      // accepted as the current owner of a row that already belongs to the fresh run.
+      await table.update(parsed.prKey, {
+        status: "converging",
+        current_round: 1,
+        url: parsed.url,
+        // Coalesce to the key so `pull_requests.title` stays non-blank for the title-led grids
+        // (issue #248): a fresh fetch wins, else the prior title, else the `owner/repo#N` key.
+        // A blank/whitespace title counts as missing (matches the 036 backfill), so an empty
+        // external title never lands as an unlabeled row.
+        title: coalesceTitle(title, existing.title, parsed.prKey),
+        waiting_since: null,
+        last_review_id: null,
+        last_nudge_at: null,
+        // Clear the no-progress head baseline: it is scoped to the PRIOR convergence run, and a fresh
+        // run at round 1 must compare its first addressed round against a clean slate. Leaving a stale
+        // `last_round_head` lets a resubmission whose branch changed read `currentHead !== previousHead`
+        // on its first husked round, mis-route it as progress, and bypass the bounded husk retry (#786).
+        last_round_head: null,
+        // Clear the attempt watermark too: it is scoped to the prior convergence run's `review-round`
+        // instances (Copilot #789). A fresh run mints new, higher-keyed instances so a carried-over
+        // watermark would still be below them, but clearing keeps the per-run husk-correlation state
+        // unambiguous and self-contained.
+        last_progress_agent_watermark: null,
+        // Clear the at-least-once REPLAY stamp too (Copilot PR #789). The idempotency guard replays a
+        // recorded outcome whenever a redelivered job key matches this row; if the stamp survived a
+        // re-open, an OLD `pr.progress-check` delivery redelivered after the NEW convergence instance
+        // starts would still match its job key here and replay a stale escalation/progress effect into
+        // the fresh run. Clearing it makes the new run treat any such straggler as an unknown key (a
+        // normal, freshly-computed decision) rather than replaying the prior run's outcome.
+        last_progress_job_key: null,
+        last_progress_result: null,
+        outcome: null,
+        converged_at: null,
+        merged_at: null,
+        abandon_token: abandonToken,
+        root_request_key: effectiveRoot,
+        // Publish the fresh run's identity in the SAME write as the status flip (may be null if the
+        // instance could not be created — a phantom row a retry re-enrolls, as on first submit).
+        process_key: processKey,
+        updated_at: ts,
+      });
+    } else if (processKey != null) {
+      // First submit: the row was INSERTED keyless before `createInstance` (the phantom-row pattern,
+      // #704/#497); publish its `process_key` now that the instance exists.
       await table.update(parsed.prKey, { process_key: processKey });
     }
     // Invalidate this PR's durable adjudication memory for the fresh run (issue #806, Copilot review) —
@@ -721,8 +742,7 @@ export async function submitPr(
     // rejected by the worker's staleness gate (its `processInstanceKey` no longer matches the advanced
     // `process_key`), so it cannot reinsert a stale adjudication after the reset; and the worker reads
     // `process_key` as late as possible so it observes this advance. The insert-if-absent record then
-    // re-learns the operator's new answer for the new run. Runs unconditionally (even if `processKey` is
-    // null: the memory must still be clean for the fresh run). The wipe is a SINGLE atomic `DELETE`
+    // re-learns the operator's new answer for the new run. The wipe is a SINGLE atomic `DELETE`
     // (`resetAdjudications`), never a row-by-row loop, so a crash mid-reset cannot leave a partially
     // cleared memory (Copilot review of #806).
     if (existing) {

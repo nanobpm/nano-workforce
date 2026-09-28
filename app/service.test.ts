@@ -338,7 +338,57 @@ test("re-submit advances process_key BEFORE resetting adjudications (fence order
   });
 });
 
-// Red/green regression (Copilot review): the durable adjudication RESET runs AFTER the new instance is
+// Red/green regression (Copilot review of #819): the reopen must publish the fresh run's identity
+// (`process_key`) in the SAME write that flips the row to `converging`/round 1. If the status flip
+// landed while `process_key` still named the OLD instance, a delayed old-run `pr.progress-check`
+// straggler would read its own key as the current owner, pass `isSuperseded`/`stillOwns`, and
+// fast-forward the PR head onto its stale checkpoint under the fresh run's identity. Asserting the
+// atomic write closes that "converging-but-old-owner" window.
+test("re-submit flips status to converging and advances process_key in the SAME write (no old-owner window, #819)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#42";
+    const patches: Array<Record<string, unknown>> = [];
+    const stores: Record<string, { rows: any[]; key: string }> = {
+      pull_requests: {
+        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", title: "t", status: "converged", process_key: "PI-OLD" }],
+        key: "pr_key",
+      },
+      escalations: { rows: [], key: "id" },
+      pr_adjudications: { rows: [], key: "id" },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const wrap = (name: string, key: string) => {
+      const t = memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key);
+      return {
+        ...t,
+        update: (k: any, patch: any) => {
+          if (name === "pull_requests") patches.push({ ...patch });
+          return t.update(k, patch);
+        },
+      };
+    };
+    const data = { table: withTrackingViews(wrap), open: () => memOpen(stores) } as any;
+    const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-NEW" }) } as any;
+
+    await submitPr(data, engine, { repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", prKey: PR_KEY });
+
+    // No update may set status to "converging" while leaving process_key at (or below) the old key.
+    const convergingPatch = patches.find((p) => p.status === "converging");
+    assertEquals(convergingPatch !== undefined, true, "the reopen flips the row to converging");
+    assertEquals(convergingPatch?.process_key, "PI-NEW", "the SAME write that flips to converging advances the owner to the new run");
+    assertEquals(
+      patches.some((p) => p.status === "converging" && p.process_key === "PI-OLD"),
+      false,
+      "the row never presents as the fresh run while still owned by the old instance",
+    );
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.status, "converging");
+    assertEquals(pr.current_round, 1);
+    assertEquals(pr.process_key, "PI-NEW");
+  });
+});
+
+
 // created and `process_key` is advanced. If the reset DELETE fails, the new convergence instance is
 // already live while the OLD adjudications remain — and because the new instance is ACTIVE the
 // `alreadyRunning` idempotency gate short-circuits every retry, so the reset is never re-run and the

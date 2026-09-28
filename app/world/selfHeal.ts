@@ -131,14 +131,21 @@ export async function attemptNoAdvanceSelfHeal(
     const head = await deps.prHead(repo, prNumber);
     const headRef = head?.headRef;
     if (!headRef) return { healed: false, reason: "no-head-ref" };
-    // Require a KNOWN, EXACT same-repo head before touching any ref. A fork-based PR's head branch
-    // lives in ANOTHER repo (`headRepo !== repo`), and an UNRESOLVABLE head repo (`headRepo == null`,
-    // e.g. a deleted fork) is equally unhealable: `fetchPrHead` reports `null` when it cannot resolve
-    // the head's owner/name, yet `headRef` can still be a same-named branch that also exists in the
-    // base repo. Treating `null` as "in the base repo" would PATCH that unrelated base-repo branch, so
-    // classify any non-exact match (a real fork OR an unresolved head) as an unhealable `fork-head`
-    // and escalate instead of risking a cross-repo / wrong-branch ref write.
-    if (head.headRepo !== repo) return { healed: false, reason: "fork-head" };
+    // Require a KNOWN, same-repo head before touching any ref. A fork-based PR's head branch lives in
+    // ANOTHER repo, and an UNRESOLVABLE head repo (`headRepo == null`, e.g. a deleted fork) is equally
+    // unhealable: `fetchPrHead` reports `null` when it cannot resolve the head's owner/name, yet
+    // `headRef` can still be a same-named branch that also exists in the base repo. Treating `null` as
+    // "in the base repo" would PATCH that unrelated base-repo branch, so classify any non-match (a real
+    // fork OR an unresolved head) as an unhealable `fork-head` and escalate instead of risking a
+    // cross-repo / wrong-branch ref write. Compare NORMALIZED (case-insensitive) identities: `parsePr`
+    // preserves the caller's `owner/repo` spelling while GitHub returns the repo's canonical
+    // `head.repo.full_name`, so a valid same-repo PR submitted as `Owner/Repo#7` would otherwise
+    // mismatch the canonical `owner/repo`, be misclassified `fork-head`, and silently skip every
+    // self-heal (Copilot review of #819). GitHub owner/repo names are case-insensitive, so lowercasing
+    // both sides is the correct identity test while retaining the null rejection.
+    if (head.headRepo == null || head.headRepo.toLowerCase() !== repo.toLowerCase()) {
+      return { healed: false, reason: "fork-head" };
+    }
 
     // Prove the checkpoint STRICTLY fast-forward-descends the current head before moving anything: a
     // `behind`/`identical`/`diverged` checkpoint is NOT a safe fast-forward and must escalate. Anchor

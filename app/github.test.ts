@@ -1006,6 +1006,59 @@ test("compareCommits: coerces an unknown status to 'diverged' and defaults missi
   assertEquals(cmp, { status: "diverged", aheadBy: 0, behindBy: 0 });
 });
 
+// Reject COERCED/UNSAFE compare counts at the transport boundary (Copilot review of #819). A bare
+// `Number(...)` would turn a malformed/tampered response into a spurious ancestry proof — a string
+// `"1"` or boolean `true` coerces to `1`, and an unsafe magnitude passes `Number.isInteger` — either
+// of which could fast-forward the ref WITHOUT a genuine GitHub proof. A present count must be a real,
+// non-negative SAFE integer number; anything else throws so the self-heal escalates rather than heals.
+test("compareCommits: rejects a string-coerced count (throws, never a spurious integer proof)", async () => {
+  await assertRejects(
+    () =>
+      withCapturingFetch(
+        () => ({ status: 200, body: { status: "ahead", ahead_by: "1", behind_by: 0 } }),
+        () => compareCommits("o/r", "base", "head", "tok"),
+      ),
+    Error,
+    "invalid ahead_by",
+  );
+});
+
+test("compareCommits: rejects a boolean-coerced count", async () => {
+  await assertRejects(
+    () =>
+      withCapturingFetch(
+        () => ({ status: 200, body: { status: "ahead", ahead_by: 1, behind_by: true } }),
+        () => compareCommits("o/r", "base", "head", "tok"),
+      ),
+    Error,
+    "invalid behind_by",
+  );
+});
+
+test("compareCommits: rejects an unsafe-magnitude integer count (passes Number.isInteger but is not a safe integer)", async () => {
+  await assertRejects(
+    () =>
+      withCapturingFetch(
+        () => ({ status: 200, body: { status: "ahead", ahead_by: 1e21, behind_by: 0 } }),
+        () => compareCommits("o/r", "base", "head", "tok"),
+      ),
+    Error,
+    "invalid ahead_by",
+  );
+});
+
+test("compareCommits: rejects a negative count", async () => {
+  await assertRejects(
+    () =>
+      withCapturingFetch(
+        () => ({ status: 200, body: { status: "ahead", ahead_by: -3, behind_by: 0 } }),
+        () => compareCommits("o/r", "base", "head", "tok"),
+      ),
+    Error,
+    "invalid ahead_by",
+  );
+});
+
 test("compareCommits: no token → null (idle transport, never a throw)", async () => {
   const cmp = await withCapturingFetch(
     () => {
