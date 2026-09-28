@@ -514,10 +514,60 @@ export async function isPrSettled(data: DataLayer, prKey: string): Promise<boole
   return !!existing && TERMINAL_STATUSES.includes(existing.derived_status);
 }
 
+// Per-`prKey` in-process serialization for `submitPr` (Copilot review of #819). `submitPr` reads the
+// PR row, decides `alreadyRunning`, `createInstance`s, and reopens the row across several `await`s.
+// Two `submitPr` calls for the SAME PR (a poll pass racing a delivery-connector redelivery, a
+// record-wave enrollment, …) could otherwise interleave at the `createInstance` await: both read the
+// pre-submit terminal row, both pass the idempotency gate (a terminal row is RESUBMITTABLE), and both
+// create a convergence instance for one PR. Serializing the whole create→reopen critical section per
+// `prKey` makes the second caller observe the row the first already claimed (`converging` + the new
+// `process_key`, derived-active) and short-circuit at the `alreadyRunning` gate instead of minting a
+// duplicate instance. The lock is deliberately IN-PROCESS, never a durable DB claim: every `submitPr`
+// caller — the poller, record-wave, delivery-connector, converge-feature — runs in THIS one Node
+// process (main.ts hosts the poller and the job workers on a single engine client) against one SQLite
+// store, so an in-memory chain fully serializes them; and an in-memory lock evaporates on crash, so a
+// half-done submit recovers through the existing terminal→resubmittable derive path. A durable non-null
+// claim would instead strand a keyed `converging` row `alreadyRunning` FOREVER on a create-instance
+// crash — exactly the #704/#497 phantom the keyless-row guard above exists to avoid. Distinct keys
+// never block each other. This composes with the atomic reopen below (which fences the old-run
+// straggler): the lock removes the duplicate-instance race, the atomic write removes the stale-owner
+// race, and neither reintroduces the other.
+const submitChains = new Map<string, Promise<unknown>>();
+function withPrSubmitLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = submitChains.get(key) ?? Promise.resolve();
+  // Chain after the previous holder SETTLES (fulfilled OR rejected — both handlers are `fn`), so one
+  // failed/throwing submit never wedges the key for the PR's next submit.
+  const run = prev.then(fn, fn);
+  // The stored tail is error-swallowed so the chain survives a rejection; bound the map by dropping
+  // the key once this tail settles and no later caller has replaced it as the chain's end.
+  const tail = run.then(() => undefined, () => undefined);
+  submitChains.set(key, tail);
+  tail.then(() => {
+    if (submitChains.get(key) === tail) submitChains.delete(key);
+  });
+  return run;
+}
+
 /** Register a PR row (if new) and start the convergence process. Idempotent on prKey. Optional
  * `dependsOn` (explicit refs) is unioned with any `Depends-on:` line parsed from the PR body and
- * recorded as the PR's merge-stage dependency set. */
+ * recorded as the PR's merge-stage dependency set. Concurrent calls for the SAME PR are serialized
+ * (see {@link withPrSubmitLock}) so a poll pass racing a worker redelivery can't mint two convergence
+ * instances for one PR; the loser observes the winner's claim and returns `alreadyRunning`. */
 export async function submitPr(
+  data: DataLayer,
+  engine: EngineClient,
+  parsed: ParsedPr,
+  dependsOn: string[] = [],
+  maxRounds: number = MAX_ROUNDS,
+  convergeOnly = false,
+  rootRequestKey: string | null = null,
+) {
+  return withPrSubmitLock(parsed.prKey, () =>
+    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey),
+  );
+}
+
+async function submitPrCritical(
   data: DataLayer,
   engine: EngineClient,
   parsed: ParsedPr,

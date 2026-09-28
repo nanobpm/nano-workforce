@@ -388,6 +388,85 @@ test("re-submit flips status to converging and advances process_key in the SAME 
   });
 });
 
+// Red/green regression (Copilot review of #819, follow-up): deferring the terminal→`converging`
+// transition until AFTER `createInstance()` (the atomic-reopen fix above) left the row in its OLD
+// terminal shape across the create await. A second `submitPr` for the same PR racing that await would
+// read the still-terminal row, pass the RESUBMITTABLE idempotency gate, and create a SECOND
+// convergence instance for one PR. `submitPr` serializes its create→reopen critical section per
+// `prKey`, so the loser observes the winner's claim (`converging` + the new key, derived-active) and
+// returns `alreadyRunning` — exactly one instance is created. Without the lock both concurrent calls
+// enter `createInstance` (calls === 2) and this fails.
+test("concurrent submitPr for one reopened PR mints only ONE convergence instance (#819 follow-up)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#42";
+    const stores: Record<string, { rows: any[]; key: string }> = {
+      pull_requests: {
+        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", title: "t", status: "converged", current_round: 3, process_key: "PI-OLD" }],
+        key: "pr_key",
+      },
+      escalations: { rows: [], key: "id" },
+      pr_adjudications: { rows: [], key: "id" },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const data = { table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)), open: () => memOpen(stores) } as any;
+    let calls = 0;
+    const engine = {
+      createInstance: async () => {
+        const id = ++calls;
+        // Hold the critical section open long enough for a racing submit to interleave at this await.
+        await new Promise((r) => setTimeout(r, 5));
+        return { processInstanceKey: `PI-${id}` };
+      },
+    } as any;
+    const parsed = { repo: "owner/repo", number: 42, url: "https://github.com/owner/repo/pull/42", prKey: PR_KEY };
+
+    const results = await Promise.all([submitPr(data, engine, parsed), submitPr(data, engine, parsed)]);
+
+    assertEquals(calls, 1, "concurrent submits of the same PR create exactly one convergence instance");
+    assertEquals(
+      results.filter((r: any) => r.alreadyRunning === true).length,
+      1,
+      "the second concurrent submit observes the first's claim and short-circuits at the alreadyRunning gate",
+    );
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.status, "converging");
+    assertEquals(pr.process_key, "PI-1", "the single created instance owns the reopened row");
+  });
+});
+
+// A distinct key must never block another PR's submit — the per-`prKey` lock serializes only same-PR
+// calls, so two DIFFERENT PRs submitted concurrently both proceed and each mints its own instance.
+test("submitPr serialization is per-prKey — different PRs never block each other (#819 follow-up)", async () => {
+  await withGithubOff(async () => {
+    const mkStores = (n: number): Record<string, { rows: any[]; key: string }> => ({
+      pull_requests: { rows: [{ pr_key: `owner/repo#${n}`, repo: "owner/repo", number: n, url: `https://github.com/owner/repo/pull/${n}`, title: "t", status: "converged", current_round: 1, process_key: `PI-OLD-${n}` }], key: "pr_key" },
+      escalations: { rows: [], key: "id" },
+      pr_adjudications: { rows: [], key: "id" },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    });
+    const s1 = mkStores(1);
+    const s2 = mkStores(2);
+    const mkData = (s: Record<string, { rows: any[]; key: string }>) => ({ table: withTrackingViews((name: string, key: string) => memTable(s[name]?.rows ?? [], s[name]?.key ?? key)), open: () => memOpen(s) } as any);
+    let calls = 0;
+    const engine = {
+      createInstance: async () => {
+        const id = ++calls;
+        await new Promise((r) => setTimeout(r, 5));
+        return { processInstanceKey: `PI-${id}` };
+      },
+    } as any;
+
+    await Promise.all([
+      submitPr(mkData(s1), engine, { repo: "owner/repo", number: 1, url: "https://github.com/owner/repo/pull/1", prKey: "owner/repo#1" }),
+      submitPr(mkData(s2), engine, { repo: "owner/repo", number: 2, url: "https://github.com/owner/repo/pull/2", prKey: "owner/repo#2" }),
+    ]);
+
+    assertEquals(calls, 2, "two different PRs each mint their own convergence instance");
+    assertEquals(s1.pull_requests.rows[0].status, "converging");
+    assertEquals(s2.pull_requests.rows[0].status, "converging");
+  });
+});
+
 
 // created and `process_key` is advanced. If the reset DELETE fails, the new convergence instance is
 // already live while the OLD adjudications remain — and because the new instance is ACTIVE the
