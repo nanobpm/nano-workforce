@@ -20,8 +20,8 @@
 // mirror and NEVER hard-locks or gates a BPMN sequence flow. Capability (cognition/weight/family/host)
 // is an ENROLMENT attribute, never a routing token.
 
-import type { AgenticHub, FamilyHandler, HubConnection } from "@nanobpm/agentic/channel";
-import {
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { AgenticHub, FamilyHandler, HubConnection } from "@nanobpm/agentic/channel";import {
   attachPresenceFamily,
   type PresenceFamilyHandle,
   type PresenceRow,
@@ -305,15 +305,25 @@ function readHarnessProtocol(payload: unknown): number | undefined {
  * — silently clearing a healthy protocol without any successful enrolment. The package accepts a
  * register by calling {@link PresenceStore.register} exactly once and rejects it (a malformed payload,
  * or an ownership takeover of an instance bound to a different identity) by dropping the frame WITHOUT
- * touching the store. So we wrap `store.register` to bump a per-instance monotonic "accepted
- * generation" counter and record only when that counter advances across the package handler — an
- * explicit acceptance signal, not an inferred one. (An earlier before/after `lastSeen` comparison
- * could FALSE-NEGATIVE two accepted same-connection re-registers that landed within one `Date.now()`
- * tick — identical millisecond timestamps read as "no change", dropping the second frame's protocol;
- * a counter never collides.) That skips every register the package dropped, so neither a foreign peer
- * nor a self-inflicted bad frame can rewrite a worker's recorded protocol. Recording is best-effort: a
- * registry write hiccup is logged and swallowed, exactly like the presence sweep, and never fails the
- * register.
+ * touching the store. So we wrap `store.register` to flip an acceptance flag bound — via
+ * {@link AsyncLocalStorage} — to the exact recording invocation whose handler triggered it, and record
+ * only when THIS frame's flag is set: an explicit, per-invocation acceptance signal, not an inferred
+ * one.
+ *
+ * The binding must be per-invocation, NOT a shared per-instance marker: the recording wrapper `await`s
+ * the package handler, so two REGISTER frames for the same instance can be in flight at once. A shared
+ * "accepted generation" counter compared before/after the await would MIS-ATTRIBUTE — a rejected frame
+ * that snapshots the counter, parks on its await while a concurrent ACCEPTED frame for the same
+ * instance advances the counter, then resumes to see it changed and records its own absent/invalid
+ * protocol, clearing a healthy value. AsyncLocalStorage carries each frame's flag through its own await
+ * chain, so a concurrent frame runs in a DISTINCT context and can never flip this frame's flag. It also
+ * holds NO per-instance state, so nothing accumulates for deregistered / TTL-swept / ephemeral
+ * instances (an earlier per-instance `Map` leaked an entry per distinct instance forever). (An even
+ * earlier before/after `lastSeen` comparison could also FALSE-NEGATIVE two accepted same-connection
+ * re-registers within one `Date.now()` tick — identical millisecond timestamps read as "no change".)
+ * That skips every register the package dropped, so neither a foreign peer nor a self-inflicted bad
+ * frame can rewrite a worker's recorded protocol. Recording is best-effort: a registry write hiccup is
+ * logged and swallowed, exactly like the presence sweep, and never fails the register.
  */
 function withHarnessProtocolRecording(
   hub: AgenticHub,
@@ -322,14 +332,18 @@ function withHarnessProtocolRecording(
   log: AgenticContext["log"],
 ): AgenticHub {
   const registry = new HarnessProtocolRegistry(data);
-  // A per-instance count of ACCEPTED registers. The package handler calls store.register only when it
-  // accepts a frame, so bumping this inside a wrapped register makes acceptance observable without a
-  // timestamp comparison that can collide within a single Date.now() tick.
-  const acceptedGeneration = new Map<string, number>();
+  // An acceptance flag bound to the CURRENT recording invocation (AsyncLocalStorage, not a shared
+  // per-instance counter): the package handler calls store.register exactly on an accepted frame, so
+  // flipping THIS invocation's flag inside the wrapped register makes acceptance observable without a
+  // before/after comparison that could either collide within one Date.now() tick or be cross-attributed
+  // to a concurrent frame for the same instance across the await. It also keeps no per-instance state,
+  // so nothing leaks for deregistered / TTL-swept instances.
+  const acceptance = new AsyncLocalStorage<{ accepted: boolean }>();
   const registerInner = store.register.bind(store);
   store.register = (input: RegisterInput): PresenceRow => {
     const row = registerInner(input);
-    acceptedGeneration.set(input.instance, (acceptedGeneration.get(input.instance) ?? 0) + 1);
+    const active = acceptance.getStore();
+    if (active) active.accepted = true;
     return row;
   };
   return new Proxy(hub, {
@@ -345,18 +359,17 @@ function withHarnessProtocolRecording(
         }
         const recording: FamilyHandler<HubConnection> = async (frame: Frame, conn: HubConnection) => {
           const instance = readInstance(frame.payload);
-          // Snapshot the instance's accepted-generation BEFORE the package handler runs so we can tell
-          // an ACCEPTED register (the handler called store.register, advancing the counter) from a
-          // REJECTED one (a malformed or ownership-rejected frame the handler drops without touching
-          // the store, leaving the counter unchanged).
-          const generationBefore = instance === undefined ? 0 : (acceptedGeneration.get(instance) ?? 0);
-          await handler(frame, conn);
+          // Run the package handler inside a fresh acceptance context. store.register — called by the
+          // handler exactly when it ACCEPTS this frame — flips THIS marker; a REJECTED frame (malformed
+          // or an ownership takeover the handler drops without touching the store) leaves it false. The
+          // marker travels with this frame's own async chain, so a concurrent frame for the same
+          // instance runs in a distinct context and can never flip it across the await.
+          const marker = { accepted: false };
+          await acceptance.run(marker, () => handler(frame, conn));
           if (instance === undefined) return;
-          const generationAfter = acceptedGeneration.get(instance) ?? 0;
-          // The register took effect only when the package accepted it — i.e. store.register ran for
-          // this instance and advanced the counter. A rejected re-register leaves it unchanged, so it
-          // records nothing and cannot clear a healthy protocol.
-          if (generationAfter === generationBefore) return;
+          // Record only when the package accepted THIS frame's register. A rejected re-register leaves
+          // the marker false, so it records nothing and cannot clear a healthy protocol.
+          if (!marker.accepted) return;
           try {
             await registry.recordEnrolment(instance, readHarnessProtocol(frame.payload));
           } catch (err) {

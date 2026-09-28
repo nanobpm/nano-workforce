@@ -290,6 +290,29 @@ function memMountData(): DataLayer {
   return { ...(data as unknown as Record<string, unknown>), source: () => ({ db: sqlite }) } as unknown as DataLayer;
 }
 
+/** Wrap a DataLayer so every `harness_protocol` value written through the registry's `table` seam is
+ * appended to `writes`, in order. Lets a test observe WHICH register frames actually recorded — a
+ * concurrent rejected frame that (wrongly) records surfaces as an extra `null` write, independent of
+ * which write happens to land last. */
+function withProtocolWriteSpy(data: DataLayer): { data: DataLayer; writes: Array<number | null> } {
+  const writes: Array<number | null> = [];
+  const realTable = (data as unknown as { table: (name: string, key: string) => unknown }).table.bind(data);
+  const wrapped = {
+    ...(data as unknown as Record<string, unknown>),
+    table: (name: string, key: string) => {
+      const t = realTable(name, key) as Record<string, (...a: unknown[]) => unknown>;
+      if (name !== "worker_harness_protocol") return t;
+      const note = (v: unknown) => writes.push(typeof v === "number" ? v : null);
+      return {
+        ...t,
+        insert: (row: Record<string, unknown>) => { note(row.harness_protocol); return t.insert(row); },
+        update: (k: unknown, patch: Record<string, unknown>) => { note(patch.harness_protocol); return t.update(k, patch); },
+      };
+    },
+  };
+  return { data: wrapped as unknown as DataLayer, writes };
+}
+
 async function mountFamily(data: DataLayer | undefined): Promise<{ hub: AgenticHub; transport: ReturnType<typeof memTransport> }> {
   const transport = memTransport();
   const hub = new AgenticHub({ transport: transport.transport, authenticator, sweepIntervalMs: 0 });
@@ -551,5 +574,47 @@ test("family: two ACCEPTED same-connection re-registers in one clock tick both r
     family.teardown?.();
     await hub.close();
     mock.timers.reset();
+  }
+});
+
+test("family: a rejected REGISTER concurrent with an accepted one for the same instance records only the accepted protocol", async () => {
+  // The recording wrapper `await`s the package handler, so two REGISTER frames for the SAME instance
+  // can be in flight at once (e.g. a foreign takeover on one connection racing a genuine re-register
+  // on the owner's). A shared per-instance "accepted generation" counter mis-attributes here: the
+  // rejected frame snapshots the counter, parks on its await while the concurrent ACCEPTED frame
+  // advances it, then resumes to see it changed and records its OWN absent protocol — a spurious
+  // `null` write that can clear a healthy value. The acceptance signal must be bound per-invocation
+  // (AsyncLocalStorage), so a concurrent frame can never flip THIS frame's flag. Assert it directly:
+  // during the overlapping pair, the ONLY value recorded is the accepted frame's — no clearing `null`
+  // write from the rejected frame. (Red under the shared-counter code, which writes `[null, 2]`;
+  // green with the per-invocation binding, which writes `[2]`.)
+  const { data, writes } = withProtocolWriteSpy(memMountData());
+  const { hub, transport } = await mountFamily(data);
+  try {
+    const owner = fakeConn("c1", "owner");
+    const attacker = fakeConn("c2", "attacker");
+    transport.connect(owner.conn);
+    transport.connect(attacker.conn);
+    await flush();
+
+    // Owner registers w1 healthily (protocol 1).
+    owner.feed(registerFrame("w1", { harnessProtocol: 1 }));
+    await flush();
+    assertEquals(writes, [1], "initial register records protocol 1");
+    writes.length = 0;
+
+    // Overlapping pair, fed WITHOUT a flush between so both are in flight across the await: a foreign
+    // takeover (rejected by ownership, no protocol) and the owner's accepted re-register to protocol 2.
+    attacker.feed(registerFrame("w1", {}));
+    owner.feed(registerFrame("w1", { harnessProtocol: 2 }));
+    await flush();
+    await flush();
+
+    // Only the accepted frame recorded; the rejected frame contributed no clearing `null` write.
+    assertEquals(writes, [2], "only the accepted re-register records; the rejected frame records nothing");
+    assertEquals((await assessWorkers(data, ["w1"], {})).get("w1")?.harnessProtocol, 2, "recorded protocol is the accepted upgrade");
+  } finally {
+    family.teardown?.();
+    await hub.close();
   }
 });
