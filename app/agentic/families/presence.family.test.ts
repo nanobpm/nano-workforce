@@ -22,6 +22,8 @@ import { encodeFrame, type Frame, type MessageFamily } from "@nanobpm/agentic/pr
 import type { SqliteDb } from "@nanobpm/agentic/presence";
 import type { DataLayer } from "@nanobpm/urban";
 import { assert, assertEquals } from "#test-assert";
+import { assessWorkers } from "../../harnessProtocol.ts";
+import { memDataFor } from "../../../test/worldDb.ts";
 import { noopLog } from "../../../test/log.ts";
 import type { AgenticContext } from "../registry.ts";
 import {
@@ -45,11 +47,6 @@ function memSqlite(): SqliteDb {
     all: <T = Record<string, unknown>>(sql: string, params: unknown[] = []) =>
       db.prepare(sql).all(...(params as never[])) as T[],
   };
-}
-
-/** A DataLayer whose default source exposes the given synchronous SqliteDb (nothing else is used). */
-function memData(db: SqliteDb): DataLayer {
-  return { source: () => ({ db }) } as unknown as DataLayer;
 }
 
 /** A mutable fake clock so TTL sweeps are deterministic. */
@@ -275,7 +272,24 @@ function familyFrame(fam: MessageFamily, instance: string): Frame {
   return { lane: "control", family: fam, seq: 1, payload: { instance } };
 }
 
-async function mountFamily(db: SqliteDb | undefined): Promise<{ hub: AgenticHub; transport: ReturnType<typeof memTransport> }> {
+/** A full in-memory DataLayer for the presence family: the synchronous `source().db` handle the
+ * presence store uses PLUS the `table()`/`open()` surface the harness-protocol registry writes
+ * through (#820), all over ONE real SQLite db with the `worker_harness_protocol` migration applied. */
+function memMountData(): DataLayer {
+  const { data, db } = memDataFor(["107_worker_harness_protocol.sql"]);
+  const sqlite: SqliteDb = {
+    exec: (sql) => db.exec(sql),
+    run: (sql, params = []) => {
+      const r = db.prepare(sql).run(...(params as never[]));
+      return { changes: Number(r.changes), lastInsertRowid: Number(r.lastInsertRowid) };
+    },
+    all: <T = Record<string, unknown>>(sql: string, params: unknown[] = []) =>
+      db.prepare(sql).all(...(params as never[])) as T[],
+  };
+  return { ...(data as unknown as Record<string, unknown>), source: () => ({ db: sqlite }) } as unknown as DataLayer;
+}
+
+async function mountFamily(data: DataLayer | undefined): Promise<{ hub: AgenticHub; transport: ReturnType<typeof memTransport> }> {
   const transport = memTransport();
   const hub = new AgenticHub({ transport: transport.transport, authenticator, sweepIntervalMs: 0 });
   const ctx: AgenticContext = {
@@ -283,7 +297,7 @@ async function mountFamily(db: SqliteDb | undefined): Promise<{ hub: AgenticHub;
     registry: hub.registry,
     // The transport handle is not exercised by the presence family; the in-memory one stands in.
     transport: transport.transport as never,
-    data: db ? memData(db) : undefined,
+    data,
     log: noopLog(),
   };
   await family.mount(ctx);
@@ -291,7 +305,7 @@ async function mountFamily(db: SqliteDb | undefined): Promise<{ hub: AgenticHub;
 }
 
 test("family: mount attaches the three handlers and a REGISTER creates a durable presence row", async () => {
-  const { hub, transport } = await mountFamily(memSqlite());
+  const { hub, transport } = await mountFamily(memMountData());
   try {
     assertEquals(hub.router.families().sort(), ["deregister", "heartbeat", "register"]);
 
@@ -315,7 +329,7 @@ test("family: mount attaches the three handlers and a REGISTER creates a durable
 });
 
 test("family: HEARTBEAT keeps a worker and DEREGISTER removes it", async () => {
-  const { hub, transport } = await mountFamily(memSqlite());
+  const { hub, transport } = await mountFamily(memMountData());
   try {
     const peer = fakeConn("c1", "leaf");
     transport.connect(peer.conn);
@@ -338,7 +352,7 @@ test("family: HEARTBEAT keeps a worker and DEREGISTER removes it", async () => {
 });
 
 test("family: a disconnect removes the worker via reconcile", async () => {
-  const { hub, transport } = await mountFamily(memSqlite());
+  const { hub, transport } = await mountFamily(memMountData());
   try {
     const peer = fakeConn("c1", "leaf");
     transport.connect(peer.conn);
@@ -361,7 +375,7 @@ test("family: a disconnect removes the worker via reconcile", async () => {
 });
 
 test("family: teardown stops the family and clears the current registry", async () => {
-  const { hub } = await mountFamily(memSqlite());
+  const { hub } = await mountFamily(memMountData());
   assert(currentPresenceRegistry(), "mounted");
   family.teardown?.();
   assertEquals(currentPresenceRegistry(), undefined, "cleared on teardown");
@@ -374,6 +388,101 @@ test("family: mounting without a DataLayer is a safe no-op", async () => {
     assertEquals(currentPresenceRegistry(), undefined, "no registry without data");
     // The three presence handlers are not attached when there is nothing to persist to.
     assertEquals(hub.router.families(), []);
+  } finally {
+    family.teardown?.();
+    await hub.close();
+  }
+});
+
+// ── harness-protocol recording over the presence channel (issue #820) ──────────────────────────
+//
+// The #802 staleness gate only ever read the HTTP-enrol recorder, so a presence-only c8ctl-nano
+// fleet reported `harnessStale: true` permanently. These tests prove the presence REGISTER path now
+// feeds the ONE canonical `worker_harness_protocol` recorder the supply assessment joins.
+
+test("family: a REGISTER advertising harnessProtocol records it → the worker is assessed healthy", async () => {
+  const data = memMountData();
+  const { hub, transport } = await mountFamily(data);
+  try {
+    const peer = fakeConn("c1", "leafA");
+    transport.connect(peer.conn);
+    await flush();
+    // A presence-channel worker advertising the protocol on its enrolment capability (#820).
+    peer.feed(registerFrame("w1", { family: "opus", host: "boxA", harnessProtocol: 1 }));
+    await flush();
+
+    // Recorded into the ONE registry, keyed by instance, and joined by the shared supply assessment
+    // (default min protocol 1) → not stale.
+    const assessment = await assessWorkers(data, ["w1"], {});
+    assertEquals(assessment.get("w1")?.harnessProtocol, 1, "advertised protocol recorded");
+    assertEquals(assessment.get("w1")?.stale, false, "advertising min protocol clears the #802 stale flag");
+  } finally {
+    family.teardown?.();
+    await hub.close();
+  }
+});
+
+test("family: a REGISTER advertising NO harnessProtocol stays stale (no #802 regression)", async () => {
+  const data = memMountData();
+  const { hub, transport } = await mountFamily(data);
+  try {
+    const peer = fakeConn("c1", "leafA");
+    transport.connect(peer.conn);
+    await flush();
+    peer.feed(registerFrame("w1", { family: "opus", host: "boxA" }));
+    await flush();
+
+    const assessment = await assessWorkers(data, ["w1"], {});
+    assertEquals(assessment.get("w1")?.harnessProtocol, undefined, "no version advertised");
+    assertEquals(assessment.get("w1")?.stale, true, "absent version is stale — the #802 signal is preserved");
+  } finally {
+    family.teardown?.();
+    await hub.close();
+  }
+});
+
+test("family: a below-minimum harnessProtocol is assessed stale against a raised minimum", async () => {
+  const data = memMountData();
+  const { hub, transport } = await mountFamily(data);
+  try {
+    const peer = fakeConn("c1", "leafA");
+    transport.connect(peer.conn);
+    await flush();
+    peer.feed(registerFrame("w1", { harnessProtocol: 1 }));
+    await flush();
+
+    const assessment = await assessWorkers(data, ["w1"], { NANO_AGENTIC_MIN_HARNESS_PROTOCOL: "2" });
+    assertEquals(assessment.get("w1")?.harnessProtocol, 1, "advertised protocol recorded");
+    assertEquals(assessment.get("w1")?.stale, true, "below the raised minimum is stale");
+  } finally {
+    family.teardown?.();
+    await hub.close();
+  }
+});
+
+test("family: a rejected takeover REGISTER cannot overwrite another peer's recorded protocol", async () => {
+  const data = memMountData();
+  const { hub, transport } = await mountFamily(data);
+  try {
+    // Owner registers instance w1 with a healthy protocol.
+    const owner = fakeConn("c1", "owner");
+    transport.connect(owner.conn);
+    await flush();
+    owner.feed(registerFrame("w1", { harnessProtocol: 1 }));
+    await flush();
+    assertEquals((await assessWorkers(data, ["w1"], {})).get("w1")?.stale, false, "owner recorded healthy");
+
+    // A different identity tries to take over w1 advertising no version — the presence store rejects
+    // the ownership takeover, so the recording must NOT clear the owner's healthy protocol.
+    const attacker = fakeConn("c2", "attacker");
+    transport.connect(attacker.conn);
+    await flush();
+    attacker.feed(registerFrame("w1", {}));
+    await flush();
+
+    const assessment = await assessWorkers(data, ["w1"], {});
+    assertEquals(assessment.get("w1")?.harnessProtocol, 1, "owner's recorded protocol survives a rejected takeover");
+    assertEquals(assessment.get("w1")?.stale, false, "no foreign peer can flip a worker stale");
   } finally {
     family.teardown?.();
     await hub.close();

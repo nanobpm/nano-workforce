@@ -19,6 +19,8 @@
 // is untouched — presence rides the agentic channel only; ADVISORY — the registry is a read-only
 // mirror and NEVER hard-locks or gates a BPMN sequence flow. Capability (cognition/weight/family/host)
 // is an ENROLMENT attribute, never a routing token.
+
+import type { AgenticHub, FamilyHandler, HubConnection } from "@nanobpm/agentic/channel";
 import {
   attachPresenceFamily,
   type PresenceFamilyHandle,
@@ -26,11 +28,16 @@ import {
   type PresenceStoreOptions,
   type SqliteDb,
 } from "@nanobpm/agentic/presence";
+import type { Frame, MessageFamily } from "@nanobpm/agentic/protocol";
 import type { DataLayer } from "@nanobpm/urban";
+import { HarnessProtocolRegistry } from "../../harnessProtocol.ts";
 import type { AgenticContext, AgenticFamily } from "../registry.ts";
 
 /** The message-family name this module owns (its three handlers are register/heartbeat/deregister). */
 export const PRESENCE_FAMILY = "presence";
+
+/** The presence REGISTER message family — the frame that carries the enrolment capability. */
+const REGISTER_FAMILY: MessageFamily = "register";
 
 /** The maintenance tick runs at a third of the presence TTL — matching the hub/store sweep cadence. */
 const SWEEP_DIVISOR = 3;
@@ -262,6 +269,81 @@ export function createPresenceStore(db: SqliteDb, options?: PresenceStoreOptions
   return new PresenceStore(db, options);
 }
 
+/** Read a property off an unknown value without an unsafe `as` cast (mirrors the relay/loader helper). */
+function readProp(value: unknown, key: string): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  return Object.hasOwn(value, key) ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;
+}
+
+/** Read an optional advertised harness protocol off a presence REGISTER capability (issue #820).
+ *
+ * The wire capability the package validates is `{cognition, weight, family, host}` and its handler
+ * DROPS any other field, so the harness-protocol version a c8ctl-nano worker advertises over the
+ * presence channel (jwulf/c8ctl-plugin-nano#272) would never reach the ONE `worker_harness_protocol`
+ * recorder that the #802 staleness gate reads — the gate is inert for the presence-only fleet. This
+ * lifts the advertised version out of the register capability so it can be recorded. It is an
+ * ADR 0056 §7 enrolment attribute (never a routing token): a non-numeric / absent value reads back as
+ * `undefined` → the recorder stores NULL → the worker is assessed STALE (absent-version-is-stale, the
+ * #802 signature, preserved). */
+function readHarnessProtocol(payload: unknown): number | undefined {
+  const value = readProp(readProp(payload, "capability"), "harnessProtocol");
+  return typeof value === "number" ? value : undefined;
+}
+
+/**
+ * Wrap `hub` so that the presence REGISTER handler the package installs ALSO records the advertised
+ * harness protocol into the ONE canonical {@link HarnessProtocolRegistry} (issue #820) — the same
+ * table the HTTP `enrolAgenticWorker` door writes and `assessWorkers` reads (derivation over
+ * duplication, not a second store). Every other family passes through untouched.
+ *
+ * The record is gated on the register having actually TAKEN EFFECT: after the package handler runs we
+ * confirm the durable presence row for the instance is now owned by THIS connection (`store.get(...)`)
+ * before recording. That skips a register the package rejected — a malformed payload or an ownership
+ * takeover of an instance already bound to a different identity — so a foreign peer can never rewrite
+ * another worker's recorded protocol. Recording is best-effort: a registry write hiccup is logged and
+ * swallowed, exactly like the presence sweep, and never fails the register.
+ */
+function withHarnessProtocolRecording(
+  hub: AgenticHub,
+  store: PresenceStore,
+  data: DataLayer,
+  log: AgenticContext["log"],
+): AgenticHub {
+  const registry = new HarnessProtocolRegistry(data);
+  return new Proxy(hub, {
+    get(target, prop, receiver) {
+      if (prop !== "registerFamilyHandler") {
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (family: MessageFamily, handler: FamilyHandler<HubConnection>) => {
+        if (family !== REGISTER_FAMILY) {
+          target.registerFamilyHandler(family, handler);
+          return;
+        }
+        const recording: FamilyHandler<HubConnection> = async (frame: Frame, conn: HubConnection) => {
+          await handler(frame, conn);
+          const instance = readInstance(frame.payload);
+          // Only record when THIS register succeeded (the row is now owned by this connection).
+          if (instance === undefined || store.get(instance)?.connectionId !== conn.id) return;
+          try {
+            await registry.recordEnrolment(instance, readHarnessProtocol(frame.payload));
+          } catch (err) {
+            log.warn("agentic presence: harness-protocol record failed", { instance, err: String(err) });
+          }
+        };
+        target.registerFamilyHandler(family, recording);
+      };
+    },
+  });
+}
+
+/** The `register.instance` off a presence payload, or undefined when absent/blank. */
+function readInstance(payload: unknown): string | undefined {
+  const value = readProp(payload, "instance");
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 /**
  * The presence family module. `mount` attaches register/heartbeat/deregister to the hub, applies the
  * schema, and starts ONE canonical maintenance tick that both ages out on the presence TTL and drops
@@ -271,8 +353,9 @@ export const family: AgenticFamily = {
   name: PRESENCE_FAMILY,
 
   mount(ctx: AgenticContext): void {
-    const db = openPresenceDb(ctx.data);
-    if (!db) {
+    const data = ctx.data;
+    const db = openPresenceDb(data);
+    if (!db || !data) {
       ctx.log.warn("agentic presence: no data layer mounted — presence registry disabled");
       return;
     }
@@ -284,12 +367,18 @@ export const family: AgenticFamily = {
 
     // Attach the three presence handlers via the S1 seam. Disable the package's own TTL timer
     // (`sweepIntervalMs: 0`) so this module runs a SINGLE maintenance loop rather than two — the
-    // canonical presence-maintenance pass, not a second poller (derivation over duplication).
-    const handle = attachPresenceFamily(ctx.hub, store, {
-      sweepIntervalMs: 0,
-      onError: (err, connectionId) =>
-        ctx.log.warn("agentic presence fault", { connectionId, err: String(err) }),
-    });
+    // canonical presence-maintenance pass, not a second poller (derivation over duplication). The hub
+    // is wrapped so the REGISTER handler ALSO records the advertised harness protocol into the ONE
+    // canonical registry (issue #820) — the presence-channel path to the #802 staleness gate.
+    const handle = attachPresenceFamily(
+      withHarnessProtocolRecording(ctx.hub, store, data, ctx.log),
+      store,
+      {
+        sweepIntervalMs: 0,
+        onError: (err, connectionId) =>
+          ctx.log.warn("agentic presence fault", { connectionId, err: String(err) }),
+      },
+    );
 
     const interval = Math.max(1, Math.floor(store.ttlMs / SWEEP_DIVISOR));
     const tick = () => {
