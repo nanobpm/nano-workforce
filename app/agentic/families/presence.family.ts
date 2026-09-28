@@ -21,7 +21,8 @@
 // is an ENROLMENT attribute, never a routing token.
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { AgenticHub, FamilyHandler, HubConnection } from "@nanobpm/agentic/channel";import {
+import type { AgenticHub, FamilyHandler, HubConnection } from "@nanobpm/agentic/channel";
+import {
   attachPresenceFamily,
   type PresenceFamilyHandle,
   type PresenceRow,
@@ -322,7 +323,11 @@ function readHarnessProtocol(payload: unknown): number | undefined {
  * earlier before/after `lastSeen` comparison could also FALSE-NEGATIVE two accepted same-connection
  * re-registers within one `Date.now()` tick — identical millisecond timestamps read as "no change".)
  * That skips every register the package dropped, so neither a foreign peer nor a self-inflicted bad
- * frame can rewrite a worker's recorded protocol. Recording is best-effort: a registry write hiccup is
+ * frame can rewrite a worker's recorded protocol. Two ACCEPTED re-registers for one instance can also
+ * be in flight at once (a reconnect race), and the record write is async; the writes are SERIALIZED
+ * per instance and stamped with the monotonic acceptance sequence, so a stale (older) frame resuming
+ * last is skipped rather than overwriting the newer protocol — the newest accepted protocol always
+ * wins. Recording is best-effort: a registry write hiccup is
  * logged and swallowed, exactly like the presence sweep, and never fails the register.
  */
 function withHarnessProtocolRecording(
@@ -338,13 +343,56 @@ function withHarnessProtocolRecording(
   // before/after comparison that could either collide within one Date.now() tick or be cross-attributed
   // to a concurrent frame for the same instance across the await. It also keeps no per-instance state,
   // so nothing leaks for deregistered / TTL-swept instances.
-  const acceptance = new AsyncLocalStorage<{ accepted: boolean }>();
+  const acceptance = new AsyncLocalStorage<{ accepted: boolean; seq: number }>();
+  let acceptSeq = 0;
   const registerInner = store.register.bind(store);
   store.register = (input: RegisterInput): PresenceRow => {
     const row = registerInner(input);
     const active = acceptance.getStore();
-    if (active) active.accepted = true;
+    // Stamp a monotonic acceptance SEQUENCE at the synchronous register call: it reflects the true
+    // order in which the store accepted overlapping re-registers, which the async record write below
+    // must preserve.
+    if (active) {
+      active.accepted = true;
+      active.seq = ++acceptSeq;
+    }
     return row;
+  };
+  // Per-instance serialized write chains. Two ACCEPTED re-registers for one instance can be in flight
+  // at once (a reconnect race on the owner), and `recordEnrolment` is async (findOne → update), so
+  // their writes could otherwise interleave and land out of order — the OLDER frame resuming last and
+  // overwriting the NEWER protocol, leaving the supply assessment stale until the next register.
+  // Serialize the writes per instance AND skip any write whose acceptance sequence is stale (a newer
+  // accepted register already applied), so the newest accepted protocol always wins regardless of
+  // completion timing. The entry is dropped once its chain drains, so — like the per-invocation marker
+  // — nothing accumulates for deregistered / TTL-swept / ephemeral instances.
+  const writeChains = new Map<string, { tail: Promise<void>; lastSeq: number; pending: number }>();
+  const recordInOrder = (instance: string, seq: number, protocol: number | undefined): Promise<void> => {
+    let chain = writeChains.get(instance);
+    if (chain === undefined) {
+      chain = { tail: Promise.resolve(), lastSeq: 0, pending: 0 };
+      writeChains.set(instance, chain);
+    }
+    const c = chain;
+    c.pending++;
+    const run = c.tail.then(async () => {
+      // A newer accepted register (higher seq) already applied — this frame's write is stale, so skip
+      // it rather than clobber the fresher protocol with an out-of-order value.
+      if (seq <= c.lastSeq) return;
+      c.lastSeq = seq;
+      await registry.recordEnrolment(instance, protocol);
+    });
+    // Keep the chain live even if one write rejects (a rejection must not wedge later writes), and drop
+    // the per-instance entry once the last queued write drains.
+    c.tail = run
+      .then(
+        () => {},
+        () => {},
+      )
+      .finally(() => {
+        if (--c.pending === 0 && writeChains.get(instance) === c) writeChains.delete(instance);
+      });
+    return run;
   };
   return new Proxy(hub, {
     get(target, prop, receiver) {
@@ -364,14 +412,14 @@ function withHarnessProtocolRecording(
           // or an ownership takeover the handler drops without touching the store) leaves it false. The
           // marker travels with this frame's own async chain, so a concurrent frame for the same
           // instance runs in a distinct context and can never flip it across the await.
-          const marker = { accepted: false };
+          const marker = { accepted: false, seq: 0 };
           await acceptance.run(marker, () => handler(frame, conn));
           if (instance === undefined) return;
           // Record only when the package accepted THIS frame's register. A rejected re-register leaves
           // the marker false, so it records nothing and cannot clear a healthy protocol.
           if (!marker.accepted) return;
           try {
-            await registry.recordEnrolment(instance, readHarnessProtocol(frame.payload));
+            await recordInOrder(instance, marker.seq, readHarnessProtocol(frame.payload));
           } catch (err) {
             log.warn("agentic presence: harness-protocol record failed", { instance, err: String(err) });
           }

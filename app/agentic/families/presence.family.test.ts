@@ -313,6 +313,31 @@ function withProtocolWriteSpy(data: DataLayer): { data: DataLayer; writes: Array
   return { data: wrapped as unknown as DataLayer, writes };
 }
 
+/** Wrap a DataLayer so the registry's `update` of `worker_harness_protocol` to a specific protocol
+ * value is deferred by one MACROTASK (`setTimeout(0)`). The in-memory gateway resolves its reads/writes
+ * on microtasks, so a macrotask deterministically lands AFTER a concurrent frame's whole write —
+ * letting a test force an OLDER accepted re-register's write to complete last, the exact out-of-order
+ * hazard the per-instance serialization guards against. */
+function withDelayedProtocolUpdate(data: DataLayer, delayValue: number): DataLayer {
+  const realTable = (data as unknown as { table: (name: string, key: string) => unknown }).table.bind(data);
+  return {
+    ...(data as unknown as Record<string, unknown>),
+    table: (name: string, key: string) => {
+      const t = realTable(name, key) as Record<string, (...a: unknown[]) => unknown>;
+      if (name !== "worker_harness_protocol") return t;
+      return {
+        ...t,
+        update: async (k: unknown, patch: Record<string, unknown>) => {
+          if (Number(patch.harness_protocol) === delayValue) {
+            await new Promise<void>((r) => setImmediate(r));
+          }
+          return t.update(k, patch);
+        },
+      };
+    },
+  } as unknown as DataLayer;
+}
+
 async function mountFamily(data: DataLayer | undefined): Promise<{ hub: AgenticHub; transport: ReturnType<typeof memTransport> }> {
   const transport = memTransport();
   const hub = new AgenticHub({ transport: transport.transport, authenticator, sweepIntervalMs: 0 });
@@ -613,6 +638,46 @@ test("family: a rejected REGISTER concurrent with an accepted one for the same i
     // Only the accepted frame recorded; the rejected frame contributed no clearing `null` write.
     assertEquals(writes, [2], "only the accepted re-register records; the rejected frame records nothing");
     assertEquals((await assessWorkers(data, ["w1"], {})).get("w1")?.harnessProtocol, 2, "recorded protocol is the accepted upgrade");
+  } finally {
+    family.teardown?.();
+    await hub.close();
+  }
+});
+
+test("family: two overlapping ACCEPTED re-registers record the NEWEST protocol even if the older write lands last", async () => {
+  // Two ACCEPTED re-registers for the same instance can be in flight at once (a reconnect race on the
+  // owner). `recordEnrolment` is async (findOne → update), so if the OLDER frame's write resumes AFTER
+  // the newer frame's, the older protocol overwrites the newer one — leaving the supply assessment
+  // stale until the next register. The recording must serialize per instance and honour acceptance
+  // order so the NEWEST accepted protocol always wins. Force the hazard deterministically: delay the
+  // older frame's (protocol 2) update by one macrotask so, unguarded, it lands after the newer
+  // (protocol 3) write. (Red under the un-serialized code, which persists the stale 2; green with the
+  // per-instance serialization + acceptance-sequence guard, which persists 3.)
+  const data = withDelayedProtocolUpdate(memMountData(), 2);
+  const { hub, transport } = await mountFamily(data);
+  try {
+    const owner = fakeConn("c1", "owner");
+    transport.connect(owner.conn);
+    await flush();
+
+    // Initial accepted register: protocol 1 (an insert, so the later updates are the ones that race).
+    owner.feed(registerFrame("w1", { harnessProtocol: 1 }));
+    await flush();
+    assertEquals((await assessWorkers(data, ["w1"], {})).get("w1")?.harnessProtocol, 1, "initial protocol recorded");
+
+    // Overlapping accepted re-registers, fed WITHOUT a flush between so both are in flight across the
+    // await: protocol 2 (older) then protocol 3 (newer). The newest accepted protocol must win.
+    owner.feed(registerFrame("w1", { harnessProtocol: 2 }));
+    owner.feed(registerFrame("w1", { harnessProtocol: 3 }));
+    await flush();
+    await flush();
+    await flush();
+
+    assertEquals(
+      (await assessWorkers(data, ["w1"], {})).get("w1")?.harnessProtocol,
+      3,
+      "the newest accepted re-register wins even when the older frame's write completes last",
+    );
   } finally {
     family.teardown?.();
     await hub.close();
