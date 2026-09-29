@@ -62,6 +62,30 @@ export const PR_RECORD_ANSWER_ELEMENT = "record-answer";
  *  `PR_RECORD_ANSWER_ELEMENT`, reached when `wait-merge-answer` completes (issue #829). */
 export const PR_RECORD_MERGE_ANSWER_ELEMENT = "record-merge-answer";
 
+/** Every `pr.persist-escalation` PRODUCER element across the two PR loops — the service tasks that write
+ *  `status="escalated"` (and INSERT the `open` escalation row) IMMEDIATELY BEFORE the engine creates the
+ *  `wait-answer` / `wait-merge-answer` user task. An ACTIVE instance of any of these is positive evidence
+ *  an escalation is being RAISED right now: the row is already `escalated` but no user task exists yet, so
+ *  neither the open-task probe nor the answer-recorder probe covers it. If such a producer stays ACTIVE
+ *  past the raise-time grace window (e.g. an app restart / lease delay between the DB commit and the job
+ *  completing), the escalated-PR self-heal would otherwise see no parked task and wrongly retire the live
+ *  escalation. So the heal must treat an ACTIVE producer as in-flight too (issue #829). This is the single
+ *  source of truth for that set; `app/persistEscalationElements.test.ts` fails if it drifts from the
+ *  `pr.persist-escalation` tasks actually modelled in the BPMN. */
+export const PR_ESCALATION_PRODUCER_ELEMENTS: readonly string[] = [
+  // convergence-loop.bpmn
+  "persist-escalation",
+  "persist-escalation-noprogress",
+  "persist-escalation-maxrounds",
+  "persist-escalation-blockedcomments",
+  "persist-escalation-scope",
+  "persist-review-stalled",
+  // merge-loop.bpmn
+  "merge-esc-conflict",
+  "merge-esc-attempt",
+  "merge-esc-landed",
+];
+
 /** The ACP permission-prompt escalation (issue #559, ADR 0056) — the Tasks-inbox kind a bridged
  *  `session/request_permission` surfaces under when an escalate-policy agent asks a human to Allow/Deny
  *  a proposed action. Unlike the other escalation elements this is NOT a BPMN user-task element; it is

@@ -106,6 +106,7 @@ import {
   latestTrialMergeQuestion,
   type OpenEscalation,
   PLAN_REVIEW_ELEMENT,
+  PR_ESCALATION_PRODUCER_ELEMENTS,
   PR_RECORD_ANSWER_ELEMENT,
   PR_RECORD_MERGE_ANSWER_ELEMENT,
   PR_WAIT_ANSWER_ELEMENT,
@@ -3380,33 +3381,47 @@ export async function pollUserTasks(
     const snapshotUpdatedAt = pr.updated_at ?? null;
     const snapshotOpenEscalationIds = (await escs(data).find({ pr_key: pr.pr_key, status: "open" })).map((e) => e.id);
     let stillParked = false;
-    let answerInFlight = false;
+    let escalationInFlight = false;
     let queryErrored = false;
     try {
       const openTasks = await engine.openUserTasks({ processInstanceKey: pr.process_key });
       stillParked = openTasks.some((t) => t.elementId === PR_WAIT_ANSWER_ELEMENT || t.elementId === PR_WAIT_MERGE_ANSWER_ELEMENT);
-      // An empty open-task set is NOT yet proof the answer-side write was lost. `pr.answer-escalation`
-      // (`record-answer` / `record-merge-answer`) is the sole writer that moves a PR OFF `escalated`, and
-      // both BPMN models flow the completed `wait-answer` / `wait-merge-answer` user task DIRECTLY to that
-      // service task. So a normal answer has a window where the user task is already gone (this query
-      // returns none) while the answer-recording job is still queued or running — the escalation may be
-      // arbitrarily old (past the raise-time grace), so the grace above does not cover it. Healing in that
-      // window flips the row to `converging` and retires the still-`open` escalation to `stale`, and the
-      // in-flight worker then finds no target and silently drops the operator's answer (issue #829). An
-      // ACTIVE answer-recording element instance is positive evidence the answer is in flight, so treat it
-      // exactly like an open task and skip the heal. Only a PR with NEITHER an open task NOR an active
-      // answer-recorder is genuinely stranded (the #828 lost-write tear) and gets healed.
+      // An empty open-task set is NOT yet proof the escalation is dead. Two distinct DB/engine boundaries
+      // each leave the row `escalated` with NO open user task while an escalation is genuinely live:
+      //
+      //   1. The ANSWER side. `pr.answer-escalation` (`record-answer` / `record-merge-answer`) is the sole
+      //      writer that moves a PR OFF `escalated`, and both BPMN models flow the completed `wait-answer` /
+      //      `wait-merge-answer` user task DIRECTLY to that service task. So a normal answer has a window
+      //      where the user task is already gone (this query returns none) while the answer-recording job is
+      //      still queued or running.
+      //   2. The PRODUCER side. `pr.persist-escalation` (the `PR_ESCALATION_PRODUCER_ELEMENTS`) COMMITS the
+      //      `open` row and `status="escalated"` IMMEDIATELY BEFORE the engine creates the `wait-answer` /
+      //      `wait-merge-answer` user task. The raise-time grace window covers the normal case, but if that
+      //      producer service task stays ACTIVE past the grace (e.g. an app restart / lease delay between
+      //      the DB commit and the job completing) the row is old enough to heal yet no user task exists.
+      //
+      // In EITHER window the escalation is arbitrarily old (past the raise-time grace), so the grace above
+      // does not cover it. Healing here flips the row to `converging` and retires the still-`open`
+      // escalation to `stale`, and the live escalation is lost — the answer-recorder finds no target and
+      // silently drops the operator's answer, or the just-raised question never surfaces (issue #829). An
+      // ACTIVE answer-recording OR persist-escalation element instance is positive evidence an escalation is
+      // in flight, so treat it exactly like an open task and skip the heal. Only a PR with NEITHER an open
+      // task NOR any ACTIVE escalation element is genuinely stranded (the #828 lost-write tear) and heals.
       if (!stillParked) {
         const elements = await engine.searchElementInstances({ processInstanceKey: pr.process_key });
-        answerInFlight = elements.some(
-          (el) => el.state === "ACTIVE" && (el.elementId === PR_RECORD_ANSWER_ELEMENT || el.elementId === PR_RECORD_MERGE_ANSWER_ELEMENT),
+        escalationInFlight = elements.some(
+          (el) =>
+            el.state === "ACTIVE" &&
+            (el.elementId === PR_RECORD_ANSWER_ELEMENT ||
+              el.elementId === PR_RECORD_MERGE_ANSWER_ELEMENT ||
+              (el.elementId != null && PR_ESCALATION_PRODUCER_ELEMENTS.includes(el.elementId))),
         );
       }
     } catch (err) {
       console.error(`[poller] escalated-pr self-heal (${pr.pr_key} @ ${pr.process_key}): ${err}`);
       queryErrored = true;
     }
-    if (queryErrored || stillParked || answerInFlight) continue;
+    if (queryErrored || stillParked || escalationInFlight) continue;
     // Repair conditionally and atomically (Copilot review of #829). The read→write window between the
     // engine reads above and here is wide (two remote RPCs), so the PR may have re-escalated on the same
     // instance meanwhile; a blind `update` would then overwrite that fresh `escalated` status and retire

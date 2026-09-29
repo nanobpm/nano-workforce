@@ -1258,6 +1258,46 @@ test("pollUserTasks (engine-first): DOES heal an escalated PR once its answer-re
   assertEquals(escById[1].status, "stale", "the orphaned open escalation row is retired to stale");
 });
 
+test("pollUserTasks (engine-first): does NOT heal an escalated PR while its persist-escalation producer is still ACTIVE (issue #829)", async () => {
+  // The producer-side twin of the answer-recorder race. `pr.persist-escalation` COMMITS the `open` row and
+  // `status="escalated"` BEFORE the engine creates the `wait-answer` user task, so there is a window with an
+  // `escalated` PR, an `open` escalation, and NO user task yet. The raise-time grace normally covers it, but
+  // if the producer service task stays ACTIVE past the grace (an app restart / lease delay between the DB
+  // commit and the job completing) the row is old enough to heal while the escalation is being raised RIGHT
+  // NOW. Healing here would retire the just-raised escalation to `stale` and the question would never surface.
+  // An ACTIVE persist-escalation element is positive evidence, so the heal must skip it — one case per loop.
+  const stale = new Date(Date.now() - 60 * 60_000).toISOString();
+  const { data, stores } = memData({
+    pull_requests: [
+      { pr_key: "o/r#829pr", status: "escalated", process_key: "rp-829pr", updated_at: stale, url: "https://github.com/o/r/pull/8293", title: "producer active (review)" },
+      { pr_key: "o/r#829pm", status: "escalated", process_key: "rp-829pm", updated_at: stale, url: "https://github.com/o/r/pull/8294", title: "producer active (merge)" },
+    ],
+    escalations: [
+      { id: 1, pr_key: "o/r#829pr", status: "open", question: "being raised", answer: null, answered_at: null },
+      { id: 2, pr_key: "o/r#829pm", status: "open", question: "being raised", answer: null, answered_at: null },
+    ],
+  });
+  const restore = stubUserTaskSearch([]); // the user task does not exist yet — the producer hasn't completed
+  const engine = fakeEngine(
+    { "rp-829pr": [], "rp-829pm": [] },
+    {
+      "rp-829pr": [{ elementId: "persist-escalation-blockedcomments", state: "ACTIVE" }],
+      "rp-829pm": [{ elementId: "merge-esc-conflict", state: "ACTIVE" }],
+    },
+  );
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    restore();
+  }
+  const byKey = Object.fromEntries((stores.pull_requests ?? []).map((r) => [r.pr_key, r]));
+  assertEquals(byKey["o/r#829pr"].status, "escalated", "a PR with an ACTIVE review persist-escalation producer is spared the heal");
+  assertEquals(byKey["o/r#829pm"].status, "escalated", "a PR with an ACTIVE merge persist-escalation producer is spared the heal");
+  const escById = Object.fromEntries((stores.escalations ?? []).map((r) => [r.id, r]));
+  assertEquals(escById[1].status, "open", "the just-raised review escalation row is left open");
+  assertEquals(escById[2].status, "open", "the just-raised merge escalation row is left open");
+});
+
 test("pollUserTasks (engine-first): a re-escalation in the read→write window is NOT clobbered — the guarded CAS refuses the moved snapshot (issue #829)", async () => {
   // The TOCTOU race Copilot flagged: the heal reads the PR, then does two remote engine RPCs, THEN writes.
   // If the SAME instance re-escalates in that window (`pr.persist-escalation` re-stamps `updated_at` and
