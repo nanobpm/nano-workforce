@@ -8,29 +8,56 @@
 // guard moved downstream of progress classification) and likewise passes `recordRound=false`; an
 // agent-raised arm with no prior round row omits the flag and must still record the round.
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assertEquals, assertRejects } from "#test-assert";
 import handler from "../workers/persist-escalation/worker.ts";
 
-function fakeApp() {
+// `failOn` forces the named table's `update` to throw, so a test can assert the escalation-insert +
+// PR-stamp transaction rolls back as a unit (issue #829 — the insert-before-timestamp window).
+function fakeApp(opts: { failOn?: string } = {}) {
   const inserts: Record<string, unknown[]> = { rounds: [], escalations: [] };
   const updates: Record<string, unknown[]> = { pull_requests: [] };
   const rows: Record<string, Map<string, unknown>> = {};
+  // `apply` decides WHEN a staged write lands: outside a transaction it applies immediately; inside
+  // `open().tx()` it is buffered and flushed only on a clean return, so a throw discards it (rollback).
+  const makeTable = (name: string, apply: (fn: () => void) => void) => {
+    const store = (rows[name] ??= new Map());
+    return {
+      async get(key: string) {
+        return store.get(key);
+      },
+      async insert(row: unknown) {
+        const pk = name === "escalations" ? "id" : name === "rounds" ? "id" : "pr_key";
+        const id = name === "escalations" ? 42 : name === "rounds" ? 1 : (row as any).pr_key;
+        const stored = pk === "id" ? { id, ...(row as Record<string, unknown>) } : row;
+        apply(() => {
+          (inserts[name] ??= []).push(row);
+          store.set((stored as any)[pk], stored);
+        });
+        return id;
+      },
+      async update(key: string, patch: unknown) {
+        if (opts.failOn === name) throw new Error(`simulated ${name} update failure`);
+        apply(() => {
+          (updates[name] ??= []).push({ key, patch });
+        });
+      },
+    };
+  };
+  const applyNow = (fn: () => void) => fn();
   const app = {
     data: {
-      table(name: string, _key: string) {
-        const store = (rows[name] ??= new Map());
+      table(name: string, _key?: string) {
+        return makeTable(name, applyNow);
+      },
+      open() {
         return {
-          async get(key: string) {
-            return store.get(key);
-          },
-          async insert(row: unknown) {
-            (inserts[name] ??= []).push(row);
-            const pk = name === "escalations" ? "id" : name === "rounds" ? "id" : "pr_key";
-            store.set((row as any)[pk], row);
-            return name === "escalations" ? 42 : 1;
-          },
-          async update(key: string, patch: unknown) {
-            (updates[name] ??= []).push({ key, patch });
+          async tx<T>(fn: (t: unknown) => Promise<T>): Promise<T> {
+            const staged: Array<() => void> = [];
+            const stage = (fn2: () => void) => staged.push(fn2);
+            const handle = { table: (name: string, _key?: string) => makeTable(name, stage) };
+            const result = await fn(handle); // a throw here skips the flush below — the staged writes roll back
+            for (const s of staged) s();
+            return result;
           },
         };
       },
@@ -48,6 +75,20 @@ test("stalled arm (recordRound=false) does not insert a duplicate rounds row", a
   assertEquals(inserts.rounds.length, 0, "no round row when the round was already recorded");
   assertEquals(inserts.escalations.length, 1, "escalation is still opened");
   assertEquals((out as any).escalationId, 42);
+});
+
+// Red/green regression for the insert-before-timestamp race (issue #829, Copilot review). The
+// escalated-PR self-heal snapshots the PR generation + open-escalation ids and fences its repair on
+// them. If this worker inserted the fresh `open` escalation BEFORE stamping the PR's `updated_at`
+// (two separate writes), a heal snapshot landing between them would see the new escalation under the
+// OLD generation and could retire it, orphaning a live user task. The insert and the PR stamp are now
+// one transaction, so they are all-or-nothing: a failed PR stamp must roll the escalation insert back
+// — proving no `open` row is ever visible while the PR still carries the pre-escalation generation.
+test("persist-escalation opens the escalation and stamps the PR atomically — a failed PR stamp rolls back the escalation insert (issue #829)", async () => {
+  const { app, inserts } = fakeApp({ failOn: "pull_requests" });
+  const job = { variables: { prKey: "o/r#1", round: 3, status: "blocked", question: "needs input" } };
+  await assertRejects(() => handler(job as any, app as any));
+  assertEquals(inserts.escalations.length, 0, "the escalation insert rolls back with the failed PR stamp — no orphan open row under the old generation");
 });
 
 test("an agent-raised arm without the flag still records the round", async () => {

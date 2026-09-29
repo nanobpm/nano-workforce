@@ -1265,6 +1265,10 @@ test("pollUserTasks (engine-first): a re-escalation in the read→write window i
   // the fresh escalation — dropping the operator's next answer. We reproduce the concurrent re-escalation
   // by mutating the store from inside `searchElementInstances` (the last read before the write), then
   // assert the snapshot-fenced CAS makes NO change: the PR stays `escalated` and the fresh escalation open.
+  // NB the mutation advances `updated_at` AND inserts the fresh escalation TOGETHER, modelling the now-atomic
+  // `pr.persist-escalation` producer (its insert + PR re-stamp share one transaction, issue #829) — so a
+  // captured snapshot can never see the new escalation under the OLD generation; the covering red/green for
+  // that producer atomicity lives in app/persist-escalation.test.ts.
   const stale = new Date(Date.now() - 60 * 60_000).toISOString();
   const { data, stores } = memData({
     pull_requests: [{ pr_key: "o/r#829race", status: "escalated", process_key: "rp-829race", updated_at: stale, url: "https://github.com/o/r/pull/8292", title: "re-escalates mid-heal" }],

@@ -111,20 +111,35 @@ const handler: AppJobHandler<In> = async (job, app) => {
       process_instance_key: job.processInstanceKey != null ? String(job.processInstanceKey) : null,
     });
   }
-  const escalationId = await app.data.table("escalations", "id").insert({
-    pr_key: prKey,
-    round_no: round,
-    kind,
-    question,
-    transcript,
-    worker,
-    status: "open",
-    asked_at: now,
-  });
-  await app.data.table("pull_requests", "pr_key").update(prKey, {
-    status: "escalated",
-    current_round: round,
-    updated_at: now,
+  // Open the escalation row and stamp the PR to `escalated` ATOMICALLY, in ONE transaction (Copilot
+  // review of #829). `pr.persist-escalation` is the SOLE producer of a PR's escalated generation, and the
+  // escalated-PR self-heal (`pollUserTasks` in app/service.ts) fences its repair on a snapshot of the PR
+  // generation (`process_key` + `updated_at`) plus the `open` escalation ids it observes. If the fresh
+  // `open` row were INSERTED before the PR's `updated_at` re-stamp — two separate writes, as this worker
+  // used to do — a heal snapshot landing between them would capture the new escalation while the PR still
+  // matched the OLD generation; its compare-and-swap, still matching the un-bumped `updated_at`, could then
+  // WIN and retire the just-opened escalation to `stale`, orphaning a live user task and dropping the
+  // operator's next answer. Committing the insert and the generation re-stamp together closes that window
+  // categorically: the heal can only ever observe the new escalation AND the bumped `updated_at` atomically,
+  // so its snapshot-fenced CAS misses (the discriminator moved) and never clobbers. The same transaction
+  // also means a crash mid-write rolls back cleanly — never an `open` escalation row with no `escalated` PR.
+  let escalationId: number | bigint = 0;
+  await app.data.open().tx(async (t) => {
+    escalationId = await t.table("escalations", "id").insert({
+      pr_key: prKey,
+      round_no: round,
+      kind,
+      question,
+      transcript,
+      worker,
+      status: "open",
+      asked_at: now,
+    });
+    await t.table("pull_requests", "pr_key").update(prKey, {
+      status: "escalated",
+      current_round: round,
+      updated_at: now,
+    });
   });
 
   return { escalationId: Number(escalationId), escalated: true, question };
