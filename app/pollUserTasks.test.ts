@@ -1298,6 +1298,49 @@ test("pollUserTasks (engine-first): does NOT heal an escalated PR while its pers
   assertEquals(escById[2].status, "open", "the just-raised merge escalation row is left open");
 });
 
+test("pollUserTasks (engine-first): does NOT heal an escalated PR when the producer→user-task transition lands BETWEEN the two engine reads (issue #829)", async () => {
+  // The producer→user-task TOCTOU the prior two guards miss. `openUserTasks()` (read 1) returns empty while
+  // a long-running persist producer is still ACTIVE; that producer then COMPLETES and the engine creates the
+  // `wait-answer` / `wait-merge-answer` user task BEFORE `searchElementInstances()` (read 2). Read 2 therefore
+  // sees an ACTIVE wait element — NOT the producer. Because user-task creation does not re-stamp the PR row's
+  // `updated_at` (only `pr.persist-escalation` does, before the task exists), the row is past the raise-time
+  // grace, so neither the grace nor the producer/answer-recorder predicate covers it: a predicate that ignores
+  // the wait elements lets the CAS win and stale a live escalation. Treat an ACTIVE `wait-answer` /
+  // `wait-merge-answer` element as positive evidence in the second snapshot too — one case per loop.
+  const stale = new Date(Date.now() - 60 * 60_000).toISOString();
+  const { data, stores } = memData({
+    pull_requests: [
+      { pr_key: "o/r#829wr", status: "escalated", process_key: "rp-829wr", updated_at: stale, url: "https://github.com/o/r/pull/8295", title: "producer→wait (review)" },
+      { pr_key: "o/r#829wm", status: "escalated", process_key: "rp-829wm", updated_at: stale, url: "https://github.com/o/r/pull/8296", title: "producer→wait (merge)" },
+    ],
+    escalations: [
+      { id: 1, pr_key: "o/r#829wr", status: "open", question: "raised mid-read", answer: null, answered_at: null },
+      { id: 2, pr_key: "o/r#829wm", status: "open", question: "raised mid-read", answer: null, answered_at: null },
+    ],
+  });
+  // The typed `openUserTasks` seam reports NO open task (the producer was still ACTIVE at read 1), while the
+  // element search (read 2) now sees the freshly-created wait element ACTIVE — the transition landed mid-read.
+  const restore = stubUserTaskSearch([]);
+  const engine = fakeEngine(
+    { "rp-829wr": [], "rp-829wm": [] },
+    {
+      "rp-829wr": [{ elementId: "wait-answer", state: "ACTIVE" }],
+      "rp-829wm": [{ elementId: "wait-merge-answer", state: "ACTIVE" }],
+    },
+  );
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    restore();
+  }
+  const byKey = Object.fromEntries((stores.pull_requests ?? []).map((r) => [r.pr_key, r]));
+  assertEquals(byKey["o/r#829wr"].status, "escalated", "a PR whose wait-answer appeared mid-read is spared the heal");
+  assertEquals(byKey["o/r#829wm"].status, "escalated", "a PR whose wait-merge-answer appeared mid-read is spared the heal");
+  const escById = Object.fromEntries((stores.escalations ?? []).map((r) => [r.id, r]));
+  assertEquals(escById[1].status, "open", "the live review escalation row is left open");
+  assertEquals(escById[2].status, "open", "the live merge escalation row is left open");
+});
+
 test("pollUserTasks (engine-first): a re-escalation in the read→write window is NOT clobbered — the guarded CAS refuses the moved snapshot (issue #829)", async () => {
   // The TOCTOU race Copilot flagged: the heal reads the PR, then does two remote engine RPCs, THEN writes.
   // If the SAME instance re-escalates in that window (`pr.persist-escalation` re-stamps `updated_at` and

@@ -3399,14 +3399,22 @@ export async function pollUserTasks(
       //      `wait-merge-answer` user task. The raise-time grace window covers the normal case, but if that
       //      producer service task stays ACTIVE past the grace (e.g. an app restart / lease delay between
       //      the DB commit and the job completing) the row is old enough to heal yet no user task exists.
+      //   3. The PRODUCER→USER-TASK TOCTOU BETWEEN THE TWO READS. `openUserTasks` (read 1) can return empty
+      //      while a persist producer is still ACTIVE; that producer then COMPLETES and the engine creates
+      //      the `wait-answer` / `wait-merge-answer` user task BEFORE `searchElementInstances` (read 2). Read 2
+      //      then sees an ACTIVE WAIT element — not the producer. Because user-task creation does NOT re-stamp
+      //      the PR row's `updated_at` (only `pr.persist-escalation` does, before the task exists), the row is
+      //      past the grace, so neither the grace nor the producer/answer-recorder check covers it. Treat an
+      //      ACTIVE wait element as positive evidence here too, or the CAS wins and stales a live escalation.
       //
       // In EITHER window the escalation is arbitrarily old (past the raise-time grace), so the grace above
       // does not cover it. Healing here flips the row to `converging` and retires the still-`open`
       // escalation to `stale`, and the live escalation is lost — the answer-recorder finds no target and
       // silently drops the operator's answer, or the just-raised question never surfaces (issue #829). An
-      // ACTIVE answer-recording OR persist-escalation element instance is positive evidence an escalation is
-      // in flight, so treat it exactly like an open task and skip the heal. Only a PR with NEITHER an open
-      // task NOR any ACTIVE escalation element is genuinely stranded (the #828 lost-write tear) and heals.
+      // ACTIVE answer-recording, persist-escalation, OR wait-answer/wait-merge-answer element instance is
+      // positive evidence an escalation is in flight, so treat it exactly like an open task and skip the
+      // heal. Only a PR with NEITHER an open task NOR any ACTIVE escalation element is genuinely stranded
+      // (the #828 lost-write tear) and heals.
       if (!stillParked) {
         const elements = await engine.searchElementInstances({ processInstanceKey: pr.process_key });
         escalationInFlight = elements.some(
@@ -3414,6 +3422,8 @@ export async function pollUserTasks(
             el.state === "ACTIVE" &&
             (el.elementId === PR_RECORD_ANSWER_ELEMENT ||
               el.elementId === PR_RECORD_MERGE_ANSWER_ELEMENT ||
+              el.elementId === PR_WAIT_ANSWER_ELEMENT ||
+              el.elementId === PR_WAIT_MERGE_ANSWER_ELEMENT ||
               (el.elementId != null && PR_ESCALATION_PRODUCER_ELEMENTS.includes(el.elementId))),
         );
       }
