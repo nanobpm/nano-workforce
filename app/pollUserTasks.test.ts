@@ -48,8 +48,63 @@ function memData(seed: Record<string, any[]> = {}): { data: DataLayer; stores: R
       },
     };
   }
-  const data = { table: (n: string, pk?: string) => tbl(n, pk) } as unknown as DataLayer;
+  const data = openableData(stores, tbl);
   return { data, stores };
+}
+
+/** Wrap the in-memory `stores` as a `DataLayer` that ALSO exposes `open()` → a `DataSource` with the
+ *  `exec` (guarded UPDATE) + `tx` (snapshot/rollback) surface the escalated-PR self-heal now uses for its
+ *  conditional, atomic repair (Copilot review of #829). `exec` interprets ONLY the two guarded statements
+ *  the heal issues — the snapshot-fenced `pull_requests` CAS and the by-id `escalations` retirement —
+ *  mutating the same store objects `table()` reads, so both surfaces stay consistent within a test. The
+ *  SQL shape itself is exercised against real SQLite by the app's integration/e2e suites; here the fake
+ *  need only honour the guards so a race assertion can observe the CAS refusing a moved snapshot. */
+// biome-ignore lint/suspicious/noExplicitAny: in-memory rows are untyped fixtures
+function openableData(stores: Record<string, any[]>, tbl: (name: string, pk?: string) => any): DataLayer {
+  const norm = (v: unknown) => v ?? null;
+  const exec = async (sql: string, params: unknown[] = []) => {
+    const flip =
+      /UPDATE "pull_requests" SET "status" = 'converging', "updated_at" = \? WHERE "pr_key" = \? AND "status" = 'escalated' AND "process_key" IS \? AND "updated_at" IS \?/.exec(
+        sql,
+      );
+    if (flip) {
+      const [at, prKey, processKey, updatedAt] = params;
+      const row = (stores.pull_requests ?? []).find((r) => r.pr_key === prKey);
+      if (row && row.status === "escalated" && norm(row.process_key) === norm(processKey) && norm(row.updated_at) === norm(updatedAt)) {
+        row.status = "converging";
+        row.updated_at = at;
+        return { changed: 1 };
+      }
+      return { changed: 0 };
+    }
+    const retire = /UPDATE "escalations" SET "status" = 'stale' WHERE "id" = \? AND "status" = 'open'/.exec(sql);
+    if (retire) {
+      const row = (stores.escalations ?? []).find((r) => r.id === params[0]);
+      if (row && row.status === "open") {
+        row.status = "stale";
+        return { changed: 1 };
+      }
+      return { changed: 0 };
+    }
+    throw new Error(`unexpected exec sql: ${sql}`);
+  };
+  const source: any = {
+    exec,
+    table: (n: string, pk?: string) => tbl(n, pk),
+    tx: async (fn: (t: any) => Promise<unknown>) => {
+      const snap = JSON.parse(JSON.stringify(stores));
+      try {
+        return await fn(source);
+      } catch (e) {
+        for (const [n, rows] of Object.entries(stores)) {
+          rows.length = 0;
+          rows.push(...(snap[n] ?? []));
+        }
+        throw e;
+      }
+    },
+  };
+  return { table: (n: string, pk?: string) => tbl(n, pk), open: () => source } as unknown as DataLayer;
 }
 
 /** A single engine-reported user task in the fixture. `state` mirrors the engine lifecycle; it
@@ -1203,8 +1258,48 @@ test("pollUserTasks (engine-first): DOES heal an escalated PR once its answer-re
   assertEquals(escById[1].status, "stale", "the orphaned open escalation row is retired to stale");
 });
 
+test("pollUserTasks (engine-first): a re-escalation in the read→write window is NOT clobbered — the guarded CAS refuses the moved snapshot (issue #829)", async () => {
+  // The TOCTOU race Copilot flagged: the heal reads the PR, then does two remote engine RPCs, THEN writes.
+  // If the SAME instance re-escalates in that window (`pr.persist-escalation` re-stamps `updated_at` and
+  // INSERTs a fresh open escalation), a blind write would clobber the fresh `escalated` status and stale
+  // the fresh escalation — dropping the operator's next answer. We reproduce the concurrent re-escalation
+  // by mutating the store from inside `searchElementInstances` (the last read before the write), then
+  // assert the snapshot-fenced CAS makes NO change: the PR stays `escalated` and the fresh escalation open.
+  const stale = new Date(Date.now() - 60 * 60_000).toISOString();
+  const { data, stores } = memData({
+    pull_requests: [{ pr_key: "o/r#829race", status: "escalated", process_key: "rp-829race", updated_at: stale, url: "https://github.com/o/r/pull/8292", title: "re-escalates mid-heal" }],
+    escalations: [{ id: 1, pr_key: "o/r#829race", status: "open", question: "first", answer: null, answered_at: null }],
+  });
+  const restore = stubUserTaskSearch([]);
+  let reEscalated = false;
+  const engine = {
+    searchUserTasks: () => Promise.resolve([]),
+    openUserTasks: () => Promise.resolve([]),
+    searchElementInstances: (filter?: { processInstanceKey?: string }) => {
+      // Simulate the concurrent re-escalation landing AFTER the heal captured its snapshot but BEFORE its
+      // write: the row's generation advances (`updated_at`) and a brand-new open escalation is inserted.
+      if (filter?.processInstanceKey === "rp-829race" && !reEscalated) {
+        reEscalated = true;
+        const row = (stores.pull_requests ?? []).find((r) => r.pr_key === "o/r#829race");
+        if (row) row.updated_at = new Date().toISOString();
+        (stores.escalations ?? []).push({ id: 2, pr_key: "o/r#829race", status: "open", question: "second", answer: null, answered_at: null });
+      }
+      return Promise.resolve([{ elementId: "record-answer", state: "COMPLETED" }]);
+    },
+  } as unknown as EngineClient;
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    restore();
+  }
+  const byKey = Object.fromEntries((stores.pull_requests ?? []).map((r) => [r.pr_key, r]));
+  assertEquals(byKey["o/r#829race"].status, "escalated", "the re-escalated PR is left escalated — the CAS refused the moved snapshot");
+  const escById = Object.fromEntries((stores.escalations ?? []).map((r) => [r.id, r]));
+  assertEquals(escById[2].status, "open", "the fresh escalation opened in the window is NOT retired");
+  assertEquals(escById[1].status, "open", "the snapshot's own escalation is left untouched too — the whole tx rolled to a no-op");
+});
+
 test("pollUserTasks (engine-first): skips the per-instance open-task RPC for an escalated PR already seen parked in this pass's sweep (issue #828)", async () => {
-  // Presence in THIS pass's swept `desired` set is POSITIVE evidence the PR is genuinely parked — the
   // best-effort sweep may truncate (drop tasks) but never invents one. Re-confirming with a per-instance
   // `openUserTasks` RPC is a redundant N+1 query; the self-heal must skip it. Only a PR NOT confirmed
   // parked by the sweep still needs the per-instance check.

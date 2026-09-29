@@ -3368,6 +3368,17 @@ export async function pollUserTasks(
     // before the engine creates the user task, so heal only rows past the grace window.
     const escalatedAt = Date.parse(pr.updated_at ?? "");
     if (Number.isFinite(escalatedAt) && Date.now() - escalatedAt < PR_ESCALATION_HEAL_GRACE_MS) continue;
+    // Snapshot the PR generation (`process_key` + `updated_at`) and the `open` escalation rows we observe
+    // NOW — BEFORE the remote engine reads below. The repair writes are fenced on this snapshot, so a
+    // FRESH escalation the SAME instance opens in the read→write window is neither clobbered nor retired.
+    // The convergence loop REUSES one process instance across rounds, so a re-escalation keeps the same
+    // `process_key`; the discriminator is `updated_at`, which `pr.persist-escalation` re-stamps every time
+    // it writes `status="escalated"`. Capturing the open-escalation ids here (not re-reading `status=open`
+    // after the write) means a fresh escalation row — a NEW id inserted after this point — is never retired
+    // to `stale` even though it is `open`, since it was not part of the snapshot we healed (issue #829).
+    const snapshotProcessKey = pr.process_key;
+    const snapshotUpdatedAt = pr.updated_at ?? null;
+    const snapshotOpenEscalationIds = (await escs(data).find({ pr_key: pr.pr_key, status: "open" })).map((e) => e.id);
     let stillParked = false;
     let answerInFlight = false;
     let queryErrored = false;
@@ -3396,13 +3407,30 @@ export async function pollUserTasks(
       queryErrored = true;
     }
     if (queryErrored || stillParked || answerInFlight) continue;
-    await prs(data).update(pr.pr_key, { status: "converging", updated_at: at });
-    // Retire any orphaned `open` escalation rows so the audit trail matches the healed PR row — the
-    // `answer-escalation` write that would have answered/retired them was the very write we lost. We
-    // mark them `stale` (not `answered`) because no operator answer was recorded for them.
-    for (const orphan of await escs(data).find({ pr_key: pr.pr_key, status: "open" })) {
-      await escs(data).update(orphan.id, { status: "stale" });
-    }
+    // Repair conditionally and atomically (Copilot review of #829). The read→write window between the
+    // engine reads above and here is wide (two remote RPCs), so the PR may have re-escalated on the same
+    // instance meanwhile; a blind `update` would then overwrite that fresh `escalated` status and retire
+    // its new `open` escalation. The PR flip is therefore a SINGLE guarded UPDATE fenced on the inspected
+    // snapshot — still `escalated`, same `process_key`, same `updated_at` — an atomic compare-and-swap
+    // (SQLite serialises it against the worker's guarded writes in the other process). Only when that CAS
+    // WON (`changed === 1`) do we retire the snapshot's own orphan escalation rows, in the SAME
+    // transaction: a crash can never leave a healed PR with a dangling `open` row, nor an un-healed PR
+    // with retired rows — a rolled-back heal is simply retried by a later pass. Retiring by the captured
+    // snapshot ids (never a fresh `status=open` re-read) means a just-opened escalation is left untouched.
+    const db = data.open();
+    await db.tx(async (t) => {
+      const flipped = await t.exec(
+        `UPDATE "pull_requests" SET "status" = 'converging', "updated_at" = ? WHERE "pr_key" = ? AND "status" = 'escalated' AND "process_key" IS ? AND "updated_at" IS ?`,
+        [at, pr.pr_key, snapshotProcessKey, snapshotUpdatedAt],
+      );
+      if (flipped.changed !== 1) return; // snapshot moved (a fresh escalation re-stamped the row) — leave it for a later pass
+      // Retire the orphaned `open` escalation rows so the audit trail matches the healed PR row — the
+      // `answer-escalation` write that would have answered/retired them was the very write we lost. We
+      // mark them `stale` (not `answered`) because no operator answer was recorded for them.
+      for (const escId of snapshotOpenEscalationIds) {
+        await t.exec(`UPDATE "escalations" SET "status" = 'stale' WHERE "id" = ? AND "status" = 'open'`, [escId]);
+      }
+    });
   }
 }
 
