@@ -3355,6 +3355,15 @@ export async function pollUserTasks(
   // PR whose escalation task was already swept is genuinely parked — skip its per-instance RPC. Only a
   // PR not confirmed parked by the sweep falls through to the per-instance `openUserTasks` check, and a
   // query error is negative evidence (skip the heal), so durable state flips only on positive proof.
+  //
+  // Candidate set: read through the ADR-0065 derived tracking VIEW and require `derived_status="escalated"`
+  // (Copilot review of #829). A PR TERMINATED while its base status was `escalated` keeps that frozen base
+  // status forever — the reconciler never rewrites it (app/instanceTracking.ts) — so a raw `prs.find({
+  // status:"escalated" })` scan would reselect every such HISTORICAL row on every poll and burn up to three
+  // sequential engine RPCs on each, indefinitely. The VIEW folds the terminal edge to `derived_status`
+  // (out-of-band terminate → `abandoned`), so filtering on `derived_status="escalated"` bounds the pass to
+  // LIVE/UNKNOWN candidates and leaves terminal rows to tracking as intended; the ACTIVE-instance gate below
+  // is the correctness backstop for a candidate the VIEW hasn't yet reconciled. Writes still target `prs`.
   const sweptParkedPrEscalations = new Set<string>();
   for (const r of desired) {
     if (r.element_id !== PR_WAIT_ANSWER_ELEMENT && r.element_id !== PR_WAIT_MERGE_ANSWER_ELEMENT) continue;
@@ -3362,7 +3371,7 @@ export async function pollUserTasks(
     if (r.process_key) sweptParkedPrEscalations.add(r.process_key);
     if (r.subject_key) sweptParkedPrEscalations.add(r.subject_key);
   }
-  for (const pr of await prs(data).find({ status: "escalated" })) {
+  for (const pr of await prsTracking(data).find({ derived_status: "escalated" })) {
     if (!pr.process_key) continue;
     if (sweptParkedPrEscalations.has(pr.process_key) || sweptParkedPrEscalations.has(pr.pr_key)) continue; // parked this pass — no RPC, no heal
     // Don't race a just-raised escalation: `pr.persist-escalation` stamps `updated_at` immediately

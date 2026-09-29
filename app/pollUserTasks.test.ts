@@ -15,6 +15,34 @@ function memData(seed: Record<string, any[]> = {}): { data: DataLayer; stores: R
   const stores: Record<string, any[]> = {};
   for (const [k, v] of Object.entries(seed)) stores[k] = v.map((r) => ({ ...r }));
   function tbl(name: string, pk = "id") {
+    // The ADR-0065 derived tracking VIEW (`<base>__tracking`) is modelled as a read-only projection
+    // over its base store, augmenting each row with `derived_status` (Copilot review of #829 — the PR
+    // self-heal now reads candidates through `prsTracking` and filters on `derived_status="escalated"`).
+    // Default `derived_status` to the base `status`, so a fixture that does NOT model out-of-band
+    // termination reads live (base status passes through). A test that wants a row the reconciler has
+    // already folded terminal seeds an explicit `derived_status` (e.g. `"abandoned"`) on the base row.
+    const trackingMatch = /^(.*)__tracking$/.exec(name);
+    if (trackingMatch) {
+      const base = (stores[trackingMatch[1]] ??= [] as any[]);
+      // biome-ignore lint/suspicious/noExplicitAny: see above
+      const project = (r: any) => ({ ...r, derived_status: r.derived_status ?? r.status });
+      // biome-ignore lint/suspicious/noExplicitAny: see above
+      const match = (r: any, where: any) => Object.entries(where).every(([k, v]) => r[k] === v);
+      return {
+        async all() {
+          return base.map(project);
+        },
+        // biome-ignore lint/suspicious/noExplicitAny: see above
+        async get(id: any) {
+          const r = base.find((row) => row[pk] === id);
+          return r ? project(r) : undefined;
+        },
+        // biome-ignore lint/suspicious/noExplicitAny: see above
+        async find(where: any = {}) {
+          return base.map(project).filter((r) => match(r, where));
+        },
+      };
+    }
     // biome-ignore lint/suspicious/noExplicitAny: see above
     const rows = (stores[name] ??= [] as any[]);
     // biome-ignore lint/suspicious/noExplicitAny: see above
@@ -1346,6 +1374,49 @@ test("pollUserTasks (engine-first): does NOT heal an escalated PR whose process 
   assertEquals(escById[2].status, "open", "the unknown-state instance's escalation row is not retired");
 });
 
+test("pollUserTasks (engine-first): a terminated-while-escalated PR is EXCLUDED by the derived tracking VIEW — never probed (issue #829)", async () => {
+  // Copilot review of #829: the candidate scan reads through `prsTracking` and requires
+  // `derived_status="escalated"`, so a PR TERMINATED while its base status was `escalated` — whose VIEW
+  // folds `derived_status` to `abandoned` — is excluded BEFORE any per-instance probe. Without the VIEW
+  // filter this historical row would be reselected every poll and burn engine RPCs forever. We seed an
+  // explicit `derived_status: "abandoned"` (the reconciler's terminal fold) and assert the heal issues NO
+  // engine RPC for it at all, and its frozen base row / escalation are left untouched.
+  const stale = new Date(Date.now() - 60 * 60_000).toISOString();
+  const { data, stores } = memData({
+    pull_requests: [
+      { pr_key: "o/r#829term", status: "escalated", derived_status: "abandoned", process_key: "rp-829term", updated_at: stale, url: "https://github.com/o/r/pull/82991", title: "terminated-while-escalated (VIEW-folded)" },
+    ],
+    escalations: [{ id: 1, pr_key: "o/r#829term", status: "open", question: "loop gone", answer: null, answered_at: null }],
+  });
+  const restore = stubUserTaskSearch([]);
+  const probed: string[] = [];
+  const engine = {
+    searchUserTasks: () => Promise.resolve([]),
+    openUserTasks: (f?: { processInstanceKey?: string }) => {
+      if (f?.processInstanceKey) probed.push(f.processInstanceKey);
+      return Promise.resolve([]);
+    },
+    searchElementInstances: (f?: { processInstanceKey?: string }) => {
+      if (f?.processInstanceKey) probed.push(f.processInstanceKey);
+      return Promise.resolve([]);
+    },
+    searchProcessInstances: (f?: { processInstanceKeys?: string[] }) => {
+      for (const k of f?.processInstanceKeys ?? []) probed.push(k);
+      return Promise.resolve([]);
+    },
+  } as unknown as EngineClient;
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    restore();
+  }
+  assertEquals(probed.includes("rp-829term"), false, "a VIEW-folded terminal row is excluded from the scan — no engine RPC is issued for it");
+  const byKey = Object.fromEntries((stores.pull_requests ?? []).map((r) => [r.pr_key, r]));
+  assertEquals(byKey["o/r#829term"].status, "escalated", "the terminated row's frozen base status is left to tracking, not rewritten");
+  const escById = Object.fromEntries((stores.escalations ?? []).map((r) => [r.id, r]));
+  assertEquals(escById[1].status, "open", "the terminated row's escalation is not retired");
+});
+
 test("pollUserTasks (engine-first): does NOT heal an escalated PR while its persist-escalation producer is still ACTIVE (issue #829)", async () => {
   // The producer-side twin of the answer-recorder race. `pr.persist-escalation` COMMITS the `open` row and
   // `status="escalated"` BEFORE the engine creates the `wait-answer` user task, so there is a window with an
@@ -1450,6 +1521,10 @@ test("pollUserTasks (engine-first): a re-escalation in the read→write window i
   const engine = {
     searchUserTasks: () => Promise.resolve([]),
     openUserTasks: () => Promise.resolve([]),
+    // Report the instance ACTIVE so the heal reaches its guarded CAS (Copilot review of #829): without a
+    // `searchProcessInstances` response the positive-liveness probe throws, sets `queryErrored`, and the
+    // row would be spared for the WRONG reason — never exercising the snapshot-fenced CAS this test asserts.
+    searchProcessInstances: () => Promise.resolve([{ processInstanceKey: "rp-829race", state: "ACTIVE" }]),
     searchElementInstances: (filter?: { processInstanceKey?: string }) => {
       // Simulate the concurrent re-escalation landing AFTER the heal captured its snapshot but BEFORE its
       // write: the row's generation advances (`updated_at`) and a brand-new open escalation is inserted.
