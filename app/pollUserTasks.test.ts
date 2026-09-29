@@ -122,8 +122,16 @@ type FakeElement = { elementId: string; state: string };
  *  genuinely exercises the lifecycle-state filtering: `searchUserTasks` returns tasks in ANY state
  *  (COMPLETED first, as the live API does — issue #294), while `openUserTasks` pins `state:"CREATED"`.
  *  `searchElementInstances` is fed from an OPTIONAL second fixture (default empty) so the PR escalation
- *  self-heal can see an ACTIVE answer-recording task (issue #829). */
-function fakeEngine(byInstance: Record<string, FakeTask[]>, elementsByInstance: Record<string, FakeElement[]> = {}): EngineClient {
+ *  self-heal can see an ACTIVE answer-recording task (issue #829). `searchProcessInstances` is fed from an
+ *  OPTIONAL third fixture keyed by processInstanceKey: any key NOT listed defaults to reporting the
+ *  instance `ACTIVE` (so existing heal fixtures, which model a genuinely-resumed live loop, stay green); a
+ *  value of `null` models an instance ABSENT from the read model; a string overrides its lifecycle state
+ *  (e.g. `"TERMINATED"`) — the positive-ACTIVE liveness gate the self-heal requires (issue #829). */
+function fakeEngine(
+  byInstance: Record<string, FakeTask[]>,
+  elementsByInstance: Record<string, FakeElement[]> = {},
+  instanceStateByInstance: Record<string, string | null> = {},
+): EngineClient {
   const all = (filter?: { processInstanceKey?: string }) =>
     filter?.processInstanceKey ? (byInstance[filter.processInstanceKey] ?? []) : [];
   return {
@@ -132,6 +140,15 @@ function fakeEngine(byInstance: Record<string, FakeTask[]>, elementsByInstance: 
       Promise.resolve(all(filter).filter((t) => (t.state ?? "CREATED") === "CREATED")),
     searchElementInstances: (filter?: { processInstanceKey?: string }) =>
       Promise.resolve(filter?.processInstanceKey ? (elementsByInstance[filter.processInstanceKey] ?? []) : []),
+    searchProcessInstances: (filter?: { processInstanceKeys?: string[] }) =>
+      Promise.resolve(
+        (filter?.processInstanceKeys ?? [])
+          .map((k) => {
+            const state = k in instanceStateByInstance ? instanceStateByInstance[k] : "ACTIVE";
+            return state === null ? null : { processInstanceKey: k, state };
+          })
+          .filter((it): it is { processInstanceKey: string; state: string } => it != null),
+      ),
   } as unknown as EngineClient;
 }
 
@@ -1258,6 +1275,77 @@ test("pollUserTasks (engine-first): DOES heal an escalated PR once its answer-re
   assertEquals(escById[1].status, "stale", "the orphaned open escalation row is retired to stale");
 });
 
+test("pollUserTasks (engine-first): does NOT heal an escalated PR whose process instance is TERMINAL (issue #829)", async () => {
+  // Copilot review of the #828 heal: "no open task and no ACTIVE escalation element" is ALSO true for a
+  // TERMINAL instance (cancelled / completed / failed), whose loop never resumed. Flipping such a frozen
+  // `escalated` row to `converging` and retiring its audit rows fabricates a live loop the engine will
+  // never advance; terminal PRs are owned by tracking/reconciliation (they read `abandoned`/settled on
+  // `derived_status`). The heal now requires POSITIVE engine-truth that the instance is `ACTIVE`, so a
+  // TERMINATED (and, below, an absent) instance is spared. One case per known terminal state.
+  const stale = new Date(Date.now() - 60 * 60_000).toISOString();
+  const { data, stores } = memData({
+    pull_requests: [
+      { pr_key: "o/r#829tt", status: "escalated", process_key: "rp-829tt", updated_at: stale, url: "https://github.com/o/r/pull/8297", title: "terminated instance" },
+      { pr_key: "o/r#829tc", status: "escalated", process_key: "rp-829tc", updated_at: stale, url: "https://github.com/o/r/pull/8298", title: "cancelled instance" },
+    ],
+    escalations: [
+      { id: 1, pr_key: "o/r#829tt", status: "open", question: "loop gone", answer: null, answered_at: null },
+      { id: 2, pr_key: "o/r#829tc", status: "open", question: "loop gone", answer: null, answered_at: null },
+    ],
+  });
+  const restore = stubUserTaskSearch([]); // no open task — but the loop is dead, not merely mid-transition
+  // No open task, no ACTIVE escalation element, but the instance itself is a known terminal state.
+  const engine = fakeEngine(
+    { "rp-829tt": [], "rp-829tc": [] },
+    {},
+    { "rp-829tt": "TERMINATED", "rp-829tc": "CANCELED" },
+  );
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    restore();
+  }
+  const byKey = Object.fromEntries((stores.pull_requests ?? []).map((r) => [r.pr_key, r]));
+  assertEquals(byKey["o/r#829tt"].status, "escalated", "a TERMINATED instance is left to tracking/reconciliation, not healed");
+  assertEquals(byKey["o/r#829tc"].status, "escalated", "a CANCELED instance is left to tracking/reconciliation, not healed");
+  const escById = Object.fromEntries((stores.escalations ?? []).map((r) => [r.id, r]));
+  assertEquals(escById[1].status, "open", "the terminal instance's escalation row is not retired");
+  assertEquals(escById[2].status, "open", "the cancelled instance's escalation row is not retired");
+});
+
+test("pollUserTasks (engine-first): does NOT heal an escalated PR whose process instance is ABSENT / unknown-state (issue #829)", async () => {
+  // The other halves of the tri-state (Copilot review of #828): an instance genuinely ABSENT from the
+  // read model (engine answered, no match) is treated like a terminal — its loop is gone, so leave it to
+  // tracking rather than fabricate a resumed loop. An instance present with an UNKNOWN/empty `state` is a
+  // partial read this app cannot interpret and is SPARED (never healed off a wire shape we misread). Both
+  // stay `escalated`. One case each.
+  const stale = new Date(Date.now() - 60 * 60_000).toISOString();
+  const { data, stores } = memData({
+    pull_requests: [
+      { pr_key: "o/r#829ab", status: "escalated", process_key: "rp-829ab", updated_at: stale, url: "https://github.com/o/r/pull/8299", title: "absent instance" },
+      { pr_key: "o/r#829uk", status: "escalated", process_key: "rp-829uk", updated_at: stale, url: "https://github.com/o/r/pull/82990", title: "unknown-state instance" },
+    ],
+    escalations: [
+      { id: 1, pr_key: "o/r#829ab", status: "open", question: "loop gone", answer: null, answered_at: null },
+      { id: 2, pr_key: "o/r#829uk", status: "open", question: "partial read", answer: null, answered_at: null },
+    ],
+  });
+  const restore = stubUserTaskSearch([]);
+  // `null` models an instance absent from the read model; a blank string models an unknown/partial state.
+  const engine = fakeEngine({ "rp-829ab": [], "rp-829uk": [] }, {}, { "rp-829ab": null, "rp-829uk": "" });
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    restore();
+  }
+  const byKey = Object.fromEntries((stores.pull_requests ?? []).map((r) => [r.pr_key, r]));
+  assertEquals(byKey["o/r#829ab"].status, "escalated", "an ABSENT instance is left to tracking/reconciliation, not healed");
+  assertEquals(byKey["o/r#829uk"].status, "escalated", "an UNKNOWN-state instance is spared, not healed off a misread wire shape");
+  const escById = Object.fromEntries((stores.escalations ?? []).map((r) => [r.id, r]));
+  assertEquals(escById[1].status, "open", "the absent instance's escalation row is not retired");
+  assertEquals(escById[2].status, "open", "the unknown-state instance's escalation row is not retired");
+});
+
 test("pollUserTasks (engine-first): does NOT heal an escalated PR while its persist-escalation producer is still ACTIVE (issue #829)", async () => {
   // The producer-side twin of the answer-recorder race. `pr.persist-escalation` COMMITS the `open` row and
   // `status="escalated"` BEFORE the engine creates the `wait-answer` user task, so there is a window with an
@@ -1408,6 +1496,10 @@ test("pollUserTasks (engine-first): skips the per-instance open-task RPC for an 
       return Promise.resolve([]);
     },
     searchElementInstances: () => Promise.resolve([]),
+    // The stranded instance genuinely resumed (ACTIVE) — so the sweep-miss falls through to the
+    // per-instance confirm AND the positive-liveness gate, and heals (issue #829).
+    searchProcessInstances: (filter?: { processInstanceKeys?: string[] }) =>
+      Promise.resolve((filter?.processInstanceKeys ?? []).map((k) => ({ processInstanceKey: k, state: "ACTIVE" }))),
   } as unknown as EngineClient;
   try {
     await pollUserTasks(data, engine, REST);

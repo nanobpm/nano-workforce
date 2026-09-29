@@ -3382,6 +3382,7 @@ export async function pollUserTasks(
     const snapshotOpenEscalationIds = (await escs(data).find({ pr_key: pr.pr_key, status: "open" })).map((e) => e.id);
     let stillParked = false;
     let escalationInFlight = false;
+    let instanceActive = false;
     let queryErrored = false;
     try {
       const openTasks = await engine.openUserTasks({ processInstanceKey: pr.process_key });
@@ -3413,8 +3414,9 @@ export async function pollUserTasks(
       // silently drops the operator's answer, or the just-raised question never surfaces (issue #829). An
       // ACTIVE answer-recording, persist-escalation, OR wait-answer/wait-merge-answer element instance is
       // positive evidence an escalation is in flight, so treat it exactly like an open task and skip the
-      // heal. Only a PR with NEITHER an open task NOR any ACTIVE escalation element is genuinely stranded
-      // (the #828 lost-write tear) and heals.
+      // heal. But even a PR with NEITHER an open task NOR any ACTIVE escalation element is NOT yet
+      // heal-eligible — it must ALSO be a confirmed-ACTIVE instance (the positive-liveness gate below);
+      // a terminal/absent instance matches this negative shape too but never resumed (the #828 tear).
       if (!stillParked) {
         const elements = await engine.searchElementInstances({ processInstanceKey: pr.process_key });
         escalationInFlight = elements.some(
@@ -3427,11 +3429,26 @@ export async function pollUserTasks(
               (el.elementId != null && PR_ESCALATION_PRODUCER_ELEMENTS.includes(el.elementId))),
         );
       }
+      // "No open task and no in-flight escalation element" is necessary but NOT sufficient to heal
+      // (Copilot review of #829). A TERMINAL or ABSENT process instance — one cancelled, completed, or
+      // dropped from the read model — ALSO reports no open task and no ACTIVE escalation element, yet its
+      // loop never resumed: flipping such a frozen `escalated` row to `converging` and retiring its audit
+      // rows fabricates a live loop the engine will never advance. Terminal/absent PRs are owned by the
+      // ADR-0065 derived tracking + reconciliation (they read `abandoned`/settled on `derived_status`), so
+      // leave them be. Require POSITIVE engine-truth that the instance is `ACTIVE` before healing — the
+      // same tri-state contract as the feature-handoff probe (search ~L2562) and `makeEngineActiveProbe`
+      // (app/reconcile.ts): ONLY a confirmed `ACTIVE` state heals; a known-terminal or genuinely-absent
+      // instance is left to tracking; a missing/empty/unknown `state` (or a query error) is spared, never
+      // healed off a wire shape we misread. So a healed row is provably the #828 lost-write tear: an
+      // ACTIVE loop that resumed but whose `status="converging"` flip was lost.
+      const snapshots = await engine.searchProcessInstances({ processInstanceKeys: [pr.process_key] });
+      const match = snapshots.find((s) => String(s.processInstanceKey) === pr.process_key);
+      instanceActive = match != null && String(match.state ?? "").trim().toUpperCase() === "ACTIVE";
     } catch (err) {
       console.error(`[poller] escalated-pr self-heal (${pr.pr_key} @ ${pr.process_key}): ${err}`);
       queryErrored = true;
     }
-    if (queryErrored || stillParked || escalationInFlight) continue;
+    if (queryErrored || stillParked || escalationInFlight || !instanceActive) continue;
     // Repair conditionally and atomically (Copilot review of #829). The read→write window between the
     // engine reads above and here is wide (two remote RPCs), so the PR may have re-escalated on the same
     // instance meanwhile; a blind `update` would then overwrite that fresh `escalated` status and retire
