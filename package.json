@@ -83,7 +83,7 @@
     "yaml": "^2.9.0"
   },
   "overrides": {
-    "@nanobpm/engine-wasm": "^0.9.0",
+    "@nanobpm/engine-wasm": "^0.10.0",
     "@semantic-release/npm": "^13.1.5"
   }
 }
