@@ -106,6 +106,8 @@ import {
   latestTrialMergeQuestion,
   type OpenEscalation,
   PLAN_REVIEW_ELEMENT,
+  PR_RECORD_ANSWER_ELEMENT,
+  PR_RECORD_MERGE_ANSWER_ELEMENT,
   PR_WAIT_ANSWER_ELEMENT,
   PR_WAIT_MERGE_ANSWER_ELEMENT,
   prEscalations,
@@ -3367,15 +3369,33 @@ export async function pollUserTasks(
     const escalatedAt = Date.parse(pr.updated_at ?? "");
     if (Number.isFinite(escalatedAt) && Date.now() - escalatedAt < PR_ESCALATION_HEAL_GRACE_MS) continue;
     let stillParked = false;
+    let answerInFlight = false;
     let queryErrored = false;
     try {
       const openTasks = await engine.openUserTasks({ processInstanceKey: pr.process_key });
       stillParked = openTasks.some((t) => t.elementId === PR_WAIT_ANSWER_ELEMENT || t.elementId === PR_WAIT_MERGE_ANSWER_ELEMENT);
+      // An empty open-task set is NOT yet proof the answer-side write was lost. `pr.answer-escalation`
+      // (`record-answer` / `record-merge-answer`) is the sole writer that moves a PR OFF `escalated`, and
+      // both BPMN models flow the completed `wait-answer` / `wait-merge-answer` user task DIRECTLY to that
+      // service task. So a normal answer has a window where the user task is already gone (this query
+      // returns none) while the answer-recording job is still queued or running — the escalation may be
+      // arbitrarily old (past the raise-time grace), so the grace above does not cover it. Healing in that
+      // window flips the row to `converging` and retires the still-`open` escalation to `stale`, and the
+      // in-flight worker then finds no target and silently drops the operator's answer (issue #829). An
+      // ACTIVE answer-recording element instance is positive evidence the answer is in flight, so treat it
+      // exactly like an open task and skip the heal. Only a PR with NEITHER an open task NOR an active
+      // answer-recorder is genuinely stranded (the #828 lost-write tear) and gets healed.
+      if (!stillParked) {
+        const elements = await engine.searchElementInstances({ processInstanceKey: pr.process_key });
+        answerInFlight = elements.some(
+          (el) => el.state === "ACTIVE" && (el.elementId === PR_RECORD_ANSWER_ELEMENT || el.elementId === PR_RECORD_MERGE_ANSWER_ELEMENT),
+        );
+      }
     } catch (err) {
       console.error(`[poller] escalated-pr self-heal (${pr.pr_key} @ ${pr.process_key}): ${err}`);
       queryErrored = true;
     }
-    if (queryErrored || stillParked) continue;
+    if (queryErrored || stillParked || answerInFlight) continue;
     await prs(data).update(pr.pr_key, { status: "converging", updated_at: at });
     // Retire any orphaned `open` escalation rows so the audit trail matches the healed PR row — the
     // `answer-escalation` write that would have answered/retired them was the very write we lost. We

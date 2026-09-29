@@ -57,17 +57,26 @@ function memData(seed: Record<string, any[]> = {}): { data: DataLayer; stores: R
  *  A looping instance holds multiple tasks for one element (COMPLETED from prior rounds + the live one). */
 type FakeTask = { userTaskKey: string; elementId?: string; state?: "CREATED" | "COMPLETED" | "CANCELED"; formKey?: string };
 
+/** A single engine-reported element instance in the fixture — the answer-recording service task the
+ *  escalation self-heal probes for (issue #829). `state` mirrors the engine lifecycle; `"ACTIVE"` is the
+ *  in-flight marker that an answer is being recorded. */
+type FakeElement = { elementId: string; state: string };
+
 /** A fake engine whose user tasks are keyed by processInstanceKey (the only field the poller queries on
  *  for plan / PR instances). It models the real engine's two accessors from ONE fixture so a test
  *  genuinely exercises the lifecycle-state filtering: `searchUserTasks` returns tasks in ANY state
- *  (COMPLETED first, as the live API does — issue #294), while `openUserTasks` pins `state:"CREATED"`. */
-function fakeEngine(byInstance: Record<string, FakeTask[]>): EngineClient {
+ *  (COMPLETED first, as the live API does — issue #294), while `openUserTasks` pins `state:"CREATED"`.
+ *  `searchElementInstances` is fed from an OPTIONAL second fixture (default empty) so the PR escalation
+ *  self-heal can see an ACTIVE answer-recording task (issue #829). */
+function fakeEngine(byInstance: Record<string, FakeTask[]>, elementsByInstance: Record<string, FakeElement[]> = {}): EngineClient {
   const all = (filter?: { processInstanceKey?: string }) =>
     filter?.processInstanceKey ? (byInstance[filter.processInstanceKey] ?? []) : [];
   return {
     searchUserTasks: (filter?: { processInstanceKey?: string }) => Promise.resolve(all(filter)),
     openUserTasks: (filter?: { processInstanceKey?: string }) =>
       Promise.resolve(all(filter).filter((t) => (t.state ?? "CREATED") === "CREATED")),
+    searchElementInstances: (filter?: { processInstanceKey?: string }) =>
+      Promise.resolve(filter?.processInstanceKey ? (elementsByInstance[filter.processInstanceKey] ?? []) : []),
   } as unknown as EngineClient;
 }
 
@@ -1129,6 +1138,71 @@ test("pollUserTasks (engine-first): self-heals an escalated MERGE-loop PR off it
   assertEquals(byKey["o/r#828m"].status, "converging", "the stranded escalated merge-loop PR is healed to converging");
 });
 
+test("pollUserTasks (engine-first): does NOT heal an escalated PR while its answer-recording job is in flight (issue #829)", async () => {
+  // The dangerous race: both BPMN models flow the completed `wait-answer` / `wait-merge-answer` user task
+  // DIRECTLY to the `record-answer` / `record-merge-answer` service task (`pr.answer-escalation`). Between
+  // the operator completing the task and that job running, the user task is already gone (openUserTasks
+  // returns none) yet the answer is being recorded RIGHT NOW. The escalation can be arbitrarily old (past
+  // the raise-time grace), so the grace window does not cover this. Healing here would flip the row to
+  // `converging` and retire the still-`open` escalation to `stale`, and the in-flight worker would then
+  // find no target and silently drop the operator's answer. An ACTIVE answer-recording element instance is
+  // positive evidence the answer is in flight, so the heal must skip it — exactly like an open task.
+  const stale = new Date(Date.now() - 60 * 60_000).toISOString();
+  const { data, stores } = memData({
+    pull_requests: [
+      { pr_key: "o/r#829r", status: "escalated", process_key: "rp-829r", updated_at: stale, url: "https://github.com/o/r/pull/829", title: "answer in flight (review)" },
+      { pr_key: "o/r#829m", status: "escalated", process_key: "rp-829m", updated_at: stale, url: "https://github.com/o/r/pull/8290", title: "answer in flight (merge)" },
+    ],
+    escalations: [
+      { id: 1, pr_key: "o/r#829r", status: "open", question: "answered, recording", answer: "do it", answered_at: stale },
+      { id: 2, pr_key: "o/r#829m", status: "open", question: "answered, recording", answer: "rebase", answered_at: stale },
+    ],
+  });
+  const restore = stubUserTaskSearch([]); // the user task has already completed on both instances
+  // Each instance's answer-recording service task is ACTIVE — the operator's answer is being written.
+  const engine = fakeEngine(
+    { "rp-829r": [], "rp-829m": [] },
+    {
+      "rp-829r": [{ elementId: "record-answer", state: "ACTIVE" }],
+      "rp-829m": [{ elementId: "record-merge-answer", state: "ACTIVE" }],
+    },
+  );
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    restore();
+  }
+  const byKey = Object.fromEntries((stores.pull_requests ?? []).map((r) => [r.pr_key, r]));
+  assertEquals(byKey["o/r#829r"].status, "escalated", "a PR with an in-flight review answer-recorder is spared the heal");
+  assertEquals(byKey["o/r#829m"].status, "escalated", "a PR with an in-flight merge answer-recorder is spared the heal");
+  const escById = Object.fromEntries((stores.escalations ?? []).map((r) => [r.id, r]));
+  assertEquals(escById[1].status, "open", "the in-flight review escalation row is left for the worker to answer");
+  assertEquals(escById[2].status, "open", "the in-flight merge escalation row is left for the worker to answer");
+});
+
+test("pollUserTasks (engine-first): DOES heal an escalated PR once its answer-recorder has completed (issue #829)", async () => {
+  // The genuine #828 lost-write tear: the answer-recording job COMPLETED (its element instance is no
+  // longer ACTIVE) but the durable `status="converging"` flip was lost around an app restart. With no open
+  // task AND no ACTIVE answer-recorder, the PR is genuinely stranded and must heal — the in-flight guard
+  // must not over-fire and wedge it permanently.
+  const stale = new Date(Date.now() - 60 * 60_000).toISOString();
+  const { data, stores } = memData({
+    pull_requests: [{ pr_key: "o/r#829c", status: "escalated", process_key: "rp-829c", updated_at: stale, url: "https://github.com/o/r/pull/8291", title: "recorder completed, write lost" }],
+    escalations: [{ id: 1, pr_key: "o/r#829c", status: "open", question: "orphaned", answer: null, answered_at: null }],
+  });
+  const restore = stubUserTaskSearch([]);
+  const engine = fakeEngine({ "rp-829c": [] }, { "rp-829c": [{ elementId: "record-answer", state: "COMPLETED" }] });
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    restore();
+  }
+  const byKey = Object.fromEntries((stores.pull_requests ?? []).map((r) => [r.pr_key, r]));
+  assertEquals(byKey["o/r#829c"].status, "converging", "a stranded PR whose answer-recorder already completed is healed");
+  const escById = Object.fromEntries((stores.escalations ?? []).map((r) => [r.id, r]));
+  assertEquals(escById[1].status, "stale", "the orphaned open escalation row is retired to stale");
+});
+
 test("pollUserTasks (engine-first): skips the per-instance open-task RPC for an escalated PR already seen parked in this pass's sweep (issue #828)", async () => {
   // Presence in THIS pass's swept `desired` set is POSITIVE evidence the PR is genuinely parked — the
   // best-effort sweep may truncate (drop tasks) but never invents one. Re-confirming with a per-instance
@@ -1151,6 +1225,7 @@ test("pollUserTasks (engine-first): skips the per-instance open-task RPC for an 
       if (filter?.processInstanceKey) openUserTasksCalls.push(filter.processInstanceKey);
       return Promise.resolve([]);
     },
+    searchElementInstances: () => Promise.resolve([]),
   } as unknown as EngineClient;
   try {
     await pollUserTasks(data, engine, REST);
@@ -1176,6 +1251,7 @@ test("pollUserTasks (engine-first): does NOT heal an escalated PR when the per-i
     searchUserTasks: () => Promise.resolve([]),
     openUserTasks: (filter?: { processInstanceKey?: string }) =>
       filter?.processInstanceKey === "rp-err" ? Promise.reject(new Error("engine down")) : Promise.resolve([]),
+    searchElementInstances: () => Promise.resolve([]),
   } as unknown as EngineClient;
   try {
     await pollUserTasks(data, engine, REST);

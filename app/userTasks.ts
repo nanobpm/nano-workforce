@@ -52,6 +52,16 @@ export const PR_WAIT_ANSWER_ELEMENT = "wait-answer";
  *  canonical `completeUserTask` door and surfaced in this same Tasks inbox. */
 export const PR_WAIT_MERGE_ANSWER_ELEMENT = "wait-merge-answer";
 
+/** The PR review-loop answer-recording service task (convergence-loop.bpmn) — the `pr.answer-escalation`
+ *  job the token moves to IMMEDIATELY when `wait-answer` completes. Its ACTIVE element instance is the
+ *  positive-evidence marker that an operator's answer is in-flight (recorded but the loop hasn't looped
+ *  yet), so the escalation self-heal must NOT steal the row while it runs (issue #829). */
+export const PR_RECORD_ANSWER_ELEMENT = "record-answer";
+
+/** The PR merge-loop answer-recording service task (merge-loop.bpmn) — the merge-path twin of
+ *  `PR_RECORD_ANSWER_ELEMENT`, reached when `wait-merge-answer` completes (issue #829). */
+export const PR_RECORD_MERGE_ANSWER_ELEMENT = "record-merge-answer";
+
 /** The ACP permission-prompt escalation (issue #559, ADR 0056) — the Tasks-inbox kind a bridged
  *  `session/request_permission` surfaces under when an escalate-policy agent asks a human to Allow/Deny
  *  a proposed action. Unlike the other escalation elements this is NOT a BPMN user-task element; it is
