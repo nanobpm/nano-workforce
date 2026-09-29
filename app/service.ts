@@ -251,6 +251,15 @@ export const REVIEW_NUDGE_MS = clampNudgeMinutes(process.env.NANO_PR_REVIEW_NUDG
  * still reconciling genuinely-stranded rows. */
 export const FEATURE_ESCALATION_HEAL_GRACE_MS = 60_000;
 
+/** Grace window (ms) before the `escalated`→`converging` PR self-heal (below) may act on a row — the
+ * convergence-path twin of `FEATURE_ESCALATION_HEAL_GRACE_MS` (issue #828). The sole writer of a PR's
+ * `status="escalated"` — `pr.persist-escalation` — stamps the row IMMEDIATELY BEFORE the engine creates
+ * the `wait-answer` / `wait-merge-answer` user task. A poll landing in that window would see
+ * `openUserTasks` report none and wrongly heal the just-raised escalation back to `converging`, hiding
+ * it before the operator can answer. Only heal rows whose escalation is older than this window, by when
+ * the user task must already be observable. */
+export const PR_ESCALATION_HEAL_GRACE_MS = 60_000;
+
 /** Whether a converged PR is automatically driven to merge (the merge-loop). Default on; set
  * `NANO_PR_AUTO_MERGE=0` to stop at `converged` (review-only mode). */
 export const AUTO_MERGE = !["0", "false", "off", "no"].includes(
@@ -3324,6 +3333,56 @@ export async function pollUserTasks(
     }
     if (queryErrored || stillParked) continue;
     await featureRuns(data).update(run.feature_key, { status: "running", updated_at: at });
+  }
+
+  // ── Self-heal: a convergence PR row holds `escalated` ONLY while parked (issue #828) ─────────────
+  // The convergence-path twin of the feature self-heal above (issue #642). `pr.persist-escalation` is
+  // the sole writer of a PR's `status="escalated"`, and the sole writer that moves it back off is the
+  // `pr.answer-escalation` worker (the guarded `UPDATE … SET status='converging'` on user-task
+  // completion). When that write is lost — e.g. the app restarts while a `wait-answer` completion /
+  // `answer-escalation` job is in flight — the engine resumes the loop (token back on `review-round`,
+  // no open user task) but the PR row stays `escalated` forever, since NOTHING on the PR path repairs
+  // it (unlike the feature path). `/status` then shows `status="escalated"` with a null derived
+  // `openEscalation` indefinitely, inviting a human to answer an already-answered question.
+  //
+  // Heal it engine-first, on the SAME positive-evidence contract as the feature sweep: a PR at
+  // `status="escalated"` is reconciled back to `converging` only when the engine confirms NO open PR
+  // escalation task (`wait-answer` / `wait-merge-answer`) for its instance. As above, presence in THIS
+  // pass's `desired` set is itself positive evidence of parking (truncation only ever DROPS tasks), so a
+  // PR whose escalation task was already swept is genuinely parked — skip its per-instance RPC. Only a
+  // PR not confirmed parked by the sweep falls through to the per-instance `openUserTasks` check, and a
+  // query error is negative evidence (skip the heal), so durable state flips only on positive proof.
+  const sweptParkedPrEscalations = new Set<string>();
+  for (const r of desired) {
+    if (r.element_id !== PR_WAIT_ANSWER_ELEMENT && r.element_id !== PR_WAIT_MERGE_ANSWER_ELEMENT) continue;
+    if (r.subject_type !== "pr") continue;
+    if (r.process_key) sweptParkedPrEscalations.add(r.process_key);
+    if (r.subject_key) sweptParkedPrEscalations.add(r.subject_key);
+  }
+  for (const pr of await prs(data).find({ status: "escalated" })) {
+    if (!pr.process_key) continue;
+    if (sweptParkedPrEscalations.has(pr.process_key) || sweptParkedPrEscalations.has(pr.pr_key)) continue; // parked this pass — no RPC, no heal
+    // Don't race a just-raised escalation: `pr.persist-escalation` stamps `updated_at` immediately
+    // before the engine creates the user task, so heal only rows past the grace window.
+    const escalatedAt = Date.parse(pr.updated_at ?? "");
+    if (Number.isFinite(escalatedAt) && Date.now() - escalatedAt < PR_ESCALATION_HEAL_GRACE_MS) continue;
+    let stillParked = false;
+    let queryErrored = false;
+    try {
+      const openTasks = await engine.openUserTasks({ processInstanceKey: pr.process_key });
+      stillParked = openTasks.some((t) => t.elementId === PR_WAIT_ANSWER_ELEMENT || t.elementId === PR_WAIT_MERGE_ANSWER_ELEMENT);
+    } catch (err) {
+      console.error(`[poller] escalated-pr self-heal (${pr.pr_key} @ ${pr.process_key}): ${err}`);
+      queryErrored = true;
+    }
+    if (queryErrored || stillParked) continue;
+    await prs(data).update(pr.pr_key, { status: "converging", updated_at: at });
+    // Retire any orphaned `open` escalation rows so the audit trail matches the healed PR row — the
+    // `answer-escalation` write that would have answered/retired them was the very write we lost. We
+    // mark them `stale` (not `answered`) because no operator answer was recorded for them.
+    for (const orphan of await escs(data).find({ pr_key: pr.pr_key, status: "open" })) {
+      await escs(data).update(orphan.id, { status: "stale" });
+    }
   }
 }
 
