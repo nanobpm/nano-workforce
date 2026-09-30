@@ -578,7 +578,9 @@ function turnTime(iso) {
   if (iso == null || iso === "") return undefined;
   const ms = Date.parse(iso);
   if (!Number.isFinite(ms)) return undefined;
-  return new Date(ms).toISOString().slice(11, 19);
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function agentHistoryView(report) {

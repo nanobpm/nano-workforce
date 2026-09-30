@@ -106,7 +106,10 @@ test("agentHistoryView carries each turn's producedAt timestamp (absent when unr
     ],
   });
   assert.equal(view.turns[0]?.producedAt, "2024-05-01T12:34:56.789Z");
-  assert.equal(view.turns[0]?.time, "12:34:56");
+  // Local time: the expected value is derived in the runner's own timezone.
+  const d = new Date("2024-05-01T12:34:56.789Z");
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  assert.equal(view.turns[0]?.time, `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`);
   assert.equal(view.turns[1]?.producedAt, undefined);
   assert.equal(view.turns[1]?.time, undefined);
 });
