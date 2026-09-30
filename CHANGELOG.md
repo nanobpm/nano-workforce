@@ -1,3 +1,9 @@
+## [0.196.0](https://github.com/nanobpm/nano-workforce/compare/v0.195.2...v0.196.0) (2026-09-30)
+
+### Features
+
+* **cockpit:** 'Agent' link on active rows opens the cockpit focused on that process ([#834](https://github.com/nanobpm/nano-workforce/issues/834)) ([c9c07a3](https://github.com/nanobpm/nano-workforce/commit/c9c07a3886d065d407260c2dabe2abb410fc7d2d)), closes [#833](https://github.com/nanobpm/nano-workforce/issues/833)
+
 ## [0.195.2](https://github.com/nanobpm/nano-workforce/compare/v0.195.1...v0.195.2) (2026-09-30)
 
 ### Bug Fixes
