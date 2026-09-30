@@ -684,3 +684,105 @@ test("#834: a failed auto-opened history read is retried on a later poll", async
     restore();
   }
 });
+
+test("#834: 'Show all' clears the focus route from the URL so a refresh does not reopen the process", async () => {
+  const restore = installEnv(focusStub({ correlations: [] }));
+  (globalThis as { location: { hash: string } }).location.hash = `#/cockpit/process/${PI_ROOT}`;
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      assert((document.querySelector(".cockpit-focus")?.textContent ?? "").includes(PI_ROOT), "the process route focused the cockpit");
+      // Clicking "Show all" must navigate the focus route out of the URL, not just hide the banner —
+      // otherwise refreshing/sharing `#/cockpit/process/<key>` reopens the process just cleared (#834).
+      const clear = document.querySelector(".cockpit-focus-clear");
+      assert(clear != null, "the focus banner offers a 'Show all' control");
+      const win = (globalThis as { window: { Event: new (t: string) => unknown; dispatchEvent: (e: unknown) => void } }).window;
+      (clear as { dispatchEvent: (e: unknown) => void }).dispatchEvent(new win.Event("click"));
+      assertEquals((globalThis as { location: { hash: string } }).location.hash, "#/cockpit", "'Show all' navigated the URL back to the cockpit root");
+      // The resulting hashchange then clears the focus, exactly as a real browser navigation would.
+      win.dispatchEvent(new win.Event("hashchange"));
+      await settle();
+      assertEquals(document.querySelector(".cockpit-focus")?.getAttribute("data-focus"), "none");
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
+
+test("#834: switching the focused process clears the old focus's agent-history list immediately", async () => {
+  const state = { correlations: [] as unknown[], transcripts: [] as unknown[], replay: undefined as unknown };
+  const restore = installEnv(mutableFocusStub(state));
+  (globalThis as { location: { hash: string } }).location.hash = `#/cockpit/process/${PI_ROOT}`;
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      assert(document.querySelector(".cockpit-agent-region .cockpit-agent-history") != null, "focus A rendered its agent-history list");
+      // The switch must blank the list SYNCHRONOUSLY, not leave A's rows up until B's reads land: a click
+      // on a stale A row would otherwise start a detail read under B's focus generation (#834).
+      handle.focus("pi-other");
+      assertEquals(document.querySelector(".cockpit-agent-region")?.childElementCount, 0, "the old focus's history list was cleared immediately on focus change");
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
+
+test("#834: a superseded focus's in-flight transcript scan does not block the new focus's scan", async () => {
+  // Park focus A's per-tree transcript scan on a never-settling fetch, then switch to B. With a shared
+  // scan lock, B would skip its scan until A's request settled (up to the 15s timeout); the lock must be
+  // scoped to the focus generation so B scans immediately and replays its own capture (#834).
+  let releaseA: () => void = () => {};
+  const aParked = new Promise<void>((r) => {
+    releaseA = r;
+  });
+  const bReplay = {
+    stream: "wk-b/j9",
+    from: 0,
+    gap: false,
+    nextOffset: 1,
+    entries: [{ offset: 0, chunk: envChunk("message", { role: "assistant", text: "B capture replays" }) }],
+  };
+  const state = { correlations: [] as unknown[], transcripts: [] as unknown[], replay: bReplay, roots: [] as string[] };
+  const base = mutableFocusStub(state);
+  const restore = installEnv(async (url: string) => {
+    if (url.includes("/transcripts") && url.includes(`processInstanceKey=${PI_ROOT}`)) {
+      await aParked; // focus A's scan hangs here until released
+      return { ok: true, status: 200, json: async () => ({ count: 0, transcripts: [] }) };
+    }
+    return base(url);
+  });
+  (globalThis as { location: { hash: string } }).location.hash = `#/cockpit/process/${PI_ROOT}`;
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      // A is focused; its transcript scan is parked awaiting `aParked` and holds the scan lock.
+      assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "idle");
+      // Switch to B, which HAS a capture: its scan must run despite A's lock still being held.
+      state.transcripts = [
+        { stream: "wk-b/j9", lifecycle: "ephemeral", status: "completed", createdAt: "2024-01-01T00:00:00Z", nextOffset: 1, byteLength: 10, chunkCount: 1, processInstanceKey: "pi-bee" },
+      ];
+      handle.focus("pi-bee");
+      await settle();
+      assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "replay");
+      assert(
+        (document.querySelector('[data-terminal="host"]')?.textContent ?? "").includes("B capture replays"),
+        "the new focus replayed its capture even though the superseded focus's scan is still in flight",
+      );
+    } finally {
+      releaseA();
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});

@@ -895,7 +895,10 @@ export function mountCockpit(host, opts = {}) {
   let focusKey;
   let focusKeys = new Set();
   let focusAuto = false;
-  let focusReplaying = false;
+  // The per-tree transcript-scan lock, scoped to the focus generation that holds it rather than a
+  // shared boolean: a stale scan from a superseded focus must NOT block the new focus's scan, and its
+  // late settle must NOT release the new focus's lock (review #834). `undefined` = free.
+  let focusReplayGen;
   // Bumped by every setFocus(); captured before each focus-scoped async read (agent-instances list,
   // per-tree transcript scan, history detail) so a response that resolves after the focus changed —
   // including an A→B→A flip where the key matches again — is dropped instead of mutating the new
@@ -1018,8 +1021,30 @@ export function mountCockpit(host, opts = {}) {
     focusBanner.appendChild(el(doc, "span", "cockpit-focus-label", `Focused on process instance ${focusKey}`));
     const clear = el(doc, "button", "cockpit-focus-clear", "Show all");
     clear.setAttribute("type", "button");
-    clear.addEventListener("click", () => setFocus(undefined));
+    clear.addEventListener("click", () => clearFocus());
     focusBanner.appendChild(clear);
+  }
+
+  // "Show all" must clear the URL that selected the focus, not just the banner — otherwise the focus
+  // route survives in the address bar and a refresh/share reopens the process the operator just
+  // dismissed (review #834). Standalone, the focus lives in our own `#/cockpit/process/<key>` hash, so
+  // navigating it to `#/cockpit` fires onHashChange, which clears the focus. Embedded, the focus derives
+  // from the host page's `#/cockpit/<param>` hash; rewrite the parent hash to `#/cockpit` so it stops
+  // re-seeding the focus (a cross-origin parent throws on access — fall back to a local clear).
+  function clearFocus() {
+    if (route.kind === "process") {
+      location.hash = "#/cockpit";
+      return;
+    }
+    try {
+      const parent = window.parent;
+      if (parent != null && parent !== window && parseHostCockpitParam(parent.location?.hash ?? "") != null) {
+        parent.location.hash = "#/cockpit";
+      }
+    } catch {
+      // cross-origin host — can't touch its hash; fall through to a local focus clear.
+    }
+    setFocus(undefined);
   }
 
   function setFocus(key) {
@@ -1034,6 +1059,10 @@ export function mountCockpit(host, opts = {}) {
     focusScanAt = 0;
     shownAgentInstanceKey = undefined;
     autoHistoryKey = undefined;
+    // Clear the agent-history LIST alongside the detail: leaving the old focus's list up until the new
+    // focus's reads land would let a click on a stale row start a detail read under the new focus's
+    // generation, surfacing A's history beneath B's banner (review #834).
+    agentRegion.replaceChildren();
     agentDetailRegion.replaceChildren();
     teardownTerminal();
     setMode(undefined, undefined);
@@ -1062,12 +1091,15 @@ export function mountCockpit(host, opts = {}) {
       teardownTerminal();
       setMode(undefined, undefined);
     }
-    if (mode != null || focusReplaying) return;
+    if (mode != null) return;
+    // A scan already running for THIS focus generation blocks a duplicate; a lock still held by a
+    // superseded focus (gen mismatch) must NOT block this focus's scan (review #834).
+    if (focusReplayGen === gen) return;
     // Throttle the per-tree transcript scan (a focus with many children and no captures would otherwise
     // re-scan every child every poll). The first scan after a focus change runs immediately (focusScanAt=0).
     if (Date.now() - focusScanAt < focusScanMinMs) return;
     focusScanAt = Date.now();
-    focusReplaying = true;
+    focusReplayGen = gen;
     try {
       const transcripts = [];
       for (const key of focusKeys) {
@@ -1082,7 +1114,9 @@ export function mountCockpit(host, opts = {}) {
     } catch (err) {
       onError(err);
     } finally {
-      focusReplaying = false;
+      // Only release the lock if THIS scan still owns it: a newer focus may have claimed it while we
+      // awaited, and clearing it then would let a duplicate scan stack under the new focus.
+      if (focusReplayGen === gen) focusReplayGen = undefined;
     }
   }
 
