@@ -153,16 +153,31 @@ export interface ReviewThread {
 }
 
 /** A suppressed / low-confidence Copilot advisory parsed out of a review body. Its `key` is the
- * line-stable identity (survives a line drift); `label` is the human-facing `path:line` shown in
- * block reasons. */
+ * line-stable identity (survives a line drift); `label` is the human-facing locator shown in block
+ * reasons.
+ *
+ * Two source formats populate this shape, so the per-field shapes below vary by variant:
+ * - LEGACY "Suppressed comments" block (`parseLegacySuppressedBlock`): a `**path:line**` header
+ *   with real `line` (> 0), `text` is the first non-empty prose line after the header, and `label`
+ *   is `path:line`.
+ * - `ccr-overview-v2` file-table findings (`parseOverviewV2TableFindings`, issue #835): `text` is a
+ *   finding clause from the table's notes column (no header, no source line), so `line` is the
+ *   sentinel `0` and `label` is `<path> (review overview)` rather than `path:line`.
+ *
+ * Consumers must therefore treat `line === 0` as "not line-addressable" (an overview finding), NOT
+ * as a real line, and must not assume `label` is always `path:line`. */
 export interface SuppressedAdvisory {
   path: string;
+  /** Source line of the advisory. Real (> 0) for a legacy `**path:line**` header; the sentinel `0`
+   * for a `ccr-overview-v2` table finding, which carries no source line and is not line-addressable. */
   line: number;
-  /** The advisory prose (first non-empty line after the header), used for the stable fingerprint. */
+  /** The advisory prose: the first non-empty line after the header (legacy block) or a finding
+   * clause from the overview table's notes column (`ccr-overview-v2`). Used for the stable fingerprint. */
   text: string;
   /** Line-stable identity: `<path>#<fingerprint>` of the normalized prose. Survives line drift. */
   key: string;
-  /** Human-facing `path:line` label for block-reason messages. */
+  /** Human-facing label for block-reason messages: `path:line` for a legacy advisory, or
+   * `<path> (review overview)` for a line-less `ccr-overview-v2` table finding. */
   label: string;
 }
 
@@ -250,11 +265,67 @@ export function questionFingerprint(text: string): string {
   return fingerprint(normalizeAdvisoryText(text));
 }
 
-/** Parse Copilot's suppressed / low-confidence advisories out of a review body. Copilot renders them
- * under a `<summary>Suppressed comments (N)</summary>` block, each as a bold `**path:line**` header
- * followed by the advisory prose. Returns de-duplicated advisories (empty when there is no block). */
+/** Parse Copilot's suppressed / low-confidence advisories out of a review body, supporting BOTH
+ * formats Copilot emits:
+ *
+ * 1. The legacy `<summary>Suppressed comments (N)</summary>` block — each advisory is a bold
+ *    `**path:line**` header followed by the advisory prose (`parseLegacySuppressedBlock`).
+ * 2. The newer `ccr-overview-v2` review body (issue #835), which has NO "Suppressed comments"
+ *    block — findings appear only as clauses in the "What changed" file table's notes column,
+ *    each ending `(<severity>, N vote[s])` (`parseOverviewV2TableFindings`).
+ *
+ * Returns de-duplicated advisories from both formats (empty when neither is present). */
 export function parseSuppressedAdvisories(reviewBody: string | null | undefined): SuppressedAdvisory[] {
   const body = reviewBody ?? "";
+  const out: SuppressedAdvisory[] = [];
+  const seen = new Set<string>();
+  for (const a of [...parseLegacySuppressedBlock(body), ...parseOverviewV2TableFindings(body)]) {
+    if (seen.has(a.key)) continue;
+    seen.add(a.key);
+    out.push(a);
+  }
+  return out;
+}
+
+/** A finding clause's trailing `(<severity>, N vote[s])` tag in the ccr-overview-v2 file table. */
+const V2_FINDING_TAG = /\s*\(\s*[a-z]+\s*,\s*\d+\s+votes?\s*\)/gi;
+
+/** Copilot's `ccr-overview-v2` review body (issue #835) has NO "Suppressed comments" block. Findings
+ * that got an inline comment are threads (gated via `isResolved`), but others appear ONLY as clauses
+ * in the "What changed" file table's notes column, each ending `(<severity>, N vote[s])`, e.g.
+ * `Adds X; A is wrong (moderate, 1 vote), and B is missing (nit, 3 votes).` Each such clause is an
+ * advisory keyed on `<path> :: <clause>` — the vote tag is EXCLUDED so a re-vote next round keeps the
+ * key stable. The first clause keeps any leading row summary (`Adds X; A is wrong`): Copilot does not
+ * always emit a summary (`Maven is declared…; requirements should model…` is ONE finding), so cutting
+ * at `; ` would silently truncate a finding — keeping it is fail-CLOSED. Table findings carry
+ * no line, so `line` is 0. Findings that duplicate an inline thread are still returned: fail-CLOSED
+ * (an extra ack is cheap; a finding silently dropped is the false-OPEN this gate prevents). */
+function parseOverviewV2TableFindings(body: string): SuppressedAdvisory[] {
+  if (!/<!--\s*ccr-overview-v\d+\s*-->/i.test(body)) return [];
+  const out: SuppressedAdvisory[] = [];
+  const rowRe = /^\|\s*`([^`]+)`\s*\|(.*)\|\s*$/;
+  for (const raw of body.split(/\r?\n/)) {
+    const row = rowRe.exec(raw);
+    if (!row) continue;
+    const path = row[1].replace(/\u200b|\u200c|\u200d|\ufeff/g, "").trim();
+    const notes = row[2].trim();
+    let prev = 0;
+    V2_FINDING_TAG.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
+    while ((m = V2_FINDING_TAG.exec(notes)) !== null) {
+      const seg = notes.slice(prev, m.index);
+      prev = m.index + m[0].length;
+      const text = seg.replace(/^[\s,;.]*(?:and\s+)?/i, "").trim();
+      if (!text) continue;
+      out.push({ path, line: 0, text, key: advisoryStableKey(path, text), label: `${path} (review overview)` });
+    }
+  }
+  return out;
+}
+
+/** The legacy "Suppressed comments (N)" block: `**path:line**` headers followed by advisory prose. */
+function parseLegacySuppressedBlock(body: string): SuppressedAdvisory[] {
   const idx = body.search(/Suppressed comments\s*\(/i);
   if (idx < 0) return [];
   // Scan only from the "Suppressed comments" marker onward so a `**path:line**` elsewhere in the

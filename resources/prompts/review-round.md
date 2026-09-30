@@ -71,6 +71,11 @@ Because several agents may run on the same host at once:
    "low confidence" list Copilot folds into the **review body** (`.../reviews`
    `body`). These are NOT in the default inline-comment API set, so a plain
    `.../comments` read misses them; scan the review body for them explicitly.
+   Newer Copilot reviews use an **overview format** (body starts `<!-- ccr-overview-v2 -->`)
+   with no "Suppressed comments" block. There, findings without an inline thread appear
+   **only** in the "What changed in this PR" file table, as clauses in the notes column
+   ending `(<severity>, N vote[s])`. The gate treats **each such clause** as an advisory
+   (even if it duplicates an inline thread), so triage and ack every one (step 5a).
    If `answer` is present, it is a human's instruction: either the decision on the
    escalation you raised last round, or change requests from merge approval of this
    converged PR. Act on it first, on this same PR branch (never open a new PR).
@@ -130,7 +135,11 @@ Because several agents may run on the same host at once:
    new line — a line-based ack would go stale and the gate would escalate to a human
    every round (issue #787). Because the ack is keyed on the prose, a decline you
    made in an earlier round stays acknowledged across the drift and you need **not**
-   re-ack it. The ack thread may sit on any valid diff line. Example:
+   re-ack it. The ack thread may sit on any valid diff line. For an **overview-format
+   table finding**, `<path>` is the file column (backticks and any invisible zero-width
+   characters removed) and `<advisory text>` is the finding clause **verbatim, without**
+   its trailing `(<severity>, N vote[s])` tag — for the row's first finding, include any
+   leading row summary before it (e.g. `nano-ack: a.json :: Adds X; A is wrong`). Example:
 
    ```sh
    # Post the ack thread (pick any changed line in the diff for path/line). Use the PR's real HEAD
