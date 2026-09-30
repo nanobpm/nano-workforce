@@ -574,6 +574,13 @@ function turnMetrics(m) {
   return dur != null ? `${base} \u00b7 ${dur}` : base;
 }
 
+function turnTime(iso) {
+  if (iso == null || iso === "") return undefined;
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return undefined;
+  return new Date(ms).toISOString().slice(11, 19);
+}
+
 function agentHistoryView(report) {
   const turns = (report.records ?? []).map((r) => ({
     historyItemKey: r.historyItemKey,
@@ -582,6 +589,8 @@ function agentHistoryView(report) {
     text: turnText(r),
     toolCalls: (r.toolCalls ?? []).map((c) => ({ toolCallId: c.toolCallId, toolName: c.toolName, elementId: c.elementId })),
     metrics: turnMetrics(r.metrics),
+    producedAt: r.producedAt != null && r.producedAt !== "" ? r.producedAt : undefined,
+    time: turnTime(r.producedAt),
   }));
   return {
     agentInstanceKey: report.agentInstanceKey,
@@ -639,17 +648,28 @@ function renderAgentSessions(host, doc, view, onSelect, activeInstanceKey) {
   host.appendChild(root);
 }
 
+// One turn as a native collapsible <details> (collapsed by default); its <summary> heading (role,
+// iteration, timestamp, metrics) toggles the details body on click (#831).
 function agentTurnBlock(doc, t) {
-  const block = el(doc, "div", "cockpit-agent-turn");
+  const block = el(doc, "details", "cockpit-agent-turn");
   block.setAttribute("data-history-item-key", t.historyItemKey);
   block.setAttribute("data-role", t.role);
   block.setAttribute("data-loop-iteration", String(t.loopIteration));
-  const meta = el(doc, "div", "cockpit-agent-turn-meta");
+  const meta = el(doc, "summary", "cockpit-agent-turn-meta");
   meta.appendChild(el(doc, "span", "cockpit-agent-turn-role", t.role));
   meta.appendChild(el(doc, "span", "cockpit-agent-turn-iter", `#${t.loopIteration}`));
+  if (t.time != null) {
+    const time = el(doc, "time", "cockpit-agent-turn-time", t.time);
+    if (t.producedAt != null) {
+      time.setAttribute("datetime", t.producedAt);
+      time.setAttribute("title", t.producedAt);
+    }
+    meta.appendChild(time);
+  }
   if (t.metrics != null) meta.appendChild(el(doc, "span", "cockpit-agent-turn-metrics", t.metrics));
   block.appendChild(meta);
-  if (t.text !== "") block.appendChild(el(doc, "pre", "cockpit-agent-turn-text", t.text));
+  const body = el(doc, "div", "cockpit-agent-turn-body");
+  if (t.text !== "") body.appendChild(el(doc, "pre", "cockpit-agent-turn-text", t.text));
   if (t.toolCalls.length > 0) {
     const tools = el(doc, "ul", "cockpit-agent-turn-tools");
     for (const call of t.toolCalls) {
@@ -657,8 +677,9 @@ function agentTurnBlock(doc, t) {
       li.setAttribute("data-tool-call-id", call.toolCallId);
       tools.appendChild(li);
     }
-    block.appendChild(tools);
+    body.appendChild(tools);
   }
+  block.appendChild(body);
   return block;
 }
 

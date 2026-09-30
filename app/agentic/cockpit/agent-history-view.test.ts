@@ -96,6 +96,21 @@ test("agentHistoryView projects turns in transport order with text, tool calls a
   assert.equal(view.turns[1]?.metrics, "12 in \u00b7 4 out \u00b7 900ms");
 });
 
+test("agentHistoryView carries each turn's producedAt timestamp (absent when unreported)", () => {
+  const view = agentHistoryView({
+    agentInstanceKey: "ai-1",
+    count: 2,
+    records: [
+      { historyItemKey: "h-0", agentInstanceKey: "ai-1", loopIteration: 0, role: "USER", commitStatus: "COMMITTED", content: [], toolCalls: [], producedAt: "2024-05-01T12:34:56.789Z" },
+      { historyItemKey: "h-1", agentInstanceKey: "ai-1", loopIteration: 1, role: "ASSISTANT", commitStatus: "COMMITTED", content: [], toolCalls: [] },
+    ],
+  });
+  assert.equal(view.turns[0]?.producedAt, "2024-05-01T12:34:56.789Z");
+  assert.equal(view.turns[0]?.time, "12:34:56");
+  assert.equal(view.turns[1]?.producedAt, undefined);
+  assert.equal(view.turns[1]?.time, undefined);
+});
+
 test("agentHistoryView read-as-absence: an empty history yields zero turns", () => {
   const view = agentHistoryView({ agentInstanceKey: "ai-9", count: 0, records: [] });
   assert.equal(view.count, 0);

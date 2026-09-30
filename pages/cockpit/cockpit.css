@@ -316,8 +316,23 @@
   display: flex;
   gap: 8px;
   align-items: baseline;
-  margin-bottom: 4px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
 }
+
+.cockpit-agent-turn-meta::-webkit-details-marker { display: none; }
+
+.cockpit-agent-turn-meta::before {
+  content: "\25B8";
+  color: var(--cockpit-muted);
+  font-size: 11px;
+  width: 10px;
+}
+
+.cockpit-agent-turn[open] > .cockpit-agent-turn-meta::before { content: "\25BE"; }
+
+.cockpit-agent-turn-body { margin-top: 4px; padding-left: 18px; }
 
 .cockpit-agent-turn-role {
   font-size: 11px;
@@ -327,6 +342,7 @@
 }
 
 .cockpit-agent-turn-iter,
+.cockpit-agent-turn-time,
 .cockpit-agent-turn-metrics {
   font-size: 11px;
   color: var(--cockpit-muted);
