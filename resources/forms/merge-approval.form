@@ -1,0 +1,36 @@
+{
+  "id": "merge-approval",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "text",
+      "label": "Approve merge",
+      "text": "This PR passed review convergence. Approve it to hand it to the merge loop, or request changes: your guidance goes to the review agent, which updates this same PR. Convergence then re-runs and approval is asked again."
+    },
+    {
+      "type": "select",
+      "key": "mergeDecision",
+      "label": "Decision",
+      "values": [
+        { "label": "Approve — merge the PR", "value": "approve" },
+        { "label": "Request changes — send guidance to the agent", "value": "revise" }
+      ],
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "key": "answer",
+      "label": "Guidance for the agent",
+      "description": "What should change before this PR merges? The agent implements it on the same PR.",
+      "validate": {
+        "required": true
+      },
+      "conditional": {
+        "hide": "=mergeDecision != \"revise\""
+      }
+    }
+  ]
+}

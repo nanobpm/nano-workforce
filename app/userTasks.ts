@@ -52,6 +52,12 @@ export const PR_WAIT_ANSWER_ELEMENT = "wait-answer";
  *  canonical `completeUserTask` door and surfaced in this same Tasks inbox. */
 export const PR_WAIT_MERGE_ANSWER_ELEMENT = "wait-merge-answer";
 
+/** The optional human merge-approval user task (convergence-loop.bpmn, issue #826) — a converged PR
+ *  parks here before `pr.finalize` hands it to the merge-loop. Approve merges; request changes loops
+ *  the guidance (`answer`) back to the review agent on the same PR. HUMAN-only: never agent-answerable,
+ *  so the fleet can never auto-approve a merge. */
+export const PR_MERGE_APPROVAL_ELEMENT = "merge-approval";
+
 /** The PR review-loop answer-recording service task (convergence-loop.bpmn) — the `pr.answer-escalation`
  *  job the token moves to IMMEDIATELY when `wait-answer` completes. Its ACTIVE element instance is the
  *  positive-evidence marker that an operator's answer is in-flight (recorded but the loop hasn't looped
@@ -237,6 +243,7 @@ export const USER_TASK_KIND_LABELS: Readonly<Record<string, string>> = {
   [TRIAL_MERGE_ELEMENT]: "Trial merge",
   [PR_WAIT_ANSWER_ELEMENT]: "PR review",
   [PR_WAIT_MERGE_ANSWER_ELEMENT]: "PR merge",
+  [PR_MERGE_APPROVAL_ELEMENT]: "PR merge approval",
   [CONFORMANCE_ESCALATION_ELEMENT]: "Conformance review",
   [READINESS_ESCALATION_PF_ELEMENT]: "Upstream readiness stalled",
   [READINESS_ESCALATION_ELEMENT]: "Readiness escalation",

@@ -1073,14 +1073,21 @@ test("classify-scope feeds gw-scope-gate, which blocks on scopeBlocked = true", 
   assertStringIncludes(blocked, "scopeBlocked = true");
 });
 
-test("gw-scope-gate default arm finalizes (scope ok → persist-converged)", () => {
+test("gw-scope-gate default arm continues to the optional merge approval, whose default finalizes", () => {
   const gw = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-scope-gate"[^>]*>/);
   assert(gw, "gw-scope-gate gateway missing");
   assertStringIncludes(gw[0], 'default="f_scopeOk"');
   const ok = flowElement("f_scopeOk");
   assert(ok, "f_scopeOk flow missing");
-  assertStringIncludes(ok, 'targetRef="persist-converged"');
+  assertStringIncludes(ok, 'targetRef="gw-approval"');
   assert(!/conditionExpression/.test(ok), "the default arm must carry no conditionExpression");
+  // Issue #826: without `humanApproval` the approval gateway's default arm finalizes as before.
+  const approval = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-approval"[^>]*>/);
+  assert(approval, "gw-approval gateway missing");
+  assertStringIncludes(approval[0], 'default="f_noApproval"');
+  const noApproval = flowElement("f_noApproval");
+  assert(noApproval, "f_noApproval flow missing");
+  assertStringIncludes(noApproval, 'targetRef="persist-converged"');
 });
 
 test("the scope escalation routes through gw-escalated with the classifier's specific reason", () => {

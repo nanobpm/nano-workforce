@@ -193,3 +193,17 @@ test("malformed readiness descriptor → 400 at the edge (never a 500)", async (
     assertEquals(started.length, 0);
   });
 });
+
+// ── human approval before merge (issue #826): threaded through the edge, pinned off without autoMerge ─
+
+test("humanApproval reaches the run only together with autoMerge", async () => {
+  await withGithub(REPO, async () => {
+    for (const [autoMerge, expected] of [[true, true], [false, false]] as const) {
+      const { app, started } = makeApp();
+      const body = { issue: `${REPO}#577`, ...GATED_BASE, converge: true, autoMerge, humanApproval: true };
+      const res = (await startFeature(input(body), app)) as any;
+      assertEquals(res.status, 202);
+      assertEquals(started[0].variables?.humanApproval, expected);
+    }
+  });
+});

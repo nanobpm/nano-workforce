@@ -62,6 +62,7 @@ interface FeatureRow {
 }
 interface PrRow {
   pr_key: string;
+  process_key: string | null;
 }
 
 describe("single-issue feature run (#172 — feature.bpmn)", () => {
@@ -180,6 +181,23 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
 
         const pr = await app.db.table<PrRow>("pull_requests", "pr_key").findOne({ pr_key: "owner/repo#102" });
         assert.ok(pr, "converge enrolled the raised PR into pull_requests (submitPr hand-off)");
+      },
+    );
+  });
+
+  test("raise + converge + human approval: the enrolled convergence loop carries the approval gate (issue #826)", async () => {
+    await withApp(
+      { "senior:feature": () => ({ status: "opened", pr: "owner/repo#103", summary: "built it" }) },
+      { baseBranch: "epic/e2e", converge: true, autoMerge: true, humanApproval: true },
+      async ({ app }) => {
+        // The flag must survive the real handoff: feature.bpmn → converge-cell callActivity →
+        // pr.converge-feature → submitPr → the live loop instance (still ACTIVE, so its vars are readable).
+        const pr = await app.db.table<PrRow>("pull_requests", "pr_key").findOne({ pr_key: "owner/repo#103" });
+        assert.ok(pr?.process_key, "converge enrolled the raised PR into a live convergence loop");
+        const instances = app.snapshot().instances;
+        assert.ok(Array.isArray(instances), "snapshot.instances is an array of instance rows");
+        const loop = instances.find((i) => i?.key === pr.process_key);
+        assert.equal(loop?.variables?.humanApproval, true, "the convergence loop was seeded with humanApproval");
       },
     );
   });

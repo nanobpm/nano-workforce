@@ -124,6 +124,22 @@ test("startFeature: converge/autoMerge flags are persisted as 0/1", async () => 
   assertEquals(row.auto_merge, 1);
 });
 
+test("startFeature: humanApproval is persisted as 0/1 and seeded onto the instance (issue #826)", async () => {
+  for (const humanApproval of [true, false]) {
+    const stores = { feature_runs: { rows: [] as any[], key: "feature_key" } };
+    let vars: any = null;
+    const engine = {
+      createInstance: (req: any) => {
+        vars = req.variables;
+        return Promise.resolve({ processInstanceKey: "PI-1" });
+      },
+    } as any;
+    await startFeature(memData(stores), engine, PARSED, "main", true, true, null, {}, humanApproval);
+    assertEquals(stores.feature_runs.rows[0].human_approval, humanApproval ? 1 : 0);
+    assertEquals(vars.humanApproval, humanApproval);
+  }
+});
+
 test("startFeature: seeds the single task slice + base-branch brief onto the instance", async () => {
   let captured: any = null;
   const engine = {

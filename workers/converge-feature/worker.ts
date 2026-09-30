@@ -22,6 +22,7 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   const featureKey = job.variables.featureKey;
   const prKey = typeof job.variables.prKey === "string" ? job.variables.prKey.trim() : "";
   const autoMerge = job.variables.autoMerge === true;
+  const humanApproval = job.variables.humanApproval === true;
   const parsed = prKey ? parsePr(prKey) : null;
   if (!parsed) {
     // Should not happen — the gateway only routes here when record-feature emitted a parseable
@@ -46,11 +47,12 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     pr_key: parsed.prKey,
     updated_at: new Date().toISOString(),
   });
-  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, !autoMerge, featureKey);
+  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, !autoMerge, featureKey, humanApproval);
   app.log.info("converge-feature: enrolled PR into convergence loop", {
     featureKey,
     prKey: parsed.prKey,
     convergeOnly: !autoMerge,
+    humanApproval,
   });
   return {};
 };

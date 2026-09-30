@@ -107,6 +107,7 @@ import {
   type OpenEscalation,
   PLAN_REVIEW_ELEMENT,
   PR_ESCALATION_PRODUCER_ELEMENTS,
+  PR_MERGE_APPROVAL_ELEMENT,
   PR_RECORD_ANSWER_ELEMENT,
   PR_RECORD_MERGE_ANSWER_ELEMENT,
   PR_WAIT_ANSWER_ELEMENT,
@@ -573,9 +574,10 @@ export async function submitPr(
   maxRounds: number = MAX_ROUNDS,
   convergeOnly = false,
   rootRequestKey: string | null = null,
+  humanApproval = false,
 ) {
   return withPrSubmitLock(parsed.prKey, () =>
-    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey),
+    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval),
   );
 }
 
@@ -587,7 +589,12 @@ async function submitPrCritical(
   maxRounds: number = MAX_ROUNDS,
   convergeOnly = false,
   rootRequestKey: string | null = null,
+  humanApproval = false,
 ) {
+  // Human approval before merge (issue #826) gates only a PR that `pr.finalize` would hand to the
+  // merge-loop — its own predicate, `AUTO_MERGE && convergeOnly !== true`. A run that won't merge
+  // (review-only, or the global switch off) must not park for a pointless approval.
+  const gated = humanApproval && !convergeOnly && AUTO_MERGE;
   const table = prs(data);
   const existing = await table.get(parsed.prKey);
   // ADR-0065: classify "already running" on the DERIVED terminal edge, not the base transient. A
@@ -607,6 +614,23 @@ async function submitPrCritical(
   // RESUBMITTABLE — fall through and re-enroll, exactly as `startFeature`'s intake guard (feature.ts)
   // treats a keyless `running` feature row. A terminal row (any `process_key`) already falls through.
   if (trackedExisting && existing?.process_key != null && !TERMINAL_STATUSES.includes(trackedExisting.derived_status)) {
+    // Human approval is monotonic (issue #826): a gated caller adopting a live loop — possibly an
+    // ungated one another run started — narrows it to gated instead of inheriting its auto-merge.
+    // Idempotent, so a retry against our own gated loop is a no-op. A loop the engine no longer reports
+    // running is left alone; one already past its `human approval?` gateway can no longer be gated. A
+    // finalized PR (`converged_at` set) is past it, and `startMerge` has re-pointed its `process_key` at
+    // the merge-loop, so it is skipped. Mid-handoff (key re-pointed, `converged_at` not yet stamped) the
+    // write reaches the merge-loop but is inert: nothing there reads `humanApproval`.
+    if (gated && existing.converged_at == null) {
+      const loopKey = existing.process_key;
+      const match = (await engine.searchProcessInstances({ processInstanceKeys: [loopKey] })).find(
+        (s) => String(s.processInstanceKey) === loopKey,
+      );
+      const state = match ? String(match.state ?? "").trim().toUpperCase() : null;
+      if (state !== null && !ENGINE_TERMINAL_STATES.has(state)) {
+        await engine.setVariables({ scopeKey: loopKey, variables: { humanApproval: true } });
+      }
+    }
     return { prKey: parsed.prKey, alreadyRunning: true };
   }
 
@@ -724,6 +748,9 @@ async function submitPrCritical(
       // `converged` for this PR without handing off to the merge-loop, independent of the global
       // NANO_PR_AUTO_MERGE default. Only ever narrows (never forces merge on when auto-merge is off).
       convergeOnly,
+      // Human approval before merge (issue #826): a converged PR parks at the `merge-approval` user
+      // task before `pr.finalize` hands it to the merge-loop. Pinned off when the PR won't merge.
+      humanApproval: gated,
       // Cooperative abandon check (#76): the capability URL + the abort brief appended to the
       // review-round agent's prompt, so it can stop before pushing if the run is cancelled.
       abandonUrl: abUrl,
@@ -2469,13 +2496,24 @@ export async function pollFeatureDelivery(
       //       it would wedge `converging` forever with no PR process.
       // Both heal via the SAME idempotent `submitPr`: it is idempotent on the PR key (a redundant call
       // on an already-live PR early-returns `alreadyRunning`), and now treats a keyless non-terminal row
-      // as resubmittable, so it re-creates the instance and installs `process_key`. `convergeOnly`
-      // mirrors `converge-feature` — the inverse of the run's `auto_merge` flag.
+      // as resubmittable, so it re-creates the instance and installs `process_key`. `convergeOnly` and
+      // `humanApproval` mirror `converge-feature` — derived from the run's `auto_merge`/`human_approval`.
       const partiallyEnrolled =
         trackedPr != null && trackedPr.process_key == null && !TERMINAL_STATUSES.includes(trackedPr.derived_status);
       if (prStatus === null || partiallyEnrolled) {
         const parsed = parsePr(run.pr_key);
-        if (parsed) await submitPr(data, engine, parsed, [], MAX_ROUNDS, run.auto_merge !== 1, run.feature_key);
+        if (parsed) {
+          await submitPr(
+            data,
+            engine,
+            parsed,
+            [],
+            MAX_ROUNDS,
+            run.auto_merge !== 1,
+            run.feature_key,
+            run.human_approval === 1,
+          );
+        }
       }
       const { status, label } = deriveFeatureDelivery(prStatus);
       if (run.status !== status || run.delivery_label !== label) {
@@ -3057,6 +3095,7 @@ export async function pollUserTasks(
     [READINESS_ESCALATION_ELEMENT]: "plan",
     [PR_WAIT_ANSWER_ELEMENT]: "pr",
     [PR_WAIT_MERGE_ANSWER_ELEMENT]: "pr",
+    [PR_MERGE_APPROVAL_ELEMENT]: "pr",
   };
 
   // The SINGLE enrichment derivation both discovery paths feed: resolve one open escalation task (by

@@ -17,6 +17,7 @@
           <nano:extend name="featureKey" type="string" />
           <nano:extend name="prKey" type="string" optional="true" />
           <nano:extend name="autoMerge" type="boolean" optional="true" />
+          <nano:extend name="humanApproval" type="boolean" optional="true" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>
@@ -249,6 +250,7 @@
           <zeebe:input source="=featureKey" target="featureKey" />
           <zeebe:input source="=prKey" target="prKey" />
           <zeebe:input source="=autoMerge" target="autoMerge" />
+          <zeebe:input source="=humanApproval" target="humanApproval" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_converge</bpmn:incoming>

@@ -115,7 +115,7 @@ test("feature.bpmn composes its converge step via callActivity to converge-cell 
     /<zeebe:ioMapping>[\s\S]*?<\/zeebe:ioMapping>/.test(convergeBlock),
     "the converge callActivity must carry an explicit zeebe:ioMapping",
   );
-  for (const field of ["featureKey", "prKey", "autoMerge"]) {
+  for (const field of ["featureKey", "prKey", "autoMerge", "humanApproval"]) {
     assert(
       new RegExp(`<zeebe:input\\b[^>]*\\btarget="${field}"`).test(convergeBlock),
       `the converge callActivity ioMapping must map ConvergeFeatureIn.${field} into the child scope`,

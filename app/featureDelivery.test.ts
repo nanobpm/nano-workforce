@@ -197,6 +197,27 @@ test("pollFeatureDelivery: a converging run whose PR row is MISSING is re-enroll
   assertEquals(stores.feature_runs[0].delivery_label, "PR record missing");
 });
 
+test("pollFeatureDelivery: the re-enroll keeps the run's human approval gate (issue #826)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#7", status: "converging", pr_key: "o/r#407", auto_merge: 1, human_approval: 1, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  let vars: Record<string, unknown> | undefined;
+  const engine = {
+    searchProcessInstances: async () => [],
+    createInstance: async (req: { variables?: Record<string, unknown> }) => {
+      vars = req.variables;
+      return { processInstanceKey: "pi-407" };
+    },
+  } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(vars?.convergeOnly, false);
+  assertEquals(vars?.humanApproval, true, "a healed enrollment must not silently drop the approval gate");
+});
+
 test("pollFeatureDelivery: a converging run whose PR row is PARTIALLY enrolled (present, non-terminal, process_key NULL) is re-enrolled — a create-instance crash after the row insert does not wedge it (PR #809)", async () => {
   const { data, stores } = memData();
   stores.feature_runs = [

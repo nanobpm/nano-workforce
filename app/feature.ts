@@ -60,6 +60,9 @@ export interface FeatureRun {
   pr_key: string | null;
   converge: number;
   auto_merge: number;
+  /** 1 ⇒ a human must approve the converged PR before the merge-loop runs (issue #826). Only
+   * meaningful with `auto_merge = 1`; the `startFeature` operation pins it to 0 otherwise. */
+  human_approval: number;
   outcome: string | null;
   /** Human rollup detail. Projected by `pollFeatureDelivery` (fix: Feature history stuck at
    * `converging`) and also written by `pr.record-blocked-ack` with the operator's disposition
@@ -352,6 +355,7 @@ export async function startFeature(
   autoMerge: boolean,
   customInstructions: string | null = null,
   readiness: FeatureReadinessOptions = {},
+  humanApproval = false,
 ): Promise<StartFeatureResult> {
   // Intake-time readiness gate (issue #295): the probes the run must satisfy before it implements,
   // and the bound its preflight escalation timers fire off. Both are load-bearing together —
@@ -450,6 +454,7 @@ export async function startFeature(
       pr_key: null,
       converge: converge ? 1 : 0,
       auto_merge: autoMerge ? 1 : 0,
+      human_approval: humanApproval ? 1 : 0,
       outcome: null,
       delivery_label: null,
       // Clear the operator tick-off so a re-dispatched run is NOT silently dropped into History when
@@ -472,6 +477,7 @@ export async function startFeature(
       pr_key: null,
       converge: converge ? 1 : 0,
       auto_merge: autoMerge ? 1 : 0,
+      human_approval: humanApproval ? 1 : 0,
       outcome: null,
       delivery_label: null,
       created_at: ts,
@@ -507,6 +513,8 @@ export async function startFeature(
       // merge-loop. `converge=false` ⇒ merge is moot.
       converge,
       autoMerge,
+      // Park the converged PR at a human approval user task before the merge-loop (issue #826).
+      humanApproval,
       // A single-issue feature run OWNS its issue (the whole issue is the slice), so the agent may
       // claim it with a "starting work" comment on a first run (resources/prompts/feature.md). Epic slices
       // (plan-fanout) deliberately DO NOT set this — their `issue` is the shared parent epic, which

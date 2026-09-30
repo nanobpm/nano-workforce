@@ -24,7 +24,7 @@
 //         so it clears class (1) — but its topology is NOT expressible with the
 //         structured-only builder (`loop`/`switch`/`branch`), empirically proven
 //         (see `derivation-parity.test.ts`): its loop head `capture-head` is a
-//         serviceTask that MERGES five back-edges directly (in=5), whereas
+//         serviceTask that MERGES six back-edges directly (in=6), whereas
 //         `loop()` always inserts an exclusive-gateway loop head (the task stays
 //         in=1); `gw-status` is a single exclusive gateway with FOUR
 //         heterogeneous-condition out-edges (two `=x = "v"`, one complex boolean,
@@ -207,10 +207,11 @@ export const PORTS: readonly PortEntry[] = [
       "blocked (arbitrary control-flow graph): single top-level start/end, but " +
       "its topology is not expressible with the published @nanobpm/workflow's " +
       "structured-only builder (loop/switch/branch). Proven in the test suite: " +
-      "the loop head `capture-head` is a serviceTask that merges 5 back-edges " +
-      "directly (in=5: f_start, f_reviewLoop, f_answerLoop, the #786 husk " +
-      "auto-retry f_huskRetry, and the #796 bounded auto-ack re-entry " +
-      "f_ackRetry), but loop() always inserts an exclusive-gateway head " +
+      "the loop head `capture-head` is a serviceTask that merges 6 back-edges " +
+      "directly (in=6: f_start, f_reviewLoop, f_answerLoop, the #786 husk " +
+      "auto-retry f_huskRetry, the #796 bounded auto-ack re-entry " +
+      "f_ackRetry, and the #826 merge-approval change request f_revise), but " +
+      "loop() always inserts an exclusive-gateway head " +
       "(task stays in=1); `gw-status` is one gateway with 4 heterogeneous-" +
       "condition out-edges (no switch/branch emits that); `gw-escalated` is one " +
       "gateway that is at once a 6-way merge and a 2-way split. Awaits an " +

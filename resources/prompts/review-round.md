@@ -23,7 +23,7 @@ cancel can land anytime.
 | `repo`     | `owner/name`                                                   |
 | `prNumber` | PR number                                                      |
 | `round`    | 1-based round counter                                          |
-| `answer`   | present only when resuming from an escalation — a human's reply|
+| `answer`   | present only when resuming from a human: an escalation reply, or merge-approval change requests|
 | `prompt`   | this document                                                  |
 
 ## Workspace (host mode) — read this first
@@ -71,8 +71,9 @@ Because several agents may run on the same host at once:
    "low confidence" list Copilot folds into the **review body** (`.../reviews`
    `body`). These are NOT in the default inline-comment API set, so a plain
    `.../comments` read misses them; scan the review body for them explicitly.
-   If `answer` is present, treat it as the human's decision on the escalation you
-   raised last round and act on it first.
+   If `answer` is present, it is a human's instruction: either the decision on the
+   escalation you raised last round, or change requests from merge approval of this
+   converged PR. Act on it first, on this same PR branch (never open a new PR).
 2. **Triage each item** into: *fix* (correct, worth doing), *nitpick* (apply
    silently), *needs human input* (design/product/tradeoff you can't decide), or
    *push back* (wrong / false positive — reply with evidence, make no change). Triage

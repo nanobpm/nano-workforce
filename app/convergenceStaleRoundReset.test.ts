@@ -73,7 +73,7 @@ test("capture-head still precedes review-round on every loop entry (the reset is
   const el = serviceTask("capture-head");
   assert(el, "capture-head service task must exist");
   const incoming = [...el!.matchAll(/<bpmn:incoming>([^<]+)<\/bpmn:incoming>/g)].map((m) => m[1]);
-  for (const flow of ["f_start", "f_reviewLoop", "f_answerLoop", "f_huskRetry", "f_ackRetry"]) {
+  for (const flow of ["f_start", "f_reviewLoop", "f_answerLoop", "f_huskRetry", "f_ackRetry", "f_revise"]) {
     assert(incoming.includes(flow), `capture-head must be the entry join for ${flow} so the reset covers that re-entry (issue #822)`);
   }
   const capture = flat.match(/<bpmn:sequenceFlow[^>]*\bid="f_capture"[^>]*\/>/);

@@ -111,8 +111,13 @@ export const MCP_TOOL_COUNT_BUDGET = 60;
  * `getAgenticSupply`, and registry read schemas (plus the `StaleWorker` leaf) so an operator can spot
  * and drain a stale harness from the tool surface alone. Measured 86,509 bytes serialized — 9 over the
  * old ceiling's headroom. Deliberate, documented growth — not schema fat.
+ *
+ * RAISE PROVENANCE — 87_000 → 87_500 (#826): the per-run `humanApproval` start option on both
+ * `startFeature` body variants (`FeatureStartByIssue`/`FeatureStartByUrl`) — the Feature tab's
+ * "Human approval before merge" checkbox. Measured 87,293 bytes serialized (86,862 → 87,293 — over
+ * the old ceiling's 138-byte headroom). Deliberate, documented growth — not schema fat.
  */
-export const MCP_SURFACE_BYTES_BUDGET = 87_000;
+export const MCP_SURFACE_BYTES_BUDGET = 87_500;
 
 /**
  * The eagerly-loaded curated subset MUST stay materially smaller than the full surface — otherwise it

@@ -3442,6 +3442,12 @@ components:
             When true (and `converge` is true), drive the merge-loop after convergence only when
             `NANO_PR_AUTO_MERGE` is enabled. When false the run stops at `converged`.
             Moot when `converge` is false.
+        humanApproval:
+          type: boolean
+          description: >-
+            When true (with `autoMerge`), the converged PR waits in Tasks for a human to approve the
+            merge or request changes; the agent applies them to the same PR and convergence re-runs.
+            Moot when the run does not merge (see `autoMerge`).
         confirmDefaultBase:
           type: boolean
           description: >-
@@ -3513,6 +3519,9 @@ components:
         autoMerge:
           type: boolean
           description: When true (with `converge`), drive the merge-loop. See `FeatureStartByIssue.autoMerge`.
+        humanApproval:
+          type: boolean
+          description: When true (with `autoMerge`), a human approves the merge. See `FeatureStartByIssue.humanApproval`.
         confirmDefaultBase:
           type: boolean
           description: Acknowledge landing on the default branch. See `PlanStartByIssue.confirmDefaultBase`.
@@ -6181,6 +6190,9 @@ paths:
                     autoMerge:
                       type: boolean
                       description: When true (and `converge` is true), drive the merge-loop after convergence only when `NANO_PR_AUTO_MERGE` is enabled. When false the run stops at `converged`. Moot when `converge` is false.
+                    humanApproval:
+                      type: boolean
+                      description: When true (with `autoMerge`), the converged PR waits in Tasks for a human to approve the merge or request changes; the agent applies them to the same PR and convergence re-runs. Moot when the run does not merge (see `autoMerge`).
                     confirmDefaultBase:
                       type: boolean
                       description: Acknowledge that `baseBranch` is the repository default branch (the PR would target it directly). See `PlanStartByIssue.confirmDefaultBase`.
@@ -6326,6 +6338,9 @@ paths:
                     autoMerge:
                       type: boolean
                       description: When true (with `converge`), drive the merge-loop. See `FeatureStartByIssue.autoMerge`.
+                    humanApproval:
+                      type: boolean
+                      description: When true (with `autoMerge`), a human approves the merge. See `FeatureStartByIssue.humanApproval`.
                     confirmDefaultBase:
                       type: boolean
                       description: Acknowledge landing on the default branch. See `PlanStartByIssue.confirmDefaultBase`.

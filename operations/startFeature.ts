@@ -116,6 +116,8 @@ export default defineOperation("startFeature", async ({ body }, app) => {
   // Auto-merge is only meaningful as a follow-on to convergence; pin it off when converge is off so
   // the persisted row and the process variable can't disagree.
   const autoMerge = converge && "autoMerge" in body && body.autoMerge === true;
+  // Human approval gates the merge-loop, so it is moot (pinned off) without auto-merge (issue #826).
+  const humanApproval = autoMerge && "humanApproval" in body && body.humanApproval === true;
   // Optional operator steering threaded to the implementation agent's prompt. Empty/whitespace is
   // normalized to null downstream (startFeature) so it never appends an empty instruction block.
   const customInstructions = "customInstructions" in body && typeof body.customInstructions === "string"
@@ -176,12 +178,14 @@ export default defineOperation("startFeature", async ({ body }, app) => {
     autoMerge,
     customInstructions,
     { probes: readiness.probes, probeTimeout: readiness.probeTimeout, probePollEvery: readiness.probePollEvery },
+    humanApproval,
   );
   app.log.info("feature run intake", {
     featureKey: parsed.planKey,
     requestedBaseBranch: normalizedBase,
     converge,
     autoMerge,
+    humanApproval,
     hasCustomInstructions: typeof customInstructions === "string" && customInstructions.trim() !== "",
     readinessProbes: readiness.probes.length,
     outcome: result.outcome,
