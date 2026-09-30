@@ -1123,3 +1123,76 @@ test("the blocked-comments escalation routes through gw-escalated toward an answ
   // The human sees the gate's own reason (the unresolved threads / unacknowledged advisories).
   assertStringIncludes(task[0], "convergeBlockReason");
 });
+
+// ── Copilot ccr-overview-v2 review format (issue #835) ──────────────────────
+// The v2 overview has no "Suppressed comments" block; findings without an inline thread live only in
+// the "What changed" file table as `… (<severity>, N vote[s])` clauses. Paths carry zero-width spaces.
+const V2_REVIEW_BODY = [
+  "<!-- ccr-overview-v2 -->",
+  "",
+  "## Copilot review overview",
+  "",
+  "<details open>",
+  "<summary><strong>Open (1)</strong></summary>",
+  "",
+  "- [Replace HEAD with a valid bootstrap commit SHA](#discussion_r1) · New",
+  "</details>",
+  "",
+  "<details>",
+  "<summary><strong>What changed in this PR</strong></summary>",
+  "",
+  "| File | Summary and final review notes |",
+  "|---|---|",
+  "| `skills/\u200bcamunda-forms/\u200bportability.json` | Adds dependency requirements. |",
+  "| `skills/\u200bcamunda-job-workers/\u200bportability.json` | Adds dependency requirements; Camunda version conflicts with the documented Node fallback (moderate, 1 vote), and Java/TypeScript runtime paths are missing (moderate, 1 vote). |",
+  "| `release-please-config.json` | Configures automated releases; `bootstrap-sha` must be removed or replaced with a full base commit SHA (moderate, 3 votes). |",
+  "</details>",
+].join("\n");
+
+test("parseSuppressedAdvisories: ccr-overview-v2 table findings are gated advisories (#835)", () => {
+  const advisories = parseSuppressedAdvisories(V2_REVIEW_BODY);
+  assertEquals(
+    advisories.map((a) => [a.path, a.text]),
+    [
+      [
+        "skills/camunda-job-workers/portability.json",
+        "Adds dependency requirements; Camunda version conflicts with the documented Node fallback",
+      ],
+      ["skills/camunda-job-workers/portability.json", "Java/TypeScript runtime paths are missing"],
+      [
+        "release-please-config.json",
+        "Configures automated releases; `bootstrap-sha` must be removed or replaced with a full base commit SHA",
+      ],
+    ],
+  );
+  // Keyed on path + prose (vote count excluded, so a re-vote next round keeps the same key).
+  assertEquals(
+    advisories[1].key,
+    advisoryStableKey("skills/camunda-job-workers/portability.json", "Java/TypeScript runtime paths are missing"),
+  );
+});
+
+test("parseSuppressedAdvisories: a v2 table finding is acked by the canonical nano-ack marker and unblocks the gate (#835)", () => {
+  const advisories = parseSuppressedAdvisories(V2_REVIEW_BODY);
+  const threads: ReviewThread[] = advisories.map((a) => ({
+    isResolved: true,
+    path: a.path,
+    bodies: [`Declined. nano-ack: ${a.path} :: ${a.text}`],
+  }));
+  const blocked = evaluateConvergeGate({ unresolvedThreadCount: 0, suppressedAdvisories: advisories, acknowledgedKeys: [] });
+  assertEquals(blocked.convergeBlocked, true);
+  const r = evaluateConvergeGate({
+    unresolvedThreadCount: 0,
+    suppressedAdvisories: advisories,
+    acknowledgedKeys: parseAckedAdvisories(threads),
+  });
+  assertEquals(r.convergeBlocked, false);
+});
+
+test("parseSuppressedAdvisories: v2 table rows without findings yield nothing; non-v2 tables are ignored (#835)", () => {
+  assertEquals(
+    parseSuppressedAdvisories("<!-- ccr-overview-v2 -->\n| `a.ts` | Adds a thing. |"),
+    [],
+  );
+  assertEquals(parseSuppressedAdvisories("| `a.ts` | Broken thing (moderate, 1 vote). |"), []);
+});

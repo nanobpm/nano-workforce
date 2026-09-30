@@ -255,6 +255,55 @@ export function questionFingerprint(text: string): string {
  * followed by the advisory prose. Returns de-duplicated advisories (empty when there is no block). */
 export function parseSuppressedAdvisories(reviewBody: string | null | undefined): SuppressedAdvisory[] {
   const body = reviewBody ?? "";
+  const out: SuppressedAdvisory[] = [];
+  const seen = new Set<string>();
+  for (const a of [...parseLegacySuppressedBlock(body), ...parseOverviewV2TableFindings(body)]) {
+    if (seen.has(a.key)) continue;
+    seen.add(a.key);
+    out.push(a);
+  }
+  return out;
+}
+
+/** A finding clause's trailing `(<severity>, N vote[s])` tag in the ccr-overview-v2 file table. */
+const V2_FINDING_TAG = /\s*\(\s*[a-z]+\s*,\s*\d+\s+votes?\s*\)/gi;
+
+/** Copilot's `ccr-overview-v2` review body (issue #835) has NO "Suppressed comments" block. Findings
+ * that got an inline comment are threads (gated via `isResolved`), but others appear ONLY as clauses
+ * in the "What changed" file table's notes column, each ending `(<severity>, N vote[s])`, e.g.
+ * `Adds X; A is wrong (moderate, 1 vote), and B is missing (nit, 3 votes).` Each such clause is an
+ * advisory keyed on `<path> :: <clause>` — the vote tag is EXCLUDED so a re-vote next round keeps the
+ * key stable. The first clause keeps any leading row summary (`Adds X; A is wrong`): Copilot does not
+ * always emit a summary (`Maven is declared…; requirements should model…` is ONE finding), so cutting
+ * at `; ` would silently truncate a finding — keeping it is fail-CLOSED. Table findings carry
+ * no line, so `line` is 0. Findings that duplicate an inline thread are still returned: fail-CLOSED
+ * (an extra ack is cheap; a finding silently dropped is the false-OPEN this gate prevents). */
+function parseOverviewV2TableFindings(body: string): SuppressedAdvisory[] {
+  if (!/<!--\s*ccr-overview-v\d+\s*-->/i.test(body)) return [];
+  const out: SuppressedAdvisory[] = [];
+  const rowRe = /^\|\s*`([^`]+)`\s*\|(.*)\|\s*$/;
+  for (const raw of body.split(/\r?\n/)) {
+    const row = rowRe.exec(raw);
+    if (!row) continue;
+    const path = row[1].replace(/\u200b|\u200c|\u200d|\ufeff/g, "").trim();
+    const notes = row[2].trim();
+    let prev = 0;
+    V2_FINDING_TAG.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
+    while ((m = V2_FINDING_TAG.exec(notes)) !== null) {
+      const seg = notes.slice(prev, m.index);
+      prev = m.index + m[0].length;
+      const text = seg.replace(/^[\s,;.]*(?:and\s+)?/i, "").trim();
+      if (!text) continue;
+      out.push({ path, line: 0, text, key: advisoryStableKey(path, text), label: `${path} (review overview)` });
+    }
+  }
+  return out;
+}
+
+/** The legacy "Suppressed comments (N)" block: `**path:line**` headers followed by advisory prose. */
+function parseLegacySuppressedBlock(body: string): SuppressedAdvisory[] {
   const idx = body.search(/Suppressed comments\s*\(/i);
   if (idx < 0) return [];
   // Scan only from the "Suppressed comments" marker onward so a `**path:line**` elsewhere in the
