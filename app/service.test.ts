@@ -1226,8 +1226,10 @@ test("repoEnvelopeVars emits the push-checkpoint under the harness-read `sha` ke
 
 // Pre-PR provisioning (issue #684): the implementation path has no head branch yet, so it passes
 // `ref = base` + a `branchCreate` so the harness clones the base and cuts the deterministic
-// `feat/<task.id>` feature branch off it. `branch.create` is emitted only for a non-blank branch and
-// is absent on the PR-based paths (which check out an existing head).
+// `feat/<task.id>` feature branch off it. `branch.create` is emitted only for a non-blank branch.
+// The PR-based paths (review-round / fix-ci / rebase) now pass `branchCreate = headRef` too (equal
+// to `ref`) so the harness commits/pushes to the PR head branch instead of cutting a throwaway
+// `nano/agent-work/*` fallback (jwulf/c8ctl-plugin-nano#231); see the PR-path test below.
 test("repoEnvelopeVars emits branch.create only for a non-blank pre-PR branch (#684)", () => {
   const repo = (repoEnvelopeVars("owner/repo", "main", null, null, "feat/issue-7") as any)["io.nanobpm.agentTask"]
     .repository;
@@ -1252,7 +1254,95 @@ test("repoEnvelopeVars emits branch.create only for a non-blank pre-PR branch (#
   assertEquals("branch" in (repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"].repository, false);
 });
 
-// Durable-resume enrolment gate (issue #325, ADR 0062 Slice 5/5): `worldRestoreSha` — the seam
+// PR-path provisioning (jwulf/c8ctl-plugin-nano#231): the review-round / fix-ci / rebase call sites
+// pass `branchCreate = headRef` (equal to `ref`, the PR head). Without it the harness's base-branch
+// guard treats the checkout as base-like and cuts a throwaway `nano/agent-work/<base>-<run>` fallback,
+// stranding the round's commits OFF the PR (the head never advances → no-progress escalation). With
+// `ref == create == head` the harness does a no-op `checkout -B <head>` and commits/pushes to the PR
+// head branch itself.
+test("repoEnvelopeVars emits branch.create = head on the PR path (ref == create == head) (#231)", () => {
+  const repo = (repoEnvelopeVars("owner/repo", "feat/issue-12", "main", null, "feat/issue-12") as any)[
+    "io.nanobpm.agentTask"
+  ].repository;
+  assertEquals(repo.ref, "feat/issue-12", "the PR-path envelope checks out the head branch");
+  assertEquals(repo.branch.create, "feat/issue-12", "and asks the harness to work on that same head branch, not a fallback");
+  // Still branch-scoped and blobless, and the base tip stays reachable for the 3-dot diff.
+  assertEquals(repo.singleBranch, true);
+  assertEquals(repo.filter, "blob:none");
+  assertEquals(repo.baseRef, "main");
+});
+
+// Regression guard for the ACTUAL call sites (Copilot PR #817 review): the helper test above would
+// still pass if `submitPr`/`startMerge` dropped the 5th `branchCreate` argument, because
+// `repoEnvelopeVars` accepted it before this change. Drive both PUBLIC entry points with a mocked
+// PR-head response and assert the seeded `createInstance` envelope carries `branch.create === headRef`
+// — i.e. the call sites really thread the PR head into the branch-create slot (jwulf/c8ctl-plugin-nano#231).
+// Both `fetchPrMeta` (submit) and `fetchPrHead` (merge) read the same token-transport pulls endpoint,
+// so one fetch stub returning `head.ref` covers both.
+function withGithubHead(headRef: string, baseRef: string, run: () => Promise<void>): Promise<void> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevTok = process.env["GITHUB_TOKEN"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  process.env["GITHUB_TOKEN"] = "t0ken";
+  globalThis.fetch = ((url: string | URL | Request) => {
+    void url;
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({ title: "PR title", body: "", head: { ref: headRef, sha: "HEADSHA" }, base: { ref: baseRef } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+  }) as typeof fetch;
+  return run().finally(() => {
+    globalThis.fetch = prevFetch;
+    if (prevMode !== undefined) process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    else delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
+    else delete process.env["GITHUB_TOKEN"];
+  });
+}
+
+test("submitPr threads the resolved PR head into the envelope branch.create (#231)", async () => {
+  await withGithubHead("feat/issue-12", "main", async () => {
+    const { data, engine, get } = captureVars();
+    await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 12,
+      url: "https://github.com/owner/repo/pull/12",
+      prKey: "owner/repo#12",
+    });
+    const repo = (get()?.["io.nanobpm.agentTask"] as any)?.repository;
+    assertEquals(repo?.ref, "feat/issue-12", "submitPr checks out the PR head branch");
+    assertEquals(repo?.branch?.create, "feat/issue-12", "submitPr passes headRef as branch.create, not a fallback");
+  });
+});
+
+test("startMerge threads the resolved PR head into the envelope branch.create (#231)", async () => {
+  await withGithubHead("feat/issue-13", "main", async () => {
+    const { data, engine, get } = captureVars();
+    await data.table("pull_requests", "pr_key").insert({
+      pr_key: "owner/repo#13",
+      repo: "owner/repo",
+      number: 13,
+      url: "https://github.com/owner/repo/pull/13",
+      status: "converged",
+      abandon_token: "tok-13",
+      root_request_key: "owner/repo#13",
+    });
+    await startMerge(data, engine, {
+      repo: "owner/repo",
+      number: 13,
+      url: "https://github.com/owner/repo/pull/13",
+      prKey: "owner/repo#13",
+      round: 2,
+    });
+    const repo = (get()?.["io.nanobpm.agentTask"] as any)?.repository;
+    assertEquals(repo?.ref, "feat/issue-13", "startMerge checks out the PR head branch");
+    assertEquals(repo?.branch?.create, "feat/issue-13", "startMerge passes headRef as branch.create, not a fallback");
+  });
+});
+
 // `submitPr`/`startMerge` thread into `repoEnvelopeVars` — hands the harness the last push-checkpoint
 // ONLY when the enrolled fleet advertises `durable-resume`. With no participant it degrades to null,
 // so the round redrives from scratch (exactly as today). Proven against a REAL in-memory SQLite db
