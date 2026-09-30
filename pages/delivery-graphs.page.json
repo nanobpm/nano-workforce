@@ -132,14 +132,15 @@
           { "label": "All", "filter": [] }
         ],
         "columns": [
-          { "field": "title", "template": "{{title}}", "header": "Graph", "subtitleField": "run_key", "truncate": true, "width": "18%", "link": { "kind": "page", "page": "delivery-graph-detail", "keyField": "run_key" } },
+          { "field": "title", "template": "{{title}}", "header": "Graph", "subtitleField": "run_key", "truncate": true, "width": "16%", "link": { "kind": "page", "page": "delivery-graph-detail", "keyField": "run_key" } },
           { "field": "status", "header": "Status", "truncate": true, "width": "10%", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "process_key", "header": "Agent", "template": "Transcript", "truncate": true, "width": "5%", "link": { "kind": "page", "page": "cockpit", "keyField": "process_key" } },
           { "field": "process_key", "header": "Instance", "width": "8%", "truncate": true, "link": { "kind": "processExplorer", "keyField": "process_key" } },
           {
             "field": "stage",
             "header": "Pipeline",
             "kind": "pipeline",
-            "width": "18%",
+            "width": "15%",
             "stages": [
               { "key": "Requested", "label": "Requested" },
               { "key": "Implementing", "label": "Implementing" },

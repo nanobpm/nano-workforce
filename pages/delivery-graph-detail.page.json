@@ -96,6 +96,7 @@
         "columns": [
           { "field": "title", "template": "{{title}}", "header": "Graph", "subtitleField": "run_key", "truncate": true, "width": "30%" },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "process_key", "header": "Agent", "template": "Transcript", "width": "7rem", "link": { "kind": "page", "page": "cockpit", "keyField": "process_key" } },
           {
             "field": "stage",
             "header": "Pipeline",
