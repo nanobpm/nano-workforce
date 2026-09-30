@@ -65,7 +65,7 @@ export interface AgentTurnView {
   readonly metrics?: string;
   /** When the turn was produced (ISO-8601), when the engine reports it. */
   readonly producedAt?: string;
-  /** The turn's compact heading timestamp (`HH:MM:SS`, the viewer's LOCAL time), when `producedAt` parses. */
+  /** The turn's compact heading timestamp (`HH:MM:SS`, UTC), when `producedAt` parses. */
   readonly time?: string;
 }
 
@@ -117,14 +117,14 @@ function turnMetrics(r: AgentHistoryRecord): string | undefined {
   return dur !== undefined ? `${base} \u00b7 ${dur}` : base;
 }
 
-/** A compact `HH:MM:SS` heading timestamp in the viewer's LOCAL timezone for an ISO instant; undefined when unparseable. */
+/** A compact `HH:MM:SS` heading timestamp in UTC for an ISO instant; undefined when unparseable. */
 export function turnTime(iso: string | undefined): string | undefined {
   if (iso === undefined || iso === "") return undefined;
   const ms = Date.parse(iso);
   if (!Number.isFinite(ms)) return undefined;
   const d = new Date(ms);
   const pad = (n: number): string => String(n).padStart(2, "0");
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
 }
 
 /** The textual content of a turn: TEXT blocks joined in order (non-textual/empty blocks dropped). */

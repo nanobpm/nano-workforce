@@ -303,6 +303,7 @@ test("agent-history panel renders the engine run list and a selected run's turns
         content: [{ contentType: "TEXT", text: "did the thing" }],
         toolCalls: [{ toolCallId: "t-1", toolName: "grep", elementId: "tool", arguments: {} }],
         metrics: { inputTokens: 12, outputTokens: 4, reasoningTokenCount: 0, cacheCreationTokenCount: 0, cacheReadTokenCount: 0, durationMs: 900 },
+        producedAt: "2024-05-01T12:34:56.789Z",
       },
     ],
   };
@@ -334,6 +335,17 @@ test("agent-history panel renders the engine run list and a selected run's turns
       assert(transcript != null, "the selected run's history rendered");
       assert((transcript?.textContent ?? "").includes("did the thing"), "the turn text rendered");
       assert((transcript?.textContent ?? "").includes("grep"), "the tool call rendered");
+      // #831 — each turn renders as a collapsed native <details> whose <summary> heading carries the
+      // UTC timestamp. Assert the browser twin mirrors the typed renderer so mount.js can't regress.
+      const turn = transcript?.querySelector(".cockpit-agent-turn");
+      assertEquals(turn?.tagName?.toLowerCase(), "details", "the turn is a <details>");
+      assertEquals(turn?.hasAttribute("open"), false, "collapsed by default: no open attribute");
+      const summary = turn?.querySelector(".cockpit-agent-turn-meta");
+      assertEquals(summary?.tagName?.toLowerCase(), "summary", "the heading is a <summary>");
+      const time = turn?.querySelector(".cockpit-agent-turn-time");
+      assertEquals(time?.tagName?.toLowerCase(), "time", "the timestamp is a <time>");
+      assertEquals(time?.textContent, "12:34:56", "the heading shows the UTC HH:MM:SS");
+      assertEquals(time?.getAttribute("datetime"), "2024-05-01T12:34:56.789Z", "the <time> carries the ISO instant");
     } finally {
       handle.dispose();
     }
