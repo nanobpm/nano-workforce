@@ -106,6 +106,7 @@
             "header": "Process",
             "link": { "kind": "processExplorer", "keyField": "process_key" }
           },
+          { "field": "process_key", "header": "Agent", "template": "Transcript", "width": "7rem", "link": { "kind": "page", "page": "cockpit", "keyField": "process_key" } },
           { "field": "updated_at", "header": "Updated", "format": "datetime" }
         ],
         "rowKey": "user_task_key",

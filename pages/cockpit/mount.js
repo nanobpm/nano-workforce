@@ -891,6 +891,22 @@ export function mountCockpit(host, opts = {}) {
   let focusKeys = new Set();
   let focusAuto = false;
   let focusReplaying = false;
+  // Bumped by every setFocus(); captured before each focus-scoped async read (agent-instances list,
+  // per-tree transcript scan, history detail) so a response that resolves after the focus changed —
+  // including an A→B→A flip where the key matches again — is dropped instead of mutating the new
+  // focus's `focusKeys`, terminal, or agent detail (review #834).
+  let focusGen = 0;
+  // The stream of a live drill the FOCUS auto-selected (vs. one the operator picked). When that job
+  // finishes (its correlation drops out) the auto drill is torn down so the focus can fall back to the
+  // newest capture; a manually chosen stream is never auto-closed.
+  let autoDrillStream;
+  // Rate-limit the per-tree transcript scan: a fan-out focus with many children and no captures would
+  // otherwise re-scan every child on every supply poll. Scan at most once per focusScanMinMs.
+  const focusScanMinMs = staleAfterMs;
+  let focusScanAt = 0;
+  // Monotonic token for the agent-history DETAIL read, so a slow response for a previously selected
+  // run can't overwrite a newer selection within the same focus.
+  let detailToken = 0;
 
   function setMode(next, stream) {
     mode = next;
@@ -971,11 +987,13 @@ export function mountCockpit(host, opts = {}) {
 
   function userDrill(stream) {
     focusAuto = false;
+    autoDrillStream = undefined;
     drillInto(stream);
   }
 
   function userReplay(stream) {
     focusAuto = false;
+    autoDrillStream = undefined;
     return replayInto(stream);
   }
 
@@ -994,11 +1012,19 @@ export function mountCockpit(host, opts = {}) {
   }
 
   function setFocus(key) {
+    // A new focus invalidates every in-flight focus-scoped read (list/scan/detail) and the terminal
+    // that was following the old focus. Bump the generation first so any awaited result now resolving
+    // is rejected, then hard-reset the panels the old focus owned.
+    focusGen++;
     focusKey = key;
     focusKeys = new Set(key == null ? [] : [key]);
     focusAuto = key != null;
+    autoDrillStream = undefined;
+    focusScanAt = 0;
     shownAgentInstanceKey = undefined;
     agentDetailRegion.replaceChildren();
+    teardownTerminal();
+    setMode(undefined, undefined);
     renderFocus();
     void focusTick();
   }
@@ -1007,14 +1033,28 @@ export function mountCockpit(host, opts = {}) {
   // the newest captured transcript of that tree (only while the terminal is idle).
   async function autoFocusTerminal() {
     if (!focusAuto || disposed) return;
+    const gen = focusGen;
     const live = (lastReport?.correlations ?? []).find(
       (c) => c.processInstanceKey != null && focusKeys.has(c.processInstanceKey) && typeof c.stream === "string" && c.stream !== "",
     );
     if (live) {
+      autoDrillStream = live.stream;
       drillInto(live.stream);
       return;
     }
+    // The auto-followed live job finished — its correlation is gone but the terminal is still parked in
+    // `live` mode on that stream. Close only THIS auto drill (never an operator's manual selection) so
+    // the focus can fall back to the newest capture below.
+    if (autoDrillStream != null && mode === "live" && drill?.stream === autoDrillStream) {
+      autoDrillStream = undefined;
+      teardownTerminal();
+      setMode(undefined, undefined);
+    }
     if (mode != null || focusReplaying) return;
+    // Throttle the per-tree transcript scan (a focus with many children and no captures would otherwise
+    // re-scan every child every poll). The first scan after a focus change runs immediately (focusScanAt=0).
+    if (Date.now() - focusScanAt < focusScanMinMs) return;
+    focusScanAt = Date.now();
     focusReplaying = true;
     try {
       const transcripts = [];
@@ -1022,10 +1062,11 @@ export function mountCockpit(host, opts = {}) {
         const url = new URL(transcriptsUrl, location.href);
         url.searchParams.set("processInstanceKey", key);
         const report = await boundedJson(url.href);
+        if (gen !== focusGen || disposed) return;
         transcripts.push(...(report.transcripts ?? []));
       }
       const newest = transcriptsView({ count: transcripts.length, transcripts }).sessions[0];
-      if (newest && focusAuto && mode == null && !disposed) await replayInto(newest.stream);
+      if (newest && gen === focusGen && focusAuto && mode == null && !disposed) await replayInto(newest.stream);
     } catch (err) {
       onError(err);
     } finally {
@@ -1281,12 +1322,15 @@ export function mountCockpit(host, opts = {}) {
   // The engine AgentInstances of one focused process TREE (#833): those owned by the instance itself
   // and those whose ROOT it is (an agent in a call-activity child). Their process keys join
   // `focusKeys` so live-job correlations on a child instance match the focus.
-  async function focusedAgentInstances(key) {
+  async function focusedAgentInstances(key, gen) {
     const byKey = new Map();
     for (const param of ["processInstanceKey", "rootProcessInstanceKey"]) {
       const url = new URL(agentInstancesUrl, location.href);
       url.searchParams.set(param, key);
       const report = await boundedJson(url.href);
+      // The focus changed while this list was in flight — drop it rather than fold a stale tree's keys
+      // into the new focus's `focusKeys`.
+      if (gen !== focusGen || disposed) return { count: 0, instances: [] };
       for (const i of report.instances ?? []) byKey.set(i.agentInstanceKey, i);
     }
     const instances = [...byKey.values()];
@@ -1305,13 +1349,14 @@ export function mountCockpit(host, opts = {}) {
     try {
       let report;
       const key = focusKey;
+      const gen = focusGen;
       try {
-        report = key == null ? await boundedJson(agentInstancesUrl) : await focusedAgentInstances(key);
+        report = key == null ? await boundedJson(agentInstancesUrl) : await focusedAgentInstances(key, gen);
       } catch (err) {
         onError(err);
         return;
       }
-      if (disposed || key !== focusKey) return;
+      if (disposed || gen !== focusGen) return;
       let sessions;
       try {
         sessions = agentSessionsView(report);
@@ -1320,10 +1365,12 @@ export function mountCockpit(host, opts = {}) {
         onError(err);
         return;
       }
-      // Under a focus, open the newest run's history once so the linked agent is on screen.
+      // Under a focus, open the newest run's history once so the linked agent is on screen. Fire it
+      // WITHOUT awaiting: `focusTick` follows autoFocusTerminal right after this resolves, so a slow
+      // (bounded) history-detail read must not stall the terminal from following the focused live job.
       if (key != null && shownAgentInstanceKey == null && sessions.sessions[0] != null) {
         shownAgentInstanceKey = sessions.sessions[0].agentInstanceKey;
-        await viewAgentHistory(shownAgentInstanceKey);
+        void viewAgentHistory(shownAgentInstanceKey);
       }
     } finally {
       agentRefreshing = false;
@@ -1336,6 +1383,10 @@ export function mountCockpit(host, opts = {}) {
 
   async function viewAgentHistory(agentInstanceKey) {
     if (disposed) return;
+    // Capture the focus generation and a fresh selection token; a response that resolves after the
+    // focus changed or after a newer run was selected is dropped instead of overwriting the current view.
+    const gen = focusGen;
+    const token = ++detailToken;
     let report;
     try {
       report = await boundedJson(agentHistoryReadUrl(agentInstanceKey));
@@ -1343,7 +1394,7 @@ export function mountCockpit(host, opts = {}) {
       onError(err);
       return;
     }
-    if (disposed) return;
+    if (disposed || gen !== focusGen || token !== detailToken) return;
     try {
       shownAgentInstanceKey = agentInstanceKey;
       renderAgentHistory(agentDetailRegion, doc, agentHistoryView(report));

@@ -34,14 +34,20 @@
       // credentials via the URL fragment — the report guard secret via #secret= (sent as
       // x-hook-secret) and the relay credentials via #token= and #capability= — NOT the query string,
       // so they never leak via server access logs, browser history, or the Referer header. The
-      // fragment is stripped from the address bar immediately after it is read.
+      // sensitive fragment keys are stripped from the address bar immediately after they are read,
+      // while any OTHER fragment — notably a `#/cockpit/process/<key>` focus route (#833) — is
+      // preserved so mountCockpit can still read it and focus that process.
       const params = new URLSearchParams(location.search);
       const secrets = new URLSearchParams(location.hash.slice(1));
       const hookSecret = secrets.get("secret") ?? undefined;
       const relayToken = secrets.get("token") ?? undefined;
       const relayCapability = secrets.get("capability") ?? undefined;
-      if (location.hash) {
-        history.replaceState(null, "", location.pathname + location.search);
+      if (hookSecret !== undefined || relayToken !== undefined || relayCapability !== undefined) {
+        secrets.delete("secret");
+        secrets.delete("token");
+        secrets.delete("capability");
+        const rest = secrets.toString();
+        history.replaceState(null, "", location.pathname + location.search + (rest ? `#${rest}` : ""));
       }
       mountCockpit(document.getElementById("cockpit-root"), {
         reportUrl: params.get("report") ?? undefined,

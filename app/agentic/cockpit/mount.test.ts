@@ -533,3 +533,89 @@ test("#833: no focus route → no focus banner", async () => {
     restore();
   }
 });
+
+// #834 review — a MUTABLE fetch stub: the supply correlations and per-tree transcripts can change
+// between polls, so a test can model a focused live job finishing and its session becoming a capture.
+function mutableFocusStub(state: { correlations: unknown[]; transcripts: unknown[]; replay?: unknown; roots?: string[] }) {
+  return (url: string): Promise<unknown> => {
+    const ok = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => body });
+    if (url.includes("/supply")) return ok({ leaves: [], workers: [], correlations: state.correlations });
+    if (/\/agent-instances\/[^/?]+\/history/.test(url)) return ok(FOCUS_HISTORY);
+    if (url.includes("/agent-instances")) {
+      const root = (state.roots ?? [PI_ROOT]).some((r) => url.includes(`rootProcessInstanceKey=${r}`));
+      return ok(root ? { count: 1, instances: [FOCUS_INSTANCE] } : { count: 0, instances: [] });
+    }
+    if (/[?&]stream=/.test(url)) return ok(state.replay);
+    if (url.includes("/transcripts")) {
+      const mine = state.transcripts.filter((t) => url.includes(`processInstanceKey=${(t as { processInstanceKey: string }).processInstanceKey}`));
+      return ok({ count: mine.length, transcripts: mine });
+    }
+    return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+  };
+}
+
+test("#834: when the auto-followed live job finishes, the focus falls back to the newest capture", async () => {
+  const replay = {
+    stream: "wk-a/j1",
+    from: 0,
+    gap: false,
+    nextOffset: 1,
+    entries: [{ offset: 0, chunk: envChunk("message", { role: "assistant", text: "captured after finish" }) }],
+  };
+  const state = {
+    correlations: [{ jobKey: "j1", stream: "wk-a/j1", processInstanceKey: "pi-child" }] as unknown[],
+    transcripts: [] as unknown[],
+    replay,
+  };
+  const restore = installEnv(mutableFocusStub(state));
+  (globalThis as { location: { hash: string } }).location.hash = `#/cockpit/process/${PI_ROOT}`;
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "live");
+      // The followed job finishes: its live correlation drops out and its session becomes a capture.
+      state.correlations = [];
+      state.transcripts = [
+        { stream: "wk-a/j1", lifecycle: "ephemeral", status: "completed", createdAt: "2024-01-01T00:00:00Z", nextOffset: 1, byteLength: 10, chunkCount: 1, processInstanceKey: "pi-child" },
+      ];
+      await handle.refresh();
+      await settle();
+      assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "replay");
+      assert((document.querySelector('[data-terminal="host"]')?.textContent ?? "").includes("captured after finish"), "the newest capture replays after the live job ends");
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
+
+test("#834: changing the focused process resets the terminal — it never keeps showing the old process's live stream", async () => {
+  const state = {
+    correlations: [{ jobKey: "j1", stream: "wk-a/j1", processInstanceKey: "pi-child" }] as unknown[],
+    transcripts: [] as unknown[],
+    replay: undefined as unknown,
+  };
+  const restore = installEnv(mutableFocusStub(state));
+  (globalThis as { location: { hash: string } }).location.hash = `#/cockpit/process/${PI_ROOT}`;
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "live");
+      // Focus a DIFFERENT process with no live job and no capture: the terminal must reset to idle,
+      // not keep replaying process A's live stream.
+      handle.focus("pi-other");
+      await settle();
+      assert((document.querySelector(".cockpit-focus")?.textContent ?? "").includes("pi-other"), "the banner names the new focus");
+      assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "idle");
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
