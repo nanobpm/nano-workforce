@@ -1,3 +1,9 @@
+## [0.195.0](https://github.com/nanobpm/nano-workforce/compare/v0.194.0...v0.195.0) (2026-09-30)
+
+### Features
+
+* **feature:** add optional human approval before merge ([#827](https://github.com/nanobpm/nano-workforce/issues/827)) ([fea6b54](https://github.com/nanobpm/nano-workforce/commit/fea6b54ee3fd63f0adccd230e45ee46ed9df24f8)), closes [#826](https://github.com/nanobpm/nano-workforce/issues/826) [#826](https://github.com/nanobpm/nano-workforce/issues/826)
+
 ## [0.194.0](https://github.com/nanobpm/nano-workforce/compare/v0.193.2...v0.194.0) (2026-09-30)
 
 ### Features
