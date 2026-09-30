@@ -1,3 +1,9 @@
+## [0.195.1](https://github.com/nanobpm/nano-workforce/compare/v0.195.0...v0.195.1) (2026-09-30)
+
+### Bug Fixes
+
+* **service:** commit review/fix-ci/rebase rounds to the PR branch, not a nano/agent-work fallback ([#817](https://github.com/nanobpm/nano-workforce/issues/817)) ([212e0cc](https://github.com/nanobpm/nano-workforce/commit/212e0cc9755d2cbba34ed5f170952a5e6a142729)), closes [jwulf/c8ctl-plugin-nano#231](https://github.com/jwulf/c8ctl-plugin-nano/issues/231) [#776](https://github.com/nanobpm/nano-workforce/issues/776)
+
 ## [0.195.0](https://github.com/nanobpm/nano-workforce/compare/v0.194.0...v0.195.0) (2026-09-30)
 
 ### Features
