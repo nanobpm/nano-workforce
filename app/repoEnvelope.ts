@@ -133,8 +133,14 @@ export class RepoEnvelopeConflictError extends Error {
  * `implement-cell`) dispatches its agent BEFORE any PR exists, so it passes `ref = base` and a
  * `branchCreate` naming the deterministic `feat/<task.id>` feature branch the harness cuts off that
  * base itself (the agent-guide's `feat/*` convention) — instead of the agent branching by hand — so
- * the isolated clone lands on the right branch deterministically across a resume. `branchCreate` is
- * omitted on the PR-based paths, which check out an existing head. */
+ * the isolated clone lands on the right branch deterministically across a resume. The PR-based paths
+ * (review-round / fix-ci / rebase) ALSO pass `branchCreate = ref` (the PR HEAD branch, equal to
+ * `ref`): without an explicit `branch.create` the harness's base-branch guard
+ * (jwulf/c8ctl-plugin-nano#231) treats the checkout as base-like and cuts a throwaway
+ * `nano/agent-work/<base>-<run>` fallback, stranding the round's commits OFF the PR; with
+ * `ref == create == head` the harness does a no-op `checkout -B <head>` and commits/pushes to the PR
+ * head branch itself. `branchCreate` is therefore emitted on both the pre-PR and PR-based paths (only
+ * a blank/omitted value drops the key). */
 export function repoEnvelopeVars(
   repo: string,
   ref: string | null,
@@ -186,7 +192,10 @@ export function repoEnvelopeVars(
         // head. `branchCreate` asks the harness to cut the deterministic `feat/<task.id>` feature branch
         // off that base itself (the agent-guide's `feat/*` convention) instead of the agent branching by
         // hand — making the isolated clone land on the right branch deterministically across a resume.
-        // Omitted (no key) on the PR-based paths (review/fix-ci/rebase), which check out an existing head.
+        // The PR-based paths (review/fix-ci/rebase) ALSO pass `branchCreate = ref` (the PR head): without
+        // it the harness's base-branch guard (jwulf/c8ctl-plugin-nano#231) cuts a throwaway
+        // `nano/agent-work/*` fallback OFF the PR; with `ref == create == head` it commits/pushes to the
+        // head branch. Only a blank/omitted value drops the key.
         ...(typeof branchCreate === "string" && branchCreate.trim() !== ""
           ? { branch: { create: branchCreate.trim() } }
           : {}),
