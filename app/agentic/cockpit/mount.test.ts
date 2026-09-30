@@ -99,6 +99,7 @@ test("the rendered transcript region sits directly beneath the Workers — suppl
     const shell = document.querySelector(".cockpit-shell");
     const order = [...(shell?.children ?? [])].map((c: { className: string }) => c.className);
     assertEquals(order, [
+      "cockpit-focus",
       "cockpit-supply-region",
       "cockpit-terminal",
       "cockpit-past-region",
@@ -388,6 +389,143 @@ test("agent-history tool call with an empty-string elementId renders no empty ()
       assert(tools.includes("grep"), `empty elementId renders bare tool name (saw: ${tools.join(", ")})`);
       assert(!tools.some((t) => t.includes("()")), `no empty () suffix rendered (saw: ${tools.join(", ")})`);
       assert(tools.includes("view (tool)"), `a present elementId still renders its suffix (saw: ${tools.join(", ")})`);
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
+
+// #833 — an "Agent" grid link lands on the cockpit focused on ONE process instance. The agent may run
+// in a CHILD instance (call activity), so the focus resolves the engine AgentInstances whose ROOT is
+// the linked key and matches live job correlations against every instance in that tree.
+const PI_ROOT = "pi-root";
+const FOCUS_INSTANCE = {
+  agentInstanceKey: "ai-7",
+  status: "THINKING",
+  processInstanceKey: "pi-child",
+  rootProcessInstanceKey: PI_ROOT,
+  elementId: "implement-task",
+  creationDate: "2024-01-01T00:00:00Z",
+};
+const FOCUS_HISTORY = {
+  agentInstanceKey: "ai-7",
+  count: 1,
+  instance: FOCUS_INSTANCE,
+  records: [
+    {
+      historyItemKey: "h-0",
+      agentInstanceKey: "ai-7",
+      loopIteration: 0,
+      role: "ASSISTANT",
+      commitStatus: "COMMITTED",
+      content: [{ contentType: "TEXT", text: "working on the focused process" }],
+      toolCalls: [],
+    },
+  ],
+};
+
+function focusStub(opts: { correlations: unknown[]; transcripts?: unknown[]; replay?: unknown; seen?: string[] }) {
+  return (url: string): Promise<unknown> => {
+    opts.seen?.push(url);
+    const ok = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => body });
+    if (url.includes("/supply")) return ok({ leaves: [], workers: [], correlations: opts.correlations });
+    if (/\/agent-instances\/[^/?]+\/history/.test(url)) return ok(FOCUS_HISTORY);
+    if (url.includes("/agent-instances")) {
+      const root = url.includes(`rootProcessInstanceKey=${PI_ROOT}`);
+      return ok(root ? { count: 1, instances: [FOCUS_INSTANCE] } : { count: 0, instances: [] });
+    }
+    if (/[?&]stream=/.test(url)) return ok(opts.replay);
+    if (url.includes("/transcripts")) {
+      const mine = (opts.transcripts ?? []).filter((t) => url.includes(`processInstanceKey=${(t as { processInstanceKey: string }).processInstanceKey}`));
+      return ok({ count: mine.length, transcripts: mine });
+    }
+    return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+  };
+}
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
+test("#833: a process-focus route live-drills the worker running a job of a CHILD instance and shows its agent history", async () => {
+  const restore = installEnv(focusStub({ correlations: [{ jobKey: "j1", stream: "wk-a/j1", processInstanceKey: "pi-child" }] }));
+  (globalThis as { location: { hash: string } }).location.hash = `#/cockpit/process/${PI_ROOT}`;
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      assert((document.querySelector(".cockpit-focus")?.textContent ?? "").includes(PI_ROOT), "the focus banner names the process");
+      assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "live");
+      assert(StubWebSocket.instances.length > 0, "a relay socket was opened for the focused job");
+      const transcript = document.querySelector('.cockpit-agent-transcript[data-agent-instance-key="ai-7"]');
+      assert((transcript?.textContent ?? "").includes("working on the focused process"), "the focused agent's history is shown");
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
+
+test("#833: with no live job, the process focus replays the newest captured transcript of that process", async () => {
+  const replay = {
+    stream: "wk-a/j9",
+    from: 0,
+    gap: false,
+    nextOffset: 1,
+    entries: [{ offset: 0, chunk: envChunk("message", { role: "assistant", text: "finished earlier" }) }],
+  };
+  const transcripts = [
+    { stream: "wk-a/j9", lifecycle: "ephemeral", status: "completed", createdAt: "2024-01-01T00:00:00Z", nextOffset: 1, byteLength: 10, chunkCount: 1, processInstanceKey: "pi-child" },
+  ];
+  const restore = installEnv(focusStub({ correlations: [], transcripts, replay }));
+  (globalThis as { location: { hash: string } }).location.hash = `#/cockpit/process/${PI_ROOT}`;
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "replay");
+      assert((document.querySelector('[data-terminal="host"]')?.textContent ?? "").includes("finished earlier"));
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
+
+test("#833: embedded, the host page's #/cockpit/<process_key> (the grid 'Agent' link) focuses the cockpit", async () => {
+  const restore = installEnv(focusStub({ correlations: [] }));
+  const win = (globalThis as { window: Record<string, unknown> }).window;
+  const savedParent = win.parent;
+  win.parent = { location: { hash: `#/cockpit/${PI_ROOT}` } };
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      assert((document.querySelector(".cockpit-focus")?.textContent ?? "").includes(PI_ROOT), "the host param focused the cockpit");
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    win.parent = savedParent;
+    restore();
+  }
+});
+
+test("#833: no focus route → no focus banner", async () => {
+  const restore = installEnv(fetchStub());
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      assertEquals(document.querySelector(".cockpit-focus")?.getAttribute("data-focus"), "none");
     } finally {
       handle.dispose();
     }

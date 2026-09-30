@@ -121,6 +121,7 @@
         "columns": [
           { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "plan_key", "truncate": true, "width": "38%", "link": { "kind": "page", "page": "epic-detail", "keyField": "plan_key" } },
           { "field": "epic_phase", "header": "Phase", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "process_key", "header": "Agent", "template": "Transcript", "width": "7rem", "link": { "kind": "page", "page": "cockpit", "keyField": "process_key" } },
           { "field": "delivery_label", "header": "Delivery", "truncate": true },
           { "field": "task_count", "header": "Tasks" },
           { "field": "issue_number", "header": "Issue", "linkField": "issue_url" },

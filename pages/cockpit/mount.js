@@ -35,18 +35,53 @@ function isPosInt(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
 
+function decodeSegment(raw) {
+  if (raw === "") return undefined;
+  try {
+    const value = decodeURIComponent(raw);
+    return value === "" ? undefined : value;
+  } catch {
+    return undefined;
+  }
+}
+
+// Mirrors app/agentic/cockpit/cockpit-route.ts `parseCockpitRoute` (keep in lockstep).
 function parseCockpitRoute(hash) {
   const route = hash.startsWith("#") ? hash.slice(1) : hash;
-  if (route === "" || route === "/cockpit" || route === "/cockpit/") return { kind: "main" };
-  const prefix = "/cockpit/worker/";
-  if (!route.startsWith(prefix)) return { kind: "main" };
+  const worker = "/cockpit/worker/";
+  if (route.startsWith(worker)) {
+    const instance = decodeSegment(route.slice(worker.length));
+    return instance === undefined ? { kind: "main" } : { kind: "worker", instance };
+  }
+  const process = "/cockpit/process/";
+  if (route.startsWith(process)) {
+    const processInstanceKey = decodeSegment(route.slice(process.length));
+    return processInstanceKey === undefined ? { kind: "main" } : { kind: "process", processInstanceKey };
+  }
+  return { kind: "main" };
+}
+
+// Mirrors app/agentic/cockpit/cockpit-route.ts `parseHostCockpitParam` (#833): the process key an
+// "Agent" grid link put on the HOST page's `#/cockpit/<param>` route.
+function parseHostCockpitParam(hash) {
+  const route = hash.startsWith("#") ? hash.slice(1) : hash;
+  const prefix = "/cockpit/";
+  if (!route.startsWith(prefix)) return undefined;
   const raw = route.slice(prefix.length);
-  if (raw === "") return { kind: "main" };
+  if (raw.includes("/")) return undefined;
+  return decodeSegment(raw);
+}
+
+// The host page's cockpit param, when this module runs in a same-origin App-View iframe. A
+// cross-origin parent throws on `location` access — no focus then.
+function hostCockpitParam() {
   try {
-    const instance = decodeURIComponent(raw);
-    return instance === "" ? { kind: "main" } : { kind: "worker", instance };
+    const parent = window.parent;
+    if (parent == null || parent === window) return undefined;
+    const hash = parent.location?.hash;
+    return typeof hash === "string" ? parseHostCockpitParam(hash) : undefined;
   } catch {
-    return { kind: "main" };
+    return undefined;
   }
 }
 
@@ -813,6 +848,10 @@ export function mountCockpit(host, opts = {}) {
   const terminalNote = el(doc, "p", "cockpit-terminal-note");
   terminalNote.setAttribute("data-terminal-note", "none");
   terminalPanel.appendChild(terminalNote);
+  // Process-focus banner (#833): shown when the cockpit was opened from an "Agent" grid link.
+  const focusBanner = el(doc, "div", "cockpit-focus");
+  focusBanner.setAttribute("data-focus", "none");
+  shell.appendChild(focusBanner);
   shell.appendChild(listRegion);
   shell.appendChild(terminalPanel);
   shell.appendChild(pastRegion);
@@ -842,6 +881,16 @@ export function mountCockpit(host, opts = {}) {
   let agentRefreshing = false;
   let agentRefreshPending = false;
   let shownAgentInstanceKey;
+  // Process focus (#833). `focusKey` is the linked process instance; `focusKeys` grows to every
+  // process instance in its tree that hosts one of its agents (a call-activity CHILD runs the agent
+  // job, so its correlation carries the child key). While `focusAuto` holds, the terminal follows the
+  // focus (live drill if a job is running, else the newest captured transcript); any operator
+  // selection clears it so the cockpit never yanks the panel away from what they chose.
+  let lastReport;
+  let focusKey;
+  let focusKeys = new Set();
+  let focusAuto = false;
+  let focusReplaying = false;
 
   function setMode(next, stream) {
     mode = next;
@@ -880,10 +929,10 @@ export function mountCockpit(host, opts = {}) {
   function renderRoute() {
     if (view == null) return;
     if (route.kind === "worker") {
-      renderWorkerDetail(listRegion, doc, workerDetailView(view, route.instance), backToMain, drillInto);
+      renderWorkerDetail(listRegion, doc, workerDetailView(view, route.instance), backToMain, userDrill);
       return;
     }
-    renderSupply(listRegion, doc, view, drillInto, openWorker);
+    renderSupply(listRegion, doc, view, userDrill, openWorker);
   }
 
   function openWorker(instance) {
@@ -909,6 +958,7 @@ export function mountCockpit(host, opts = {}) {
 
   function onHashChange() {
     route = parseCockpitRoute(location.hash);
+    if (route.kind === "process" && route.processInstanceKey !== focusKey) setFocus(route.processInstanceKey);
     try {
       renderRoute();
     } catch (err) {
@@ -918,6 +968,75 @@ export function mountCockpit(host, opts = {}) {
   }
 
   window.addEventListener("hashchange", onHashChange);
+
+  function userDrill(stream) {
+    focusAuto = false;
+    drillInto(stream);
+  }
+
+  function userReplay(stream) {
+    focusAuto = false;
+    return replayInto(stream);
+  }
+
+  function renderFocus() {
+    focusBanner.replaceChildren();
+    if (focusKey == null) {
+      focusBanner.setAttribute("data-focus", "none");
+      return;
+    }
+    focusBanner.setAttribute("data-focus", focusKey);
+    focusBanner.appendChild(el(doc, "span", "cockpit-focus-label", `Focused on process instance ${focusKey}`));
+    const clear = el(doc, "button", "cockpit-focus-clear", "Show all");
+    clear.setAttribute("type", "button");
+    clear.addEventListener("click", () => setFocus(undefined));
+    focusBanner.appendChild(clear);
+  }
+
+  function setFocus(key) {
+    focusKey = key;
+    focusKeys = new Set(key == null ? [] : [key]);
+    focusAuto = key != null;
+    shownAgentInstanceKey = undefined;
+    agentDetailRegion.replaceChildren();
+    renderFocus();
+    void focusTick();
+  }
+
+  // Follow the focus: drill into a live job of any process in the focused tree; otherwise replay
+  // the newest captured transcript of that tree (only while the terminal is idle).
+  async function autoFocusTerminal() {
+    if (!focusAuto || disposed) return;
+    const live = (lastReport?.correlations ?? []).find(
+      (c) => c.processInstanceKey != null && focusKeys.has(c.processInstanceKey) && typeof c.stream === "string" && c.stream !== "",
+    );
+    if (live) {
+      drillInto(live.stream);
+      return;
+    }
+    if (mode != null || focusReplaying) return;
+    focusReplaying = true;
+    try {
+      const transcripts = [];
+      for (const key of focusKeys) {
+        const url = new URL(transcriptsUrl, location.href);
+        url.searchParams.set("processInstanceKey", key);
+        const report = await boundedJson(url.href);
+        transcripts.push(...(report.transcripts ?? []));
+      }
+      const newest = transcriptsView({ count: transcripts.length, transcripts }).sessions[0];
+      if (newest && focusAuto && mode == null && !disposed) await replayInto(newest.stream);
+    } catch (err) {
+      onError(err);
+    } finally {
+      focusReplaying = false;
+    }
+  }
+
+  async function focusTick() {
+    await refreshAgentHistory();
+    await autoFocusTerminal();
+  }
 
   function drillInto(stream) {
     if (disposed || (mode === "live" && drill?.stream === stream)) return;
@@ -1090,7 +1209,7 @@ export function mountCockpit(host, opts = {}) {
           pastRegion,
           doc,
           transcriptsView(report),
-          replayInto,
+          userReplay,
           mode === "replay" ? shownStream : undefined,
           instance == null ? "Past sessions" : "Job history",
           instance == null ? "No captured sessions yet." : "No captured sessions for this worker yet.",
@@ -1120,6 +1239,7 @@ export function mountCockpit(host, opts = {}) {
     }
     if (disposed) return;
     try {
+      lastReport = report;
       view = supplyView(report, staleAfterMs);
       renderRoute();
     } catch (err) {
@@ -1127,8 +1247,9 @@ export function mountCockpit(host, opts = {}) {
     }
     // Fire-and-forget: a hung transcripts endpoint must never stall the supply poll's next tick.
     void refreshPast(routeInstance());
-    // Same discipline for the engine agent-history list (issue #745): single-flight + bounded.
-    void refreshAgentHistory();
+    // Same discipline for the engine agent-history list (issue #745): single-flight + bounded. Under a
+    // process focus (#833) the list is focus-filtered and the terminal follows the focus.
+    void focusTick();
   }
 
   // The engine-native SETTLED agent-history endpoints (issue #745/#747), anchored module-relatively
@@ -1157,6 +1278,22 @@ export function mountCockpit(host, opts = {}) {
     }
   }
 
+  // The engine AgentInstances of one focused process TREE (#833): those owned by the instance itself
+  // and those whose ROOT it is (an agent in a call-activity child). Their process keys join
+  // `focusKeys` so live-job correlations on a child instance match the focus.
+  async function focusedAgentInstances(key) {
+    const byKey = new Map();
+    for (const param of ["processInstanceKey", "rootProcessInstanceKey"]) {
+      const url = new URL(agentInstancesUrl, location.href);
+      url.searchParams.set(param, key);
+      const report = await boundedJson(url.href);
+      for (const i of report.instances ?? []) byKey.set(i.agentInstanceKey, i);
+    }
+    const instances = [...byKey.values()];
+    for (const i of instances) if (i.processInstanceKey) focusKeys.add(i.processInstanceKey);
+    return { count: instances.length, instances };
+  }
+
   async function refreshAgentHistory() {
     // Single-flight (mirrors refreshPast): a slow/hung engine read endpoint never stacks fetches nor
     // gates the supply poll. The list is engine-global (settled AgentInstances), so it is not route-filtered.
@@ -1167,17 +1304,26 @@ export function mountCockpit(host, opts = {}) {
     agentRefreshing = true;
     try {
       let report;
+      const key = focusKey;
       try {
-        report = await boundedJson(agentInstancesUrl);
+        report = key == null ? await boundedJson(agentInstancesUrl) : await focusedAgentInstances(key);
       } catch (err) {
         onError(err);
         return;
       }
-      if (disposed) return;
+      if (disposed || key !== focusKey) return;
+      let sessions;
       try {
-        renderAgentSessions(agentRegion, doc, agentSessionsView(report), viewAgentHistory, shownAgentInstanceKey);
+        sessions = agentSessionsView(report);
+        renderAgentSessions(agentRegion, doc, sessions, viewAgentHistory, shownAgentInstanceKey);
       } catch (err) {
         onError(err);
+        return;
+      }
+      // Under a focus, open the newest run's history once so the linked agent is on screen.
+      if (key != null && shownAgentInstanceKey == null && sessions.sessions[0] != null) {
+        shownAgentInstanceKey = sessions.sessions[0].agentInstanceKey;
+        await viewAgentHistory(shownAgentInstanceKey);
       }
     } finally {
       agentRefreshing = false;
@@ -1238,8 +1384,16 @@ export function mountCockpit(host, opts = {}) {
     window.removeEventListener("hashchange", onHashChange);
   }
 
+  const initialFocus = route.kind === "process" ? route.processInstanceKey : hostCockpitParam();
+  if (initialFocus != null) {
+    focusKey = initialFocus;
+    focusKeys = new Set([initialFocus]);
+    focusAuto = true;
+  }
+  renderFocus();
+
   start();
-  return { start, stop, dispose, refresh, drill: drillInto, replay: replayInto, viewAgentHistory };
+  return { start, stop, dispose, refresh, drill: userDrill, replay: userReplay, viewAgentHistory, focus: setFocus };
 }
 
 /**

@@ -529,3 +529,20 @@
   border-top: 1px solid var(--cockpit-edge);
   padding-top: 6px;
 }
+
+/* ── Process focus banner (#833): the cockpit opened from an "Agent" grid link. ── */
+
+.cockpit-focus[data-focus="none"] { display: none; }
+
+.cockpit-focus {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--cockpit-edge);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.cockpit-focus-clear { margin-left: auto; }
