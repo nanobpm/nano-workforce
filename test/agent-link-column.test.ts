@@ -17,6 +17,19 @@ function columnLink(column: unknown): Record<string, unknown> | undefined {
   return isObject(column.link) ? column.link : undefined;
 }
 
+// The process-explorer link of a column, wherever it lives: a plain column carries it at `link`,
+// but a `pipeline` column carries it on its `locus` (the cell that links the row's process instance —
+// e.g. the Feature runs grid's Pipeline column, pages/feature.page.json). Guarding only `link` would
+// let a pipeline-locus explorer link ship with no Agent column and this test still pass (#834).
+function explorerLink(column: unknown): Record<string, unknown> | undefined {
+  const direct = columnLink(column);
+  if (direct?.kind === "processExplorer") return direct;
+  if (!isObject(column)) return undefined;
+  const locus = isObject(column.locus) ? column.locus : undefined;
+  const locusLink = locus && isObject(locus.link) ? locus.link : undefined;
+  return locusLink?.kind === "processExplorer" ? locusLink : undefined;
+}
+
 // Collect every `columns` array anywhere in the page tree (top-level grids, tab grids, detail
 // children, …) without asserting the parsed JSON's shape.
 function grids(node: unknown, out: unknown[][]): void {
@@ -36,8 +49,9 @@ test("#833: every process-explorer grid also links its process to the cockpit vi
     grids(JSON.parse(readFileSync(`pages/${file}`, "utf8")), all);
     for (const cols of all) {
       // A grid qualifies whenever ANY of its columns links to the process explorer — not just a
-      // Status/Phase header — so a Stage/Process (or any future) explorer link is guarded too.
-      const explorer = cols.some((c) => columnLink(c)?.kind === "processExplorer");
+      // Status/Phase header, and not just a plain `link`: a pipeline column's `locus.link` counts too
+      // — so a Stage/Process/Pipeline (or any future) explorer link is guarded too.
+      const explorer = cols.some((c) => explorerLink(c) !== undefined);
       if (!explorer) continue;
       checked++;
       const agent = cols.find((c) => isObject(c) && c.header === "Agent");

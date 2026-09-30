@@ -619,3 +619,68 @@ test("#834: changing the focused process resets the terminal — it never keeps 
     restore();
   }
 });
+
+test("#834: navigating from a process route to the main route clears the focus", async () => {
+  const restore = installEnv(focusStub({ correlations: [] }));
+  (globalThis as { location: { hash: string } }).location.hash = `#/cockpit/process/${PI_ROOT}`;
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      assert((document.querySelector(".cockpit-focus")?.textContent ?? "").includes(PI_ROOT), "the process route focused the cockpit");
+      // Navigate away to the main route: the URL no longer selects a process, so the focus must clear
+      // (the banner and background focus polls must not keep following the process the view left).
+      // linkedom's dispatchEvent rejects a native Event, so construct the event from the stub window.
+      (globalThis as { location: { hash: string } }).location.hash = "#/cockpit";
+      const win = (globalThis as { window: { Event: new (t: string) => unknown; dispatchEvent: (e: unknown) => void } }).window;
+      win.dispatchEvent(new win.Event("hashchange"));
+      await settle();
+      assertEquals(document.querySelector(".cockpit-focus")?.getAttribute("data-focus"), "none");
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
+
+test("#834: a failed auto-opened history read is retried on a later poll", async () => {
+  // The history read fails on the FIRST attempt (ok:false → boundedJson throws), then succeeds. The
+  // focus must not latch the run as shown on the failed read: a later poll re-fires it and lands the detail.
+  let historyCalls = 0;
+  const state = { correlations: [] as unknown[], transcripts: [] as unknown[], replay: undefined as unknown };
+  const base = mutableFocusStub(state);
+  const restore = installEnv((url: string) => {
+    if (/\/agent-instances\/[^/?]+\/history/.test(url)) {
+      historyCalls++;
+      if (historyCalls === 1) return Promise.resolve({ ok: false, status: 500, json: async () => ({}) });
+    }
+    return base(url);
+  });
+  (globalThis as { location: { hash: string } }).location.hash = `#/cockpit/process/${PI_ROOT}`;
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      assertEquals(historyCalls, 1, "the focus auto-opened the newest run's history once");
+      assert(
+        (document.querySelector(".cockpit-agent-transcript")?.textContent ?? "").includes("working on the focused process") === false,
+        "the failed read rendered nothing",
+      );
+      // A later poll retries the failed read; the detail now renders.
+      await handle.refresh();
+      await settle();
+      assert(historyCalls >= 2, "the failed auto-open was retried on a later poll");
+      assert(
+        (document.querySelector(".cockpit-agent-transcript")?.textContent ?? "").includes("working on the focused process"),
+        "the retried read rendered the focused agent's history",
+      );
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});

@@ -881,6 +881,11 @@ export function mountCockpit(host, opts = {}) {
   let agentRefreshing = false;
   let agentRefreshPending = false;
   let shownAgentInstanceKey;
+  // In-flight guard for an auto-triggered agent-history read, distinct from `shownAgentInstanceKey`.
+  // The focus auto-opens the newest run's history once; marking it `shown` only AFTER the read renders
+  // (in viewAgentHistory) means a failed/timed-out read leaves `shown` unset so a later poll retries —
+  // while this in-flight key still prevents a duplicate request stacking on the one outstanding (#834).
+  let autoHistoryKey;
   // Process focus (#833). `focusKey` is the linked process instance; `focusKeys` grows to every
   // process instance in its tree that hosts one of its agents (a call-activity CHILD runs the agent
   // job, so its correlation carries the child key). While `focusAuto` holds, the terminal follows the
@@ -974,7 +979,13 @@ export function mountCockpit(host, opts = {}) {
 
   function onHashChange() {
     route = parseCockpitRoute(location.hash);
-    if (route.kind === "process" && route.processInstanceKey !== focusKey) setFocus(route.processInstanceKey);
+    if (route.kind === "process") {
+      if (route.processInstanceKey !== focusKey) setFocus(route.processInstanceKey);
+    } else if (focusKey != null) {
+      // Navigated to the main/worker route: the URL no longer selects a process, so drop the focus —
+      // otherwise the banner and the background focus polls keep following a process the view left (#834).
+      setFocus(undefined);
+    }
     try {
       renderRoute();
     } catch (err) {
@@ -1022,6 +1033,7 @@ export function mountCockpit(host, opts = {}) {
     autoDrillStream = undefined;
     focusScanAt = 0;
     shownAgentInstanceKey = undefined;
+    autoHistoryKey = undefined;
     agentDetailRegion.replaceChildren();
     teardownTerminal();
     setMode(undefined, undefined);
@@ -1368,9 +1380,14 @@ export function mountCockpit(host, opts = {}) {
       // Under a focus, open the newest run's history once so the linked agent is on screen. Fire it
       // WITHOUT awaiting: `focusTick` follows autoFocusTerminal right after this resolves, so a slow
       // (bounded) history-detail read must not stall the terminal from following the focused live job.
-      if (key != null && shownAgentInstanceKey == null && sessions.sessions[0] != null) {
-        shownAgentInstanceKey = sessions.sessions[0].agentInstanceKey;
-        void viewAgentHistory(shownAgentInstanceKey);
+      // Gate on the in-flight `autoHistoryKey`, NOT `shownAgentInstanceKey`: the run is marked shown
+      // only after its detail actually renders (viewAgentHistory), so a read that failed or timed out
+      // leaves `shown` unset and a later poll retries it — while `autoHistoryKey` still stops a second
+      // request stacking on the one already outstanding (#834).
+      const newest = sessions.sessions[0];
+      if (key != null && shownAgentInstanceKey == null && newest != null && autoHistoryKey !== newest.agentInstanceKey) {
+        autoHistoryKey = newest.agentInstanceKey;
+        void viewAgentHistory(newest.agentInstanceKey);
       }
     } finally {
       agentRefreshing = false;
@@ -1392,6 +1409,10 @@ export function mountCockpit(host, opts = {}) {
       report = await boundedJson(agentHistoryReadUrl(agentInstanceKey));
     } catch (err) {
       onError(err);
+      // The auto-open read failed: release the in-flight key so a later poll retries it (the run was
+      // never marked shown). A stale superseded read is left latched — a newer selection already
+      // replaced it.
+      if (gen === focusGen && autoHistoryKey === agentInstanceKey) autoHistoryKey = undefined;
       return;
     }
     if (disposed || gen !== focusGen || token !== detailToken) return;
@@ -1402,6 +1423,9 @@ export function mountCockpit(host, opts = {}) {
       void refreshAgentHistory();
     } catch (err) {
       onError(err);
+    } finally {
+      // The auto-open read settled: release the in-flight key (no-op for a manual or superseded read).
+      if (gen === focusGen && autoHistoryKey === agentInstanceKey) autoHistoryKey = undefined;
     }
   }
 
