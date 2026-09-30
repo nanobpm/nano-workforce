@@ -250,9 +250,16 @@ export function questionFingerprint(text: string): string {
   return fingerprint(normalizeAdvisoryText(text));
 }
 
-/** Parse Copilot's suppressed / low-confidence advisories out of a review body. Copilot renders them
- * under a `<summary>Suppressed comments (N)</summary>` block, each as a bold `**path:line**` header
- * followed by the advisory prose. Returns de-duplicated advisories (empty when there is no block). */
+/** Parse Copilot's suppressed / low-confidence advisories out of a review body, supporting BOTH
+ * formats Copilot emits:
+ *
+ * 1. The legacy `<summary>Suppressed comments (N)</summary>` block — each advisory is a bold
+ *    `**path:line**` header followed by the advisory prose (`parseLegacySuppressedBlock`).
+ * 2. The newer `ccr-overview-v2` review body (issue #835), which has NO "Suppressed comments"
+ *    block — findings appear only as clauses in the "What changed" file table's notes column,
+ *    each ending `(<severity>, N vote[s])` (`parseOverviewV2TableFindings`).
+ *
+ * Returns de-duplicated advisories from both formats (empty when neither is present). */
 export function parseSuppressedAdvisories(reviewBody: string | null | undefined): SuppressedAdvisory[] {
   const body = reviewBody ?? "";
   const out: SuppressedAdvisory[] = [];
