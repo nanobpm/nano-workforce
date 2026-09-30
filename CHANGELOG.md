@@ -1,3 +1,9 @@
+## [0.195.2](https://github.com/nanobpm/nano-workforce/compare/v0.195.1...v0.195.2) (2026-09-30)
+
+### Bug Fixes
+
+* **converge-gate:** gate Copilot ccr-overview-v2 table findings ([#835](https://github.com/nanobpm/nano-workforce/issues/835)) ([#836](https://github.com/nanobpm/nano-workforce/issues/836)) ([8e3c0b6](https://github.com/nanobpm/nano-workforce/commit/8e3c0b690b7a212b0fcd4904b9e50ab7589e5bda))
+
 ## [0.195.1](https://github.com/nanobpm/nano-workforce/compare/v0.195.0...v0.195.1) (2026-09-30)
 
 ### Bug Fixes
