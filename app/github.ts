@@ -153,16 +153,31 @@ export interface ReviewThread {
 }
 
 /** A suppressed / low-confidence Copilot advisory parsed out of a review body. Its `key` is the
- * line-stable identity (survives a line drift); `label` is the human-facing `path:line` shown in
- * block reasons. */
+ * line-stable identity (survives a line drift); `label` is the human-facing locator shown in block
+ * reasons.
+ *
+ * Two source formats populate this shape, so the per-field shapes below vary by variant:
+ * - LEGACY "Suppressed comments" block (`parseLegacySuppressedBlock`): a `**path:line**` header
+ *   with real `line` (> 0), `text` is the first non-empty prose line after the header, and `label`
+ *   is `path:line`.
+ * - `ccr-overview-v2` file-table findings (`parseOverviewV2TableFindings`, issue #835): `text` is a
+ *   finding clause from the table's notes column (no header, no source line), so `line` is the
+ *   sentinel `0` and `label` is `<path> (review overview)` rather than `path:line`.
+ *
+ * Consumers must therefore treat `line === 0` as "not line-addressable" (an overview finding), NOT
+ * as a real line, and must not assume `label` is always `path:line`. */
 export interface SuppressedAdvisory {
   path: string;
+  /** Source line of the advisory. Real (> 0) for a legacy `**path:line**` header; the sentinel `0`
+   * for a `ccr-overview-v2` table finding, which carries no source line and is not line-addressable. */
   line: number;
-  /** The advisory prose (first non-empty line after the header), used for the stable fingerprint. */
+  /** The advisory prose: the first non-empty line after the header (legacy block) or a finding
+   * clause from the overview table's notes column (`ccr-overview-v2`). Used for the stable fingerprint. */
   text: string;
   /** Line-stable identity: `<path>#<fingerprint>` of the normalized prose. Survives line drift. */
   key: string;
-  /** Human-facing `path:line` label for block-reason messages. */
+  /** Human-facing label for block-reason messages: `path:line` for a legacy advisory, or
+   * `<path> (review overview)` for a line-less `ccr-overview-v2` table finding. */
   label: string;
 }
 
