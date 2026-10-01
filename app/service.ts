@@ -137,6 +137,18 @@ export const MERGE_PROCESS_ID = "merge-loop";
  * in convergence-loop.bpmn). Deliberately NOT hosted here — an external harness services it; the
  * activation poll keys off it to tell "agent working" from "queued". */
 const REVIEW_JOB_TYPE = "senior:pr-review";
+/** Job type of the local adversarial-review agent (the `adversarial-review` service task's
+ * `zeebe:taskDefinition` in convergence-loop.bpmn, issue #844). Like {@link REVIEW_JOB_TYPE} it is
+ * serviced by an external harness while the PR stays `converging`, so the activation poll must
+ * treat it as another live convergence agent — otherwise the grid reports "queued" for the whole
+ * adversarial pass even though an agent has leased the job. */
+const ADVERSARIAL_JOB_TYPE = "senior:adversarial-review";
+/** Every external-agent job type the convergence loop parks on while the PR reads `converging`.
+ * `pollJobActivation` reconciles `active_worker`/`lease_until` against ANY of these so the
+ * review-round ↔ adversarial-review handoff (same `converging` status, different job type) never
+ * flashes a phantom "queued". Typed `readonly string[]` (not `as const`) so `.includes(aString)`
+ * needs no `as` cast at the read site. */
+const CONVERGENCE_AGENT_JOB_TYPES: readonly string[] = [REVIEW_JOB_TYPE, ADVERSARIAL_JOB_TYPE];
 
 /** Default round cap before the loop escalates to a human. A per-submit override (submit form /
  * webhook / start action) takes precedence; this env var sets the fleet-wide default. The cap
@@ -1681,15 +1693,19 @@ interface JobSearchItem {
   worker?: string;
   deadline?: string | null;
   state?: string;
+  /** The job's `zeebe:taskDefinition` type — read to defensively re-filter the wire `$in` type
+   * filter so a non-agent job can never masquerade as a leasing convergence agent. */
+  type?: string;
 }
 
-/** One job-activation poll pass. The `converging` status means the process is parked at the
- * `review-round` service task with a `senior:pr-review` job outstanding — but it does not say
- * whether an external agent has *activated* (leased) that job yet. This pass reads that off the
- * engine's Camunda-8 `/v2/jobs/search`: an activated job carries a leasing `worker` + a lock
- * `deadline`; a merely-created (queued) one carries neither. (The wire `state` can't tell them
- * apart — Camunda's JobStateEnum has no ACTIVATED value, so the engine projects Activated ->
- * CREATED; the `worker`/`deadline` fields are the compatible activation signal.)
+/** One job-activation poll pass. The `converging` status means the process is parked at a
+ * convergence-agent service task (`review-round`'s `senior:pr-review`, or `adversarial-review`'s
+ * `senior:adversarial-review` — issue #844) with a job outstanding — but it does not say whether an
+ * external agent has *activated* (leased) that job yet. This pass reads that off the engine's
+ * Camunda-8 `/v2/jobs/search`: an activated job carries a leasing `worker` + a lock `deadline`; a
+ * merely-created (queued) one carries neither. (The wire `state` can't tell them apart — Camunda's
+ * JobStateEnum has no ACTIVATED value, so the engine projects Activated -> CREATED; the
+ * `worker`/`deadline` fields are the compatible activation signal.)
  *
  * It writes `active_worker` + `lease_until` onto the PR row so the pages surface can show
  * "agent working" vs "queued (awaiting an agent)", updating (and bumping `updated_at`) only on
@@ -1703,10 +1719,21 @@ async function pollJobActivation(
   const base = restAddress.replace(/\/+$/, "");
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (engineToken) headers.authorization = `Bearer ${engineToken}`;
+  await pollJobActivationImpl(data, base, headers);
+}
 
+/** Testable core of {@link pollJobActivation}: given the normalised `base` URL and prepared auth
+ * `headers`, reconcile every `converging` PR row against the engine's open convergence-agent jobs.
+ * Split out so tests can exercise the reconciliation with a stubbed `fetch` without re-deriving
+ * transport wiring. */
+export async function pollJobActivationImpl(
+  data: DataLayer,
+  base: string,
+  headers: Record<string, string>,
+) {
   const all = await prsTracking(data).all();
   for (const pr of all) {
-    // Only a `converging` PR has a live review-round job. Any other status with a stale worker
+    // Only a `converging` PR has a live convergence-agent job. Any other status with a stale worker
     // set (e.g. it just moved to `waiting_review`) gets cleared so the grid can't show a
     // phantom "agent working". ADR-0065: classify on the DERIVED status, not the base transient —
     // a PR whose instance was terminated out-of-band keeps its base `status` frozen at `converging`
@@ -1743,7 +1770,15 @@ async function pollJobActivation(
         method: "POST",
         headers,
         body: JSON.stringify({
-          filter: { type: REVIEW_JOB_TYPE, processInstanceKey: pr.process_key, state: "CREATED" },
+          filter: {
+            // ANY convergence-agent job type: the loop moves between `review-round`
+            // (`senior:pr-review`) and `adversarial-review` (`senior:adversarial-review`) without
+            // leaving `converging`, so filtering on only one would clear the lease mid-handoff and
+            // report "queued" while the other agent is actively working (issue #845 review).
+            type: { $in: [...CONVERGENCE_AGENT_JOB_TYPES] },
+            processInstanceKey: pr.process_key,
+            state: "CREATED",
+          },
           page: { limit: 20 },
         }),
       });
@@ -1751,9 +1786,16 @@ async function pollJobActivation(
       // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
       const body = (await res.json()) as { items?: JobSearchItem[] };
       // An open job with a leasing worker means an agent has activated it. Prefer the one with
-      // the latest deadline if several are open (there is normally at most one).
+      // the latest deadline if several are open (there is normally at most one). Re-filter on the
+      // job type defensively in case the wire `$in` filter is ignored, so a non-agent job (e.g. an
+      // internal `pr.*` worker) can never masquerade as a leasing convergence agent.
       const activated = (body.items ?? [])
-        .filter((j) => typeof j.worker === "string" && j.worker.length > 0)
+        .filter(
+          (j) =>
+            typeof j.worker === "string" &&
+            j.worker.length > 0 &&
+            CONVERGENCE_AGENT_JOB_TYPES.includes(j.type ?? ""),
+        )
         .sort((a, b) => (a.deadline ?? "").localeCompare(b.deadline ?? ""))
         .pop();
       if (activated) {

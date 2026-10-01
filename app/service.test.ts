@@ -11,7 +11,7 @@ import { memDataFor } from "../test/worldDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
 import { WorldStore } from "./world/index.ts";
-import { abandonClosedPr, isPrSettled, MAX_ACK_RETRIES, MAX_ADVERSARIAL_PASSES, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollReviews, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
+import { abandonClosedPr, isPrSettled, MAX_ACK_RETRIES, MAX_ADVERSARIAL_PASSES, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollJobActivationImpl, pollReviews, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
 import { trackingTargetFor } from "./instanceTracking.ts";
 import type { DataLayer } from "@nanobpm/urban";
 import { READINESS_READY_MESSAGE } from "./readiness.ts";
@@ -666,6 +666,158 @@ test("pollIncidents picks the oldest incident by creationTime, sorting a missing
   }
   assertEquals(row.incident_key, "INC-OLD");
   assertEquals(row.incident_message, "the first fault");
+});
+
+
+// Red/green regression (nano-workforce#845 Copilot review): the convergence loop runs TWO external
+// agent task types while the PR reads `converging` — `review-round` (`senior:pr-review`) and, since
+// issue #844, `adversarial-review` (`senior:adversarial-review`). `pollJobActivation` originally
+// searched only for `senior:pr-review`, so during an adversarial pass it found no matching job and
+// cleared `active_worker`/`lease_until` — the Home/Overview grids reported "queued" while an agent
+// was actively working. This drives the pass's reconciliation core against a stubbed
+// `/v2/jobs/search`:
+//   1. an activated `senior:adversarial-review` job surfaces its leasing worker (the defect),
+//   2. the review-round → adversarial-review handoff keeps a live worker visible across the switch,
+//   3. a non-agent job (an internal `pr.*` worker) is defensively excluded even if the wire `$in`
+//      filter is ignored,
+//   4. a merely-created (unactivated) agent job — no `worker` yet — reads as "queued" (lease null).
+function jobActivationFetch(byInstance: Record<string, unknown[]>) {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = typeof url === "string" ? url : url.toString();
+    if (!u.endsWith("/jobs/search")) {
+      throw new Error(`unexpected fetch: ${u}`);
+    }
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      filter?: { processInstanceKey?: string; type?: string | { $in?: string[] } };
+    };
+    const all = (byInstance[body.filter?.processInstanceKey ?? ""] ?? []) as { type?: string }[];
+    // Honor the wire `type` filter (scalar `$eq` or `{ $in: [...] }`) the way the engine does, so the
+    // test reproduces the real defect: a single-type `senior:pr-review` filter returns ZERO items for
+    // an adversarial-pass job (the engine filters server-side), which is exactly what cleared the
+    // lease pre-fix. A stub that ignores `type` would pass against the old code and prove nothing.
+    const t = body.filter?.type;
+    const wanted: string[] | null = typeof t === "string" ? [t] : Array.isArray(t?.$in) ? t.$in : null;
+    const items = wanted == null ? all : all.filter((j) => wanted.includes(j.type ?? ""));
+    return Promise.resolve(
+      new Response(JSON.stringify({ items }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+  };
+}
+
+function jobActivationData(rows: unknown[]) {
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: { rows, key: "pr_key" },
+  };
+  return {
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
+  } as any;
+}
+
+test("pollJobActivation surfaces an activated adversarial-review agent (not just senior:pr-review)", async () => {
+  const row = {
+    pr_key: "owner/repo#20",
+    status: "converging",
+    process_key: "PI-20",
+    active_worker: null as string | null,
+    lease_until: null as string | null,
+    updated_at: "t0",
+  };
+  const data = jobActivationData([row]);
+  const headers = { "content-type": "application/json" };
+
+  const prevFetch = globalThis.fetch;
+  // The PR is mid adversarial pass: the only open job is `senior:adversarial-review`, leased by a
+  // worker. Before the fix the pass filtered on `senior:pr-review` alone, found nothing, and left
+  // `active_worker` null — the grid showed "queued" while this agent was actively working.
+  globalThis.fetch = jobActivationFetch({
+    "PI-20": [
+      { type: "senior:adversarial-review", worker: "agent-adv", deadline: "2024-01-01T00:15:00Z", state: "CREATED" },
+    ],
+  }) as typeof fetch;
+  try {
+    await pollJobActivationImpl(data, "http://engine/v2", headers);
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(row.active_worker, "agent-adv");
+  assertEquals(row.lease_until, "2024-01-01T00:15:00Z");
+});
+
+test("pollJobActivation keeps a live worker visible across the review-round ↔ adversarial handoff", async () => {
+  const row = {
+    pr_key: "owner/repo#21",
+    status: "converging",
+    process_key: "PI-21",
+    active_worker: null as string | null,
+    lease_until: null as string | null,
+    updated_at: "t0",
+  };
+  const data = jobActivationData([row]);
+  const headers = { "content-type": "application/json" };
+
+  const prevFetch = globalThis.fetch;
+  try {
+    // Leg 1: the review-round agent (`senior:pr-review`) is working.
+    globalThis.fetch = jobActivationFetch({
+      "PI-21": [
+        { type: "senior:pr-review", worker: "agent-review", deadline: "2024-01-01T00:10:00Z", state: "CREATED" },
+      ],
+    }) as typeof fetch;
+    await pollJobActivationImpl(data, "http://engine/v2", headers);
+    assertEquals(row.active_worker, "agent-review");
+
+    // Leg 2: the loop handed off to the adversarial pass (`senior:adversarial-review`) — same
+    // `converging` status, different job type. The grid must keep showing "agent working", not
+    // flash "queued".
+    globalThis.fetch = jobActivationFetch({
+      "PI-21": [
+        { type: "senior:adversarial-review", worker: "agent-adv", deadline: "2024-01-01T00:20:00Z", state: "CREATED" },
+      ],
+    }) as typeof fetch;
+    await pollJobActivationImpl(data, "http://engine/v2", headers);
+    assertEquals(row.active_worker, "agent-adv");
+    assertEquals(row.lease_until, "2024-01-01T00:20:00Z");
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test("pollJobActivation excludes a non-agent job and reports an unactivated agent job as queued", async () => {
+  const row = {
+    pr_key: "owner/repo#22",
+    status: "converging",
+    process_key: "PI-22",
+    active_worker: "stale-worker" as string | null,
+    lease_until: "2024-01-01T00:05:00Z" as string | null,
+    updated_at: "t0",
+  };
+  const data = jobActivationData([row]);
+  const headers = { "content-type": "application/json" };
+
+  const prevFetch = globalThis.fetch;
+  try {
+    // An internal `pr.*` worker job is open and "leased" — but it is not a convergence agent, so it
+    // must NOT keep `active_worker` lit even if the engine ignores the wire `$in` type filter.
+    globalThis.fetch = jobActivationFetch({
+      "PI-22": [
+        { type: "pr.capture-head", worker: "host-internal", deadline: "2024-01-01T00:30:00Z", state: "CREATED" },
+      ],
+    }) as typeof fetch;
+    await pollJobActivationImpl(data, "http://engine/v2", headers);
+    assertEquals(row.active_worker, null);
+    assertEquals(row.lease_until, null);
+
+    // A merely-created (queued) agent job carries no worker yet → still "queued" (lease null).
+    globalThis.fetch = jobActivationFetch({
+      "PI-22": [{ type: "senior:adversarial-review", state: "CREATED" }],
+    }) as typeof fetch;
+    await pollJobActivationImpl(data, "http://engine/v2", headers);
+    assertEquals(row.active_worker, null);
+    assertEquals(row.lease_until, null);
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
 });
 
 
