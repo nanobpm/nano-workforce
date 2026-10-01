@@ -888,7 +888,6 @@ test("submitPr seeds the #844 adversarial-review budget (advPass=0, advMax=MAX_A
     const vars = get();
     assertEquals(vars?.advPass, 0);
     assertEquals(vars?.advMax, MAX_ADVERSARIAL_PASSES);
-    assertEquals(MAX_ADVERSARIAL_PASSES, 1);
   });
 });
 

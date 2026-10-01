@@ -45,9 +45,12 @@ global/host state. You may run the project's tests and linters to confirm a susp
 
 ## What to do
 
-1. **Get the diff under review.** If `roundEntryHead` is set and is an ancestor of
-   `HEAD`, review `git diff <roundEntryHead>..HEAD`, which is this round's change.
-   Otherwise review the whole PR (`gh pr diff <prNumber> --repo <repo>`). Read
+1. **Get the diff under review.** If `roundEntryHead` is set, **differs from `HEAD`**,
+   and is an ancestor of `HEAD`, review `git diff <roundEntryHead>..HEAD`, which is
+   this round's change. Otherwise — when it is unset, **equal to `HEAD`** (e.g. the
+   first-push path, where `review-round` returned `waiting` without advancing the head,
+   so `roundEntryHead == HEAD` and the range diff would be empty), or not an ancestor —
+   review the whole PR (`gh pr diff <prNumber> --repo <repo>`). Read
    enough of the surrounding code to judge each change in context.
 2. **Read what the round was answering.** Skim the latest Copilot review and the open
    review threads (`gh pr view <prNumber> --repo <repo> --comments`, or

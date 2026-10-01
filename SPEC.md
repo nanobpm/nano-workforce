@@ -110,7 +110,13 @@ known at submit time, carried as a process variable and stored on the DB row.
 │      │                                 → [Escalate: unaddressed comments] (blocked)             │
 │      │                                 → [Wait: wait-answer userTask] ────────────────────────────┤
 │      │                                                                                          │
-│      ├── addressed  → [Record round] → [Check progress] (did the PR head advance?)              │
+│      ├── addressed  → <adversarial pass due? (#844)>                                             │
+│      │  (or waiting)    ├── pass due (addressed, or first push; budget unspent)                  │
+│      │                  │      → [Adversarial review] (service task, taskType: senior:adversarial-review) │
+│      │                  │          → <findings?> ── findings → re-dispatch [Review round] (round unchanged) │
+│      │                  │                          └── clean → [Record round]                    │
+│      │                  └── disabled / budget spent → [Record round]                             │
+│      │                        [Record round] → [Check progress] (did the PR head advance?)       │
 │      │                   ├── progressed → <guard: round ≥ maxRounds → escalate "not converged"> │
 │      │                   │                   → <event-based gateway: review ready or timeout?>   │
 │      │                   │      ├── readiness-ready (msg catch, key = prKey) → round++ ─┐        │
@@ -138,6 +144,20 @@ inbox), reconcile the answer via the `record-answer` (`pr.answer-escalation`)
 step, then retry the same round with the human's `answer`. They differ only by escalation `kind`,
 which the UI uses to label the card. Neither ends the run — a human always gets
 a chance to unblock and resume.
+
+**Local adversarial-review stage (issue #844).** Before an `addressed` or first-push
+`waiting` round parks on `waiting_review` (the only status the poller solicits a Copilot
+review for), the loop runs a bounded local adversarial pass over the round's diff. The
+`<adversarial pass due?>` gate (`gw-adv-due`) fires when the per-round budget is unspent
+and the round is `addressed` **or** the first push (`advMax != null and advPass < advMax
+and (status != "waiting" or round = 1)`); otherwise (disabled, budget spent) it skips
+straight to `[Record round]`. The `senior:adversarial-review` service task (prompt
+delivered via the `prompts/adversarial-review.md` linked resource) critiques the diff and
+returns `adversarialFindings`. Non-blank findings **re-dispatch `[Review round]` within the
+same round** (round unchanged) with `adversarialFindings` seeded, so the agent fixes them
+before Copilot ever sees the push; a clean result records the round and proceeds to
+`[Check progress]`. The pass budget is `MAX_ADVERSARIAL_PASSES` (default 1,
+`NANO_PR_MAX_ADVERSARIAL_PASSES=0` disables the stage).
 
 **Durable adjudication auto-resume (issue #806).** A human's answer to a `wait-answer`
 is remembered durably, keyed by `(PR, canonical question fingerprint)` — the
@@ -350,6 +370,7 @@ Notes:
 | `prNumber` | int | |
 | `round` | int | 1-based round counter |
 | `answer` | string? | present only when resuming from an escalation |
+| `adversarialFindings` | string? | present only when the local adversarial-review stage (§4) produced findings on this round's push — the agent is re-dispatched within the same round to address them |
 
 The base instructions are **not** a job variable: they are delivered as a
 **linked resource** on the `senior:pr-review` task —
