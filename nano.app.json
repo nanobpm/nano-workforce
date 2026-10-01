@@ -265,7 +265,8 @@
       "enabled": true,
       "pagesDir": "pages",
       "homePage": "overview",
-      "sourceName": "app"
+      "sourceName": "app",
+      "gridLayout": "cards"
     }
   },
   "ui": {
