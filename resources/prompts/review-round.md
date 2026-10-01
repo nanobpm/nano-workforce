@@ -110,22 +110,28 @@ Because several agents may run on the same host at once:
      only the one cited.
 
    Make the code changes for all fixes + nitpicks in your workspace (`cwd`)
-   in one coherent, signed-off commit (`git commit -s`). Run the repo's
-   build/test/lint locally before pushing.
+   in one coherent, signed-off commit (`git commit -s`). If the branch has drifted
+   behind its base and you need to **rebase / resolve a merge conflict** to keep it
+   mergeable, do that rebase **now, before validating** — never after the self-review
+   pass below. Then run the repo's build/test/lint locally.
 
    **Before you push, do one adversarial self-review pass over your own diff**
    (`git diff origin/<head-branch>...HEAD`). Read it as the reviewer will: what input,
    edge case, error path, or bypass would a hostile reviewer cite next? Fix what you
    find in the same commit. **If this pass edits the diff, re-run the repo's
    build/test/lint before pushing** — otherwise the self-review fix ships unvalidated,
-   since the checks above ran against the pre-self-review code. Then push. Do only
-   **one** pass: it exists to catch the obvious next finding, not to block the round.
+   since the checks above ran against the pre-self-review code. **The same rule covers
+   any change after the pass:** if you rebase, resolve a conflict, or otherwise alter
+   the diff after this point, re-run build/test/lint *and* redo this self-review before
+   pushing — a late rebase must never ship unvalidated. Do only **one** self-review
+   pass per state of the diff: it exists to catch the obvious next finding, not to
+   block the round.
 
    Push to the PR's head branch (the branch
-   you are already on) — do not open a new branch or PR. If the branch has drifted
-   behind its base and you need to **rebase / resolve a merge conflict** to keep it
-   mergeable, that is allowed: do it in place on this branch and **force-push**
-   (`--force-with-lease`). Any push this round — including a rebase/force-push with
+   you are already on) — do not open a new branch or PR. A rebase/force-push
+   (`--force-with-lease`) is allowed when it is needed to keep the branch mergeable,
+   but only **before** the validation + self-review above (or followed by re-running
+   both). Any push this round — including a rebase/force-push with
    no reviewer comments to act on — is an **`addressed`** round (see the return table).
 4. **Reply in-thread** to each comment you addressed or pushed back on, one reply
    per comment, so the trail lives on the PR.
