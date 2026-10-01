@@ -209,6 +209,40 @@ test("a later waiting round (round > 1, review still pending) does not re-run th
   assert(completions(engine, "persist-round") === 1, runs(engine));
 });
 
+// Issue #822 husk failure mode ON THE FINDINGS BACK-EDGE: the `f_advFindings` edge re-dispatches
+// `review-round` straight from `gw-adv-result`, bypassing `capture-head` — so it must not inherit the
+// PRIOR review-round's verdict. Here round 1 returns `waiting` (no review yet), the adversarial pass
+// finds a finding, and the re-dispatched `review-round` HUSKS (completes with NO result vars). If the
+// back-edge does not reset the round's output vars, the stale `status="waiting"` survives into
+// gw-status / persist-round even though the findings were never handled. The back-edge must clear
+// `status`/`summary`/`question` (a findings-only reset) while PRESERVING `roundEntryHead`, `advPass`
+// and `adversarialFindings` (so the budget and the findings survive the re-dispatch).
+test("a husked re-dispatch on the findings back-edge does not reuse the prior round's verdict", async () => {
+  const { engine, seen } = await boot({
+    responses: {
+      // Round 1 review-round: waiting (no review yet). Re-dispatched review-round: HUSK ({}).
+      "senior:pr-review": [{ status: "waiting", summary: "no review yet" }, {}],
+      "senior:adversarial-review": [{ adversarialFindings: FINDINGS, adversarialSummary: "1 finding" }],
+    },
+    vars: { advMax: 1 },
+  });
+  assertThatInstance(engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+  assert(completions(engine, "review-round") === 2, `findings re-dispatch review-round: ${runs(engine)}`);
+  assert(completions(engine, "adversarial-review") === 1, runs(engine));
+  assert(completions(engine, "persist-round") === 1, runs(engine));
+  // The findings survived the re-dispatch (the husked review-round received them)...
+  assert(seen["senior:pr-review"][1].adversarialFindings === FINDINGS, "the re-dispatch carries the findings");
+  // ...and the pass budget was consumed (advPass incremented, NOT reset to 0 by a capture-head re-entry).
+  assert(instanceVars(engine).advPass === 1, `advPass preserved across the back-edge: ${instanceVars(engine).advPass}`);
+  // ...but the stale `waiting` verdict did NOT reach persist-round: the back-edge reset it to blank,
+  // so the round is recorded on the safe default rather than the inherited `waiting`.
+  const recorded = seen["pr.persist-round"][0];
+  assert(
+    recorded.status == null || recorded.status === "",
+    `a husked re-dispatch must not record the stale verdict; status reaching persist-round: ${JSON.stringify(recorded.status)}`,
+  );
+});
+
 test("a converged round does not run the adversarial pass", async () => {
   const { engine } = await boot({ responses: { "senior:pr-review": { status: "converged", summary: "done" } } });
   assertThatInstance(engine, byProcessId("convergence-loop")).hasCompleted().hasNoIncident();
