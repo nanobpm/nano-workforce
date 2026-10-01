@@ -77,13 +77,34 @@ test("escalation is an explicit needs_input/blocked arm gated on a non-blank que
 test("the default (addressed) arm carries no condition and re-enters round processing", () => {
   const addressed = flowElement("f_addressed");
   assert(addressed, "f_addressed flow missing");
-  assertStringIncludes(addressed, 'targetRef="persist-round"');
+  // #844: the addressed arm first passes the (bounded) local adversarial-review gate, whose
+  // unconditional defaults — budget spent / findings clean — both land on round processing.
+  assertStringIncludes(addressed, 'targetRef="gw-adv-due"');
   // A default flow must have NO conditionExpression.
   assert(
     !/conditionExpression/.test(addressed),
     "f_addressed is the default flow and must not carry a conditionExpression",
   );
+  assertAdversarialDefaultsReenterRound();
 });
+
+/** The adversarial-review detour (#844) on the addressed arm must always drain to round
+ * processing: both gateways' DEFAULT arms are unconditional and target persist-round, and the only
+ * conditional arm loops back into review-round (bounded by advPass/advMax) — never escalation. */
+function assertAdversarialDefaultsReenterRound() {
+  for (const [gw, dflt] of [["gw-adv-due", "f_advSkip"], ["gw-adv-result", "f_advClean"]]) {
+    const g = flat.match(new RegExp(`<bpmn:exclusiveGateway\\b[^>]*\\bid="${gw}"[^>]*>`));
+    assert(g, `${gw} gateway missing`);
+    assertStringIncludes(g[0], `default="${dflt}"`);
+    const f = flowElement(dflt);
+    assert(f, `${dflt} flow missing`);
+    assertStringIncludes(f, 'targetRef="persist-round"');
+    assert(!/conditionExpression/.test(f), `${dflt} is a default arm and must not carry a condition`);
+  }
+  const loop = flowElement("f_advFindings");
+  assert(loop, "f_advFindings flow missing");
+  assertStringIncludes(loop, 'targetRef="review-round"');
+}
 
 test("regression: an empty/unknown status no longer routes to persist-escalation", () => {
   // Escalation is reachable ONLY via an explicit condition (the needs_input/blocked arm),
@@ -98,7 +119,8 @@ test("regression: an empty/unknown status no longer routes to persist-escalation
   // The addressed default must land on round processing (persist-round → check-progress, which
   // re-solicits the review after the round-cap gate downstream), not escalation.
   const addressed = flowElement("f_addressed");
-  assert(addressed && /targetRef="persist-round"/.test(addressed), "default arm must re-enter round processing");
+  assert(addressed && /targetRef="gw-adv-due"/.test(addressed), "default arm must re-enter round processing");
+  assertAdversarialDefaultsReenterRound();
 });
 
 // The canonical router (app/roundResultDefault.ts) mirrors the gw-status routing above, with the

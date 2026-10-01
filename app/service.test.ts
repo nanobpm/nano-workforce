@@ -11,7 +11,7 @@ import { memDataFor } from "../test/worldDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
 import { WorldStore } from "./world/index.ts";
-import { abandonClosedPr, isPrSettled, MAX_ACK_RETRIES, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollReviews, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
+import { abandonClosedPr, isPrSettled, MAX_ACK_RETRIES, MAX_ADVERSARIAL_PASSES, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollReviews, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
 import { trackingTargetFor } from "./instanceTracking.ts";
 import type { DataLayer } from "@nanobpm/urban";
 import { READINESS_READY_MESSAGE } from "./readiness.ts";
@@ -873,6 +873,22 @@ test("submitPr seeds the #796 auto-ack budget onto the instance (ackRetryRound=0
     const vars = get();
     assertEquals(vars?.ackRetryRound, 0);
     assertEquals(vars?.ackRetryMax, MAX_ACK_RETRIES);
+  });
+});
+
+test("submitPr seeds the #844 adversarial-review budget (advPass=0, advMax=MAX_ADVERSARIAL_PASSES)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, get } = captureVars();
+    await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 14,
+      url: "https://github.com/owner/repo/pull/14",
+      prKey: "owner/repo#14",
+    });
+    const vars = get();
+    assertEquals(vars?.advPass, 0);
+    assertEquals(vars?.advMax, MAX_ADVERSARIAL_PASSES);
+    assertEquals(MAX_ADVERSARIAL_PASSES, 1);
   });
 });
 

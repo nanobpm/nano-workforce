@@ -24,6 +24,7 @@ cancel can land anytime.
 | `prNumber` | PR number                                                      |
 | `round`    | 1-based round counter                                          |
 | `answer`   | present only when resuming from a human: an escalation reply, or merge-approval change requests|
+| `adversarialFindings` | present only when a local adversarial reviewer critiqued your last push this round — see below |
 | `prompt`   | this document                                                  |
 
 ## Workspace (host mode) — read this first
@@ -79,6 +80,14 @@ Because several agents may run on the same host at once:
    If `answer` is present, it is a human's instruction: either the decision on the
    escalation you raised last round, or change requests from merge approval of this
    converged PR. Act on it first, on this same PR branch (never open a new PR).
+   If `adversarialFindings` is present, you are **re-dispatched within the same round**:
+   a separate adversarial reviewer (a different agent, often a different model) read
+   the diff you just pushed and reported the findings below **before** Copilot is asked
+   to review it. Treat them exactly like review findings (step 2 triage, step 3
+   fix-the-class) — they have no GitHub threads, so there is nothing to reply to or
+   resolve. Push back on a wrong one by declining it in your `summary` with a one-line
+   rationale; fix the rest and push. Return `addressed` as usual (or `needs_input` if
+   one is a genuine design decision).
 2. **Triage each item** into: *fix* (correct, worth doing), *nitpick* (apply
    silently), *needs human input* (design/product/tradeoff you can't decide), or
    *push back* (wrong / false positive — reply with evidence, make no change). Triage

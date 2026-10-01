@@ -133,7 +133,8 @@ test("convergence-loop golden has arbitrary-graph features the structured builde
   // merging SIX back-edges directly is the arbitrary-graph shape the structured builder cannot emit —
   // the feature this asserts, now on `capture-head`.
   assertEquals(between("capture-head", "serviceTask", "incoming"), 6, "capture-head should merge 6 flows on the task itself");
-  assertEquals(between("review-round", "serviceTask", "incoming"), 1, "review-round now takes the single f_capture in-edge");
+  // #844: review-round also merges the bounded adversarial-findings back-edge (f_advFindings).
+  assertEquals(between("review-round", "serviceTask", "incoming"), 2, "review-round takes f_capture + the f_advFindings back-edge");
   // (b) a single exclusive gateway forks FOUR heterogeneous-condition out-edges.
   assertEquals(between("gw-status", "exclusiveGateway", "outgoing"), 4, "gw-status should be a 4-way exclusive gateway");
   // (c) a single exclusive gateway is at once a 6-way merge and a 2-way split.

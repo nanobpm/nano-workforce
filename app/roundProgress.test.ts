@@ -946,7 +946,9 @@ test("the round-cap guard is downstream of progress classification, so a husk au
   assert(retry, "f_huskRetry flow missing");
   assertStringIncludes(retry, 'targetRef="capture-head"');
   // The addressed/waiting status arms feed persist-round directly (not the guard).
-  for (const id of ["f_addressed", "f_waiting"]) {
+  // (#844: the addressed arm detours through the bounded adversarial gate, whose arms all land on
+  // persist-round or loop to review-round — never gw-guard.)
+  for (const id of ["f_advSkip", "f_advClean", "f_waiting"]) {
     const f = flowElement(id);
     assert(f, `${id} flow missing`);
     assertStringIncludes(f, 'targetRef="persist-round"');

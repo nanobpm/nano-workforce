@@ -179,6 +179,13 @@ export const MAX_MERGE_RETRIES = clampCiFixBudget(process.env.NANO_PR_MAX_MERGE_
  * (allows 0 = disable, ceiling-capped). */
 export const MAX_ACK_RETRIES = clampCiFixBudget(process.env.NANO_PR_MAX_ACK_RETRIES, 2);
 
+/** Local adversarial-review passes per convergence round (issue #844). An `addressed` round runs the
+ * `senior:adversarial-review` agent over its diff BEFORE the round parks on `waiting_review` (the only
+ * status the poller solicits a Copilot review for); non-blank findings re-dispatch `review-round`, up
+ * to this many passes per round. Default 1; `NANO_PR_MAX_ADVERSARIAL_PASSES=0` disables the stage.
+ * Reuses the CI-fix budget clamp (allows 0 = disable, ceiling-capped). */
+export const MAX_ADVERSARIAL_PASSES = clampCiFixBudget(process.env.NANO_PR_MAX_ADVERSARIAL_PASSES, 1);
+
 /** How many times the mergeable-wait timeout backstop (`merge-stall-probe`) will re-derive
  * mergeability from ground truth and re-arm the merge stage before giving up and escalating to a
  * human. Bounds the timer arm of the `gw-merge-wait` event-based gateway so a dead in-process poller
@@ -740,6 +747,10 @@ async function submitPrCritical(
       // solely on unacked ones, before escalating to a human. `ackRetryRound` counts those passes.
       ackRetryRound: 0,
       ackRetryMax: MAX_ACK_RETRIES,
+      // Local adversarial review (issue #844): `advPass` counts this round's adversarial passes (reset
+      // by `capture-head` each round); `advMax` bounds them. 0 skips the stage.
+      advPass: 0,
+      advMax: MAX_ADVERSARIAL_PASSES,
       // Lineage (issue #245): carry the origin identity onto the convergence instance so every
       // descendant (and any message it correlates) is stitched back to the originating request.
       // A human/webhook PR that is its own root carries its own `pr_key` (never NULL — see above).
