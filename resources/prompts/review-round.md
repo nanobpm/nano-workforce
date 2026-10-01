@@ -90,9 +90,36 @@ Because several agents may run on the same host at once:
    *nitpick*); otherwise **decline it explicitly with a one-line rationale in your
    `summary`** (e.g. "declined suppressed advisory X — input already validated
    upstream at Y"). Never silently drop one.
-3. **Act.** Make the code changes for all fixes + nitpicks in your workspace (`cwd`)
+   Treat a **"Previously missed"** advisory as evidence that a whole *category* of issue
+   (e.g. unvalidated input, terminal-width overflow, an unhandled error path) went
+   unchecked in that area. Sweep **every file you touch** for that category this round,
+   rather than fixing only the cited line and waiting for the next review to cite the
+   neighbour.
+3. **Act — fix the class, not the instance.** Each review round costs a full GitHub
+   re-review cycle, so a fix that closes only the cited occurrence just buys another
+   round when the reviewer finds its sibling. For every *fix*:
+   - **Name the bug class** the finding is an instance of (e.g. "fail-open detector:
+     an unrecognised shape is allowed through", "unsanitised text reaches the
+     terminal", "unbounded growth").
+   - **Sweep for the class.** Search the changed code and its siblings (same file,
+     same pattern, same helper's other call sites) for every other occurrence, and fix
+     them in this same commit. Prefer a structural fix that removes the whole class
+     (e.g. fail closed by default, one validating constructor) over patching the cited
+     case.
+   - **Test the class.** Add a red-first regression test per variant you found, not
+     only the one cited.
+
+   Make the code changes for all fixes + nitpicks in your workspace (`cwd`)
    in one coherent, signed-off commit (`git commit -s`). Run the repo's
-   build/test/lint locally before pushing. Push to the PR's head branch (the branch
+   build/test/lint locally before pushing.
+
+   **Before you push, do one adversarial self-review pass over your own diff**
+   (`git diff origin/<head-branch>...HEAD`). Read it as the reviewer will: what input,
+   edge case, error path, or bypass would a hostile reviewer cite next? Fix what you
+   find in the same commit, and then push. Do only **one** pass: it exists to catch the
+   obvious next finding, not to block the round.
+
+   Push to the PR's head branch (the branch
    you are already on) — do not open a new branch or PR. If the branch has drifted
    behind its base and you need to **rebase / resolve a merge conflict** to keep it
    mergeable, that is allowed: do it in place on this branch and **force-push**
@@ -258,8 +285,14 @@ default, and you waste a round. So emit a machine-readable result one of two way
    round that needs a human decision:
 
    ```sh
-   printf '%s' '{"status":"needs_input","summary":"Resolved 3 nits; blocked on API shape","question":"Should getUser() throw or return null when the user is absent?"}' > "$AGENT_RESULT_FILE"
+   cat > "$AGENT_RESULT_FILE" <<'EOF'
+   {"status":"needs_input","summary":"Resolved 3 nits; blocked on API shape","question":"Should getUser() throw or return null when the user is absent?"}
+   EOF
    ```
+
+   Use the **quoted heredoc** shown above (`<<'EOF'`), never a single-quoted
+   `printf '…'` string: your `summary` is free text, and its first apostrophe
+   ("review 123's finding") ends a single-quoted string and breaks the command.
 
    Write this file **once**, at the very end, with your final result. Keep it a flat
    JSON object of exactly the variables in the table above.

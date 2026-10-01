@@ -114,11 +114,17 @@ machine-readable result one of two ways:
 
    ```sh
    # branch tip now contains the latest base (you pushed a resolved rebase, or it was already up to date):
-   printf '%s' '{"status":"rebased","summary":"Rebased onto main, resolved 2 conflicts in router.ts, pushed"}' > "$AGENT_RESULT_FILE"
+   cat > "$AGENT_RESULT_FILE" <<'EOF'
+   {"status":"rebased","summary":"Rebased onto main, resolved 2 conflicts in router.ts, pushed"}
+   EOF
    # ordering constraint — must wait for another PR to land first:
-   printf '%s' '{"status":"waiting-on-pr","summary":"Stacked on the base PR that has not merged","dependsOn":"owner/repo#123"}' > "$AGENT_RESULT_FILE"
+   cat > "$AGENT_RESULT_FILE" <<'EOF'
+   {"status":"waiting-on-pr","summary":"Stacked on the base PR that has not merged","dependsOn":"owner/repo#123"}
+   EOF
    # genuine semantic conflict — a human must decide which behaviour wins:
-   printf '%s' '{"status":"blocked","summary":"main and this branch both rewrote retry() incompatibly","question":"Should retries stay capped at 3 (main) or become unbounded (this PR)?"}' > "$AGENT_RESULT_FILE"
+   cat > "$AGENT_RESULT_FILE" <<'EOF'
+   {"status":"blocked","summary":"main and this branch both rewrote retry() incompatibly","question":"Should retries stay capped at 3 (main) or become unbounded (this PR)?"}
+   EOF
    ```
 
    Write this file **once**, at the very end, with your final result. Keep it a flat
