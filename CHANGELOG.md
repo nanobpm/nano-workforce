@@ -1,3 +1,9 @@
+## [0.197.0](https://github.com/nanobpm/nano-workforce/compare/v0.196.0...v0.197.0) (2026-10-01)
+
+### Features
+
+* **pages:** render every list as the card view ([#838](https://github.com/nanobpm/nano-workforce/issues/838)) ([47b9bad](https://github.com/nanobpm/nano-workforce/commit/47b9bad71fe999cd34e298a2c6f36ce796a402bb)), closes [#837](https://github.com/nanobpm/nano-workforce/issues/837)
+
 ## [0.196.0](https://github.com/nanobpm/nano-workforce/compare/v0.195.2...v0.196.0) (2026-09-30)
 
 ### Features
