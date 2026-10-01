@@ -120,22 +120,22 @@ machine-readable result one of two ways:
    harness sets for you). The object's keys become process variables. Examples:
 
    ```sh
-   # pushed a fix you believe turns the failing checks green:
-   cat > "$AGENT_RESULT_FILE" <<'EOF'
-   {"status":"fixed","pushed":true,"summary":"Fixed the flaky timeout in auth.test.ts and pushed"}
-   EOF
-   # nothing to fix — the failing checks are stale/transient (CANCELLED superseded on the same head SHA, head already green); just re-attempt the merge:
-   cat > "$AGENT_RESULT_FILE" <<'EOF'
-   {"status":"reattempt","pushed":false,"summary":"Failing checks are CANCELLED runs superseded by a green run on the same head SHA — nothing to fix, re-queue the merge"}
-   EOF
-   # ordering constraint — must wait for another PR to land first:
-   cat > "$AGENT_RESULT_FILE" <<'EOF'
-   {"status":"waiting-on-pr","pushed":false,"summary":"Blocked by the linked-issue gate","dependsOn":"owner/repo#123"}
-   EOF
-   # genuinely stuck — a human must decide:
-   cat > "$AGENT_RESULT_FILE" <<'EOF'
-   {"status":"blocked","pushed":false,"summary":"CI needs an NPM_TOKEN secret I cannot set","question":"Add the NPM_TOKEN repo secret, then answer to rerun."}
-   EOF
+# pushed a fix you believe turns the failing checks green:
+cat > "$AGENT_RESULT_FILE" <<'EOF'
+{"status":"fixed","pushed":true,"summary":"Fixed the flaky timeout in auth.test.ts and pushed"}
+EOF
+# nothing to fix — the failing checks are stale/transient (CANCELLED superseded on the same head SHA, head already green); just re-attempt the merge:
+cat > "$AGENT_RESULT_FILE" <<'EOF'
+{"status":"reattempt","pushed":false,"summary":"Failing checks are CANCELLED runs superseded by a green run on the same head SHA — nothing to fix, re-queue the merge"}
+EOF
+# ordering constraint — must wait for another PR to land first:
+cat > "$AGENT_RESULT_FILE" <<'EOF'
+{"status":"waiting-on-pr","pushed":false,"summary":"Blocked by the linked-issue gate","dependsOn":"owner/repo#123"}
+EOF
+# genuinely stuck — a human must decide:
+cat > "$AGENT_RESULT_FILE" <<'EOF'
+{"status":"blocked","pushed":false,"summary":"CI needs an NPM_TOKEN secret I cannot set","question":"Add the NPM_TOKEN repo secret, then answer to rerun."}
+EOF
    ```
 
    Write this file **once**, at the very end, with your final result. Keep it a flat

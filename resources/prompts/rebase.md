@@ -113,18 +113,18 @@ machine-readable result one of two ways:
    harness sets for you). The object's keys become process variables. Examples:
 
    ```sh
-   # branch tip now contains the latest base (you pushed a resolved rebase, or it was already up to date):
-   cat > "$AGENT_RESULT_FILE" <<'EOF'
-   {"status":"rebased","summary":"Rebased onto main, resolved 2 conflicts in router.ts, pushed"}
-   EOF
-   # ordering constraint — must wait for another PR to land first:
-   cat > "$AGENT_RESULT_FILE" <<'EOF'
-   {"status":"waiting-on-pr","summary":"Stacked on the base PR that has not merged","dependsOn":"owner/repo#123"}
-   EOF
-   # genuine semantic conflict — a human must decide which behaviour wins:
-   cat > "$AGENT_RESULT_FILE" <<'EOF'
-   {"status":"blocked","summary":"main and this branch both rewrote retry() incompatibly","question":"Should retries stay capped at 3 (main) or become unbounded (this PR)?"}
-   EOF
+# branch tip now contains the latest base (you pushed a resolved rebase, or it was already up to date):
+cat > "$AGENT_RESULT_FILE" <<'EOF'
+{"status":"rebased","summary":"Rebased onto main, resolved 2 conflicts in router.ts, pushed"}
+EOF
+# ordering constraint — must wait for another PR to land first:
+cat > "$AGENT_RESULT_FILE" <<'EOF'
+{"status":"waiting-on-pr","summary":"Stacked on the base PR that has not merged","dependsOn":"owner/repo#123"}
+EOF
+# genuine semantic conflict — a human must decide which behaviour wins:
+cat > "$AGENT_RESULT_FILE" <<'EOF'
+{"status":"blocked","summary":"main and this branch both rewrote retry() incompatibly","question":"Should retries stay capped at 3 (main) or become unbounded (this PR)?"}
+EOF
    ```
 
    Write this file **once**, at the very end, with your final result. Keep it a flat

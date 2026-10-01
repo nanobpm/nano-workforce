@@ -13,17 +13,40 @@ import { assert } from "#test-assert";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const PROMPTS_DIR = join(import.meta.dirname, "..", "resources", "prompts");
+// Urban deploys everything under resources/ RECURSIVELY (AGENTS.md "Deploy by convention"), so a
+// nested prompt (resources/**/foo.md) ships just like a top-level one. Scan the whole deployed
+// surface, not just the immediate children of resources/prompts, or a nested prompt could
+// reintroduce the unsafe example past this guard.
+const RESOURCES_DIR = join(import.meta.dirname, "..", "resources");
 
-// A single-quoted shell argument that opens a JSON object, on a line that writes the result file.
-const SINGLE_QUOTED_RESULT_JSON = /'\{"[^\n]*>\s*"?\$AGENT_RESULT_FILE/;
+function deployedMarkdownFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...deployedMarkdownFiles(full));
+    else if (entry.isFile() && entry.name.endsWith(".md")) out.push(full);
+  }
+  return out;
+}
+
+// The unsafe class is a single-quoted shell string that opens a JSON object (`'{"`) on any line
+// that also targets the result file — in ANY redirection form. The retired `printf '…' > "$FILE"`
+// shape is only one instance; `cat > "${AGENT_RESULT_FILE}" <<< '{"…"}'` (herestring, braced var)
+// and `printf '…' | tee "$AGENT_RESULT_FILE"` break identically the moment an apostrophe appears in
+// the free-text JSON. So match the two signals independently (order-free), not the printf layout:
+//   (a) a single-quoted JSON opener, and (b) a reference to AGENT_RESULT_FILE (with or without braces).
+const SINGLE_QUOTED_JSON_OPENER = /'\{"/;
+const RESULT_FILE_REF = /\$\{?AGENT_RESULT_FILE\}?/;
+const isUnsafeResultLine = (line: string): boolean =>
+  SINGLE_QUOTED_JSON_OPENER.test(line) && RESULT_FILE_REF.test(line);
 
 test("no agent prompt writes $AGENT_RESULT_FILE from a single-quoted JSON string (#842)", () => {
   const offenders: string[] = [];
-  for (const name of readdirSync(PROMPTS_DIR).filter((f) => f.endsWith(".md"))) {
-    const lines = readFileSync(join(PROMPTS_DIR, name), "utf8").split("\n");
+  for (const file of deployedMarkdownFiles(RESOURCES_DIR)) {
+    const rel = file.slice(RESOURCES_DIR.length + 1);
+    const lines = readFileSync(file, "utf8").split("\n");
     lines.forEach((line, i) => {
-      if (SINGLE_QUOTED_RESULT_JSON.test(line)) offenders.push(`${name}:${i + 1}`);
+      if (isUnsafeResultLine(line)) offenders.push(`${rel}:${i + 1}`);
     });
   }
   assert(
@@ -32,10 +55,22 @@ test("no agent prompt writes $AGENT_RESULT_FILE from a single-quoted JSON string
   );
 });
 
-test("the guard pattern catches the retired printf shape and accepts the heredoc shape", () => {
+test("the guard flags every unsafe result-file shape and accepts the heredoc shape", () => {
+  // The printf redirection that bit, plus the equivalents a `> "$AGENT_RESULT_FILE"`-only check missed:
   assert(
-    SINGLE_QUOTED_RESULT_JSON.test(`printf '%s' '{"status":"addressed","summary":"x"}' > "$AGENT_RESULT_FILE"`),
-    "retired shape must be flagged",
+    isUnsafeResultLine(`printf '%s' '{"status":"addressed","summary":"x"}' > "$AGENT_RESULT_FILE"`),
+    "retired printf shape must be flagged",
   );
-  assert(!SINGLE_QUOTED_RESULT_JSON.test(`cat > "$AGENT_RESULT_FILE" <<'EOF'`), "heredoc must pass");
+  assert(
+    isUnsafeResultLine(`cat > "\${AGENT_RESULT_FILE}" <<< '{"summary":"x"}'`),
+    "herestring into a braced result var must be flagged",
+  );
+  assert(
+    isUnsafeResultLine(`printf '%s' '{"summary":"x"}' | tee "$AGENT_RESULT_FILE"`),
+    "tee pipe of single-quoted JSON must be flagged",
+  );
+  // The safe heredoc shape, and its dedented/body lines, must all pass:
+  assert(!isUnsafeResultLine(`cat > "$AGENT_RESULT_FILE" <<'EOF'`), "heredoc opener must pass");
+  assert(!isUnsafeResultLine(`{"status":"addressed","summary":"x"}`), "heredoc body line must pass");
+  assert(!isUnsafeResultLine(`EOF`), "heredoc terminator must pass");
 });
