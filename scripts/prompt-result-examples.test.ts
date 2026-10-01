@@ -35,7 +35,7 @@ function deployedMarkdownFiles(dir: string): string[] {
 // `printf '…' | tee "$AGENT_RESULT_FILE"` break identically the moment an apostrophe appears in the
 // free-text JSON. So match the two signals independently (order-free), not the printf layout:
 //   (a) a single-quoted JSON opener, and (b) a reference to AGENT_RESULT_FILE (with or without braces).
-const SINGLE_QUOTED_JSON_OPENER = /'\{"/;
+const SINGLE_QUOTED_JSON_OPENER = /'[ \t]*\{"/;
 const RESULT_FILE_REF = /\$\{?AGENT_RESULT_FILE\}?/;
 const isUnsafeResultLine = (line: string): boolean =>
   SINGLE_QUOTED_JSON_OPENER.test(line) && RESULT_FILE_REF.test(line);
@@ -96,6 +96,12 @@ function malformedHeredocs(lines: string[]): string[] {
           closed = true;
           break;
         }
+        // Another executable opener reusing this delimiter appears BEFORE our terminator. A shell
+        // folds that opener line into THIS heredoc's body (writing garbage) and credits the later
+        // column-1 terminator to the first opener — so a reused delimiter would let one terminator
+        // close two openers and mask an indented/missing terminator on the first. Stop here so the
+        // malformed first block is reported instead of silently borrowing the reuse's terminator.
+        if (heredocOpeners(lines[j]).includes(tag)) break;
       }
       if (!closed) problems.push(`line ${i + 1}: heredoc <<'${tag}' has no column-1 '${tag}' terminator`);
     }
@@ -134,6 +140,10 @@ test("the guard flags every unsafe result-file shape and accepts the heredoc sha
   assert(
     isUnsafeResultLine(`printf '%s' '{"status":"addressed","summary":"x"}' > "$AGENT_RESULT_FILE"`),
     "retired printf shape must be flagged",
+  );
+  assert(
+    isUnsafeResultLine(`printf '%s' ' {"summary":"x"}' > "$AGENT_RESULT_FILE"`),
+    "single-quoted JSON with leading whitespace before { must still be flagged",
   );
   assert(
     isUnsafeResultLine(`cat > "\${AGENT_RESULT_FILE}" <<< '{"summary":"x"}'`),
@@ -179,5 +189,17 @@ test("the heredoc block validator flags an indented terminator and accepts a col
   assert(
     malformedHeredocs(["   Use the **quoted heredoc** shown above (`<<'EOF'`), never a single-quoted"]).length === 0,
     "inline-code mention of <<'EOF' in prose must not be treated as an opener",
+  );
+  // A later block REUSING the same delimiter must not lend its terminator to an earlier malformed
+  // opener: the first `EOF` is indented, so a shell would swallow the second opener and write
+  // garbage. The first block must be flagged, not credited the reuse's column-1 terminator.
+  assert(
+    malformedHeredocs([`cat <<'EOF'`, `  EOF`, `cat <<'EOF'`, `body`, `EOF`]).length > 0,
+    "a reused delimiter must not credit a later terminator to an earlier malformed opener",
+  );
+  // Two correctly-terminated blocks reusing the same delimiter must still pass.
+  assert(
+    malformedHeredocs([`cat <<'EOF'`, `a`, `EOF`, `cat <<'EOF'`, `b`, `EOF`]).length === 0,
+    "two well-formed blocks reusing one delimiter must pass",
   );
 });
