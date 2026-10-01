@@ -87,7 +87,11 @@ Because several agents may run on the same host at once:
    fix-the-class) — they have no GitHub threads, so there is nothing to reply to or
    resolve. Push back on a wrong one by declining it in your `summary` with a one-line
    rationale; fix the rest and push. Return `addressed` as usual (or `needs_input` if
-   one is a genuine design decision).
+   one is a genuine design decision). This also applies on the **first round, before
+   any Copilot review has landed**: the findings are your backlog, so act on them and
+   return `addressed`, not `waiting`. The exception is when you decline **every**
+   finding and push nothing on that first round; then return `waiting`, because an
+   `addressed` round that does not advance the head is treated as no progress.
 2. **Triage each item** into: *fix* (correct, worth doing), *nitpick* (apply
    silently), *needs human input* (design/product/tradeoff you can't decide), or
    *push back* (wrong / false positive — reply with evidence, make no change). Triage
@@ -257,7 +261,8 @@ there is simply nothing to triage *yet*. In that case:
 
 - Do **not** touch reviewer membership (see step 6) — the process's poller
   solicits the review for you.
-- Return **`waiting`** with a `summary` noting you are awaiting the review. The
+- Return **`waiting`** with a `summary` noting you are awaiting the review
+  (unless `adversarialFindings` is present; then fix them and return `addressed`). The
   process durably waits for the review to land (and has its own timeout that
   escalates a genuinely stalled review for you).
 

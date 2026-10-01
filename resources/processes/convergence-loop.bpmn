@@ -186,6 +186,7 @@
     </bpmn:exclusiveGateway>
     <bpmn:exclusiveGateway id="gw-adv-due" name="adversarial pass due?" default="f_advSkip">
       <bpmn:incoming>f_addressed</bpmn:incoming>
+      <bpmn:incoming>f_waiting</bpmn:incoming>
       <bpmn:outgoing>f_advDue</bpmn:outgoing>
       <bpmn:outgoing>f_advSkip</bpmn:outgoing>
     </bpmn:exclusiveGateway>
@@ -228,7 +229,6 @@
       </bpmn:extensionElements>
       <bpmn:incoming>f_advSkip</bpmn:incoming>
       <bpmn:incoming>f_advClean</bpmn:incoming>
-      <bpmn:incoming>f_waiting</bpmn:incoming>
       <bpmn:incoming>f_escReenter</bpmn:incoming>
       <bpmn:incoming>f_convergeStale</bpmn:incoming>
       <bpmn:outgoing>f_roundWait</bpmn:outgoing>
@@ -532,8 +532,8 @@
     <bpmn:sequenceFlow id="f_scopeEscGate" sourceRef="persist-escalation-scope" targetRef="gw-escalated" />
     <bpmn:sequenceFlow id="f_blockedGate" sourceRef="persist-escalation-blockedcomments" targetRef="gw-escalated" />
     <bpmn:sequenceFlow id="f_addressed" name="addressed / default" sourceRef="gw-status" targetRef="gw-adv-due" />
-    <bpmn:sequenceFlow id="f_advDue" name="pass budget left" sourceRef="gw-adv-due" targetRef="adversarial-review">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=advMax != null and (if advPass = null then 0 else advPass) &lt; advMax</bpmn:conditionExpression>
+    <bpmn:sequenceFlow id="f_advDue" name="pass due (addressed, or first push)" sourceRef="gw-adv-due" targetRef="adversarial-review">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=advMax != null and (if advPass = null then 0 else advPass) &lt; advMax and (status != "waiting" or round = 1)</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_advSkip" name="disabled / budget spent" sourceRef="gw-adv-due" targetRef="persist-round" />
     <bpmn:sequenceFlow id="f_toAdvResult" sourceRef="adversarial-review" targetRef="gw-adv-result" />
@@ -541,7 +541,7 @@
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=adversarialFindings != null and trim(adversarialFindings) != ""</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_advClean" name="clean / default" sourceRef="gw-adv-result" targetRef="persist-round" />
-    <bpmn:sequenceFlow id="f_waiting" name="waiting" sourceRef="gw-status" targetRef="persist-round">
+    <bpmn:sequenceFlow id="f_waiting" name="waiting" sourceRef="gw-status" targetRef="gw-adv-due">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "waiting"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_escalate" name="needs_input / blocked" sourceRef="gw-status" targetRef="persist-escalation">
@@ -929,7 +929,7 @@
         <di:waypoint x="641" y="280" />
         <di:waypoint x="791" y="280" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="677" y="247" width="78" height="28" />
+          <dc:Bounds x="646" y="199" width="78" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_advDue" bpmnElement="f_advDue">
@@ -937,15 +937,15 @@
         <di:waypoint x="816" y="440" />
         <di:waypoint x="966" y="440" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="852" y="407" width="78" height="28" />
+          <dc:Bounds x="851" y="379" width="81" height="56" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_waiting" bpmnElement="f_waiting">
         <di:waypoint x="641" y="145" />
-        <di:waypoint x="641" y="760" />
-        <di:waypoint x="1366" y="760" />
+        <di:waypoint x="641" y="280" />
+        <di:waypoint x="791" y="280" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="701" y="738" width="56" height="14" />
+          <dc:Bounds x="580" y="206" width="56" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_escalate" bpmnElement="f_escalate">
@@ -953,7 +953,7 @@
         <di:waypoint x="641" y="1240" />
         <di:waypoint x="766" y="1240" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="646" y="986" width="81" height="28" />
+          <dc:Bounds x="646" y="746" width="81" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_guardMax" bpmnElement="f_guardMax">

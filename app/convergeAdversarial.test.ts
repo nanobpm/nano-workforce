@@ -179,10 +179,34 @@ test("an instance seeded without advPass/advMax (pre-#844 shape) skips the pass,
   assert(completions(engine, "persist-round") === 1, runs(engine));
 });
 
-test("a waiting round (no review yet) does not run the adversarial pass", async () => {
-  const { engine } = await boot({ responses: { "senior:pr-review": { status: "waiting", summary: "no review" } } });
+// The FIRST push (#844): a PR enters the loop with no Copilot review yet, so round 1 returns
+// `waiting`. That never-reviewed head is exactly what Copilot would review first, so the adversarial
+// pass runs on it too — before progress-check parks the PR on `waiting_review` (which is what makes
+// the poller solicit the initial Copilot review). This covers every PR entering convergence
+// (feature runs, plan fan-out slices, human-submitted PRs) from the one canonical stage.
+test("the first push (round 1, no review yet) gets an adversarial pass before Copilot is solicited", async () => {
+  const { engine, seen } = await boot({
+    responses: {
+      "senior:pr-review": [{ status: "waiting", summary: "no review yet" }, { status: "addressed", summary: "fixed finding" }],
+      "senior:adversarial-review": [{ adversarialFindings: FINDINGS, adversarialSummary: "1 finding" }],
+    },
+  });
+  assertThatInstance(engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+  assert(completions(engine, "adversarial-review") === 1, `first push must be adversarially reviewed: ${runs(engine)}`);
+  assert(completions(engine, "review-round") === 2, `findings must re-dispatch review-round: ${runs(engine)}`);
+  assert(seen["senior:pr-review"][1].adversarialFindings === FINDINGS, "the re-dispatch carries the findings");
+  assert(completions(engine, "persist-round") === 1, runs(engine));
+  assert(completions(engine, "capture-head") === 1, "no head re-capture within the round");
+});
+
+test("a later waiting round (round > 1, review still pending) does not re-run the adversarial pass", async () => {
+  const { engine } = await boot({
+    vars: { round: 2 },
+    responses: { "senior:pr-review": { status: "waiting", summary: "review pending" } },
+  });
   assertThatInstance(engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
   assert(completions(engine, "adversarial-review") === 0, runs(engine));
+  assert(completions(engine, "persist-round") === 1, runs(engine));
 });
 
 test("a converged round does not run the adversarial pass", async () => {
