@@ -1,3 +1,9 @@
+## [0.200.0](https://github.com/nanobpm/nano-workforce/compare/v0.199.0...v0.200.0) (2026-10-02)
+
+### Features
+
+* **convergence:** local adversarial-review agent pass before Copilot ([#845](https://github.com/nanobpm/nano-workforce/issues/845)) ([3aec0da](https://github.com/nanobpm/nano-workforce/commit/3aec0da99224dd29f43566a9c75a5cf34dbc843a)), closes [#842](https://github.com/nanobpm/nano-workforce/issues/842) [#844](https://github.com/nanobpm/nano-workforce/issues/844) [#844](https://github.com/nanobpm/nano-workforce/issues/844) [#844](https://github.com/nanobpm/nano-workforce/issues/844) [#822](https://github.com/nanobpm/nano-workforce/issues/822)
+
 ## [0.199.0](https://github.com/nanobpm/nano-workforce/compare/v0.198.1...v0.199.0) (2026-10-02)
 
 ### Features
