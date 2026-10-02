@@ -1,3 +1,9 @@
+## [0.198.1](https://github.com/nanobpm/nano-workforce/compare/v0.198.0...v0.198.1) (2026-10-02)
+
+### Bug Fixes
+
+* **deps:** update dependency @nanobpm/agentic to ^0.15.0 ([#848](https://github.com/nanobpm/nano-workforce/issues/848)) ([26f731a](https://github.com/nanobpm/nano-workforce/commit/26f731a9d87a50a9a4852dc7dd5bc8b3e61c72c4))
+
 ## [0.198.0](https://github.com/nanobpm/nano-workforce/compare/v0.197.0...v0.198.0) (2026-10-02)
 
 ### Features
