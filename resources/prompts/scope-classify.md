@@ -115,13 +115,17 @@ your output is **not** parsed. Emit a machine-readable result one of two ways:
    once, at the very end. Example (not blocked):
 
    ```sh
-   printf '%s' '{"scopeBlocked":false,"scopeBlockReason":""}' > "$AGENT_RESULT_FILE"
+cat > "$AGENT_RESULT_FILE" <<'EOF'
+{"scopeBlocked":false,"scopeBlockReason":""}
+EOF
    ```
 
    Blocked example:
 
    ```sh
-   printf '%s' '{"scopeBlocked":true,"scopeBlockReason":"#412 requires both the read AND write projection (acceptance criteria 2 + 3); this PR ships only the read side and defers the write projection with no filed tracker. File a follow-up issue for the write projection, link it (Follow-up: #N), and downgrade Closes #412 -> Part of #412 (close #412 by hand only when the write side lands)."}' > "$AGENT_RESULT_FILE"
+cat > "$AGENT_RESULT_FILE" <<'EOF'
+{"scopeBlocked":true,"scopeBlockReason":"#412 requires both the read AND write projection (acceptance criteria 2 + 3); this PR ships only the read side and defers the write projection with no filed tracker. File a follow-up issue for the write projection, link it (Follow-up: #N), and downgrade Closes #412 -> Part of #412 (close #412 by hand only when the write side lands)."}
+EOF
    ```
 
 2. **Fallback** (only if you cannot write the file): print a single last line to

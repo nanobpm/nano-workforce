@@ -90,13 +90,60 @@ Because several agents may run on the same host at once:
    *nitpick*); otherwise **decline it explicitly with a one-line rationale in your
    `summary`** (e.g. "declined suppressed advisory X — input already validated
    upstream at Y"). Never silently drop one.
-3. **Act.** Make the code changes for all fixes + nitpicks in your workspace (`cwd`)
-   in one coherent, signed-off commit (`git commit -s`). Run the repo's
-   build/test/lint locally before pushing. Push to the PR's head branch (the branch
-   you are already on) — do not open a new branch or PR. If the branch has drifted
+   Treat a **"Previously missed"** advisory as evidence that a whole *category* of issue
+   (e.g. unvalidated input, terminal-width overflow, an unhandled error path) went
+   unchecked in that area. Sweep **every file you touch** for that category this round,
+   rather than fixing only the cited line and waiting for the next review to cite the
+   neighbour.
+3. **Act — fix the class, not the instance.** Each review round costs a full GitHub
+   re-review cycle, so a fix that closes only the cited occurrence just buys another
+   round when the reviewer finds its sibling. For every *fix*:
+   - **Name the bug class** the finding is an instance of (e.g. "fail-open detector:
+     an unrecognised shape is allowed through", "unsanitised text reaches the
+     terminal", "unbounded growth").
+   - **Sweep for the class.** Search the changed code and its siblings (same file,
+     same pattern, same helper's other call sites) for every other occurrence, and fix
+     them in this same commit. Prefer a structural fix that removes the whole class
+     (e.g. fail closed by default, one validating constructor) over patching the cited
+     case.
+   - **Test the class.** Add a red-first regression test per variant you found, not
+     only the one cited.
+
+   Make the code changes for all fixes + nitpicks in your workspace (`cwd`)
+   in one coherent, signed-off commit (`git commit -s`). If the branch has drifted
    behind its base and you need to **rebase / resolve a merge conflict** to keep it
-   mergeable, that is allowed: do it in place on this branch and **force-push**
-   (`--force-with-lease`). Any push this round — including a rebase/force-push with
+   mergeable, do that rebase **now, before validating** — never after the self-review
+   pass below. Then run the repo's build/test/lint locally.
+
+   **Before you push, do one adversarial self-review pass over your own diff.**
+   Diff against the PR's **current base**, not `origin/<head-branch>`: after a
+   permitted rebase, `origin/<head-branch>` still names the pre-rebase remote
+   history, so the three-dot merge base can fall back to the old base and pull
+   unrelated upstream changes into the pass. Resolve and fetch the base fresh,
+   then diff it against `HEAD` — correct before and after any rebase:
+
+   ```sh
+   BASE=$(gh pr view --json baseRefName --jq .baseRefName)   # the PR's current base branch
+   git fetch origin "$BASE"
+   git diff FETCH_HEAD...HEAD                                # the diff the reviewer actually sees
+   ```
+
+   Read it as the reviewer will: what input,
+   edge case, error path, or bypass would a hostile reviewer cite next? Fix what you
+   find in the same commit. **If this pass edits the diff, re-run the repo's
+   build/test/lint before pushing** — otherwise the self-review fix ships unvalidated,
+   since the checks above ran against the pre-self-review code. **The same rule covers
+   any change after the pass:** if you rebase, resolve a conflict, or otherwise alter
+   the diff after this point, re-run build/test/lint *and* redo this self-review before
+   pushing — a late rebase must never ship unvalidated. Do only **one** self-review
+   pass per state of the diff: it exists to catch the obvious next finding, not to
+   block the round.
+
+   Push to the PR's head branch (the branch
+   you are already on) — do not open a new branch or PR. A rebase/force-push
+   (`--force-with-lease`) is allowed when it is needed to keep the branch mergeable,
+   but only **before** the validation + self-review above (or followed by re-running
+   both). Any push this round — including a rebase/force-push with
    no reviewer comments to act on — is an **`addressed`** round (see the return table).
 4. **Reply in-thread** to each comment you addressed or pushed back on, one reply
    per comment, so the trail lives on the PR.
@@ -142,24 +189,24 @@ Because several agents may run on the same host at once:
    leading row summary before it (e.g. `nano-ack: a.json :: Adds X; A is wrong`). Example:
 
    ```sh
-   # Post the ack thread (pick any changed line in the diff for path/line). Use the PR's real HEAD
-   # SHA as commit_id — `git rev-parse HEAD` can drift from the PR head; ask GitHub:
-   CID=$(gh api repos/OWNER/REPO/pulls/PR --jq .head.sha)
-   # Build the body via a QUOTED heredoc so the verbatim advisory prose is never re-interpreted by
-   # the shell — a single-quoted `-f body='...'` breaks the moment the prose contains a `'` (e.g.
-   # "doesn't handle ..."), and a double-quoted one breaks on `$`/backticks. `<<'EOF'` (quoted
-   # delimiter) disables ALL expansion, so any advisory text is safe:
-   BODY=$(cat <<'EOF'
-   Applied. nano-ack: <path> :: <verbatim advisory text>
-   EOF
-   )   # to DECLINE instead, build the body the same quoted-heredoc way (never a single-quoted
-       # `-f body='...'`, which breaks the moment the reason or advisory prose contains a `'`):
-       #   BODY=$(cat <<'EOF'
-       #   Declined, false positive — <reason>. nano-ack: <path> :: <verbatim advisory text>
-       #   EOF
-       #   )
-   gh api repos/OWNER/REPO/pulls/PR/comments -f commit_id="$CID" -f path="PATH" -F line=LINE -f side=RIGHT -f body="$BODY"
-   # Then resolve it exactly like any other thread (map its databaseId -> thread node id -> resolveReviewThread).
+# Post the ack thread (pick any changed line in the diff for path/line). Use the PR's real HEAD
+# SHA as commit_id — `git rev-parse HEAD` can drift from the PR head; ask GitHub:
+CID=$(gh api repos/OWNER/REPO/pulls/PR --jq .head.sha)
+# Build the body via a QUOTED heredoc so the verbatim advisory prose is never re-interpreted by
+# the shell — a single-quoted `-f body='...'` breaks the moment the prose contains a `'` (e.g.
+# "doesn't handle ..."), and a double-quoted one breaks on `$`/backticks. `<<'EOF'` (quoted
+# delimiter) disables ALL expansion, so any advisory text is safe:
+BODY=$(cat <<'EOF'
+Applied. nano-ack: <path> :: <verbatim advisory text>
+EOF
+)   # to DECLINE instead, build the body the same quoted-heredoc way (never a single-quoted
+    # `-f body='...'`, which breaks the moment the reason or advisory prose contains a `'`):
+    #   BODY=$(cat <<'EOF'
+    #   Declined, false positive — <reason>. nano-ack: <path> :: <verbatim advisory text>
+    #   EOF
+    #   )
+gh api repos/OWNER/REPO/pulls/PR/comments -f commit_id="$CID" -f path="PATH" -F line=LINE -f side=RIGHT -f body="$BODY"
+# Then resolve it exactly like any other thread (map its databaseId -> thread node id -> resolveReviewThread).
    ```
    Only the `nano-ack: <path> :: <text>` (prose-keyed) form is honoured. A bare
    `nano-ack: <path>:<line>` marker is **not** an acknowledgement: keyed only on
@@ -258,8 +305,14 @@ default, and you waste a round. So emit a machine-readable result one of two way
    round that needs a human decision:
 
    ```sh
-   printf '%s' '{"status":"needs_input","summary":"Resolved 3 nits; blocked on API shape","question":"Should getUser() throw or return null when the user is absent?"}' > "$AGENT_RESULT_FILE"
+cat > "$AGENT_RESULT_FILE" <<'EOF'
+{"status":"needs_input","summary":"Resolved 3 nits; blocked on API shape","question":"Should getUser() throw or return null when the user is absent?"}
+EOF
    ```
+
+   Use the **quoted heredoc** shown above (`<<'EOF'`), never a single-quoted
+   `printf '…'` string: your `summary` is free text, and its first apostrophe
+   ("review 123's finding") ends a single-quoted string and breaks the command.
 
    Write this file **once**, at the very end, with your final result. Keep it a flat
    JSON object of exactly the variables in the table above.
