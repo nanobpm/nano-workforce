@@ -125,7 +125,7 @@ Because several agents may run on the same host at once:
    ```sh
    BASE=$(gh pr view --json baseRefName --jq .baseRefName)   # the PR's current base branch
    git fetch origin "$BASE"
-   git diff "origin/$BASE"...HEAD                            # the diff the reviewer actually sees
+   git diff FETCH_HEAD...HEAD                                # the diff the reviewer actually sees
    ```
 
    Read it as the reviewer will: what input,

@@ -144,25 +144,34 @@ function heredocOpeners(line: string): { tag: string; dash: boolean }[] {
 //    the bare delimiter at column 1.
 //  - A heredoc body does not begin until a backslash-CONTINUED command is complete: `cat <<'A' \`
 //    followed by `<<'B'` is one command stacking two heredocs, so the second line is more command,
-//    not body, and its opener must still be discovered (review 5387476399). While the previous line
-//    ends in a backslash we keep discovering openers even though a heredoc is pending; once the
-//    command completes (no trailing backslash) the body is literal as above.
+//    not body, and its opener must still be discovered (review 5387476399). Continuation state must
+//    be tracked ONLY across the command portion — as an explicit flag carried forward, NOT recomputed
+//    from the previous physical line each iteration (review 5387541694). Recomputing it per line had
+//    two symmetric defects: (a) a terminator was tested BEFORE continuation, so `cat <<'A' \` then a
+//    bare `A` credited that `A` as the terminator even though it is a command argument (real bash:
+//    `cat: A: No such file or directory`) and the heredoc is unterminated; and (b) a BODY line ending
+//    in a backslash wrongly re-entered command mode, letting the next literal body line (e.g. text
+//    `<<'INNER'`) be parsed as a new opener. With the flag, `continued` is updated only while in
+//    command mode: once the command completes (a command line not ending in `\`), the body is literal
+//    and a trailing backslash inside it can never reopen command mode.
 function malformedHeredocs(lines: string[]): string[] {
   const pending: { tag: string; dash: boolean; line: number }[] = [];
   const isTerminator = (line: string, open: { tag: string; dash: boolean }) =>
     open.dash ? line.replace(/^\t+/, "") === open.tag : line === open.tag;
+  // `continued` === we are still inside the (possibly multi-line, backslash-continued) COMMAND that
+  // opened the pending heredocs — its body has not begun yet. While command mode is active we discover
+  // openers and never test terminators; once it ends, pending bodies are literal until their terminators.
+  let continued = false;
   for (let i = 0; i < lines.length; i++) {
-    if (pending.length > 0) {
-      if (isTerminator(lines[i], pending[0])) {
-        pending.shift();
-        continue;
-      }
-      // A pending body is literal — unless the command is still being continued (the previous line
-      // ended in a backslash), in which case this line is more command and can stack another opener.
-      const continued = (i > 0 ? lines[i - 1] : "").replace(/\s+$/, "").endsWith("\\");
-      if (!continued) continue;
+    const inBody = pending.length > 0 && !continued;
+    if (inBody) {
+      // A pending body is literal input: the only thing that matters is whether this line closes the
+      // FRONT heredoc. It never opens a new one and never re-enters command mode.
+      if (isTerminator(lines[i], pending[0])) pending.shift();
+      continue;
     }
     for (const open of heredocOpeners(lines[i])) pending.push({ ...open, line: i });
+    continued = lines[i].replace(/\s+$/, "").endsWith("\\");
   }
   return pending.map(
     (open) => `line ${open.line + 1}: heredoc <<'${open.tag}' has no column-1 '${open.tag}' terminator`,
@@ -376,5 +385,20 @@ test("the heredoc block validator flags an indented terminator and accepts a col
   assert(
     malformedHeredocs([`cat <<'EOF'`, `\tbody`, `\tEOF`]).length > 0,
     "a plain << heredoc must still reject a tab-indented terminator",
+  );
+  // Continuation state is tracked only across the COMMAND, not recomputed per line (review 5387541694).
+  // (F1) A terminator is never credited while the command is still being continued: `cat <<'A' \`
+  // followed by a bare `A` is `cat <<'A' A` — the `A` is a command ARGUMENT (real bash: `cat: A: No
+  // such file or directory`), not the terminator, so the heredoc is unterminated and must be flagged.
+  assert(
+    malformedHeredocs([`cat <<'A' \\`, `A`]).length > 0,
+    "a bare delimiter on a backslash-continued command line is an argument, not a terminator",
+  );
+  // (F2) A trailing backslash inside a heredoc BODY must NOT re-enter command mode: once `cat <<'OUTER'`
+  // opens, a body line ending in `\` is still literal data, so the following `<<'INNER'` is body text,
+  // not a new opener — the block is well-formed with just the one `OUTER` terminator.
+  assert(
+    malformedHeredocs([`cat <<'OUTER'`, `some text \\`, `<<'INNER'`, `OUTER`]).length === 0,
+    "a backslash at the end of a body line must not reopen command mode and parse the next body line as an opener",
   );
 });
