@@ -1,3 +1,9 @@
+## [0.198.0](https://github.com/nanobpm/nano-workforce/compare/v0.197.0...v0.198.0) (2026-10-02)
+
+### Features
+
+* **ui:** selectable themes (classic / soft / cartoon) ([#841](https://github.com/nanobpm/nano-workforce/issues/841)) ([5eb42e1](https://github.com/nanobpm/nano-workforce/commit/5eb42e17c0157311fde152f1d270dc6d7ff1610c)), closes [#840](https://github.com/nanobpm/nano-workforce/issues/840)
+
 ## [0.197.0](https://github.com/nanobpm/nano-workforce/compare/v0.196.0...v0.197.0) (2026-10-01)
 
 ### Features
