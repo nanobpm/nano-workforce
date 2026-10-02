@@ -35,7 +35,14 @@ function deployedMarkdownFiles(dir: string): string[] {
 // `printf '…' | tee "$AGENT_RESULT_FILE"` break identically the moment an apostrophe appears in the
 // free-text JSON. So match the two signals independently (order-free), not the printf layout:
 //   (a) a single-quoted JSON opener, and (b) a reference to AGENT_RESULT_FILE (with or without braces).
-const SINGLE_QUOTED_JSON_OPENER = /'[ \t]*\{"/;
+// The opener's whitespace class is `\s`, not `[ \t]`: a multiline single-quoted value (`JSON='` on
+// one line, `{"summary":"x"}` on the next) is one shell string, and `unsafeResultBlocks` joins those
+// lines — a horizontal-only class can't cross the inserted newline, so the same apostrophe failure
+// would slip past the guard (review 5387000199). `\s` matches the joined newline too. But `\s` also
+// lets the CLOSING quote of a quoted-heredoc delimiter (`<<'EOF'`) pair with a JSON body line on the
+// next line — the safe shape — so the lookbehind `(?<![A-Za-z0-9_])` requires the `'` to be an
+// OPENING quote (not preceded by a word char), excluding a delimiter's closing quote.
+const SINGLE_QUOTED_JSON_OPENER = /(?<![A-Za-z0-9_])'\s*\{"/;
 const RESULT_FILE_REF = /\$\{?AGENT_RESULT_FILE\}?/;
 const isUnsafeResultLine = (line: string): boolean =>
   SINGLE_QUOTED_JSON_OPENER.test(line) && RESULT_FILE_REF.test(line);
@@ -165,6 +172,14 @@ test("the guard flags unsafe shapes split across lines (continuations and assign
   assert(unsafeResultBlocks(continuation).length > 0, "backslash-continued unsafe command must be flagged");
   const assignThenWrite = [`JSON='{"summary":"x"}'`, `printf '%s' "$JSON" > "$AGENT_RESULT_FILE"`];
   assert(unsafeResultBlocks(assignThenWrite).length > 0, "single-quoted JSON assigned then written must be flagged");
+  // A MULTILINE single-quoted value — `JSON='` opens on one line and the JSON object starts on the
+  // next — is one shell string. The joined window inserts a newline between `'` and `{"`, which a
+  // horizontal-only whitespace class cannot cross (review 5387000199): this shape must be flagged.
+  const multilineSingleQuoted = [`JSON='`, `{"summary":"x"}'`, `printf '%s' "$JSON" > "$AGENT_RESULT_FILE"`];
+  assert(
+    unsafeResultBlocks(multilineSingleQuoted).length > 0,
+    "multiline single-quoted JSON value reaching the result file must be flagged",
+  );
   // The safe heredoc shape spans lines but has no single-quoted JSON opener, so it must pass.
   const safeHeredoc = [`cat > "$AGENT_RESULT_FILE" <<'EOF'`, `{"summary":"x"}`, `EOF`];
   assert(unsafeResultBlocks(safeHeredoc).length === 0, "safe heredoc block must pass");

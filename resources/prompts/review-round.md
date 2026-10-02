@@ -115,8 +115,20 @@ Because several agents may run on the same host at once:
    mergeable, do that rebase **now, before validating** — never after the self-review
    pass below. Then run the repo's build/test/lint locally.
 
-   **Before you push, do one adversarial self-review pass over your own diff**
-   (`git diff origin/<head-branch>...HEAD`). Read it as the reviewer will: what input,
+   **Before you push, do one adversarial self-review pass over your own diff.**
+   Diff against the PR's **current base**, not `origin/<head-branch>`: after a
+   permitted rebase, `origin/<head-branch>` still names the pre-rebase remote
+   history, so the three-dot merge base can fall back to the old base and pull
+   unrelated upstream changes into the pass. Resolve and fetch the base fresh,
+   then diff it against `HEAD` — correct before and after any rebase:
+
+   ```sh
+   BASE=$(gh pr view --json baseRefName --jq .baseRefName)   # the PR's current base branch
+   git fetch origin "$BASE"
+   git diff "origin/$BASE"...HEAD                            # the diff the reviewer actually sees
+   ```
+
+   Read it as the reviewer will: what input,
    edge case, error path, or bypass would a hostile reviewer cite next? Fix what you
    find in the same commit. **If this pass edits the diff, re-run the repo's
    build/test/lint before pushing** — otherwise the self-review fix ships unvalidated,
