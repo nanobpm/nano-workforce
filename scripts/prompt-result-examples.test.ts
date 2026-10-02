@@ -110,13 +110,17 @@ function unsafeResultBlocks(lines: string[]): number[] {
 // complete block: every `<<'TAG'` opener must be closed by a line that is exactly `TAG` at column 1.
 // An opener is a real shell redirect, so ignore backtick-quoted inline-code mentions (`<<'EOF'`) and
 // prose references to the syntax — only a `<<'TAG'` that is NOT inside backticks opens a heredoc.
-const HEREDOC_OPENER = /<<-?\s*'([A-Za-z_][A-Za-z0-9_]*)'/;
-function heredocOpeners(line: string): string[] {
+// Capture whether the opener used `<<-` (strip-leading-tabs): shell `<<-` deliberately permits a
+// TAB-indented terminator, so the dash flag must be preserved per pending heredoc and the
+// terminator check strips leading tabs only for a `<<-` opener (review 5387476399, previously-missed).
+const HEREDOC_OPENER = /<<(-?)\s*'([A-Za-z_][A-Za-z0-9_]*)'/;
+function heredocOpeners(line: string): { tag: string; dash: boolean }[] {
   // Strip inline-code spans (`...`) so a prose mention of `<<'EOF'` is not mistaken for an opener.
   const code = line.replace(/`[^`]*`/g, "");
   if (code.trimStart().startsWith("#")) return []; // a commented-out example is not a real opener
-  const tags: string[] = [];
-  for (const m of code.matchAll(new RegExp(HEREDOC_OPENER.source, "g"))) tags.push(m[1]);
+  const tags: { tag: string; dash: boolean }[] = [];
+  for (const m of code.matchAll(new RegExp(HEREDOC_OPENER.source, "g")))
+    tags.push({ tag: m[2], dash: m[1] === "-" });
   return tags;
 }
 // Model the pending heredocs as an ordered QUEUE of expected terminators. One command line can
@@ -129,18 +133,36 @@ function heredocOpeners(line: string): string[] {
 // While a heredoc is pending its body is LITERAL shell input, so a body line is never a new opener:
 // once `cat <<'OUTER'` opens, a body line containing the text `<<'INNER'` is data the command reads,
 // not a redirection, and must not enqueue an `INNER` terminator (review 5387415767). So when the
-// queue is non-empty we only test whether the line is the FRONT terminator (column-1 bare
-// delimiter); if it is, that heredoc closes, and either way we skip opener discovery for the line.
-// Only a line scanned while NO heredoc is pending can contribute new openers. Every opener still
-// pending at end-of-input is an unterminated heredoc.
+// queue is non-empty we only test whether the line is the FRONT terminator; if it is, that heredoc
+// closes, and either way we skip opener discovery for the line. Only a line scanned while NO heredoc
+// is pending can contribute new openers. Every opener still pending at end-of-input is an
+// unterminated heredoc.
+//
+// Two refinements:
+//  - A `<<-` opener's terminator may be TAB-indented (shell strips leading tabs), so the terminator
+//    test strips leading tabs only when that pending opener used `<<-`; a plain `<<` still requires
+//    the bare delimiter at column 1.
+//  - A heredoc body does not begin until a backslash-CONTINUED command is complete: `cat <<'A' \`
+//    followed by `<<'B'` is one command stacking two heredocs, so the second line is more command,
+//    not body, and its opener must still be discovered (review 5387476399). While the previous line
+//    ends in a backslash we keep discovering openers even though a heredoc is pending; once the
+//    command completes (no trailing backslash) the body is literal as above.
 function malformedHeredocs(lines: string[]): string[] {
-  const pending: { tag: string; line: number }[] = [];
+  const pending: { tag: string; dash: boolean; line: number }[] = [];
+  const isTerminator = (line: string, open: { tag: string; dash: boolean }) =>
+    open.dash ? line.replace(/^\t+/, "") === open.tag : line === open.tag;
   for (let i = 0; i < lines.length; i++) {
     if (pending.length > 0) {
-      if (lines[i] === pending[0].tag) pending.shift();
-      continue; // a pending heredoc's body is literal text, never a new opener
+      if (isTerminator(lines[i], pending[0])) {
+        pending.shift();
+        continue;
+      }
+      // A pending body is literal — unless the command is still being continued (the previous line
+      // ended in a backslash), in which case this line is more command and can stack another opener.
+      const continued = (i > 0 ? lines[i - 1] : "").replace(/\s+$/, "").endsWith("\\");
+      if (!continued) continue;
     }
-    for (const tag of heredocOpeners(lines[i])) pending.push({ tag, line: i });
+    for (const open of heredocOpeners(lines[i])) pending.push({ ...open, line: i });
   }
   return pending.map(
     (open) => `line ${open.line + 1}: heredoc <<'${open.tag}' has no column-1 '${open.tag}' terminator`,
@@ -329,5 +351,30 @@ test("the heredoc block validator flags an indented terminator and accepts a col
   assert(
     malformedHeredocs([`cat <<'A' <<'B'`, `a`, `A`, `body with <<'C' inside`, `B`]).length === 0,
     "a stacked heredoc body containing opener-like text must still pass",
+  );
+  // A heredoc body does not begin until a backslash-CONTINUED command completes: `cat <<'A' \`
+  // followed by `<<'B'` is ONE command stacking two heredocs, so the second line is more command,
+  // not body, and its opener must be discovered. Omitting the `B` terminator is therefore malformed
+  // (review 5387476399).
+  assert(
+    malformedHeredocs([`cat <<'A' \\`, `<<'B'`, `body-A`, `A`]).length > 0,
+    "a backslash-continued second opener must be discovered, so its omitted terminator is flagged",
+  );
+  // The same split stacked-heredoc command with BOTH terminators present is well-formed and passes.
+  assert(
+    malformedHeredocs([`cat <<'A' \\`, `<<'B'`, `body-A`, `A`, `body-B`, `B`]).length === 0,
+    "a backslash-continued stacked command with both terminators must pass",
+  );
+  // A `<<-` opener's terminator may be TAB-indented (shell strips leading tabs), so a tab-indented
+  // `EOF` closes a `<<-'EOF'` heredoc (review 5387476399, previously-missed).
+  assert(
+    malformedHeredocs([`cat <<-'EOF'`, `\tbody`, `\tEOF`]).length === 0,
+    "a <<- heredoc must accept a tab-indented terminator",
+  );
+  // A plain `<<` opener still requires the bare delimiter at column 1: a tab-indented `EOF` does NOT
+  // terminate it, so the heredoc runs to end-of-input and is malformed.
+  assert(
+    malformedHeredocs([`cat <<'EOF'`, `\tbody`, `\tEOF`]).length > 0,
+    "a plain << heredoc must still reject a tab-indented terminator",
   );
 });
