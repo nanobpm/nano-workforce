@@ -41,8 +41,10 @@ function deployedMarkdownFiles(dir: string): string[] {
 // would slip past the guard (review 5387000199). `\s` matches the joined newline too. But `\s` also
 // lets the CLOSING quote of a quoted-heredoc delimiter (`<<'EOF'`) pair with a JSON body line on the
 // next line — the safe shape — so the lookbehind `(?<![A-Za-z0-9_])` requires the `'` to be an
-// OPENING quote (not preceded by a word char), excluding a delimiter's closing quote.
-const SINGLE_QUOTED_JSON_OPENER = /(?<![A-Za-z0-9_])'\s*\{"/;
+// OPENING quote (not preceded by a word char), excluding a delimiter's closing quote. JSON also
+// allows whitespace AFTER the opening brace (`'{ "summary":…}'`), which breaks on an apostrophe
+// identically — so the brace is followed by `\s*` too, not `"` directly (review 5387091667).
+const SINGLE_QUOTED_JSON_OPENER = /(?<![A-Za-z0-9_])'\s*\{\s*"/;
 const RESULT_FILE_REF = /\$\{?AGENT_RESULT_FILE\}?/;
 const isUnsafeResultLine = (line: string): boolean =>
   SINGLE_QUOTED_JSON_OPENER.test(line) && RESULT_FILE_REF.test(line);
@@ -151,6 +153,10 @@ test("the guard flags every unsafe result-file shape and accepts the heredoc sha
   assert(
     isUnsafeResultLine(`printf '%s' ' {"summary":"x"}' > "$AGENT_RESULT_FILE"`),
     "single-quoted JSON with leading whitespace before { must still be flagged",
+  );
+  assert(
+    isUnsafeResultLine(`printf '%s' '{ "summary":"review 123's finding"}' > "$AGENT_RESULT_FILE"`),
+    "single-quoted JSON with whitespace after { must still be flagged (review 5387091667)",
   );
   assert(
     isUnsafeResultLine(`cat > "\${AGENT_RESULT_FILE}" <<< '{"summary":"x"}'`),
