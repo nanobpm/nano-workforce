@@ -255,7 +255,8 @@
     "senior:trial-merge",
     "senior:retro",
     "senior:conformance",
-    "senior:scope-classify"
+    "senior:scope-classify",
+    "senior:adversarial-review"
   ],
   "surfaces": {
     "taskInbox": {

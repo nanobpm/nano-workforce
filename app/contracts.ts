@@ -140,6 +140,14 @@ export const ENV_CONTRACTS = {
       "Maximum bounded review-round re-dispatches the convergence loop makes to auto-ack unacked suppressed advisories before escalating to a human (#796); 0 escalates on the first ack-only block.",
     default: "2",
   },
+  NANO_PR_MAX_ADVERSARIAL_PASSES: {
+    category: "env",
+    name: "NANO_PR_MAX_ADVERSARIAL_PASSES",
+    owner: "app/service.ts",
+    semantics:
+      "Maximum local adversarial-review agent passes per convergence round before the round parks for a Copilot review (#844); non-blank findings re-dispatch review-round. 0 disables the stage.",
+    default: "1",
+  },
   NANO_PR_MAX_MERGE_STALL_ROUNDS: {
     category: "env",
     name: "NANO_PR_MAX_MERGE_STALL_ROUNDS",
