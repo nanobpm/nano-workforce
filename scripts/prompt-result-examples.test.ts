@@ -119,27 +119,30 @@ function heredocOpeners(line: string): string[] {
   for (const m of code.matchAll(new RegExp(HEREDOC_OPENER.source, "g"))) tags.push(m[1]);
   return tags;
 }
+// Model the pending heredocs as an ordered QUEUE of expected terminators. One command line can
+// stack several openers (`cat <<'A' <<'B'`), and the shell reads each body in turn, so EVERY opener
+// needs its own later column-1 terminator. A single terminator line therefore closes only the FRONT
+// pending heredoc — it must NOT be credited to every same-line opener that happens to share the
+// delimiter: `cat <<'EOF' <<'EOF'` closed by a single `EOF` still leaves a second heredoc open, so
+// it is malformed (review 5387296036). Walk the lines once: a line that exactly matches the front
+// pending terminator (column-1 bare delimiter) closes it; otherwise any openers on the line are
+// appended to the queue. This also subsumes the reused-delimiter case — a later block reusing a
+// delimiter simply enqueues another terminator, so an earlier malformed opener can't borrow it —
+// and matches the shell's rule that, once inside a body, only the front delimiter can terminate
+// (a later queued tag appearing in an earlier body is literal text, not a terminator). Every opener
+// still pending at EOF is an unterminated heredoc.
 function malformedHeredocs(lines: string[]): string[] {
-  const problems: string[] = [];
+  const pending: { tag: string; line: number }[] = [];
   for (let i = 0; i < lines.length; i++) {
-    for (const tag of heredocOpeners(lines[i])) {
-      let closed = false;
-      for (let j = i + 1; j < lines.length; j++) {
-        if (lines[j] === tag) {
-          closed = true;
-          break;
-        }
-        // Another executable opener reusing this delimiter appears BEFORE our terminator. A shell
-        // folds that opener line into THIS heredoc's body (writing garbage) and credits the later
-        // column-1 terminator to the first opener — so a reused delimiter would let one terminator
-        // close two openers and mask an indented/missing terminator on the first. Stop here so the
-        // malformed first block is reported instead of silently borrowing the reuse's terminator.
-        if (heredocOpeners(lines[j]).includes(tag)) break;
-      }
-      if (!closed) problems.push(`line ${i + 1}: heredoc <<'${tag}' has no column-1 '${tag}' terminator`);
+    if (pending.length > 0 && lines[i] === pending[0].tag) {
+      pending.shift();
+      continue;
     }
+    for (const tag of heredocOpeners(lines[i])) pending.push({ tag, line: i });
   }
-  return problems;
+  return pending.map(
+    (open) => `line ${open.line + 1}: heredoc <<'${open.tag}' has no column-1 '${open.tag}' terminator`,
+  );
 }
 
 test("no agent prompt writes $AGENT_RESULT_FILE from a single-quoted JSON string (#842)", () => {
@@ -277,5 +280,18 @@ test("the heredoc block validator flags an indented terminator and accepts a col
   assert(
     malformedHeredocs([`cat <<'EOF'`, `a`, `EOF`, `cat <<'EOF'`, `b`, `EOF`]).length === 0,
     "two well-formed blocks reusing one delimiter must pass",
+  );
+  // Several heredocs STACKED on one line (`cat <<'EOF' <<'EOF'`) each need their own terminator: the
+  // shell reads each body in turn, so one `EOF` closes only the first and leaves the second open.
+  // A single terminator must not be credited to every same-line opener sharing the delimiter
+  // (review 5387296036).
+  assert(
+    malformedHeredocs([`cat <<'EOF' <<'EOF'`, `body`, `EOF`]).length > 0,
+    "one terminator must not close two same-line heredocs sharing a delimiter",
+  );
+  // The same stacked pair with BOTH terminators present is well-formed and must pass.
+  assert(
+    malformedHeredocs([`cat <<'EOF' <<'EOF'`, `a`, `EOF`, `b`, `EOF`]).length === 0,
+    "two same-line heredocs each with their own column-1 terminator must pass",
   );
 });
