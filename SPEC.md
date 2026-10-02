@@ -155,8 +155,9 @@ straight to `[Record round]`. The `senior:adversarial-review` service task (prom
 delivered via the `prompts/adversarial-review.md` linked resource) critiques the diff and
 returns `adversarialFindings`. Non-blank findings **re-dispatch `[Review round]` within the
 same round** (round unchanged) with `adversarialFindings` seeded, so the agent fixes them
-before Copilot ever sees the push; a clean result records the round and proceeds to
-`[Check progress]`. The pass budget is `MAX_ADVERSARIAL_PASSES` (default 1,
+before this app's poller solicits the Copilot review (the only `waiting_review` trigger); a
+clean result records the round and proceeds to `[Check progress]`. The pass budget is
+`MAX_ADVERSARIAL_PASSES` (default 1,
 `NANO_PR_MAX_ADVERSARIAL_PASSES=0` disables the stage).
 
 **Durable adjudication auto-resume (issue #806).** A human's answer to a `wait-answer`

@@ -27,7 +27,7 @@ import {
   CONFORMANCE_ESCALATION_ELEMENT,
   conformanceEscalationQuestion,
 } from "./conformance.ts";
-import { readEnv } from "./contracts.ts";
+import { envContract, readEnvOr } from "./contracts.ts";
 import { makeDefaultReadHead } from "./currentHead.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
@@ -196,8 +196,13 @@ export const MAX_ACK_RETRIES = clampCiFixBudget(process.env.NANO_PR_MAX_ACK_RETR
  * `senior:adversarial-review` agent over its diff BEFORE the round parks on `waiting_review` (the only
  * status the poller solicits a Copilot review for); non-blank findings re-dispatch `review-round`, up
  * to this many passes per round. Default 1; `NANO_PR_MAX_ADVERSARIAL_PASSES=0` disables the stage.
- * Reuses the CI-fix budget clamp (allows 0 = disable, ceiling-capped). */
-export const MAX_ADVERSARIAL_PASSES = clampCiFixBudget(readEnv("NANO_PR_MAX_ADVERSARIAL_PASSES"), 1);
+ * Reuses the CI-fix budget clamp (allows 0 = disable, ceiling-capped). The clamp fallback is
+ * derived from the registered `default` so the schema stays the single source of truth (a
+ * registry edit can't drift from a second literal here). */
+export const MAX_ADVERSARIAL_PASSES = clampCiFixBudget(
+  readEnvOr("NANO_PR_MAX_ADVERSARIAL_PASSES"),
+  Number(envContract("NANO_PR_MAX_ADVERSARIAL_PASSES").default),
+);
 
 /** How many times the mergeable-wait timeout backstop (`merge-stall-probe`) will re-derive
  * mergeability from ground truth and re-arm the merge stage before giving up and escalating to a
