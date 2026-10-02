@@ -51,11 +51,13 @@ const isUnsafeResultLine = (line: string): boolean =>
 
 // A single unsafe command need not fit on one physical line: a shell command split with `\`
 // continuations, or a single-quoted JSON assignment on one line whose value is written to the
-// result file on the next, has the two signals on different lines and slips past a per-line check.
-// So scan LOGICAL shell blocks: join continuation lines, then test a sliding window of consecutive
-// lines so a split command / assignment-then-write is still caught (the failure class is "a
-// single-quoted JSON string reaches the result file", which can span lines).
-const LOGICAL_WINDOW = 4;
+// result file on another, has the two signals on different lines and slips past a per-line check.
+// And the assignment and write can be ARBITRARILY separated inside one shell example — three
+// comments between them push the write past any fixed line-distance window, yet the apostrophe
+// still breaks the assignment (review 5387175386). So scope the scan to the unit an agent actually
+// copies and runs — the whole fenced code block — not a fixed window: join continuation lines,
+// then test each fenced block as one unit so a split command / assignment-then-write is caught no
+// matter how far apart the two signals sit inside the block.
 function logicalLines(lines: string[]): string[] {
   const joined: string[] = [];
   let buf = "";
@@ -70,12 +72,34 @@ function logicalLines(lines: string[]): string[] {
   if (buf) joined.push(buf);
   return joined;
 }
+// Extract the fenced ``` code blocks from a markdown example. Only a fenced block is a runnable
+// shell example an agent copies verbatim; prose between blocks never mixes into a command, so a
+// single-quoted JSON opener and a result-file write only form the unsafe shape when they share a
+// block. Scoping to the block (not the whole file) is what keeps a benign single-quoted JSON in
+// one block from pairing with an unrelated `$AGENT_RESULT_FILE` prose mention in another.
+function fencedBlocks(lines: string[]): string[][] {
+  const blocks: string[][] = [];
+  let cur: string[] | null = null;
+  for (const line of lines) {
+    if (/^```/.test(line.trim())) {
+      if (cur) {
+        blocks.push(cur);
+        cur = null;
+      } else {
+        cur = [];
+      }
+    } else if (cur) {
+      cur.push(line);
+    }
+  }
+  if (cur) blocks.push(cur);
+  return blocks;
+}
 function unsafeResultBlocks(lines: string[]): number[] {
-  const logical = logicalLines(lines);
   const bad: number[] = [];
-  for (let i = 0; i < logical.length; i++) {
-    const window = logical.slice(i, i + LOGICAL_WINDOW).join("\n");
-    if (SINGLE_QUOTED_JSON_OPENER.test(window) && RESULT_FILE_REF.test(window)) bad.push(i);
+  for (const block of fencedBlocks(lines)) {
+    const text = logicalLines(block).join("\n");
+    if (SINGLE_QUOTED_JSON_OPENER.test(text) && RESULT_FILE_REF.test(text)) bad.push(0);
   }
   return bad;
 }
@@ -174,21 +198,52 @@ test("the guard flags every unsafe result-file shape and accepts the heredoc sha
 
 test("the guard flags unsafe shapes split across lines (continuations and assignment-then-write)", () => {
   // A single-quoted JSON and the result-file write on DIFFERENT physical lines must still be caught.
-  const continuation = [`printf '%s' \\`, `'{"summary":"x"}' \\`, `> "$AGENT_RESULT_FILE"`];
+  // Each fixture is a fenced ``` block — the unit an agent copies and runs.
+  const continuation = ["```sh", `printf '%s' \\`, `'{"summary":"x"}' \\`, `> "$AGENT_RESULT_FILE"`, "```"];
   assert(unsafeResultBlocks(continuation).length > 0, "backslash-continued unsafe command must be flagged");
-  const assignThenWrite = [`JSON='{"summary":"x"}'`, `printf '%s' "$JSON" > "$AGENT_RESULT_FILE"`];
+  const assignThenWrite = ["```sh", `JSON='{"summary":"x"}'`, `printf '%s' "$JSON" > "$AGENT_RESULT_FILE"`, "```"];
   assert(unsafeResultBlocks(assignThenWrite).length > 0, "single-quoted JSON assigned then written must be flagged");
   // A MULTILINE single-quoted value — `JSON='` opens on one line and the JSON object starts on the
-  // next — is one shell string. The joined window inserts a newline between `'` and `{"`, which a
+  // next — is one shell string. The joined block inserts a newline between `'` and `{"`, which a
   // horizontal-only whitespace class cannot cross (review 5387000199): this shape must be flagged.
-  const multilineSingleQuoted = [`JSON='`, `{"summary":"x"}'`, `printf '%s' "$JSON" > "$AGENT_RESULT_FILE"`];
+  const multilineSingleQuoted = ["```sh", `JSON='`, `{"summary":"x"}'`, `printf '%s' "$JSON" > "$AGENT_RESULT_FILE"`, "```"];
   assert(
     unsafeResultBlocks(multilineSingleQuoted).length > 0,
     "multiline single-quoted JSON value reaching the result file must be flagged",
   );
   // The safe heredoc shape spans lines but has no single-quoted JSON opener, so it must pass.
-  const safeHeredoc = [`cat > "$AGENT_RESULT_FILE" <<'EOF'`, `{"summary":"x"}`, `EOF`];
+  const safeHeredoc = ["```sh", `cat > "$AGENT_RESULT_FILE" <<'EOF'`, `{"summary":"x"}`, `EOF`, "```"];
   assert(unsafeResultBlocks(safeHeredoc).length === 0, "safe heredoc block must pass");
+  // A benign single-quoted JSON in one fenced block must NOT pair with a `$AGENT_RESULT_FILE` prose
+  // mention in a DIFFERENT block — scoping to the block (not the whole file) prevents that false
+  // positive.
+  const separateBlocks = [
+    "```sh",
+    `echo '{"status":"ok"}'`,
+    "```",
+    "Write the result to `$AGENT_RESULT_FILE` as shown above.",
+  ];
+  assert(
+    unsafeResultBlocks(separateBlocks).length === 0,
+    "a benign single-quoted JSON in one block and a result-file mention in another must not be flagged",
+  );
+  // An assignment and its write can be arbitrarily separated inside one shell example. Three
+  // comments between them push the write past a fixed four-line window, yet the apostrophe still
+  // breaks the assignment — so the scan is scoped to the whole fenced code block, not a fixed
+  // line distance (review 5387175386).
+  const beyondWindow = [
+    "```sh",
+    `JSON='{"summary":"review 123's finding"}'`,
+    `# comment one`,
+    `# comment two`,
+    `# comment three`,
+    `printf '%s' "$JSON" > "$AGENT_RESULT_FILE"`,
+    "```",
+  ];
+  assert(
+    unsafeResultBlocks(beyondWindow).length > 0,
+    "single-quoted JSON assigned then written beyond a fixed four-line window must be flagged",
+  );
 });
 
 test("the heredoc block validator flags an indented terminator and accepts a column-1 one", () => {
