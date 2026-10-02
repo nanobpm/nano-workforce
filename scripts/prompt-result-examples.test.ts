@@ -113,7 +113,11 @@ function unsafeResultBlocks(lines: string[]): number[] {
 // Capture whether the opener used `<<-` (strip-leading-tabs): shell `<<-` deliberately permits a
 // TAB-indented terminator, so the dash flag must be preserved per pending heredoc and the
 // terminator check strips leading tabs only for a `<<-` opener (review 5387476399, previously-missed).
-const HEREDOC_OPENER = /<<(-?)\s*'([A-Za-z_][A-Za-z0-9_]*)'/;
+// The `<<` must NOT be preceded by another `<`: a here-STRING `cat <<<'EOF'` is not a heredoc at
+// all (it feeds the literal text `EOF` to the command's stdin), so without the `(?<!<)` lookbehind
+// the regex matches the here-string's final two `<` and reports an unterminated heredoc where none
+// exists (review 5387687539).
+const HEREDOC_OPENER = /(?<!<)<<(-?)\s*'([A-Za-z_][A-Za-z0-9_]*)'/;
 function heredocOpeners(line: string): { tag: string; dash: boolean }[] {
   // Strip inline-code spans (`...`) so a prose mention of `<<'EOF'` is not mistaken for an opener.
   const code = line.replace(/`[^`]*`/g, "");
@@ -400,5 +404,18 @@ test("the heredoc block validator flags an indented terminator and accepts a col
   assert(
     malformedHeredocs([`cat <<'OUTER'`, `some text \\`, `<<'INNER'`, `OUTER`]).length === 0,
     "a backslash at the end of a body line must not reopen command mode and parse the next body line as an opener",
+  );
+  // A here-STRING `cat <<<'EOF'` is NOT a heredoc: it feeds the literal text `EOF` to the command's
+  // stdin (real bash prints `EOF`, exit 0 — no terminator is ever expected). The opener regex must
+  // not match the here-string's final two `<`, so no `EOF` terminator is required (review 5387687539).
+  assert(
+    malformedHeredocs([`cat <<<'EOF'`]).length === 0,
+    "a here-string `<<<'EOF'` must not be reported as an unterminated heredoc",
+  );
+  // A real `<<` heredoc still matches even when it directly follows other text on the line, and a
+  // here-string's leading `<<<` must not swallow a genuine `<<` opener later on the same line.
+  assert(
+    malformedHeredocs([`cat <<<'X' && cat <<'EOF'`, `body`, `EOF`]).length === 0,
+    "a real heredoc later on a line that also contains a here-string must still be validated",
   );
 });
