@@ -1,3 +1,9 @@
+## [0.199.0](https://github.com/nanobpm/nano-workforce/compare/v0.198.1...v0.199.0) (2026-10-02)
+
+### Features
+
+* **review-round:** fix the bug class + self-review before push; heredoc result examples ([#843](https://github.com/nanobpm/nano-workforce/issues/843)) ([0b2f26f](https://github.com/nanobpm/nano-workforce/commit/0b2f26f817f15191ef530075d34f6131c99e43cb)), closes [#842](https://github.com/nanobpm/nano-workforce/issues/842)
+
 ## [0.198.1](https://github.com/nanobpm/nano-workforce/compare/v0.198.0...v0.198.1) (2026-10-02)
 
 ### Bug Fixes
