@@ -124,25 +124,37 @@ function heredocOpeners(line: string): string[] {
 // needs its own later column-1 terminator. A single terminator line therefore closes only the FRONT
 // pending heredoc — it must NOT be credited to every same-line opener that happens to share the
 // delimiter: `cat <<'EOF' <<'EOF'` closed by a single `EOF` still leaves a second heredoc open, so
-// it is malformed (review 5387296036). Walk the lines once: a line that exactly matches the front
-// pending terminator (column-1 bare delimiter) closes it; otherwise any openers on the line are
-// appended to the queue. This also subsumes the reused-delimiter case — a later block reusing a
-// delimiter simply enqueues another terminator, so an earlier malformed opener can't borrow it —
-// and matches the shell's rule that, once inside a body, only the front delimiter can terminate
-// (a later queued tag appearing in an earlier body is literal text, not a terminator). Every opener
-// still pending at EOF is an unterminated heredoc.
+// it is malformed (review 5387296036).
+//
+// While a heredoc is pending its body is LITERAL shell input, so a body line is never a new opener:
+// once `cat <<'OUTER'` opens, a body line containing the text `<<'INNER'` is data the command reads,
+// not a redirection, and must not enqueue an `INNER` terminator (review 5387415767). So when the
+// queue is non-empty we only test whether the line is the FRONT terminator (column-1 bare
+// delimiter); if it is, that heredoc closes, and either way we skip opener discovery for the line.
+// Only a line scanned while NO heredoc is pending can contribute new openers. Every opener still
+// pending at end-of-input is an unterminated heredoc.
 function malformedHeredocs(lines: string[]): string[] {
   const pending: { tag: string; line: number }[] = [];
   for (let i = 0; i < lines.length; i++) {
-    if (pending.length > 0 && lines[i] === pending[0].tag) {
-      pending.shift();
-      continue;
+    if (pending.length > 0) {
+      if (lines[i] === pending[0].tag) pending.shift();
+      continue; // a pending heredoc's body is literal text, never a new opener
     }
     for (const tag of heredocOpeners(lines[i])) pending.push({ tag, line: i });
   }
   return pending.map(
     (open) => `line ${open.line + 1}: heredoc <<'${open.tag}' has no column-1 '${open.tag}' terminator`,
   );
+}
+// Validate a whole Markdown file one fenced block at a time. A runnable heredoc example lives inside
+// a single ``` fence; scanning the whole file at once lets an unterminated opener borrow a bare
+// delimiter from later prose or another fence (review 5387415767, previously-missed). `malformedHeredocs`
+// itself validates ONE runnable unit (its `lines` are the block), so the cross-fence isolation lives
+// here in the caller: feed each fenced block separately so a terminator can never cross a fence.
+function malformedHeredocsInFile(lines: string[]): string[] {
+  const bad: string[] = [];
+  for (const block of fencedBlocks(lines)) bad.push(...malformedHeredocs(block));
+  return bad;
 }
 
 test("no agent prompt writes $AGENT_RESULT_FILE from a single-quoted JSON string (#842)", () => {
@@ -163,7 +175,7 @@ test("every deployed heredoc is a complete, executable block with a column-1 ter
   for (const file of deployedMarkdownFiles(RESOURCES_DIR)) {
     const rel = file.slice(RESOURCES_DIR.length + 1);
     const lines = readFileSync(file, "utf8").split("\n");
-    for (const p of malformedHeredocs(lines)) problems.push(`${rel}: ${p}`);
+    for (const p of malformedHeredocsInFile(lines)) problems.push(`${rel}: ${p}`);
   }
   assert(
     problems.length === 0,
@@ -269,12 +281,23 @@ test("the heredoc block validator flags an indented terminator and accepts a col
     malformedHeredocs(["   Use the **quoted heredoc** shown above (`<<'EOF'`), never a single-quoted"]).length === 0,
     "inline-code mention of <<'EOF' in prose must not be treated as an opener",
   );
-  // A later block REUSING the same delimiter must not lend its terminator to an earlier malformed
-  // opener: the first `EOF` is indented, so a shell would swallow the second opener and write
-  // garbage. The first block must be flagged, not credited the reuse's column-1 terminator.
+  // A heredoc whose terminator is INDENTED is not terminated at that line, so the shell keeps
+  // reading body until a column-1 delimiter. Under correct shell semantics (verified against bash),
+  // a later `cat <<'EOF'` line INSIDE that pending body is literal text, not a second opener — so
+  // `cat <<'EOF'` / `  EOF` / `cat <<'EOF'` / `body` / `EOF` is ONE well-formed heredoc closed by the
+  // final column-1 `EOF`. The "reused delimiter lends its terminator" hazard this fixture guarded in
+  // round 8 is real only when the two blocks are SEPARATE runnable units — i.e. in different fences —
+  // which is exactly the cross-fence case `malformedHeredocsInFile` now isolates (review 5387415767).
+  // Within one pending body there is no second opener to mis-credit, so this must PASS.
   assert(
-    malformedHeredocs([`cat <<'EOF'`, `  EOF`, `cat <<'EOF'`, `body`, `EOF`]).length > 0,
-    "a reused delimiter must not credit a later terminator to an earlier malformed opener",
+    malformedHeredocs([`cat <<'EOF'`, `  EOF`, `cat <<'EOF'`, `body`, `EOF`]).length === 0,
+    "a later same-delimiter line inside a pending body is literal text, not a borrowed terminator",
+  );
+  // The cross-fence borrow IS malformed: an unterminated opener in one fence must not be closed by a
+  // bare delimiter in later prose or another fence. This is the per-fence isolation fix.
+  assert(
+    malformedHeredocsInFile(["```sh", `cat <<'EOF'`, "```", "trailing prose", "EOF"]).length > 0,
+    "an unterminated fence must not borrow a terminator from later prose (review 5387415767)",
   );
   // Two correctly-terminated blocks reusing the same delimiter must still pass.
   assert(
@@ -293,5 +316,18 @@ test("the heredoc block validator flags an indented terminator and accepts a col
   assert(
     malformedHeredocs([`cat <<'EOF' <<'EOF'`, `a`, `EOF`, `b`, `EOF`]).length === 0,
     "two same-line heredocs each with their own column-1 terminator must pass",
+  );
+  // A pending heredoc's body is LITERAL shell input: a body line containing the text `<<'INNER'` is
+  // data the command reads, not a redirection, so it must NOT enqueue an `INNER` terminator. The
+  // block is one well-formed heredoc closed by `OUTER` (review 5387415767).
+  assert(
+    malformedHeredocs([`cat <<'OUTER'`, `this body mentions <<'INNER' as literal text`, `OUTER`]).length === 0,
+    "a body line containing a heredoc-opener-looking text must not be treated as a new opener",
+  );
+  // The same holds when heredocs are stacked: once `A` is pending, a body line with `<<'C'` is
+  // literal until `A` (then `B`) terminate in turn.
+  assert(
+    malformedHeredocs([`cat <<'A' <<'B'`, `a`, `A`, `body with <<'C' inside`, `B`]).length === 0,
+    "a stacked heredoc body containing opener-like text must still pass",
   );
 });
