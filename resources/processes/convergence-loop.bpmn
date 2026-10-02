@@ -205,9 +205,9 @@
           <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
           <zeebe:output source="=adversarialFindings" target="adversarialFindings" />
           <zeebe:output source="=(if advPass = null then 0 else advPass) + 1" target="advPass" />
-          <zeebe:output source="=null" target="status" />
-          <zeebe:output source="=null" target="summary" />
-          <zeebe:output source="=null" target="question" />
+          <zeebe:output source="=(if adversarialFindings != null and trim(adversarialFindings) != &#34;&#34; then null else status)" target="status" />
+          <zeebe:output source="=(if adversarialFindings != null and trim(adversarialFindings) != &#34;&#34; then null else summary)" target="summary" />
+          <zeebe:output source="=(if adversarialFindings != null and trim(adversarialFindings) != &#34;&#34; then null else question)" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_advDue</bpmn:incoming>

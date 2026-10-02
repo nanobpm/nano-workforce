@@ -681,7 +681,7 @@ test("pollIncidents picks the oldest incident by creationTime, sorting a missing
 //   3. a non-agent job (an internal `pr.*` worker) is defensively excluded even if the wire `$in`
 //      filter is ignored,
 //   4. a merely-created (unactivated) agent job — no `worker` yet — reads as "queued" (lease null).
-function jobActivationFetch(byInstance: Record<string, unknown[]>) {
+function jobActivationFetch(byInstance: Record<string, unknown[]>, opts: { ignoreTypeFilter?: boolean } = {}) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const u = typeof url === "string" ? url : url.toString();
     if (!u.endsWith("/jobs/search")) {
@@ -695,9 +695,12 @@ function jobActivationFetch(byInstance: Record<string, unknown[]>) {
     // test reproduces the real defect: a single-type `senior:pr-review` filter returns ZERO items for
     // an adversarial-pass job (the engine filters server-side), which is exactly what cleared the
     // lease pre-fix. A stub that ignores `type` would pass against the old code and prove nothing.
+    // `ignoreTypeFilter` simulates an engine that IGNORES the `$in` filter, so the non-agent item
+    // reaches `pollJobActivationImpl` and the test exercises the defensive client-side `.includes`
+    // re-filter (service.ts) rather than the wire filter doing the work.
     const t = body.filter?.type;
     const wanted: string[] | null = typeof t === "string" ? [t] : Array.isArray(t?.$in) ? t.$in : null;
-    const items = wanted == null ? all : all.filter((j) => wanted.includes(j.type ?? ""));
+    const items = opts.ignoreTypeFilter || wanted == null ? all : all.filter((j) => wanted.includes(j.type ?? ""));
     return Promise.resolve(
       new Response(JSON.stringify({ items }), { status: 200, headers: { "content-type": "application/json" } }),
     );
@@ -798,12 +801,19 @@ test("pollJobActivation excludes a non-agent job and reports an unactivated agen
   const prevFetch = globalThis.fetch;
   try {
     // An internal `pr.*` worker job is open and "leased" — but it is not a convergence agent, so it
-    // must NOT keep `active_worker` lit even if the engine ignores the wire `$in` type filter.
-    globalThis.fetch = jobActivationFetch({
-      "PI-22": [
-        { type: "pr.capture-head", worker: "host-internal", deadline: "2024-01-01T00:30:00Z", state: "CREATED" },
-      ],
-    }) as typeof fetch;
+    // must NOT keep `active_worker` lit even if the engine ignores the wire `$in` type filter. Pass
+    // `ignoreTypeFilter` so the mock returns the non-agent item UNFILTERED (an engine that ignores
+    // `$in`): the defensive client-side `.includes(j.type)` re-filter in `pollJobActivationImpl` is
+    // then what excludes it — so the assertion genuinely guards that branch (a wire-filtered stub
+    // would pass even if the defensive check were deleted).
+    globalThis.fetch = jobActivationFetch(
+      {
+        "PI-22": [
+          { type: "pr.capture-head", worker: "host-internal", deadline: "2024-01-01T00:30:00Z", state: "CREATED" },
+        ],
+      },
+      { ignoreTypeFilter: true },
+    ) as typeof fetch;
     await pollJobActivationImpl(data, "http://engine/v2", headers);
     assertEquals(row.active_worker, null);
     assertEquals(row.lease_until, null);

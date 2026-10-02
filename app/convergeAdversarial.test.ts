@@ -153,6 +153,37 @@ test("a clean adversarial pass proceeds straight to persist-round", async () => 
   assert(completions(engine, "persist-round") === 1, runs(engine));
 });
 
+// Regression for Copilot review 5386944381 (round 5): the round-4 verdict reset on
+// `adversarial-review` was UNCONDITIONAL, so it also fired on the clean/default arm
+// (`f_advClean` -> `persist-round`). A first-round `waiting` verdict was therefore blanked before
+// `pr.progress-check` ran; the real worker classifies a blank status as `addressed`, and because the
+// head did not change it routed the initial pass to no-progress escalation instead of parking on
+// `waiting_review` for Copilot. The reset must be findings-ONLY: a clean pass must PRESERVE the
+// review-round verdict (status/summary/question) all the way to persist-round.
+test("a clean adversarial pass preserves a first-round waiting verdict for progress-check", async () => {
+  const { engine, seen } = await boot({
+    responses: {
+      "senior:pr-review": { status: "waiting", summary: "no review yet" },
+      "senior:adversarial-review": CLEAN,
+    },
+  });
+  assertThatInstance(engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+  assert(completions(engine, "adversarial-review") === 1, runs(engine));
+  assert(completions(engine, "persist-round") === 1, runs(engine));
+  // The clean pass must NOT blank the verdict: persist-round / progress-check see `waiting`, so the
+  // worker parks the PR on `waiting_review` (the only status the poller solicits a review for).
+  const recorded = seen["pr.persist-round"][0];
+  assert(
+    recorded.status === "waiting",
+    `a clean pass must preserve the waiting verdict; status reaching persist-round: ${JSON.stringify(recorded.status)}`,
+  );
+  const progress = seen["pr.progress-check"][0];
+  assert(
+    progress.status === "waiting",
+    `progress-check must see the waiting verdict, not a blanked one: ${JSON.stringify(progress.status)}`,
+  );
+});
+
 test("the adversarial pass is bounded by advMax per round", async () => {
   const { engine } = await boot({
     responses: { "senior:adversarial-review": { adversarialFindings: FINDINGS, adversarialSummary: "always" } },
