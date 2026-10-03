@@ -1,3 +1,9 @@
+## [0.200.2](https://github.com/nanobpm/nano-workforce/compare/v0.200.1...v0.200.2) (2026-10-03)
+
+### Documentation
+
+* **agent-guide:** require repository on every delivery-graph agent node ([#851](https://github.com/nanobpm/nano-workforce/issues/851)) ([d6770ae](https://github.com/nanobpm/nano-workforce/commit/d6770ae2f6acc490e102aecaf0cab17ca5d10119)), closes [#850](https://github.com/nanobpm/nano-workforce/issues/850) [#850](https://github.com/nanobpm/nano-workforce/issues/850) [#505](https://github.com/nanobpm/nano-workforce/issues/505) [#850](https://github.com/nanobpm/nano-workforce/issues/850) [739/#776](https://github.com/739/nano-workforce/issues/776) [#505](https://github.com/nanobpm/nano-workforce/issues/505)
+
 ## [0.200.1](https://github.com/nanobpm/nano-workforce/compare/v0.200.0...v0.200.1) (2026-10-03)
 
 ### Performance Improvements
