@@ -61,7 +61,7 @@ test("the guide documents the delivery-graph surface (ADR 0005)", async () => {
   // The closed node vocabulary: assert the exact config snippet for each of the four kinds,
   // so the test fails if §9's node-kind table is removed or reworded — not merely if the bare
   // words "agent"/"wait"/"human"/"connector" appear anywhere else in the guide.
-  assert(md.includes("agent: { jobType, repository?, baseBranch?, prompt?, converge?, merge? }"), "documents the agent node config");
+  assert(md.includes("agent: { jobType, repository?, baseBranch?, prompt?, converge?, merge?, timeout? }"), "documents the agent node config");
   // Per-node repository provisioning is only enforced at DISPATCH (a run-level fallback can satisfy it),
   // so compile stages an unprovisioned graph silently — the guide must tell the authoring agent to
   // declare `repository` on every agent node, or the operator's Dispatch fails out of the agent's loop.

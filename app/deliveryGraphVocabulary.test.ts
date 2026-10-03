@@ -6,7 +6,9 @@
 // key sets are byte-identical to the closed sets in `app/deliveryGraph.ts` / `app/readiness.ts` /
 // `app/convergeTargets.ts` (AGENTS.md — "no drift surfaces").
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
 import { CONVERGE_MERGE_TARGET, CONVERGE_TARGET, isConvergeTarget, MERGE_MAIN_TARGET } from "./convergeTargets.ts";
 import { DELIVERY_FACT_TYPES, DELIVERY_GUARD_SCALAR_TYPES, DELIVERY_NODE_KINDS } from "./deliveryGraph.ts";
 import { deliveryGraphVocabulary } from "./deliveryGraphVocabulary.ts";
@@ -101,23 +103,41 @@ test("fact-threading rule names the unbound-pr rejection", () => {
   assert.match(vocab.factThreading.rule, /unbound-pr/);
 });
 
-test("the agent entry carries the per-node repository provisioning semantics (#739/#850)", () => {
-  // The vocabulary is the guide's "cannot drift" structured discovery surface — when #739 added
-  // per-node `repository`/`baseBranch` to the agent config the vocabulary entry was left behind, so
-  // an agent authoring from `getDeliveryGraphVocabulary` alone could still stage an unprovisioned
-  // graph (issue #850). Pin the fields AND the dispatch-time failure mode so the entry can't regress.
+test("the agent entry's field sets are DERIVED from the OpenAPI DeliveryNodeAgent.agent contract (#739/#850)", () => {
+  // The #850 failure mode is drift between `DeliveryNodeAgent.agent` (the authoritative OpenAPI
+  // contract) and this vocabulary surface. A literal field list duplicated here would NOT catch it:
+  // if OpenAPI adds or removes an `agent` property, a hand-copied list stays green while the surface
+  // lies. So derive the required/optional sets from the PARSED spec and compare the sets directly —
+  // the vocabulary cannot silently drift from the contract it claims to mirror.
+  const ROOT = decodeURIComponent(new URL("../", import.meta.url).pathname);
+  const spec = parseYaml(readFileSync(`${ROOT}openapi.yaml`, "utf8")) as Record<string, any>;
+  const schema = spec?.components?.schemas?.DeliveryNodeAgent;
+  assert.ok(schema, "openapi.yaml must define components.schemas.DeliveryNodeAgent");
+  // DeliveryNodeAgent is `allOf: [DeliveryNodeCommon, { properties: { agent: {…} } }]` — find the
+  // member that carries the `agent` sub-schema (the node's config contract).
+  const agentSchema = (schema.allOf as Array<Record<string, any>> | undefined)?.map((m) => m?.properties?.agent).find(Boolean);
+  assert.ok(agentSchema?.properties, "DeliveryNodeAgent.agent must declare its config properties");
+  const specRequired = [...((agentSchema.required as string[] | undefined) ?? [])].sort();
+  const specOptional = Object.keys(agentSchema.properties as Record<string, unknown>)
+    .filter((k) => !specRequired.includes(k))
+    .sort();
+
   const vocab = deliveryGraphVocabulary();
   const agent = vocab.nodeKinds.find((n) => n.kind === "agent");
   assert.ok(agent, "agent node-kind entry must exist");
-  assert.deepEqual(agent.requiredFields, ["jobType"]);
-  for (const field of ["repository", "baseBranch", "prompt", "converge", "merge", "timeout"]) {
-    assert.ok(
-      agent.optionalFields.includes(field),
-      `agent.optionalFields is missing '${field}' — the vocabulary drifted from the DeliveryNodeAgent config`,
-    );
-  }
-  // The non-obvious rule an authoring agent must learn from the surface: an ABSENT repository is not
-  // compile-rejected (a run-level fallback can satisfy it) — it fails at the OPERATOR's Dispatch.
+  assert.deepEqual(
+    [...agent.requiredFields].sort(),
+    specRequired,
+    "agent.requiredFields drifted from DeliveryNodeAgent.agent.required in openapi.yaml",
+  );
+  assert.deepEqual(
+    [...agent.optionalFields].sort(),
+    specOptional,
+    "agent.optionalFields drifted from DeliveryNodeAgent.agent's optional properties in openapi.yaml",
+  );
+  // The non-obvious rules an authoring agent must learn from the surface prose: an ABSENT repository
+  // is not compile-rejected (a run-level fallback can satisfy it) — it fails at the OPERATOR's
+  // Dispatch; and the per-node SLA timeout override exists.
   assert.match(agent.summary, /resolve to no repository/, "names the dispatch-time failure the author must pre-empt");
   assert.match(agent.summary, /invalid-node-repository/, "names the compile-time validation for a present value");
   assert.match(agent.summary, /repoless/, "names the checkout-less opt-out");

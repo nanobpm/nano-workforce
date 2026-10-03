@@ -564,34 +564,42 @@ layer schedules, it does not re-implement execution):
 
 | kind | config | what it does | may `emits`? |
 |---|---|---|---|
-| `agent` | `agent: { jobType, repository?, baseBranch?, prompt?, converge?, merge? }` | a worker runs an agent job type (the fan-out body) in a fresh checkout of its `repository` (see *Provision every agent node* below). **Side-effecting.** First-class **`converge?` / `merge?`** cell policy (§9.4) — a **declared, compiler-validated** completion-policy flag that *declares* review-convergence / landing intent (`merge` requires `converge`); a raw `senior:converge`/`senior:merge` job is rejected. This slice adds + validates the flags; the delivery-graph execution wiring that consumes them lands in a follow-up slice. | yes |
+| `agent` | `agent: { jobType, repository?, baseBranch?, prompt?, converge?, merge?, timeout? }` | a worker runs an agent job type (the fan-out body) in a fresh checkout of its `repository` (see *Provision every agent node* below). **Side-effecting.** First-class **`converge?` / `merge?`** cell policy (§9.4) — a **declared, compiler-validated** completion-policy flag that *declares* review-convergence / landing intent (`merge` requires `converge`); a raw `senior:converge`/`senior:merge` job is rejected. This slice adds + validates the flags; the delivery-graph execution wiring that consumes them lands in a follow-up slice. **`timeout?`** is an OPTIONAL per-node ISO-8601 SLA (#505) that overrides the run-level `nodeTimeout` (and the `PT1H` default) for this node's bounded-timeout → escalate boundary, so a legitimately-long node outlasts a quick gate without a spurious escalation. | yes |
 | `wait` | `wait: <ReadinessProbe>` | a durable, bounded readiness probe — kind ∈ `http`, `command`, `npm`, `github-check`, `capability`, `pr`, `epic`. Read-only. | yes (binds observed facts) |
 | `human` | `human?: { formKey?, prompt? }` | a scheduled user task + form (the Tasks inbox, §3). Blocks dependents, SLA-bounded, answerable by a human **or** an agent. | yes |
 | `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). Three **real targets** ship today — **`converge`**, **`converge-merge`** (unit → base branch) and **`merge-main`** (graph → `main`, the two-level top-level land) (§9.4); other targets are a forward-declared stub. | yes |
 
 > **Provision every `agent` node with a repository — compile will NOT catch it.** Each `agent`
 > cell runs in an isolated checkout: the harness clones the node's **`repository`**
-> (`owner/repo`, no `.git`/URL) at **`baseBranch`** (omit it to use the repo's default branch)
-> and cuts `feat/<node.id>` off it (#739/#776). A node with no `repository` can only be
+> (`owner/repo`, no `.git`/URL) at **`baseBranch`** — resolved **per field**: the node's own
+> `baseBranch` wins, else the **run-level dispatch `baseBranch`**, and only when *neither* exists
+> the repository's default branch — and cuts `feat/<node.id>` off it (#739/#776). A node with no
+> `repository` can only be
 > provisioned by a **run-level fallback** the operator supplies *at dispatch*, so the compile door
 > treats it as valid and **stages it without a warning** — then the operator's Dispatch fails
 > with `N agent node(s) resolve to no repository (…)`, and you are not in the loop to fix it.
 > So when you author a graph:
 >
-> - **Declare `repository` (and `baseBranch` when it isn't the default branch) on EVERY `agent`
+> - **Declare `repository` (and `baseBranch` when it is neither the run-level base nor the
+>   default branch) on EVERY `agent`
 >   node** — a single-repo graph repeats the same value on each node; a cross-repo graph names
 >   each node's own repo. Every repo a node's prompt says it will change must be that node's
 >   `repository`.
-> - **Only if a node genuinely needs no checkout** (e.g. pure research/comment work), say so
->   explicitly to the operator: the whole run must then be dispatched **checkout-less**
->   (`repoless`), which strips isolation from *every* node — it is not per-node.
+> - **`repoless` is a RUN-WIDE mode, not a per-node escape hatch.** Use it only when **every**
+>   `agent` node is genuinely checkout-less (e.g. pure research/comment work) — dispatching a
+>   *mixed* graph `repoless` strips repository isolation from the implementation nodes too, which
+>   is almost never what you want. If even one node needs a checkout, provision repositories
+>   instead. When the whole run truly is checkout-less, say so explicitly to the operator so they
+>   dispatch it **`repoless`** (which strips isolation from *every* node — it is not per-node).
 > - **Before you hand over the digest, self-check:** every `"kind": "agent"` node has a
 >   `repository`. If you deliberately left some unset, tell the operator which nodes, and that
 >   they must choose the run-level **repository + base branch fallback** in the Dispatch form
 >   (the default "use node repositories" mode will reject the graph).
 >
 > A **present** `repository`/`baseBranch` is validated at compile (`invalid-node-repository`
-> / `invalid-node-base-branch`); only an **absent** one is deferred to dispatch.
+> / `invalid-node-base-branch`). Only an **absent `repository`** is deferred to dispatch (and can
+> fail there); an **absent `baseBranch` is always valid** and is never rejected — it inherits the
+> run-level base, else the repository default.
 
 A **`wait` node's `wait` is a `ReadinessProbe` verbatim** (the same shape feature-run
 intake uses): `{ kind, target, onTimeout?, match?, poll? }`, where `poll` is
