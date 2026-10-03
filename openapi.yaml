@@ -2025,6 +2025,7 @@ components:
             kind: agent
             agent:
               jobType: senior:feature
+              repository: nanobpm/nano-workforce
               prompt: Implement nanobpm/nano-workforce#567 and open a PR.
         edges:
           - { from: gate-epic, to: start-b }
@@ -2406,7 +2407,7 @@ components:
       # cockpit paste). `previewDeliveryGraph` takes `{ "graphJson": "<serialized DeliveryGraph>" }`.
       example:
         graphJson: >-
-          {"name":"start #567 once epic #488 has fully merged","nodes":[{"id":"gate-epic","kind":"wait","wait":{"kind":"epic","target":"nanobpm/nano-ide#488","match":{"epicState":"merged"},"poll":{"everyMs":300000,"timeoutMs":259200000},"onTimeout":"escalate"},"emits":[{"name":"prCount","type":"number"}]},{"id":"start-b","kind":"agent","agent":{"jobType":"senior:feature","prompt":"Implement nanobpm/nano-workforce#567 and open a PR."}}],"edges":[{"from":"gate-epic","to":"start-b"}]}
+          {"name":"start #567 once epic #488 has fully merged","nodes":[{"id":"gate-epic","kind":"wait","wait":{"kind":"epic","target":"nanobpm/nano-ide#488","match":{"epicState":"merged"},"poll":{"everyMs":300000,"timeoutMs":259200000},"onTimeout":"escalate"},"emits":[{"name":"prCount","type":"number"}]},{"id":"start-b","kind":"agent","agent":{"jobType":"senior:feature","repository":"nanobpm/nano-workforce","prompt":"Implement nanobpm/nano-workforce#567 and open a PR."}}],"edges":[{"from":"gate-epic","to":"start-b"}]}
       required:
         - graphJson
       properties:
@@ -5016,6 +5017,7 @@ paths:
                     kind: agent
                     agent:
                       jobType: senior:feature
+                      repository: nanobpm/nano-workforce
                       prompt: Implement nanobpm/nano-workforce#567 and open a PR.
                 edges:
                   - from: gate-epic
@@ -5467,7 +5469,7 @@ paths:
               type: object
               additionalProperties: false
               example:
-                graphJson: '{"name":"start #567 once epic #488 has fully merged","nodes":[{"id":"gate-epic","kind":"wait","wait":{"kind":"epic","target":"nanobpm/nano-ide#488","match":{"epicState":"merged"},"poll":{"everyMs":300000,"timeoutMs":259200000},"onTimeout":"escalate"},"emits":[{"name":"prCount","type":"number"}]},{"id":"start-b","kind":"agent","agent":{"jobType":"senior:feature","prompt":"Implement nanobpm/nano-workforce#567 and open a PR."}}],"edges":[{"from":"gate-epic","to":"start-b"}]}'
+                graphJson: '{"name":"start #567 once epic #488 has fully merged","nodes":[{"id":"gate-epic","kind":"wait","wait":{"kind":"epic","target":"nanobpm/nano-ide#488","match":{"epicState":"merged"},"poll":{"everyMs":300000,"timeoutMs":259200000},"onTimeout":"escalate"},"emits":[{"name":"prCount","type":"number"}]},{"id":"start-b","kind":"agent","agent":{"jobType":"senior:feature","repository":"nanobpm/nano-workforce","prompt":"Implement nanobpm/nano-workforce#567 and open a PR."}}],"edges":[{"from":"gate-epic","to":"start-b"}]}'
               required:
                 - graphJson
               properties:
@@ -5890,7 +5892,7 @@ paths:
                     - kind: connector
                       configKey: connector
                       requiredFields: [target]
-                      optionalFields: [dedupeKey, payload]
+                      optionalFields: [dedupeKey, payload, timeout]
                       sideEffecting: true
                       mayEmit: true
                       summary: "An automated outbound action; payload for a converge target is { pr, autoMerge?, dependsOn? }."

@@ -150,14 +150,16 @@ const NODE_KIND_DETAIL: Record<string, Omit<NodeKindEntry, "kind">> = {
   connector: {
     configKey: "connector",
     requiredFields: ["target"],
-    optionalFields: ["dedupeKey", "payload"],
+    optionalFields: ["dedupeKey", "payload", "timeout"],
     sideEffecting: true,
     mayEmit: true,
     summary:
       "An automated, side-effecting outbound action. `payload` for a converge target is " +
       "`{ pr, autoMerge?, dependsOn? }` (`pr` may be a literal `owner/repo#N`, a `<node>.pr` fact " +
       "reference, or omitted to auto-bind the single incoming `pr` fact). Carries a `dedupeKey` " +
-      "(at-least-once safe). See connectorTargets for which targets are real vs. forward-declared.",
+      "(at-least-once safe). An optional per-node ISO-8601 `timeout` (#505) overrides the run-level " +
+      "`nodeTimeout` (and the `PT1H` default) for THIS node's bounded-timeout → escalate boundary; " +
+      "absent → the run/default value. See connectorTargets for which targets are real vs. forward-declared.",
   },
 };
 
