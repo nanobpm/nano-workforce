@@ -104,6 +104,22 @@ export const ENV_CONTRACTS = {
       "Clone timeout in milliseconds emitted as `repository.cloneTimeoutMs` in the agent-task envelope so the c8ctl harness raises its 120s default for large-repo provisioning (branch-scoped blobless clones of big monorepos still approach/exceed 120s; issue #694). Inherited by both the review-round and merge paths via the one `repoEnvelopeVars` builder.",
     default: "600000",
   },
+  NANO_DELIVERY_LAYOUT_TIMEOUT_MS: {
+    category: "env",
+    name: "NANO_DELIVERY_LAYOUT_TIMEOUT_MS",
+    owner: "app/layoutOffThread.ts",
+    semantics:
+      "Bound (ms) on the delivery-graph BPMN autolayout (`layoutBpmn` → `bpmn-auto-layout`), which runs OFF the main event loop in a `node:worker_threads` worker (`layoutBpmnOffThread`, issue #854). On expiry the worker is terminated and the compile/launch fails CLEANLY rather than hanging — the inline layout previously froze the whole app (no HTTP, no poll passes) for the entire superlinear run (#852). Shared by both the dispatch (`dispatchDeliveryGraphRun` → `compileDeliveryGraph`) and preview (`previewProposalBpmn`) paths, which both funnel through the one `layoutDeliveryDiagram` entry point.",
+    default: "300000",
+  },
+  NANO_DELIVERY_LAYOUT_MAX_CONCURRENCY: {
+    category: "env",
+    name: "NANO_DELIVERY_LAYOUT_MAX_CONCURRENCY",
+    owner: "app/layoutOffThread.ts",
+    semantics:
+      "Maximum number of delivery-graph BPMN autolayout workers (`layoutBpmnOffThread`, issue #854) allowed to run CONCURRENTLY. Each layout is a CPU-bound `node:worker_threads` worker running the superlinear `bpmn-auto-layout` pass; overlapping preview/dispatch requests would otherwise spawn an UNBOUNDED number of them and saturate CPU/memory, starving the very event loop this off-thread move exists to protect. Excess layouts queue (FIFO) for a slot via the shared `Semaphore`. Capacity is fixed at first use, so a retune needs a restart (unlike the per-call timeout).",
+    default: "2",
+  },
   NANO_PR_MAX_ROUNDS: {
     category: "env",
     name: "NANO_PR_MAX_ROUNDS",

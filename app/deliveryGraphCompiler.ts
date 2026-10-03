@@ -23,7 +23,6 @@
 // parallel gateways for genuine fan-out (>1 downstream) and fan-in (>1 upstream). This slice targets
 // the WIRING/SHAPE — the concrete node bodies land in S4.
 
-import { layoutBpmn } from "@nanobpm/urban";
 import type {
   CompileDeliveryGraphErrors,
   CompileDeliveryGraphResult,
@@ -50,6 +49,7 @@ import {
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
+import { layoutBpmnOffThread } from "./layoutOffThread.ts";
 import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactEmbeddedCredential, redactString } from "./readiness.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -719,9 +719,15 @@ export async function compileDeliveryGraph(
  * `bpmn-auto-layout` is a real runtime dependency of `@nanobpm/urban` (which re-exports `layoutBpmn`),
  * but the toolkit no-ops layout (semantic model unchanged, no DI) when it is somehow absent. That
  * silent no-op is exactly the DI-less bug this fixes, so we FAIL LOUD if the pass produced no diagram.
- * Deterministic given identical input, preserving the compiler's "same JSON → byte-identical XML". */
+ * Deterministic given identical input, preserving the compiler's "same JSON → byte-identical XML".
+ *
+ * The autolayout itself runs OFF the main event loop in a `node:worker_threads` worker, bounded by a
+ * timeout (`layoutBpmnOffThread` → `app/layoutOffThread.ts`, issue #854): `layoutBpmn` is superlinear
+ * and, run inline here, blocked the whole app (no HTTP, no poll passes) for the entire layout — a hard
+ * lock-up on a large graph (#852). This is the ONE place the layout runs, so hoisting it off-thread
+ * covers BOTH the dispatch and preview paths that funnel through `compileDeliveryGraph`. */
 async function layoutDeliveryDiagram(semanticBpmn: string): Promise<string> {
-  const laidOut = await layoutBpmn(semanticBpmn);
+  const laidOut = await layoutBpmnOffThread(semanticBpmn);
   const start = laidOut.indexOf("<bpmndi:BPMNDiagram");
   const endTag = "</bpmndi:BPMNDiagram>";
   const end = laidOut.lastIndexOf(endTag);
