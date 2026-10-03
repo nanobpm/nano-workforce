@@ -116,6 +116,26 @@ export interface DeliveryGraphRunIdentity {
 export const deliveryGraphRunIdentities = (data: DataLayer) =>
   data.table<DeliveryGraphRunIdentity>("delivery_graph_run_identity", "run_key");
 
+/** How long a launch claim (`running` with no `process_key` yet) may stay unlaunched before it is
+ * presumed dead (issue #852). A dispatch claims the row BEFORE the CPU-bound layout + deploy; a large
+ * graph legitimately spends minutes there (54 nodes ≈ 105 s on merlin), but a process that dies
+ * mid-launch never runs `markClaimFailed`, stranding a phantom `running` row that short-circuited every
+ * re-dispatch onto a run that does not exist. Past this TTL the claim is re-claimable by a dispatch and
+ * reconciled to `failed` by the poller (`pollDeliveryGraphPhase`). Generous on purpose: re-claiming a
+ * launch that is in fact still in flight would double-launch. */
+export const LAUNCH_CLAIM_TTL_MS = 15 * 60_000;
+
+/** True when `run` is a launch claim that never got an instance key within {@link LAUNCH_CLAIM_TTL_MS}
+ * (issue #852). A launched run (process key set) or a non-`running` row is never stale. */
+export function isStaleLaunchClaim(
+  run: Pick<DeliveryGraphRun, "status" | "process_key" | "updated_at">,
+  nowMs: number = Date.now(),
+): boolean {
+  if (run.status !== "running" || run.process_key) return false;
+  const at = Date.parse(run.updated_at);
+  return Number.isFinite(at) && nowMs - at > LAUNCH_CLAIM_TTL_MS;
+}
+
 /** Atomically claim a run for LAUNCH — the at-most-once dispatch fence. Returns `true` iff THIS caller
  * won the claim and must proceed to `runDeliveryGraph`; `false` iff a concurrent submit already claimed
  * it (the caller must short-circuit as `alreadyRunning` instead of double-launching). Two fences, one
@@ -157,7 +177,7 @@ export async function claimRunForLaunch(
   }
   const res = await data.open().tx(async (t) => {
     const flip = await t.exec(
-      `UPDATE "delivery_graph_runs" SET "status" = ?, "process_key" = ?, "process_definition_id" = ?, "phase" = ?, "phase_node_id" = ?, "updated_at" = ? WHERE "run_key" = ? AND "status" <> 'running'`,
+      `UPDATE "delivery_graph_runs" SET "status" = ?, "process_key" = ?, "process_definition_id" = ?, "phase" = ?, "phase_node_id" = ?, "updated_at" = ? WHERE "run_key" = ? AND ("status" <> 'running' OR ("process_key" IS NULL AND "updated_at" < ?))`,
       [
         claim.status,
         claim.process_key,
@@ -166,6 +186,8 @@ export async function claimRunForLaunch(
         claim.phase_node_id,
         claim.updated_at,
         claim.run_key,
+        // #852: a stale launch claim (running, never got an instance key) is re-claimable.
+        new Date(Date.now() - LAUNCH_CLAIM_TTL_MS).toISOString(),
       ],
     );
     if (flip.changed !== 1) return false;
@@ -212,7 +234,7 @@ function firstLine(text: string | undefined | null): string {
  * Tasks-inbox "Decision context" (issue #813). Storing the full prompt (not a clamped first line) is
  * what lets the operator read the entire instruction, and lets a URL embedded in the prompt reach the
  * task's clickable link. Falls back to the node id when a human node declares no prompt. */
-export function buildHumanLabels(compiled: CompileDeliveryGraphResult): Record<string, string> {
+export function buildHumanLabels(compiled: Pick<CompileDeliveryGraphResult, "resolved" | "humanNodes">): Record<string, string> {
   const elementByNodeId = new Map(compiled.resolved.nodes.map((n) => [n.id, n.element]));
   const labels: Record<string, string> = {};
   for (const stop of compiled.humanNodes) {
