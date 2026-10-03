@@ -65,13 +65,19 @@ test("the worked example's nodeKind field contract cannot drift from the runtime
   // The spec's `example:` is a hand-authored YAML copy of the served payload (the runtime cannot be
   // called from a static spec). It is a deliberately curated SUBSET (fewer kinds / terser summaries),
   // but the per-kind FIELD CONTRACT it advertises is consumer-facing: a stale `optionalFields` makes
-  // agents author nodes that omit real fields (#739/#776 — `repository`/`baseBranch`/`timeout`). Guard
-  // the class: every nodeKind the example shows must carry EXACTLY the runtime kind's required/optional
-  // field lists, so the two surfaces cannot drift apart again.
+  // agents author nodes that omit real fields (#739/#776 — `repository`/`baseBranch`/`timeout`), and a
+  // stale `configKey`/`sideEffecting`/`mayEmit` misleads them the same way. Guard the class, not one
+  // field: every nodeKind the example shows must carry EXACTLY the runtime kind's whole contract object
+  // — `kind`, `configKey`, `requiredFields`, `optionalFields`, `sideEffecting`, `mayEmit` — so no part
+  // of the two surfaces can drift apart again. Only `summary` is excluded: the example's is a
+  // deliberately terser curated paraphrase of the runtime's (see this block's preamble).
   const doc = parseYaml(SPEC_TEXT) as Record<string, any>;
   const exampleKinds = doc.paths["/delivery-graph/vocabulary"].get.responses["200"].content["application/json"].schema
     .example?.nodeKinds as Array<Record<string, unknown>> | undefined;
   assert(Array.isArray(exampleKinds) && exampleKinds.length > 0, "the worked example must list nodeKinds");
+
+  // Compare the full per-kind contract minus `summary` (the sole intentionally-divergent field).
+  const contract = ({ summary: _summary, ...rest }: Record<string, unknown>): Record<string, unknown> => rest;
 
   const runtimeByKind = new Map(
     (deliveryGraphVocabulary().nodeKinds as Array<Record<string, unknown>>).map((k) => [k.kind, k]),
@@ -80,14 +86,9 @@ test("the worked example's nodeKind field contract cannot drift from the runtime
     const runtime = runtimeByKind.get(shown.kind);
     assert(runtime, `example nodeKind '${String(shown.kind)}' is not a real runtime kind (stale/removed)`);
     assert.deepEqual(
-      shown.requiredFields,
-      runtime!.requiredFields,
-      `example nodeKind '${String(shown.kind)}' requiredFields drifted from runtime`,
-    );
-    assert.deepEqual(
-      shown.optionalFields,
-      runtime!.optionalFields,
-      `example nodeKind '${String(shown.kind)}' optionalFields drifted from runtime`,
+      contract(shown),
+      contract(runtime!),
+      `example nodeKind '${String(shown.kind)}' field contract (configKey/requiredFields/optionalFields/sideEffecting/mayEmit) drifted from runtime`,
     );
   }
 });
