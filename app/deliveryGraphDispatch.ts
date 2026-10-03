@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import type { AppApi } from "@nanobpm/urban";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { canonicalJson, validateDeliveryGraph } from "./deliveryGraph.ts";
-import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets } from "./deliveryGraphCompiler.ts";
+import { compileDeliveryGraphSemantic, digestInvisibleRawValues, graphCarriesRedactedSecrets } from "./deliveryGraphCompiler.ts";
 import {
   buildDeliveryGraphRunRow,
   buildHumanLabels,
@@ -25,6 +25,7 @@ import {
   type DeliveryGraphRunIdentity,
   deliveryGraphRunIdentities,
   deliveryGraphRuns,
+  isStaleLaunchClaim,
 } from "./deliveryGraphRun.ts";
 import type { DeliveryRunTimeouts } from "./deliveryRunner.ts";
 import { deliveryGraphDigest, runDeliveryGraph } from "./deliveryRunner.ts";
@@ -97,7 +98,9 @@ export async function dispatchDeliveryGraphRun(
   // The graph passed the semantic validator above, so it is safe to narrow to the typed contract.
   // biome-ignore lint/plugin: validated external body narrowed to its contract after validateDeliveryGraph
   const typedGraph = graph as DeliveryGraph;
-  const compiled = await compileDeliveryGraph(typedGraph);
+  // Semantic compile only (#852): this needs the digest / resolved model / side effects / human stops,
+  // not the laid-out BPMN — `runDeliveryGraph` below runs the CPU-bound layout exactly once.
+  const compiled = await compileDeliveryGraphSemantic(typedGraph);
   if (!compiled.ok) {
     return { ok: false, errors: compiled.errors };
   }
@@ -182,7 +185,7 @@ export async function dispatchDeliveryGraphRun(
 
   // Idempotency short-circuit — a re-dispatch onto a still-running run does NOT double-launch.
   const existing = await runs.get(runKey);
-  if (existing && existing.status === "running") {
+  if (existing && existing.status === "running" && !isStaleLaunchClaim(existing)) {
     app.log.info("dispatch-delivery-graph short-circuit: already running", { runKey });
     return {
       ok: true,

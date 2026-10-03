@@ -32,7 +32,7 @@ import { makeDefaultReadHead } from "./currentHead.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
-import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
+import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
 import { deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
@@ -3052,7 +3052,15 @@ export async function pollDeliveryGraphPhase(
   engine: Pick<EngineClient, "searchProcessInstances" | "searchUserTasks">,
 ) {
   for (const run of await deliveryGraphRuns(data).find({ status: "running" })) {
-    if (!run.process_key) continue;
+    if (!run.process_key) {
+      // #852: a launch claim that never got an instance key within the TTL died mid-launch (the dispatch
+      // process went down before deploy, so its own `markClaimFailed` never ran). Reconcile it to
+      // `failed` so the cockpit stops showing a phantom in-flight run; a re-dispatch re-claims it. The
+      // flip is a CAS on the snapshot we read (via `reconcileStaleLaunchClaim`), so a claim a concurrent
+      // dispatch has already re-claimed between our `find()` and here is left untouched, never clobbered.
+      await reconcileStaleLaunchClaim(data, run);
+      continue;
+    }
     const processKey = run.process_key;
     try {
       const [snapshots, parks] = await Promise.all([

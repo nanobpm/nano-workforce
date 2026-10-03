@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { redactFreeText } from "../app/deliveryGraphCompiler.ts";
 import { deliveryGraphProposals } from "../app/deliveryGraphProposals.ts";
-import { deliveryGraphRuns } from "../app/deliveryGraphRun.ts";
+import { deliveryGraphRuns, LAUNCH_CLAIM_TTL_MS } from "../app/deliveryGraphRun.ts";
 import { isEquivalentReStage, stableProposalRunKey } from "./dispatchDeliveryGraph.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
@@ -188,6 +188,28 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     await app.settle();
     assert.equal(agentFired, 1, "the side effect fired exactly once");
     assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
+  });
+
+  test("#852: a launch claim stranded by a crash mid-launch (running, no process key, past the TTL) does not wedge the proposal — a re-dispatch LAUNCHES it", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const digest = staged.body.digest;
+    // The merlin state: the claim row + identity were written, then the process died before deploy.
+    const stale = new Date(Date.now() - LAUNCH_CLAIM_TTL_MS - 60_000).toISOString();
+    await deliveryGraphRuns(app.db).insert({
+      run_key: digest, process_key: null, process_definition_id: null, digest, status: "running", side_effecting: 0,
+      node_count: 1, human_node_count: 1, side_effect_count: 0, title: "manual gate", phase: "Running", phase_node_id: null,
+      human_labels: null, created_at: stale, updated_at: stale, acknowledged_at: null,
+    });
+    const res = await api.call<{ ok: boolean; alreadyRunning: boolean; processInstanceKey?: string }>("dispatchDeliveryGraph", {
+      body: { digest, repoless: true },
+    });
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(res.body.alreadyRunning, false, "must not short-circuit onto the phantom run");
+    assert.ok(res.body.processInstanceKey, "a real instance was started");
+    assert.equal((await deliveryGraphProposals(app.db).get(digest))?.status, "dispatched");
   });
 
   test("re-dispatching an ALREADY-dispatched digest → 400 (the proposal is consumed; the run shows in the in-flight grid)", async () => {

@@ -22,7 +22,10 @@ import {
   deliveryGraphRunIdentities,
   deliveryGraphRuns,
   humanTaskElementId,
+  isStaleLaunchClaim,
+  LAUNCH_CLAIM_TTL_MS,
   parseHumanLabels,
+  reconcileStaleLaunchClaim,
 } from "./deliveryGraphRun.ts";
 import { pollDeliveryGraphPhase } from "./service.ts";
 
@@ -124,6 +127,90 @@ test("claimRunForLaunch: winning a re-run claim ATOMICALLY invalidates the prior
     // Missing → dispatch's identityConfirmed is false (the safe 409) throughout the window.
     const after = await identities.get("rk");
     assert(after == null, `the stale identity row must be gone, got: ${JSON.stringify(after)}`);
+  });
+});
+
+// ── #852: a launch claim stranded by a crash mid-launch must not wedge the run forever ──────────────
+// The dispatch claims the row `running` (process_key null) BEFORE deploy; if the process dies mid-launch
+// (merlin: a 54-node graph spent ~105 s in layout, the app went down) `markClaimFailed` never runs, and
+// the phantom row short-circuited every re-dispatch onto a run that does not exist.
+const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+test("#852 isStaleLaunchClaim: only a `running` row with NO process key older than the launch TTL is stale", () => {
+  const base = claimRow("running");
+  assertEquals(isStaleLaunchClaim({ ...base, updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) }), true);
+  assertEquals(isStaleLaunchClaim({ ...base, updated_at: ago(1000) }), false, "an in-flight launch is not stale");
+  assertEquals(isStaleLaunchClaim({ ...base, process_key: "29", updated_at: ago(LAUNCH_CLAIM_TTL_MS * 10) }), false, "a launched run is never stale");
+  assertEquals(isStaleLaunchClaim({ ...base, status: "failed", updated_at: ago(LAUNCH_CLAIM_TTL_MS * 10) }), false);
+  assert(LAUNCH_CLAIM_TTL_MS >= 10 * 60_000, "the TTL must comfortably exceed a slow large-graph launch");
+});
+
+test("#852 claimRunForLaunch: a STALE launch claim is re-claimable; a fresh in-flight claim still blocks the double-launch", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert({ ...claimRow("running"), updated_at: ago(1000) });
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), false, "fresh claim: launch still in flight");
+    await runs.update("rk", { updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) });
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), true, "stale claim: the crashed launch is re-claimed");
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), false, "…by exactly one racer");
+  });
+});
+
+test("#852 pollDeliveryGraphPhase: a stale launch claim is reconciled to failed; a fresh one is left alone", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert({ ...claimRow("running"), run_key: "stale", updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) });
+    await runs.insert({ ...claimRow("running"), run_key: "fresh", updated_at: ago(1000) });
+    const engine = {
+      searchProcessInstances: async () => [],
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    assertEquals((await runs.get("stale"))?.status, "failed");
+    assertEquals((await runs.get("stale"))?.phase, DELIVERY_PHASE.FAILED);
+    assertEquals((await runs.get("fresh"))?.status, "running");
+  });
+});
+
+test("#852 reconcileStaleLaunchClaim: the retire-to-failed flip is a CAS on the OBSERVED snapshot — a claim a concurrent dispatch re-claimed (refreshing updated_at) between the poller's read and the write is NOT clobbered", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    // The poller read this row as a stale launch claim …
+    const observed = { ...claimRow("running"), updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) };
+    await runs.insert(observed);
+    // … but before it writes, a concurrent dispatch atomically RE-CLAIMS the stale row, refreshing
+    // `updated_at` to a fresh in-flight claim (still running, still no process key yet).
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), true, "concurrent dispatch re-claims the stale row");
+    const reclaimedAt = (await runs.get("rk"))?.updated_at;
+    // The poller now reconciles off its STALE snapshot. The CAS must find no matching row and leave the
+    // fresh claim untouched — otherwise a third dispatch could re-claim mid-layout and double-launch.
+    assertEquals(await reconcileStaleLaunchClaim(data, observed), false, "stale snapshot no longer matches → no flip");
+    const row = await runs.get("rk");
+    assertEquals(row?.status, "running", "the renewed claim is left running, not clobbered to failed");
+    assertEquals(row?.process_key, null);
+    assertEquals(row?.updated_at, reclaimedAt, "the renewed claim's updated_at is preserved");
+  });
+});
+
+test("#852 reconcileStaleLaunchClaim: a genuinely stale claim whose snapshot still matches IS retired to failed exactly once", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    const observed = { ...claimRow("running"), updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) };
+    await runs.insert(observed);
+    assertEquals(await reconcileStaleLaunchClaim(data, observed), true, "the unchanged stale claim is flipped");
+    assertEquals((await runs.get("rk"))?.status, "failed");
+    assertEquals((await runs.get("rk"))?.phase, DELIVERY_PHASE.FAILED);
+    assertEquals(await reconcileStaleLaunchClaim(data, observed), false, "already failed → no second flip");
+  });
+});
+
+test("#852 reconcileStaleLaunchClaim: a non-stale claim (launched, or within TTL) is never retired", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    const fresh = { ...claimRow("running"), updated_at: ago(1000) };
+    await runs.insert(fresh);
+    assertEquals(await reconcileStaleLaunchClaim(data, fresh), false, "an in-flight launch is not stale");
+    assertEquals((await runs.get("rk"))?.status, "running");
   });
 });
 
