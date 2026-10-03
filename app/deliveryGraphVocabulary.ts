@@ -112,7 +112,9 @@ const NODE_KIND_DETAIL: Record<string, Omit<NodeKindEntry, "kind">> = {
       "A worker runs an agent job type (the fan-out body, e.g. `senior:feature`) in an isolated " +
       "checkout. Per-node provisioning (#739/#776): declare `repository` (`owner/repo`, no `.git`/URL) " +
       "on EVERY agent node — the harness clones it at `baseBranch` (omit it to use the run-level " +
-      "dispatch `baseBranch`, else the repo's default branch) and cuts `feat/<node.id>` off it. A node " +
+      "dispatch `baseBranch`, else the repo's default branch) and cuts `feat/<node.id>` off it " +
+      "(when that derived ref is a valid Git branch name; an id like `a..b`/`a.lock` yields an " +
+      "ill-formed ref, so the harness omits `branch.create` and the agent cuts its own branch). A node " +
       "with no `repository` can only be satisfied by the run-level dispatch fallback, so COMPILE " +
       "stages it without a warning; at Dispatch it resolves to the run-level `repository` + `baseBranch` " +
       "fallback when the operator supplies one, and the Dispatch fails with `N agent node(s) " +

@@ -573,7 +573,9 @@ layer schedules, it does not re-implement execution):
 > cell runs in an isolated checkout: the harness clones the node's **`repository`**
 > (`owner/repo`, no `.git`/URL) at **`baseBranch`** — resolved **per field**: the node's own
 > `baseBranch` wins, else the **run-level dispatch `baseBranch`**, and only when *neither* exists
-> the repository's default branch — and cuts `feat/<node.id>` off it (#739/#776). A node with no
+> the repository's default branch — and cuts `feat/<node.id>` off it (#739/#776) — provided that
+> derived ref is a valid Git branch name: a node id like `a..b` or `a.lock` produces an ill-formed
+> `feat/...` ref, so the harness omits `branch.create` and the agent cuts its own branch instead. A node with no
 > `repository` can only be
 > provisioned by a **run-level fallback** the operator supplies *at dispatch*, so the compile door
 > treats it as valid and **stages it without a warning** — then, **unless the operator supplies that
