@@ -100,3 +100,25 @@ test("fact-threading rule names the unbound-pr rejection", () => {
   const vocab = deliveryGraphVocabulary();
   assert.match(vocab.factThreading.rule, /unbound-pr/);
 });
+
+test("the agent entry carries the per-node repository provisioning semantics (#739/#850)", () => {
+  // The vocabulary is the guide's "cannot drift" structured discovery surface — when #739 added
+  // per-node `repository`/`baseBranch` to the agent config the vocabulary entry was left behind, so
+  // an agent authoring from `getDeliveryGraphVocabulary` alone could still stage an unprovisioned
+  // graph (issue #850). Pin the fields AND the dispatch-time failure mode so the entry can't regress.
+  const vocab = deliveryGraphVocabulary();
+  const agent = vocab.nodeKinds.find((n) => n.kind === "agent");
+  assert.ok(agent, "agent node-kind entry must exist");
+  assert.deepEqual(agent.requiredFields, ["jobType"]);
+  for (const field of ["repository", "baseBranch", "prompt", "converge", "merge"]) {
+    assert.ok(
+      agent.optionalFields.includes(field),
+      `agent.optionalFields is missing '${field}' — the vocabulary drifted from the DeliveryNodeAgent config`,
+    );
+  }
+  // The non-obvious rule an authoring agent must learn from the surface: an ABSENT repository is not
+  // compile-rejected (a run-level fallback can satisfy it) — it fails at the OPERATOR's Dispatch.
+  assert.match(agent.summary, /resolve to no repository/, "names the dispatch-time failure the author must pre-empt");
+  assert.match(agent.summary, /invalid-node-repository/, "names the compile-time validation for a present value");
+  assert.match(agent.summary, /repoless/, "names the checkout-less opt-out");
+});

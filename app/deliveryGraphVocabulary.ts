@@ -105,11 +105,19 @@ const NODE_KIND_DETAIL: Record<string, Omit<NodeKindEntry, "kind">> = {
   agent: {
     configKey: "agent",
     requiredFields: ["jobType"],
-    optionalFields: ["prompt", "converge", "merge"],
+    optionalFields: ["repository", "baseBranch", "prompt", "converge", "merge"],
     sideEffecting: true,
     mayEmit: true,
     summary:
-      "A worker runs an agent job type (the fan-out body, e.g. `senior:feature`). First-class " +
+      "A worker runs an agent job type (the fan-out body, e.g. `senior:feature`) in an isolated " +
+      "checkout. Per-node provisioning (#739/#776): declare `repository` (`owner/repo`, no `.git`/URL) " +
+      "on EVERY agent node — the harness clones it at `baseBranch` (omit it to use the run-level " +
+      "dispatch `baseBranch`, else the repo's default branch) and cuts `feat/<node.id>` off it. A node " +
+      "with no `repository` can only be satisfied by the run-level dispatch fallback, so COMPILE " +
+      "stages it without a warning and the operator's Dispatch then fails with `N agent node(s) " +
+      "resolve to no repository (…)` (a present value IS compile-validated: `invalid-node-repository`/" +
+      "`invalid-node-base-branch`); a genuinely checkout-less graph must be dispatched `repoless: true`, " +
+      "which strips isolation from every node. First-class " +
       "`converge?`/`merge?` cell-policy flags declare review-convergence / landing intent (`merge` " +
       "requires `converge`); a raw `senior:converge`/`senior:merge` jobType is rejected (`raw-converge-node`). " +
       "An `agent` that opens a PR emits it as a `pr`-typed fact so downstream connector/wait nodes late-bind it.",
