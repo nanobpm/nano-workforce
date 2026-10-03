@@ -114,8 +114,10 @@ const NODE_KIND_DETAIL: Record<string, Omit<NodeKindEntry, "kind">> = {
       "on EVERY agent node — the harness clones it at `baseBranch` (omit it to use the run-level " +
       "dispatch `baseBranch`, else the repo's default branch) and cuts `feat/<node.id>` off it. A node " +
       "with no `repository` can only be satisfied by the run-level dispatch fallback, so COMPILE " +
-      "stages it without a warning and the operator's Dispatch then fails with `N agent node(s) " +
-      "resolve to no repository (…)` (a present value IS compile-validated: `invalid-node-repository`/" +
+      "stages it without a warning; at Dispatch it resolves to the run-level `repository` + `baseBranch` " +
+      "fallback when the operator supplies one, and the Dispatch fails with `N agent node(s) " +
+      "resolve to no repository (…)` ONLY when neither the node nor the run supplies a repository " +
+      "(a present value IS compile-validated: `invalid-node-repository`/" +
       "`invalid-node-base-branch`); a genuinely checkout-less graph must be dispatched `repoless: true`, " +
       "which strips isolation from every node. First-class " +
       "`converge?`/`merge?` cell-policy flags declare review-convergence / landing intent (`merge` " +

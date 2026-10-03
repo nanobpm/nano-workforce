@@ -576,7 +576,8 @@ layer schedules, it does not re-implement execution):
 > the repository's default branch — and cuts `feat/<node.id>` off it (#739/#776). A node with no
 > `repository` can only be
 > provisioned by a **run-level fallback** the operator supplies *at dispatch*, so the compile door
-> treats it as valid and **stages it without a warning** — then the operator's Dispatch fails
+> treats it as valid and **stages it without a warning** — then, **unless the operator supplies that
+> run-level fallback at dispatch**, the operator's Dispatch fails
 > with `N agent node(s) resolve to no repository (…)`, and you are not in the loop to fix it.
 > So when you author a graph:
 >
