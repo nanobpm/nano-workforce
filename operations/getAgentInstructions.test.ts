@@ -69,7 +69,7 @@ test("the guide documents the delivery-graph surface (ADR 0005)", async () => {
   assert(md.includes("resolve to no repository"), "quotes the dispatch-time failure the agent must pre-empt");
   assert(md.includes("wait: <ReadinessProbe>"), "documents the wait node config");
   assert(md.includes("human?: { formKey?, prompt? }"), "documents the human node config");
-  assert(md.includes("connector: { target, dedupeKey?, payload? }"), "documents the connector node config");
+  assert(md.includes("connector: { target, dedupeKey?, payload?, timeout? }"), "documents the connector node config");
   // The fact-edge syntax: an edge is `{ from, to }` and `from` may be a qualified `<nodeId>.<fact>`.
   assert(md.includes("each edge is `{ from, to }`"), "documents the edge shape");
   assert(md.includes("qualified `<nodeId>.<fact>`"), "documents the qualified fact-edge syntax");
