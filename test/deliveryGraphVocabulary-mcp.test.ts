@@ -60,3 +60,34 @@ test("the served payload matches the response schema's required keys (data ⇄ c
     assert(key in payload, `served vocabulary is missing required schema key '${key}'`);
   }
 });
+
+test("the worked example's nodeKind field contract cannot drift from the runtime vocabulary", () => {
+  // The spec's `example:` is a hand-authored YAML copy of the served payload (the runtime cannot be
+  // called from a static spec). It is a deliberately curated SUBSET (fewer kinds / terser summaries),
+  // but the per-kind FIELD CONTRACT it advertises is consumer-facing: a stale `optionalFields` makes
+  // agents author nodes that omit real fields (#739/#776 — `repository`/`baseBranch`/`timeout`). Guard
+  // the class: every nodeKind the example shows must carry EXACTLY the runtime kind's required/optional
+  // field lists, so the two surfaces cannot drift apart again.
+  const doc = parseYaml(SPEC_TEXT) as Record<string, any>;
+  const exampleKinds = doc.paths["/delivery-graph/vocabulary"].get.responses["200"].content["application/json"].schema
+    .example?.nodeKinds as Array<Record<string, unknown>> | undefined;
+  assert(Array.isArray(exampleKinds) && exampleKinds.length > 0, "the worked example must list nodeKinds");
+
+  const runtimeByKind = new Map(
+    (deliveryGraphVocabulary().nodeKinds as Array<Record<string, unknown>>).map((k) => [k.kind, k]),
+  );
+  for (const shown of exampleKinds) {
+    const runtime = runtimeByKind.get(shown.kind);
+    assert(runtime, `example nodeKind '${String(shown.kind)}' is not a real runtime kind (stale/removed)`);
+    assert.deepEqual(
+      shown.requiredFields,
+      runtime!.requiredFields,
+      `example nodeKind '${String(shown.kind)}' requiredFields drifted from runtime`,
+    );
+    assert.deepEqual(
+      shown.optionalFields,
+      runtime!.optionalFields,
+      `example nodeKind '${String(shown.kind)}' optionalFields drifted from runtime`,
+    );
+  }
+});

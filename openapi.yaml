@@ -5876,10 +5876,10 @@ paths:
                     - kind: agent
                       configKey: agent
                       requiredFields: [jobType]
-                      optionalFields: [prompt, converge, merge]
+                      optionalFields: [repository, baseBranch, prompt, converge, merge, timeout]
                       sideEffecting: true
                       mayEmit: true
-                      summary: "A worker runs an agent job type; an agent that opens a PR emits it as a `pr` fact."
+                      summary: "A worker runs an agent job type in an isolated checkout; declare `repository` (`owner/repo`) on every agent node — the harness clones it at `baseBranch` (else the run-level dispatch base, else the repo default). Optional per-node ISO-8601 `timeout`, plus `converge?`/`merge?` cell-policy flags. An agent that opens a PR emits it as a `pr` fact."
                     - kind: wait
                       configKey: wait
                       requiredFields: [kind, target]
