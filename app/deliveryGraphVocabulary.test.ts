@@ -105,9 +105,12 @@ test("fact-threading rule names the unbound-pr rejection", () => {
 
 // Resolve a node kind's per-kind CONFIG sub-schema (the authoritative OpenAPI contract for that
 // kind's body) from the parsed spec. `DeliveryNode<Kind>` is `allOf: [DeliveryNodeCommon, { properties:
-// { <configKey>: {…} } }]`, so find the allOf member carrying the `<configKey>` sub-schema. Returns
-// null when the kind's node schema is a bare `$ref` (the `wait` kind's config IS `ReadinessProbe`,
-// referenced rather than inlined) — the caller resolves that reference itself.
+// { <configKey>: {…} } }]`, so find the allOf member carrying the `<configKey>` sub-schema and return
+// that member's `<configKey>` VALUE. For most kinds that value is the inline config object; for the
+// `wait` kind it is the `{ $ref: "#/components/schemas/ReadinessProbe" }` object (the config is
+// referenced, not inlined), which this helper returns AS-IS — the caller follows the reference itself.
+// Returns null only when the kind's node schema has NO inline `<configKey>` member at all (which the
+// caller's assert.ok rejects), never for the `wait` kind.
 function nodeConfigSchema(
   spec: Record<string, any>,
   nodeSchemaName: string,
