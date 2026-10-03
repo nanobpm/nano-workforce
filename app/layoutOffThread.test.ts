@@ -71,4 +71,10 @@ test("#854 layoutTimeoutMs honours the env knob and ignores garbage", () => {
   assert(layoutTimeoutMs({ NANO_DELIVERY_LAYOUT_TIMEOUT_MS: "90000" }) === 90000, "valid override honoured");
   assert(layoutTimeoutMs({ NANO_DELIVERY_LAYOUT_TIMEOUT_MS: "nope" }) === 300000, "garbage → default");
   assert(layoutTimeoutMs({ NANO_DELIVERY_LAYOUT_TIMEOUT_MS: "-5" }) === 300000, "non-positive → default");
+  // Node's setTimeout ceiling is a signed 32-bit ms value (2_147_483_647); a larger delay wraps to
+  // 1ms and would abort every layout immediately, so an overflowing override must degrade to the
+  // registered default rather than be honoured (issue #854 review).
+  assert(layoutTimeoutMs({ NANO_DELIVERY_LAYOUT_TIMEOUT_MS: "2147483647" }) === 2147483647, "ceiling value honoured");
+  assert(layoutTimeoutMs({ NANO_DELIVERY_LAYOUT_TIMEOUT_MS: "2147483648" }) === 300000, "above Node timer ceiling → default");
+  assert(layoutTimeoutMs({ NANO_DELIVERY_LAYOUT_TIMEOUT_MS: "999999999999" }) === 300000, "far above ceiling → default");
 });

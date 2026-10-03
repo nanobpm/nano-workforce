@@ -16,13 +16,26 @@
 import { Worker } from "node:worker_threads";
 import { readEnvOr } from "./contracts.ts";
 
-/** Resolve the layout timeout (ms) from `NANO_DELIVERY_LAYOUT_TIMEOUT_MS` (default 300000 = 5 min),
- * ignoring a non-positive/garbage value in favour of the registered default. Read per call so an
- * operator can retune it without a restart; the layout is rare (dispatch/preview), so the lookup cost
- * is irrelevant. */
+/** Node's `setTimeout` delay ceiling (a signed 32-bit ms value). A delay above this silently wraps to
+ * 1ms (emitting `TimeoutOverflowWarning`), so an over-large override would abort layouts IMMEDIATELY
+ * instead of extending the bound — a value that large is treated as garbage and degrades to the
+ * registered default. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** The registered default, resolved once from the schema (empty env ⇒ registry `default`) so the
+ * invalid-override fallback and the timeout message stay single-sourced — not a literal `300000`
+ * duplicated here that would drift from `ENV_CONTRACTS`. Mirrors `cloneTimeoutMs` in
+ * `app/repoEnvelope.ts`. */
+const envDefaultLayoutTimeoutMs = Number(readEnvOr("NANO_DELIVERY_LAYOUT_TIMEOUT_MS", "300000", {}));
+
+/** Resolve the layout timeout (ms) from `NANO_DELIVERY_LAYOUT_TIMEOUT_MS` (registered default 300000
+ * = 5 min), degrading to the registered default for any value that is non-positive, garbage, or above
+ * Node's timer ceiling ({@link MAX_TIMER_MS} — an overflow would wrap to 1ms and abort every layout).
+ * Read per call so an operator can retune it without a restart; the layout is rare (dispatch/preview),
+ * so the lookup cost is irrelevant. */
 export function layoutTimeoutMs(env: Record<string, string | undefined> = process.env): number {
   const raw = Number(readEnvOr("NANO_DELIVERY_LAYOUT_TIMEOUT_MS", "300000", env));
-  return Number.isFinite(raw) && raw > 0 ? raw : 300000;
+  return Number.isFinite(raw) && raw > 0 && raw <= MAX_TIMER_MS ? raw : envDefaultLayoutTimeoutMs;
 }
 
 /** The worker message shape: a laid-out XML payload on success, or a server-side error string. */
@@ -55,7 +68,7 @@ export async function layoutBpmnOffThread(
               `layoutDeliveryDiagram: BPMN autolayout exceeded its ${timeoutMs}ms bound and was aborted — the ` +
                 "delivery graph is too large/dense to lay out within the timeout (bpmn-auto-layout is superlinear in " +
                 "node/edge count, issue #854). The launch was failed cleanly rather than hung; retune " +
-                "`NANO_DELIVERY_LAYOUT_TIMEOUT_MS` (default 300000) or shrink the graph.",
+                `\`NANO_DELIVERY_LAYOUT_TIMEOUT_MS\` (default ${envDefaultLayoutTimeoutMs}) or shrink the graph.`,
             ),
           ),
         );
