@@ -207,6 +207,37 @@ export async function claimRunForLaunch(
   return res;
 }
 
+/** Atomically reconcile a STALE launch claim to `failed` — the poller's mirror of
+ * {@link claimRunForLaunch}, and the single canonical writer of that transition (the poller calls ONLY
+ * this; it does not run its own unconditional update). A stale claim (`running`, NULL `process_key`,
+ * past {@link LAUNCH_CLAIM_TTL_MS}) died mid-launch and leaves a phantom in-flight row, so the poller
+ * retires it to `failed`. But the poller observed the row on a PRIOR `find()` read, and between that
+ * read and this write a concurrent dispatch may have atomically RE-CLAIMED the same stale row
+ * (`claimRunForLaunch`), refreshing `updated_at` (and, once it stamps, `process_key`). An UNCONDITIONAL
+ * `update(run_key, {status:'failed'})` would clobber that fresh, live claim — and a third dispatch
+ * could then re-claim it mid-layout and double-launch. So the flip is a compare-and-swap GUARDED on the
+ * exact snapshot the caller observed (`status='running'`, `process_key IS NULL`, the SAME `updated_at`):
+ * a row a concurrent dispatch has touched no longer matches and is left untouched. Returns `true` iff
+ * THIS caller flipped the row (issue #852 review — thread service.ts:3065). */
+export async function reconcileStaleLaunchClaim(
+  data: DataLayer,
+  run: Pick<DeliveryGraphRun, "run_key" | "status" | "process_key" | "updated_at">,
+  nowMs: number = Date.now(),
+): Promise<boolean> {
+  // Non-stale rows (launched, terminal, or a claim still within its TTL) are never retired here — the
+  // staleness decision is owned HERE, not re-derived by each caller, so the CAS guard below and this
+  // predicate can never drift apart.
+  if (!isStaleLaunchClaim(run, nowMs)) return false;
+  const res = await data.open().tx(async (t) => {
+    const flip = await t.exec(
+      `UPDATE "delivery_graph_runs" SET "status" = 'failed', "phase" = ?, "phase_node_id" = NULL, "updated_at" = ? WHERE "run_key" = ? AND "status" = 'running' AND "process_key" IS NULL AND "updated_at" = ?`,
+      [DELIVERY_PHASE.FAILED, new Date(nowMs).toISOString(), run.run_key, run.updated_at],
+    );
+    return flip.changed === 1;
+  });
+  return res;
+}
+
 /** The idempotency key for a submitted graph: a caller-supplied `idempotencyKey` (trimmed) when
  * present and non-blank, else the graph's content `digest`. So two dispatches of the SAME graph (no
  * explicit key) collapse onto one run, and a caller can force a fresh run with an explicit key. */
