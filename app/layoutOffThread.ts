@@ -118,52 +118,65 @@ type LayoutWorkerMessage = { ok: true; laidOut: string } | { ok: false; error: s
  * {@link Semaphore} gate) — a burst of overlapping preview/dispatch layouts queues for a slot rather
  * than spawning an unbounded number of superlinear CPU-bound workers that would saturate the host.
  * The timeout covers only the ACTUAL layout (it starts after a slot is acquired), so queueing behind
- * other layouts is never charged against a graph's bound. */
+ * other layouts is never charged against a graph's bound.
+ *
+ * `spawnWorker` is an injectable seam (default: the real `layoutWorker.ts` worker) so a test can force
+ * a SYNCHRONOUS construction failure — `new Worker(...)` can throw (e.g. `ERR_WORKER_INIT_FAILED`
+ * under resource pressure) — and prove the slot is still released (see below). */
 export async function layoutBpmnOffThread(
   semanticBpmn: string,
   timeoutMs: number = layoutTimeoutMs(),
+  spawnWorker: () => Worker = () =>
+    new Worker(new URL("./layoutWorker.ts", import.meta.url), { workerData: { semanticBpmn } }),
 ): Promise<string> {
+  // Acquire the slot, then wrap EVERYTHING — including worker construction — in the release `finally`.
+  // `new Worker(...)` can throw synchronously (e.g. `ERR_WORKER_INIT_FAILED` under resource pressure);
+  // if construction sat outside this guard, each such failure would permanently consume a slot and,
+  // after `max` failures, wedge every later layout waiting on the gate forever (issue #854 review).
   const release = await layoutConcurrencyGate().acquire();
-  const worker = new Worker(new URL("./layoutWorker.ts", import.meta.url), { workerData: { semanticBpmn } });
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await new Promise<string>((resolve, reject) => {
-      let settled = false;
-      const settle = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        fn();
-      };
-      timer = setTimeout(() => {
-        settle(() =>
-          reject(
-            new Error(
-              `layoutDeliveryDiagram: BPMN autolayout exceeded its ${timeoutMs}ms bound and was aborted — the ` +
-                "delivery graph is too large/dense to lay out within the timeout (bpmn-auto-layout is superlinear in " +
-                "node/edge count, issue #854). The launch was failed cleanly rather than hung; retune " +
-                `\`NANO_DELIVERY_LAYOUT_TIMEOUT_MS\` (default ${envDefaultLayoutTimeoutMs}) or shrink the graph.`,
+    const worker = spawnWorker();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await new Promise<string>((resolve, reject) => {
+        let settled = false;
+        const settle = (fn: () => void) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          fn();
+        };
+        timer = setTimeout(() => {
+          settle(() =>
+            reject(
+              new Error(
+                `layoutDeliveryDiagram: BPMN autolayout exceeded its ${timeoutMs}ms bound and was aborted — the ` +
+                  "delivery graph is too large/dense to lay out within the timeout (bpmn-auto-layout is superlinear in " +
+                  "node/edge count, issue #854). The launch was failed cleanly rather than hung; retune " +
+                  `\`NANO_DELIVERY_LAYOUT_TIMEOUT_MS\` (default ${envDefaultLayoutTimeoutMs}) or shrink the graph.`,
+              ),
             ),
-          ),
-        );
-      }, timeoutMs);
-      // A setTimeout in a hot dispatch path should not itself keep a draining process alive.
-      timer.unref?.();
-      worker.once("message", (msg: LayoutWorkerMessage) => {
-        settle(() => {
-          if (msg.ok) resolve(msg.laidOut);
-          else reject(new Error(msg.error));
+          );
+        }, timeoutMs);
+        // A setTimeout in a hot dispatch path should not itself keep a draining process alive.
+        timer.unref?.();
+        worker.once("message", (msg: LayoutWorkerMessage) => {
+          settle(() => {
+            if (msg.ok) resolve(msg.laidOut);
+            else reject(new Error(msg.error));
+          });
+        });
+        worker.once("error", (err) => settle(() => reject(err)));
+        worker.once("exit", (code) => {
+          if (code === 0) return; // a clean exit after a delivered message is expected on teardown
+          settle(() => reject(new Error(`layoutDeliveryDiagram: layout worker exited early with code ${code}`)));
         });
       });
-      worker.once("error", (err) => settle(() => reject(err)));
-      worker.once("exit", (code) => {
-        if (code === 0) return; // a clean exit after a delivered message is expected on teardown
-        settle(() => reject(new Error(`layoutDeliveryDiagram: layout worker exited early with code ${code}`)));
-      });
-    });
+    } finally {
+      if (timer) clearTimeout(timer);
+      await worker.terminate();
+    }
   } finally {
-    if (timer) clearTimeout(timer);
-    await worker.terminate();
-    release(); // hand our slot to the next queued layout — ALWAYS, even on reject/terminate
+    release(); // hand our slot to the next queued layout — ALWAYS, even on a construction throw/reject/terminate
   }
 }

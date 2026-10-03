@@ -177,3 +177,32 @@ test("#854 a holder that releases in `finally` frees its slot even when its work
   assert(nextAdmitted, "the slot held by a throwing holder must be freed, admitting the next layout");
   await next;
 });
+
+test("#854 a synchronous worker-construction failure releases the slot instead of wedging the gate", async () => {
+  // Regression for the review finding: `new Worker(...)` can throw synchronously (e.g.
+  // `ERR_WORKER_INIT_FAILED` under resource pressure). The slot is acquired BEFORE construction, so if
+  // construction isn't inside the release `finally`, each failure permanently consumes a slot and —
+  // after `layoutMaxConcurrency()` failures — every later layout queues on the shared singleton gate
+  // FOREVER. Force construction to throw more times than the bound: with the leak, the (max+1)-th call
+  // hangs on `acquire()` and never reaches the throwing factory; with the fix, every call rejects
+  // promptly. A per-call watchdog turns a wedge into a clean assertion failure rather than a suite hang.
+  const spawnThrows = (): never => {
+    throw new Error("ERR_WORKER_INIT_FAILED (simulated)");
+  };
+  const calls = layoutMaxConcurrency() + 2; // more than the bound, so a leak would exhaust the gate
+  for (let i = 0; i < calls; i++) {
+    const watchdog = new Promise<"hung">((resolve) => {
+      const t = setTimeout(() => resolve("hung"), 2000);
+      t.unref?.();
+    });
+    const attempt = layoutBpmnOffThread("<x/>", 60000, spawnThrows).then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    );
+    const outcome = await Promise.race([attempt, watchdog]);
+    assert(
+      outcome === "rejected",
+      `construction-failure call #${i + 1} must reject and free its slot, not wedge the gate (got "${outcome}")`,
+    );
+  }
+});
