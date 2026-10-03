@@ -564,10 +564,33 @@ layer schedules, it does not re-implement execution):
 
 | kind | config | what it does | may `emits`? |
 |---|---|---|---|
-| `agent` | `agent: { jobType, prompt?, converge?, merge? }` | a worker runs an agent job type (the fan-out body). **Side-effecting.** First-class **`converge?` / `merge?`** cell policy (§9.4) — a **declared, compiler-validated** completion-policy flag that *declares* review-convergence / landing intent (`merge` requires `converge`); a raw `senior:converge`/`senior:merge` job is rejected. This slice adds + validates the flags; the delivery-graph execution wiring that consumes them lands in a follow-up slice. | yes |
+| `agent` | `agent: { jobType, repository?, baseBranch?, prompt?, converge?, merge?, timeout? }` | a worker runs an agent job type (the fan-out body) in a fresh checkout of its `repository` (see *Provision every agent node* below). **Side-effecting.** First-class **`converge?` / `merge?`** cell policy (§9.4) — a **declared, compiler-validated** completion-policy flag that *declares* review-convergence / landing intent (`merge` requires `converge`); a raw `senior:converge`/`senior:merge` job is rejected. This slice adds + validates the flags; the delivery-graph execution wiring that consumes them lands in a follow-up slice. **`timeout?`** is an OPTIONAL per-node ISO-8601 SLA (#505) that overrides the run-level `nodeTimeout` (and the `PT1H` default) for this node's bounded-timeout → escalate boundary, so a legitimately-long node outlasts a quick gate without a spurious escalation. | yes |
 | `wait` | `wait: <ReadinessProbe>` | a durable, bounded readiness probe — kind ∈ `http`, `command`, `npm`, `github-check`, `capability`, `pr`, `epic`. Read-only. | yes (binds observed facts) |
 | `human` | `human?: { formKey?, prompt? }` | a scheduled user task + form (the Tasks inbox, §3). Blocks dependents, SLA-bounded, answerable by a human **or** an agent. | yes |
-| `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). Three **real targets** ship today — **`converge`**, **`converge-merge`** (unit → base branch) and **`merge-main`** (graph → `main`, the two-level top-level land) (§9.4); other targets are a forward-declared stub. | yes |
+| `connector` | `connector: { target, dedupeKey?, payload?, timeout? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). Three **real targets** ship today — **`converge`**, **`converge-merge`** (unit → base branch) and **`merge-main`** (graph → `main`, the two-level top-level land) (§9.4); other targets are a forward-declared stub. **`timeout?`** — a per-node ISO-8601 SLA (#505), same semantics as the `agent` row. | yes |
+
+> **Provision every `agent` node with a repository — compile will NOT catch it.** Each `agent` cell
+> runs in an isolated checkout: the harness clones the node's **`repository`** (`owner/repo`, no
+> `.git`/URL) at **`baseBranch`** and cuts `feat/<node.id>` off it (#739/#776). `baseBranch` resolves
+> **per field** — the node's own, else the **run-level dispatch `baseBranch`**, else the repo default
+> (an id yielding an ill-formed ref like `a..b`/`a.lock` makes the harness skip `branch.create`, so
+> the agent cuts its own branch). A node with **no `repository`** is staged by compile **without a
+> warning**, then — absent a **run-level fallback** supplied *at dispatch* — Dispatch fails with
+> `N agent node(s) resolve to no repository (…)`. So:
+>
+> - **Declare `repository` on EVERY `agent` node** (and `baseBranch` when it is neither the run-level
+>   base nor the default): a single-repo graph repeats one value; a cross-repo graph names each node's
+>   own repo. Every repo a node's prompt changes must be that node's `repository`.
+> - **`repoless` is a RUN-WIDE mode, not a per-node escape hatch** — it strips isolation from *every*
+>   node. Use it only when **every** `agent` node is checkout-less (pure research/comment work); if
+>   even one needs a checkout, provision repositories instead.
+> - **Self-check before handing over the digest:** every `"kind": "agent"` node has a `repository`;
+>   if you leave some unset, tell the operator which, and that they must pick the run-level
+>   **repository + base-branch fallback** in the Dispatch form (the default mode rejects the graph).
+>
+> A **present** `repository`/`baseBranch` is validated at compile (`invalid-node-repository` /
+> `invalid-node-base-branch`); an **absent `repository`** defers to dispatch (and can fail there); an
+> **absent `baseBranch` is always valid** — it inherits the run-level base, else the repo default.
 
 A **`wait` node's `wait` is a `ReadinessProbe` verbatim** (the same shape feature-run
 intake uses): `{ kind, target, onTimeout?, match?, poll? }`, where `poll` is
@@ -720,12 +743,12 @@ publish and records the version → open+merge PR #303 (repo 3) consuming that v
       "wait": { "kind": "pr", "target": "acme/repo-1#101", "match": { "prState": "merged" },
                 "poll": { "everyMs": 300000, "timeoutMs": 259200000 }, "onTimeout": "escalate" } },
     { "id": "undraft-merge-b", "kind": "agent",
-      "agent": { "jobType": "senior:feature", "converge": true, "merge": true, "prompt": "Take draft PR acme/repo-2#202 out of draft; converge it to green and land it." } },
+      "agent": { "jobType": "senior:feature", "repository": "acme/repo-2", "converge": true, "merge": true, "prompt": "Take draft PR acme/repo-2#202 out of draft; converge it to green and land it." } },
     { "id": "manual-publish", "kind": "human",
       "human": { "prompt": "Run the manual OTP-authenticated `npm publish` for @acme/widget and set up OIDC trusted publishing. Record the exact published version." },
       "emits": [ { "name": "publishedVersion", "type": "version", "description": "The version just published to npm." } ] },
     { "id": "open-pr-c", "kind": "agent",
-      "agent": { "jobType": "senior:feature", "prompt": "Bump @acme/widget to the published version in acme/repo-3 and open PR #303." } },
+      "agent": { "jobType": "senior:feature", "repository": "acme/repo-3", "prompt": "Bump @acme/widget to the published version in acme/repo-3 and open PR #303." } },
     { "id": "merge-c", "kind": "wait",
       "wait": { "kind": "pr", "target": "acme/repo-3#303", "match": { "prState": "merged" },
                 "poll": { "everyMs": 300000, "timeoutMs": 259200000 }, "onTimeout": "escalate" } }
@@ -804,7 +827,7 @@ author never knows the PR number at compose time, so reference it by fact:
   "name": "open → converge+merge → wait merged",
   "nodes": [
     { "id": "open", "kind": "agent",
-      "agent": { "jobType": "senior:feature", "prompt": "Implement the change in acme/repo and open a PR." },
+      "agent": { "jobType": "senior:feature", "repository": "acme/repo", "prompt": "Implement the change in acme/repo and open a PR." },
       "emits": [ { "name": "pr", "type": "pr" } ] },
     { "id": "land", "kind": "connector",
       "connector": { "target": "converge-merge", "payload": { "pr": "open.pr" } } },
@@ -870,7 +893,7 @@ babysitting a `confirm` gate.
                 "onTimeout": "escalate" },
       "emits": [ { "name": "prCount", "type": "number" } ] },
     { "id": "start-b", "kind": "agent",
-      "agent": { "jobType": "senior:feature", "prompt": "Implement nanobpm/nano-workforce#567 and open a PR." } }
+      "agent": { "jobType": "senior:feature", "repository": "nanobpm/nano-workforce", "prompt": "Implement nanobpm/nano-workforce#567 and open a PR." } }
   ],
   "edges": [ { "from": "gate-epic", "to": "start-b" } ]
 }

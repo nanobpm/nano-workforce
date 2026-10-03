@@ -6,7 +6,9 @@
 // key sets are byte-identical to the closed sets in `app/deliveryGraph.ts` / `app/readiness.ts` /
 // `app/convergeTargets.ts` (AGENTS.md — "no drift surfaces").
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
 import { CONVERGE_MERGE_TARGET, CONVERGE_TARGET, isConvergeTarget, MERGE_MAIN_TARGET } from "./convergeTargets.ts";
 import { DELIVERY_FACT_TYPES, DELIVERY_GUARD_SCALAR_TYPES, DELIVERY_NODE_KINDS } from "./deliveryGraph.ts";
 import { deliveryGraphVocabulary } from "./deliveryGraphVocabulary.ts";
@@ -99,4 +101,81 @@ test("the epic probe states the FEATURE-RUN observation semantics (the #605 evid
 test("fact-threading rule names the unbound-pr rejection", () => {
   const vocab = deliveryGraphVocabulary();
   assert.match(vocab.factThreading.rule, /unbound-pr/);
+});
+
+// Resolve a node kind's per-kind CONFIG sub-schema (the authoritative OpenAPI contract for that
+// kind's body) from the parsed spec. `DeliveryNode<Kind>` is `allOf: [DeliveryNodeCommon, { properties:
+// { <configKey>: {…} } }]`, so find the allOf member carrying the `<configKey>` sub-schema and return
+// that member's `<configKey>` VALUE. For most kinds that value is the inline config object; for the
+// `wait` kind it is the `{ $ref: "#/components/schemas/ReadinessProbe" }` object (the config is
+// referenced, not inlined), which this helper returns AS-IS — the caller follows the reference itself.
+// Returns null only when the kind's node schema has NO inline `<configKey>` member at all (which the
+// caller's assert.ok rejects), never for the `wait` kind.
+function nodeConfigSchema(
+  spec: Record<string, any>,
+  nodeSchemaName: string,
+  configKey: string,
+): Record<string, any> | null {
+  const schema = spec?.components?.schemas?.[nodeSchemaName];
+  if (!schema) return null;
+  const sub = (schema.allOf as Array<Record<string, any>> | undefined)?.map((m) => m?.properties?.[configKey]).find(Boolean);
+  return sub ?? null;
+}
+
+/** Derive the (sorted) required + optional field sets from a config sub-schema's own `required`/`properties`. */
+function fieldSets(configSchema: Record<string, any>): { required: string[]; optional: string[] } {
+  const required = [...((configSchema.required as string[] | undefined) ?? [])].sort();
+  const optional = Object.keys((configSchema.properties as Record<string, unknown>) ?? {})
+    .filter((k) => !required.includes(k))
+    .sort();
+  return { required, optional };
+}
+
+test("every node-kind entry's field sets are DERIVED from its OpenAPI DeliveryNode<Kind>.<configKey> contract (#739/#850)", () => {
+  // The #850 failure mode is drift between a `DeliveryNode<Kind>.<configKey>` (the authoritative
+  // OpenAPI contract) and this vocabulary surface. A literal field list duplicated here would NOT
+  // catch it: if OpenAPI adds or removes a config property, a hand-copied list stays green while the
+  // surface lies. So derive the required/optional sets from the PARSED spec and compare the sets
+  // directly — the vocabulary cannot silently drift from the contract it claims to mirror. This
+  // guards EVERY kind, not just `agent`: the connector entry omitting the real `timeout` field
+  // (PR #851 review) is the same drift class the agent-only guard missed.
+  const ROOT = decodeURIComponent(new URL("../", import.meta.url).pathname);
+  const spec = parseYaml(readFileSync(`${ROOT}openapi.yaml`, "utf8")) as Record<string, any>;
+
+  const vocab = deliveryGraphVocabulary();
+  for (const entry of vocab.nodeKinds) {
+    const nodeSchemaName = `DeliveryNode${entry.kind[0]!.toUpperCase()}${entry.kind.slice(1)}`;
+    let configSchema = nodeConfigSchema(spec, nodeSchemaName, entry.configKey);
+    assert.ok(
+      configSchema,
+      `openapi.yaml components.schemas.${nodeSchemaName} must carry an inline '${entry.configKey}' config sub-schema`,
+    );
+    // The `wait` kind's config is `$ref: "#/components/schemas/ReadinessProbe"` — follow the reference.
+    if (typeof configSchema!.$ref === "string") {
+      const refName = configSchema!.$ref.replace(/^#\/components\/schemas\//, "");
+      configSchema = spec?.components?.schemas?.[refName];
+      assert.ok(configSchema?.properties, `${refName} (the wait config contract) must declare its properties`);
+    }
+    const { required, optional } = fieldSets(configSchema!);
+    assert.deepEqual(
+      [...entry.requiredFields].sort(),
+      required,
+      `${entry.kind}.requiredFields drifted from ${nodeSchemaName}.${entry.configKey}.required in openapi.yaml`,
+    );
+    assert.deepEqual(
+      [...entry.optionalFields].sort(),
+      optional,
+      `${entry.kind}.optionalFields drifted from ${nodeSchemaName}.${entry.configKey}'s optional properties in openapi.yaml`,
+    );
+  }
+
+  // The non-obvious rules an authoring agent must learn from the surface prose: an ABSENT repository
+  // is not compile-rejected (a run-level fallback can satisfy it) — it fails at the OPERATOR's
+  // Dispatch; and the per-node SLA timeout override exists.
+  const agent = vocab.nodeKinds.find((n) => n.kind === "agent");
+  assert.ok(agent, "agent node-kind entry must exist");
+  assert.match(agent.summary, /resolve to no repository/, "names the dispatch-time failure the author must pre-empt");
+  assert.match(agent.summary, /invalid-node-repository/, "names the compile-time validation for a present value");
+  assert.match(agent.summary, /repoless/, "names the checkout-less opt-out");
+  assert.match(agent.summary, /per-node ISO-8601 `timeout`/, "names the per-node SLA timeout override (#505)");
 });

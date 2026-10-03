@@ -105,13 +105,29 @@ const NODE_KIND_DETAIL: Record<string, Omit<NodeKindEntry, "kind">> = {
   agent: {
     configKey: "agent",
     requiredFields: ["jobType"],
-    optionalFields: ["prompt", "converge", "merge"],
+    optionalFields: ["repository", "baseBranch", "prompt", "converge", "merge", "timeout"],
     sideEffecting: true,
     mayEmit: true,
     summary:
-      "A worker runs an agent job type (the fan-out body, e.g. `senior:feature`). First-class " +
+      "A worker runs an agent job type (the fan-out body, e.g. `senior:feature`) in an isolated " +
+      "checkout. Per-node provisioning (#739/#776): declare `repository` (`owner/repo`, no `.git`/URL) " +
+      "on EVERY agent node — the harness clones it at `baseBranch` (omit it to use the run-level " +
+      "dispatch `baseBranch`, else the repo's default branch) and cuts `feat/<node.id>` off it " +
+      "(when that derived ref is a valid Git branch name; an id like `a..b`/`a.lock` yields an " +
+      "ill-formed ref, so the harness omits `branch.create` and the agent cuts its own branch). A node " +
+      "with no `repository` can only be satisfied by the run-level dispatch fallback, so COMPILE " +
+      "stages it without a warning; at Dispatch it resolves to the run-level `repository` + `baseBranch` " +
+      "fallback when the operator supplies one, and the Dispatch fails with `N agent node(s) " +
+      "resolve to no repository (…)` ONLY when neither the node nor the run supplies a repository " +
+      "(a present value IS compile-validated: `invalid-node-repository`/" +
+      "`invalid-node-base-branch`); a genuinely checkout-less graph must be dispatched `repoless: true`, " +
+      "which strips isolation from every node. First-class " +
       "`converge?`/`merge?` cell-policy flags declare review-convergence / landing intent (`merge` " +
       "requires `converge`); a raw `senior:converge`/`senior:merge` jobType is rejected (`raw-converge-node`). " +
+      "An optional per-node ISO-8601 `timeout` (#505) overrides the run-level `nodeTimeout` (and the " +
+      "`PT1H` default) for THIS node's bounded-timeout → escalate boundary, so a legitimately-long node " +
+      "(e.g. a full `senior:feature`) outlasts a quick gate without a spurious escalation; absent → the " +
+      "run/default value. " +
       "An `agent` that opens a PR emits it as a `pr`-typed fact so downstream connector/wait nodes late-bind it.",
   },
   wait: {
@@ -138,14 +154,16 @@ const NODE_KIND_DETAIL: Record<string, Omit<NodeKindEntry, "kind">> = {
   connector: {
     configKey: "connector",
     requiredFields: ["target"],
-    optionalFields: ["dedupeKey", "payload"],
+    optionalFields: ["dedupeKey", "payload", "timeout"],
     sideEffecting: true,
     mayEmit: true,
     summary:
       "An automated, side-effecting outbound action. `payload` for a converge target is " +
       "`{ pr, autoMerge?, dependsOn? }` (`pr` may be a literal `owner/repo#N`, a `<node>.pr` fact " +
       "reference, or omitted to auto-bind the single incoming `pr` fact). Carries a `dedupeKey` " +
-      "(at-least-once safe). See connectorTargets for which targets are real vs. forward-declared.",
+      "(at-least-once safe). An optional per-node ISO-8601 `timeout` (#505) overrides the run-level " +
+      "`nodeTimeout` (and the `PT1H` default) for THIS node's bounded-timeout → escalate boundary; " +
+      "absent → the run/default value. See connectorTargets for which targets are real vs. forward-declared.",
   },
 };
 
