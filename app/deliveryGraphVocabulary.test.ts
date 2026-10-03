@@ -110,7 +110,7 @@ test("the agent entry carries the per-node repository provisioning semantics (#7
   const agent = vocab.nodeKinds.find((n) => n.kind === "agent");
   assert.ok(agent, "agent node-kind entry must exist");
   assert.deepEqual(agent.requiredFields, ["jobType"]);
-  for (const field of ["repository", "baseBranch", "prompt", "converge", "merge"]) {
+  for (const field of ["repository", "baseBranch", "prompt", "converge", "merge", "timeout"]) {
     assert.ok(
       agent.optionalFields.includes(field),
       `agent.optionalFields is missing '${field}' — the vocabulary drifted from the DeliveryNodeAgent config`,
@@ -121,4 +121,5 @@ test("the agent entry carries the per-node repository provisioning semantics (#7
   assert.match(agent.summary, /resolve to no repository/, "names the dispatch-time failure the author must pre-empt");
   assert.match(agent.summary, /invalid-node-repository/, "names the compile-time validation for a present value");
   assert.match(agent.summary, /repoless/, "names the checkout-less opt-out");
+  assert.match(agent.summary, /per-node ISO-8601 `timeout`/, "names the per-node SLA timeout override (#505)");
 });

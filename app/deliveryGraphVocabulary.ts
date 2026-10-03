@@ -105,7 +105,7 @@ const NODE_KIND_DETAIL: Record<string, Omit<NodeKindEntry, "kind">> = {
   agent: {
     configKey: "agent",
     requiredFields: ["jobType"],
-    optionalFields: ["repository", "baseBranch", "prompt", "converge", "merge"],
+    optionalFields: ["repository", "baseBranch", "prompt", "converge", "merge", "timeout"],
     sideEffecting: true,
     mayEmit: true,
     summary:
@@ -120,6 +120,10 @@ const NODE_KIND_DETAIL: Record<string, Omit<NodeKindEntry, "kind">> = {
       "which strips isolation from every node. First-class " +
       "`converge?`/`merge?` cell-policy flags declare review-convergence / landing intent (`merge` " +
       "requires `converge`); a raw `senior:converge`/`senior:merge` jobType is rejected (`raw-converge-node`). " +
+      "An optional per-node ISO-8601 `timeout` (#505) overrides the run-level `nodeTimeout` (and the " +
+      "`PT1H` default) for THIS node's bounded-timeout → escalate boundary, so a legitimately-long node " +
+      "(e.g. a full `senior:feature`) outlasts a quick gate without a spurious escalation; absent → the " +
+      "run/default value. " +
       "An `agent` that opens a PR emits it as a `pr`-typed fact so downstream connector/wait nodes late-bind it.",
   },
   wait: {
