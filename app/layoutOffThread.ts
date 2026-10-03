@@ -38,6 +38,75 @@ export function layoutTimeoutMs(env: Record<string, string | undefined> = proces
   return Number.isFinite(raw) && raw > 0 && raw <= MAX_TIMER_MS ? raw : envDefaultLayoutTimeoutMs;
 }
 
+/** A sanity ceiling on the concurrency bound: a value this large is effectively unbounded and is
+ * treated as garbage (degrading to the registered default) rather than honoured — the whole point of
+ * the bound is to keep concurrent CPU-bound layouts SMALL. */
+const MAX_LAYOUT_CONCURRENCY = 1024;
+
+/** The registered default concurrency, resolved once from the schema (empty env ⇒ registry `default`)
+ * so the invalid-override fallback stays single-sourced — not a literal duplicated here that would
+ * drift from `ENV_CONTRACTS`. Mirrors {@link envDefaultLayoutTimeoutMs}. */
+const envDefaultLayoutMaxConcurrency = Number(readEnvOr("NANO_DELIVERY_LAYOUT_MAX_CONCURRENCY", "2", {}));
+
+/** Resolve the max number of concurrent layout workers from `NANO_DELIVERY_LAYOUT_MAX_CONCURRENCY`
+ * (registered default 2), degrading to the registered default for any value that is non-integer,
+ * non-positive, garbage, or above {@link MAX_LAYOUT_CONCURRENCY}. Mirrors {@link layoutTimeoutMs}'s
+ * fail-safe parsing so a bad override can never make the bound 0/∞ (either of which defeats it). */
+export function layoutMaxConcurrency(env: Record<string, string | undefined> = process.env): number {
+  const raw = Number(readEnvOr("NANO_DELIVERY_LAYOUT_MAX_CONCURRENCY", "2", env));
+  return Number.isInteger(raw) && raw > 0 && raw <= MAX_LAYOUT_CONCURRENCY ? raw : envDefaultLayoutMaxConcurrency;
+}
+
+/** A minimal FIFO counting semaphore: at most `max` holders run concurrently, the rest queue in
+ * arrival order. Bounds how many CPU-bound layout workers exist at once so a burst of overlapping
+ * preview/dispatch layouts cannot spawn an UNBOUNDED number of superlinear workers and saturate
+ * CPU/memory — the very starvation this off-thread move exists to prevent (issue #854). Each
+ * `acquire()` resolves with an idempotent `release` that hands the freed slot to the next waiter. */
+export class Semaphore {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+  private readonly max: number;
+
+  constructor(max: number) {
+    if (!Number.isInteger(max) || max < 1) {
+      throw new Error(`Semaphore: max must be a positive integer, got ${String(max)}`);
+    }
+    this.max = max;
+  }
+
+  /** Wait (FIFO) for a slot, then return a one-shot `release`. Always `release()` in a `finally` so a
+   * rejecting holder cannot leak its slot and wedge every queued layout behind it. */
+  async acquire(): Promise<() => void> {
+    await new Promise<void>((resolve) => {
+      if (this.active < this.max) {
+        this.active++;
+        resolve();
+      } else {
+        this.waiters.push(() => {
+          this.active++;
+          resolve();
+        });
+      }
+    });
+    let released = false;
+    return () => {
+      if (released) return; // idempotent: a double release must not free a slot it never held
+      released = true;
+      this.active--;
+      this.waiters.shift()?.();
+    };
+  }
+}
+
+/** The ONE shared gate bounding concurrent layout workers, sized lazily on first use from
+ * {@link layoutMaxConcurrency}. A singleton so EVERY `layoutBpmnOffThread` call — across both the
+ * dispatch and preview paths — contends for the same small pool of slots. */
+let layoutGate: Semaphore | undefined;
+function layoutConcurrencyGate(): Semaphore {
+  if (!layoutGate) layoutGate = new Semaphore(layoutMaxConcurrency());
+  return layoutGate;
+}
+
 /** The worker message shape: a laid-out XML payload on success, or a server-side error string. */
 type LayoutWorkerMessage = { ok: true; laidOut: string } | { ok: false; error: string };
 
@@ -45,11 +114,16 @@ type LayoutWorkerMessage = { ok: true; laidOut: string } | { ok: false; error: s
  * bounded by `timeoutMs`. Resolves with the laid-out XML; rejects (and TERMINATES the worker — the
  * bound that stops a runaway layout) on timeout, a worker error, an early exit, or a layout failure
  * reported by the worker. The worker is always torn down before this resolves/rejects, so no isolate
- * leaks across calls. */
+ * leaks across calls. At most {@link layoutMaxConcurrency} workers run at once (the shared
+ * {@link Semaphore} gate) — a burst of overlapping preview/dispatch layouts queues for a slot rather
+ * than spawning an unbounded number of superlinear CPU-bound workers that would saturate the host.
+ * The timeout covers only the ACTUAL layout (it starts after a slot is acquired), so queueing behind
+ * other layouts is never charged against a graph's bound. */
 export async function layoutBpmnOffThread(
   semanticBpmn: string,
   timeoutMs: number = layoutTimeoutMs(),
 ): Promise<string> {
+  const release = await layoutConcurrencyGate().acquire();
   const worker = new Worker(new URL("./layoutWorker.ts", import.meta.url), { workerData: { semanticBpmn } });
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -90,5 +164,6 @@ export async function layoutBpmnOffThread(
   } finally {
     if (timer) clearTimeout(timer);
     await worker.terminate();
+    release(); // hand our slot to the next queued layout — ALWAYS, even on reject/terminate
   }
 }
