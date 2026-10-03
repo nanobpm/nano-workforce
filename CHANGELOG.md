@@ -1,3 +1,9 @@
+## [0.200.1](https://github.com/nanobpm/nano-workforce/compare/v0.200.0...v0.200.1) (2026-10-03)
+
+### Performance Improvements
+
+* **delivery-graph:** run BPMN autolayout off the main thread (worker_threads) so a large graph cannot freeze the app ([#855](https://github.com/nanobpm/nano-workforce/issues/855)) ([d726bca](https://github.com/nanobpm/nano-workforce/commit/d726bcafd1b8e89484c7231a705f287943633a8a)), closes [#852](https://github.com/nanobpm/nano-workforce/issues/852) [#854](https://github.com/nanobpm/nano-workforce/issues/854)
+
 ## [0.200.0](https://github.com/nanobpm/nano-workforce/compare/v0.199.0...v0.200.0) (2026-10-02)
 
 ### Features
