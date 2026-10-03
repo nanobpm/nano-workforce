@@ -32,7 +32,7 @@ import { makeDefaultReadHead } from "./currentHead.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
-import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
+import { DELIVERY_PHASE, deliveryGraphRuns, deriveDeliveryPhase, isStaleLaunchClaim, parseHumanLabels } from "./deliveryGraphRun.ts";
 import { deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
@@ -3052,7 +3052,20 @@ export async function pollDeliveryGraphPhase(
   engine: Pick<EngineClient, "searchProcessInstances" | "searchUserTasks">,
 ) {
   for (const run of await deliveryGraphRuns(data).find({ status: "running" })) {
-    if (!run.process_key) continue;
+    if (!run.process_key) {
+      // #852: a launch claim that never got an instance key within the TTL died mid-launch (the dispatch
+      // process went down before deploy, so its own `markClaimFailed` never ran). Reconcile it to
+      // `failed` so the cockpit stops showing a phantom in-flight run; a re-dispatch re-claims it.
+      if (isStaleLaunchClaim(run)) {
+        await deliveryGraphRuns(data).update(run.run_key, {
+          status: "failed",
+          phase: DELIVERY_PHASE.FAILED,
+          phase_node_id: null,
+          updated_at: now(),
+        });
+      }
+      continue;
+    }
     const processKey = run.process_key;
     try {
       const [snapshots, parks] = await Promise.all([
