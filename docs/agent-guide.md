@@ -564,10 +564,34 @@ layer schedules, it does not re-implement execution):
 
 | kind | config | what it does | may `emits`? |
 |---|---|---|---|
-| `agent` | `agent: { jobType, prompt?, converge?, merge? }` | a worker runs an agent job type (the fan-out body). **Side-effecting.** First-class **`converge?` / `merge?`** cell policy (§9.4) — a **declared, compiler-validated** completion-policy flag that *declares* review-convergence / landing intent (`merge` requires `converge`); a raw `senior:converge`/`senior:merge` job is rejected. This slice adds + validates the flags; the delivery-graph execution wiring that consumes them lands in a follow-up slice. | yes |
+| `agent` | `agent: { jobType, repository?, baseBranch?, prompt?, converge?, merge? }` | a worker runs an agent job type (the fan-out body) in a fresh checkout of its `repository` (see *Provision every agent node* below). **Side-effecting.** First-class **`converge?` / `merge?`** cell policy (§9.4) — a **declared, compiler-validated** completion-policy flag that *declares* review-convergence / landing intent (`merge` requires `converge`); a raw `senior:converge`/`senior:merge` job is rejected. This slice adds + validates the flags; the delivery-graph execution wiring that consumes them lands in a follow-up slice. | yes |
 | `wait` | `wait: <ReadinessProbe>` | a durable, bounded readiness probe — kind ∈ `http`, `command`, `npm`, `github-check`, `capability`, `pr`, `epic`. Read-only. | yes (binds observed facts) |
 | `human` | `human?: { formKey?, prompt? }` | a scheduled user task + form (the Tasks inbox, §3). Blocks dependents, SLA-bounded, answerable by a human **or** an agent. | yes |
 | `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). Three **real targets** ship today — **`converge`**, **`converge-merge`** (unit → base branch) and **`merge-main`** (graph → `main`, the two-level top-level land) (§9.4); other targets are a forward-declared stub. | yes |
+
+> **Provision every `agent` node with a repository — compile will NOT catch it.** Each `agent`
+> cell runs in an isolated checkout: the harness clones the node's **`repository`**
+> (`owner/repo`, no `.git`/URL) at **`baseBranch`** (omit it to use the repo's default branch)
+> and cuts `feat/<node.id>` off it (#739/#776). A node with no `repository` can only be
+> provisioned by a **run-level fallback** the operator supplies *at dispatch*, so the compile door
+> treats it as valid and **stages it without a warning** — then the operator's Dispatch fails
+> with `N agent node(s) resolve to no repository (…)`, and you are not in the loop to fix it.
+> So when you author a graph:
+>
+> - **Declare `repository` (and `baseBranch` when it isn't the default branch) on EVERY `agent`
+>   node** — a single-repo graph repeats the same value on each node; a cross-repo graph names
+>   each node's own repo. Every repo a node's prompt says it will change must be that node's
+>   `repository`.
+> - **Only if a node genuinely needs no checkout** (e.g. pure research/comment work), say so
+>   explicitly to the operator: the whole run must then be dispatched **checkout-less**
+>   (`repoless`), which strips isolation from *every* node — it is not per-node.
+> - **Before you hand over the digest, self-check:** every `"kind": "agent"` node has a
+>   `repository`. If you deliberately left some unset, tell the operator which nodes, and that
+>   they must choose the run-level **repository + base branch fallback** in the Dispatch form
+>   (the default "use node repositories" mode will reject the graph).
+>
+> A **present** `repository`/`baseBranch` is validated at compile (`invalid-node-repository`
+> / `invalid-node-base-branch`); only an **absent** one is deferred to dispatch.
 
 A **`wait` node's `wait` is a `ReadinessProbe` verbatim** (the same shape feature-run
 intake uses): `{ kind, target, onTimeout?, match?, poll? }`, where `poll` is
@@ -720,12 +744,12 @@ publish and records the version → open+merge PR #303 (repo 3) consuming that v
       "wait": { "kind": "pr", "target": "acme/repo-1#101", "match": { "prState": "merged" },
                 "poll": { "everyMs": 300000, "timeoutMs": 259200000 }, "onTimeout": "escalate" } },
     { "id": "undraft-merge-b", "kind": "agent",
-      "agent": { "jobType": "senior:feature", "converge": true, "merge": true, "prompt": "Take draft PR acme/repo-2#202 out of draft; converge it to green and land it." } },
+      "agent": { "jobType": "senior:feature", "repository": "acme/repo-2", "converge": true, "merge": true, "prompt": "Take draft PR acme/repo-2#202 out of draft; converge it to green and land it." } },
     { "id": "manual-publish", "kind": "human",
       "human": { "prompt": "Run the manual OTP-authenticated `npm publish` for @acme/widget and set up OIDC trusted publishing. Record the exact published version." },
       "emits": [ { "name": "publishedVersion", "type": "version", "description": "The version just published to npm." } ] },
     { "id": "open-pr-c", "kind": "agent",
-      "agent": { "jobType": "senior:feature", "prompt": "Bump @acme/widget to the published version in acme/repo-3 and open PR #303." } },
+      "agent": { "jobType": "senior:feature", "repository": "acme/repo-3", "prompt": "Bump @acme/widget to the published version in acme/repo-3 and open PR #303." } },
     { "id": "merge-c", "kind": "wait",
       "wait": { "kind": "pr", "target": "acme/repo-3#303", "match": { "prState": "merged" },
                 "poll": { "everyMs": 300000, "timeoutMs": 259200000 }, "onTimeout": "escalate" } }
@@ -804,7 +828,7 @@ author never knows the PR number at compose time, so reference it by fact:
   "name": "open → converge+merge → wait merged",
   "nodes": [
     { "id": "open", "kind": "agent",
-      "agent": { "jobType": "senior:feature", "prompt": "Implement the change in acme/repo and open a PR." },
+      "agent": { "jobType": "senior:feature", "repository": "acme/repo", "prompt": "Implement the change in acme/repo and open a PR." },
       "emits": [ { "name": "pr", "type": "pr" } ] },
     { "id": "land", "kind": "connector",
       "connector": { "target": "converge-merge", "payload": { "pr": "open.pr" } } },
@@ -870,7 +894,7 @@ babysitting a `confirm` gate.
                 "onTimeout": "escalate" },
       "emits": [ { "name": "prCount", "type": "number" } ] },
     { "id": "start-b", "kind": "agent",
-      "agent": { "jobType": "senior:feature", "prompt": "Implement nanobpm/nano-workforce#567 and open a PR." } }
+      "agent": { "jobType": "senior:feature", "repository": "nanobpm/nano-workforce", "prompt": "Implement nanobpm/nano-workforce#567 and open a PR." } }
   ],
   "edges": [ { "from": "gate-epic", "to": "start-b" } ]
 }
