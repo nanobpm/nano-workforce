@@ -474,12 +474,24 @@ const SCOPE_ATTRIBUTED_TO_OTHERS =
  * ownership (`this slice delivers the full scope`) stays an affirmative assertion. A `our`-POSSESSIVE
  * self-reference (`our team delivers the full scope`) is likewise SELF-ownership — the passive equivalent
  * `delivered by our team` is already treated as valid self-ownership (the `SCOPE_ATTRIBUTED_TO_OTHERS`
- * self-exclusion) — so the optional possessive before a `team` noun excludes `our` (only `the`/`their`
- * mark the team as OTHERS). Tested against the
+ * self-exclusion) — so the possessive before a `team` noun excludes `our` specifically while staying
+ * OPTIONAL: a BARE `team`/`teams` (`Team delivers the full scope`) is still OTHERS-attribution exactly
+ * as the round-entry code flagged it — requiring a determiner there was a fail-open regression (issue
+ * #858 round-9 adversarial review). Tested against the
  * marker's DELIVERY ASSERTION (like the passive check), so a sibling clause coordinated onto an
- * UNRELATED constraint by `and`, or sitting in a different comma/`;`-bounded clause, does not over-fire. */
+ * UNRELATED constraint by `and`, or sitting in a different comma/`;`-bounded clause, does not over-fire.
+ *
+ * The subject-to-verb window spans up to four words AND tolerates a coordinator (`and`/`or`/`then`)
+ * inside it: the compound-predicate subject retention (see `deliveryAssertionAround`) deliberately keeps
+ * the subject for `Siblings plan AND deliver the full scope` — including its ADVERB-LED form
+ * (`COMPOUND_PREDICATE_LEAD` admits `(?:\w+ly\s+)?`, e.g. `Siblings plan and CAREFULLY deliver …`) — so
+ * this check must reach the verb across the coordinator gap, or the very attribution bypass the
+ * retention exists to close re-opens the moment one adverb is inserted (issue #858 round-9 adversarial
+ * review). Widening the window cannot over-fire onto a SELF assertion (`this slice plans and carefully
+ * delivers …`): the subject allowlist is OTHERS-only, so a self-subject never matches regardless of how
+ * many words precede the verb. */
 const SCOPE_ACTIVE_VOICE_OTHERS =
-  /\b(?:(?:(?:the|their)\s+)?(?:siblings?|other\s+slices?|sibling\s+slices?|peers?|another\s+slice|the\s+rest|the\s+others?|others|upstream\s+slice|upstream\s+slices?)|(?:(?:the|their|another|other)\s+)teams?)\s+(?:\w+\s+){0,2}?(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship)(?:s|es|ed|ing)?\b/i;
+  /\b(?:(?:(?:the|their)\s+)?(?:siblings?|other\s+slices?|sibling\s+slices?|peers?|another\s+slice|the\s+rest|the\s+others?|others|upstream\s+slice|upstream\s+slices?)|(?:(?:(?!our\b)(?:the|their|another|other)\s+)?(?<!\bour )teams?))\s+(?:(?:(?:\w+ly|and|or|then|\w+)\s+)){0,4}?(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship)(?:s|es|ed|ing)?\b/i;
 
 /** A whole-scope phrase whose CLAUSE explicitly NEGATES or DISCLAIMS it ("this slice does NOT deliver
  * the full scope of #12", "we won't cover every acceptance criterion", "the full scope of #12 is NOT
@@ -689,9 +701,14 @@ function deliveryAssertionAround(prompt: string, markerStart: number, markerEnd:
       // introduces an INDEPENDENT constraint (its own subject + verb, e.g. `… AND the suite is handled
       // by another team`) leads with a noun/determiner, so it still splits.
       const introduced = clause.slice(bEnd, relStart);
-      const compound =
-        isCompoundPredicateContinuation(introduced) ||
-        (introduced.trim() === "" && isCompoundPredicateContinuation(clause.slice(relStart, relEnd)));
+      // The marker's OWN lead is the continuation when the coordinator sits right at the marker
+      // (`… and OWN the whole`, `introduced` empty) OR when only adverbs/coordinators intervene
+      // (`… and QUICKLY own the whole` — `introduced` is ` quickly `, the verb `own` is the marker's
+      // lead). In both the predicate's head verb is inside the marker, so test the marker's lead.
+      const markerLeadIsCompound =
+        (introduced.trim() === "" || /^(?:\s*(?:\w+ly|and|or|then))*\s*$/.test(introduced)) &&
+        isCompoundPredicateContinuation(clause.slice(relStart, relEnd));
+      const compound = isCompoundPredicateContinuation(introduced) || markerLeadIsCompound;
       if (bEnd > segStart && !compound) {
         segStart = bEnd;
       }
@@ -713,9 +730,21 @@ function deliveryAssertionAround(prompt: string, markerStart: number, markerEnd:
  * when the lead word is clearly verb-like, so an independent constraint with a nominal subject still
  * splits (issue #858 round-9 review). */
 const COMPOUND_PREDICATE_LEAD =
-  /^\s*(?:\w+ly\s+)?(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship|plan|design|scope|close|fix|resolve|add|update|open|write|create|land|merge|test|verify|document)(?:s|es|ed|ing)?\b/i;
+  /^\s*(?:(?:\w+ly|and|or|then)\s+)*(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship|plan|design|scope|close|fix|resolve|add|update|open|write|create|land|merge|test|verify|document)(?:s|es|ed|ing)?\b/i;
 function isCompoundPredicateContinuation(between: string): boolean {
-  return COMPOUND_PREDICATE_LEAD.test(between);
+  // A compound predicate is a bare VERB PHRASE with no subject of its own. It can be verb-led
+  // (`and deliver …`), adverb-led (`and carefully deliver …`), or a coordinator+adverb chain whose
+  // LAST token is the verb (`and quickly own …`, `and then handle …`) — the verb need not be the FIRST
+  // word, only the predicate's head. So test the lead at the start AND after each adverb/coordinator
+  // boundary: if any suffix leads with a completion verb, the segment is a compound continuation and
+  // the coordinator shares the prior subject (issue #858 round-9 adversarial review — requiring the
+  // verb first dropped the subject for `design and quickly own`, re-opening the attribution bypass).
+  if (COMPOUND_PREDICATE_LEAD.test(between)) return true;
+  const tokens = between.split(/\s+/).filter((t) => t.length > 0);
+  for (let k = 1; k < tokens.length; k++) {
+    if (COMPOUND_PREDICATE_LEAD.test(tokens.slice(k).join(" "))) return true;
+  }
+  return false;
 }
 
 /** A whole-scope marker narrowed by a PREFIX PARTITIVE ("half of every acceptance criterion", "part of

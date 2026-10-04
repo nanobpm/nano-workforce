@@ -2478,3 +2478,59 @@ test("#858 a full-scope marker licenses the `closes its issue` form (no false po
     assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
   }
 });
+
+// Issue #858 (round-9 adversarial review, app/deliveryGraph.ts:715): the compound-predicate
+// subject-retention heuristic (`COMPOUND_PREDICATE_LEAD`) admits an ADVERB-LED continuation
+// (`(?:\w+ly\s+)?`), so `deliveryAssertionAround` correctly retains the subject for `Siblings plan and
+// carefully deliver the full scope of #12` — but the retained assertion then failed
+// `SCOPE_ACTIVE_VOICE_OTHERS`, whose verb had to sit within `(?:\w+\s+){0,2}?` of the subject and so
+// could not reach across the `and carefully` coordinator gap. The exact active-voice attribution bypass
+// the compound-predicate fix exists to close still worked the moment one adverb was inserted. The
+// subject-to-verb window now also spans a coordinator (`and`/`or`/`then`) plus adverbs.
+test("#858 an adverb-led compound predicate still attributes the scope to its others-subject", () => {
+  const bypasses = [
+    "Siblings plan and carefully deliver the full scope of #12; implement criterion 1 and close #12.",
+    "The other slices design and quickly own the whole issue #12; implement part and close it.",
+    "Peers build and then handle the full scope of #12; implement the UI and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while widening that window must NOT over-fire onto an affirmative SELF assertion that merely has a
+// coordinator+adverb before its verb, nor re-admit an independent `and`-coordinated constraint (the
+// round-6 scoping guarantee).
+test("#858 the widened subject-to-verb window does not over-fire on self or independent constraints", () => {
+  const ok = [
+    "This slice plans and carefully delivers the full scope of #12; close #12.",
+    "We design and then implement every acceptance criterion of #12; close #12.",
+    "Deliver the full scope of #12 and the regression suite is carefully maintained by another team; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-9 adversarial review, app/deliveryGraph.ts:482): the `our team` self-carve-out
+// restructured the team alternative to REQUIRE a determiner (`(?:(?:the|their|another|other)\s+)teams?`),
+// so the previously-flagged BARE `Team delivers the full scope of #12` / `Teams deliver …` (no
+// determiner) regressed to validating — a fail-open regression vs. the round-entry code, whose optional
+// determiner `(?:(?:the|our|their)\s+)?` still covered the bare form. The determiner is optional again
+// but now excludes `our` specifically, so bare `team`/`teams` is others-attribution while `our team`
+// stays self-ownership.
+test("#858 active-voice BARE `team`/`teams` (no determiner) still disqualifies (not self)", () => {
+  const bypasses = [
+    "Team delivers the full scope of #12; implement criterion 1 and close #12.",
+    "Teams deliver the full scope of #12; implement criterion 1 and close #12.",
+    "Team owns the whole issue #12; implement part and close it.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
