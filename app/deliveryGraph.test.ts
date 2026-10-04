@@ -2659,3 +2659,89 @@ test("#858 a full-scope closer using the issue-first/passive form still validate
     assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
   }
 });
+
+// Issue #858 (round-11 review, app/deliveryGraph.ts:379 — the active closing arm): the extractor
+// captured only the FIRST target of a COORDINATED close, so `Deliver the full scope of #12; implement
+// only criterion 1 of #13; close #12 and #13.` validated — #13 entered `numbered` only via the
+// un-anchored sole-issue fallback, never as a checked target, and its under-delivery was never
+// guarded. Every issue a prompt directs the agent to close must be extracted and acknowledged.
+test("#858 a coordinated close extracts and validates EVERY target (close #12 and #13)", () => {
+  const bypasses = [
+    // The cited case: #13 is a part-scope node told to close, but only #12 was checked.
+    "Deliver the full scope of #12; implement only criterion 1 of #13; close #12 and #13.",
+    // The `both`/`and` and comma-list forms, and a repo-qualified extra target.
+    "Deliver the full scope of #12; implement criterion 1 of #13; close both #12 and #13.",
+    "Deliver the full scope of #12; do one slice of #13 and one of #14; close #12, #13, and #14.",
+    "Deliver the full scope of #12; implement criterion 1 of owner/repo#13; close #12 and owner/repo#13.",
+    "Deliver the full scope of #12; implement criterion 1 of #13; close #12 and #13 and #14.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: when EVERY coordinated target is genuinely acknowledged full-scope, the close is
+// licensed — extracting the extra targets must not over-fire on a legitimate full-scope close.
+test("#858 a coordinated close of fully-acknowledged issues still validates (must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and the full scope of #13; close #12 and #13.",
+    "Own the whole issue #12 and the whole issue #13; close both #12 and #13.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-11 suppressed advisory, app/deliveryGraph.ts:392 — `NEGATED_CLOSE_PREFIX`): the
+// negation gap admitted only ADVERBS and `to`, so the safe, contract-compliant meta-instruction
+// `Do not include Closes #12; use Part of #12` was treated as an ACTIVE close (`include` is not an
+// adverb) and the graph was wrongly rejected. A negated `use`/`write`/`include`/`add` of a closing
+// keyword is a SAFE partial-slice brief — explicitly telling the agent NOT to close — so it must
+// validate. A meaning-flipping verb (`do not forget to close`) still stays ACTIVE.
+test("#858 a negated use/write/include/add of a closing keyword is a safe partial-slice brief (validates)", () => {
+  const ok = [
+    "Implement criterion 1 of #12. Do not include Closes #12; use Part of #12.",
+    "Implement criterion 1 of #12. Do not use Closes #12; use Part of #12.",
+    "Implement criterion 1 of #12. Do not write Fixes #12 in the commit body.",
+    "Implement criterion 1 of #12. Do not add a Closes #12 line; reference Part of #12.",
+    "Implement criterion 1 of #12. Never include Resolves #12 in the PR description.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Widening the negation gap to admit `use`/`write`/`include`/`add` must NOT reopen the bypass for a
+// meaning-flipping verb — `do not forget/hesitate to close #12` still INSTRUCTS the close.
+test("#858 a meaning-flipping verb still keeps the close active (no reopened bypass)", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Do not forget to close #12.",
+    "Implement criterion 1 of #12. Do not hesitate to close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-11 suppressed advisory, app/deliveryGraph.ts:910 — the full-scope scan): every
+// marker occurrence re-scanned back/forward to its clause boundaries, so a long prompt repeating a
+// marker made validation quadratic and could monopolise the event loop across the 256 allowed nodes.
+// The boundaries are now precomputed once and binary-searched. A long prompt heavy with repeated
+// markers must still validate correctly (and return promptly).
+test("#858 a long prompt with repeated full-scope markers validates correctly (bounded scan)", () => {
+  const filler = "Deliver the full scope of #12. ".repeat(400); // ~12k chars, one clause per repetition
+  const g = {
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: `${filler}Close #12.` } }],
+    edges: [],
+  };
+  const start = performance.now();
+  // Every occurrence is an affirmative full-scope acknowledgement of #12, so the close is licensed.
+  assertEquals(validateDeliveryGraph(g), []);
+  assert(performance.now() - start < 1000, "validation should be bounded, not quadratic");
+});

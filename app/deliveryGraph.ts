@@ -315,7 +315,7 @@ const NODE_ID_MAX_LENGTH = 128;
 const ISSUE_REF_PATTERN =
   /(?:#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+)/i;
 const CLOSING_ACTION_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+\b|https?:\/\/[^\s)]*\/issues\/[0-9]+|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+(?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b/i;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)(?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+))*|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+\b|https?:\/\/[^\s)]*\/issues\/[0-9]+|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+(?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b/i;
 
 /** A repo-qualified issue IDENTITY key (issue #858 round-4 review). The accepted issue syntax includes
  * `owner/repo#N` and issue URLs, and this validator supports cross-repository graphs, so collapsing an
@@ -376,7 +376,7 @@ function issueRefsIn(text: string): string[] {
  * closed`) can drop the match — see `NEGATED_PASSIVE_WINDOW`. Detection and targeting never disagree:
  * `CLOSING_ACTION_PATTERN` carries the identical passive arm as a non-capturing pre-filter. */
 const CLOSING_TARGET_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)\b|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+((?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)/gi;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+))*)*)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)\b|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+((?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)/gi;
 /** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
  * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
  * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
@@ -389,7 +389,7 @@ const CLOSING_TARGET_PATTERN =
  * close that way is a safe partial-slice brief, not a partial-scope-close (issue #858 round-8
  * adversarial review). */
 const NEGATED_CLOSE_PREFIX =
-  /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|just|simply|only|then|also|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,3}$/i;
+  /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|just|simply|only|then|also|now|yet|automatically|silently|blindly|actually|really|to|use|using|write|writing|include|including|add|adding)\s+){0,3}(?:(?:a|an|the)\s+)?$/i;
 /** The CORRELATIVE additive negation `not <adverb> …` is ADDITIVE, not prohibitive, when paired with an
  * additive continuation: `Do not just close #12; also add a release note` still INSTRUCTS the close
  * (`not only X but/also Y` keeps X), so treating it as a negated close drops a real close and lets the
@@ -443,16 +443,27 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
         ADDITIVE_CONTINUATION.test(prompt.slice(m.index + m[0].length));
       if (!additive) continue;
     }
-    // The issue-first/passive arm (groups 5-9) carries its negation INSIDE the match's auxiliary
+    // The issue-first/passive arm (groups 10-14) carries its negation INSIDE the match's auxiliary
     // window (`#12 is NOT closed`), which the before-verb prefix check above cannot see — the negator
     // sits AFTER the arm's issue-ref start, so the text ending at `m.index` does not reach it. Drop a
     // passive close whose own window is negated (issue #858 round-10 review).
-    if (m[9] !== undefined && NEGATED_PASSIVE_WINDOW.test(m[9])) continue;
+    if (m[14] !== undefined && NEGATED_PASSIVE_WINDOW.test(m[14])) continue;
     if (m[2] !== undefined) numbered.push(issueKey(m[1], m[2]));
     else if (m[4] !== undefined) numbered.push(issueKey(m[3], m[4]));
-    else if (m[6] !== undefined) numbered.push(issueKey(m[5], m[6]));
-    else if (m[8] !== undefined) numbered.push(issueKey(m[7], m[8]));
+    else if (m[11] !== undefined) numbered.push(issueKey(m[10], m[11]));
+    else if (m[13] !== undefined) numbered.push(issueKey(m[12], m[13]));
     else pronoun = true;
+    // A COORDINATED close names every target (`close #12 and #13`, `close #12, #13, and #14`). The
+    // active arm captures only the FIRST; group 5 is the whole coordinated tail, re-scanned for every
+    // extra numbered target so each closed issue needs its own acknowledgement (issue #858 round-11
+    // review — `close #12 and #13` previously validated with only #12 acknowledged, a fail-open bypass).
+    if (m[5] !== undefined && m[5] !== "") {
+      for (const e of m[5].matchAll(ISSUE_REF_GLOBAL)) {
+        if (e[2] !== undefined) numbered.push(issueKey(e[1], e[2]));
+        else if (e[4] !== undefined) numbered.push(issueKey(e[3], e[4]));
+        else if (e[5] !== undefined) numbered.push(issueKey(null, e[5]));
+      }
+    }
   }
   return { numbered, pronoun };
 }
@@ -679,13 +690,43 @@ const FULL_SCOPE_MARKERS: readonly string[] = [
  * at PR time and catches an under-delivery that is semantically — not lexically — a partial close. */
 const CLAUSE_DELIMITERS = new Set([".", ";", ":", ",", "\n", "—"]);
 
-/** The clause (delimiter-bounded span) of `prompt` that contains index `idx`. */
-function clauseAroundIndex(prompt: string, idx: number): string {
-  let start = idx;
-  while (start > 0 && !CLAUSE_DELIMITERS.has(prompt.charAt(start - 1))) start--;
-  let end = idx;
-  while (end < prompt.length && !CLAUSE_DELIMITERS.has(prompt.charAt(end))) end++;
-  return prompt.slice(start, end);
+/** The sorted clause-delimiter POSITIONS in `prompt`, computed once in a single O(n) pass. The
+ * full-scope acknowledgement scan tests each marker occurrence against its surrounding clause; locating
+ * that clause by scanning back/forward per occurrence makes the whole scan QUADRATIC in prompt length
+ * when a prompt repeats a marker (issue #858 round-11 review — a valid 20,000-char prompt with repeated
+ * `full scope` markers was rescanned thousands of times, monopolising the event loop across the
+ * allowed 256 nodes). Precomputing the boundaries once and binary-searching them per occurrence keeps
+ * the aggregate scan O(n log n) regardless of marker count. */
+function clauseBoundaries(prompt: string): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < prompt.length; i++) {
+    if (CLAUSE_DELIMITERS.has(prompt.charAt(i))) out.push(i);
+  }
+  return out;
+}
+
+/** The start of the clause containing `idx`: one past the last delimiter strictly before `idx`. */
+function clauseStartAt(b: number[], idx: number): number {
+  let lo = 0;
+  let hi = b.length; // first index with b[i] >= idx
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (b[mid] < idx) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo === 0 ? 0 : b[lo - 1] + 1;
+}
+
+/** The end of the clause containing `idx`: the first delimiter at or after `idx` (exclusive). */
+function clauseEndAt(b: number[], idx: number, len: number): number {
+  let lo = 0;
+  let hi = b.length; // first index with b[i] >= idx
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (b[mid] < idx) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo === b.length ? len : b[lo];
 }
 
 /** The text of the marker's own clause that lies BEFORE the marker occurrence at `idx` (from the
@@ -693,10 +734,8 @@ function clauseAroundIndex(prompt: string, idx: number): string {
  * an exception/redirection preposition (`SCOPE_NEGATED_PREFIX`) or a part-qualifier
  * (`PART_QUALIFIER_BEFORE_MARKER`) — which negate/narrow only the phrase that FOLLOWS them, so they
  * disqualify the marker only when they precede it (issue #858 round-5 review). */
-function clauseBeforeMarker(prompt: string, idx: number): string {
-  let start = idx;
-  while (start > 0 && !CLAUSE_DELIMITERS.has(prompt.charAt(start - 1))) start--;
-  return prompt.slice(start, idx);
+function clauseBeforeMarker(prompt: string, idx: number, b: number[]): string {
+  return prompt.slice(clauseStartAt(b, idx), idx);
 }
 
 /** A coordinating conjunction that joins an INDEPENDENT additional constraint onto a clause. Only `and`
@@ -716,12 +755,11 @@ const ASSERTION_COORDINATOR = /\b(?:and|plus)\b|&&?/gi;
  * directly on the marker (`does not deliver the full scope`) has no coordinator between it and the
  * marker, so it stays in-segment and still disqualifies; the fail-closed default is the whole clause
  * when no coordinator splits it. */
-function deliveryAssertionAround(prompt: string, markerStart: number, markerEnd: number): string {
-  const clause = clauseAroundIndex(prompt, markerStart);
+function deliveryAssertionAround(prompt: string, markerStart: number, markerEnd: number, b: number[]): string {
+  const cStart = clauseStartAt(b, markerStart);
+  const clause = prompt.slice(cStart, clauseEndAt(b, markerStart, prompt.length));
   // The clause spans the marker; locate the marker's offset within it (the clause start is the first
   // delimiter boundary at or before markerStart).
-  let cStart = markerStart;
-  while (cStart > 0 && !CLAUSE_DELIMITERS.has(prompt.charAt(cStart - 1))) cStart--;
   const relStart = markerStart - cStart;
   const relEnd = markerEnd - cStart;
   let segStart = 0;
@@ -903,6 +941,11 @@ function isPartialScopeClose(prompt: string): boolean {
   // slice") — each is a non-assertion, not a whole-scope acknowledgement.
   const lower = prompt.toLowerCase();
   const acknowledged = new Set<string>();
+  // Clause-delimiter positions, computed ONCE (issue #858 round-11 review): the per-occurrence
+  // disqualifiers below each locate the marker's clause, and doing that by scanning back/forward per
+  // occurrence makes the whole scan quadratic in prompt length when a marker repeats. Binary-searching
+  // the precomputed boundaries keeps it O(n log n).
+  const bounds = clauseBoundaries(prompt);
   for (const marker of FULL_SCOPE_MARKERS) {
     for (let i = lower.indexOf(marker); i >= 0; i = lower.indexOf(marker, i + marker.length)) {
       if (isPartQualified(prompt, i + marker.length)) continue;
@@ -911,7 +954,7 @@ function isPartialScopeClose(prompt: string): boolean {
       // constraint coordinated by `and` (`…full scope of #12 AND do not introduce regressions`,
       // `…full scope of #12 AND the regression suite is handled by another team`) does not disqualify
       // (issue #858 round-6 + round-6 adversarial review).
-      const assertion = deliveryAssertionAround(prompt, i, i + marker.length);
+      const assertion = deliveryAssertionAround(prompt, i, i + marker.length, bounds);
       if (SCOPE_ATTRIBUTED_TO_OTHERS.test(assertion)) continue;
       if (SCOPE_ACTIVE_VOICE_OTHERS.test(assertion)) continue;
       if (SCOPE_NEGATED_CORE.test(assertion)) continue;
@@ -921,8 +964,8 @@ function isPartialScopeClose(prompt: string): boolean {
       // sibling segment the assertion above never sees — re-catch it against the marker's whole
       // comma-bounded clause so the assertion-scoping does not fail open (issue #858 round-6
       // adversarial review).
-      if (SCOPE_NEGATED_AFTER_MARKER_DELIVERY.test(clauseAroundIndex(prompt, i))) continue;
-      const before = clauseBeforeMarker(prompt, i);
+      if (SCOPE_NEGATED_AFTER_MARKER_DELIVERY.test(prompt.slice(clauseStartAt(bounds, i), clauseEndAt(bounds, i, prompt.length)))) continue;
+      const before = clauseBeforeMarker(prompt, i, bounds);
       if (SCOPE_NEGATED_PREFIX.test(before)) continue;
       if (PART_QUALIFIER_BEFORE_MARKER.test(before)) continue;
       const anchored = anchoredIssueKey(prompt, i, i + marker.length);
