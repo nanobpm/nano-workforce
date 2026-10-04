@@ -46,12 +46,25 @@ result.
 
 ## What to do
 
-1. **Read the PR body.** `gh pr view <prNumber> --repo <repo> --json body,title`.
+1. **Read the PR body AND the commit bodies.**
+   `gh pr view <prNumber> --repo <repo> --json body,title`.
    Extract every issue the body **closes with a GitHub closing keyword** —
    `close/closes/closed`, `fix/fixes/fixed`, `resolve/resolves/resolved` followed by
    `#N`, `owner/repo#N`, or a full issue URL. A **non-closing** reference (`Refs #N`,
    `Part of #N`, `Depends-on #N`, `Follow-up: #N`) does **not** close an issue —
    ignore those for the closing-scope check (but note the follow-up links; see below).
+
+   **Then scan the PR's commit messages for the same closing keywords** —
+   `gh pr view <prNumber> --repo <repo> --json commits --jq '.commits[].messageBody, .commits[].messageHeadline'`
+   (or `gh pr diff`/`git log origin/<base>..<head>`). This matters because this repo
+   family **squash-merges with `COMMIT_MESSAGES`**: the squash commit concatenates
+   every commit body, so a `Closes #N` left in **any commit body closes #N on
+   merge** even when the PR body was later corrected to `Part of #N`. Treat a
+   closing keyword found in a commit body **exactly** like one in the PR body — add
+   its `#N` to the set of closed issues you judge below. A PR whose body says
+   `Part of #N` but whose commit body still carries `Closes #N`, while part of #N's
+   scope is undelivered and untracked, is a genuine under-delivery you must block
+   (name the offending commit and tell the human to reword/amend it to `Part of #N`).
 
 2. **If there are no closing-keyword issues, the PR closes nothing** — there is no
    broader-scoped parent to under-deliver. Return **`scopeBlocked: false`** and stop.

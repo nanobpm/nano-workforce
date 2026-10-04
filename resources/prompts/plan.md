@@ -84,10 +84,15 @@ For every distinct child issue number `N` you find:
 - Otherwise, emit **one task** for it (see the output contract), with:
   - `id` = `issue-N`,
   - `title` = the sub-issue's title,
-  - `prompt` = a self-contained brief built from the sub-issue's body, and end
-    the prompt with an explicit instruction to the implementing agent to open its
-    PR against this specific sub-issue and include `Closes #N` in the PR body so
-    the sub-issue is linked and auto-closed on merge.
+  - `prompt` = a self-contained brief built from the sub-issue's body carrying
+    **#N's FULL stated scope** (every acceptance criterion / checkbox of the
+    sub-issue — an adopted sub-issue task owns its whole sub-issue, so the brief
+    must not silently cover only part of it), and end the prompt with an explicit
+    instruction to the implementing agent to open its PR against this specific
+    sub-issue and include `Closes #N` in the PR body so the sub-issue is linked and
+    auto-closed on merge. A closing keyword is only correct because the task
+    delivers #N in full; **never pair `Closes #N` with a brief scoped to a subset
+    of #N** (see "Closing keywords" below).
   - `dependsOn` = **honour any inter-sub-issue ordering the human declared.** Scan
     the sub-issue's body for an explicit dependency directive — a line such as
     `Depends-on: #7`, `Depends on #7`, or `Blocked by #7` (case-insensitive; there
@@ -191,6 +196,35 @@ touches the shared manifest or barrel. That buys parallel-merge independence **a
 a cohesive published artifact at the same time. Reserve genuinely separate packages
 for the consumer-facing cases above, and say in the task prompt which consumer
 justifies the split.
+
+### Closing keywords → only a FULL-scope slice may close its issue
+
+When you decompose one issue into several slices, each slice delivers only **part**
+of that issue's acceptance criteria. A slice scoped to a subset of an issue's scope
+**must not be told to close that issue** — that is the exact planning defect this
+rule exists to prevent (a node scoped to one of an issue's three acceptance
+criteria was told to "close" it, the remainder was lost, and a human had to file
+the follow-up and rewrite the PR by hand).
+
+So, when you author each slice's `prompt`:
+
+- **Only instruct a closing keyword (`Closes/Fixes/Resolves #N`) in a slice whose
+  brief delivers #N's FULL stated scope.** If exactly one slice covers the whole
+  issue (the common single-task case), it may close it. If you split the issue
+  across slices, the parent issue is **broader** than any one slice — so **no
+  slice** closes it with a bare brief: instruct each partial slice to reference the
+  parent non-blockingly (`Part of #N` / `Refs #N`) and **leave #N open**, OR
+  designate one final slice that genuinely delivers the remaining scope and depends
+  (`dependsOn`) on the others to carry the `Closes #N`.
+- **The remainder must be tracked, never dropped.** Every acceptance criterion of
+  the split issue must be covered by **some** slice in this plan (collectively the
+  slices must deliver #N's whole scope). Do not emit a slice set that silently
+  under-delivers the parent while one slice closes it.
+- **This governs the COMMIT MESSAGES you tell the agent to write, too.** This repo
+  family squash-merges with `COMMIT_MESSAGES`, so a `Closes #N` in **any commit
+  body** closes the issue on merge even if the PR body says `Part of #N`. When a
+  slice is partial, instruct the agent to write `Part of #N` (never a closing
+  keyword) in **both** the PR body and every commit body.
 
 ## Output contract
 
