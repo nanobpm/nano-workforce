@@ -1594,6 +1594,32 @@ test("#857 parsePr still ACCEPTS canonical GitHub PR URLs incl. supported suffix
   assertEquals(parsePr("https://github.com/owner/repo/pull/7#issuecomment-1")?.prKey, "owner/repo#7");
 });
 
+// #857 (Copilot review, app/prParse.ts): the SHORTHAND branch's repo capture (`[^/]+/[^#]+`) admitted
+// EXTRA `/` characters, so a URL-shaped value (`https://example.com/o/r#7`) or a multi-slash path
+// (`a/b/c#9`) parsed to a "PR" whose repo is the whole multi-slash string — and readiness/worker
+// callers treat this parser as canonical, so that malformed target reached `gh` and polled the wrong
+// repository. The documented grammar is EXACTLY `owner/repo#N` (one slash) or a GitHub PR URL — fail
+// closed on every extra-slash impersonator. This also retires the slash-count discriminator
+// `parsePlanKey` carried (app/readiness.ts): the grammar now IS one-slash.
+test("#857 parsePr REJECTS a shorthand whose repo carries extra slashes (exactly owner/repo#N)", () => {
+  for (const bad of [
+    "https://example.com/o/r#7", // the exact advisory case — a non-GitHub URL via the shorthand branch
+    "https://github.com/o/r#7", // a GitHub URL that is NOT the /pull/<n> spelling
+    "//host/o/r#7", // scheme-relative URL-shaped
+    "a/b/c#9", // a multi-slash path is not owner/repo
+    "a/b/c/d#9",
+  ]) {
+    assertEquals(parsePr(bad), null, `expected null for ${JSON.stringify(bad)}`);
+  }
+});
+
+test("#857 parsePr still ACCEPTS the canonical one-slash shorthand (incl. a repo literally named github.com)", () => {
+  assertEquals(parsePr("owner/repo#7")?.prKey, "owner/repo#7");
+  // A repo literally named `github.com` is ONE slash — the grammar keys on the slash count, not the
+  // host substring, so this legitimate shorthand is not collateral damage (parseIssue relies on it).
+  assertEquals(parsePr("owner/github.com#42")?.prKey, "owner/github.com#42");
+});
+
 // Red/green regression for the level-triggered wave-merge barrier (issue #262). The barrier is
 // armed (`plans.gate_wave = W`) at wave handoff, long BEFORE the token traverses the slow
 // `trial-merge` agent job and finally opens the `wait-wave-merged` subscription. The old

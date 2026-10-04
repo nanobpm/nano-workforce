@@ -31,7 +31,13 @@ export function parsePr(input: unknown): ParsedPr | null {
     const number = Number(m[3]);
     return { repo, number, url: `https://github.com/${repo}/pull/${number}`, prKey: `${repo}#${number}` };
   }
-  m = s.match(/^([^/]+\/[^#]+)#(\d+)$/);
+  // The shorthand is EXACTLY `owner/repo#N` — precisely one `/`. The old capture (`[^/]+/[^#]+`)
+  // admitted EXTRA slashes, so a URL-shaped value (`https://example.com/o/r#7`, `//host/o/r#7`) or a
+  // multi-slash path (`a/b/c#9`) parsed to a "PR" whose repo is the whole multi-slash string, and a
+  // canonical-grammar caller (readiness `parsePrTarget`, the workers) then polled that wrong target
+  // via `gh` (#857 review). Fail closed on every extra-slash impersonator: a repo segment carries no
+  // `/`, so the only slash in a valid shorthand is the owner/repo separator.
+  m = s.match(/^([^/#]+\/[^/#]+)#(\d+)$/);
   if (m) {
     const repo = m[1];
     const number = Number(m[2]);

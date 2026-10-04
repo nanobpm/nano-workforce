@@ -491,7 +491,13 @@ export interface ParsedIssue {
  * a repo literally named `github.com` — to the one canonical grammar. */
 export function parseIssue(input: string): ParsedIssue | null {
   const s = input.trim();
-  const m = s.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/i);
+  // ANCHORED to the whole string with an exact `github.com` host (optional scheme + `www.`),
+  // mirroring the hardened `parsePr` URL branch: the old UNANCHORED `github\.com/…` matched
+  // `github.com` as a SUBSTRING — a spoofed host suffix (`notgithub.com`), a userinfo trick
+  // (`github.com@evil.com`), or any prose-wrapped occurrence — and issue intake then operated on the
+  // embedded `owner/repo`, a DIFFERENT target than the submitted value (#857 review). Supported URL
+  // suffixes (`?query`, `#fragment`) are preserved via the trailing group.
+  const m = s.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)(?:[/?#].*)?$/i);
   if (m) {
     const repo = `${m[1]}/${m[2]}`;
     const number = Number(m[3]);
