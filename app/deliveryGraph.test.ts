@@ -1721,6 +1721,36 @@ test("#858 a LEADING exception preposition that governs the marker still disqual
   }
 });
 
+// Issue #858 (round-12 adversarial review, app/deliveryGraph.ts clauseBeforeMarker): the round-12
+// complexity fix capped the before-marker text `SCOPE_NEGATED_PREFIX` is tested against to the last
+// `PREFIX_WINDOW` (96) chars. That is sound ONLY for a `$`-anchored SUFFIX pattern
+// (`PART_QUALIFIER_BEFORE_MARKER`), but `SCOPE_NEGATED_PREFIX` is an UNANCHORED "contains" test — so a
+// scope-narrowing negator sitting MORE than 96 chars before the marker (inside one long delimiter-free
+// clause) fell outside the window and was silently dropped, failing the guard OPEN. The negator must be
+// tested against the WHOLE before-clause (it is a per-clause "contains", so it is memoised per clause
+// start to stay linear); only the genuinely `$`-anchored part-qualifier may use the bounded window.
+test("#858 a leading exception preposition >96 chars before the marker still disqualifies the close (prefix-window fail-open regression)", () => {
+  // One long DELIMITER-FREE clause (no `.`/`;`/`:`) so the negator and the marker share a clause, with
+  // the negator pushed >96 chars before the marker by filler. At roundEntryHead (whole before-clause)
+  // this was flagged; the round-12 window let it through.
+  const filler = "word ".repeat(20); // pushes the negator ~130 chars before the marker
+  const bypasses = [
+    `excluding the parser only ${filler}the full scope of #12 so close #12`,
+    `apart from the auth slice ${filler}deliver the whole issue #12 and close #12`,
+    `other than the parser ${filler}own the entire issue #12 then close #12`,
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+  // …but a long clause with NO negator and an affirmative full-scope acknowledgement must still VALIDATE
+  // (testing the whole before-clause must not over-fire and break a legitimate closer).
+  const genuine = `deliver ${filler}the full scope of #12 then close #12`;
+  const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: genuine } }], edges: [] };
+  assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${genuine}`);
+});
+
 // Issue #858 (round-5 review, "Allow current-slice ownership in passive attribution",
 // deliveryGraph.ts:354): a whole-scope phrase attributed to THIS slice ("delivered by this slice",
 // "owned by the current slice") is an AFFIRMATIVE ownership assertion and must licence a close. Only

@@ -762,18 +762,23 @@ function clauseEndAt(b: number[], idx: number, len: number): number {
   return lo === b.length ? len : b[lo];
 }
 
-/** The text of the marker's own clause that lies BEFORE the marker occurrence at `idx` (from the
- * clause's delimiter boundary up to `idx`). Used to test the GRAMMATICALLY PREFIX disqualifiers —
- * an exception/redirection preposition (`SCOPE_NEGATED_PREFIX`) or a part-qualifier
- * (`PART_QUALIFIER_BEFORE_MARKER`) — which negate/narrow only the phrase that FOLLOWS them, so they
- * disqualify the marker only when they precede it (issue #858 round-5 review).
+/** The bounded text of the marker's own clause that lies BEFORE the marker occurrence at `idx`, used to
+ * test the part-qualifier `PART_QUALIFIER_BEFORE_MARKER` — which narrows only the phrase that FOLLOWS it,
+ * so it disqualifies the marker only when it precedes it (issue #858 round-5 review).
  *
- * Both consumers are `$`-anchored SUFFIX patterns matching a bounded handful of words (a negation plus up
- * to three adverbs and an article, or a partitive plus `of` and a determiner). Only the trailing few
- * words can match, so return at most the last `PREFIX_WINDOW` chars — cut at a word boundary so the
- * leading `\b` never sees a spliced token. Testing the WHOLE growing before-clause per marker made the
- * `$`-anchored regex scan O(clause-length) per marker — O(markers · clause) overall, quadratic on a long
- * delimiter-free clause (issue #858 round-12 review). */
+ * `PART_QUALIFIER_BEFORE_MARKER` is a `$`-anchored SUFFIX pattern matching a bounded handful of words (a
+ * partitive plus `of` and a determiner), so only the trailing few words can match: return at most the
+ * last `PREFIX_WINDOW` chars — cut at a word boundary so the leading `\b` never sees a spliced token.
+ * Testing the WHOLE growing before-clause per marker made the `$`-anchored regex scan O(clause-length)
+ * per marker — O(markers · clause) overall, quadratic on a long delimiter-free clause (issue #858
+ * round-12 review).
+ *
+ * This window is sound ONLY for a `$`-anchored suffix pattern. The OTHER before-marker consumer,
+ * `SCOPE_NEGATED_PREFIX`, is an UNANCHORED "contains" test (a negator anywhere in the before-clause
+ * disqualifies), so capping it to this window silently drops a negator sitting more than `PREFIX_WINDOW`
+ * chars before the marker — a fail-open regression (issue #858 round-12 adversarial review). That
+ * consumer therefore tests the WHOLE before-clause, memoised per clause start (see
+ * `negatedPrefixByClause` in `isPartialScopeClose`); it does NOT use this bounded window. */
 const PREFIX_WINDOW = 96;
 function clauseBeforeMarker(prompt: string, idx: number, b: number[]): string {
   const start = clauseStartAt(b, idx);
@@ -1275,6 +1280,15 @@ function isPartialScopeClose(prompt: string): boolean {
   // clause start). Re-running the backtracking regex over a long clause for every marker was itself
   // O(markers · clause-length) — quadratic on a long delimiter-free clause (issue #858 round-12 review).
   const negatedAfterMarkerByClause = new Map<number, boolean>();
+  // `SCOPE_NEGATED_PREFIX` is an UNANCHORED "contains" test over the marker's WHOLE before-clause (a
+  // negator anywhere before the marker disqualifies it), so it must NOT be capped to the bounded
+  // `clauseBeforeMarker` window — that window is sound only for the `$`-anchored
+  // `PART_QUALIFIER_BEFORE_MARKER`, and capping the contains test to it silently dropped a negator
+  // sitting more than `PREFIX_WINDOW` chars before the marker, failing the guard open (issue #858
+  // round-12 adversarial review). The whole before-clause is identical for every marker in a clause, so
+  // test it ONCE per clause and cache the boolean keyed by clause start — re-running it per marker over a
+  // long clause would be O(markers · clause-length), quadratic on a long delimiter-free clause.
+  const negatedPrefixByClause = new Map<number, boolean>();
   // The four assertion disqualifiers (`SCOPE_ATTRIBUTED_TO_OTHERS`, `SCOPE_ACTIVE_VOICE_OTHERS`,
   // `SCOPE_NEGATED_CORE`, `SCOPE_NEGATED_WITHOUT_DELIVERY`) are "contains" tests over the marker's
   // assertion segment. Occurrences that share a segment START sit in nested segments (same start, growing
@@ -1360,9 +1374,17 @@ function isPartialScopeClose(prompt: string): boolean {
         negatedAfterMarkerByClause.set(clauseStart, negatedAfterMarker);
       }
       if (negatedAfterMarker) continue;
-      const before = clauseBeforeMarker(prompt, i, bounds);
-      if (SCOPE_NEGATED_PREFIX.test(before)) continue;
-      if (PART_QUALIFIER_BEFORE_MARKER.test(before)) continue;
+      // `SCOPE_NEGATED_PREFIX` is an unanchored "contains" test, so it must run against the WHOLE
+      // before-clause (memoised per clause start) — not the bounded window, which would drop a negator
+      // sitting more than `PREFIX_WINDOW` chars before the marker (issue #858 round-12 adversarial
+      // review). Only the genuinely `$`-anchored `PART_QUALIFIER_BEFORE_MARKER` may use the window.
+      let negatedPrefix = negatedPrefixByClause.get(clauseStart);
+      if (negatedPrefix === undefined) {
+        negatedPrefix = SCOPE_NEGATED_PREFIX.test(prompt.slice(clauseStart, i));
+        negatedPrefixByClause.set(clauseStart, negatedPrefix);
+      }
+      if (negatedPrefix) continue;
+      if (PART_QUALIFIER_BEFORE_MARKER.test(clauseBeforeMarker(prompt, i, bounds))) continue;
       const anchored = anchoredIssueKey(prompt, i, markerEnd);
       if (anchored !== null) acknowledged.add(anchored);
       else if (sole !== null) acknowledged.add(sole);
