@@ -23,7 +23,7 @@
 // there is no agent-facing approval gate to park a run at. The old replayable `approvalToken` and the
 // approval-park write were removed with the agent `start` door.
 
-import type { DataLayer, ProcessInstanceState } from "@nanobpm/urban";
+import type { DataLayer, EngineClient, ProcessInstanceState } from "@nanobpm/urban";
 import type { CompileDeliveryGraphResult } from "../nano-generated/api-io.d.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { redactFreeText } from "./deliveryGraphCompiler.ts";
@@ -236,6 +236,55 @@ export async function reconcileStaleLaunchClaim(
     return flip.changed === 1;
   });
   return res;
+}
+
+/** The engine seam {@link reconcileOriginalInstanceBeforeRelaunch} needs — instance search by
+ * definition, per-instance variable read, and cancel. */
+type ReconcileEngine = Pick<EngineClient, "searchProcessInstances" | "searchVariables" | "cancelInstance">;
+
+/** Reconcile a still-running ORIGINAL instance of this run before a stale-claim relaunch starts a
+ * second one — the at-most-once recovery the Copilot review on issue #852 asked for (thread
+ * deliveryGraphRun.ts:180).
+ *
+ * A timeout-only reclaim cannot distinguish "the dispatch host died BEFORE `createInstance`" (safe to
+ * reclaim) from "died AFTER `createInstance` succeeded but BEFORE the process key was stamped" (a live
+ * instance is already executing the graph's side-effecting nodes — reclaiming and relaunching would run
+ * them TWICE). Now that the engine seam exposes it (@nanobpm/urban 0.96), close that window: every
+ * launched instance carries its `runKey` as a run-root process variable (`runDeliveryGraph`), so a
+ * relaunch can FIND a live original of THIS run and cancel it before starting its replacement.
+ *
+ * Returns the process keys of any live original instances it cancelled (normally ≤1). A candidate is a
+ * live duplicate iff it is an ACTIVE instance of this content-addressed `processDefinitionId` whose
+ * seeded `runKey` variable equals ours. A candidate whose `runKey` variable is absent/unreadable is
+ * treated as NOT ours (left running) — we never cancel an instance we cannot prove belongs to this run. */
+export async function reconcileOriginalInstanceBeforeRelaunch(
+  engine: ReconcileEngine,
+  run: { runKey: string; processDefinitionId: string },
+): Promise<string[]> {
+  const candidates = await engine.searchProcessInstances({
+    processDefinitionId: run.processDefinitionId,
+    state: "ACTIVE",
+  });
+  const cancelled: string[] = [];
+  for (const candidate of candidates) {
+    const processInstanceKey = String(candidate.processInstanceKey);
+    // Match the seeded `runKey` variable, not just the definition: two DISTINCT runs of the same graph
+    // (different explicit idempotencyKeys) share one content-addressed `processDefinitionId`, so the
+    // definition filter alone would cancel a DIFFERENT run's live instance. The variable read is the
+    // per-instance proof that this candidate is THIS run.
+    const vars = await engine.searchVariables({ processInstanceKey, name: "runKey" });
+    const match = vars.some((v) => {
+      try {
+        return JSON.parse(v.value) === run.runKey;
+      } catch {
+        return v.value === run.runKey;
+      }
+    });
+    if (!match) continue;
+    await engine.cancelInstance({ processInstanceKey });
+    cancelled.push(processInstanceKey);
+  }
+  return cancelled;
 }
 
 /** The idempotency key for a submitted graph: a caller-supplied `idempotencyKey` (trimmed) when

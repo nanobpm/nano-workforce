@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import type { AppApi } from "@nanobpm/urban";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { canonicalJson, validateDeliveryGraph } from "./deliveryGraph.ts";
-import { compileDeliveryGraphSemantic, digestInvisibleRawValues, graphCarriesRedactedSecrets } from "./deliveryGraphCompiler.ts";
+import { compileDeliveryGraphSemantic, DELIVERY_GRAPH_PROCESS_ID, digestInvisibleRawValues, graphCarriesRedactedSecrets } from "./deliveryGraphCompiler.ts";
 import {
   buildDeliveryGraphRunRow,
   buildHumanLabels,
@@ -26,6 +26,7 @@ import {
   deliveryGraphRunIdentities,
   deliveryGraphRuns,
   isStaleLaunchClaim,
+  reconcileOriginalInstanceBeforeRelaunch,
 } from "./deliveryGraphRun.ts";
 import type { DeliveryRunTimeouts } from "./deliveryRunner.ts";
 import { deliveryGraphDigest, runDeliveryGraph } from "./deliveryRunner.ts";
@@ -185,6 +186,10 @@ export async function dispatchDeliveryGraphRun(
 
   // Idempotency short-circuit — a re-dispatch onto a still-running run does NOT double-launch.
   const existing = await runs.get(runKey);
+  // Capture staleness NOW, off the pre-claim snapshot: the claim CAS below rewrites `updated_at`, so a
+  // staleness check after it would read the fresh claim and never fire. Only a STALE re-claim needs
+  // reconcile-before-relaunch (a fresh claim or a terminal-row re-run has no possibly-live original).
+  const reclaimingStaleClaim = existing != null && isStaleLaunchClaim(existing);
   if (existing && existing.status === "running" && !isStaleLaunchClaim(existing)) {
     app.log.info("dispatch-delivery-graph short-circuit: already running", { runKey });
     return {
@@ -239,6 +244,32 @@ export async function dispatchDeliveryGraphRun(
     const { run_key, created_at, ...patch } = failed;
     await runs.update(runKey, patch);
   };
+  // Reconcile-before-relaunch (issue #852 review — thread deliveryGraphRun.ts:180): if we just RE-CLAIMED
+  // a STALE launch claim (a `running`/NULL-key row past its TTL), the original dispatch may have died
+  // AFTER `createInstance` succeeded but BEFORE stamping the process key — leaving a LIVE instance
+  // executing this graph's side-effecting nodes. A timeout alone cannot tell that from "died before
+  // create". Now that the engine seam exposes it, close the window: cancel any still-ACTIVE instance of
+  // this run (matched by its seeded `runKey` variable) BEFORE we launch a replacement, so the relaunch
+  // stays at-most-once. Only a STALE re-claim needs this — a fresh claim or a terminal-row re-run has no
+  // possibly-live original. The content-addressed definition id is derived from the same digest the
+  // runner deploys under (`delivery-graph-<digest>`).
+  if (reclaimingStaleClaim) {
+    try {
+      const cancelled = await reconcileOriginalInstanceBeforeRelaunch(app.engine, {
+        runKey,
+        processDefinitionId: `${DELIVERY_GRAPH_PROCESS_ID}-${digest}`,
+      });
+      if (cancelled.length > 0) {
+        app.log.warn("dispatch-delivery-graph cancelled a still-running original instance before relaunch", { runKey, cancelled });
+      }
+    } catch (err) {
+      // A reconciliation read failure must not strand the claim: fail the claim (so it is not a phantom)
+      // and surface the error rather than relaunching blind into a possible double-launch.
+      await markClaimFailed();
+      app.log.error("dispatch-delivery-graph reconcile-before-relaunch threw", { runKey });
+      throw err;
+    }
+  }
   // The claim is ours — persist THIS run's lossless identity so a later same-key short-circuit can prove
   // the running run is this exact graph. Upsert: a relaunch off a persisted (e.g. failed) row under an
   // explicit key may carry a different graph, so overwrite the stored fingerprint. This runs AFTER the

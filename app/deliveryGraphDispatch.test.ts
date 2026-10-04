@@ -11,9 +11,10 @@ import type { AppApi } from "@nanobpm/urban";
 import { dispatchDeliveryGraphRun } from "./deliveryGraphDispatch.ts";
 import { noopLog } from "../test/log.ts";
 
-function makeApp(opts: { failIdentityWrite?: boolean } = {}) {
+function makeApp(opts: { failIdentityWrite?: boolean; liveOriginal?: { processInstanceKey: string; runKey: string | null; processDefinitionId?: string } } = {}) {
   const tables = new Map<string, Record<string, unknown>[]>();
-  const started: { processDefinitionId: string }[] = [];
+  const started: { processDefinitionId: string; variables?: Record<string, unknown> }[] = [];
+  const cancelled: string[] = [];
   const table = (name: string, key: string) => {
     if (opts.failIdentityWrite && name === "delivery_graph_run_identity") {
       // Simulate a transient side-table write error (e.g. a SQLite `disk I/O error`) — NOT a UNIQUE
@@ -61,31 +62,63 @@ function makeApp(opts: { failIdentityWrite?: boolean } = {}) {
   const app = {
     data: {
       table,
-      open: () => ({
-        exec: (sql: string, params: unknown[]) =>
+      open: () => {
+        const exec = (sql: string, params: unknown[]) =>
           Promise.resolve().then(() => {
             const cols = [...sql.matchAll(/"(\w+)"\s*=\s*\?/g)].map((m) => m[1]);
-            const runKey = params[params.length - 1];
+            // The claim CAS (claimRunForLaunch) ends `… WHERE "run_key" = ? AND ("status" <> 'running'
+            // OR ("process_key" IS NULL AND "updated_at" < ?))` — the run_key is the 2nd-to-last param,
+            // the stale-TTL threshold the last. Model BOTH branches so a stale re-claim wins.
+            const isClaimCas = sql.includes('OR ("process_key" IS NULL AND "updated_at" < ?)');
+            const runKey = isClaimCas ? params[params.length - 2] : params[params.length - 1];
+            const staleBefore = isClaimCas ? (params[params.length - 1] as string) : null;
             const rows = tables.get("delivery_graph_runs") ?? [];
             const row = rows.find((r) => r["run_key"] === runKey);
-            if (row && row["status"] !== "running") {
+            const staleReclaimable =
+              isClaimCas && row && row["status"] === "running" && (row["process_key"] == null) && typeof staleBefore === "string" && (row["updated_at"] as string) < staleBefore;
+            if (row && (row["status"] !== "running" || staleReclaimable)) {
               for (let i = 0; i < cols.length - 1; i++) row[cols[i]] = params[i];
               return { changed: 1 };
             }
             return { changed: 0 };
-          }),
-      }),
+          });
+        // The claim runs inside a transaction (`data.open().tx(...)`); model `tx` as a pass-through
+        // that hands the same `exec` to the callback (the mock has no real isolation to model).
+        return { exec, tx: async (fn: (t: { exec: typeof exec }) => Promise<unknown>) => fn({ exec }) };
+      },
     },
     engine: {
       deployResources: () => Promise.resolve([]),
-      createInstance: (req: { processDefinitionId: string }) => {
+      createInstance: (req: { processDefinitionId: string; variables?: Record<string, unknown> }) => {
         started.push(req);
-        return Promise.resolve({ processInstanceKey: "PI-1", processDefinitionId: req.processDefinitionId });
+        return Promise.resolve({ processInstanceKey: `PI-${started.length}`, processDefinitionId: req.processDefinitionId });
+      },
+      // The reconcile-before-relaunch seam (issue #852 review): surface a configured LIVE original
+      // instance (a dispatch that died after createInstance but before stamping the key) so the test can
+      // assert the relaunch cancels it. `liveOriginal.runKey === null` models an instance whose runKey
+      // variable is absent/unreadable — it must NOT be cancelled (unproven ownership).
+      searchProcessInstances: (filter?: { processDefinitionId?: string; state?: string }) =>
+        Promise.resolve(
+          opts.liveOriginal &&
+            (filter?.processDefinitionId === undefined || filter.processDefinitionId === (opts.liveOriginal.processDefinitionId ?? filter.processDefinitionId)) &&
+            (filter?.state === undefined || filter.state === "ACTIVE")
+            ? [{ processInstanceKey: opts.liveOriginal.processInstanceKey, state: "ACTIVE" }]
+            : [],
+        ),
+      searchVariables: (filter?: { processInstanceKey?: string; name?: string }) =>
+        Promise.resolve(
+          opts.liveOriginal && filter?.name === "runKey" && filter.processInstanceKey === opts.liveOriginal.processInstanceKey && opts.liveOriginal.runKey !== null
+            ? [{ variableKey: "v1", name: "runKey", value: JSON.stringify(opts.liveOriginal.runKey), scopeKey: opts.liveOriginal.processInstanceKey, processInstanceKey: opts.liveOriginal.processInstanceKey, isTruncated: false }]
+            : [],
+        ),
+      cancelInstance: (req: { processInstanceKey: string }) => {
+        cancelled.push(req.processInstanceKey);
+        return Promise.resolve();
       },
     },
     log: noopLog(),
   } as unknown as AppApi;
-  return { app, started, runs: () => tables.get("delivery_graph_runs") ?? [] };
+  return { app, started, cancelled, runs: () => tables.get("delivery_graph_runs") ?? [] };
 }
 
 const HUMAN_ONLY = {
@@ -256,4 +289,67 @@ test("dispatchDeliveryGraphRun: two credential-differing secret graphs with DIST
   assert(a.ok && b.ok);
   assertEquals(started.length, 2);
   assertEquals(new Set(runs().map((r) => r.run_key)).size, 2);
+});
+
+// ── #852 review: reconcile-before-relaunch (thread deliveryGraphRun.ts:180) ──────────────────────
+// A STALE launch claim can hide a LIVE original instance (the dispatch died after createInstance but
+// before stamping the process key). The relaunch must cancel that original — matched by its seeded
+// `runKey` variable — before starting a second instance of the same side-effecting graph.
+
+/** Seed a STALE launch-claim row (running, NULL process_key, updated_at older than the TTL) straight
+ * into the mock store, as a crashed dispatch left it. */
+async function seedStaleClaim(app: AppApi, runKey: string, digest: string) {
+  const staleAt = new Date(Date.now() - 20 * 60_000).toISOString(); // 20 min ago > 15 min TTL
+  await app.data.table("delivery_graph_runs", "run_key").insert({
+    run_key: runKey,
+    process_key: null,
+    process_definition_id: `delivery-graph-${digest}`,
+    digest,
+    status: "running",
+    side_effecting: 1,
+    node_count: 2,
+    human_node_count: 1,
+    side_effect_count: 1,
+    title: "t",
+    phase: "Running",
+    phase_node_id: null,
+    human_labels: null,
+    created_at: staleAt,
+    updated_at: staleAt,
+    acknowledged_at: null,
+  });
+}
+
+test("#852 dispatchDeliveryGraphRun: re-claiming a STALE claim with a LIVE original instance cancels it before relaunch (at-most-once)", async () => {
+  // The original dispatch died after createInstance but before stamping the key: the row is a stale
+  // claim AND a live instance of this run (runKey "run-x") is still ACTIVE on the engine.
+  const { app, started, cancelled } = makeApp({ liveOriginal: { processInstanceKey: "PI-orig", runKey: "run-x" } });
+  // First dispatch to learn the digest, on a SEPARATE app so it doesn't disturb the test store.
+  const probe = await dispatchDeliveryGraphRun(makeApp().app, SIDE_EFFECTING, { runKey: "run-x", repoless: true });
+  assert(probe.ok);
+  if (!probe.ok) return;
+  await seedStaleClaim(app, "run-x", probe.digest);
+
+  const res = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { runKey: "run-x", repoless: true });
+  assertEquals(res.ok, true);
+  if (!res.ok) return;
+  assertEquals(res.alreadyRunning, false, "the stale claim is re-claimed, not short-circuited");
+  assertEquals(cancelled, ["PI-orig"], "the live original instance is cancelled before the relaunch");
+  assertEquals(started.length, 1, "exactly one replacement instance launches");
+});
+
+test("#852 dispatchDeliveryGraphRun: re-claiming a STALE claim whose only ACTIVE instance is a DIFFERENT run relaunches WITHOUT cancelling it", async () => {
+  // A different run of the SAME graph (same content-addressed processDefinitionId) is still ACTIVE.
+  // The relaunch must NOT cancel it — the runKey variable proves it is not ours.
+  const { app, started, cancelled } = makeApp({ liveOriginal: { processInstanceKey: "PI-other", runKey: "other-run" } });
+  const probe = await dispatchDeliveryGraphRun(makeApp().app, SIDE_EFFECTING, { runKey: "run-y", repoless: true });
+  assert(probe.ok);
+  if (!probe.ok) return;
+  await seedStaleClaim(app, "run-y", probe.digest);
+
+  const res = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { runKey: "run-y", repoless: true });
+  assertEquals(res.ok, true);
+  if (!res.ok) return;
+  assertEquals(cancelled, [], "a different run's live instance is never cancelled");
+  assertEquals(started.length, 1, "the relaunch still proceeds");
 });

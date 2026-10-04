@@ -32,7 +32,7 @@ import { makeDefaultReadHead } from "./currentHead.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
-import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
+import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
 import { deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
@@ -3049,7 +3049,7 @@ export async function pollTasklessPlanTermination(
  * Scoped to `running` rows (an `awaiting-approval` run has no instance yet), so it stays O(in-flight). */
 export async function pollDeliveryGraphPhase(
   data: DataLayer,
-  engine: Pick<EngineClient, "searchProcessInstances" | "searchUserTasks">,
+  engine: Pick<EngineClient, "searchProcessInstances" | "searchUserTasks" | "searchVariables" | "cancelInstance">,
 ) {
   for (const run of await deliveryGraphRuns(data).find({ status: "running" })) {
     if (!run.process_key) {
@@ -3058,6 +3058,27 @@ export async function pollDeliveryGraphPhase(
       // `failed` so the cockpit stops showing a phantom in-flight run; a re-dispatch re-claims it. The
       // flip is a CAS on the snapshot we read (via `reconcileStaleLaunchClaim`), so a claim a concurrent
       // dispatch has already re-claimed between our `find()` and here is left untouched, never clobbered.
+      // Reconcile-before-retire (issue #852 review — thread deliveryGraphRun.ts:180): the crash may have
+      // happened AFTER `createInstance` succeeded but BEFORE the key was stamped, leaving a LIVE instance
+      // executing this graph's side-effecting nodes. Retiring the row to `failed` and letting a
+      // re-dispatch relaunch would then double-run those nodes. Cancel any still-ACTIVE instance of THIS
+      // run (matched by its seeded `runKey` variable) BEFORE retiring the claim, so the recovery stays
+      // at-most-once. Best-effort: a reconcile read failure must not wedge the pass — log and skip the
+      // retire this pass (the row stays stale-claim `running` and is retried next pass).
+      if (run.process_definition_id) {
+        try {
+          const cancelled = await reconcileOriginalInstanceBeforeRelaunch(engine, {
+            runKey: run.run_key,
+            processDefinitionId: run.process_definition_id,
+          });
+          if (cancelled.length > 0) {
+            console.error(`[poller] delivery graph ${run.run_key}: cancelled a still-running original instance before retiring the stale claim: ${cancelled.join(", ")}`);
+          }
+        } catch (err) {
+          console.error(`[poller] delivery graph ${run.run_key}: reconcile-before-retire failed, leaving the claim for next pass: ${err}`);
+          continue;
+        }
+      }
       await reconcileStaleLaunchClaim(data, run);
       continue;
     }

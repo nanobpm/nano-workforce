@@ -25,6 +25,7 @@ import {
   isStaleLaunchClaim,
   LAUNCH_CLAIM_TTL_MS,
   parseHumanLabels,
+  reconcileOriginalInstanceBeforeRelaunch,
   reconcileStaleLaunchClaim,
 } from "./deliveryGraphRun.ts";
 import { pollDeliveryGraphPhase } from "./service.ts";
@@ -172,6 +173,58 @@ test("#852 pollDeliveryGraphPhase: a stale launch claim is reconciled to failed;
   });
 });
 
+test("#852 pollDeliveryGraphPhase: retiring a stale claim cancels a still-running ORIGINAL instance first (at-most-once recovery)", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    // A stale claim whose dispatch died AFTER createInstance but BEFORE stamping the key: the row has a
+    // process_definition_id but NULL process_key, and a LIVE instance of this run (runKey "rk") is ACTIVE.
+    await runs.insert({
+      ...claimRow("running"),
+      run_key: "rk",
+      process_definition_id: "delivery-graph-d",
+      updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000),
+    });
+    const cancelled: string[] = [];
+    const engine = {
+      searchProcessInstances: async (filter?: { processDefinitionId?: string; state?: string }) =>
+        filter?.state === "ACTIVE" ? [{ processInstanceKey: "PI-live", state: "ACTIVE" }] : [],
+      searchVariables: async (filter?: { processInstanceKey?: string; name?: string }) =>
+        filter?.name === "runKey" && filter.processInstanceKey === "PI-live"
+          ? [{ variableKey: "v", name: "runKey", value: JSON.stringify("rk"), scopeKey: "PI-live", processInstanceKey: "PI-live", isTruncated: false }]
+          : [],
+      cancelInstance: async (req: { processInstanceKey: string }) => {
+        cancelled.push(req.processInstanceKey);
+      },
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    assertEquals(cancelled, ["PI-live"], "the live original is cancelled before the claim is retired");
+    assertEquals((await runs.get("rk"))?.status, "failed");
+  });
+});
+
+test("#852 pollDeliveryGraphPhase: a reconcile read failure leaves the stale claim for the next pass (no wedge, no blind retire)", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert({
+      ...claimRow("running"),
+      run_key: "rk",
+      process_definition_id: "delivery-graph-d",
+      updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000),
+    });
+    const engine = {
+      searchProcessInstances: async () => {
+        throw new Error("engine read unavailable");
+      },
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    // The claim is NOT retired this pass (the reconcile could not prove no live original), so a
+    // re-dispatch is not waved through into a possible double-launch; the next pass retries.
+    assertEquals((await runs.get("rk"))?.status, "running");
+  });
+});
+
 test("#852 reconcileStaleLaunchClaim: the retire-to-failed flip is a CAS on the OBSERVED snapshot — a claim a concurrent dispatch re-claimed (refreshing updated_at) between the poller's read and the write is NOT clobbered", async () => {
   await withData(async (data) => {
     const runs = deliveryGraphRuns(data);
@@ -212,6 +265,63 @@ test("#852 reconcileStaleLaunchClaim: a non-stale claim (launched, or within TTL
     assertEquals(await reconcileStaleLaunchClaim(data, fresh), false, "an in-flight launch is not stale");
     assertEquals((await runs.get("rk"))?.status, "running");
   });
+});
+
+// ── #852 review: reconcile-before-relaunch (the at-most-once fence a timeout-only reclaim lacks) ──
+// A stale launch claim can hide a LIVE original instance (the dispatch died after createInstance but
+// before stamping the process key). `reconcileOriginalInstanceBeforeRelaunch` cancels that original —
+// matched by its seeded `runKey` variable — before a relaunch starts a second instance of the same
+// side-effecting graph (thread deliveryGraphRun.ts:180).
+
+/** A minimal engine stub for the reconcile seam: serves the configured ACTIVE instances, their `runKey`
+ * variables, and records cancels. */
+function reconcileEngine(instances: { processInstanceKey: string; runKey?: string }[]) {
+  const cancelled: string[] = [];
+  const engine = {
+    searchProcessInstances: async (filter?: { processDefinitionId?: string; state?: string }) =>
+      filter?.state === "ACTIVE" || filter?.state === undefined
+        ? instances.map((i) => ({ processInstanceKey: i.processInstanceKey, state: "ACTIVE" }))
+        : [],
+    searchVariables: async (filter?: { processInstanceKey?: string; name?: string }) => {
+      const inst = instances.find((i) => i.processInstanceKey === filter?.processInstanceKey);
+      if (!inst || filter?.name !== "runKey" || inst.runKey === undefined) return [];
+      return [{ variableKey: "v", name: "runKey", value: JSON.stringify(inst.runKey), scopeKey: inst.processInstanceKey, processInstanceKey: inst.processInstanceKey, isTruncated: false }];
+    },
+    cancelInstance: async (req: { processInstanceKey: string }) => {
+      cancelled.push(req.processInstanceKey);
+    },
+  };
+  return { engine, cancelled };
+}
+
+test("#852 reconcileOriginalInstanceBeforeRelaunch: a live original carrying THIS run key is cancelled before relaunch", async () => {
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-orig", runKey: "rk" }]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, ["PI-orig"]);
+  assertEquals(cancelled, ["PI-orig"], "the live original is cancelled so the relaunch stays at-most-once");
+});
+
+test("#852 reconcileOriginalInstanceBeforeRelaunch: an ACTIVE instance of the SAME definition but a DIFFERENT run key is left running", async () => {
+  // Two distinct runs of one graph share the content-addressed processDefinitionId; the definition
+  // filter alone would cancel a DIFFERENT run's live instance. The runKey variable is the proof.
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-other", runKey: "other-run" }]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, []);
+  assertEquals(cancelled, [], "a different run's instance is never cancelled");
+});
+
+test("#852 reconcileOriginalInstanceBeforeRelaunch: a candidate whose runKey variable is absent is NOT cancelled (unproven ownership)", async () => {
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-noseed" }]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, []);
+  assertEquals(cancelled, [], "never cancel an instance we cannot prove belongs to this run");
+});
+
+test("#852 reconcileOriginalInstanceBeforeRelaunch: no ACTIVE instances → nothing to cancel", async () => {
+  const { engine, cancelled } = reconcileEngine([]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, []);
+  assertEquals(cancelled, []);
 });
 
 // ── pollDeliveryGraphPhase: engine-key coercion ───────────────────────────────
