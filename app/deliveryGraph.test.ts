@@ -2030,3 +2030,77 @@ test("#858 an after-marker negation that references delivery still disqualifies 
     assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
   }
 });
+
+// Issue #858 (round-7 review, app/deliveryGraph.ts:298/342 — "Exclude negated closing actions"): the
+// closing-action detector matched a closing verb even when it was DIRECTLY NEGATED, so a safe
+// partial-slice brief that explicitly forbids the close (`Implement criterion 1 of #12. Do not close
+// #12; use Part of #12.`) — which follows the partial-slice contract — was wrongly rejected as
+// `partial-scope-close`, blocking a legitimate graph at compile/dispatch time. A directly-negated close
+// (`do not close`, `don't close`, `never close`) is the OPPOSITE of the defect (a part-scope node told
+// TO close), so it must not count as a closing action.
+test("#858 a directly-negated close is not a partial-scope-close (safe partial-slice brief validates)", () => {
+  const ok = [
+    "Implement criterion 1 of nanobpm/nano-supervisor#12. Do not close #12; use Part of #12.",
+    "Implement criterion 1 of #12. Don't close #12.",
+    "Work on one slice of #12; never close #12 — that is the epic's job.",
+    "Implement part of #12. Do not resolve #12. Do not fix #12.",
+    "Scope: one criterion of #12. Do not simply close it; leave the parent open.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: negating ONE close must not blind the guard to a DIFFERENT active close, and a
+// double-negative idiom (`do not forget to close`) is still an active close instruction. Both must stay
+// flagged — the negation refinement must not reopen the partial-scope-close bypass.
+test("#858 a negated close must not mask a sibling active close (no reopened bypass)", () => {
+  const bypasses = [
+    // #34 is actively closed with no full-scope marker; the negated #12 must not suppress detection.
+    "Implement criterion 1 of #12. Do not close #12, but close #34.",
+    // "do not forget to close" INSTRUCTS the close — a double negative, still a partial-scope-close.
+    "Implement criterion 1 of #12. Do not forget to close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-7 review, app/deliveryGraph.ts:378 — "Distinguish implementation methods from
+// alternate ownership"): the broad `<completion verb> by <non-self>` attribution branch mistook an
+// implementation METHOD (a gerund describing HOW the scope is delivered) for attribution to another
+// owner, because the method word is not on the self allowlist. `The full scope of #12 is implemented by
+// updating the parser; close #12.` was wrongly rejected. A `by <gerund>` means-clause is the slice's
+// own method, not another actor, so it must stay a valid full-scope acknowledgement.
+test("#858 a `by <implementation method>` gerund is the slice's own method, not attribution (validates)", () => {
+  const ok = [
+    "The full scope of #12 is implemented by updating the parser; close #12.",
+    "Deliver the full scope of #12, satisfied by adding the missing migration; close #12.",
+    "The whole issue #12 is delivered by carefully refactoring the module, then close #12.",
+    "Own the full scope of #12, completed by wiring up the remaining handlers; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: attribution to another ACTOR (not a gerund method) must STILL disqualify — the
+// gerund-method carve-out must not reopen the attribution bypass. A determiner before an `-ing` word
+// (`by the training team`) makes it an actor noun phrase, not a method, so it still disqualifies.
+test("#858 attribution to another actor still disqualifies after the gerund-method carve-out (no reopened bypass)", () => {
+  const bypasses = [
+    "The full scope of #12 is handled by siblings; close #12.",
+    "The full scope of #12 is delivered by the other slices; close #12.",
+    "The full scope of #12 is implemented by the platform team; close #12.",
+    "The full scope of #12 is delivered by the training team; close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});

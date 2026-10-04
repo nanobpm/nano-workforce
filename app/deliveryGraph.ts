@@ -287,9 +287,11 @@ const NODE_ID_MAX_LENGTH = 128;
  * (`closes it` / `close the issue` / `resolve that issue`, the literal field-case phrasing). The
  * prompt must ALSO reference an issue somewhere (so a bare prose "close the door" never matches), and
  * the verb must reach its object with no intervening clause (so "resolve conflicts in #12" / "closes
- * the loop on #12" do not match). Case-insensitive and conservative: a prompt that mentions closing
- * the issue at all — even negated ("do NOT close it") — is flagged, because an agent brief that
- * discusses closing should carry the full-scope marker regardless. The optional `(?:github\s+)?issues?\s+`
+ * the loop on #12" do not match). Case-insensitive and conservative. This pattern is only a cheap
+ * PRE-FILTER for closing LANGUAGE: it still matches a negated close ("do NOT close it"), so the brief
+ * proceeds to the authoritative, negation-aware `closingTargets`, which drops a DIRECTLY-NEGATED close
+ * (a safe partial-slice brief that forbids the close is NOT the defect; issue #858 round-7 review). The
+ * optional `(?:github\s+)?issues?\s+`
  * sits before BOTH the `owner/repo` prefix and the bare `#N` (and tolerates the plural `issues #N`), so
  * `closes issue #12` and `fixes GitHub issue owner/repo#12` both match; `close the issue` (no number)
  * still resolves via the pronoun alternative, not this prefix. */
@@ -336,13 +338,35 @@ function issueRefsIn(text: string): string[] {
  * caller falls back to "the sole issue referenced". Mirrors `CLOSING_ACTION_PATTERN`'s verb+object
  * grammar (including the optional `(?:github\s+)?issue\s+` before the number) so detection and targeting
  * never disagree, and preserves the `owner/repo` prefix (or URL repo) so a close of `owner/beta#12` is
- * NOT satisfied by an acknowledgement anchored to `owner/alpha#12`. */
+ * NOT satisfied by an acknowledgement anchored to `owner/alpha#12`.
+ *
+ * A DIRECTLY-NEGATED close is NOT a closing target (issue #858 round-7 review). A brief that explicitly
+ * forbids the close (`Do not close #12; use Part of #12.`, `never close #12`, `don't resolve #12`) is a
+ * SAFE partial-slice brief following the partial-slice contract — the OPPOSITE of the defect (a
+ * part-scope node told TO close) — so flagging it blocks a legitimate graph. Each match is dropped when
+ * the text immediately before its verb ends in a negator (`NEGATED_CLOSE_PREFIX`), so a negated close
+ * no longer contributes a target. The negator→verb gap admits only ADVERBS (`do not simply close`), not
+ * arbitrary words, so a meaning-flipping idiom (`do not forget to close #12` — "forget to" is a verb,
+ * not an adverb) stays an ACTIVE close and is still flagged; and negating ONE close never masks a
+ * DIFFERENT active close in the same prompt (`do not close #12, but close #34` still targets #34). */
 const CLOSING_TARGET_PATTERN =
   /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
+/** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
+ * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
+ * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
+ * ADVERBS are admitted (`(?:\w+ly|ever|just|simply|only|then|also|now|yet|…)\s+){0,2}`) — NOT arbitrary
+ * words — so a verb between them (`do not forget to close`) does not bridge and the close stays active,
+ * and an earlier unrelated negation blocked by punctuation/a verb (`do not introduce regressions; close
+ * #12`) never reaches the verb. */
+const NEGATED_CLOSE_PREFIX =
+  /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|just|simply|only|then|also|now|yet|automatically|silently|blindly|actually|really)\s+){0,2}$/i;
 function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean } {
   const numbered: string[] = [];
   let pronoun = false;
   for (const m of prompt.matchAll(CLOSING_TARGET_PATTERN)) {
+    // A directly-negated close (`do not close #12`) is not a close TARGET — skip it. The negation never
+    // masks a sibling ACTIVE close: each match is judged on the text before its OWN verb.
+    if (NEGATED_CLOSE_PREFIX.test(prompt.slice(0, m.index))) continue;
     if (m[2] !== undefined) numbered.push(issueKey(m[1], m[2]));
     else if (m[4] !== undefined) numbered.push(issueKey(m[3], m[4]));
     else pronoun = true;
@@ -367,6 +391,14 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
  * unaffected — those nouns are not in the others list, so they still fail the lookahead-excluded self
  * branch and do NOT disqualify.
  *
+ * The `<verb> by` branch ALSO excludes an implementation METHOD — a `by <gerund>` means-clause that
+ * says HOW this slice delivers the scope (`implemented by updating the parser`, `satisfied by adding
+ * the migration`, `delivered by carefully refactoring`), NOT attribution to another owner (issue #858
+ * round-7 review). A second negative lookahead `(?!(?:\w+ly\s+)?\w+ing\b)` right after `by\s+` skips a
+ * bare (optionally adverb-prefixed) gerund, so an "implemented by doing X" acknowledgement stays valid.
+ * A DETERMINER before an `-ing` word (`by the training team`) makes it an actor noun phrase, not a bare
+ * gerund, so it is NOT excluded and still disqualifies — attribution to a real actor is preserved.
+ *
  * Tested against the marker's DELIVERY ASSERTION, not its whole comma-bounded clause (see
  * `deliveryAssertionAround`): an attribution governing an UNRELATED constraint coordinated onto the
  * clause by `and` (`Deliver the full scope of #12 AND the regression suite is handled by another team;
@@ -376,7 +408,7 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
  * handled by siblings`) has no coordinator between it and the marker, so it stays in-segment and still
  * disqualifies. */
 const SCOPE_ATTRIBUTED_TO_OTHERS =
-  /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\s+(?!(?:the\s+)?(?:this|current|present|me|us|our|my|myself|ourselves|here)\b)|\bby\s+(?:(?:the|our|their|its|his|her)\s+)?(?:siblings?|others?|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
+  /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\s+(?!(?:the\s+)?(?:this|current|present|me|us|our|my|myself|ourselves|here)\b)(?!(?:\w+ly\s+)?\w+ing\b)|\bby\s+(?:(?:the|our|their|its|his|her)\s+)?(?:siblings?|others?|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
 
 /** A whole-scope phrase whose CLAUSE explicitly NEGATES or DISCLAIMS it ("this slice does NOT deliver
  * the full scope of #12", "we won't cover every acceptance criterion", "the full scope of #12 is NOT
@@ -677,6 +709,14 @@ function isPartialScopeClose(prompt: string): boolean {
   if (!CLOSING_ACTION_PATTERN.test(prompt)) return false;
   if (!ISSUE_REF_PATTERN.test(prompt)) return false;
 
+  // The AUTHORITATIVE closing targets (negation-aware): a directly-negated close (`do not close #12`)
+  // is not a target. If every close in the prompt is negated there is no ACTIVE close to guard, so the
+  // brief is a safe partial-slice brief — not a partial-scope-close (issue #858 round-7 review).
+  // `CLOSING_ACTION_PATTERN` above is only a cheap pre-filter for closing LANGUAGE (it still matches a
+  // negated close); `closingTargets` makes the real decision.
+  const { numbered, pronoun } = closingTargets(prompt);
+  if (numbered.length === 0 && !pronoun) return false;
+
   const distinct = new Set(issueRefsIn(prompt));
   const sole = distinct.size === 1 ? [...distinct][0] : null;
 
@@ -714,7 +754,6 @@ function isPartialScopeClose(prompt: string): boolean {
     }
   }
 
-  const { numbered, pronoun } = closingTargets(prompt);
   for (const n of numbered) {
     if (!acknowledged.has(n)) return true;
   }
