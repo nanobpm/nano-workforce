@@ -2207,15 +2207,17 @@ test("#858 the colon closing form with a full-scope acknowledgement validates", 
 });
 
 // Issue #858 (round-8 review, app/deliveryGraph.ts:366 — "Distinguish additive not-just constructions
-// from negation"): the negator gap admitted `just`/`only`, so an ADDITIVE `not just/only … ; also/but …`
+// from negation"): the negator gap admitted `just`/`only`, so an ADDITIVE `not just/only … ; also …`
 // correlative (`Do not just close #12; also add a release note` — the close STILL happens) was treated as
 // a negated close and the partial brief validated. The additive correlative now re-activates the close.
+// (Round-8 adversarial review narrowed the trigger: the additive signal is the `also`/`as well`/`too`
+// continuation, never a bare `but`, so these cases all carry an explicit additive word.)
 test("#858 an additive `not just/only … ; also/but …` close is a partial-scope-close (not a negation)", () => {
   const bypasses = [
     "Implement criterion 1 of #12. Do not just close #12; also add a release note.",
     "Implement one slice of #12. Do not only close #12, but also update the docs.",
     "Do the parser part of #12. Don't just close #12; also open a follow-up.",
-    "Implement part of #12. Do not only close #12 but notify the team.",
+    "Implement part of #12. Do not only close #12 but also notify the team.",
   ];
   for (const prompt of bypasses) {
     const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
@@ -2269,5 +2271,115 @@ test("#858 active-voice self ownership still validates (active-voice check fires
   for (const prompt of ok) {
     const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
     assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 adversarial review): the round-8 additive trigger admitted a BARE `but` as an
+// additive continuation. A genuine CONTRASTIVE `but` after a negated close (`Do not just close it; but
+// leave the parent open`) is a SAFE negated close — the `but` introduces a contrast, not an added action
+// — yet it was re-activated and flagged, a FALSE-POSITIVE REGRESSION vs. round-7. The additive signal is
+// the correlative `also`, never a bare `but`, so a bare `but` must NOT reinstate the close.
+test("#858 a contrastive `but` after a negated close is NOT an additive continuation (no false positive)", () => {
+  const ok = [
+    "Scope: one criterion of #12. Do not just close it; but leave the parent open.",
+    "Do not only close #12, but never reopen it.",
+    "Implement one slice of #12. Do not just close #12; but do add a note.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// …while the correlative `not only X but ALSO Y` still instructs the close — the additive signal is the
+// `also`, so requiring it keeps the cited bypass flagged without the bare-`but` false positive.
+test("#858 the correlative `not only … but also …` close still flags (additive via `also`)", () => {
+  const bypasses = [
+    "Implement one slice of #12. Do not only close #12, but also update the docs.",
+    "Implement criterion 1 of #12. Do not just close #12; but also add a release note.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 adversarial review): the correlative re-activation fired only on `just`/`only`, so
+// the SAME additive construction with another manner adverb (`merely`/`simply`/`basically`) + an `also`
+// continuation stayed a false negation and the partial close validated. The additive signal is the `also`
+// continuation, not the specific adverb, so the correlative class now spans the manner-adverb family.
+test("#858 an additive `not merely/simply/basically … ; also …` close is a partial-scope-close", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Do not merely close #12; also add a note.",
+    "Implement one slice of #12. Do not simply close #12; also update the docs.",
+    "Do the parser part of #12. Do not basically close #12; also open a follow-up.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while the synonymous additive continuation `as well` (in place of `also`) still instructs the close —
+// `Do not just close #12; add a note as well.` performs the close AND adds a note. (A bare `too` is NOT
+// treated as additive: it is also the intensifier `too risky/early`, which would over-fire on a safe
+// negated close — a fail-closed tradeoff that keeps `too` a safe negation.)
+test("#858 an additive `not just/only … ; … as well` close is a partial-scope-close", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Do not just close #12; add a note as well.",
+    "Implement one slice of #12. Do not only close #12; update the docs as well.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …and a bare `too` is the INTENSIFIER (`too risky`/`too early`) as often as the additive (`add a note
+// too`), so it is deliberately NOT an additive trigger — a safe negated close followed by a `too <adj>`
+// constraint stays a safe negated close (the additive widening must not over-fire on the intensifier).
+test("#858 a `too <adjective>` intensifier after a negated close is NOT additive (no false positive)", () => {
+  const ok = [
+    "Implement criterion 1 of #12. Do not just close #12; it is too risky.",
+    "Implement one slice of #12. Do not only close #12; it is too early to ship.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 adversarial review): the active-voice attribution subject allowlist omitted the
+// common actor nouns, so an active-voice `The team / another team / the upstream slice delivers the full
+// scope of #12` bypassed — asymmetric with the passive `handled by the team`, which already disqualifies.
+test("#858 active-voice team/upstream-slice ownership disqualifies the full-scope marker", () => {
+  const bypasses = [
+    "The team delivers the full scope of #12; implement criterion 1 and close #12.",
+    "Another team owns the whole issue #12; implement criterion 1 and close #12.",
+    "The upstream slice delivers the full scope of #12; implement criterion 1 and close #12.",
+    "Other teams handle every acceptance criterion of #12; do the parser part and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 adversarial review): the colon fix admitted only a single optional colon, so a
+// doubled colon (`Closes:: #12` / `Closes: : #12`) — which GitHub's trailing-colon trim still closes —
+// was not detected and the partial close validated.
+test("#858 the double-colon closing form (`Closes:: #12`) is detected as a partial-scope-close", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Closes:: #12.",
+    "Implement the parser slice of #12. Fixes: : #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
   }
 });

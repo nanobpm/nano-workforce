@@ -300,7 +300,7 @@ const NODE_ID_MAX_LENGTH = 128;
 const ISSUE_REF_PATTERN =
   /(?:#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+)/i;
 const CLOSING_ACTION_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s*(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|the issue\b|that issue\b|this issue\b|them\b)/i;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|the issue\b|that issue\b|this issue\b|them\b)/i;
 
 /** A repo-qualified issue IDENTITY key (issue #858 round-4 review). The accepted issue syntax includes
  * `owner/repo#N` and issue URLs, and this validator supports cross-repository graphs, so collapsing an
@@ -352,7 +352,7 @@ function issueRefsIn(text: string): string[] {
  * not an adverb) stays an ACTIVE close and is still flagged; and negating ONE close never masks a
  * DIFFERENT active close in the same prompt (`do not close #12, but close #34` still targets #34). */
 const CLOSING_TARGET_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s*(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
 /** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
  * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
  * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
@@ -366,23 +366,32 @@ const CLOSING_TARGET_PATTERN =
  * adversarial review). */
 const NEGATED_CLOSE_PREFIX =
   /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|just|simply|only|then|also|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,3}$/i;
-/** The CORRELATIVE merely-adverb negation `not just …` / `not only …` is ADDITIVE, not prohibitive:
- * `Do not just close #12; also add a release note` still INSTRUCTS the close (`not only X but/also Y`
- * keeps X), so treating it as a negated close drops a real close and lets the partial brief validate
- * (issue #858 round-8 review). This prefix matches a negator whose gap is governed by the correlative
- * adverb `just`/`only` immediately before the verb; paired with a following additive continuation
- * (`ADDITIVE_CONTINUATION`) it RE-ACTIVATES the close in `closingTargets`. Only `just`/`only` qualify —
- * they are the correlative-additive adverbs. `simply`/`merely` are MANNER negations (`do not simply
- * close it; leave the parent open` genuinely forbids the close), so they stay a negated close and this
- * prefix deliberately excludes them — which also confines the contrastive-`but` ambiguity to a branch
- * this pattern never reaches. */
+/** The CORRELATIVE additive negation `not <adverb> …` is ADDITIVE, not prohibitive, when paired with an
+ * additive continuation: `Do not just close #12; also add a release note` still INSTRUCTS the close
+ * (`not only X but/also Y` keeps X), so treating it as a negated close drops a real close and lets the
+ * partial brief validate (issue #858 round-8 review). This prefix matches a negator whose gap is
+ * governed by a correlative/manner adverb immediately before the verb; paired with a following additive
+ * continuation (`ADDITIVE_CONTINUATION`) it RE-ACTIVATES the close in `closingTargets`. The class spans
+ * the correlative `just`/`only` AND any `-ly` manner adverb (`merely`/`simply`/`basically`/`hardly`/…) —
+ * the additive signal is the `also`/`as well` CONTINUATION, not the specific adverb, so `Do not merely
+ * close #12; also …` is the same additive construction (issue #858 round-8 adversarial review). A manner
+ * adverb with NO additive continuation (`do not simply close it; leave the parent open`) genuinely
+ * forbids the close and stays a safe negated close — the continuation, not the adverb, is what
+ * re-activates. */
 const CORRELATIVE_NEGATED_CLOSE_PREFIX =
-  /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|then|also|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,2}(?:just|only)\s+(?:(?:\w+ly|ever|then|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,2}$/i;
-/** The additive continuation that reinstates a `not just/only` close: the additive `also`, or — for a
- * `just`/`only` negation specifically — the correlative `but` (`… but also …`, `… but notify …`), within
- * the SAME sentence after the close (bounded at `.`/newline so an unrelated later sentence never
- * re-activates the close). Tested on the text immediately AFTER the matched close. */
-const ADDITIVE_CONTINUATION = /^[^.\n]*?\b(?:also|but)\b/i;
+  /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|then|also|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,2}(?:just|only|\w+ly)\s+(?:(?:\w+ly|ever|then|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,2}$/i;
+/** The additive continuation that reinstates a `not <adverb>` close: an additive marker — `also` or
+ * `as well` — within the SAME sentence after the close (bounded at `.`/newline so an unrelated later
+ * sentence never re-activates the close). The signal is the ADDITIVE word, never a bare `but`: a bare
+ * contrastive `but` (`Do not just close it; but leave the parent open`) introduces a CONTRAST, not an
+ * added action, so it is a SAFE negated close — admitting it was a false-positive REGRESSION vs. round-7
+ * (issue #858 round-8 adversarial review). The correlative `not only X but ALSO Y` still carries `also`,
+ * so it is caught here without the bare-`but` false positive. `as well` is matched as a phrase (it never
+ * leads a clause, so a word-boundary false positive is not a concern). A bare `too` is deliberately NOT
+ * an additive trigger: it is also the INTENSIFIER (`too risky`/`too early`), so matching it over-fired on
+ * a safe negated close followed by a `too <adj>` constraint — a fail-closed tradeoff that keeps `too` a
+ * safe negation. Tested on the text immediately AFTER the matched close. */
+const ADDITIVE_CONTINUATION = /^[^.\n]*?\b(?:also|as\s+well)\b/i;
 function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean } {
   const numbered: string[] = [];
   let pronoun = false;
@@ -466,7 +475,7 @@ const SCOPE_ATTRIBUTED_TO_OTHERS =
  * marker's DELIVERY ASSERTION (like the passive check), so a sibling clause coordinated onto an
  * UNRELATED constraint by `and`, or sitting in a different comma/`;`-bounded clause, does not over-fire. */
 const SCOPE_ACTIVE_VOICE_OTHERS =
-  /\b(?:(?:the|our|their)\s+)?(?:siblings?|other\s+slices?|sibling\s+slices?|peers?|another\s+slice|the\s+rest|the\s+others?|others)\s+(?:\w+\s+){0,2}?(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship)(?:s|es|ed|ing)?\b/i;
+  /\b(?:(?:the|our|their)\s+)?(?:siblings?|other\s+slices?|sibling\s+slices?|peers?|another\s+slice|the\s+rest|the\s+others?|others|(?:other\s+)?teams?|another\s+team|upstream\s+slice|upstream\s+slices?)\s+(?:\w+\s+){0,2}?(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship)(?:s|es|ed|ing)?\b/i;
 
 /** A whole-scope phrase whose CLAUSE explicitly NEGATES or DISCLAIMS it ("this slice does NOT deliver
  * the full scope of #12", "we won't cover every acceptance criterion", "the full scope of #12 is NOT
