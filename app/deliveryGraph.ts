@@ -293,33 +293,52 @@ const ISSUE_REF_PATTERN =
 const CLOSING_ACTION_PATTERN =
   /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|the issue\b|that issue\b|this issue\b|them\b)/i;
 
-/** Every issue NUMBER referenced in `text`, in any accepted form (`#N`, `owner/repo#N`, or an issue
- * URL `…/issues/N`). Used to (a) anchor a full-scope acknowledgement to the issue it names and (b)
- * decide whether a prompt is single-issue (so a generic, un-numbered marker is unambiguous). The
- * `owner/repo#N` form is covered by the `#(\d+)` branch (it ends in `#N`). */
-const ISSUE_NUMBER_PATTERN = /#([0-9]+)|\/issues\/([0-9]+)/g;
-function issueNumbersIn(text: string): number[] {
-  const out: number[] = [];
-  for (const m of text.matchAll(ISSUE_NUMBER_PATTERN)) {
-    const raw = m[1] ?? m[2];
-    if (raw !== undefined) out.push(Number(raw));
+/** A repo-qualified issue IDENTITY key (issue #858 round-4 review). The accepted issue syntax includes
+ * `owner/repo#N` and issue URLs, and this validator supports cross-repository graphs, so collapsing an
+ * issue to its bare number `N` would let an acknowledgement of `owner/alpha#12`'s scope licence closing
+ * a DIFFERENT issue `owner/beta#12` — both become `12`. The key preserves repository identity: an
+ * EXPLICIT `owner/repo` (from `owner/repo#N` or an issue URL) keys as `owner/repo#N` (lowercased); a
+ * BARE `#N` keys as `#N` (the implicit node/run repository). Two keys name the same issue only when
+ * equal, so `owner/alpha#12`, `owner/beta#12`, and bare `#12` are three distinct issues. This is
+ * fail-closed: a bare acknowledgement never credits an explicitly-qualified close of a different repo
+ * (and vice-versa), so a cross-repo number collision can no longer bypass the guard. */
+function issueKey(repo: string | null | undefined, num: string | number): string {
+  const r = (repo ?? "").trim().toLowerCase();
+  return `${r}#${num}`;
+}
+
+/** Every issue referenced in `text`, as a repo-qualified identity key (see `issueKey`), in any accepted
+ * form (`#N`, `owner/repo#N`, or an issue URL `…/owner/repo/issues/N`). Used to (a) anchor a full-scope
+ * acknowledgement to the issue it names and (b) decide whether a prompt is single-issue (so a generic,
+ * un-numbered marker is unambiguous). The `owner/repo#N` and URL alternatives are ordered BEFORE the
+ * bare `#N` branch so a qualified reference is captured with its repo, never as a bare number. */
+const ISSUE_REF_GLOBAL =
+  /([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|#([0-9]+)/gi;
+function issueRefsIn(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(ISSUE_REF_GLOBAL)) {
+    if (m[2] !== undefined) out.push(issueKey(m[1], m[2]));
+    else if (m[4] !== undefined) out.push(issueKey(m[3], m[4]));
+    else if (m[5] !== undefined) out.push(issueKey(null, m[5]));
   }
   return out;
 }
 
-/** The closing TARGETS of a prompt: which issue the closing verb actually acts on. A numbered target
- * (`closes #N`, `fixes owner/repo#N`, `resolves <url>/issues/N`) yields `N`; a pronoun target
- * (`closes it` / `close the issue`) can't name a number, so it is reported via `pronoun` and the
- * caller falls back to "the sole issue referenced". Mirrors `CLOSING_ACTION_PATTERN`'s verb+object
- * grammar so detection and targeting never disagree. */
+/** The closing TARGETS of a prompt: which issue the closing verb actually acts on, as repo-qualified
+ * identity keys (see `issueKey`). A numbered target (`closes #N`, `fixes owner/repo#N`, `resolves
+ * <url>/.../issues/N`) yields its key; a pronoun target (`closes it` / `close the issue`) can't name an
+ * issue, so it is reported via `pronoun` and the caller falls back to "the sole issue referenced".
+ * Mirrors `CLOSING_ACTION_PATTERN`'s verb+object grammar so detection and targeting never disagree, and
+ * preserves the `owner/repo` prefix (or URL repo) so a close of `owner/beta#12` is NOT satisfied by an
+ * acknowledgement anchored to `owner/alpha#12`. */
 const CLOSING_TARGET_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#([0-9]+)|https?:\/\/[^\s)]*\/issues\/([0-9]+)|it\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
-function closingTargets(prompt: string): { numbered: number[]; pronoun: boolean } {
-  const numbered: number[] = [];
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
+function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean } {
+  const numbered: string[] = [];
   let pronoun = false;
   for (const m of prompt.matchAll(CLOSING_TARGET_PATTERN)) {
-    const raw = m[1] ?? m[2];
-    if (raw !== undefined) numbered.push(Number(raw));
+    if (m[2] !== undefined) numbered.push(issueKey(m[1], m[2]));
+    else if (m[4] !== undefined) numbered.push(issueKey(m[3], m[4]));
     else pronoun = true;
   }
   return { numbered, pronoun };
@@ -333,6 +352,18 @@ function closingTargets(prompt: string): { numbered: number[]; pronoun: boolean 
  * `by <sibling/other/peer/the rest>` agent phrase. */
 const SCOPE_ATTRIBUTED_TO_OTHERS =
   /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\b|\bby\s+(?:the\s+)?(?:siblings?|other|others|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
+
+/** A whole-scope phrase whose CLAUSE explicitly NEGATES or DISCLAIMS it ("this slice does NOT deliver
+ * the full scope of #12", "we won't cover every acceptance criterion", "without delivering the whole
+ * issue") does NOT acknowledge that this brief owns the scope — it asserts the opposite, yet the bare
+ * substring `full scope` is still present (issue #858 round-4 review). Such an occurrence is disqualified
+ * so a negated clause cannot licence a close and re-open the partial-close bypass. Matches a negation
+ * token anywhere in the marker's own clause (clause-scoped via `clauseAround`, so a negation elsewhere in
+ * the prompt is irrelevant). Conservative/fail-closed: the planner contract (plan.md) directs a genuine
+ * full-scope closer to carry a plain AFFIRMATIVE acknowledgement, so negating the marker's clause is a
+ * disclaimer, not an assertion. */
+const SCOPE_NEGATED =
+  /\b(?:not|never|without|cannot|exclud(?:e|es|ing|ed)|omit(?:s|ting|ted)?|aside\s+from|apart\s+from|other\s+than|rather\s+than|instead\s+of|short\s+of|fail(?:s|ing|ed)?\s+to|unable\s+to)\b|n['’]t\b/i;
 
 /** The explicit full-scope acknowledgement markers that licence a closing keyword. These are the
  * phrases the planner contract (resources/prompts/plan.md) directs a full-scope slice to carry, so a
@@ -441,21 +472,29 @@ function isPartQualified(prompt: string, end: number): boolean {
   return false;
 }
 
-/** The issue number ANCHORED to a whole-scope phrase occupying `[start,end)` in `prompt`, or null if
- * none is adjacent. Checks, in order: a `#N` immediately AFTER the phrase (through at most a few
- * connective words — "of", "the", "issue"; or directly, for markers that already end in `#`), then a
- * possessive `#N's`/`#N` immediately BEFORE it. Proximity is what ties the acknowledgement to a
- * specific issue, so a phrase next to #11 cannot license closing #12 in the same clause. */
-function anchoredIssueNumber(prompt: string, start: number, end: number): number | null {
-  const after = prompt.slice(end, end + 32);
+/** The repo-qualified issue KEY (see `issueKey`) ANCHORED to a whole-scope phrase occupying
+ * `[start,end)` in `prompt`, or null if none is adjacent. Checks, in order: a `#N` (optionally
+ * `owner/repo#N`) immediately AFTER the phrase (through at most a few connective words — "of", "the",
+ * "issue"; or directly, for markers that already end in `#`), then a possessive `owner/repo#N's`/`#N`
+ * immediately BEFORE it. Proximity is what ties the acknowledgement to a specific issue, so a phrase
+ * next to `owner/alpha#12` cannot license closing `owner/beta#12` (or a bare `#12`) in the same
+ * clause — the repository prefix is preserved, not collapsed to the bare number. */
+function anchoredIssueKey(prompt: string, start: number, end: number): string | null {
+  const after = prompt.slice(end, end + 48);
   const afterMatch =
     prompt[end - 1] === "#"
       ? after.match(/^([0-9]+)/)
-      : after.match(/^\s*(?:(?:of|the|issue)\s+){0,3}#([0-9]+)/i);
-  if (afterMatch) return Number(afterMatch[1]);
-  const before = prompt.slice(Math.max(0, start - 32), start);
-  const beforeMatch = before.match(/#([0-9]+)(?:'s|s'|')?\s*(?:of\s+)?$/i);
-  if (beforeMatch) return Number(beforeMatch[1]);
+      : after.match(/^\s*(?:(?:of|the|issue)\s+){0,3}(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)/i);
+  if (afterMatch) {
+    // The `#`-ending-marker branch captures only a bare number (group 1); the general branch captures
+    // an optional repo (group 1) then the number (group 2).
+    return prompt[end - 1] === "#"
+      ? issueKey(null, afterMatch[1])
+      : issueKey(afterMatch[1], afterMatch[2]);
+  }
+  const before = prompt.slice(Math.max(0, start - 48), start);
+  const beforeMatch = before.match(/(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#([0-9]+)(?:'s|s'|')?\s*(?:of\s+)?$/i);
+  if (beforeMatch) return issueKey(beforeMatch[1], beforeMatch[2]);
   return null;
 }
 
@@ -463,20 +502,23 @@ function isPartialScopeClose(prompt: string): boolean {
   if (!CLOSING_ACTION_PATTERN.test(prompt)) return false;
   if (!ISSUE_REF_PATTERN.test(prompt)) return false;
 
-  const distinct = new Set(issueNumbersIn(prompt));
+  const distinct = new Set(issueRefsIn(prompt));
   const sole = distinct.size === 1 ? [...distinct][0] : null;
 
   // Which issues does the brief genuinely acknowledge owning the FULL scope of? Scan each whole-scope
   // phrase occurrence, anchor it to the issue immediately adjacent to it (or the sole issue), and skip
-  // any occurrence whose clause attributes the scope to others — or that is immediately qualified DOWN
-  // to a part ("the whole issue's parser slice"), which is a partial acknowledgement, not a whole one.
+  // any occurrence whose clause attributes the scope to others, NEGATES/disclaims it ("does not deliver
+  // the full scope of #12"), or that is immediately qualified DOWN to a part ("the whole issue's parser
+  // slice") — each is a non-assertion, not a whole-scope acknowledgement.
   const lower = prompt.toLowerCase();
-  const acknowledged = new Set<number>();
+  const acknowledged = new Set<string>();
   for (const marker of FULL_SCOPE_MARKERS) {
     for (let i = lower.indexOf(marker); i >= 0; i = lower.indexOf(marker, i + marker.length)) {
       if (isPartQualified(prompt, i + marker.length)) continue;
-      if (SCOPE_ATTRIBUTED_TO_OTHERS.test(clauseAround(prompt, i))) continue;
-      const anchored = anchoredIssueNumber(prompt, i, i + marker.length);
+      const clause = clauseAround(prompt, i);
+      if (SCOPE_ATTRIBUTED_TO_OTHERS.test(clause)) continue;
+      if (SCOPE_NEGATED.test(clause)) continue;
+      const anchored = anchoredIssueKey(prompt, i, i + marker.length);
       if (anchored !== null) acknowledged.add(anchored);
       else if (sole !== null) acknowledged.add(sole);
     }

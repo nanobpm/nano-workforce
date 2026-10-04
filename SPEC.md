@@ -285,6 +285,37 @@ Notes:
   the (re-dispatched) agent cannot decide and returns **`needs_input`** — that
   routes through the normal status-escalation arm to `wait-answer`. Decline =
   agent-adjudicated → converge; `needs_input` = agent defers → human.
+- **Scope-integrity gate: a closed issue must not be under-delivered (issue #858).**
+  Convergence is guarded against a partial delivery that silently under-delivers a
+  broader-scoped parent — an agent ships one slice of an issue, `Closes #N` it, and
+  records the deferred remainder only in prose (never a filed, tracked issue), so the
+  parent reads as fully done. Two layers enforce this:
+  - **Compile/lint-time (deterministic, lexical).** `validateDeliveryGraph`
+    (`app/deliveryGraph.ts`, `isPartialScopeClose`) rejects an `agent` node whose
+    `prompt` pairs a GitHub closing keyword (`Closes/Fixes/Resolves #N`,
+    `owner/repo#N`, or an issue URL) with NO full-scope acknowledgement **tied to
+    that same issue** (`partial-scope-close`). The acknowledgement must assert THIS
+    brief owns the issue's whole stated scope and be anchored to the issue it closes:
+    a marker for a different issue, one **attributed to siblings/others**, one
+    **negated/disclaimed** in its clause ("does not deliver the full scope of #N"),
+    or one **qualified down to a part** ("the whole issue's parser slice") does not
+    count. Issue **identity preserves the repository** — `owner/alpha#12`,
+    `owner/beta#12`, and a bare `#12` are distinct, so an acknowledgement of one repo
+    cannot licence closing a same-numbered issue in another. A part-scoped brief must
+    instead reference the issue non-blockingly (`Part of #N` / `Refs #N`) and leave
+    it open.
+  - **Convergence-time (semantic, `scope-classify`).** After the comment-gate passes,
+    the `Scope classifier` (`resources/prompts/scope-classify.md`) reads each closed
+    issue's stated scope and blocks (`scopeBlocked = true`, routing to a human) when
+    the PR leaves part of a *closed* issue's stated scope undelivered with the
+    remainder untracked. It extracts closing keywords from the **PR body AND every
+    commit body** (via `git log origin/<base>..<head>`, not the GitHub CLI's
+    `--json commits`, which silently truncates at 100 entries): this repo family
+    **squash-merges with `COMMIT_MESSAGES`**, so the squash commit concatenates every
+    commit body and a `Closes #N` left in ANY commit body closes #N on merge even if
+    the PR body was later reworded to `Part of #N`. Such a PR — body `Part of #N`,
+    a commit body still `Closes #N`, part of #N undelivered and untracked — is a
+    genuine under-delivery the gate blocks (naming the offending commit to reword).
 - **No-progress guard + husk classification (issue #786).** Before the review
   wait, an `addressed` round passes through `pr.progress-check`
   (`workers/progress-check/worker.ts`, mirrored by `app/roundProgress.ts`): it

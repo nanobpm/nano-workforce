@@ -1567,3 +1567,75 @@ test("#858 a full-scope marker tied to the closed issue still validates after th
   }
 });
 
+// Issue #858 (round-4 review): issue identity must preserve the REPOSITORY, not collapse to the bare
+// number. The accepted syntax includes `owner/repo#N` and issue URLs, and the validator supports
+// cross-repository graphs, so an acknowledgement anchored to `owner/alpha#12` must NOT licence closing
+// a DIFFERENT issue `owner/beta#12` — both used to become `12`. Each explicit-repo closing target
+// requires its own repo-matched acknowledgement; a bare `#N` (the implicit node/run repo) is a third,
+// distinct identity.
+test("#858 a full-scope marker for one repo's issue does not licence closing a different repo's same-numbered issue (cross-repo collision)", () => {
+  const bypasses = [
+    // Acknowledge owner/alpha#12's full scope, but ALSO close owner/beta#12 (partial) — the collapse-to-12
+    // bug credited beta from alpha's acknowledgement.
+    "Deliver owner/alpha#12's full stated scope and close owner/alpha#12. Implement only criterion 1 of owner/beta#12 and close owner/beta#12.",
+    // Marker anchored (after) to owner/alpha, close targets owner/beta.
+    "Deliver the full scope of owner/alpha#12 and close owner/beta#12.",
+    // A bare #12 acknowledgement must not licence closing an explicitly-qualified owner/alpha#12.
+    "Deliver #12's full stated scope; implement part of owner/alpha#12 and close owner/alpha#12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a repo-qualified marker genuinely tied to the SAME repo-qualified issue it closes must
+// still validate — the repository-identity tightening must not regress a legitimate `owner/repo#N`
+// closer, nor a bare `#N` closer (unchanged).
+test("#858 a repo-qualified full-scope marker tied to the SAME repo-qualified issue it closes still validates", () => {
+  const ok = [
+    "Deliver owner/alpha#12's full stated scope and close owner/alpha#12.",
+    "This slice delivers nanobpm/nano-supervisor#99's full stated scope; Closes nanobpm/nano-supervisor#99.",
+    "Own the whole issue of owner/alpha#7 — every acceptance criterion — then close owner/alpha#7.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-4 review): a whole-scope phrase whose CLAUSE explicitly NEGATES or disclaims it
+// ("this slice does NOT deliver the full scope of #12", "we won't cover every acceptance criterion")
+// asserts the opposite of ownership, yet the bare `full scope` substring is still present. Such an
+// occurrence must NOT licence a close — the negated clause reopens the exact partial-close bypass.
+test("#858 a NEGATED/disclaimed full-scope acknowledgement does not licence a close (negation bypass)", () => {
+  const bypasses = [
+    "This slice does not deliver the full scope of #12; implement criterion 1 and close #12.",
+    "We won't cover every acceptance criterion of #12 — just the parser. Close #12.",
+    "This does not own the whole issue #12; close it.",
+    "Implement part of #12; this is not the full scope of #12. Closes #12.",
+    "Deliver everything other than the full scope of #12, then close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: the negation disqualifier must not over-fire on an AFFIRMATIVE whole-scope closer that
+// merely contains an innocuous "no …" phrase ("with no gaps", "leaving nothing deferred") — those are
+// not negations of the delivery. A genuine full-scope closer must still validate.
+test("#858 an affirmative whole-scope closer with an innocuous 'no' phrase still validates (negation must not over-fire)", () => {
+  const ok = [
+    "Deliver the whole issue #12 with no gaps; close it.",
+    "Own the whole issue #12, leaving nothing deferred, and close #12.",
+    "This slice covers the full stated scope of #12 — no part is out of scope — then Closes #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
