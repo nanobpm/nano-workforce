@@ -9,9 +9,10 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 import { dispatchDeliveryGraphRun } from "./deliveryGraphDispatch.ts";
+import { isStaleLaunchClaim } from "./deliveryGraphRun.ts";
 import { noopLog } from "../test/log.ts";
 
-function makeApp(opts: { failIdentityWrite?: boolean; liveOriginal?: { processInstanceKey: string; runKey: string | null; processDefinitionId?: string } } = {}) {
+function makeApp(opts: { failIdentityWrite?: boolean; reconcileReadThrows?: { on: boolean }; liveOriginal?: { processInstanceKey: string; runKey: string | null; processDefinitionId?: string } } = {}) {
   const tables = new Map<string, Record<string, unknown>[]>();
   const started: { processDefinitionId: string; variables?: Record<string, unknown> }[] = [];
   const cancelled: string[] = [];
@@ -98,7 +99,11 @@ function makeApp(opts: { failIdentityWrite?: boolean; liveOriginal?: { processIn
       // assert the relaunch cancels it. `liveOriginal.runKey === null` models an instance whose runKey
       // variable is absent/unreadable — it must NOT be cancelled (unproven ownership).
       searchProcessInstances: (filter?: { processDefinitionId?: string; state?: string }) =>
-        Promise.resolve(
+        // A reconcile READ failure (issue #853 review — thread deliveryGraphDispatch.ts:280): the
+        // reconcile pass queries by `processDefinitionId`, so gate the transient throw on that filter.
+        opts.reconcileReadThrows?.on && filter?.processDefinitionId !== undefined
+          ? Promise.reject(new Error("engine unavailable"))
+          : Promise.resolve(
           opts.liveOriginal &&
             (filter?.processDefinitionId === undefined || filter.processDefinitionId === (opts.liveOriginal.processDefinitionId ?? filter.processDefinitionId)) &&
             (filter?.state === undefined || filter.state === "ACTIVE")
@@ -379,4 +384,42 @@ test("#852 dispatchDeliveryGraphRun: an explicit-key stale re-claim whose graph 
   assertEquals(res.alreadyRunning, false, "the stale claim is re-claimed, not short-circuited");
   assertEquals(cancelled, ["PI-orig"], "the original (under the stale row's digest) is cancelled despite the graph drift");
   assertEquals(started.length, 1, "exactly one replacement instance launches");
+});
+
+// ── #853 review: a reconcile-read failure must leave the row RECLAIMABLE-with-reconcile, never `failed`
+// (thread deliveryGraphDispatch.ts:280) ──────────────────────────────────────────────────────────────
+// If the reconcile read/cancel throws TRANSIENTLY while the original instance is still live, retiring
+// the stale claim to `failed` would let the NEXT dispatch relaunch WITHOUT reconciling (a `failed` row
+// is a plain terminal re-run, not a stale claim), double-launching the side-effecting nodes. The claim
+// must instead revert to a stale launch-claim so the reconcile is retried before any relaunch.
+
+test("#853 dispatchDeliveryGraphRun: a reconcile-read failure reverts the row to a STALE claim (not `failed`), launching nothing — so the next dispatch retries reconcile instead of relaunching blind", async () => {
+  const reconcileReadThrows = { on: true };
+  const { app, started, cancelled, runs } = makeApp({ liveOriginal: { processInstanceKey: "PI-orig", runKey: "run-r" }, reconcileReadThrows });
+  const probe = await dispatchDeliveryGraphRun(makeApp().app, SIDE_EFFECTING, { runKey: "run-r", repoless: true });
+  assert(probe.ok);
+  if (!probe.ok) return;
+  await seedStaleClaim(app, "run-r", probe.digest);
+
+  // Phase 1: the reconcile read throws. The dispatch must propagate the error, launch NOTHING, and
+  // leave the row a reclaimable stale claim — NOT retire it to `failed`.
+  await assertRejects(() => dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { runKey: "run-r", repoless: true }), Error, "engine unavailable");
+  const row = runs().find((r) => r["run_key"] === "run-r");
+  assert(row, "the run row still exists");
+  assertEquals(row?.["status"], "running", "the row stays a `running` claim, not `failed`");
+  assertEquals(row?.["process_key"], null, "the row stays a NULL-key launch claim (still reclaimable as stale)");
+  assert(isStaleLaunchClaim(row as Parameters<typeof isStaleLaunchClaim>[0]), "the row is still a STALE launch claim, so the reconcile is retried before any relaunch");
+  assertEquals(started.length, 0, "nothing launched while the original may still be live");
+  assertEquals(cancelled, [], "nothing cancelled — the read failed before any cancel");
+
+  // Phase 2: the engine recovers. The NEXT dispatch re-enters reconcile (because the row is still a
+  // stale claim), cancels the live original, and relaunches exactly once — proving the row was never
+  // stranded in a `failed` state that would have relaunched blind.
+  reconcileReadThrows.on = false;
+  const res = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { runKey: "run-r", repoless: true });
+  assertEquals(res.ok, true);
+  if (!res.ok) return;
+  assertEquals(res.alreadyRunning, false, "the stale claim is re-claimed, not short-circuited");
+  assertEquals(cancelled, ["PI-orig"], "the recovered reconcile cancels the live original before relaunch");
+  assertEquals(started.length, 1, "exactly one replacement instance launches across the two dispatches");
 });

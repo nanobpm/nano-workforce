@@ -197,6 +197,11 @@ export async function dispatchDeliveryGraphRun(
   // the short-circuit and the reconcile in lock-step (issue #853 review — thread
   // deliveryGraphDispatch.ts:193).
   const reclaimingStaleClaim = existing != null && isStaleLaunchClaim(existing);
+  // Capture the stale claim's original `updated_at` NOW, before the CAS below rewrites it: a
+  // reconcile-read failure must restore the row to exactly this past-the-TTL timestamp so it stays a
+  // RECLAIMABLE stale claim (see `revertToStaleClaim`). Captured as a value (not read back off
+  // `existing` after the CAS) because the CAS refreshes `updated_at` in place.
+  const staleClaimUpdatedAt = existing?.updated_at;
   if (existing && existing.status === "running" && !reclaimingStaleClaim) {
     app.log.info("dispatch-delivery-graph short-circuit: already running", { runKey });
     return {
@@ -251,6 +256,20 @@ export async function dispatchDeliveryGraphRun(
     const { run_key, created_at, ...patch } = failed;
     await runs.update(runKey, patch);
   };
+  // Reconcile-FAILURE recovery (issue #853 review — thread deliveryGraphDispatch.ts:280): a reconcile
+  // READ/CANCEL failure must NOT retire the row to `failed`. A `failed` row is terminal, so
+  // `isStaleLaunchClaim` rejects it and the NEXT dispatch re-runs it as a plain terminal-row relaunch —
+  // WITHOUT re-entering reconcile-before-relaunch — double-launching the side-effecting nodes if the
+  // original instance is in fact still live (the read failed only transiently). Instead revert the row
+  // to the pre-claim STALE launch-claim snapshot so the reconcile is RETRIED before any relaunch: the
+  // next dispatch sees a stale claim again (`reclaimingStaleClaim` → reconcile) and the poller sees one
+  // too (`reconcileStaleLaunchClaim` cancels the original via `finalize`). This mirrors the poller's own
+  // reconcile-failure behaviour, whose `finalize` throw rolls the CAS back to the same stale-claim
+  // `running` state rather than failing it — one canonical "a failed reconcile leaves the row
+  // reconcile-pending, never terminal" rule across both the dispatch and poller paths.
+  const revertToStaleClaim = async () => {
+    await runs.update(runKey, { status: "running", phase: DELIVERY_PHASE.RUNNING, process_key: null, process_definition_id: null, updated_at: staleClaimUpdatedAt });
+  };
   // Reconcile-before-relaunch (issue #852 review — thread deliveryGraphRun.ts:180): if we just RE-CLAIMED
   // a STALE launch claim (a `running`/NULL-key row past its TTL), the original dispatch may have died
   // AFTER `createInstance` succeeded but BEFORE stamping the process key — leaving a LIVE instance
@@ -275,9 +294,11 @@ export async function dispatchDeliveryGraphRun(
         app.log.warn("dispatch-delivery-graph cancelled a still-running original instance before relaunch", { runKey, cancelled });
       }
     } catch (err) {
-      // A reconciliation read failure must not strand the claim: fail the claim (so it is not a phantom)
-      // and surface the error rather than relaunching blind into a possible double-launch.
-      await markClaimFailed();
+      // A reconciliation read/cancel failure must not strand the claim OR waive a blind relaunch
+      // through: revert to the pre-claim STALE launch-claim so the reconcile is retried (by the next
+      // dispatch or the poller) BEFORE any replacement launches, rather than retiring to `failed`
+      // (which a later dispatch would short-circuit past into a possible double-launch).
+      await revertToStaleClaim();
       app.log.error("dispatch-delivery-graph reconcile-before-relaunch threw", { runKey });
       throw err;
     }
