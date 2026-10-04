@@ -46,7 +46,7 @@ result.
 
 ## What to do
 
-1. **Read the PR body AND the commit bodies.**
+1. **Read the PR body, the PR TITLE, AND the commit bodies.**
    `gh pr view <prNumber> --repo <repo> --json body,title`.
    Extract every issue the body **closes with a GitHub closing keyword** —
    `close/closes/closed`, `fix/fixes/fixed`, `resolve/resolves/resolved` followed by
@@ -55,6 +55,16 @@ result.
    colon form as a closing reference too. A **non-closing** reference (`Refs #N`,
    `Part of #N`, `Depends-on #N`, `Follow-up: #N`) does **not** close an issue —
    ignore those for the closing-scope check (but note the follow-up links; see below).
+
+   **Scan the PR TITLE with these exact same closing-keyword rules too.** This repo
+   family squash-merges, so the **PR title becomes the squash commit SUBJECT**
+   (`AGENTS.md` "PR titles must be Conventional too — they become the release trigger"),
+   and GitHub honours a closing keyword in the squash subject exactly like one in the
+   body or a commit. So a conventional title such as `fix: parser slice (Closes #12)`
+   **closes #12 on merge** even when the body only says `Part of #12` and every commit
+   is clean. Treat a closing keyword found in the **title** exactly like one in the PR
+   body — add its `#N` to the set of closed issues you judge below (and if the slice is
+   partial, tell the human to reword the title to a non-closing form).
 
    **Then scan the PR's commit messages for the same closing keywords.** Use the
    **full commit history** — fetch base and head, then

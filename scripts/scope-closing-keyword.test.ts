@@ -82,6 +82,35 @@ test("scope-classify.md: the scope gate scans COMMIT bodies for closing keywords
   assert(lower.includes("commit_messages"), "scope-classify.md must name the COMMIT_MESSAGES squash behaviour");
 });
 
+test("scope-classify.md: the scope gate scans the PR TITLE for closing keywords (squash subject)", () => {
+  const gate = read("scope-classify.md");
+  const lower = gate.toLowerCase();
+  // A closing keyword in the PR title becomes the squash commit SUBJECT and closes the issue on merge,
+  // so the gate must scan the title with the same closing-keyword rules as the body/commits — not only
+  // fetch it (issue #858 round-16 review). Pin the instruction, not just the `--json body,title` fetch.
+  assert(lower.includes("title"), "scope-classify.md must reference the PR title");
+  assert(
+    /scan\s+the\s+pr\s+title|title[\s\S]{0,80}closing[- ]keyword|closing[- ]keyword[\s\S]{0,80}title/.test(lower),
+    "scope-classify.md must instruct scanning the PR TITLE with the closing-keyword rules",
+  );
+  // …and explain WHY the title matters: it becomes the squash commit subject.
+  assert(
+    /squash\s+(?:commit\s+)?subject|title\s+becomes\s+the\s+squash/.test(lower),
+    "scope-classify.md must explain the title becomes the squash commit subject",
+  );
+});
+
+test("feature.md: the no-close-on-partial rule also governs the PR TITLE (squash subject)", () => {
+  const lower = read("feature.md").toLowerCase();
+  // The agent authors the PR title, so its contract must warn that a closing keyword there closes the
+  // issue on merge (title -> squash subject), not only the body/commit bodies (issue #858 round-16).
+  assert(lower.includes("title"), "feature.md must reference the PR title in the closing-keyword rule");
+  assert(
+    /title\s+becomes\s+the\s+squash|squash\s+(?:commit\s+)?subject/.test(lower),
+    "feature.md must tie the PR title to the squash commit subject",
+  );
+});
+
 test("all three prompts recognise the full set of GitHub closing keywords", () => {
   for (const name of ["feature.md", "plan.md", "scope-classify.md"]) {
     const lower = read(name).toLowerCase();

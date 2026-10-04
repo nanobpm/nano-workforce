@@ -308,11 +308,13 @@ Notes:
     the `Scope classifier` (`resources/prompts/scope-classify.md`) reads each closed
     issue's stated scope and blocks (`scopeBlocked = true`, routing to a human) when
     the PR leaves part of a *closed* issue's stated scope undelivered with the
-    remainder untracked. It extracts closing keywords from the **PR body AND every
-    commit body** (via `git log origin/<base>..<head>`, not the GitHub CLI's
+    remainder untracked. It extracts closing keywords from the **PR title, the PR
+    body, AND every commit body** (via `git log origin/<base>..<head>`, not the GitHub
+    CLI's
     `--json commits`, which silently truncates at 100 entries): this repo family
     **squash-merges with `COMMIT_MESSAGES`**, so the squash commit concatenates every
-    commit body and a `Closes #N` left in ANY commit body closes #N on merge even if
+    commit body — and takes the **PR title as its subject** — so a `Closes #N` left in
+    ANY commit body (or in the PR title) closes #N on merge even if
     the PR body was later reworded to `Part of #N`. Such a PR — body `Part of #N`,
     a commit body still `Closes #N`, part of #N undelivered and untracked — is a
     genuine under-delivery the gate blocks (naming the offending commit to reword).

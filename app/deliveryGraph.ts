@@ -279,47 +279,19 @@ const NODE_ID_MAX_LENGTH = 128;
  * legitimately closes, e.g. "full stated scope" / "every acceptance criterion"). A closing keyword
  * with NO such marker is the defect class — a partial brief told to close — and is rejected.
  *
- * Closing-keyword detection mirrors the scope gate's contract (resources/prompts/scope-classify.md):
- * a closing verb (`close/closes/closed`, `fix/fixes/fixed`, `resolve/resolves/resolved`) applied to an
- * issue — either directly (`closes #N`, `fixes owner/repo#N`, `resolves <issue-url>`), via an
- * `issue #N` / `GitHub issue #N` noun phrase (`closes issue #12` — the common explicit form where the
- * word `issue` sits between the verb and the number; issue #858 round-6 review), or by pronoun
- * (`closes it` / `close the issue` / `resolve that issue`, the literal field-case phrasing). The
- * prompt must ALSO reference an issue somewhere (so a bare prose "close the door" never matches), and
- * the verb must reach its object with no intervening clause (so "resolve conflicts in #12" / "closes
- * the loop on #12" do not match). An OPTIONAL colon between the keyword and its target (`Closes: #12`)
- * is admitted — GitHub recognises the colon form, so a partial brief using it must still be caught
- * (issue #858 round-8 review). The grammar ALSO recognises the ISSUE-FIRST / PASSIVE closing directive
- * — `<issue-ref> [auxiliaries] closed|fixed|resolved [by …]` (`ensure issue #12 is closed by the PR`,
- * `#12 will be closed by the PR`, `see #12 closed`, `mark #12 as resolved`, `the issue gets fixed`) —
- * the same instruction with the issue as SUBJECT instead of object (issue #858 round-10 review). The
- * passive arm's subject is an issue REFERENCE (a `#N` / `owner/repo#N` / issue URL / `the issue` /
- * `it` / `them`), never a bare noun, so a benign passive about a non-issue subject (`the door is
- * closed by the latch`, `the PR is closed by the merge queue`, `the milestone is closed by the bot`)
- * never matches. A leading `\b` cannot anchor a `#N` subject (`#` is a non-word char, so there is no
- * boundary before it), so the `#N` alternative carries a `(?<![A-Za-z0-9_.-])` lookbehind instead —
- * the same "not part of a larger token" guarantee for a subject that starts with `#`. The auxiliary
- * window is at most four words plus an optional `get(s)` — wide enough for periphrastic-future passives
- * (`#12 is going to be closed`, `#12 is expected to be closed`, where `is/going/to/be` is four window
- * words; issue #858 round-10 adversarial review) — so an unrelated later verb (`#12 is closed
- * and deployed`) still reads as a close of #12 (fail-closed), and a verb-first close keeps priority
- * (the first arm is ordered before the passive arm, so `close #12` never re-reads `#12` as a passive
- * subject). Case-insensitive and conservative. This pattern is only a cheap
- * PRE-FILTER for closing LANGUAGE: it still matches a negated close ("do NOT close it"), so the brief
- * proceeds to the authoritative, negation-aware `closingTargets`, which drops a DIRECTLY-NEGATED close
- * (a safe partial-slice brief that forbids the close is NOT the defect; issue #858 round-7 review). The
- * optional `(?:github\s+)?issues?\s+`
- * sits before BOTH the `owner/repo` prefix and the bare `#N` (and tolerates the plural `issues #N`), so
- * `closes issue #12` and `fixes GitHub issue owner/repo#12` both match; `close the issue` (no number)
- * still resolves via the pronoun alternative, not this prefix. A quantifier/determiner
- * (`both`/`all`/`each`/`every`/`the`) is admitted on EITHER side of the `issues?` noun, so the natural
- * multi-target directive `close both issues #12 and #13` (quantifier BEFORE the noun) matches as well as
- * `close issues #12` — otherwise a partial-scope prompt worded that way slipped past the prefilter AND
- * `CLOSING_TARGET_PATTERN` and received no `partial-scope-close` error (issue #858 round-15 review). */
+ * `ISSUE_REF_PATTERN` is the "the prompt references an issue SOMEWHERE" guard (so a bare prose "close
+ * the door" / "closes it" with no `#N` never matches). It is NOT a closing-language grammar — closing
+ * detection AND targeting are done by the SINGLE authoritative, negation-aware grammar
+ * `CLOSING_TARGET_PATTERN` (via `closingTargets`). There used to be a second `CLOSING_ACTION_PATTERN`
+ * pre-filter here that duplicated that whole active+passive grammar; it was removed (issue #858
+ * round-16 review) because the duplication was a DRIFT SURFACE that violated the one-canonical rule
+ * (AGENTS.md "derivation over duplication"): any syntax added only to `CLOSING_TARGET_PATTERN` was
+ * silently unreachable through the prefilter and failed OPEN, and the review history repeatedly forced
+ * the two regexes to be edited in lock-step. `closingTargets` already answers "is there an active,
+ * non-negated close?" (it returns no target when there is none), so `isPartialScopeClose` derives that
+ * answer from the one grammar instead of gating it behind a divergent copy. */
 const ISSUE_REF_PATTERN =
   /(?:#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+)/i;
-const CLOSING_ACTION_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)(?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+))*|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+\b|https?:\/\/[^\s)]*\/issues\/[0-9]+|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+(?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b/i;
 
 /** A repo-qualified issue IDENTITY key (issue #858 round-4 review). The accepted issue syntax includes
  * `owner/repo#N` and issue URLs, and this validator supports cross-repository graphs, so collapsing an
@@ -356,9 +328,14 @@ function issueRefsIn(text: string): string[] {
  * identity keys (see `issueKey`). A numbered target (`closes #N`, `fixes owner/repo#N`, `resolves
  * <url>/.../issues/N`, or the `issue #N` / `GitHub issue #N` noun-phrase form) yields its key; a pronoun
  * target (`closes it` / `close the issue`) can't name an issue, so it is reported via `pronoun` and the
- * caller falls back to "the sole issue referenced". Mirrors `CLOSING_ACTION_PATTERN`'s verb+object
- * grammar (including the optional `(?:github\s+)?issue\s+` before the number) so detection and targeting
- * never disagree, and preserves the `owner/repo` prefix (or URL repo) so a close of `owner/beta#12` is
+ * caller falls back to "the sole issue referenced". This is the SINGLE authoritative closing grammar —
+ * both "is there a close?" (detection) and "which issue?" (targeting) derive from it, with no separate
+ * pre-filter to drift from (issue #858 round-16 review removed the duplicate `CLOSING_ACTION_PATTERN`).
+ * It recognises the verb+object forms (`close/closes/closed`, `fix/fixes/fixed`,
+ * `resolve/resolves/resolved` applied to `#N`, `owner/repo#N`, an issue URL, the `issue #N` /
+ * `GitHub issue #N` noun phrase, or a pronoun), the optional colon (`Closes: #12`), and the
+ * quantifier/determiner on either side of `issues?` (`close both issues #12 and #13`); it
+ * preserves the `owner/repo` prefix (or URL repo) so a close of `owner/beta#12` is
  * NOT satisfied by an acknowledgement anchored to `owner/alpha#12`.
  *
  * A DIRECTLY-NEGATED close is NOT a closing target (issue #858 round-7 review). A brief that explicitly
@@ -377,8 +354,8 @@ function issueRefsIn(text: string): string[] {
  * fixed`. It captures the SAME target shapes (groups 5/6 = repo/number for `#N`, 7/8 for a URL, a
  * bare pronoun subject otherwise) so a passive close is attributed to its issue exactly like the
  * active form, and captures the auxiliary window (group 9) so a negator INSIDE it (`#12 is NOT
- * closed`) can drop the match — see `NEGATED_PASSIVE_WINDOW`. Detection and targeting never disagree:
- * `CLOSING_ACTION_PATTERN` carries the identical passive arm as a non-capturing pre-filter. */
+ * closed`) can drop the match — see `NEGATED_PASSIVE_WINDOW`. This passive arm lives ONLY here, in the
+ * one authoritative grammar — there is no duplicate pre-filter carrying a second copy of it. */
 const CLOSING_TARGET_PATTERN =
   /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+))*)*)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)\b|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+((?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)/gi;
 /** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
@@ -1306,14 +1283,14 @@ function anchoredIssueKey(prompt: string, start: number, end: number): string | 
 }
 
 function isPartialScopeClose(prompt: string): boolean {
-  if (!CLOSING_ACTION_PATTERN.test(prompt)) return false;
   if (!ISSUE_REF_PATTERN.test(prompt)) return false;
 
   // The AUTHORITATIVE closing targets (negation-aware): a directly-negated close (`do not close #12`)
-  // is not a target. If every close in the prompt is negated there is no ACTIVE close to guard, so the
-  // brief is a safe partial-slice brief — not a partial-scope-close (issue #858 round-7 review).
-  // `CLOSING_ACTION_PATTERN` above is only a cheap pre-filter for closing LANGUAGE (it still matches a
-  // negated close); `closingTargets` makes the real decision.
+  // is not a target. If every close in the prompt is negated — or there is no closing LANGUAGE at all —
+  // there is no ACTIVE close to guard, so the brief is a safe partial-slice brief, not a
+  // partial-scope-close (issue #858 round-7 review). `closingTargets` is the SINGLE source of the
+  // closing grammar (`CLOSING_TARGET_PATTERN`); there is no separate pre-filter to drift from it
+  // (issue #858 round-16 review removed the duplicate `CLOSING_ACTION_PATTERN`).
   const { numbered, pronoun } = closingTargets(prompt);
   if (numbered.length === 0 && !pronoun) return false;
 

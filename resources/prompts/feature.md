@@ -133,15 +133,17 @@ you on the right side of it:
    (`Refs #N` / `Part of #N`) and **leave #N open** (or convert #N into a
    tracking/umbrella issue for the remainder). The classifier flags a PR that
    closes #N while leaving part of #N's stated scope undelivered and untracked.
-   **This rule governs your COMMIT MESSAGES too, not just the PR body.** This repo
-   family squash-merges with `COMMIT_MESSAGES`, so a `Closes #N` in **any commit
-   body** closes the issue on merge — even after you correct the PR body to
-   `Part of #N`. A partial slice whose PR body says `Part of #N` but whose first
-   commit still carries `Closes #N` *still* closes the broader parent on merge, and
-   the scope gate scans commit bodies as well as the PR body. So when you split
-   scope, write `Part of #N` (never a closing keyword) in **both** the PR body and
-   every commit body; if an early commit already closed it, amend/reword that commit
-   before you push.
+   **This rule governs your COMMIT MESSAGES and your PR TITLE too, not just the PR
+   body.** This repo family squash-merges with `COMMIT_MESSAGES`, so a `Closes #N`
+   in **any commit body** closes the issue on merge — even after you correct the PR
+   body to `Part of #N`. The **PR title becomes the squash commit SUBJECT**, so a
+   closing keyword in the title (`fix: parser slice (Closes #N)`) likewise closes #N
+   on merge. A partial slice whose PR body says `Part of #N` but whose first commit —
+   or whose title — still carries `Closes #N` *still* closes the broader parent on
+   merge, and the scope gate scans the title and commit bodies as well as the PR
+   body. So when you split scope, write `Part of #N` (never a closing keyword) in the
+   PR **title**, the PR body, and every commit body; if an early commit already
+   closed it, amend/reword that commit before you push.
 2. **A deferred remainder must be a FILED, tracked issue — never just prose.** If
    your PR defers part of its scope, **file a follow-up issue for each deferred
    item** and link it in the PR body with an explicit tracking marker the classifier

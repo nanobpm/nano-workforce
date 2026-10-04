@@ -14,6 +14,8 @@ import {
   redactConnectorValue,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 /** The single error in the result, asserting there is exactly one. */
 function only(errors: DeliveryGraphError[]): DeliveryGraphError {
@@ -1393,6 +1395,28 @@ test("#858 the closing-keyword families (closes/fixes/resolves, owner/repo#N, is
     const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
     assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
   }
+});
+
+test("#858 round-16: the duplicate closing-language prefilter is gone (one canonical closing grammar)", () => {
+  // Finding (review 5407092970): a second `CLOSING_ACTION_PATTERN` prefilter duplicated the whole
+  // active+passive closing grammar of `CLOSING_TARGET_PATTERN`, violating the one-canonical rule — any
+  // syntax added only to the authoritative pattern was unreachable through the prefilter and failed
+  // OPEN. It was removed so `isPartialScopeClose` derives "is there an active close?" from the single
+  // `closingTargets` grammar. Guard against the drift surface being reintroduced.
+  const src = readFileSync(join(import.meta.dirname, "deliveryGraph.ts"), "utf8");
+  assert(
+    !/const\s+CLOSING_ACTION_PATTERN\b/.test(src) && !/CLOSING_ACTION_PATTERN\s*\.\s*test\b/.test(src),
+    "deliveryGraph.ts must not reintroduce a duplicate CLOSING_ACTION_PATTERN prefilter — the single " +
+      "authoritative closing grammar is CLOSING_TARGET_PATTERN (via closingTargets)",
+  );
+  // And the behaviour it used to gate must still hold through the one grammar: a passive, issue-first
+  // close with no full-scope marker (a form only CLOSING_TARGET_PATTERN parses) is still rejected.
+  const g = {
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "Implement criterion 1 of #12; ensure #12 is closed by the PR." } }],
+    edges: [],
+  };
+  const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+  assertEquals(err.path, "nodes[0].agent.prompt");
 });
 
 test("#858 a closing keyword WITH an explicit full-scope marker validates (the legitimate final closer)", () => {
