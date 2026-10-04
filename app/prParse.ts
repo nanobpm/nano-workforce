@@ -18,13 +18,26 @@ export function parsePr(input: unknown): ParsedPr | null {
   // a retrying job. Fail closed to `null` here so every caller resolves safely instead of throwing.
   if (typeof input !== "string") return null;
   const s = input.trim();
-  let m = s.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/i);
+  // ANCHORED to the whole string with an exact `github.com` host (optional scheme + `www.`): an
+  // unanchored `github\.com/…` matched `github.com` as a SUBSTRING — a spoofed host suffix
+  // (`notgithub.com`), a userinfo trick (`github.com@evil.com`), or any prose-wrapped occurrence —
+  // and the pr/epic probe would then silently poll the embedded `owner/repo` (a DIFFERENT target
+  // than the submitted value) or time out (#857). Supported URL suffixes (`/files`, `?query`,
+  // `#fragment`) are preserved via the trailing group. This is the ONE PR-URL grammar; every
+  // downstream (`parsePrTarget`/`parsePlanKey` in readiness.ts, etc.) inherits the anchoring.
+  let m = s.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/i);
   if (m) {
     const repo = `${m[1]}/${m[2]}`;
     const number = Number(m[3]);
     return { repo, number, url: `https://github.com/${repo}/pull/${number}`, prKey: `${repo}#${number}` };
   }
-  m = s.match(/^([^/]+\/[^#]+)#(\d+)$/);
+  // The shorthand is EXACTLY `owner/repo#N` — precisely one `/`. The old capture (`[^/]+/[^#]+`)
+  // admitted EXTRA slashes, so a URL-shaped value (`https://example.com/o/r#7`, `//host/o/r#7`) or a
+  // multi-slash path (`a/b/c#9`) parsed to a "PR" whose repo is the whole multi-slash string, and a
+  // canonical-grammar caller (readiness `parsePrTarget`, the workers) then polled that wrong target
+  // via `gh` (#857 review). Fail closed on every extra-slash impersonator: a repo segment carries no
+  // `/`, so the only slash in a valid shorthand is the owner/repo separator.
+  m = s.match(/^([^/#]+\/[^/#]+)#(\d+)$/);
   if (m) {
     const repo = m[1];
     const number = Number(m[2]);

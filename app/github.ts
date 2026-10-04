@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 // `fetchRepoFile` from here): `classifyMergeability` reads a repo's declared required checks to gate
 // a merge independently of GitHub branch protection.
 import type { MergeProtocol } from "./mergeProtocol.ts";
+import { parsePr } from "./prParse.ts";
 
 /** A GitHub pull-request review, narrowed to the fields the poller needs. */
 export interface GhReview {
@@ -2020,9 +2021,9 @@ export async function createPullRequest(
     ]);
     // `gh pr create` prints the new PR's URL on stdout; parse its number from the canonical path.
     const url = out.trim().split(/\s+/).pop() ?? "";
-    const m = url.match(/\/pull\/(\d+)/);
-    if (!m) throw new Error(`could not parse a PR number from \`gh pr create\` output: ${out.trim()}`);
-    return { number: Number(m[1]), url };
+    const pr = parsePr(url); // the ONE PR-shape grammar (#856)
+    if (!pr) throw new Error(`could not parse a PR number from \`gh pr create\` output: ${out.trim()}`);
+    return { number: pr.number, url };
   }
   if (!token) return null;
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
