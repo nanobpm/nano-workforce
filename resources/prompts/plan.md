@@ -209,19 +209,30 @@ the follow-up and rewrite the PR by hand).
 So, when you author each slice's `prompt`:
 
 - **Only instruct a closing keyword (`Closes/Fixes/Resolves #N`) in a slice whose
-  brief delivers #N's FULL stated scope.** If exactly one slice covers the whole
-  issue (the common single-task case), it may close it. If you split the issue
-  across slices, the parent issue is **broader** than any one slice — so **no
-  slice** closes it with a bare brief: instruct each partial slice to reference the
-  parent non-blockingly (`Part of #N` / `Refs #N`) and **leave #N open**, OR
-  designate one final slice that carries the `Closes #N`. That final slice is the
-  exception only when its brief makes it **own and verify #N's COMPLETE stated
-  scope** — every acceptance criterion, not just the remainder. `dependsOn` on the
-  sibling slices orders the merges, but it does **not** by itself make the final
-  slice's brief full-scope: a final slice scoped only to "the remaining criterion"
-  is still a partial brief and must **not** close #N. Scope the final closer to
-  re-verify the whole issue (its brief must direct it to check every checkbox and
-  confirm the siblings' merged work satisfies them) before it emits `Closes #N`.
+  brief delivers #N's FULL stated scope — and say so in an issue-anchored
+  whole-scope phrase the deterministic validator recognises.** If exactly one
+  slice covers the whole issue (the common single-task case), it may close it. If
+  you split the issue across slices, the parent issue is **broader** than any one
+  slice — so **no slice** closes it with a bare brief: instruct each partial slice
+  to reference the parent non-blockingly (`Part of #N` / `Refs #N`) and **leave
+  #N open**, OR designate one final slice that carries the `Closes #N`. That final
+  slice is the exception only when its brief makes it **own and verify #N's
+  COMPLETE stated scope** — every acceptance criterion, not just the remainder.
+  `dependsOn` on the sibling slices orders the merges, but it does **not** by
+  itself make the final slice's brief full-scope: a final slice scoped only to
+  "the remaining criterion" is still a partial brief and must **not** close #N.
+  Scope the final closer to re-verify the whole issue (its brief must direct it to
+  check every checkbox and confirm the siblings' merged work satisfies them)
+  before it emits `Closes #N`.
+  **The validator (`validateDeliveryGraph`) enforces this deterministically:** an
+  `agent.prompt` that closes an issue is rejected unless the brief also carries an
+  explicit **issue-anchored whole-scope acknowledgement**. Anchor the
+  acknowledgement to the issue's whole scope — e.g. "delivers #N's full stated
+  scope", "every acceptance criterion", "all checkboxes", "the whole issue", "the
+  entire issue", "all of #N". A **bare adverb of completeness does not count** —
+  "fully", "completely", "end-to-end", "in full", "in its entirety" can modify a
+  *partial* deliverable ("implement one criterion fully"), so the validator
+  ignores them; always name the issue's whole scope, not just an adverb.
 - **The remainder must be tracked, never dropped.** Every acceptance criterion of
   the split issue must be covered by **some** slice in this plan (collectively the
   slices must deliver #N's whole scope). Do not emit a slice set that silently

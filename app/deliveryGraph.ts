@@ -297,7 +297,15 @@ const CLOSING_ACTION_PATTERN =
  * phrases the planner contract (resources/prompts/plan.md) directs a full-scope slice to carry, so a
  * legitimately-closing brief already contains one and is NOT rejected. Matching is case-insensitive
  * substring (not a bareword regex) so inflections ("full stated scope", "the full scope", "every
- * acceptance criterion", "all acceptance criteria", "owns the whole issue") all count. */
+ * acceptance criterion", "all acceptance criteria", "owns the whole issue") all count.
+ *
+ * Every marker is ISSUE-ANCHORED — it names the whole issue/scope as the thing delivered ("the whole
+ * issue", "all of #N", "the entire issue", "every acceptance criterion"). A BARE adverb of
+ * completeness (`fully` / `completely` / `end-to-end` / `in full` / `in its entirety`) is
+ * deliberately NOT a marker: it can modify a PARTIAL deliverable ("implement one criterion of #12
+ * fully, then close #12"), so accepting it would silently disable the guard for exactly the partial
+ * brief it exists to catch. The contract (plan.md) tells the planner to anchor the acknowledgement
+ * to the issue's whole scope, so a legitimate closer always has an anchored form available. */
 const FULL_SCOPE_MARKERS: readonly string[] = [
   "full stated scope",
   "full scope",
@@ -309,6 +317,18 @@ const FULL_SCOPE_MARKERS: readonly string[] = [
   "own the whole",
   "complete stated scope",
   "entire scope",
+  // Issue-anchored whole-scope paraphrases — the natural phrasings a planner uses when it genuinely
+  // scopes a slice to the whole issue (the under-inclusive-marker false positive this widens for).
+  "the whole issue",
+  "whole issue",
+  "the entire issue",
+  "entire issue",
+  "the complete issue",
+  "complete issue",
+  "all of #",
+  "all of the issue",
+  "the whole of #",
+  "the whole of the issue",
 ];
 
 /** True when `prompt` pairs a GitHub closing action with NO explicit full-scope acknowledgement

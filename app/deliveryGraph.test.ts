@@ -1406,6 +1406,44 @@ test("#858 a closing keyword WITH an explicit full-scope marker validates (the l
   }
 });
 
+// The marker list must also recognise the NATURAL issue-anchored whole-scope paraphrases a planner
+// writes when it genuinely scopes a slice to the whole issue — not only the exact phrases the
+// contract happens to use verbatim. A legitimately full-scope closer phrased "the whole issue" /
+// "all of #N" / "the entire issue" must NOT be rejected (the under-inclusive-marker false positive).
+test("#858 a closing keyword WITH a natural issue-anchored whole-scope paraphrase validates", () => {
+  const ok = [
+    "Deliver the whole issue #12 and close it.",
+    "Implement all of #12 and close it.",
+    "Own the entire issue #12, then close it.",
+    "This slice covers the complete issue #12; open a PR with Closes #12.",
+    "Implement all of the issue #12 and resolve it.",
+    "Deliver the whole of #12 and close it.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse guard: a bare adverb of completeness (`fully` / `completely` / `end-to-end` /
+// `in full` / `in its entirety`) is NOT a full-scope marker, because it can modify a PARTIAL
+// deliverable ("implement one criterion fully"). Only an issue-anchored whole-scope phrase licenses
+// a closing keyword — a partial brief dressed in an adverb must still be rejected.
+test("#858 a bare completeness adverb on a partial brief is STILL rejected (not a full-scope marker)", () => {
+  const partials = [
+    "Implement one criterion of #12 fully, then close #12.",
+    "Do the parser slice of #12 completely; close #12.",
+    "Implement part of #12 end-to-end and close it.",
+    "This slice covers the login part of #12 in full; close it.",
+    "Implement the backend portion of #12 in its entirety; close it.",
+  ];
+  for (const prompt of partials) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
 test("#858 a non-closing reference (Part of / Refs) is NOT flagged, and a prompt with no issue ref is NOT flagged", () => {
   const ok = [
     "Implement criterion 1 of #12 and reference it as Part of #12.", // non-closing ref
