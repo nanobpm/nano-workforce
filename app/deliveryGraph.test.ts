@@ -1786,3 +1786,120 @@ test("#858 a full-scope marker anchored to one issue URL does not licence closin
     assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
   }
 });
+
+// Issue #858 (round-5 adversarial review): the prefix-partitive guard required a literal `of` after the
+// partitive, so the most common English partitive — `half the X` (NO `of`) — bypassed it: `half of the
+// full scope` was caught but `half the full scope` was credited. The `of` is optional in English
+// ("half the …", "part the …", "half my …"), so the qualifier must narrow the marker with or without it.
+test("#858 a whole-scope marker narrowed by a prefix partitive with NO `of` is rejected (half-the bypass)", () => {
+  const bypasses = [
+    "Deliver half the full scope of #12; close #12.",
+    "Deliver half the whole issue #12; close #12.",
+    "Implement part the whole issue #12 and close it.",
+    "Deliver half my full scope of #12; close #12.",
+    "Cover half its full scope of #12. Closes #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: making the partitive `of` optional must not over-fire on a plain whole-scope marker, a
+// whole-quantifier prefix, or a part-word used non-partitively earlier in the clause.
+test("#858 a whole-scope marker with no partitive prefix still validates (optional-`of` must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and close #12.",
+    "Implement all of #12 and close it.",
+    "As part of the milestone, deliver the full scope of #12 and close #12.",
+    // A part-word used NON-partitively (not governing the marker) must not disqualify.
+    "Deliver the full scope of #12 from the halfway house; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-5 adversarial review): the self-exclusion lookahead added `our`/`us`/`my` to the
+// self list, which opened an attribution-to-others hole — `delivered by OUR siblings` / `handled by OUR
+// peers` were credited because the `<verb> by` alternative's lookahead failed on the leading `our` and
+// the sibling/peer alternative didn't allow an intervening possessive. A possessive before a
+// sibling/peer/other noun is still attribution to OTHERS, so it must disqualify.
+test("#858 a whole-scope phrase attributed to OUR/THEIR siblings or peers does not licence a close (possessive attribution bypass)", () => {
+  const bypasses = [
+    "The full scope of #12 is delivered by our siblings; implement criterion 1 and close #12.",
+    "The full scope of #12 is handled by our peers; implement criterion 1 and close #12.",
+    "The full scope of #12 is delivered by our sibling slices; implement criterion 1 and close #12.",
+    "The full scope of #12 is delivered by our other slices; implement criterion 1 and close #12.",
+    "The full scope of #12 is delivered by their siblings; implement criterion 1 and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a possessive before a SELF noun ("our team", "our slice") is still self-ownership and
+// must NOT be disqualified — the possessive allowance is scoped to the sibling/peer/other nouns only.
+test("#858 a whole-scope phrase attributed to a SELF possessive (our team/slice) still validates", () => {
+  const ok = [
+    "The full scope of #12 is delivered by our team; close #12.",
+    "The full scope of #12 is delivered by our slice; close #12.",
+    "The full scope of #12 is delivered by this slice; close #12.",
+    "The full scope of #12 is delivered by us; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-5 adversarial review): splitting `without` into a before-marker-only prefix check
+// was a fail-open regression for a TRAILING delivery-negating `without` — `Deliver the full scope of #12
+// WITHOUT COVERING the edge cases; close #12.` genuinely disclaims completeness yet was credited. The
+// benign carve-out is `without <noun>` ("without regressions"); a trailing `without <delivery gerund>`
+// (covering/delivering/finishing/implementing the scope) is still a disclaimer and must disqualify.
+test("#858 a TRAILING `without <delivery gerund>` still disqualifies the close (trailing-negation regression)", () => {
+  const bypasses = [
+    "Deliver the full scope of #12 without covering the edge cases; close #12.",
+    "Deliver the full scope of #12 without delivering the auth work; close #12.",
+    "Deliver the full scope of #12 without finishing the parser; close #12.",
+    "Deliver the full scope of #12 without implementing criterion 3; close #12.",
+    "Deliver the full scope of #12 without completing the migration; close #12.",
+    "Deliver the full scope of #12 without shipping the docs; close #12.",
+    "Deliver the full scope of #12 without addressing the feedback; close #12.",
+    // An adverb between `without` and the gerund still negates.
+    "Deliver the full scope of #12 without fully covering the edge cases; close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a trailing `without <noun>` (the benign carve-out the round-5 split was FOR) must still
+// validate — only a trailing `without <delivery gerund>` negates, not every trailing `without`.
+test("#858 a TRAILING `without <noun>` (benign constraint) still validates (gerund-only negation must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 without regressions; close #12.",
+    "Deliver the full scope of #12 without tests; close #12.",
+    "Deliver the full scope of #12 without any regressions; close #12.",
+    "Deliver the full scope of #12 without breaking changes; close #12.",
+    "Deliver the full scope of #12 rather than a piecemeal split. Closes #12.",
+    // A benign NOUN that merely looks like a delivery gerund ("a covering letter", "the building
+    // blocks", "meeting notes") is an unrelated trailing constraint, NOT a scope disclaimer — the
+    // article/determiner (or the noun sense) keeps it affirmative.
+    "Deliver the full scope of #12 without a covering letter; close #12.",
+    "Deliver the full scope of #12 without the building blocks; close #12.",
+    "Deliver the full scope of #12 without meeting notes; close #12.",
+    "Deliver the full scope of #12 without a finishing touch; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});

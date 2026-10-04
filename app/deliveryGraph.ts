@@ -353,9 +353,15 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
  * is an AFFIRMATIVE ownership assertion, not a disclaimer, so the `<verb> by` alternative excludes a
  * self-reference agent (`by this slice` / `by the current slice` / `by me` / `by us` / `by me here`)
  * via a negative lookahead — only attribution to a non-self agent disqualifies (issue #858 round-5
- * review: "allow current-slice ownership in passive attribution"). */
+ * review: "allow current-slice ownership in passive attribution"). The sibling/peer/other alternative
+ * allows an optional POSSESSIVE (`our`/`their`/`the`) before the noun — `delivered by OUR siblings` is
+ * still attribution to OTHERS even though `our` is a self word (the round-5 self-exclusion lookahead
+ * added `our`/`us`/`my`, which let `by our siblings` slip through both alternatives; issue #858
+ * round-5 adversarial review). A possessive before a SELF noun (`by our team` / `by our slice`) is
+ * unaffected — those nouns are not in the others list, so they still fail the lookahead-excluded self
+ * branch and do NOT disqualify. */
 const SCOPE_ATTRIBUTED_TO_OTHERS =
-  /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\s+(?!(?:the\s+)?(?:this|current|present|me|us|our|my|myself|ourselves|here)\b)|\bby\s+(?:the\s+)?(?:siblings?|other|others|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
+  /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\s+(?!(?:the\s+)?(?:this|current|present|me|us|our|my|myself|ourselves|here)\b)|\bby\s+(?:(?:the|our|their|its|his|her)\s+)?(?:siblings?|others?|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
 
 /** A whole-scope phrase whose CLAUSE explicitly NEGATES or DISCLAIMS it ("this slice does NOT deliver
  * the full scope of #12", "we won't cover every acceptance criterion", "the full scope of #12 is NOT
@@ -385,6 +391,26 @@ const SCOPE_ATTRIBUTED_TO_OTHERS =
 const SCOPE_NEGATED_CORE = /\b(?:not|never|cannot|fail(?:s|ing|ed)?\s+to|unable\s+to)\b|n['’]t\b/i;
 const SCOPE_NEGATED_PREFIX =
   /\b(?:without|exclud(?:e|es|ing|ed)|omit(?:s|ting|ted)?|aside\s+from|apart\s+from|other\s+than|rather\s+than|instead\s+of|short\s+of|all\s+but|everything\s+but|anything\s+but|nothing\s+but)\b/i;
+
+/** A TRAILING `without <delivery gerund>` ("Deliver the full scope of #12 WITHOUT COVERING the edge
+ * cases") still disclaims completeness — it is a negation, not the benign `without <noun>` constraint
+ * ("without regressions") the before-marker-only split was carved out for. Restricting
+ * `SCOPE_NEGATED_PREFIX` to the before-marker text (so a trailing "without regressions" stays
+ * affirmative) was a fail-open regression for this trailing delivery-negating shape (issue #858
+ * round-5 adversarial review): round-4's whole-clause check caught it, the split let it through. This
+ * pattern distinguishes the two by what `without` GOVERNS: a delivery gerund (covering / delivering /
+ * implementing / finishing / …) means part of the scope is left undelivered, so the marker is
+ * disqualified; a plain noun (regressions / tests / breaking changes) is an unrelated trailing
+ * constraint and stays affirmative. Tested against the WHOLE clause (the gerund sits AFTER the
+ * marker). Two guards keep it from over-firing on a benign noun that merely LOOKS like a gerund:
+ *  - an article/determiner between `without` and the word ("without A covering letter", "without THE
+ *    building blocks") makes the word a NOUN, so the lookbehinds exclude it; and
+ *  - `meeting` is deliberately left OUT of the gerund list — "without meeting notes" (a benign noun)
+ *    is more common in a brief than "without meeting every criterion", and the core-negator /
+ *    scope-classify layers backstop that phrasing.
+ * The gerund list is the delivery vocabulary; a `without <noun>` never matches it. */
+const SCOPE_NEGATED_WITHOUT_DELIVERY =
+  /\bwithout\s+(?:\w+\s+){0,2}(?<!the\s)(?<!a\s)(?<!an\s)(?<!any\s)(?<!its\s)(?<!their\s)(?<!our\s)(?<!my\s)(?<!your\s)(?<!his\s)(?<!her\s)(?:covering|delivering|implementing|finishing|completing|building|satisfying|addressing|providing|handling|doing|shipping|including)\b/i;
 
 /** The explicit full-scope acknowledgement markers that licence a closing keyword. These are the
  * phrases the planner contract (resources/prompts/plan.md) directs a full-scope slice to carry, so a
@@ -471,12 +497,16 @@ function clauseBeforeMarker(prompt: string, idx: number): string {
  * the whole issue", "a subset of the full scope") scopes the acknowledgement DOWN to a part, so it must
  * NOT licence a close — the mirror of `PART_QUALIFIER_AFTER_MARKER` on the LEADING side (issue #858
  * round-5 review: "detect partial-scope qualifiers before the issue marker"). Matches a partitive
- * quantifier + `of` at the END of the marker's before-clause text, so it is adjacent to the marker.
- * Whole quantifiers (`all of`, `the whole of`) are deliberately excluded — they denote the WHOLE, not a
- * part — and an unrelated earlier "… of …" ("as part of the milestone, deliver the full scope …") is
- * not adjacent to the marker, so it does not disqualify. */
+ * quantifier at the END of the marker's before-clause text, so it is adjacent to the marker. The `of`
+ * is OPTIONAL: the most common English partitive drops it ("half the full scope", "part the whole
+ * issue", "half my scope"), so requiring a literal `of` let exactly those siblings bypass the guard
+ * (issue #858 round-5 adversarial review). An optional determiner/possessive (`the`/`its`/`my`/`our`/…)
+ * may sit between the partitive and the marker. Whole quantifiers (`all of`, `the whole of`) are
+ * deliberately excluded — they denote the WHOLE, not a part — and an unrelated earlier "… of …" ("as
+ * part of the milestone, deliver the full scope …") is not adjacent to the marker, so it does not
+ * disqualify. */
 const PART_QUALIFIER_BEFORE_MARKER =
-  /\b(?:(?:a|one|two|three|four|five)\s+)?(?:half|part|portion|some|subset|fraction|piece|bit|chunk|segment|slice|section|fragment|sliver|handful|couple|number|few|several|most|many|much|majority|minority|remainder|rest)\s+of(?:\s+(?:the|its|this|that|each|every|all|a))?\s+$/i;
+  /\b(?:(?:a|one|two|three|four|five)\s+)?(?:half|part|portion|some|subset|fraction|piece|bit|chunk|segment|slice|section|fragment|sliver|handful|couple|number|few|several|most|many|much|majority|minority|remainder|rest)\s+(?:of\s+)?(?:(?:the|its|this|that|each|every|all|a|my|our|your|their|his|her)\s+)?$/i;
 
 /** A whole-scope marker immediately followed by a PART-QUALIFIER scopes the acknowledgement DOWN to a
  * part, so it must NOT licence a close (issue #858 round-3 adversarial review). Matching is a bare
@@ -574,6 +604,7 @@ function isPartialScopeClose(prompt: string): boolean {
       const clause = clauseAround(prompt, i);
       if (SCOPE_ATTRIBUTED_TO_OTHERS.test(clause)) continue;
       if (SCOPE_NEGATED_CORE.test(clause)) continue;
+      if (SCOPE_NEGATED_WITHOUT_DELIVERY.test(clause)) continue;
       const before = clauseBeforeMarker(prompt, i);
       if (SCOPE_NEGATED_PREFIX.test(before)) continue;
       if (PART_QUALIFIER_BEFORE_MARKER.test(before)) continue;
