@@ -4,6 +4,7 @@
 // pure surface: descriptor parse/validation, each kind's matcher, the injectable `probeOnce`
 // dispatch (no network / subprocess), backoff, the ms→ISO timeout derivation, and log redaction.
 import { test } from "node:test";
+import { parsePr } from "./prParse.ts";
 import { assert, assertEquals, assertRejects, assertStringIncludes, assertThrows } from "#test-assert";
 import {
   type CommandResult,
@@ -523,6 +524,33 @@ test("parseProbe: a pr probe with an unknown match.prState throws (mistyped stat
 test("parseProbe: a valid pr probe round-trips its prState", () => {
   const p = parseProbe({ kind: "pr", target: "o/r#12", match: { prState: "mergeable" } });
   assertEquals(p.match?.prState, "mergeable");
+});
+
+// ── #856: a PR URL is a valid pr target — the agent contract allows "a URL or owner/repo#N" ──────────
+// Field incident (merlin, graph 5e36636255ab): an agent returned its `pr` as a GitHub URL — explicitly
+// allowed by the injected agent contract — the converge-merge connector accepted it (canonical
+// `parsePr`), but the downstream `wait[pr merged]` probe threw at parse (a second, stricter PR regex)
+// and the job incidented with no retries.
+test("#856 parseProbe: a PR URL target parses (same shapes as the canonical parsePr)", () => {
+  const p = parseProbe({ kind: "pr", target: "https://github.com/nanobpm/nano-supervisor/pull/32", match: { prState: "merged" } });
+  assertEquals(p.kind, "pr");
+});
+
+test("#856 probeOnce pr: a PR URL target reads the right repo + number", async () => {
+  const cap: { cmd?: string } = {};
+  const exec = stubExec({ command: { code: 0, stdout: JSON.stringify({ state: "MERGED", mergedAt: "2026-01-01T00:00:00Z" }), stderr: "" }, capture: cap });
+  const p = parseProbe({ kind: "pr", target: "https://github.com/nanobpm/nano-supervisor/pull/32", match: { prState: "merged" } });
+  await probeOnce(p, exec, {});
+  assertStringIncludes(cap.cmd ?? "", "gh pr view '32'");
+  assertStringIncludes(cap.cmd ?? "", "--repo 'nanobpm/nano-supervisor'");
+});
+
+test("#856 parsePrTarget agrees with the canonical parsePr on every PR shape (no second PR-shape grammar)", () => {
+  const cases = ["o/r#12", "https://github.com/o/r/pull/12", "github.com/o/r/pull/12", " o/r#12 ", "o/r@12", "o/r", "#12", "o/r/pull/12"];
+  for (const c of cases) {
+    const canon = parsePr(c);
+    assertEquals(parsePrTarget(c), canon ? { repo: canon.repo, number: String(canon.number) } : null, c);
+  }
 });
 
 // ── #570: a fact-bound pr/epic target DISPATCHES (late-binding), a malformed literal still fails ──
