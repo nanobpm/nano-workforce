@@ -23,6 +23,7 @@ import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
+import { parseIssue } from "./plan.ts";
 import { BACKOFFS, hasEmbeddedCredential, hasEmbeddedUrl, hasSchemeRelativeAuthority, isBackoff, isUrlShaped, redactEmbeddedCredentialUrl, redactEmbeddedSchemeRelativeUrl, redactEmbeddedUrl, redactString } from "./readiness.ts";
 import { isResolvableRepo } from "./repoEnvelope.ts";
 
@@ -313,16 +314,29 @@ function issueKey(repo: string | null | undefined, num: string | number): string
 /** Every issue referenced in `text`, as a repo-qualified identity key (see `issueKey`), in any accepted
  * form (`#N`, `owner/repo#N`, or an issue URL `…/owner/repo/issues/N`). Used to (a) anchor a full-scope
  * acknowledgement to the issue it names and (b) decide whether a prompt is single-issue (so a generic,
- * un-numbered marker is unambiguous). The `owner/repo#N` and URL alternatives are ordered BEFORE the
- * bare `#N` branch so a qualified reference is captured with its repo, never as a bare number. */
-const ISSUE_REF_GLOBAL =
-  /([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|#([0-9]+)/gi;
+ * un-numbered marker is unambiguous).
+ *
+ * The `owner/repo#N` and issue-URL shapes are NOT re-declared here as a local capture regex — that
+ * duplicate grammar is exactly what the single-grammar guard (`app/prShapeSingleGrammar.test.ts`,
+ * #856/#857) bans. Instead each candidate token is classified by the CANONICAL `parseIssue`
+ * (`app/prParse.ts`), the one source of the issue-shape grammar. `ISSUE_REF_TOKEN` only finds the
+ * candidate tokens (a bare `#N`, an `owner/repo#N`, or an `http(s)` URL); it carries NO digit-capture
+ * group, so it is not a parser. A token that merely LOOKS like a reference but is not the canonical
+ * shape (a non-`github.com` issue URL, a multi-slash `a/b/c#9`) is rejected by `parseIssue` and
+ * contributes nothing — fail-closed, matching the canonical grammar exactly. */
+const ISSUE_REF_TOKEN = /#[0-9]+\b|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+\b|https?:\/\/[^\s)]+/gi;
 function issueRefsIn(text: string): string[] {
   const out: string[] = [];
-  for (const m of text.matchAll(ISSUE_REF_GLOBAL)) {
-    if (m[2] !== undefined) out.push(issueKey(m[1], m[2]));
-    else if (m[4] !== undefined) out.push(issueKey(m[3], m[4]));
-    else if (m[5] !== undefined) out.push(issueKey(null, m[5]));
+  for (const m of text.matchAll(ISSUE_REF_TOKEN)) {
+    const tok = m[0];
+    // Bare `#N` has no repo — key it as the implicit node/run repository (parseIssue rejects a
+    // repo-less ref, so handle it directly rather than through the canonical parser).
+    if (tok.startsWith("#")) {
+      out.push(issueKey(null, tok.slice(1)));
+      continue;
+    }
+    const parsed = parseIssue(tok);
+    if (parsed) out.push(issueKey(parsed.repo, parsed.number));
   }
   return out;
 }
@@ -361,9 +375,21 @@ function issueRefsIn(text: string): string[] {
  * coordination tail as the active arm (group 14, re-scanned in `closingTargets`), so a coordinated
  * passive close (`issues #12 and #13 are closed`) attributes the close to EVERY subject, not just the
  * first (issue #858 round-18 review). This passive arm lives ONLY here, in the
- * one authoritative grammar — there is no duplicate pre-filter carrying a second copy of it. */
-const CLOSING_TARGET_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+))*)*)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)\b|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+))*)*)\s+((?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)/gi;
+ * one authoritative grammar — there is no duplicate pre-filter carrying a second copy of it.
+ *
+ * The issue-REFERENCE shape inside this grammar is NOT a local capture regex. The single-grammar guard
+ * (`app/prShapeSingleGrammar.test.ts`, #856/#857) bans any module but `app/prParse.ts`/`app/plan.ts`
+ * from carrying a `#(<digits>` or `/issues/(<digits>` capture group, so this pattern matches the
+ * reference with the CAPTURE-FREE {@link ISSUE_REF_SRC} fragment (no digit-capture group) and
+ * `closingTargets` then classifies the matched reference substring through the CANONICAL `parseIssue`
+ * — the one source of the issue-shape grammar. The grammar's structure (which target shapes exist, the
+ * coordination tails, the passive auxiliary window) stays here; only the reference *lexing* delegates
+ * to the canonical parser. */
+const ISSUE_REF_SRC = "(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+|https?://[^\\s)]+|#[0-9]+)";
+const CLOSING_TARGET_PATTERN = new RegExp(
+  String.raw`(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(${ISSUE_REF_SRC}|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?${ISSUE_REF_SRC})*)*)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(${ISSUE_REF_SRC})\b|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?${ISSUE_REF_SRC})*)*)\s+((?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)`,
+  "gi",
+);
 /** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
  * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
  * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
@@ -415,6 +441,23 @@ const ADDITIVE_CONTINUATION = /^[^.\n]*?\b(?:also|as\s+well)\b/i;
  * the close. The window is at most four words plus an optional `get(s)`, so a plain substring test
  * suffices — no anchoring needed. */
 const NEGATED_PASSIVE_WINDOW = /\b(?:not|never|cannot)\b|\b\w+n['’]t\b/i;
+/** Classify a matched issue-REFERENCE substring (from {@link ISSUE_REF_SRC}) into its repo-qualified
+ * identity key via the CANONICAL `parseIssue`, or null when the substring is not the canonical shape
+ * (a non-`github.com` issue URL, a multi-slash `a/b/c#9`). A bare `#N` (no repo) keys as the implicit
+ * node/run repository — `parseIssue` rejects a repo-less ref, so it is keyed directly. Returning null
+ * (rather than a key) for a non-canonical reference keeps the close UN-attributed, so the validator
+ * fails closed exactly as the canonical grammar does. */
+function issueRefKey(ref: string | undefined): string | null {
+  if (!ref) return null;
+  if (ref.startsWith("#")) return issueKey(null, ref.slice(1));
+  // A URL token is lexed as a maximal `[^\s)]+` run, so it can carry a trailing possessive (`'s`) or
+  // prose punctuation (`;`, `,`, `.`, `:`, `!`, `?`) that is not part of the reference (`…/issues/12's
+  // full scope`, `…/issues/12; note …`). The canonical parser is anchored, so strip the trailing
+  // possessive/punctuation before classifying — a bare `#N` token ends in a digit and never needs this.
+  const cleaned = ref.replace(/(?:['’]s|s['’]|['’])?[;.,:!?]*$/, "");
+  const parsed = parseIssue(cleaned);
+  return parsed ? issueKey(parsed.repo, parsed.number) : null;
+}
 function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean } {
   const numbered: string[] = [];
   let pronoun = false;
@@ -430,37 +473,34 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
         ADDITIVE_CONTINUATION.test(prompt.slice(m.index + m[0].length));
       if (!additive) continue;
     }
-    // The issue-first/passive arm (groups 10-13) carries its negation INSIDE the match's auxiliary
-    // window (`#12 is NOT closed`), which the before-verb prefix check above cannot see — the negator
-    // sits AFTER the arm's issue-ref start, so the text ending at `m.index` does not reach it. Drop a
-    // passive close whose own window is negated (issue #858 round-10 review).
-    if (m[19] !== undefined && NEGATED_PASSIVE_WINDOW.test(m[19])) continue;
-    if (m[2] !== undefined) numbered.push(issueKey(m[1], m[2]));
-    else if (m[4] !== undefined) numbered.push(issueKey(m[3], m[4]));
-    else if (m[11] !== undefined) numbered.push(issueKey(m[10], m[11]));
-    else if (m[13] !== undefined) numbered.push(issueKey(m[12], m[13]));
+    // The issue-first/passive arm carries its negation INSIDE the match's auxiliary window (`#12 is
+    // NOT closed`), which the before-verb prefix check above cannot see — the negator sits AFTER the
+    // arm's issue-ref start, so the text ending at `m.index` does not reach it. Drop a passive close
+    // whose own window is negated (issue #858 round-10 review). The window is group 5.
+    if (m[5] !== undefined && NEGATED_PASSIVE_WINDOW.test(m[5])) continue;
+    // Group 1 is the ACTIVE arm's issue reference (or a pronoun); group 3 is the PASSIVE arm's subject
+    // reference. Classify each through the canonical parser; a pronoun (`it`/`them`/`the issue`) is not
+    // a reference, so it sets `pronoun` instead.
+    const activeRef = m[1];
+    const passiveRef = m[3];
+    const activeKey = issueRefKey(activeRef);
+    const passiveKey = issueRefKey(passiveRef);
+    if (activeKey) numbered.push(activeKey);
+    else if (passiveKey) numbered.push(passiveKey);
     else pronoun = true;
     // A COORDINATED close names every target (`close #12 and #13`, `close #12, #13, and #14`). The
-    // active arm captures only the FIRST; group 5 is the whole coordinated tail, re-scanned for every
+    // active arm captures only the FIRST; group 2 is the whole coordinated tail, re-scanned for every
     // extra numbered target so each closed issue needs its own acknowledgement (issue #858 round-11
     // review — `close #12 and #13` previously validated with only #12 acknowledged, a fail-open bypass).
-    if (m[5] !== undefined && m[5] !== "") {
-      for (const e of m[5].matchAll(ISSUE_REF_GLOBAL)) {
-        if (e[2] !== undefined) numbered.push(issueKey(e[1], e[2]));
-        else if (e[4] !== undefined) numbered.push(issueKey(e[3], e[4]));
-        else if (e[5] !== undefined) numbered.push(issueKey(null, e[5]));
-      }
+    if (m[2] !== undefined && m[2] !== "") {
+      for (const key of issueRefsIn(m[2])) numbered.push(key);
     }
     // The issue-first/passive arm's subject is coordinated the same way (`issues #12 and #13 are
-    // closed`); group 14 is ITS whole coordinated tail, re-scanned identically so a passive close of
+    // closed`); group 4 is ITS whole coordinated tail, re-scanned identically so a passive close of
     // several issues checks every one (issue #858 round-18 review — `issues #12 and #13 are closed`
     // previously checked only the first subject, the same fail-open bypass one arm over).
-    if (m[14] !== undefined && m[14] !== "") {
-      for (const e of m[14].matchAll(ISSUE_REF_GLOBAL)) {
-        if (e[2] !== undefined) numbered.push(issueKey(e[1], e[2]));
-        else if (e[4] !== undefined) numbered.push(issueKey(e[3], e[4]));
-        else if (e[5] !== undefined) numbered.push(issueKey(null, e[5]));
-      }
+    if (m[4] !== undefined && m[4] !== "") {
+      for (const key of issueRefsIn(m[4])) numbered.push(key);
     }
   }
   return { numbered, pronoun };
@@ -1274,28 +1314,28 @@ function isExclusionQualified(prompt: string, end: number): boolean {
  * collapsed to the bare number. */
 function anchoredIssueKey(prompt: string, start: number, end: number): string | null {
   const after = prompt.slice(end, end + 96);
-  const afterUrl = after.match(
-    /^\s*(?:(?:of|the|issue)\s+){0,3}https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)/i,
-  );
-  if (afterUrl) return issueKey(afterUrl[1], afterUrl[2]);
-  const afterMatch =
-    prompt[end - 1] === "#"
-      ? after.match(/^([0-9]+)/)
-      : after.match(/^\s*(?:(?:of|the|issue)\s+){0,3}(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)/i);
-  if (afterMatch) {
-    // The `#`-ending-marker branch captures only a bare number (group 1); the general branch captures
-    // an optional repo (group 1) then the number (group 2).
-    return prompt[end - 1] === "#"
-      ? issueKey(null, afterMatch[1])
-      : issueKey(afterMatch[1], afterMatch[2]);
+  // Lex the candidate reference that immediately FOLLOWS the marker (through at most a few connective
+  // words — "of", "the", "issue"), with NO digit-capture group (the single-grammar guard bans a local
+  // `#(<digits>`/`/issues/(<digits>` capture), then classify it through the canonical parser
+  // (`issueRefKey`). A marker that already ends in `#` is anchored to the bare number that follows.
+  if (prompt[end - 1] === "#") {
+    const num = after.match(/^[0-9]+/);
+    if (num) return issueKey(null, num[0]);
+  } else {
+    const afterRef = after.match(/^\s*(?:(?:of|the|issue)\s+){0,3}(https?:\/\/[^\s)]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|#[0-9]+)/i);
+    if (afterRef) {
+      const key = issueRefKey(afterRef[1]);
+      if (key) return key;
+    }
   }
   const before = prompt.slice(Math.max(0, start - 96), start);
-  const beforeUrl = before.match(
-    /https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)\/?(?:['’]s|s['’]|['’])?\s*(?:of\s+)?$/i,
-  );
-  if (beforeUrl) return issueKey(beforeUrl[1], beforeUrl[2]);
-  const beforeMatch = before.match(/(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#([0-9]+)(?:['’]s|s['’]|['’])?\s*(?:of\s+)?$/i);
-  if (beforeMatch) return issueKey(beforeMatch[1], beforeMatch[2]);
+  // The reference immediately BEFORE the marker (a possessive/adjacent `owner/repo#N`, bare `#N`, or an
+  // issue URL), optionally followed by `'s`/`of`. Lexed capture-free, classified via `issueRefKey`.
+  const beforeRef = before.match(/(https?:\/\/[^\s)]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|#[0-9]+)(?:['’]s|s['’]|['’])?\s*(?:of\s+)?$/i);
+  if (beforeRef) {
+    const key = issueRefKey(beforeRef[1]);
+    if (key) return key;
+  }
   return null;
 }
 
