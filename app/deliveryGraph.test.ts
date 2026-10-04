@@ -1976,3 +1976,57 @@ test("#858 a negator governing the marker still disqualifies after assertion-sco
     assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
   }
 });
+
+// Issue #858 (round-6 adversarial review, app/deliveryGraph.ts:666): the ATTRIBUTION disqualifier was
+// still tested against the marker's WHOLE comma-bounded clause while its two negation siblings were
+// scoped to the marker's `and`-coordinated delivery assertion — the SAME false-positive class round-6
+// fixed for them. A legit full-scope closer carrying an UNRELATED `and`-coordinated attribution
+// (`…full scope of #12 AND the regression suite is handled by another team`) was falsely flagged. The
+// attribution check is now scoped to the delivery assertion too, so such a closer validates — while an
+// attribution in the marker's OWN segment still disqualifies.
+test("#858 an affirmative closer whose `and`-coordinated attribution is unrelated still validates (attribution scoped to the assertion)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and the regression suite is handled by another team; close #12.",
+    "Own the whole issue #12 and the docs are owned by a sibling slice, then close #12.",
+    "Deliver every acceptance criterion of #12 and the migration is covered by our peers; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: an attribution that GOVERNS the marker (in its own `and`-segment, or with no
+// coordinator between it and the marker) must STILL disqualify — assertion-scoping the attribution
+// check must not reopen the attribution bypass.
+test("#858 an attribution governing the marker still disqualifies after assertion-scoping (no reopened bypass)", () => {
+  const bypasses = [
+    "The full scope of #12 is handled by siblings and close #12.",
+    "The full scope of #12 is delivered by another team and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-6 adversarial review, app/deliveryGraph.ts:671): scoping the core-negation check
+// to the marker's `and`-segment opened a fail-open regression — a GENUINE disclaimer that sits AFTER
+// the marker in an `and`-segment (`…full scope of #12 AND it is not fully delivered`) was shed from
+// the segment and no longer disqualified, where the pre-round whole-clause test caught it. An
+// after-marker negation that REFERENCES DELIVERY (a delivery verb / `it` referring back to the scope)
+// still disclaims the marker and must disqualify — while an after-marker negation of an UNRELATED
+// constraint (`…AND do not introduce regressions`) stays affirmative.
+test("#858 an after-marker negation that references delivery still disqualifies (fail-open regression closed)", () => {
+  const bypasses = [
+    "Deliver the full scope of #12 and it is not fully delivered; close #12.",
+    "Deliver the full scope of #12 and we cannot deliver the edge cases; close #12.",
+    "Own the whole issue #12 and it is never fully covered, then close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});

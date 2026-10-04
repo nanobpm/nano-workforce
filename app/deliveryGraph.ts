@@ -365,7 +365,16 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
  * added `our`/`us`/`my`, which let `by our siblings` slip through both alternatives; issue #858
  * round-5 adversarial review). A possessive before a SELF noun (`by our team` / `by our slice`) is
  * unaffected — those nouns are not in the others list, so they still fail the lookahead-excluded self
- * branch and do NOT disqualify. */
+ * branch and do NOT disqualify.
+ *
+ * Tested against the marker's DELIVERY ASSERTION, not its whole comma-bounded clause (see
+ * `deliveryAssertionAround`): an attribution governing an UNRELATED constraint coordinated onto the
+ * clause by `and` (`Deliver the full scope of #12 AND the regression suite is handled by another team;
+ * close #12.`) attributes that other constraint, not the marker's scope, so it must NOT disqualify the
+ * close — the SAME false-positive class round-6 scoped the two negation disqualifiers for (issue #858
+ * round-6 adversarial review). An attribution in the marker's OWN segment (`the full scope of #12 is
+ * handled by siblings`) has no coordinator between it and the marker, so it stays in-segment and still
+ * disqualifies. */
 const SCOPE_ATTRIBUTED_TO_OTHERS =
   /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\s+(?!(?:the\s+)?(?:this|current|present|me|us|our|my|myself|ourselves|here)\b)|\bby\s+(?:(?:the|our|their|its|his|her)\s+)?(?:siblings?|others?|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
 
@@ -379,15 +388,18 @@ const SCOPE_ATTRIBUTED_TO_OTHERS =
  * not mistaken for scope negation (issue #858 round-5 review — `Deliver the full scope of #12 without
  * regressions; close #12.` must validate):
  *  - `SCOPE_NEGATED_CORE` — core negators (`not`/`never`/`cannot`/`n't`) and the delivery-failure
- *    idioms (`fails to`/`unable to`) that negate the assertion wherever they sit in it, including
- *    AFTER the marker (`…full scope… is NOT delivered`, `…full scope… fails to cover the edge cases`).
- *    Tested against the marker's DELIVERY ASSERTION, not its whole comma-bounded clause (see
+ *    idioms (`fails to`/`unable to`) that negate the assertion when they sit in the marker's OWN
+ *    `and`-segment (`does not deliver the full scope`, `…full scope… is NOT delivered`). Tested against
+ *    the marker's DELIVERY ASSERTION, not its whole comma-bounded clause (see
  *    `deliveryAssertionAround`): a core negator governing an UNRELATED constraint coordinated onto the
  *    clause by `and` (`Deliver the full scope of #12 AND do NOT introduce regressions; close #12.`)
  *    negates that other constraint, not the marker, so it must NOT disqualify the close (issue #858
  *    round-6 review). The assertion is the clause narrowed to the `and`-bounded segment the marker sits
  *    in, so a negator in a sibling coordinated segment is excluded while one in the marker's own segment
- *    (`does not deliver the full scope`) still disqualifies.
+ *    (`does not deliver the full scope`) still disqualifies. The guarantee is therefore NARROWED from
+ *    "wherever they sit": a negator split into a SIBLING `and`-segment no longer disqualifies via this
+ *    pattern — unless it REFERENCES DELIVERY, which `SCOPE_NEGATED_AFTER_MARKER_DELIVERY` re-catches
+ *    against the whole clause (issue #858 round-6 adversarial review).
  *  - `SCOPE_NEGATED_PREFIX` — exception/redirection PREFIXES (`without`, `other than`, `rather than`,
  *    `instead of`, `apart from`, `all but`, `excluding`, …) that negate only the phrase they GOVERN,
  *    i.e. the one that FOLLOWS them. They disqualify the marker only when they sit BEFORE it in the
@@ -431,6 +443,23 @@ const SCOPE_NEGATED_PREFIX =
  * The gerund list is the delivery vocabulary; a `without <noun>` never matches it. */
 const SCOPE_NEGATED_WITHOUT_DELIVERY =
   /\bwithout\s+(?:\w+\s+){0,2}(?<!the\s)(?<!a\s)(?<!an\s)(?<!any\s)(?<!its\s)(?<!their\s)(?<!our\s)(?<!my\s)(?<!your\s)(?<!his\s)(?<!her\s)(?:covering|delivering|implementing|finishing|completing|building|satisfying|addressing|providing|handling|doing|shipping|including)\b/i;
+
+/** A core negator (`not`/`never`/`cannot`/`n't`/`fails to`/`unable to`) that sits AFTER the marker and
+ * REFERENCES DELIVERY still disclaims the marker's scope — `Deliver the full scope of #12 AND it is not
+ * fully delivered; close #12.` asserts the scope is NOT delivered, yet the `and`-coordinator splits that
+ * trailing disclaimer into a sibling segment the assertion-scoped `SCOPE_NEGATED_CORE` never sees, so
+ * round-6's narrowing let it VALIDATE (a fail-open regression vs. the pre-round whole-clause test; issue
+ * #858 round-6 adversarial review). Tested against the marker's whole comma-bounded CLAUSE (not the
+ * `and`-segment): the negator may sit in a trailing coordinated segment, and the DELIVERY reference is
+ * what ties it back to the marker. The delivery reference is EITHER a delivery noun/verb
+ * (`delivered`/`cover`/`implement`/`scope`/`criterion`…) OR the anaphoric `it`/`that` referring back to
+ * the just-named scope. An after-marker negation with NO delivery reference (`…AND do not introduce
+ * regressions`, `…AND never break the build`) governs an UNRELATED constraint and stays affirmative —
+ * this pattern does NOT match it, so the round-6 false-positive fix is preserved. The delivery
+ * vocabulary mirrors the attribution/gerund lists (deliver/cover/implement/complete/scope/criterion/
+ * checkbox/…) plus the anaphoric `it`/`that`. */
+const SCOPE_NEGATED_AFTER_MARKER_DELIVERY =
+  /(?:\b(?:not|never|cannot|fail(?:s|ing|ed)?\s+to|unable\s+to)\b|\b\w+n['’]t\b)(?:\s+[\w'’-]+){0,4}?\s+(?:it|that|deliver(?:y|s|ed|ing)?|cover(?:s|ed|ing)?|implement(?:s|ed|ing)?|complet(?:e|es|ed|ing)|finish(?:es|ed|ing)?|satisf(?:y|ies|ied|ying)|acceptance\s+criteri\w+|checkbox\w*|scope|criteri\w+|done)\b/i;
 
 /** The explicit full-scope acknowledgement markers that licence a closing keyword. These are the
  * phrases the planner contract (resources/prompts/plan.md) directs a full-scope slice to carry, so a
@@ -492,9 +521,8 @@ const FULL_SCOPE_MARKERS: readonly string[] = [
  * at PR time and catches an under-delivery that is semantically — not lexically — a partial close. */
 const CLAUSE_DELIMITERS = new Set([".", ";", ":", ",", "\n", "—"]);
 
-/** The clause (delimiter-bounded span) of `prompt` that contains index `idx` — used to test whether a
- * whole-scope phrase is attributed to others within its own clause. */
-function clauseAround(prompt: string, idx: number): string {
+/** The clause (delimiter-bounded span) of `prompt` that contains index `idx`. */
+function clauseAroundIndex(prompt: string, idx: number): string {
   let start = idx;
   while (start > 0 && !CLAUSE_DELIMITERS.has(prompt.charAt(start - 1))) start--;
   let end = idx;
@@ -531,11 +559,11 @@ const ASSERTION_COORDINATOR = /\b(?:and|plus)\b|&&?/gi;
  * marker, so it stays in-segment and still disqualifies; the fail-closed default is the whole clause
  * when no coordinator splits it. */
 function deliveryAssertionAround(prompt: string, markerStart: number, markerEnd: number): string {
+  const clause = clauseAroundIndex(prompt, markerStart);
+  // The clause spans the marker; locate the marker's offset within it (the clause start is the first
+  // delimiter boundary at or before markerStart).
   let cStart = markerStart;
   while (cStart > 0 && !CLAUSE_DELIMITERS.has(prompt.charAt(cStart - 1))) cStart--;
-  let cEnd = markerEnd;
-  while (cEnd < prompt.length && !CLAUSE_DELIMITERS.has(prompt.charAt(cEnd))) cEnd++;
-  const clause = prompt.slice(cStart, cEnd);
   const relStart = markerStart - cStart;
   const relEnd = markerEnd - cStart;
   let segStart = 0;
@@ -662,14 +690,21 @@ function isPartialScopeClose(prompt: string): boolean {
   for (const marker of FULL_SCOPE_MARKERS) {
     for (let i = lower.indexOf(marker); i >= 0; i = lower.indexOf(marker, i + marker.length)) {
       if (isPartQualified(prompt, i + marker.length)) continue;
-      const clause = clauseAround(prompt, i);
-      if (SCOPE_ATTRIBUTED_TO_OTHERS.test(clause)) continue;
-      // The negation disqualifiers test the marker's DELIVERY ASSERTION (its `and`-coordinated segment),
-      // not the whole clause, so a negator governing an UNRELATED constraint coordinated by `and`
-      // (`…full scope of #12 AND do not introduce regressions`) does not disqualify (issue #858 round-6).
+      // The attribution and negation disqualifiers test the marker's DELIVERY ASSERTION (its
+      // `and`-coordinated segment), not the whole clause, so a disqualifier governing an UNRELATED
+      // constraint coordinated by `and` (`…full scope of #12 AND do not introduce regressions`,
+      // `…full scope of #12 AND the regression suite is handled by another team`) does not disqualify
+      // (issue #858 round-6 + round-6 adversarial review).
       const assertion = deliveryAssertionAround(prompt, i, i + marker.length);
+      if (SCOPE_ATTRIBUTED_TO_OTHERS.test(assertion)) continue;
       if (SCOPE_NEGATED_CORE.test(assertion)) continue;
       if (SCOPE_NEGATED_WITHOUT_DELIVERY.test(assertion)) continue;
+      // …but a negator AFTER the marker that REFERENCES DELIVERY (`…full scope of #12 AND it is not
+      // fully delivered`) still disclaims the marker even though the `and`-coordinator splits it into a
+      // sibling segment the assertion above never sees — re-catch it against the marker's whole
+      // comma-bounded clause so the assertion-scoping does not fail open (issue #858 round-6
+      // adversarial review).
+      if (SCOPE_NEGATED_AFTER_MARKER_DELIVERY.test(clauseAroundIndex(prompt, i))) continue;
       const before = clauseBeforeMarker(prompt, i);
       if (SCOPE_NEGATED_PREFIX.test(before)) continue;
       if (PART_QUALIFIER_BEFORE_MARKER.test(before)) continue;
