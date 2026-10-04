@@ -1565,6 +1565,35 @@ test("parsePr still resolves a well-formed prKey and PR URL", () => {
   assertEquals(parsePr("https://github.com/owner/repo/pull/7")?.repo, "owner/repo");
 });
 
+// #857 (Copilot "Previously missed" advisory, app/readiness.ts:829/852): the canonical PR-URL
+// branch's host regex was UNANCHORED, so `github.com` matched as a substring of another host
+// (`notgithub.com`), as userinfo of a different host (`github.com@evil.com`), or anywhere inside a
+// prose-wrapped string — the pr/epic probe would then silently poll the embedded `owner/repo`
+// (a DIFFERENT target than the submitted value) or time out. Fail CLOSED on every non-canonical
+// host/wrap; anchoring the ONE grammar fixes both `parsePrTarget` and `parsePlanKey` at once.
+test("#857 parsePr REJECTS a spoofed/non-github host, userinfo trick, or prose-wrapped URL (anchored)", () => {
+  for (const bad of [
+    "https://notgithub.com/o/r/pull/7",
+    "https://evilgithub.com/o/r/pull/7",
+    "https://github.com.evil.com/o/r/pull/7",
+    "https://github.com@evil.com/o/r/pull/7",
+    "see https://github.com/o/r/pull/7",
+    "https://github.com/o/r/pull/7 and more text",
+    "ftp://github.com/o/r/pull/7",
+  ]) {
+    assertEquals(parsePr(bad), null, `expected null for ${JSON.stringify(bad)}`);
+  }
+});
+
+test("#857 parsePr still ACCEPTS canonical GitHub PR URLs incl. supported suffixes", () => {
+  assertEquals(parsePr("https://github.com/owner/repo/pull/7")?.prKey, "owner/repo#7");
+  assertEquals(parsePr("github.com/owner/repo/pull/7")?.prKey, "owner/repo#7");
+  assertEquals(parsePr("https://www.github.com/owner/repo/pull/7")?.prKey, "owner/repo#7");
+  assertEquals(parsePr("https://github.com/owner/repo/pull/7/files")?.prKey, "owner/repo#7");
+  assertEquals(parsePr("https://github.com/owner/repo/pull/7?diff=split")?.prKey, "owner/repo#7");
+  assertEquals(parsePr("https://github.com/owner/repo/pull/7#issuecomment-1")?.prKey, "owner/repo#7");
+});
+
 // Red/green regression for the level-triggered wave-merge barrier (issue #262). The barrier is
 // armed (`plans.gate_wave = W`) at wave handoff, long BEFORE the token traverses the slow
 // `trial-merge` agent job and finally opens the `wait-wave-merged` subscription. The old
