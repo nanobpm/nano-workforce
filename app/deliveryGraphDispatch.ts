@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import type { AppApi } from "@nanobpm/urban";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { canonicalJson, validateDeliveryGraph } from "./deliveryGraph.ts";
-import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets } from "./deliveryGraphCompiler.ts";
+import { compileDeliveryGraphSemantic, DELIVERY_GRAPH_PROCESS_ID, digestInvisibleRawValues, graphCarriesRedactedSecrets } from "./deliveryGraphCompiler.ts";
 import {
   buildDeliveryGraphRunRow,
   buildHumanLabels,
@@ -25,6 +25,8 @@ import {
   type DeliveryGraphRunIdentity,
   deliveryGraphRunIdentities,
   deliveryGraphRuns,
+  isStaleLaunchClaim,
+  reconcileOriginalInstanceBeforeRelaunch,
 } from "./deliveryGraphRun.ts";
 import type { DeliveryRunTimeouts } from "./deliveryRunner.ts";
 import { deliveryGraphDigest, runDeliveryGraph } from "./deliveryRunner.ts";
@@ -97,7 +99,9 @@ export async function dispatchDeliveryGraphRun(
   // The graph passed the semantic validator above, so it is safe to narrow to the typed contract.
   // biome-ignore lint/plugin: validated external body narrowed to its contract after validateDeliveryGraph
   const typedGraph = graph as DeliveryGraph;
-  const compiled = await compileDeliveryGraph(typedGraph);
+  // Semantic compile only (#852): this needs the digest / resolved model / side effects / human stops,
+  // not the laid-out BPMN — `runDeliveryGraph` below runs the CPU-bound layout exactly once.
+  const compiled = await compileDeliveryGraphSemantic(typedGraph);
   if (!compiled.ok) {
     return { ok: false, errors: compiled.errors };
   }
@@ -182,7 +186,23 @@ export async function dispatchDeliveryGraphRun(
 
   // Idempotency short-circuit — a re-dispatch onto a still-running run does NOT double-launch.
   const existing = await runs.get(runKey);
-  if (existing && existing.status === "running") {
+  // Capture staleness NOW, off the pre-claim snapshot, and reuse that ONE decision below: the claim
+  // CAS below rewrites `updated_at`, so a staleness check after it would read the fresh claim and
+  // never fire. Only a STALE re-claim needs reconcile-before-relaunch (a fresh claim or a terminal-row
+  // re-run has no possibly-live original). Re-deriving staleness a second time here would race the TTL
+  // boundary: `isStaleLaunchClaim` reads `Date.now()` afresh, so the row can cross the TTL between this
+  // capture and a second check — the short-circuit would then stop firing while `reclaimingStaleClaim`
+  // stays false, the CAS below would still reclaim the (now-stale) row, and the reconcile block would
+  // be skipped, relaunching WITHOUT cancelling a possibly-live original. One captured decision keeps
+  // the short-circuit and the reconcile in lock-step (issue #853 review — thread
+  // deliveryGraphDispatch.ts:193).
+  const reclaimingStaleClaim = existing != null && isStaleLaunchClaim(existing);
+  // Capture the stale claim's original `updated_at` NOW, before the CAS below rewrites it: a
+  // reconcile-read failure must restore the row to exactly this past-the-TTL timestamp so it stays a
+  // RECLAIMABLE stale claim (see `revertToStaleClaim`). Captured as a value (not read back off
+  // `existing` after the CAS) because the CAS refreshes `updated_at` in place.
+  const staleClaimUpdatedAt = existing?.updated_at;
+  if (existing && existing.status === "running" && !reclaimingStaleClaim) {
     app.log.info("dispatch-delivery-graph short-circuit: already running", { runKey });
     return {
       ok: true,
@@ -236,6 +256,55 @@ export async function dispatchDeliveryGraphRun(
     const { run_key, created_at, ...patch } = failed;
     await runs.update(runKey, patch);
   };
+  // Reconcile-FAILURE recovery (issue #853 review — thread deliveryGraphDispatch.ts:280): a reconcile
+  // READ/CANCEL failure must NOT retire the row to `failed`. A `failed` row is terminal, so
+  // `isStaleLaunchClaim` rejects it and the NEXT dispatch re-runs it as a plain terminal-row relaunch —
+  // WITHOUT re-entering reconcile-before-relaunch — double-launching the side-effecting nodes if the
+  // original instance is in fact still live (the read failed only transiently). Instead revert the row
+  // to the pre-claim STALE launch-claim snapshot so the reconcile is RETRIED before any relaunch: the
+  // next dispatch sees a stale claim again (`reclaimingStaleClaim` → reconcile) and the poller sees one
+  // too (`reconcileStaleLaunchClaim` cancels the original via `finalize`). This mirrors the poller's own
+  // reconcile-failure behaviour, whose `finalize` throw rolls the CAS back to the same stale-claim
+  // `running` state rather than failing it — one canonical "a failed reconcile leaves the row
+  // reconcile-pending, never terminal" rule across both the dispatch and poller paths.
+  const revertToStaleClaim = async () => {
+    await runs.update(runKey, { status: "running", phase: DELIVERY_PHASE.RUNNING, process_key: null, process_definition_id: null, updated_at: staleClaimUpdatedAt });
+  };
+  // Reconcile-before-relaunch (issue #852 review — thread deliveryGraphRun.ts:180): if we just RE-CLAIMED
+  // a STALE launch claim (a `running`/NULL-key row past its TTL), the original dispatch may have died
+  // AFTER `createInstance` succeeded but BEFORE stamping the process key — leaving a LIVE instance
+  // executing this graph's side-effecting nodes. A timeout alone cannot tell that from "died before
+  // create". Now that the engine seam exposes it, close the window: cancel any still-ACTIVE instance of
+  // this run (matched by its seeded `runKey` variable) BEFORE we launch a replacement, so the relaunch
+  // stays at-most-once. Only a STALE re-claim needs this — a fresh claim or a terminal-row re-run has no
+  // possibly-live original. The content-addressed definition id is derived from the STALE ROW's own
+  // `digest` (`existing.digest`), NOT the freshly-compiled `digest` of THIS dispatch: under an explicit
+  // idempotency key the re-dispatched graph can differ (digest drift), and the original was deployed
+  // under `delivery-graph-<existing.digest>`. Searching under the new digest would miss the original and
+  // strand it live — the exact double-launch this reconcile exists to prevent. Mirrors the poller, which
+  // uses the stored `run.digest` (service.ts). `existing` is non-null whenever `reclaimingStaleClaim`.
+  if (reclaimingStaleClaim) {
+    const originalDigest = existing?.digest ?? digest;
+    try {
+      const cancelled = await reconcileOriginalInstanceBeforeRelaunch(app.engine, {
+        runKey,
+        processDefinitionId: `${DELIVERY_GRAPH_PROCESS_ID}-${originalDigest}`,
+      });
+      if (cancelled.length > 0) {
+        app.log.warn("dispatch-delivery-graph cancelled a still-running original instance before relaunch", { runKey, cancelled });
+      }
+    } catch (err) {
+      // A reconciliation read/cancel failure — OR a fail-closed `ReconcileConflictError` (an ACTIVE
+      // same-definition instance with no readable run-root `runKey`, e.g. a pre-upgrade legacy original)
+      // — must not strand the claim OR waive a blind relaunch through: revert to the pre-claim STALE
+      // launch-claim so the reconcile is retried (by the next dispatch or the poller) BEFORE any
+      // replacement launches, rather than retiring to `failed` (which a later dispatch would
+      // short-circuit past into a possible double-launch).
+      await revertToStaleClaim();
+      app.log.error("dispatch-delivery-graph reconcile-before-relaunch threw", { runKey });
+      throw err;
+    }
+  }
   // The claim is ours — persist THIS run's lossless identity so a later same-key short-circuit can prove
   // the running run is this exact graph. Upsert: a relaunch off a persisted (e.g. failed) row under an
   // explicit key may carry a different graph, so overwrite the stored fingerprint. This runs AFTER the

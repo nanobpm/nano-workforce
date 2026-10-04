@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { assert, assertEquals, assertStringIncludes } from "#test-assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
 import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
@@ -22,7 +22,12 @@ import {
   deliveryGraphRunIdentities,
   deliveryGraphRuns,
   humanTaskElementId,
+  isStaleLaunchClaim,
+  LAUNCH_CLAIM_TTL_MS,
   parseHumanLabels,
+  ReconcileConflictError,
+  reconcileOriginalInstanceBeforeRelaunch,
+  reconcileStaleLaunchClaim,
 } from "./deliveryGraphRun.ts";
 import { pollDeliveryGraphPhase } from "./service.ts";
 
@@ -125,6 +130,324 @@ test("claimRunForLaunch: winning a re-run claim ATOMICALLY invalidates the prior
     const after = await identities.get("rk");
     assert(after == null, `the stale identity row must be gone, got: ${JSON.stringify(after)}`);
   });
+});
+
+// ── #852: a launch claim stranded by a crash mid-launch must not wedge the run forever ──────────────
+// The dispatch claims the row `running` (process_key null) BEFORE deploy; if the process dies mid-launch
+// (merlin: a 54-node graph spent ~105 s in layout, the app went down) `markClaimFailed` never runs, and
+// the phantom row short-circuited every re-dispatch onto a run that does not exist.
+const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+test("#852 isStaleLaunchClaim: only a `running` row with NO process key older than the launch TTL is stale", () => {
+  const base = claimRow("running");
+  assertEquals(isStaleLaunchClaim({ ...base, updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) }), true);
+  assertEquals(isStaleLaunchClaim({ ...base, updated_at: ago(1000) }), false, "an in-flight launch is not stale");
+  assertEquals(isStaleLaunchClaim({ ...base, process_key: "29", updated_at: ago(LAUNCH_CLAIM_TTL_MS * 10) }), false, "a launched run is never stale");
+  assertEquals(isStaleLaunchClaim({ ...base, status: "failed", updated_at: ago(LAUNCH_CLAIM_TTL_MS * 10) }), false);
+  assert(LAUNCH_CLAIM_TTL_MS >= 10 * 60_000, "the TTL must comfortably exceed a slow large-graph launch");
+});
+
+test("#852 claimRunForLaunch: a STALE launch claim is re-claimable; a fresh in-flight claim still blocks the double-launch", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert({ ...claimRow("running"), updated_at: ago(1000) });
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), false, "fresh claim: launch still in flight");
+    await runs.update("rk", { updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) });
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), true, "stale claim: the crashed launch is re-claimed");
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), false, "…by exactly one racer");
+  });
+});
+
+test("#852 pollDeliveryGraphPhase: a stale launch claim is reconciled to failed; a fresh one is left alone", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert({ ...claimRow("running"), run_key: "stale", updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) });
+    await runs.insert({ ...claimRow("running"), run_key: "fresh", updated_at: ago(1000) });
+    const engine = {
+      searchProcessInstances: async () => [],
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    assertEquals((await runs.get("stale"))?.status, "failed");
+    assertEquals((await runs.get("stale"))?.phase, DELIVERY_PHASE.FAILED);
+    assertEquals((await runs.get("fresh"))?.status, "running");
+  });
+});
+
+test("#852 pollDeliveryGraphPhase: retiring a stale claim cancels a still-running ORIGINAL instance first (at-most-once recovery)", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    // A stale claim whose dispatch died AFTER createInstance but BEFORE stamping the key: the row has a
+    // NULL process_key AND a NULL process_definition_id (the stamp never landed) — the poller derives the
+    // definition id from the row's `digest` (`delivery-graph-d`). A LIVE instance of this run is ACTIVE.
+    await runs.insert({
+      ...claimRow("running"),
+      run_key: "rk",
+      digest: "d",
+      updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000),
+    });
+    const cancelled: string[] = [];
+    const engine = {
+      searchProcessInstances: async (filter?: { processDefinitionId?: string; state?: string }) =>
+        filter?.state === "ACTIVE" ? [{ processInstanceKey: "PI-live", state: "ACTIVE" }] : [],
+      searchVariables: async (filter?: { processInstanceKey?: string; name?: string }) =>
+        filter?.name === "runKey" && filter.processInstanceKey === "PI-live"
+          ? [{ variableKey: "v", name: "runKey", value: JSON.stringify("rk"), scopeKey: "PI-live", processInstanceKey: "PI-live", isTruncated: false }]
+          : [],
+      cancelInstance: async (req: { processInstanceKey: string }) => {
+        cancelled.push(req.processInstanceKey);
+      },
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    assertEquals(cancelled, ["PI-live"], "the live original is cancelled before the claim is retired");
+    assertEquals((await runs.get("rk"))?.status, "failed");
+  });
+});
+
+test("#852 pollDeliveryGraphPhase: a reconcile read failure leaves the stale claim for the next pass (no wedge, no blind retire)", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert({
+      ...claimRow("running"),
+      run_key: "rk",
+      digest: "d",
+      updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000),
+    });
+    const engine = {
+      searchProcessInstances: async () => {
+        throw new Error("engine read unavailable");
+      },
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    // The claim is NOT retired this pass (the reconcile could not prove no live original), so a
+    // re-dispatch is not waved through into a possible double-launch; the next pass retries.
+    assertEquals((await runs.get("rk"))?.status, "running");
+  });
+});
+
+test("#853 pollDeliveryGraphPhase: a FRESH in-flight claim (within TTL) is never engine-cancelled — the cancel is fenced behind the staleness CAS", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    // A launch that is still in flight: running, no process key yet, but WELL within the launch TTL.
+    // `createInstance` may have just succeeded (a legitimate live instance) with the key stamp still
+    // pending. The poller must NOT cancel that instance — the row is not stale, so the reconcile lease
+    // is never acquired and `finalize` (the cancel) never runs.
+    await runs.insert({ ...claimRow("running"), run_key: "fresh", digest: "d", updated_at: ago(1000) });
+    const cancelled: string[] = [];
+    const engine = {
+      searchProcessInstances: async (filter?: { state?: string }) =>
+        filter?.state === "ACTIVE" ? [{ processInstanceKey: "PI-legit", state: "ACTIVE" }] : [],
+      searchVariables: async (filter?: { processInstanceKey?: string; name?: string }) =>
+        filter?.name === "runKey" && filter.processInstanceKey === "PI-legit"
+          ? [{ variableKey: "v", name: "runKey", value: JSON.stringify("fresh"), scopeKey: "PI-legit", processInstanceKey: "PI-legit", isTruncated: false }]
+          : [],
+      cancelInstance: async (req: { processInstanceKey: string }) => {
+        cancelled.push(req.processInstanceKey);
+      },
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    assertEquals(cancelled, [], "a fresh in-flight claim's legitimate instance is never cancelled");
+    assertEquals((await runs.get("fresh"))?.status, "running", "the fresh claim is left running, not retired");
+  });
+});
+
+test("#853 reconcileStaleLaunchClaim: a concurrent dispatch that re-claims the stale row first is NOT cancelled — the finalize cancel runs only for the lease owner", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    // The poller read this row as a stale launch claim …
+    const observed = { ...claimRow("running"), updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) };
+    await runs.insert(observed);
+    // … but before the poller's CAS, a concurrent dispatch atomically RE-CLAIMS the stale row
+    // (refreshing `updated_at`) and starts its replacement instance.
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), true, "concurrent dispatch re-claims the stale row");
+    let cancelled = false;
+    // The poller now reconciles off its STALE snapshot, passing the engine cancel as `finalize`. The CAS
+    // matches zero rows (updated_at moved), so the lease is not acquired and `finalize` must NOT run —
+    // the live replacement is never cancelled.
+    const flipped = await reconcileStaleLaunchClaim(data, observed, async () => {
+      cancelled = true;
+    });
+    assertEquals(flipped, false, "the stale snapshot no longer matches → no flip");
+    assertEquals(cancelled, false, "the cancel is fenced: it never runs against a claim the poller did not win");
+    assertEquals((await runs.get("rk"))?.status, "running", "the renewed claim is left running");
+  });
+});
+
+test("#853 reconcileStaleLaunchClaim: the lease holder's finalize cancel DOES run, and the row is retired to failed only for the lease owner", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    const observed = { ...claimRow("running"), updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) };
+    await runs.insert(observed);
+    let cancelled = false;
+    const flipped = await reconcileStaleLaunchClaim(data, observed, async () => {
+      cancelled = true;
+    });
+    assertEquals(flipped, true, "the unchanged stale claim is flipped (lease acquired)");
+    assertEquals(cancelled, true, "the lease owner's finalize cancel runs");
+    assertEquals((await runs.get("rk"))?.status, "failed", "the row is retired to failed");
+  });
+});
+
+test("#852 reconcileStaleLaunchClaim: the retire-to-failed flip is a CAS on the OBSERVED snapshot — a claim a concurrent dispatch re-claimed (refreshing updated_at) between the poller's read and the write is NOT clobbered", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    // The poller read this row as a stale launch claim …
+    const observed = { ...claimRow("running"), updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) };
+    await runs.insert(observed);
+    // … but before it writes, a concurrent dispatch atomically RE-CLAIMS the stale row, refreshing
+    // `updated_at` to a fresh in-flight claim (still running, still no process key yet).
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), true, "concurrent dispatch re-claims the stale row");
+    const reclaimedAt = (await runs.get("rk"))?.updated_at;
+    // The poller now reconciles off its STALE snapshot. The CAS must find no matching row and leave the
+    // fresh claim untouched — otherwise a third dispatch could re-claim mid-layout and double-launch.
+    assertEquals(await reconcileStaleLaunchClaim(data, observed), false, "stale snapshot no longer matches → no flip");
+    const row = await runs.get("rk");
+    assertEquals(row?.status, "running", "the renewed claim is left running, not clobbered to failed");
+    assertEquals(row?.process_key, null);
+    assertEquals(row?.updated_at, reclaimedAt, "the renewed claim's updated_at is preserved");
+  });
+});
+
+test("#852 reconcileStaleLaunchClaim: a genuinely stale claim whose snapshot still matches IS retired to failed exactly once", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    const observed = { ...claimRow("running"), updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) };
+    await runs.insert(observed);
+    assertEquals(await reconcileStaleLaunchClaim(data, observed), true, "the unchanged stale claim is flipped");
+    assertEquals((await runs.get("rk"))?.status, "failed");
+    assertEquals((await runs.get("rk"))?.phase, DELIVERY_PHASE.FAILED);
+    assertEquals(await reconcileStaleLaunchClaim(data, observed), false, "already failed → no second flip");
+  });
+});
+
+test("#852 reconcileStaleLaunchClaim: a non-stale claim (launched, or within TTL) is never retired", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    const fresh = { ...claimRow("running"), updated_at: ago(1000) };
+    await runs.insert(fresh);
+    assertEquals(await reconcileStaleLaunchClaim(data, fresh), false, "an in-flight launch is not stale");
+    assertEquals((await runs.get("rk"))?.status, "running");
+  });
+});
+
+// ── #852 review: reconcile-before-relaunch (the at-most-once fence a timeout-only reclaim lacks) ──
+// A stale launch claim can hide a LIVE original instance (the dispatch died after createInstance but
+// before stamping the process key). `reconcileOriginalInstanceBeforeRelaunch` cancels that original —
+// matched by its seeded `runKey` variable — before a relaunch starts a second instance of the same
+// side-effecting graph (thread deliveryGraphRun.ts:180).
+
+/** A minimal engine stub for the reconcile seam: serves the configured ACTIVE instances, their `runKey`
+ * variables, and records cancels. Each instance's `runKey` is seeded at the RUN-ROOT scope (scopeKey ===
+ * processInstanceKey); an optional `childRunKey` seeds a SAME-NAMED variable at a DIFFERENT (child) scope
+ * to exercise the scope-restriction guard. */
+function reconcileEngine(instances: { processInstanceKey: string; runKey?: string; childRunKey?: string; truncated?: boolean }[]) {
+  const cancelled: string[] = [];
+  const engine = {
+    searchProcessInstances: async (filter?: { processDefinitionId?: string; state?: string }) =>
+      filter?.state === "ACTIVE" || filter?.state === undefined
+        ? instances.map((i) => ({ processInstanceKey: i.processInstanceKey, state: "ACTIVE" }))
+        : [],
+    searchVariables: async (filter?: { processInstanceKey?: string; name?: string }) => {
+      const inst = instances.find((i) => i.processInstanceKey === filter?.processInstanceKey);
+      if (!inst || filter?.name !== "runKey") return [];
+      const out: { variableKey: string; name: string; value: string; scopeKey: string; processInstanceKey: string; isTruncated: boolean }[] = [];
+      if (inst.runKey !== undefined) {
+        out.push({ variableKey: "v", name: "runKey", value: JSON.stringify(inst.runKey), scopeKey: inst.processInstanceKey, processInstanceKey: inst.processInstanceKey, isTruncated: inst.truncated ?? false });
+      }
+      if (inst.childRunKey !== undefined) {
+        out.push({ variableKey: "vc", name: "runKey", value: JSON.stringify(inst.childRunKey), scopeKey: `${inst.processInstanceKey}-child`, processInstanceKey: inst.processInstanceKey, isTruncated: false });
+      }
+      return out;
+    },
+    cancelInstance: async (req: { processInstanceKey: string }) => {
+      cancelled.push(req.processInstanceKey);
+    },
+  };
+  return { engine, cancelled };
+}
+
+test("#852 reconcileOriginalInstanceBeforeRelaunch: a live original carrying THIS run key is cancelled before relaunch", async () => {
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-orig", runKey: "rk" }]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, ["PI-orig"]);
+  assertEquals(cancelled, ["PI-orig"], "the live original is cancelled so the relaunch stays at-most-once");
+});
+
+test("#852 reconcileOriginalInstanceBeforeRelaunch: an ACTIVE instance of the SAME definition but a DIFFERENT run key is left running", async () => {
+  // Two distinct runs of one graph share the content-addressed processDefinitionId; the definition
+  // filter alone would cancel a DIFFERENT run's live instance. The runKey variable is the proof.
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-other", runKey: "other-run" }]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, []);
+  assertEquals(cancelled, [], "a different run's instance is never cancelled");
+});
+
+test("#853 reconcileOriginalInstanceBeforeRelaunch: an ACTIVE same-definition candidate with NO run-root runKey (pre-upgrade legacy) fails CLOSED — throws rather than waiving a blind relaunch", async () => {
+  // A legacy instance launched before this PR seeded the correlation variable has no readable run-root
+  // `runKey`. Treating that as "not ours → relaunch" would double-run its side-effecting nodes during
+  // the upgrade window (thread deliveryGraphRun.ts:328). We can neither cancel it (unproven) nor rule it
+  // out, so we fail closed: throw ReconcileConflictError so the stale claim stays reconcile-pending.
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-legacy" }]);
+  await assertRejects(
+    () => reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" }),
+    ReconcileConflictError,
+    "PI-legacy",
+  );
+  assertEquals(cancelled, [], "never cancel an instance we cannot prove belongs to this run");
+});
+
+test("#853 reconcileOriginalInstanceBeforeRelaunch: a TRUNCATED run-root runKey value also fails CLOSED (unreadable ≠ not ours)", async () => {
+  // The engine capped the returned root value, so a byte compare would spuriously differ and fail OPEN.
+  // Same class as the absent case: unreadable must not be treated as a different run.
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-trunc", runKey: "rk", truncated: true }]);
+  await assertRejects(
+    () => reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" }),
+    ReconcileConflictError,
+    "PI-trunc",
+  );
+  assertEquals(cancelled, [], "a truncated root value is unclassifiable, not a cancel");
+});
+
+test("#853 reconcileOriginalInstanceBeforeRelaunch: an unclassifiable candidate does NOT block once we positively matched and cancelled our own original", async () => {
+  // We found and cancelled our run-root match, so we KNOW which instance is ours; an unclassifiable
+  // sibling (a different legacy run of the same graph) must not block our relaunch.
+  const { engine, cancelled } = reconcileEngine([
+    { processInstanceKey: "PI-legacy" },
+    { processInstanceKey: "PI-orig", runKey: "rk" },
+  ]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, ["PI-orig"]);
+  assertEquals(cancelled, ["PI-orig"], "a positive match resolves the reconcile; the unclassifiable sibling is a different run");
+});
+
+test("#852 reconcileOriginalInstanceBeforeRelaunch: no ACTIVE instances → nothing to cancel", async () => {
+  const { engine, cancelled } = reconcileEngine([]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, []);
+  assertEquals(cancelled, []);
+});
+
+test("#853 reconcileOriginalInstanceBeforeRelaunch: a CHILD-scoped runKey equal to ours does NOT mark an unrelated run as ours (scope-restricted match)", async () => {
+  // The candidate's ROOT runKey is a DIFFERENT run; it only happens to carry a same-named `runKey`
+  // variable in a CHILD scope (a graph-emitted fact, or an agent job-scope field) whose value equals
+  // our run key. Matching that child value would cancel an unrelated live run (thread
+  // deliveryGraphRun.ts:318). The match is restricted to the run-root scope, so this is left running.
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-other", runKey: "other-run", childRunKey: "rk" }]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, []);
+  assertEquals(cancelled, [], "a child-scoped coincidental runKey never triggers a cancel of another run");
+});
+
+test("#853 reconcileOriginalInstanceBeforeRelaunch: our run is still cancelled when it ALSO carries a differing child-scoped runKey", async () => {
+  // The run-root scope carries OUR run key (a true original) while a child scope carries a different
+  // value. The scope-restricted match must still find the root variable and cancel the original.
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-orig", runKey: "rk", childRunKey: "something-else" }]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, ["PI-orig"]);
+  assertEquals(cancelled, ["PI-orig"], "a true root-scope match is still cancelled despite a noisy child variable");
 });
 
 // ── pollDeliveryGraphPhase: engine-key coercion ───────────────────────────────

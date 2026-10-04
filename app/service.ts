@@ -31,8 +31,9 @@ import { envContract, readEnvOr } from "./contracts.ts";
 import { makeDefaultReadHead } from "./currentHead.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
+import { DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
-import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
+import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
 import { deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
@@ -3049,10 +3050,58 @@ export async function pollTasklessPlanTermination(
  * Scoped to `running` rows (an `awaiting-approval` run has no instance yet), so it stays O(in-flight). */
 export async function pollDeliveryGraphPhase(
   data: DataLayer,
-  engine: Pick<EngineClient, "searchProcessInstances" | "searchUserTasks">,
+  engine: Pick<EngineClient, "searchProcessInstances" | "searchUserTasks" | "searchVariables" | "cancelInstance">,
 ) {
   for (const run of await deliveryGraphRuns(data).find({ status: "running" })) {
-    if (!run.process_key) continue;
+    if (!run.process_key) {
+      // #852: a launch claim that never got an instance key within the TTL died mid-launch (the dispatch
+      // process went down before deploy, so its own `markClaimFailed` never ran). Reconcile it to
+      // `failed` so the cockpit stops showing a phantom in-flight run; a re-dispatch re-claims it. The
+      // flip is a CAS on the snapshot we read (via `reconcileStaleLaunchClaim`), so a claim a concurrent
+      // dispatch has already re-claimed between our `find()` and here is left untouched, never clobbered.
+      // Reconcile-before-retire (issue #852 review — thread deliveryGraphRun.ts:180): the crash may have
+      // happened AFTER `createInstance` succeeded but BEFORE the key was stamped, leaving a LIVE instance
+      // executing this graph's side-effecting nodes. Retiring the row to `failed` and letting a
+      // re-dispatch relaunch would then double-run those nodes. Cancel any still-ACTIVE instance of THIS
+      // run (matched by its seeded `runKey` variable) BEFORE retiring the claim, so the recovery stays
+      // at-most-once. Best-effort: a reconcile read failure must not wedge the pass — log and skip the
+      // retire this pass (the row stays stale-claim `running` and is retried next pass). The definition
+      // id is derived from the row's `digest` (`delivery-graph-<digest>`), NOT the `process_definition_id`
+      // column — that column is stamped only AFTER a successful launch, so it is NULL on exactly the
+      // crashed-mid-launch claim this path exists to recover.
+      //
+      // Fence the engine cancellation with the stale-claim CAS lease (issue #853 review — thread
+      // service.ts:3077): the cancel is passed to `reconcileStaleLaunchClaim` as `finalize`, run INSIDE
+      // the CAS transaction ONLY after the lease flip lands. Two races close:
+      //   • a FRESH `running`/NULL-key claim (still within its TTL) is non-stale, so
+      //     `reconcileStaleLaunchClaim` returns before the flip and the cancel never runs — a legitimate
+      //     just-launched instance (createInstance succeeded, key stamp pending) is never cancelled; and
+      //   • a concurrent dispatch that RE-CLAIMS the row first (refreshing `updated_at`) makes the CAS
+      //     match zero rows, so `finalize` never runs and the live replacement is never cancelled — the
+      //     retire is finalized only for the lease owner, and the lease is non-reclaimable for the
+      //     cancel's duration (the flipped `failed` row fails the dispatch's `status <> 'running'` guard).
+      // Best-effort: a reconcile read failure must not wedge the pass — `finalize` throws, the
+      // transaction rolls back (the row stays stale-claim `running`), we log and skip the retire this
+      // pass, and the next pass retries. A fail-closed `ReconcileConflictError` (an ACTIVE
+      // same-definition instance with no readable run-root `runKey`, e.g. a pre-upgrade legacy original)
+      // takes this same path: the retire is deferred rather than relaunching a possible duplicate.
+      const cancelOriginal = async () => {
+        if (!run.digest) return;
+        const cancelled = await reconcileOriginalInstanceBeforeRelaunch(engine, {
+          runKey: run.run_key,
+          processDefinitionId: `${DELIVERY_GRAPH_PROCESS_ID}-${run.digest}`,
+        });
+        if (cancelled.length > 0) {
+          console.error(`[poller] delivery graph ${run.run_key}: cancelled a still-running original instance before retiring the stale claim: ${cancelled.join(", ")}`);
+        }
+      };
+      try {
+        await reconcileStaleLaunchClaim(data, run, cancelOriginal);
+      } catch (err) {
+        console.error(`[poller] delivery graph ${run.run_key}: reconcile-before-retire failed, leaving the claim for next pass: ${err}`);
+      }
+      continue;
+    }
     const processKey = run.process_key;
     try {
       const [snapshots, parks] = await Promise.all([

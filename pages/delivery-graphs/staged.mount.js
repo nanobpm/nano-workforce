@@ -53,6 +53,12 @@ const DEFAULT_REFRESH_MS = 5000;
 // forever, so the busy() lock never clears and the UI is stranded; on timeout the AbortController
 // rejects the fetch, surfacing as an error banner and re-enabling the controls via the finally blocks.
 const REQUEST_TIMEOUT_MS = 30000;
+// The dispatch POST gets its own, much longer budget (#852): the server lays out + deploys the graph
+// before it answers, which for a large graph legitimately takes minutes (54 nodes ≈ 105 s on merlin).
+// Aborting at 30 s showed the operator a failure while the launch was still in flight. Stays bounded so
+// a genuinely hung door still releases the controls. Kept under the server's launch-claim TTL
+// (`LAUNCH_CLAIM_TTL_MS`, 15 min) so the UI never gives up AFTER a crashed launch became re-claimable.
+const DISPATCH_TIMEOUT_MS = 10 * 60_000;
 
 // The confirm shown before a dispatch — dispatching authorises every side-effecting node, so the
 // operator acknowledges that the launch (and its side effects) is content-addressed to this graph.
@@ -273,9 +279,9 @@ export function mountStagedProposals(host, config = {}) {
 
   /** Fetch JSON from a door and return { status, body } (never throws on an HTTP error). Rejects
    * (AbortError) if the request outlives REQUEST_TIMEOUT_MS so a hung door can't wedge the busy lock. */
-  async function request(url, init) {
+  async function request(url, init, timeoutMs = REQUEST_TIMEOUT_MS) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(url, { ...init, headers: headers(url), signal: controller.signal });
       let body = {};
@@ -291,7 +297,7 @@ export function mountStagedProposals(host, config = {}) {
   }
 
   const get = (url) => request(url, { method: "GET" });
-  const post = (url, payload) => request(url, { method: "POST", body: JSON.stringify(payload) });
+  const post = (url, payload, timeoutMs) => request(url, { method: "POST", body: JSON.stringify(payload) }, timeoutMs);
 
   let disposed = false;
   // True while the last completed load failed — so a subsequent successful load knows to clear its own
@@ -372,9 +378,9 @@ export function mountStagedProposals(host, config = {}) {
   // the list on the next poll — refresh immediately so the operator sees it leave.
   async function doDispatch(payload) {
     busy(true);
-    setStatus("Dispatching…");
+    setStatus("Dispatching… laying out and deploying the graph — a large graph can take a few minutes.");
     try {
-      const { status, body } = await post(dispatchUrl, payload);
+      const { status, body } = await post(dispatchUrl, payload, DISPATCH_TIMEOUT_MS);
       if ((status === 202 || status === 200) && body.ok) {
         setStatus("\u2713 Dispatched — the run is now in flight.", "ok");
         await refresh();
@@ -382,7 +388,12 @@ export function mountStagedProposals(host, config = {}) {
         setStatus(body && body.error ? body.error : "Dispatch failed.", "err");
       }
     } catch (err) {
-      setStatus(err && err.message ? err.message : "Dispatch request failed.", "err");
+      setStatus(
+        err && err.name === "AbortError"
+          ? "Dispatch is taking longer than expected — it may still be launching. Check Active Delivery Graphs before dispatching again."
+          : err && err.message ? err.message : "Dispatch request failed.",
+        "err",
+      );
     } finally {
       busy(false);
     }

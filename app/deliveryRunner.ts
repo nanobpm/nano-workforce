@@ -122,6 +122,10 @@ export interface PreparedDeliveryGraph {
   processDefinitionId: string;
   bpmn: string;
   nodeInputs: Record<string, NodeInput>;
+  /** The per-run token this prepare resolved (`options.runKey` or a fresh random). Surfaced so
+   *  `runDeliveryGraph` seeds the SAME value as a run-root process variable — the reconciliation
+   *  handle a stale-claim relaunch matches a still-running original instance on (issue #852). */
+  runKey: string;
 }
 
 export type PrepareDeliveryResult =
@@ -193,7 +197,7 @@ export async function prepareDeliveryGraph(
     if (element === undefined) continue; // unreachable — resolved covers every node — but keep total.
     nodeInputs[element] = buildNodeInput(node, { runKey, element, ...timeouts, requiredEmits: requiredEmitsByNodeId.get(node.id) ?? EMPTY_REQUIRED_EMITS });
   }
-  return { ok: true, prepared: { processDefinitionId, bpmn, nodeInputs } };
+  return { ok: true, prepared: { processDefinitionId, bpmn, nodeInputs, runKey } };
 }
 
 /** Deploy + start a compiled graph as a running engine-native instance. Idempotent at the DEFINITION
@@ -207,7 +211,7 @@ export async function runDeliveryGraph(
 ): Promise<RunDeliveryResult> {
   const prep = await prepareDeliveryGraph(graph, options);
   if (!prep.ok) return prep;
-  const { processDefinitionId, bpmn, nodeInputs } = prep.prepared;
+  const { processDefinitionId, bpmn, nodeInputs, runKey } = prep.prepared;
 
   await engine.deployResources([{ name: `${processDefinitionId}.bpmn`, content: bpmn, contentType: "application/xml" }]);
   // Per-node repository isolation (#739): the `io.nanobpm.agentTask.repository` envelope is now seeded
@@ -218,10 +222,18 @@ export async function runDeliveryGraph(
   // repository variable is seeded here; the resolution + loud-failure invariant (unresolved agent cell
   // on a non-`repoless` run) and the `repoless`/repo-base conflict guard all live in
   // `injectAgentRepoEnvelopes`, which the prepare step above already ran (throwing before deploy).
+  //
+  // `runKey` IS seeded as a run-root variable (unlike the repo envelope): it is the durable
+  // reconciliation handle a stale-claim relaunch uses to find a still-running ORIGINAL instance of this
+  // run before starting a second one (issue #852 review — thread deliveryGraphRun.ts:180). Every
+  // instance of this content-addressed definition carries its run key, so
+  // `searchProcessInstances({ processDefinitionId, state:"ACTIVE" })` + a `runKey` variable match
+  // identifies the live duplicate a timeout-only reclaim cannot distinguish from a dead claim.
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId,
     variables: {
       nodeInputs,
+      runKey,
       // Stage 0 transcript correlation (#543): the transcript-endpoint base every agent node's
       // completing worker appends its jobKey-scoped stream to, to emit `transcriptUrl` (see the agent
       // node ioMapping in deliveryGraphCompiler). Seeded once at the run root — the same value for
@@ -233,7 +245,7 @@ export async function runDeliveryGraph(
   // downstream consumers expect a string — coerce (codebase-wide `String(...)` pattern, e.g. app/plan.ts).
   return {
     ok: true,
-    handle: { processDefinitionId, bpmn, nodeInputs, processInstanceKey: String(processInstanceKey) },
+    handle: { processDefinitionId, bpmn, nodeInputs, runKey, processInstanceKey: String(processInstanceKey) },
   };
 }
 
