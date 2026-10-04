@@ -300,7 +300,7 @@ const NODE_ID_MAX_LENGTH = 128;
 const ISSUE_REF_PATTERN =
   /(?:#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+)/i;
 const CLOSING_ACTION_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|the issue\b|that issue\b|this issue\b|them\b)/i;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)/i;
 
 /** A repo-qualified issue IDENTITY key (issue #858 round-4 review). The accepted issue syntax includes
  * `owner/repo#N` and issue URLs, and this validator supports cross-repository graphs, so collapsing an
@@ -352,7 +352,7 @@ function issueRefsIn(text: string): string[] {
  * not an adverb) stays an ACTIVE close and is still flagged; and negating ONE close never masks a
  * DIFFERENT active close in the same prompt (`do not close #12, but close #34` still targets #34). */
 const CLOSING_TARGET_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
 /** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
  * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
  * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
@@ -471,11 +471,15 @@ const SCOPE_ATTRIBUTED_TO_OTHERS =
  * peers / another slice / other slices / the rest / the others, optionally possessive) followed within a
  * couple of words by a completion verb — the active voice of `SCOPE_ATTRIBUTED_TO_OTHERS`'s verb list.
  * The subject allowlist is OTHERS only (never `this`/`current` slice, `I`, `we`), so active-voice SELF
- * ownership (`this slice delivers the full scope`) stays an affirmative assertion. Tested against the
+ * ownership (`this slice delivers the full scope`) stays an affirmative assertion. A `our`-POSSESSIVE
+ * self-reference (`our team delivers the full scope`) is likewise SELF-ownership — the passive equivalent
+ * `delivered by our team` is already treated as valid self-ownership (the `SCOPE_ATTRIBUTED_TO_OTHERS`
+ * self-exclusion) — so the optional possessive before a `team` noun excludes `our` (only `the`/`their`
+ * mark the team as OTHERS). Tested against the
  * marker's DELIVERY ASSERTION (like the passive check), so a sibling clause coordinated onto an
  * UNRELATED constraint by `and`, or sitting in a different comma/`;`-bounded clause, does not over-fire. */
 const SCOPE_ACTIVE_VOICE_OTHERS =
-  /\b(?:(?:the|our|their)\s+)?(?:siblings?|other\s+slices?|sibling\s+slices?|peers?|another\s+slice|the\s+rest|the\s+others?|others|(?:other\s+)?teams?|another\s+team|upstream\s+slice|upstream\s+slices?)\s+(?:\w+\s+){0,2}?(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship)(?:s|es|ed|ing)?\b/i;
+  /\b(?:(?:(?:the|their)\s+)?(?:siblings?|other\s+slices?|sibling\s+slices?|peers?|another\s+slice|the\s+rest|the\s+others?|others|upstream\s+slice|upstream\s+slices?)|(?:(?:the|their|another|other)\s+)teams?)\s+(?:\w+\s+){0,2}?(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship)(?:s|es|ed|ing)?\b/i;
 
 /** A whole-scope phrase whose CLAUSE explicitly NEGATES or DISCLAIMS it ("this slice does NOT deliver
  * the full scope of #12", "we won't cover every acceptance criterion", "the full scope of #12 is NOT
@@ -672,13 +676,46 @@ function deliveryAssertionAround(prompt: string, markerStart: number, markerEnd:
     const bStart = m.index;
     const bEnd = m.index + m[0].length;
     if (bEnd <= relStart) {
-      if (bEnd > segStart) segStart = bEnd;
+      // A coordinator BEFORE the marker normally splits the assertion (the marker sits in the segment
+      // the coordinator introduces). But when the segment the coordinator introduces is a COMPOUND
+      // PREDICATE — a bare verb phrase with NO new subject of its own — the coordinator shares the PRIOR
+      // segment's subject across both verbs, so splitting here would drop that subject and blind the
+      // active-voice attribution check (issue #858 round-9 review). Two shapes:
+      //  - `Siblings plan AND deliver the full scope` — the text between `and` and the marker is the
+      //    verb phrase `deliver`.
+      //  - `The other slices design AND own the whole` — the marker `own the whole` starts right at the
+      //    post-`and` verb, so the in-between text is empty and the marker's OWN lead is the verb.
+      // In both, retain the subject by NOT advancing segStart past the coordinator. An `and` that
+      // introduces an INDEPENDENT constraint (its own subject + verb, e.g. `… AND the suite is handled
+      // by another team`) leads with a noun/determiner, so it still splits.
+      const introduced = clause.slice(bEnd, relStart);
+      const compound =
+        isCompoundPredicateContinuation(introduced) ||
+        (introduced.trim() === "" && isCompoundPredicateContinuation(clause.slice(relStart, relEnd)));
+      if (bEnd > segStart && !compound) {
+        segStart = bEnd;
+      }
     } else if (bStart >= relEnd) {
       segEnd = bStart;
       break;
     }
   }
   return clause.slice(segStart, segEnd);
+}
+
+/** True when the text between a coordinator and the marker is a COMPOUND PREDICATE continuation — a bare
+ * verb phrase (optionally adverb-led) with NO subject noun of its own. `Siblings plan and DELIVER the
+ * full scope` has `deliver` right after `and` (a verb, no new subject), so the `and` shares the prior
+ * subject `Siblings`. By contrast `… and THE REGRESSION SUITE is handled …` leads with a determiner/noun
+ * (a new subject), so it is an independent constraint, not a compound predicate. The heuristic: the
+ * continuation leads with an optional adverb then a VERB (a delivery/completion verb or a generic
+ * `-ing`/`-s`/base verb), never a determiner/pronoun/noun. Conservative — it only suppresses the split
+ * when the lead word is clearly verb-like, so an independent constraint with a nominal subject still
+ * splits (issue #858 round-9 review). */
+const COMPOUND_PREDICATE_LEAD =
+  /^\s*(?:\w+ly\s+)?(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship|plan|design|scope|close|fix|resolve|add|update|open|write|create|land|merge|test|verify|document)(?:s|es|ed|ing)?\b/i;
+function isCompoundPredicateContinuation(between: string): boolean {
+  return COMPOUND_PREDICATE_LEAD.test(between);
 }
 
 /** A whole-scope marker narrowed by a PREFIX PARTITIVE ("half of every acceptance criterion", "part of

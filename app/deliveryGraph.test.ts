@@ -2383,3 +2383,98 @@ test("#858 the double-colon closing form (`Closes:: #12`) is detected as a parti
     assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
   }
 });
+
+// Issue #858 (round-9 review, app/deliveryGraph.ts:660 — "Preserve subjects when splitting compound
+// predicates"): `deliveryAssertionAround` splits the marker's clause at EVERY `and`, so a compound
+// predicate (`Siblings plan and deliver the full scope of #12`) drops the segment containing the
+// grammatical SUBJECT (`Siblings plan`) and leaves only `deliver the full scope…` in the assertion —
+// `SCOPE_ACTIVE_VOICE_OTHERS` then cannot see the `Siblings` actor and the attribution bypass returns.
+// A compound predicate shares ONE subject across both verbs, so the subject must be retained when the
+// post-`and` segment is a bare verb phrase (no new subject of its own).
+test("#858 a compound-predicate subject is retained for active-voice attribution (no bypass)", () => {
+  const bypasses = [
+    "Siblings plan and deliver the full scope of #12; implement criterion 1 and close #12.",
+    "The other slices design and own the whole issue #12; implement part and close it.",
+    "Peers build and handle the full scope of #12; implement the UI and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while an `and` that coordinates an INDEPENDENT constraint (its own subject + verb) still splits the
+// assertion, so a disqualifier governing that OTHER constraint does not disqualify the marker (the
+// round-6 scoping guarantee is preserved — only a shared-subject compound predicate retains the subject).
+test("#858 an independent `and`-coordinated constraint still splits the assertion (no over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and the regression suite is handled by another team; close #12.",
+    "Deliver the full scope of #12 and do not introduce regressions; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-9 review, app/deliveryGraph.ts:478 — "Treat our team as self-ownership in active
+// voice"): the others-subject pattern admitted an optional `our` before `team`, so `Our team delivers the
+// full scope of #12` was classified as EXTERNAL ownership and rejected — even though the passive
+// equivalent `delivered by our team` is explicitly treated as valid SELF-ownership. `our team` is the
+// current slice, so it must NOT disqualify; `the/another/other team` still do.
+test("#858 active-voice `our team` is self-ownership and validates (active check fires only on others)", () => {
+  const ok = [
+    "Our team delivers the full scope of #12; close #12.",
+    "Our team owns the whole issue #12; close it.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// …while `the team` / `another team` / `other teams` (no self-possessive) remain OTHERS and still
+// disqualify — the self-carve-out is only for the `our`-possessive self-reference.
+test("#858 active-voice `the/another/other team` still disqualifies (not self)", () => {
+  const bypasses = [
+    "The team delivers the full scope of #12; implement criterion 1 and close #12.",
+    "Another team delivers the full scope of #12; implement criterion 1 and close #12.",
+    "Other teams deliver the full scope of #12; implement criterion 1 and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-9 review, "Previously missed", app/deliveryGraph.ts:303 — "Recognize possessive
+// pronouns in closing targets"): the closing grammar accepted `it`/`the issue`/`that issue`/`this issue`
+// but not the POSSESSIVE `its issue`, so `…open a PR that closes its issue.` produced no
+// `partial-scope-close`. The possessive-pronoun form is now an (unresolved/pronoun) closing target in
+// both the prefilter and `CLOSING_TARGET_PATTERN`.
+test("#858 the possessive-pronoun close (`closes its issue`) is detected as a partial-scope-close", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12 and open a PR that closes its issue.",
+    "Implement the parser slice of #12; a follow-up PR resolves its issue.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while a full-scope marker still licenses the possessive-pronoun close (the new target is only a
+// detection widening — the legitimate final closer that owns the whole scope still validates).
+test("#858 a full-scope marker licenses the `closes its issue` form (no false positive)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and open a PR that closes its issue.",
+    "This slice covers every acceptance criterion of #12; the PR resolves its issue.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
