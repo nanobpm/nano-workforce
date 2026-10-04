@@ -2104,3 +2104,72 @@ test("#858 attribution to another actor still disqualifies after the gerund-meth
     assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
   }
 });
+
+// Issue #858 (round-8 adversarial review, app/deliveryGraph.ts:411 — "gerund-method lookahead fails
+// open on a bare `-ing` noun actor"): the round-7 lookahead `(?!(?:\w+ly\s+)?\w+ing\b)` excluded ANY
+// bare `-ing` word after `by`, so attribution to a real actor whose name ends in `-ing` (`owned by
+// engineering`, `handled by marketing`, `covered by staffing`) no longer disqualified — a fail-OPEN
+// regression vs. round-6 (no lookahead). The carve-out must exclude only a gerund that GOVERNS an
+// object (a means-clause like `by updating the parser`), not a bare terminal `-ing` noun.
+test("#858 a bare `-ing` noun actor still disqualifies after the gerund-method carve-out (no fail-open regression)", () => {
+  const bypasses = [
+    "The full scope of #12 is owned by engineering; close #12.",
+    "The full scope of #12 is handled by marketing; close #12.",
+    "The full scope of #12 is covered by staffing; close #12.",
+    "The full scope of #12 is delivered by engineering; close #12.",
+    "The full scope of #12 is owned by engineering and product; close #12.",
+    "The full scope of #12 is handled by marketing or sales; close #12.",
+    "The full scope of #12 is provided by consulting; close #12.",
+    "The full scope of #12 is owned by engineering that reports to product; close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while a genuine means-clause — a gerund GOVERNING an object — is still the slice's own method and
+// must validate (the round-7 carve-out's intent, preserved).
+test("#858 a gerund governing an object is still a method, not attribution (validates)", () => {
+  const ok = [
+    "The full scope of #12 is implemented by updating the parser; close #12.",
+    "The full scope of #12 is satisfied by doing it; close #12.",
+    "The full scope of #12 is addressed by filing tickets; close #12.",
+    "The full scope of #12 is met by quietly shipping it; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 adversarial review, app/deliveryGraph.ts:361 — "NEGATED_CLOSE_PREFIX misses the
+// `not to close` infinitive"): the negator→verb gap admitted only adverbs, so the `to` of the
+// infinitive (`Remember not to close #12.`, `Be sure not to close #12.`) was not admitted and a brief
+// that forbids the close this way was still rejected. The gap now admits an optional `to`.
+test("#858 a `not to close` infinitive is a negated close, not a partial-scope-close (validates)", () => {
+  const ok = [
+    "Implement criterion 1 of #12. Remember not to close #12; use Part of #12.",
+    "Implement one slice of #12. Be sure not to close #12.",
+    "Implement criterion 1 of #12. Do not simply blindly close it.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// …and admitting `to` must not reopen the double-negative bypass: `do not forget to close` still
+// INSTRUCTS the close (a verb sits between the negator and `to`), so it stays flagged.
+test("#858 admitting `to` keeps `do not forget to close` an active close (no reopened bypass)", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Do not forget to close #12.",
+    "Implement criterion 1 of #12. Do not hesitate to close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});

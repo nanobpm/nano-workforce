@@ -354,12 +354,16 @@ const CLOSING_TARGET_PATTERN =
 /** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
  * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
  * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
- * ADVERBS are admitted (`(?:\w+ly|ever|just|simply|only|then|also|now|yet|…)\s+){0,2}`) — NOT arbitrary
- * words — so a verb between them (`do not forget to close`) does not bridge and the close stays active,
- * and an earlier unrelated negation blocked by punctuation/a verb (`do not introduce regressions; close
- * #12`) never reaches the verb. */
+ * ADVERBS and the infinitive marker `to` are admitted (`(?:\w+ly|ever|just|simply|only|then|also|now|
+ * yet|…|to)\s+){0,3}`) — NOT arbitrary words — so a verb between them (`do not forget to close` /
+ * `do not hesitate to close` — "forget"/"hesitate" is a verb, not an adverb or `to`) does not bridge
+ * and the close stays active, and an earlier unrelated negation blocked by punctuation/a verb (`do not
+ * introduce regressions; close #12`) never reaches the verb. Admitting `to` covers the `not to close`
+ * INFINITIVE (`Remember not to close #12.`, `Be sure not to close #12.`) — a brief that forbids the
+ * close that way is a safe partial-slice brief, not a partial-scope-close (issue #858 round-8
+ * adversarial review). */
 const NEGATED_CLOSE_PREFIX =
-  /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|just|simply|only|then|also|now|yet|automatically|silently|blindly|actually|really)\s+){0,2}$/i;
+  /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|just|simply|only|then|also|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,3}$/i;
 function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean } {
   const numbered: string[] = [];
   let pronoun = false;
@@ -394,10 +398,22 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
  * The `<verb> by` branch ALSO excludes an implementation METHOD — a `by <gerund>` means-clause that
  * says HOW this slice delivers the scope (`implemented by updating the parser`, `satisfied by adding
  * the migration`, `delivered by carefully refactoring`), NOT attribution to another owner (issue #858
- * round-7 review). A second negative lookahead `(?!(?:\w+ly\s+)?\w+ing\b)` right after `by\s+` skips a
- * bare (optionally adverb-prefixed) gerund, so an "implemented by doing X" acknowledgement stays valid.
- * A DETERMINER before an `-ing` word (`by the training team`) makes it an actor noun phrase, not a bare
- * gerund, so it is NOT excluded and still disqualifies — attribution to a real actor is preserved.
+ * round-7 review). A negative lookahead right after `by\s+` skips a (optionally adverb-prefixed)
+ * gerund, so an "implemented by doing X" acknowledgement stays valid. The gerund is excluded only
+ * when it GOVERNS an object — i.e. it is followed by whitespace plus a continuation that is not a
+ * coordinator (`and`/`or`/`then`) or a relative pronoun (`that`/`which`/`who`): `by updating the
+ * parser` / `by doing it` / `by filing tickets` are means-clauses. A BARE terminal `-ing` word (end
+ * of the assertion, or punctuation next) is an ACTOR noun, not a method — `owned by engineering`,
+ * `handled by marketing`, `covered by staffing`, `provided by consulting` all still disqualify
+ * (issue #858 round-8 adversarial review: the round-7 lookahead excluded ANY bare `-ing` word after
+ * `by`, a fail-OPEN regression vs. round-6 that let an `-ing`-named actor slip past attribution).
+ * The coordinator/relative-pronoun guard keeps an `-ing` noun CONJUNCT or noun+relative-clause an
+ * actor (`by engineering and product`, `by engineering that reports to product`). A DETERMINER before
+ * an `-ing` word (`by the training team`) makes it an actor noun phrase, not a bare gerund, so it is
+ * NOT excluded and still disqualifies — attribution to a real actor is preserved. One accepted
+ * tradeoff, fail-CLOSED: an intransitive or adverb-led gerund with no object (`by pairing`, `by
+ * carefully refactoring` at assertion end) reads as an actor noun and still disqualifies — a rare
+ * phrasing that errs toward flagging, never toward letting an attribution through.
  *
  * Tested against the marker's DELIVERY ASSERTION, not its whole comma-bounded clause (see
  * `deliveryAssertionAround`): an attribution governing an UNRELATED constraint coordinated onto the
@@ -408,7 +424,7 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
  * handled by siblings`) has no coordinator between it and the marker, so it stays in-segment and still
  * disqualifies. */
 const SCOPE_ATTRIBUTED_TO_OTHERS =
-  /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\s+(?!(?:the\s+)?(?:this|current|present|me|us|our|my|myself|ourselves|here)\b)(?!(?:\w+ly\s+)?\w+ing\b)|\bby\s+(?:(?:the|our|their|its|his|her)\s+)?(?:siblings?|others?|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
+  /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\s+(?!(?:the\s+)?(?:this|current|present|me|us|our|my|myself|ourselves|here)\b)(?!(?:\w+ly\s+)?\w+ing\s+(?:[^\w\s]|(?!and\b|or\b|then\b|that\b|which\b|who\b)\w))|\bby\s+(?:(?:the|our|their|its|his|her)\s+)?(?:siblings?|others?|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
 
 /** A whole-scope phrase whose CLAUSE explicitly NEGATES or DISCLAIMS it ("this slice does NOT deliver
  * the full scope of #12", "we won't cover every acceptance criterion", "the full scope of #12 is NOT
