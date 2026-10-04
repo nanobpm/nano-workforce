@@ -23,6 +23,7 @@ import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
+import { parseIssue } from "./plan.ts";
 import { BACKOFFS, hasEmbeddedCredential, hasEmbeddedUrl, hasSchemeRelativeAuthority, isBackoff, isUrlShaped, redactEmbeddedCredentialUrl, redactEmbeddedSchemeRelativeUrl, redactEmbeddedUrl, redactString } from "./readiness.ts";
 import { isResolvableRepo } from "./repoEnvelope.ts";
 
@@ -108,7 +109,8 @@ export type DeliveryGraphErrorCode =
   | "scheme-relative-url-in-job-type"
   | "invalid-credential-env"
   | "invalid-backoff"
-  | "unbound-pr";
+  | "unbound-pr"
+  | "partial-scope-close";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
  * input (`nodes[2].kind`, `edges[1].from`, `nodes[0].emits[1].name`), `message` is human-actionable,
@@ -266,6 +268,1261 @@ export const FACT_NAME_MAX_LENGTH = 128;
  * resolvable while dot-free fact names keep `<nodeId>.<fact>` unambiguous. */
 const NODE_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 const NODE_ID_MAX_LENGTH = 128;
+
+/** Issue #858: a delivery-graph `agent` node's `prompt` is PLANNER/authored free text — no code path
+ * injects a `Closes #N` for it (unlike the single-issue `feature.ts` path, which owns its whole
+ * issue). The field case (delivery graph `5e36636255ab`, node `i12`) paired a brief scoped to ONE of
+ * an issue's three acceptance criteria with "…and open a PR that closes it", so the agent wrote
+ * `Closes #N` and the remainder was silently dropped. The planner/feature/scope-gate prompt contracts
+ * (resources/prompts/{plan,feature,scope-classify}.md) carry the prose rule; THIS is the deterministic
+ * compile/lint-time guard the issue asks for ("validate this at graph compile/lint time: an agent
+ * prompt that says 'close(s) #N' must cover all of #N's checkboxes, or carry an explicit partial-scope
+ * marker"). The validator is pure — it cannot read the GitHub issue to count its checkboxes — so the
+ * enforceable, self-contained form is: a prompt that closes an issue must ALSO carry an explicit
+ * full-scope acknowledgement marker (the exact phrase the planner is told to write when a slice
+ * legitimately closes, e.g. "full stated scope" / "every acceptance criterion"). A closing keyword
+ * with NO such marker is the defect class — a partial brief told to close — and is rejected.
+ *
+ * `ISSUE_REF_PATTERN` is the "the prompt references an issue SOMEWHERE" guard (so a bare prose "close
+ * the door" / "closes it" with no `#N` never matches). It is NOT a closing-language grammar — closing
+ * detection AND targeting are done by the SINGLE authoritative, negation-aware grammar
+ * `CLOSING_TARGET_PATTERN` (via `closingTargets`). There used to be a second `CLOSING_ACTION_PATTERN`
+ * pre-filter here that duplicated that whole active+passive grammar; it was removed (issue #858
+ * round-16 review) because the duplication was a DRIFT SURFACE that violated the one-canonical rule
+ * (AGENTS.md "derivation over duplication"): any syntax added only to `CLOSING_TARGET_PATTERN` was
+ * silently unreachable through the prefilter and failed OPEN, and the review history repeatedly forced
+ * the two regexes to be edited in lock-step. `closingTargets` already answers "is there an active,
+ * non-negated close?" (it returns no target when there is none), so `isPartialScopeClose` derives that
+ * answer from the one grammar instead of gating it behind a divergent copy. */
+const ISSUE_REF_PATTERN =
+  /(?:#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+)/i;
+
+/** A repo-qualified issue IDENTITY key (issue #858 round-4 review). The accepted issue syntax includes
+ * `owner/repo#N` and issue URLs, and this validator supports cross-repository graphs, so collapsing an
+ * issue to its bare number `N` would let an acknowledgement of `owner/alpha#12`'s scope licence closing
+ * a DIFFERENT issue `owner/beta#12` — both become `12`. The key preserves repository identity: an
+ * EXPLICIT `owner/repo` (from `owner/repo#N` or an issue URL) keys as `owner/repo#N` (lowercased); a
+ * BARE `#N` keys as `#N` (the implicit node/run repository). Two keys name the same issue only when
+ * equal, so `owner/alpha#12`, `owner/beta#12`, and bare `#12` are three distinct issues. This is
+ * fail-closed: a bare acknowledgement never credits an explicitly-qualified close of a different repo
+ * (and vice-versa), so a cross-repo number collision can no longer bypass the guard. */
+function issueKey(repo: string | null | undefined, num: string | number): string {
+  const r = (repo ?? "").trim().toLowerCase();
+  return `${r}#${num}`;
+}
+
+/** Every issue referenced in `text`, as a repo-qualified identity key (see `issueKey`), in any accepted
+ * form (`#N`, `owner/repo#N`, or an issue URL `…/owner/repo/issues/N`). Used to (a) anchor a full-scope
+ * acknowledgement to the issue it names and (b) decide whether a prompt is single-issue (so a generic,
+ * un-numbered marker is unambiguous).
+ *
+ * The `owner/repo#N` and issue-URL shapes are NOT re-declared here as a local capture regex — that
+ * duplicate grammar is exactly what the single-grammar guard (`app/prShapeSingleGrammar.test.ts`,
+ * #856/#857) bans. Instead each candidate token is classified by the CANONICAL `parseIssue`
+ * (`app/prParse.ts`), the one source of the issue-shape grammar. `ISSUE_REF_TOKEN` only finds the
+ * candidate tokens (a bare `#N`, an `owner/repo#N`, or an `http(s)` URL); it carries NO digit-capture
+ * group, so it is not a parser. A token that merely LOOKS like a reference but is not the canonical
+ * shape (a non-`github.com` issue URL, a multi-slash `a/b/c#9`) is rejected by `parseIssue` and
+ * contributes nothing — fail-closed, matching the canonical grammar exactly. */
+const ISSUE_REF_TOKEN = /#[0-9]+\b|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+\b|https?:\/\/[^\s)]+/gi;
+function issueRefsIn(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(ISSUE_REF_TOKEN)) {
+    const tok = m[0];
+    // Bare `#N` has no repo — key it as the implicit node/run repository (parseIssue rejects a
+    // repo-less ref, so handle it directly rather than through the canonical parser).
+    if (tok.startsWith("#")) {
+      out.push(issueKey(null, tok.slice(1)));
+      continue;
+    }
+    const parsed = parseIssue(tok);
+    if (parsed) out.push(issueKey(parsed.repo, parsed.number));
+  }
+  return out;
+}
+
+/** The closing TARGETS of a prompt: which issue the closing verb actually acts on, as repo-qualified
+ * identity keys (see `issueKey`). A numbered target (`closes #N`, `fixes owner/repo#N`, `resolves
+ * <url>/.../issues/N`, or the `issue #N` / `GitHub issue #N` noun-phrase form) yields its key; a pronoun
+ * target (`closes it` / `close the issue`) can't name an issue, so it is reported via `pronoun` and the
+ * caller falls back to "the sole issue referenced". This is the SINGLE authoritative closing grammar —
+ * both "is there a close?" (detection) and "which issue?" (targeting) derive from it, with no separate
+ * pre-filter to drift from (issue #858 round-16 review removed the duplicate `CLOSING_ACTION_PATTERN`).
+ * It recognises the verb+object forms (`close/closes/closed`, `fix/fixes/fixed`,
+ * `resolve/resolves/resolved` applied to `#N`, `owner/repo#N`, an issue URL, the `issue #N` /
+ * `GitHub issue #N` noun phrase, or a pronoun), the optional colon (`Closes: #12`), and the
+ * quantifier/determiner on either side of `issues?` (`close both issues #12 and #13`); it
+ * preserves the `owner/repo` prefix (or URL repo) so a close of `owner/beta#12` is
+ * NOT satisfied by an acknowledgement anchored to `owner/alpha#12`.
+ *
+ * A DIRECTLY-NEGATED close is NOT a closing target (issue #858 round-7 review). A brief that explicitly
+ * forbids the close (`Do not close #12; use Part of #12.`, `never close #12`, `don't resolve #12`) is a
+ * SAFE partial-slice brief following the partial-slice contract — the OPPOSITE of the defect (a
+ * part-scope node told TO close) — so flagging it blocks a legitimate graph. Each match is dropped when
+ * the text immediately before its verb ends in a negator (`NEGATED_CLOSE_PREFIX`), so a negated close
+ * no longer contributes a target. The negator→verb gap admits only ADVERBS (`do not simply close`), not
+ * arbitrary words, so a meaning-flipping idiom (`do not forget to close #12` — "forget to" is a verb,
+ * not an adverb) stays an ACTIVE close and is still flagged; and negating ONE close never masks a
+ * DIFFERENT active close in the same prompt (`do not close #12, but close #34` still targets #34).
+ *
+ * The SECOND alternative is the ISSUE-FIRST / PASSIVE mirror of the verb-first grammar (issue #858
+ * round-10 review): `<issue-ref> [auxiliaries] closed|fixed|resolved` — `ensure issue #12 is closed by
+ * the PR`, `#12 will be closed by the PR`, `see #12 closed`, `mark #12 as resolved`, `the issue gets
+ * fixed`. It captures the SAME target shapes (groups 5/6 = repo/number for `#N`, 7/8 for a URL, a
+ * bare pronoun subject otherwise) so a passive close is attributed to its issue exactly like the
+ * active form, and captures the auxiliary window (group 19) so a negator INSIDE it (`#12 is NOT
+ * closed`) can drop the match — see `NEGATED_PASSIVE_WINDOW`. The passive subject carries the SAME
+ * coordination tail as the active arm (group 14, re-scanned in `closingTargets`), so a coordinated
+ * passive close (`issues #12 and #13 are closed`) attributes the close to EVERY subject, not just the
+ * first (issue #858 round-18 review). This passive arm lives ONLY here, in the
+ * one authoritative grammar — there is no duplicate pre-filter carrying a second copy of it.
+ *
+ * The issue-REFERENCE shape inside this grammar is NOT a local capture regex. The single-grammar guard
+ * (`app/prShapeSingleGrammar.test.ts`, #856/#857) bans any module but `app/prParse.ts`/`app/plan.ts`
+ * from carrying a `#(<digits>` or `/issues/(<digits>` capture group, so this pattern matches the
+ * reference with the CAPTURE-FREE {@link ISSUE_REF_SRC} fragment (no digit-capture group) and
+ * `closingTargets` then classifies the matched reference substring through the CANONICAL `parseIssue`
+ * — the one source of the issue-shape grammar. The grammar's structure (which target shapes exist, the
+ * coordination tails, the passive auxiliary window) stays here; only the reference *lexing* delegates
+ * to the canonical parser. */
+const ISSUE_REF_SRC = "(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+|https?://[^\\s)]+|#[0-9]+)";
+const CLOSING_TARGET_PATTERN = new RegExp(
+  String.raw`(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(${ISSUE_REF_SRC}|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?${ISSUE_REF_SRC})*)*)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(${ISSUE_REF_SRC})\b|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?${ISSUE_REF_SRC})*)*)\s+((?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)`,
+  "gi",
+);
+/** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
+ * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
+ * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
+ * ADVERBS and the infinitive marker `to` are admitted (`(?:\w+ly|ever|just|simply|only|then|also|now|
+ * yet|…|to)\s+){0,3}`) — NOT arbitrary words — so a verb between them (`do not forget to close` /
+ * `do not hesitate to close` — "forget"/"hesitate" is a verb, not an adverb or `to`) does not bridge
+ * and the close stays active, and an earlier unrelated negation blocked by punctuation/a verb (`do not
+ * introduce regressions; close #12`) never reaches the verb. Admitting `to` covers the `not to close`
+ * INFINITIVE (`Remember not to close #12.`, `Be sure not to close #12.`) — a brief that forbids the
+ * close that way is a safe partial-slice brief, not a partial-scope-close (issue #858 round-8
+ * adversarial review). */
+const NEGATED_CLOSE_PREFIX =
+  /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|just|simply|only|then|also|now|yet|automatically|silently|blindly|actually|really|to|use|using|write|writing|include|including|add|adding)\s+){0,3}(?:(?:a|an|the)\s+)?$/i;
+/** The CORRELATIVE additive negation `not <adverb> …` is ADDITIVE, not prohibitive, when paired with an
+ * additive continuation: `Do not just close #12; also add a release note` still INSTRUCTS the close
+ * (`not only X but/also Y` keeps X), so treating it as a negated close drops a real close and lets the
+ * partial brief validate (issue #858 round-8 review). This prefix matches a negator whose gap is
+ * governed by a correlative/manner adverb immediately before the verb; paired with a following additive
+ * continuation (`ADDITIVE_CONTINUATION`) it RE-ACTIVATES the close in `closingTargets`. The class spans
+ * the correlative `just`/`only` AND any `-ly` manner adverb (`merely`/`simply`/`basically`/`hardly`/…) —
+ * the additive signal is the `also`/`as well` CONTINUATION, not the specific adverb, so `Do not merely
+ * close #12; also …` is the same additive construction (issue #858 round-8 adversarial review). A manner
+ * adverb with NO additive continuation (`do not simply close it; leave the parent open`) genuinely
+ * forbids the close and stays a safe negated close — the continuation, not the adverb, is what
+ * re-activates. */
+const CORRELATIVE_NEGATED_CLOSE_PREFIX =
+  /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|then|also|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,2}(?:just|only|\w+ly)\s+(?:(?:\w+ly|ever|then|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,2}$/i;
+/** The additive continuation that reinstates a `not <adverb>` close: an additive marker — `also` or
+ * `as well` — within the SAME sentence after the close (bounded at `.`/newline so an unrelated later
+ * sentence never re-activates the close). The signal is the ADDITIVE word, never a bare `but`: a bare
+ * contrastive `but` (`Do not just close it; but leave the parent open`) introduces a CONTRAST, not an
+ * added action, so it is a SAFE negated close — admitting it was a false-positive REGRESSION vs. round-7
+ * (issue #858 round-8 adversarial review). The correlative `not only X but ALSO Y` still carries `also`,
+ * so it is caught here without the bare-`but` false positive. `as well` is matched as a phrase (it never
+ * leads a clause, so a word-boundary false positive is not a concern). A bare `too` is deliberately NOT
+ * an additive trigger: it is also the INTENSIFIER (`too risky`/`too early`), so matching it over-fired on
+ * a safe negated close followed by a `too <adj>` constraint — a fail-closed tradeoff that keeps `too` a
+ * safe negation. Tested on the text immediately AFTER the matched close. */
+const ADDITIVE_CONTINUATION = /^[^.\n]*?\b(?:also|as\s+well)\b/i;
+/** A negator inside the AUXILIARY WINDOW of an issue-first/passive close (`issue #12 is NOT closed by
+ * the PR`, `#12 will NEVER be fixed by the PR`, `the issue is not getting resolved`) — the passive
+ * mirror of `NEGATED_CLOSE_PREFIX` (issue #858 round-10 review). A brief that explicitly forbids the
+ * passive close (`Implement criterion 1 of #12; issue #12 is NOT closed by this PR`) is a SAFE
+ * partial-slice brief, exactly like its active-voice sibling (`do not close #12`), so the match is
+ * dropped. The negator is searched only inside the match's own captured auxiliary window (group 19 of
+ * `CLOSING_TARGET_PATTERN`) — never across the whole prompt — so an unrelated earlier negation
+ * (`do not introduce regressions; issue #12 is closed by the PR`) cannot mask an ACTIVE passive close,
+ * and a `not` AFTER the participle (`#12 is closed, not merely referenced`) is not read as negating
+ * the close. The window is at most four words plus an optional `get(s)`, so a plain substring test
+ * suffices — no anchoring needed. */
+const NEGATED_PASSIVE_WINDOW = /\b(?:not|never|cannot)\b|\b\w+n['’]t\b/i;
+/** Classify a matched issue-REFERENCE substring (from {@link ISSUE_REF_SRC}) into its repo-qualified
+ * identity key via the CANONICAL `parseIssue`, or null when the substring is not the canonical shape
+ * (a non-`github.com` issue URL, a multi-slash `a/b/c#9`). A bare `#N` (no repo) keys as the implicit
+ * node/run repository — `parseIssue` rejects a repo-less ref, so it is keyed directly. Returning null
+ * (rather than a key) for a non-canonical reference keeps the close UN-attributed, so the validator
+ * fails closed exactly as the canonical grammar does. */
+function issueRefKey(ref: string | undefined): string | null {
+  if (!ref) return null;
+  if (ref.startsWith("#")) return issueKey(null, ref.slice(1));
+  // A URL token is lexed as a maximal `[^\s)]+` run, so it can carry a trailing possessive (`'s`) or
+  // prose punctuation (`;`, `,`, `.`, `:`, `!`, `?`) that is not part of the reference (`…/issues/12's
+  // full scope`, `…/issues/12; note …`). The canonical parser is anchored, so strip the trailing
+  // possessive/punctuation before classifying — a bare `#N` token ends in a digit and never needs this.
+  const cleaned = ref.replace(/(?:['’]s|s['’]|['’])?[;.,:!?]*$/, "");
+  const parsed = parseIssue(cleaned);
+  return parsed ? issueKey(parsed.repo, parsed.number) : null;
+}
+function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean } {
+  const numbered: string[] = [];
+  let pronoun = false;
+  for (const m of prompt.matchAll(CLOSING_TARGET_PATTERN)) {
+    // A directly-negated close (`do not close #12`) is not a close TARGET — skip it. The negation never
+    // masks a sibling ACTIVE close: each match is judged on the text before its OWN verb. EXCEPTION: an
+    // additive `not just/only … ; also/but …` correlative still INSTRUCTS the close, so it stays a target
+    // (issue #858 round-8 review).
+    const before = prompt.slice(0, m.index);
+    if (NEGATED_CLOSE_PREFIX.test(before)) {
+      const additive =
+        CORRELATIVE_NEGATED_CLOSE_PREFIX.test(before) &&
+        ADDITIVE_CONTINUATION.test(prompt.slice(m.index + m[0].length));
+      if (!additive) continue;
+    }
+    // The issue-first/passive arm carries its negation INSIDE the match's auxiliary window (`#12 is
+    // NOT closed`), which the before-verb prefix check above cannot see — the negator sits AFTER the
+    // arm's issue-ref start, so the text ending at `m.index` does not reach it. Drop a passive close
+    // whose own window is negated (issue #858 round-10 review). The window is group 5.
+    if (m[5] !== undefined && NEGATED_PASSIVE_WINDOW.test(m[5])) continue;
+    // Group 1 is the ACTIVE arm's issue reference (or a pronoun); group 3 is the PASSIVE arm's subject
+    // reference. Classify each through the canonical parser; a pronoun (`it`/`them`/`the issue`) is not
+    // a reference, so it sets `pronoun` instead.
+    const activeRef = m[1];
+    const passiveRef = m[3];
+    const activeKey = issueRefKey(activeRef);
+    const passiveKey = issueRefKey(passiveRef);
+    if (activeKey) numbered.push(activeKey);
+    else if (passiveKey) numbered.push(passiveKey);
+    else pronoun = true;
+    // A COORDINATED close names every target (`close #12 and #13`, `close #12, #13, and #14`). The
+    // active arm captures only the FIRST; group 2 is the whole coordinated tail, re-scanned for every
+    // extra numbered target so each closed issue needs its own acknowledgement (issue #858 round-11
+    // review — `close #12 and #13` previously validated with only #12 acknowledged, a fail-open bypass).
+    if (m[2] !== undefined && m[2] !== "") {
+      for (const key of issueRefsIn(m[2])) numbered.push(key);
+    }
+    // The issue-first/passive arm's subject is coordinated the same way (`issues #12 and #13 are
+    // closed`); group 4 is ITS whole coordinated tail, re-scanned identically so a passive close of
+    // several issues checks every one (issue #858 round-18 review — `issues #12 and #13 are closed`
+    // previously checked only the first subject, the same fail-open bypass one arm over).
+    if (m[4] !== undefined && m[4] !== "") {
+      for (const key of issueRefsIn(m[4])) numbered.push(key);
+    }
+  }
+  return { numbered, pronoun };
+}
+
+/** A whole-scope phrase ATTRIBUTED to someone other than this brief ("…is handled BY siblings",
+ * "delivered BY the other slices", "owned BY another slice") does NOT acknowledge that THIS brief
+ * owns the scope — it says the opposite. Such an occurrence is disqualified so it cannot licence a
+ * close (issue #858 round-3: the full-scope marker must assert this node's ownership of the closing
+ * target, not merely mention the scope). Matches a completion verb immediately followed by `by` SOME
+ * OTHER agent, or a `by <sibling/other/peer/the rest>` agent phrase. Attribution to the CURRENT slice
+ * is an AFFIRMATIVE ownership assertion, not a disclaimer, so the `<verb> by` alternative excludes a
+ * self-reference agent (`by this slice` / `by the current slice` / `by me` / `by us` / `by me here`)
+ * via a negative lookahead — only attribution to a non-self agent disqualifies (issue #858 round-5
+ * review: "allow current-slice ownership in passive attribution"). The sibling/peer/other alternative
+ * allows an optional POSSESSIVE (`our`/`their`/`the`) before the noun — `delivered by OUR siblings` is
+ * still attribution to OTHERS even though `our` is a self word (the round-5 self-exclusion lookahead
+ * added `our`/`us`/`my`, which let `by our siblings` slip through both alternatives; issue #858
+ * round-5 adversarial review). A possessive before a SELF noun (`by our team` / `by our slice`) is
+ * unaffected — those nouns are not in the others list, so they still fail the lookahead-excluded self
+ * branch and do NOT disqualify.
+ *
+ * The `<verb> by` branch ALSO excludes an implementation METHOD — a `by <gerund>` means-clause that
+ * says HOW this slice delivers the scope (`implemented by updating the parser`, `satisfied by adding
+ * the migration`, `delivered by carefully refactoring`), NOT attribution to another owner (issue #858
+ * round-7 review). A negative lookahead right after `by\s+` skips a (optionally adverb-prefixed)
+ * gerund, so an "implemented by doing X" acknowledgement stays valid. The gerund is excluded only
+ * when it GOVERNS an object — i.e. it is followed by whitespace plus a continuation that is not a
+ * coordinator (`and`/`or`/`then`) or a relative pronoun (`that`/`which`/`who`): `by updating the
+ * parser` / `by doing it` / `by filing tickets` are means-clauses. A BARE terminal `-ing` word (end
+ * of the assertion, or punctuation next) is an ACTOR noun, not a method — `owned by engineering`,
+ * `handled by marketing`, `covered by staffing`, `provided by consulting` all still disqualify
+ * (issue #858 round-8 adversarial review: the round-7 lookahead excluded ANY bare `-ing` word after
+ * `by`, a fail-OPEN regression vs. round-6 that let an `-ing`-named actor slip past attribution).
+ * The coordinator/relative-pronoun guard keeps an `-ing` noun CONJUNCT or noun+relative-clause an
+ * actor (`by engineering and product`, `by engineering that reports to product`). A DETERMINER before
+ * an `-ing` word (`by the training team`) makes it an actor noun phrase, not a bare gerund, so it is
+ * NOT excluded and still disqualifies — attribution to a real actor is preserved. One accepted
+ * tradeoff, fail-CLOSED: an intransitive or adverb-led gerund with no object (`by pairing`, `by
+ * carefully refactoring` at assertion end) reads as an actor noun and still disqualifies — a rare
+ * phrasing that errs toward flagging, never toward letting an attribution through.
+ *
+ * Tested against the marker's DELIVERY ASSERTION, not its whole comma-bounded clause (see
+ * `deliveryAssertionAround`): an attribution governing an UNRELATED constraint coordinated onto the
+ * clause by `and` (`Deliver the full scope of #12 AND the regression suite is handled by another team;
+ * close #12.`) attributes that other constraint, not the marker's scope, so it must NOT disqualify the
+ * close — the SAME false-positive class round-6 scoped the two negation disqualifiers for (issue #858
+ * round-6 adversarial review). An attribution in the marker's OWN segment (`the full scope of #12 is
+ * handled by siblings`) has no coordinator between it and the marker, so it stays in-segment and still
+ * disqualifies. */
+const SCOPE_ATTRIBUTED_TO_OTHERS =
+  /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\s+(?!(?:the\s+)?(?:this|current|present|me|us|our|my|myself|ourselves|here)\b)(?!(?:\w+ly\s+)?\w+ing\s+(?:[^\w\s]|(?!and\b|or\b|then\b|that\b|which\b|who\b)\w))|\bby\s+(?:(?:the|our|their|its|his|her)\s+)?(?:siblings?|others?|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
+
+/** ACTIVE-VOICE attribution to others: a sibling/other-slice SUBJECT performing a completion verb on the
+ * scope (`Siblings deliver the full scope of #12`, `the other slices own every criterion`, `another
+ * slice covers the whole issue`) credits OTHERS with the delivery exactly as the passive `delivered by
+ * siblings` does, so it must disqualify the marker too (issue #858 round-8 review: the passive-only
+ * `SCOPE_ATTRIBUTED_TO_OTHERS` let an active-voice sibling-ownership sentence restore the attribution
+ * bypass, contradicting the per-node ownership invariant). Matches an OTHERS-noun subject (siblings /
+ * peers / another slice / other slices / the rest / the others, optionally possessive) followed within a
+ * couple of words by a completion verb — the active voice of `SCOPE_ATTRIBUTED_TO_OTHERS`'s verb list.
+ * The subject allowlist is OTHERS only (never `this`/`current` slice, `I`, `we`), so active-voice SELF
+ * ownership (`this slice delivers the full scope`) stays an affirmative assertion. A `our`-POSSESSIVE
+ * self-reference (`our team delivers the full scope`) is likewise SELF-ownership — the passive equivalent
+ * `delivered by our team` is already treated as valid self-ownership (the `SCOPE_ATTRIBUTED_TO_OTHERS`
+ * self-exclusion) — so the possessive before a `team` noun excludes `our` specifically while staying
+ * OPTIONAL: a BARE `team`/`teams` (`Team delivers the full scope`) is still OTHERS-attribution exactly
+ * as the round-entry code flagged it — requiring a determiner there was a fail-open regression (issue
+ * #858 round-9 adversarial review). Tested against the
+ * marker's DELIVERY ASSERTION (like the passive check), so a sibling clause coordinated onto an
+ * UNRELATED constraint by `and`, or sitting in a different comma/`;`-bounded clause, does not over-fire.
+ *
+ * The subject-to-verb window spans up to four words AND tolerates a coordinator (`and`/`or`/`then`)
+ * inside it: the compound-predicate subject retention (see `deliveryAssertionAround`) deliberately keeps
+ * the subject for `Siblings plan AND deliver the full scope` — including its ADVERB-LED form
+ * (`COMPOUND_PREDICATE_LEAD` admits `(?:\w+ly\s+)?`, e.g. `Siblings plan and CAREFULLY deliver …`) — so
+ * this check must reach the verb across the coordinator gap, or the very attribution bypass the
+ * retention exists to close re-opens the moment one adverb is inserted (issue #858 round-9 adversarial
+ * review). Widening the window cannot over-fire onto a SELF assertion (`this slice plans and carefully
+ * delivers …`): the subject allowlist is OTHERS-only, so a self-subject never matches regardless of how
+ * many words precede the verb. */
+const SCOPE_ACTIVE_VOICE_OTHERS =
+  /\b(?:(?:(?:the|their)\s+)?(?:siblings?|other\s+slices?|sibling\s+slices?|peers?|another\s+slice|the\s+rest|the\s+others?|others|upstream\s+slice|upstream\s+slices?)|(?:(?:(?!our\b)(?:the|their|another|other)\s+)?(?<!\bour )teams?))\s+(?:(?:(?:\w+ly|and|or|then|\w+)\s+)){0,4}?(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship)(?:s|es|ed|ing)?\b/i;
+
+/** A whole-scope phrase whose CLAUSE explicitly NEGATES or DISCLAIMS it ("this slice does NOT deliver
+ * the full scope of #12", "we won't cover every acceptance criterion", "the full scope of #12 is NOT
+ * delivered here") does NOT acknowledge that this brief owns the scope — it asserts the opposite, yet
+ * the bare substring `full scope` is still present (issue #858 round-4 review). Such an occurrence is
+ * disqualified so a negated clause cannot licence a close and re-open the partial-close bypass.
+ *
+ * Negation comes in TWO grammatical shapes, handled separately so an UNRELATED trailing constraint is
+ * not mistaken for scope negation (issue #858 round-5 review — `Deliver the full scope of #12 without
+ * regressions; close #12.` must validate):
+ *  - `SCOPE_NEGATED_CORE` — core negators (`not`/`never`/`cannot`/`n't`) and the delivery-failure
+ *    idioms (`fails to`/`unable to`) that negate the assertion when they sit in the marker's OWN
+ *    `and`-segment (`does not deliver the full scope`, `…full scope… is NOT delivered`). Tested against
+ *    the marker's DELIVERY ASSERTION, not its whole comma-bounded clause (see
+ *    `deliveryAssertionAround`): a core negator governing an UNRELATED constraint coordinated onto the
+ *    clause by `and` (`Deliver the full scope of #12 AND do NOT introduce regressions; close #12.`)
+ *    negates that other constraint, not the marker, so it must NOT disqualify the close (issue #858
+ *    round-6 review). The assertion is the clause narrowed to the `and`-bounded segment the marker sits
+ *    in, so a negator in a sibling coordinated segment is excluded while one in the marker's own segment
+ *    (`does not deliver the full scope`) still disqualifies. The guarantee is therefore NARROWED from
+ *    "wherever they sit": a negator split into a SIBLING `and`-segment no longer disqualifies via this
+ *    pattern — unless it REFERENCES DELIVERY, which `SCOPE_NEGATED_AFTER_MARKER_DELIVERY` re-catches
+ *    against the whole clause (issue #858 round-6 adversarial review).
+ *  - `SCOPE_NEGATED_PREFIX` — exception/redirection PREFIXES (`without`, `other than`, `rather than`,
+ *    `instead of`, `apart from`, `all but`, `excluding`, …) that negate only the phrase they GOVERN,
+ *    i.e. the one that FOLLOWS them. They disqualify the marker only when they sit BEFORE it in the
+ *    clause; a TRAILING occurrence governs some other phrase (`…full scope… WITHOUT regressions`,
+ *    `…full scope… RATHER THAN a piecemeal split`) and is an affirmative closer.
+ *
+ * Conservative/fail-closed: the planner contract (plan.md) directs a genuine full-scope closer to
+ * carry a plain AFFIRMATIVE acknowledgement, so negating the marker's assertion is a disclaimer, not an
+ * assertion. The exception idiom covers `but` only in its narrow "except" phrases (`all but` /
+ * `everything but` / `anything but` / `nothing but`) — a BARE `but` is left out deliberately: it is a
+ * common affirmative conjunction ("the full scope of #12, but split across two commits"), so matching
+ * it would over-fire on legitimate closers. The assertion-narrowing coordinator is `and`/`plus` ONLY
+ * (NOT `but`/`or`): `but` is the exception idiom's own keyword (`but without covering X` must stay a
+ * disclaimer of the marker, so its segment must still include the trailing negation), and `and` is the
+ * unambiguous "independent additional constraint" conjunction the round-6 false positive turned on. */
+const SCOPE_NEGATED_CORE = /\b(?:not|never|cannot|fail(?:s|ing|ed)?\s+to|unable\s+to)\b|n['’]t\b/i;
+const SCOPE_NEGATED_PREFIX =
+  /\b(?:without|exclud(?:e|es|ing|ed)|omit(?:s|ting|ted)?|aside\s+from|apart\s+from|other\s+than|rather\s+than|instead\s+of|short\s+of|all\s+but|everything\s+but|anything\s+but|nothing\s+but)\b/i;
+/** Global-flag twin of `SCOPE_NEGATED_PREFIX`, derived from its `source` so the two never drift. Used by
+ * `earliestNegatorEnd` to find, in ONE left-to-right scan of a clause, the earliest offset at which a
+ * prefix negator completes (so each marker can be tested against its OWN before-marker prefix without
+ * re-running the regex per marker — issue #858 round-14 review). */
+const SCOPE_NEGATED_PREFIX_G = new RegExp(SCOPE_NEGATED_PREFIX.source, "gi");
+
+/** A TRAILING `without <delivery gerund>` ("Deliver the full scope of #12 WITHOUT COVERING the edge
+ * cases") still disclaims completeness — it is a negation, not the benign `without <noun>` constraint
+ * ("without regressions") the before-marker-only split was carved out for. Restricting
+ * `SCOPE_NEGATED_PREFIX` to the before-marker text (so a trailing "without regressions" stays
+ * affirmative) was a fail-open regression for this trailing delivery-negating shape (issue #858
+ * round-5 adversarial review): round-4's whole-clause check caught it, the split let it through. This
+ * pattern distinguishes the two by what `without` GOVERNS: a delivery gerund (covering / delivering /
+ * implementing / finishing / …) means part of the scope is left undelivered, so the marker is
+ * disqualified; a plain noun (regressions / tests / breaking changes) is an unrelated trailing
+ * constraint and stays affirmative. Tested against the marker's DELIVERY ASSERTION (the gerund sits
+ * AFTER the marker; see `deliveryAssertionAround`) — like `SCOPE_NEGATED_CORE`, a `without <gerund>`
+ * coordinated onto the clause by `and` (`Deliver the full scope of #12 AND refactor without breaking
+ * the build; close #12.`) governs that other constraint, not the marker, and must NOT disqualify
+ * (issue #858 round-6 review). A `but without covering X` stays IN the marker's assertion (`but` is not
+ * an assertion-splitting coordinator), so that trailing disclaimer still disqualifies. Two guards keep
+ * it from over-firing on a benign noun that merely LOOKS like a gerund:
+ *  - an article/determiner between `without` and the word ("without A covering letter", "without THE
+ *    building blocks") makes the word a NOUN, so the lookbehinds exclude it; and
+ *  - `meeting` is deliberately left OUT of the gerund list — "without meeting notes" (a benign noun)
+ *    is more common in a brief than "without meeting every criterion", and the core-negator /
+ *    scope-classify layers backstop that phrasing.
+ * The gerund list is the delivery vocabulary; a `without <noun>` never matches it. */
+const SCOPE_NEGATED_WITHOUT_DELIVERY =
+  /\bwithout\s+(?:\w+\s+){0,2}(?<!the\s)(?<!a\s)(?<!an\s)(?<!any\s)(?<!its\s)(?<!their\s)(?<!our\s)(?<!my\s)(?<!your\s)(?<!his\s)(?<!her\s)(?:covering|delivering|implementing|finishing|completing|building|satisfying|addressing|providing|handling|doing|shipping|including)\b/i;
+
+/** A core negator (`not`/`never`/`cannot`/`n't`/`fails to`/`unable to`) that sits AFTER the marker and
+ * REFERENCES DELIVERY still disclaims the marker's scope — `Deliver the full scope of #12 AND it is not
+ * fully delivered; close #12.` asserts the scope is NOT delivered, yet the `and`-coordinator splits that
+ * trailing disclaimer into a sibling segment the assertion-scoped `SCOPE_NEGATED_CORE` never sees, so
+ * round-6's narrowing let it VALIDATE (a fail-open regression vs. the pre-round whole-clause test; issue
+ * #858 round-6 adversarial review). Tested against the marker's whole comma-bounded CLAUSE (not the
+ * `and`-segment): the negator may sit in a trailing coordinated segment, and the DELIVERY reference is
+ * what ties it back to the marker. The delivery reference is EITHER a delivery noun/verb
+ * (`delivered`/`cover`/`implement`/`scope`/`criterion`…) OR the anaphoric `it`/`that` referring back to
+ * the just-named scope. An after-marker negation with NO delivery reference (`…AND do not introduce
+ * regressions`, `…AND never break the build`) governs an UNRELATED constraint and stays affirmative —
+ * this pattern does NOT match it, so the round-6 false-positive fix is preserved. The delivery
+ * vocabulary mirrors the attribution/gerund lists (deliver/cover/implement/complete/scope/criterion/
+ * checkbox/…) plus the anaphoric `it`/`that`. */
+const SCOPE_NEGATED_AFTER_MARKER_DELIVERY =
+  /(?:\b(?:not|never|cannot|fail(?:s|ing|ed)?\s+to|unable\s+to)\b|\b\w+n['’]t\b)(?:\s+[\w'’-]+){0,4}?\s+(?:it|that|deliver(?:y|s|ed|ing)?|cover(?:s|ed|ing)?|implement(?:s|ed|ing)?|complet(?:e|es|ed|ing)|finish(?:es|ed|ing)?|satisf(?:y|ies|ied|ying)|acceptance\s+criteri\w+|checkbox\w*|scope|criteri\w+|done)\b/i;
+
+/** The explicit full-scope acknowledgement markers that licence a closing keyword. These are the
+ * phrases the planner contract (resources/prompts/plan.md) directs a full-scope slice to carry, so a
+ * legitimately-closing brief already contains one and is NOT rejected. Matching is case-insensitive
+ * substring (not a bareword regex) so inflections ("full stated scope", "the full scope", "every
+ * acceptance criterion", "all acceptance criteria", "owns the whole issue") all count.
+ *
+ * Every marker is ISSUE-ANCHORED — it names the whole issue/scope as the thing delivered ("the whole
+ * issue", "all of #N", "the entire issue", "every acceptance criterion"). A BARE adverb of
+ * completeness (`fully` / `completely` / `end-to-end` / `in full` / `in its entirety`) is
+ * deliberately NOT a marker: it can modify a PARTIAL deliverable ("implement one criterion of #12
+ * fully, then close #12"), so accepting it would silently disable the guard for exactly the partial
+ * brief it exists to catch. The contract (plan.md) tells the planner to anchor the acknowledgement
+ * to the issue's whole scope, so a legitimate closer always has an anchored form available.
+ *
+ * These phrases are whole-scope LANGUAGE only; `isPartialScopeClose` decides, per closing target,
+ * whether a phrase occurrence is actually TIED to the issue being closed (same clause / sole issue)
+ * and not attributed to others — a phrase alone, anywhere in the prompt, is NOT sufficient. */
+const FULL_SCOPE_MARKERS: readonly string[] = [
+  "full stated scope",
+  "full scope",
+  "every acceptance criterion",
+  "all acceptance criteria",
+  "every checkbox",
+  "all checkboxes",
+  "owns the whole",
+  "own the whole",
+  "complete stated scope",
+  "entire scope",
+  // Issue-anchored whole-scope paraphrases — the natural phrasings a planner uses when it genuinely
+  // scopes a slice to the whole issue (the under-inclusive-marker false positive this widens for).
+  "the whole issue",
+  "whole issue",
+  "the entire issue",
+  "entire issue",
+  "the complete issue",
+  "complete issue",
+  "all of #",
+  "all of the issue",
+  "the whole of #",
+  "the whole of the issue",
+];
+
+/** True when `prompt` pairs a GitHub closing action with NO full-scope acknowledgement TIED to the
+ * issue it closes — the partial-scope-close defect class (issue #858). Requires BOTH a closing action
+ * and an issue reference (so a bare prose "close the door" or "Part of #12" never matches).
+ *
+ * The acknowledgement is TARGET-ASSOCIATED, not a global substring (issue #858 round-3): a whole-scope
+ * phrase is credited to issue `N` only when `#N` is ANCHORED to that phrase (immediately adjacent —
+ * "all of #N", "the whole issue #N", "full scope of #N", "#N's full scope"), or — when the whole
+ * prompt references exactly one issue — to that sole issue (unambiguous). A marker anchored to a
+ * DIFFERENT issue than the one closed (acknowledge #11's scope, close #12), or one ATTRIBUTED to
+ * others ("the full scope of #12 is handled by siblings; … close #12"), does NOT licence the close.
+ * Every numbered closing target must be acknowledged; a pronoun close ("close it") requires every
+ * referenced issue to be acknowledged (we can't tell which "it" means, so fail closed).
+ *
+ * This is a lexical lint that cannot read the issue body, so it is the first of a two-layer guard:
+ * the scope-classify gate (resources/prompts/scope-classify.md) reads each closed issue's checkboxes
+ * at PR time and catches an under-delivery that is semantically — not lexically — a partial close. */
+const CLAUSE_DELIMITERS = new Set([".", ";", ":", ",", "\n", "—"]);
+
+/** An `http(s)://…` URL span. The body runs to whitespace or `)`; trailing clause-delimiter punctuation
+ * (`.`/`,`/`;`/`:`/`!`/`?`) is trimmed because it is sentence punctuation, not URL structure (a URL
+ * written at the end of a clause must not swallow that clause's boundary). Delimiters INSIDE the trimmed
+ * span (the `.` in `github.com`, the `:` in `https:`) are part of the URL, not clause boundaries. */
+const URL_SPAN = /https?:\/\/[^\s)]+/gi;
+const URL_TRAILING_PUNCT = /[.;:,!?]+$/;
+
+/** The `[start,end)` spans of every URL in `prompt`, with trailing sentence punctuation excluded. */
+function urlSpans(prompt: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  const re = new RegExp(URL_SPAN.source, "gi");
+  let m = re.exec(prompt);
+  while (m !== null) {
+    let end = m.index + m[0].length;
+    const trailing = m[0].match(URL_TRAILING_PUNCT);
+    if (trailing) end -= trailing[0].length;
+    out.push([m.index, end]);
+    m = re.exec(prompt);
+  }
+  return out;
+}
+
+/** The sorted clause-delimiter POSITIONS in `prompt`, computed once in a single O(n) pass. The
+ * full-scope acknowledgement scan tests each marker occurrence against its surrounding clause; locating
+ * that clause by scanning back/forward per occurrence makes the whole scan QUADRATIC in prompt length
+ * when a prompt repeats a marker (issue #858 round-11 review — a valid 20,000-char prompt with repeated
+ * `full scope` markers was rescanned thousands of times, monopolising the event loop across the
+ * allowed 256 nodes). Precomputing the boundaries once and binary-searching them per occurrence keeps
+ * the aggregate scan O(n log n) regardless of marker count.
+ *
+ * A delimiter INSIDE a URL is NOT a boundary (issue #858 round-12 review): treating the `:` in `https:`
+ * or the `.` in `github.com` as a boundary split an issue URL, so the attribution/negation checks saw
+ * only the fragment before the URL (`The full scope of https`) and missed the assertion that followed it
+ * (`… is handled by siblings`). URL spans are detected once and their interior delimiters skipped. */
+function clauseBoundaries(prompt: string): number[] {
+  const spans = urlSpans(prompt);
+  let spanIdx = 0;
+  const out: number[] = [];
+  for (let i = 0; i < prompt.length; i++) {
+    // Advance past any span that ends at/before i (spans are non-overlapping and in order).
+    while (spanIdx < spans.length && spans[spanIdx][1] <= i) spanIdx++;
+    const inUrl = spanIdx < spans.length && i >= spans[spanIdx][0] && i < spans[spanIdx][1];
+    if (inUrl) continue;
+    if (CLAUSE_DELIMITERS.has(prompt.charAt(i))) out.push(i);
+  }
+  return out;
+}
+
+/** The start of the clause containing `idx`: one past the last delimiter strictly before `idx`. */
+function clauseStartAt(b: number[], idx: number): number {
+  let lo = 0;
+  let hi = b.length; // first index with b[i] >= idx
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (b[mid] < idx) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo === 0 ? 0 : b[lo - 1] + 1;
+}
+
+/** The end of the clause containing `idx`: the first delimiter at or after `idx` (exclusive). */
+function clauseEndAt(b: number[], idx: number, len: number): number {
+  let lo = 0;
+  let hi = b.length; // first index with b[i] >= idx
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (b[mid] < idx) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo === b.length ? len : b[lo];
+}
+
+/** The earliest absolute offset in `[start, end)` at which a `SCOPE_NEGATED_PREFIX` exception/redirection
+ * negator COMPLETES, or `+Infinity` when the span holds none. `SCOPE_NEGATED_PREFIX` disqualifies a
+ * marker only when a negator sits fully BEFORE it, and it is an UNANCHORED "contains" test monotonic in
+ * the marker offset `i` (once a negator is inside `slice(start, i)` it stays inside as `i` grows). So a
+ * marker at offset `i` in this clause is prefix-negated iff this value is `<= i` — computing it ONCE per
+ * clause (via a single global-regex scan, taking the minimum match-END over every match) lets each of
+ * the clause's markers be judged against its OWN prefix, instead of reusing one clause-wide boolean that
+ * let the first (shortest-prefix) marker decide every later one (issue #858 round-14 review). The single
+ * scan keeps the per-clause cost linear — no O(markers · clause-length) quadratic on a long
+ * delimiter-free clause. */
+function earliestNegatorEnd(prompt: string, start: number, end: number): number {
+  const clause = prompt.slice(start, end);
+  SCOPE_NEGATED_PREFIX_G.lastIndex = 0;
+  let min = Number.POSITIVE_INFINITY;
+  let m: RegExpExecArray | null = SCOPE_NEGATED_PREFIX_G.exec(clause);
+  while (m !== null) {
+    const matchEnd = start + m.index + m[0].length;
+    if (matchEnd < min) min = matchEnd;
+    if (m[0].length === 0) SCOPE_NEGATED_PREFIX_G.lastIndex++; // defensive: never loop on a zero-width match
+    m = SCOPE_NEGATED_PREFIX_G.exec(clause);
+  }
+  return min;
+}
+
+/** The bounded text of the marker's own clause that lies BEFORE the marker occurrence at `idx`, used to
+ * test the part-qualifier `PART_QUALIFIER_BEFORE_MARKER` — which narrows only the phrase that FOLLOWS it,
+ * so it disqualifies the marker only when it precedes it (issue #858 round-5 review).
+ *
+ * `PART_QUALIFIER_BEFORE_MARKER` is a `$`-anchored SUFFIX pattern matching a bounded handful of words (a
+ * partitive plus `of` and a determiner), so only the trailing few words can match: return at most the
+ * last `PREFIX_WINDOW` chars — cut at a word boundary so the leading `\b` never sees a spliced token.
+ * Testing the WHOLE growing before-clause per marker made the `$`-anchored regex scan O(clause-length)
+ * per marker — O(markers · clause) overall, quadratic on a long delimiter-free clause (issue #858
+ * round-12 review).
+ *
+ * This window is sound ONLY for a `$`-anchored suffix pattern. The OTHER before-marker consumer,
+ * `SCOPE_NEGATED_PREFIX`, is an UNANCHORED "contains" test (a negator anywhere in the before-clause
+ * disqualifies), so capping it to this window silently drops a negator sitting more than `PREFIX_WINDOW`
+ * chars before the marker — a fail-open regression (issue #858 round-12 adversarial review). That
+ * consumer therefore tests the WHOLE before-marker text, with the earliest negator offset cached per
+ * clause start (see `negatedPrefixEndByClause` / `earliestNegatorEnd` in `isPartialScopeClose`); it does
+ * NOT use this bounded window. */
+const PREFIX_WINDOW = 96;
+function clauseBeforeMarker(prompt: string, idx: number, b: number[]): string {
+  const start = clauseStartAt(b, idx);
+  if (idx - start <= PREFIX_WINDOW) return prompt.slice(start, idx);
+  // Cut at a whitespace boundary at/after `idx - PREFIX_WINDOW` so no token is spliced (a mid-token cut
+  // could create a spurious `\b` for the consumer's leading anchor).
+  let cut = idx - PREFIX_WINDOW;
+  while (cut < idx && !/\s/.test(prompt.charAt(cut))) cut++;
+  return prompt.slice(cut, idx);
+}
+
+/** A coordinating conjunction that joins an INDEPENDENT additional constraint onto a clause. Only `and`
+ * (and its `plus`/`&` kin) qualifies: it is the unambiguous "and also do X" additive conjunction, so a
+ * negation in the segment it introduces (`…full scope of #12 AND do not introduce regressions`) governs
+ * that other constraint, not the marker. `but`/`or`/`nor` are deliberately EXCLUDED — `but` is the
+ * exception idiom's own keyword (`but without covering X` must keep the trailing negation inside the
+ * marker's assertion so it still disqualifies), and `or` rarely coordinates an independent constraint in
+ * a planner brief. (issue #858 round-6 review) */
+const ASSERTION_COORDINATOR = /\b(?:and|plus)\b|&&?/gi;
+
+/** Test-only instrumentation: the number of clause-scan steps (coordinator-threshold sweep iterations +
+ * per-marker coordinator examinations) performed by the full-scope acknowledgement scan since the last
+ * `resetClauseScanSteps()`. This lets the complexity regression test assert the scan is LINEAR in clause
+ * size with a deterministic operation count instead of a nondeterministic wall-clock threshold (issue
+ * #858 round-12 review). Not read in production logic. */
+let clauseScanSteps = 0;
+
+/** Test-only: read and reset the clause-scan step counter. Returns the count since the previous reset. */
+export function drainClauseScanSteps(): number {
+  const n = clauseScanSteps;
+  clauseScanSteps = 0;
+  return n;
+}
+
+/** Precomputed, per-clause data that lets each marker's delivery-assertion segment be located WITHOUT
+ * re-scanning the clause. Round-11 precomputed the delimiter boundaries once and binary-searched them,
+ * but `deliveryAssertionAround` still re-ran the coordinator regex over the whole clause and re-derived
+ * every coordinator's compound-predicate status for EACH marker — so a long delimiter-free clause with M
+ * markers and C coordinators cost O(M·C) slice+scan work, and the old O(tokens²)
+ * `isCompoundPredicateContinuation` made it worse (issue #858 round-12 review: a valid 20,000-char
+ * `full scope … and …` prompt took minutes across the 256 allowed nodes). This precompute is built ONCE
+ * per clause in a single forward pass; each marker then costs O(number of coordinators in its clause)
+ * with O(1) compound lookups and no re-slicing. */
+interface ClauseAssertionData {
+  /** The clause text (delimiter-bounded). */
+  clause: string;
+  /** Coordinator occurrences in order: `[bStart, bEnd]` char offsets within `clause`. */
+  coords: Array<[number, number]>;
+  /** Per coordinator, the minimal MARKER token index at which the text it introduces (`bEnd` up to the
+   * marker) becomes a compound-predicate continuation — i.e. the coordinator stops splitting. `Infinity`
+   * when the introduced text never leads with a verb. Lets the per-marker compound test be O(1). */
+  compoundAtToken: number[];
+  /** Token start offsets within `clause` (for mapping a marker char offset to its token index). */
+  tokenStarts: number[];
+  /** Per token `t`, the smallest token index `s` such that every token in `[s, t)` is an
+   * adverb/coordinator (`isSkip`). The "near window" before a marker at token `t` is `[s, t)`; a
+   * coordinator ending inside it has an empty/adverbs-only `introduced`, which is exactly when the
+   * marker-lead compound test applies. */
+  nearStart: number[];
+  /** Per coordinator, `tokenIndexAt(bEnd)` — the first token at/after the coordinator's end. */
+  coordTok: number[];
+  /** Whether each token is an adverb/coordinator (`quickly`/`and`/`or`/`then`/`-ly`). */
+  isSkip: boolean[];
+  /** The first token index at/after a char offset (binary search over `tokenStarts`). */
+  tokenIndexAt: (pos: number) => number;
+  // --- Mutable ascending-sweep state (reset per clause; markers are fed in ascending position order) ---
+  /** Index into `coords` of the next coordinator not yet pushed onto the far heap. */
+  farPtr: number;
+  /** Max-heap (by `bEnd`) of far coordinators' `[bEnd, compoundAtToken]`, with lazy expiry. */
+  farHeap: Array<[number, number]>;
+}
+
+/** A token that can lead a compound predicate's adverb/coordinator run (`quickly`, `and`, `or`, `then`). */
+const COMPOUND_SKIP_TOKEN = /^(?:\w+ly|and|or|then)$/i;
+/** A token that is a delivery/completion verb lead (the compound predicate's head). Mirrors the verb
+ * alternation in `COMPOUND_PREDICATE_LEAD`; matched against a whole token so a trailing `\b` inside the
+ * token (e.g. `handle-bar`) still counts, exactly as the sticky lead pattern does. */
+const COMPOUND_VERB_TOKEN =
+  /^(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship|plan|design|scope|close|fix|resolve|add|update|open|write|create|land|merge|test|verify|document)(?:s|es|ed|ing)?\b/i;
+
+/** Build the per-clause precompute in ONE forward pass (see `ClauseAssertionData`). Pure string/regex
+ * tokenisation plus a monotonic sweep — O(tokens + coordinators) per clause. */
+function buildClauseAssertionData(clause: string): ClauseAssertionData {
+  // Tokenise once (whitespace-separated runs), recording each token's start offset.
+  const tokenStarts: number[] = [];
+  const isSkip: boolean[] = [];
+  const isVerb: boolean[] = [];
+  {
+    const re = /\S+/g;
+    let m = re.exec(clause);
+    while (m !== null) {
+      tokenStarts.push(m.index);
+      isSkip.push(COMPOUND_SKIP_TOKEN.test(m[0]));
+      isVerb.push(COMPOUND_VERB_TOKEN.test(m[0]));
+      m = re.exec(clause);
+    }
+  }
+  const T = tokenStarts.length;
+  // nextContent[k] = smallest token index >= k that is NOT an adverb/coordinator (the lead candidate of
+  // the suffix starting at k); T when the rest is all adverbs/coordinators.
+  const nextContent = new Array<number>(T + 1).fill(T);
+  for (let k = T - 1; k >= 0; k--) nextContent[k] = isSkip[k] ? nextContent[k + 1] : k;
+  // leadVerbReach[k] = the verb's token index when the suffix starting at k leads with a verb, else Infinity.
+  const leadVerbReach = new Array<number>(T).fill(Number.POSITIVE_INFINITY);
+  for (let k = 0; k < T; k++) {
+    const nc = nextContent[k];
+    if (nc < T && isVerb[nc]) leadVerbReach[k] = nc;
+  }
+  // Coordinator occurrences in order.
+  const coords: Array<[number, number]> = [];
+  {
+    const re = new RegExp(ASSERTION_COORDINATOR.source, "gi");
+    let m = re.exec(clause);
+    while (m !== null) {
+      coords.push([m.index, m.index + m[0].length]);
+      m = re.exec(clause);
+    }
+  }
+  // The first token index at/after a char offset (binary search over tokenStarts).
+  const tokenIndexAt = (pos: number): number => {
+    let lo = 0;
+    let hi = T;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (tokenStarts[mid] < pos) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  // Per coordinator, the marker token index at which it stops splitting when its introduced text is a
+  // compound-predicate continuation. The introduced text must be VERB-LED — its FIRST content token,
+  // after skipping a leading adverb/coordinator run, is a completion verb (`and deliver …`, `and quickly
+  // own …`). `leadVerbReach[te]` answers exactly that lead question for the suffix starting at the
+  // coordinator's first introduced token `te`: it is the verb's token index (finite) iff the introduced
+  // text leads with a verb, else `Infinity`.
+  //
+  // Testing only the LEAD (not any later suffix) is the correct semantics (issue #858 round-13 review):
+  // scanning every later token until SOME suffix reaches a verb misclassifies an INDEPENDENT clause whose
+  // verb merely sits later (`… and this slice delivers the full scope of #12`) as a compound predicate,
+  // retaining an unrelated earlier negation/attribution; and that nested scan was itself O(coords ·
+  // tokens) on a clause whose introduced text never leads with a verb. When the introduced text leads
+  // with a verb the coordinator shares the prior subject for EVERY marker at/after the first introduced
+  // token, so the threshold is the constant `te + 1` (the marker sits at/after token `te`); when it does
+  // not, the coordinator always splits (`Infinity`). This is O(1) per coordinator — no sweep.
+  const compoundAtToken = coords.map(([, bEnd]) => {
+    const te = tokenIndexAt(bEnd);
+    return te < T && leadVerbReach[te] !== Number.POSITIVE_INFINITY ? te + 1 : Number.POSITIVE_INFINITY;
+  });
+  // nearStart[t] = smallest token index `s` such that tokens [s, t) are all adverb/coordinator (`isSkip`).
+  // Computed in one forward pass: as t advances, the window's left edge resets to t whenever token t-1 is
+  // NOT a skip token, and otherwise extends.
+  const nearStart = new Array<number>(T + 1).fill(0);
+  {
+    let left = 0;
+    for (let t = 0; t <= T; t++) {
+      if (t > 0 && !isSkip[t - 1]) left = t;
+      nearStart[t] = left;
+    }
+  }
+  const coordTok = coords.map(([, bEnd]) => tokenIndexAt(bEnd));
+  return {
+    clause,
+    coords,
+    compoundAtToken,
+    tokenStarts,
+    nearStart,
+    coordTok,
+    isSkip,
+    tokenIndexAt,
+    farPtr: 0,
+    farHeap: [],
+  };
+}
+
+/** Max-heap (by element `[0]`, the coordinator `bEnd`) operations for the far-coordinator sweep. A tiny
+ * binary heap; expiry of compound coordinators is LAZY (skipped at the top on read), so a coordinator is
+ * pushed/popped at most once per clause — keeping the ascending marker sweep O((markers + coordinators)
+ * log coordinators) per clause instead of O(markers · coordinators). */
+function heapPush(heap: Array<[number, number]>, item: [number, number]): void {
+  heap.push(item);
+  let i = heap.length - 1;
+  while (i > 0) {
+    const parent = (i - 1) >> 1;
+    if (heap[parent][0] >= heap[i][0]) break;
+    [heap[parent], heap[i]] = [heap[i], heap[parent]];
+    i = parent;
+  }
+}
+
+function heapPop(heap: Array<[number, number]>): void {
+  const last = heap.pop();
+  if (heap.length === 0 || last === undefined) return;
+  heap[0] = last;
+  let i = 0;
+  for (;;) {
+    const l = 2 * i + 1;
+    const r = 2 * i + 2;
+    let m = i;
+    if (l < heap.length && heap[l][0] > heap[m][0]) m = l;
+    if (r < heap.length && heap[r][0] > heap[m][0]) m = r;
+    if (m === i) break;
+    [heap[m], heap[i]] = [heap[i], heap[m]];
+    i = m;
+  }
+}
+
+/** The marker's DELIVERY ASSERTION: its own comma-bounded clause, further narrowed to the
+ * `and`-coordinated segment the marker occurrence at `[markerStart,markerEnd)` sits in. Used by the
+ * whole-assertion negation disqualifiers (`SCOPE_NEGATED_CORE`, `SCOPE_NEGATED_WITHOUT_DELIVERY`) so a
+ * negator governing an UNRELATED constraint coordinated onto the clause by `and` does not disqualify the
+ * marker, while a negator in the marker's own segment still does (issue #858 round-6 review). A negator
+ * directly on the marker (`does not deliver the full scope`) has no coordinator between it and the
+ * marker, so it stays in-segment and still disqualifies; the fail-closed default is the whole clause
+ * when no coordinator splits it.
+ *
+ * `cache` memoises `buildClauseAssertionData` per clause start so the many markers sharing one clause do
+ * not each rebuild it (issue #858 round-12 review).
+ *
+ * Returns the segment text AND its absolute (`prompt`-relative) `[absStart, absEnd)` bounds. The bounds
+ * let the caller group occurrences that share a segment start: those segments are nested prefixes
+ * (same start, growing end), so a "contains" disqualifier regex over them is MONOTONIC in the end offset
+ * — the basis for the per-group memoisation in `isPartialScopeClose` (issue #858 round-12 review). */
+function deliveryAssertionAround(
+  prompt: string,
+  markerStart: number,
+  markerEnd: number,
+  b: number[],
+  cache: Map<number, ClauseAssertionData>,
+): { text: string; absStart: number; absEnd: number } {
+  const cStart = clauseStartAt(b, markerStart);
+  let data = cache.get(cStart);
+  if (data === undefined) {
+    data = buildClauseAssertionData(prompt.slice(cStart, clauseEndAt(b, markerStart, prompt.length)));
+    cache.set(cStart, data);
+  }
+  const { clause, coords, compoundAtToken, nearStart, coordTok, tokenIndexAt } = data;
+  // The clause spans the marker; locate the marker's offset within it (the clause start is the first
+  // delimiter boundary at or before markerStart).
+  const relStart = markerStart - cStart;
+  const relEnd = markerEnd - cStart;
+  // The marker's token index: the first token starting at/after relStart. Markers are whole words found
+  // by substring scan, so relStart is always a token start.
+  const markerToken = tokenIndexAt(relStart);
+
+  // The marker's assertion segment is `[segStart, segEnd)`: segStart is the end of the LAST coordinator
+  // before the marker that genuinely SPLITS (is not a compound-predicate continuation), segEnd the start
+  // of the first coordinator at/after the marker. A coordinator BEFORE the marker normally splits, but a
+  // coordinator introducing a COMPOUND PREDICATE — a bare verb phrase with no new subject — shares the
+  // prior segment's subject, so it must NOT split (else the active-voice attribution check loses the
+  // subject; issue #858 round-9 review).
+  //
+  // Markers are fed in ASCENDING position order, so this is a single forward sweep per clause (issue
+  // #858 round-12 review). Coordinators split into two sets relative to the marker:
+  //  - FAR coordinators end before the marker's "near window" (the trailing adverb/coordinator run), so
+  //    their introduced text contains a real (non-adverb) token and the marker-lead test canNOT apply —
+  //    their compound status is purely the precomputed threshold. The max valid far `bEnd` is tracked on
+  //    a max-heap, advanced and expired monotonically.
+  //  - NEAR coordinators end inside the near window (empty/adverbs-only introduced), so the marker-lead
+  //    test (mlc) CAN apply; there are only as many as the adverb run is long, so they are checked
+  //    individually.
+  const nStart = nearStart[markerToken];
+
+  // FAR set: coordinators with coordTok <= nStart-1 (they end at/before the near window's start, so a
+  // non-skip token lies between them and the marker). Push newly-in-range coordinators; expire those whose
+  // compound threshold the marker has passed (they no longer split). The heap top is the max valid bEnd.
+  while (data.farPtr < coords.length && coordTok[data.farPtr] <= nStart - 1) {
+    heapPush(data.farHeap, [coords[data.farPtr][1], compoundAtToken[data.farPtr]]);
+    data.farPtr++;
+  }
+  while (data.farHeap.length > 0 && data.farHeap[0][1] <= markerToken) heapPop(data.farHeap);
+  const far = data.farHeap.length > 0 ? data.farHeap[0][0] : 0;
+
+  // NEAR set: coordinators from farPtr onward whose bEnd <= relStart (they end inside the near window or
+  // right at the marker). These are few (the adverb run is short); test each with the full compound rule.
+  let near = 0;
+  for (let ci = data.farPtr; ci < coords.length; ci++) {
+    clauseScanSteps++; // test instrumentation: one near-coordinator examined per marker
+    const bEnd = coords[ci][1];
+    if (bEnd > relStart) break; // coords are ordered; past the marker
+    // The marker's OWN lead is the continuation when the coordinator sits right at the marker
+    // (`… and OWN the whole`, `introduced` empty) OR when only adverbs/coordinators intervene
+    // (`… and QUICKLY own the whole`). In both the predicate's head verb is inside the marker, so test
+    // the marker's lead.
+    const introduced = clause.slice(bEnd, relStart);
+    const markerLeadIsCompound =
+      (introduced.trim() === "" || /^(?:\s*(?:\w+ly|and|or|then))*\s*$/.test(introduced)) &&
+      isCompoundPredicateContinuation(clause.slice(relStart, relEnd));
+    const compound = markerToken >= compoundAtToken[ci] || markerLeadIsCompound;
+    if (bEnd > near && !compound) {
+      near = bEnd;
+    }
+  }
+  const segStart = Math.max(far, near);
+
+  // segEnd: the start of the first coordinator at/after the marker's end (binary search — coords are
+  // ordered by bStart).
+  let segEnd = clause.length;
+  {
+    let lo = 0;
+    let hi = coords.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (coords[mid][0] < relEnd) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo < coords.length) segEnd = coords[lo][0];
+  }
+  // Return ABSOLUTE (prompt-relative) bounds so the caller can group occurrences sharing a segment start.
+  return { text: clause.slice(segStart, segEnd), absStart: cStart + segStart, absEnd: cStart + segEnd };
+}
+
+/** True when the text between a coordinator and the marker is a COMPOUND PREDICATE continuation — a bare
+ * verb phrase (optionally adverb-led) with NO subject noun of its own. `Siblings plan and DELIVER the
+ * full scope` has `deliver` right after `and` (a verb, no new subject), so the `and` shares the prior
+ * subject `Siblings`. By contrast `… and THE REGRESSION SUITE is handled …` leads with a determiner/noun
+ * (a new subject), so it is an independent constraint, not a compound predicate. The heuristic: the
+ * continuation leads with an optional adverb then a VERB (a delivery/completion verb or a generic
+ * `-ing`/`-s`/base verb), never a determiner/pronoun/noun. Conservative — it only suppresses the split
+ * when the lead word is clearly verb-like, so an independent constraint with a nominal subject still
+ * splits (issue #858 round-9 review). */
+const COMPOUND_PREDICATE_LEAD =
+  /^\s*(?:(?:\w+ly|and|or|then)\s+)*(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship|plan|design|scope|close|fix|resolve|add|update|open|write|create|land|merge|test|verify|document)(?:s|es|ed|ing)?\b/i;
+/** Sticky (anchored at `lastIndex`) form of the lead test, WITHOUT the leading `^\s*` — the caller
+ * positions `lastIndex` at a token start. Derived from `COMPOUND_PREDICATE_LEAD.source` (single source of
+ * truth — no divergent copy of the verb list) by stripping the leading `^\s*` anchor and adding the
+ * sticky flag. Used by the linear token scan in `isCompoundPredicateContinuation` so testing every
+ * token-suffix of a segment is O(tokens), not the O(tokens²) of re-joining and re-matching each suffix
+ * (`tokens.slice(k).join(" ")` rebuilt a fresh string per suffix — issue #858 round-12 review: on a long
+ * delimiter-free clause that per-suffix re-join made the whole full-scope scan superlinear). */
+const COMPOUND_PREDICATE_LEAD_STICKY = new RegExp(
+  // Strip the leading `^` anchor and the `\s*` run (the caller positions lastIndex at a token start).
+  COMPOUND_PREDICATE_LEAD.source.replace(/^\^/, "").replace(/^\\s\*/, ""),
+  "iy",
+);
+// Reference the anchored form so the canonical pattern stays a live symbol (the sticky derivative is the
+// one used in the hot scan); this also guards the derivation above against a source drift that drops the
+// anchor the `.replace` expects.
+void COMPOUND_PREDICATE_LEAD;
+function isCompoundPredicateContinuation(between: string): boolean {
+  // A compound predicate is a bare VERB PHRASE with no subject of its own. It can be verb-led
+  // (`and deliver …`), adverb-led (`and carefully deliver …`), or a coordinator+adverb chain whose
+  // LAST token is the verb (`and quickly own …`, `and then handle …`) — the verb need not be the FIRST
+  // word, only the predicate's head. So test the lead at the start AND after each adverb/coordinator
+  // boundary: if any suffix leads with a completion verb, the segment is a compound continuation and
+  // the coordinator shares the prior subject (issue #858 round-9 adversarial review — requiring the
+  // verb first dropped the subject for `design and quickly own`, re-opening the attribution bypass).
+  //
+  // Test each token start with the STICKY lead pattern (O(1) per position, O(tokens) total) instead of
+  // rebuilding every suffix string (O(tokens²)). Behaviour-identical to the suffix-join form: the lead
+  // pattern only inspects a leading run of adverb/coordinator tokens then one verb, so anchoring it at
+  // each token start matches exactly the suffixes the old loop re-joined (verified by differential fuzz).
+  const n = between.length;
+  let i = 0;
+  while (i < n) {
+    while (i < n && /\s/.test(between.charAt(i))) i++; // skip whitespace to the next token start
+    if (i >= n) break;
+    COMPOUND_PREDICATE_LEAD_STICKY.lastIndex = i;
+    if (COMPOUND_PREDICATE_LEAD_STICKY.test(between)) return true;
+    while (i < n && !/\s/.test(between.charAt(i))) i++; // advance past this token
+  }
+  return false;
+}
+
+/** A whole-scope marker narrowed by a PREFIX PARTITIVE ("half of every acceptance criterion", "part of
+ * the whole issue", "a subset of the full scope") scopes the acknowledgement DOWN to a part, so it must
+ * NOT licence a close — the mirror of `PART_QUALIFIER_AFTER_MARKER` on the LEADING side (issue #858
+ * round-5 review: "detect partial-scope qualifiers before the issue marker"). Matches a partitive
+ * quantifier at the END of the marker's before-clause text, so it is adjacent to the marker. The `of`
+ * is OPTIONAL: the most common English partitive drops it ("half the full scope", "part the whole
+ * issue", "half my scope"), so requiring a literal `of` let exactly those siblings bypass the guard
+ * (issue #858 round-5 adversarial review). An optional determiner/possessive (`the`/`its`/`my`/`our`/…)
+ * may sit between the partitive and the marker. Whole quantifiers (`all of`, `the whole of`) are
+ * deliberately excluded — they denote the WHOLE, not a part — and an unrelated earlier "… of …" ("as
+ * part of the milestone, deliver the full scope …") is not adjacent to the marker, so it does not
+ * disqualify. */
+const PART_QUALIFIER_BEFORE_MARKER =
+  /\b(?:(?:a|one|two|three|four|five)\s+)?(?:half|part|portion|some|subset|fraction|piece|bit|chunk|segment|slice|section|fragment|sliver|handful|couple|number|few|several|most|many|much|majority|minority|remainder|rest)\s+(?:of\s+)?(?:(?:the|its|this|that|each|every|all|a|my|our|your|their|his|her)\s+)?$/i;
+
+/** A whole-scope marker immediately followed by a PART-QUALIFIER scopes the acknowledgement DOWN to a
+ * part, so it must NOT licence a close (issue #858 round-3 adversarial review). Matching is a bare
+ * substring, so "the whole issue's parser slice", "all of #12's backend", and "every acceptance
+ * criterion's auth half" all credit the marker even though each describes a PARTIAL deliverable — the
+ * exact defect class the guard exists to catch. This pattern matches the text IMMEDIATELY after a
+ * marker occurrence when that text is a possessive (`'s <part>`) or partitive (`of <part>` / `of the
+ * <part>`) that narrows the whole to one slice. The marker is anchored at its end (`end`), so the
+ * qualifier must be adjacent — a part-word appearing LATER in the clause ("the whole issue #12,
+ * including the parser slice") does NOT disqualify. The part-word list is the vocabulary a planner
+ * uses to name a sub-scope; it is deliberately broad (any of these words right after the marker means
+ * the acknowledgement is not whole-scope). */
+const PART_QUALIFIER_AFTER_MARKER =
+  /^(?:['’]s|of)\s+(?:(?:the|a|an|one|first|second|third|single|only|just)\s+){0,2}(?:parser|slice|part|portion|half|backend|frontend|auth|criteri(?:on|a)|checkbox|front|back|ui|api|db|database|server|client|component|module|piece|section|stage|step|phase|bit|chunk|segment|subset|subpart|aspect|layer|tier|side|edge|corner|fragment|shard|sliver|remnant|rest|remainder)\b/i;
+
+/** True when the text immediately after a whole-scope marker occurrence (at `[start,end)`) is a
+ * part-qualifier that scopes the acknowledgement DOWN to a part — disqualifying the occurrence so it
+ * cannot licence a close. The qualifier can follow the marker directly ("the whole issue's parser
+ * slice"), follow a connective word the marker is a prefix of ("own the whole issue's backend" — the
+ * marker "own the whole" ends before "issue"), or follow the `#N` anchor the marker attaches to ("all
+ * of #12's backend"). So we first consume any run of connective/anchor tokens (whitespace, `issue`,
+ * `scope`, `of`, `the`, `#N`) and then test for the part-qualifier at each step. */
+function isPartQualified(prompt: string, end: number): boolean {
+  const rest = prompt.slice(end, end + 64);
+  if (PART_QUALIFIER_AFTER_MARKER.test(rest)) return true;
+  // Walk past one connective/anchor token at a time, re-testing for the qualifier after each, so a
+  // qualifier that follows "issue" / "scope" / "#N" (etc.) right after the marker still disqualifies.
+  const step = /^(\s+|issue\b|scope\b|of\b|the\b|#[0-9]+|[0-9]+)/i;
+  let offset = 0;
+  for (let n = 0; n < 4; n++) {
+    const m = rest.slice(offset).match(step);
+    if (!m) break;
+    offset += m[0].length;
+    if (PART_QUALIFIER_AFTER_MARKER.test(rest.slice(offset))) return true;
+  }
+  return false;
+}
+
+/** A TRAILING scope-EXCLUSION connective (`except`/`excluding`/`excluded`/`omitting`/`other than`/
+ * `apart from`/`aside from`/`but not`/`save for`/`with the exception of`/`minus`) that narrows a whole-scope marker DOWN to "the
+ * whole MINUS a named part" — so it must NOT licence a close (issue #858 round-15 review). This is the
+ * AFTER-anchor mirror of the before-marker `SCOPE_NEGATED_PREFIX` exception vocabulary: in `Deliver the
+ * full scope of #12, excluding the parser; close #12.` the exclusion sits AFTER the marker's `#12`
+ * anchor and the comma ends the marker's clause before it, so neither the clause-bounded
+ * `SCOPE_NEGATED_AFTER_MARKER_DELIVERY` re-catch nor the before-marker `SCOPE_NEGATED_PREFIX` ever sees
+ * it, and the explicitly-partial brief validated. Keyed `^\s*,?\s*…` so it may cross at most ONE comma
+ * (the clause boundary the exclusion typically follows); the negative lookahead keeps an EXCLUSION OF
+ * NOTHING (`excluding nothing`, `except none`, `other than no part`) affirmative — that still delivers
+ * the whole scope. A BARE trailing `but` (`…, but split across two commits`) is deliberately NOT here —
+ * only the `but not` exception idiom is — mirroring `SCOPE_NEGATED_PREFIX`, which leaves bare `but` out
+ * as a common affirmative conjunction. Trailing `without`/`rather than`/`instead of` are likewise
+ * excluded: those govern a manner/constraint and stay affirmative (the `without <delivery gerund>` case
+ * is already caught by `SCOPE_NEGATED_WITHOUT_DELIVERY`). */
+const SCOPE_EXCLUSION_LEAD =
+  /^\s*,?\s*\b(?:except(?:ing|\s+for)?|exclud(?:e|es|ed|ing)|omit(?:s|ted|ting)?|other\s+than|apart\s+from|aside\s+from|save\s+for|but\s+not|with\s+the\s+exception\s+of|minus)\b\s+(?!nothing\b|none\b|no\b|any\s+other\b)\S/i;
+
+/** True when a whole-scope marker ending at `end` is narrowed by a TRAILING exclusion phrase that sits
+ * after the marker's issue anchor (and at most one comma). We walk past the anchor run — whitespace,
+ * `of`/`the`/`issue`/`scope`/`'s`, a bare or repo-qualified `#N`, or an issue URL — re-testing for the
+ * exclusion connective after each token, so `full scope of #12, excluding the parser` disqualifies even
+ * though the exclusion is several anchor tokens and a comma past the marker. The walk is bounded (at
+ * most 8 anchor tokens) and `SCOPE_EXCLUSION_LEAD` crosses at most one comma, so a distant `excluding`
+ * governing an unrelated later phrase cannot reach back and disqualify this marker. */
+function isExclusionQualified(prompt: string, end: number): boolean {
+  const rest = prompt.slice(end, end + 96);
+  const step = /^(?:\s+|['’]s|of\b|the\b|issue\b|scope\b|#?\s*[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+|https?:\/\/[^\s)]+)/i;
+  let offset = 0;
+  for (let n = 0; n < 8; n++) {
+    if (SCOPE_EXCLUSION_LEAD.test(rest.slice(offset))) return true;
+    const m = rest.slice(offset).match(step);
+    if (!m || m[0].length === 0) break;
+    offset += m[0].length;
+  }
+  return false;
+}
+
+/** The repo-qualified issue KEY (see `issueKey`) ANCHORED to a whole-scope phrase occupying
+ * `[start,end)` in `prompt`, or null if none is adjacent. Checks, in order: a `#N` (optionally
+ * `owner/repo#N`) or an issue URL (`…/owner/repo/issues/N`) immediately AFTER the phrase (through at
+ * most a few connective words — "of", "the", "issue"; or directly, for markers that already end in
+ * `#`), then a possessive/adjacent `owner/repo#N`, bare `#N`, or issue URL immediately BEFORE it.
+ * Issue URLs are a first-class issue reference (parsed by `issueRefsIn`/`closingTargets`), so the
+ * anchor must recognise them too — otherwise a prompt whose only full-scope acknowledgement is
+ * URL-anchored, and which references a second issue (so the sole-issue fallback is unavailable), is
+ * wrongly rejected (issue #858 round-5 review). Proximity is what ties the acknowledgement to a
+ * specific issue, so a phrase next to `owner/alpha#12` (or its URL) cannot license closing
+ * `owner/beta#12` (or a bare `#12`) in the same clause — the repository prefix is preserved, not
+ * collapsed to the bare number. */
+function anchoredIssueKey(prompt: string, start: number, end: number): string | null {
+  const after = prompt.slice(end, end + 96);
+  // Lex the candidate reference that immediately FOLLOWS the marker (through at most a few connective
+  // words — "of", "the", "issue"), with NO digit-capture group (the single-grammar guard bans a local
+  // `#(<digits>`/`/issues/(<digits>` capture), then classify it through the canonical parser
+  // (`issueRefKey`). A marker that already ends in `#` is anchored to the bare number that follows.
+  if (prompt[end - 1] === "#") {
+    const num = after.match(/^[0-9]+/);
+    if (num) return issueKey(null, num[0]);
+  } else {
+    const afterRef = after.match(/^\s*(?:(?:of|the|issue)\s+){0,3}(https?:\/\/[^\s)]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|#[0-9]+)/i);
+    if (afterRef) {
+      const key = issueRefKey(afterRef[1]);
+      if (key) return key;
+    }
+  }
+  const before = prompt.slice(Math.max(0, start - 96), start);
+  // The reference immediately BEFORE the marker (a possessive/adjacent `owner/repo#N`, bare `#N`, or an
+  // issue URL), optionally followed by `'s`/`of`. Lexed capture-free, classified via `issueRefKey`.
+  const beforeRef = before.match(/(https?:\/\/[^\s)]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|#[0-9]+)(?:['’]s|s['’]|['’])?\s*(?:of\s+)?$/i);
+  if (beforeRef) {
+    const key = issueRefKey(beforeRef[1]);
+    if (key) return key;
+  }
+  return null;
+}
+
+function isPartialScopeClose(prompt: string): boolean {
+  if (!ISSUE_REF_PATTERN.test(prompt)) return false;
+
+  // The AUTHORITATIVE closing targets (negation-aware): a directly-negated close (`do not close #12`)
+  // is not a target. If every close in the prompt is negated — or there is no closing LANGUAGE at all —
+  // there is no ACTIVE close to guard, so the brief is a safe partial-slice brief, not a
+  // partial-scope-close (issue #858 round-7 review). `closingTargets` is the SINGLE source of the
+  // closing grammar (`CLOSING_TARGET_PATTERN`); there is no separate pre-filter to drift from it
+  // (issue #858 round-16 review removed the duplicate `CLOSING_ACTION_PATTERN`).
+  const { numbered, pronoun } = closingTargets(prompt);
+  if (numbered.length === 0 && !pronoun) return false;
+
+  const distinct = new Set(issueRefsIn(prompt));
+  const sole = distinct.size === 1 ? [...distinct][0] : null;
+
+  // Which issues does the brief genuinely acknowledge owning the FULL scope of? Scan each whole-scope
+  // phrase occurrence, anchor it to the issue immediately adjacent to it (or the sole issue), and skip
+  // any occurrence whose clause attributes the scope to others, NEGATES/disclaims it ("does not deliver
+  // the full scope of #12"), or that is immediately qualified DOWN to a part ("the whole issue's parser
+  // slice") — each is a non-assertion, not a whole-scope acknowledgement.
+  const lower = prompt.toLowerCase();
+  const acknowledged = new Set<string>();
+  // Clause-delimiter positions, computed ONCE (issue #858 round-11 review): the per-occurrence
+  // disqualifiers below each locate the marker's clause, and doing that by scanning back/forward per
+  // occurrence makes the whole scan quadratic in prompt length when a marker repeats. Binary-searching
+  // the precomputed boundaries keeps it O(n log n).
+  const bounds = clauseBoundaries(prompt);
+  // Per-clause coordinator/segment precompute, built lazily ONCE per clause and shared across every
+  // marker occurrence in that clause (issue #858 round-12 review): without it, a long delimiter-free
+  // clause with many markers re-derives each coordinator's compound-predicate status per marker, which is
+  // quadratic in clause length.
+  const assertionCache = new Map<number, ClauseAssertionData>();
+  // Collect every whole-scope marker occurrence across all marker phrases, then process them in
+  // ASCENDING position order. The per-clause sweeper (`deliveryAssertionAround`) advances a coordinator
+  // pointer and a far/near split monotonically as the marker position advances, so feeding occurrences
+  // in ascending order keeps the whole scan LINEAR in clause size (issue #858 round-12 review); feeding
+  // them phrase-by-phrase (all of one marker, then the next) would revisit earlier positions and break
+  // the monotonic sweep.
+  const occurrences: Array<[number, number]> = [];
+  for (const marker of FULL_SCOPE_MARKERS) {
+    for (let i = lower.indexOf(marker); i >= 0; i = lower.indexOf(marker, i + marker.length)) {
+      occurrences.push([i, i + marker.length]);
+    }
+  }
+  occurrences.sort((a, b) => a[0] - b[0]);
+  // `SCOPE_NEGATED_AFTER_MARKER_DELIVERY` re-catches a negator that sits AFTER the marker yet still
+  // disclaims its scope (`…full scope of #12 AND it is not fully delivered`). It must therefore run
+  // against the MARKER-RELATIVE SUFFIX — the text from the marker to the clause end — NOT the whole
+  // clause: scanning the text BEFORE the marker matched a negator that PRECEDES it (`The tests must not
+  // regress and this slice delivers the full scope of #12` matches `not … delivers`), rejecting a
+  // legitimate acknowledgement for a negation that governs an unrelated earlier constraint (issue #858
+  // round-13 review). The suffix differs per marker, so memoise the boolean keyed by the marker's own
+  // offset `i` — re-running the backtracking regex per marker over a long clause would be O(markers ·
+  // clause-length), quadratic on a long delimiter-free clause (issue #858 round-12 review).
+  const negatedAfterMarkerByMarker = new Map<number, boolean>();
+  // `SCOPE_NEGATED_PREFIX` is an UNANCHORED "contains" test over the marker's BEFORE-MARKER text
+  // (`slice(clauseStart, i)`, a negator anywhere before the marker disqualifies it), so it must NOT be
+  // capped to the bounded `clauseBeforeMarker` window — that window is sound only for the `$`-anchored
+  // `PART_QUALIFIER_BEFORE_MARKER`, and capping the contains test to it silently dropped a negator
+  // sitting more than `PREFIX_WINDOW` chars before the marker, failing the guard open (issue #858
+  // round-12 adversarial review). The before-marker text is NOT identical across a clause's markers — it
+  // GROWS with each marker's offset `i` — so a single boolean keyed by clause start let the first
+  // (shortest-prefix) marker decide every later one, crediting a disclaimed trailing marker whose own
+  // prefix DOES hold a negator (issue #858 round-14 review). Because the test is monotonic in `i`, cache
+  // instead the earliest absolute offset at which a negator completes (one O(clause-length) scan per
+  // clause, via `earliestNegatorEnd`); a marker at `i` is negated iff that offset `<= i`.
+  const negatedPrefixEndByClause = new Map<number, number>();
+  // The four assertion disqualifiers (`SCOPE_ATTRIBUTED_TO_OTHERS`, `SCOPE_ACTIVE_VOICE_OTHERS`,
+  // `SCOPE_NEGATED_CORE`, `SCOPE_NEGATED_WITHOUT_DELIVERY`) are "contains" tests over the marker's
+  // assertion segment. Occurrences that share a segment START sit in nested segments (same start, growing
+  // end — e.g. a delimiter-free clause where every coordinator is a compound predicate), so each such test
+  // is MONOTONIC in the segment end: a prefix that matches stays matching as it grows, and a prefix that
+  // does NOT match means no shorter prefix in the group matches either. So, per absStart-group, test each
+  // regex ONCE against the group's LONGEST segment: if it does not match, no occurrence in the group is
+  // disqualified by it; if it does match, only the occurrences at/past the minimal matching end are
+  // disqualified (found by a binary search over the group's sorted ends). This collapses the per-marker
+  // regex work on a pathological clause from O(markers · segment) to O(segment) per group (issue #858
+  // round-12 review).
+  const ASSERTION_DISQUALIFIERS: ReadonlyArray<RegExp> = [
+    SCOPE_ATTRIBUTED_TO_OTHERS,
+    SCOPE_ACTIVE_VOICE_OTHERS,
+    SCOPE_NEGATED_CORE,
+    SCOPE_NEGATED_WITHOUT_DELIVERY,
+  ];
+
+  // First pass: compute each surviving occurrence's assertion segment and group occurrences by segment
+  // start (occurrences are already in ascending position order, so each group's ends come out sorted).
+  interface Occurrence {
+    i: number;
+    markerEnd: number;
+    absStart: number;
+    absEnd: number;
+    text: string;
+  }
+  const groups = new Map<number, Occurrence[]>();
+  for (const [i, markerEnd] of occurrences) {
+    if (isPartQualified(prompt, markerEnd)) continue;
+    if (isExclusionQualified(prompt, markerEnd)) continue;
+    const assertion = deliveryAssertionAround(prompt, i, markerEnd, bounds, assertionCache);
+    const occ: Occurrence = { i, markerEnd, absStart: assertion.absStart, absEnd: assertion.absEnd, text: assertion.text };
+    const g = groups.get(assertion.absStart);
+    if (g === undefined) groups.set(assertion.absStart, [occ]);
+    else g.push(occ);
+  }
+
+  // Per group + per regex, the minimal segment-end that matches (Infinity if the longest segment is
+  // clean). Computed once per group against the longest segment, refined by binary search only on a hit.
+  const groupMinMatch = new Map<number, number[]>();
+  for (const [absStart, group] of groups) {
+    const longest = group[group.length - 1]; // ascending ends ⇒ last is longest
+    const minMatch = ASSERTION_DISQUALIFIERS.map((re) => {
+      if (!re.test(longest.text)) return Number.POSITIVE_INFINITY; // clean for the whole group
+      // The regex matches somewhere in the longest segment. Find the minimal group-end that still matches
+      // (monotonic ⇒ binary search over the group's sorted absEnd values).
+      let lo = 0;
+      let hi = group.length - 1; // invariant: group[hi] matches, group[lo-1] (virtual) does not
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (re.test(group[mid].text)) hi = mid;
+        else lo = mid + 1;
+      }
+      return group[lo].absEnd;
+    });
+    groupMinMatch.set(absStart, minMatch);
+  }
+
+  for (const [, group] of groups) {
+    const minMatch = groupMinMatch.get(group[0].absStart);
+    for (const occ of group) {
+      const { i, markerEnd, absEnd } = occ;
+      // Disqualified iff ANY assertion disqualifier matches at a segment-end <= this occurrence's end.
+      let disqualified = false;
+      if (minMatch !== undefined) {
+        for (const m of minMatch) {
+          if (m <= absEnd) {
+            disqualified = true;
+            break;
+          }
+        }
+      }
+      if (disqualified) continue;
+      // …but a negator AFTER the marker that REFERENCES DELIVERY (`…full scope of #12 AND it is not
+      // fully delivered`) still disclaims the marker even though the `and`-coordinator splits it into a
+      // sibling segment the assertion above never sees — re-catch it against the marker-relative suffix
+      // (the text from the marker to the clause end) so the assertion-scoping does not fail open, without
+      // matching a negator that PRECEDES the marker (issue #858 round-6 + round-13 adversarial reviews).
+      const clauseStart = clauseStartAt(bounds, i);
+      let negatedAfterMarker = negatedAfterMarkerByMarker.get(i);
+      if (negatedAfterMarker === undefined) {
+        negatedAfterMarker = SCOPE_NEGATED_AFTER_MARKER_DELIVERY.test(prompt.slice(i, clauseEndAt(bounds, i, prompt.length)));
+        negatedAfterMarkerByMarker.set(i, negatedAfterMarker);
+      }
+      if (negatedAfterMarker) continue;
+      // `SCOPE_NEGATED_PREFIX` is an unanchored "contains" test, so it must run against the WHOLE
+      // before-marker text — not the bounded window, which would drop a negator sitting more than
+      // `PREFIX_WINDOW` chars before the marker (issue #858 round-12 adversarial review). The earliest
+      // negator offset is cached per clause and compared with THIS marker's own `i` (issue #858 round-14
+      // review): a clause-wide boolean let the first marker's clean prefix credit a later disclaimed one.
+      // Only the genuinely `$`-anchored `PART_QUALIFIER_BEFORE_MARKER` may use the window.
+      let negatedPrefixEnd = negatedPrefixEndByClause.get(clauseStart);
+      if (negatedPrefixEnd === undefined) {
+        negatedPrefixEnd = earliestNegatorEnd(prompt, clauseStart, clauseEndAt(bounds, i, prompt.length));
+        negatedPrefixEndByClause.set(clauseStart, negatedPrefixEnd);
+      }
+      if (negatedPrefixEnd <= i) continue;
+      if (PART_QUALIFIER_BEFORE_MARKER.test(clauseBeforeMarker(prompt, i, bounds))) continue;
+      const anchored = anchoredIssueKey(prompt, i, markerEnd);
+      if (anchored !== null) acknowledged.add(anchored);
+      else if (sole !== null) acknowledged.add(sole);
+    }
+  }
+
+  for (const n of numbered) {
+    if (!acknowledged.has(n)) return true;
+  }
+  // A pronoun close (or a closing verb with no resolvable numbered target) can't name its issue, so
+  // every referenced issue must be acknowledged for the close to be licensed.
+  if (pronoun || numbered.length === 0) {
+    for (const n of distinct) {
+      if (!acknowledged.has(n)) return true;
+    }
+  }
+  return false;
+}
 
 /** The graph's optional top-level `name` must match openapi's `DeliveryGraph.name` `maxLength: 255`.
  * Re-enforced here INDEPENDENTLY of the OpenAPI shape gate because later steps trust it: the compiler
@@ -782,6 +2039,25 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "`agent.baseBranch`, when present, must be a plausible git branch name (no whitespace, shell " +
               `metacharacters, leading \`-\`, \`..\`/\`//\`, etc.) — got ${JSON.stringify(config.baseBranch)} (#739)`,
             code: "invalid-node-base-branch",
+          });
+        }
+        // Issue #858: the deterministic compile/lint-time guard for the partial-scope-close defect
+        // class. An `agent` node's `prompt` is planner/authored free text; when it pairs a GitHub
+        // closing keyword (`Closes/Fixes/Resolves #N`) with NO explicit full-scope acknowledgement
+        // marker, it is the field-case defect (a brief scoped to PART of an issue told to close it).
+        // Reject it path-qualified so the planner must either scope the brief to the issue's FULL
+        // stated scope (and say so) or reference the issue non-blockingly (`Part of #N` / `Refs #N`).
+        if (kind === "agent" && typeof config.prompt === "string" && isPartialScopeClose(config.prompt)) {
+          errors.push({
+            path: `${path}.${configKey}.prompt`,
+            message:
+              "`agent.prompt` closes an issue (`Closes/Fixes/Resolves #N`) but carries no full-scope " +
+              "acknowledgement TIED to that issue — a brief scoped to PART of an issue must not be " +
+              "told to close it (issue #858). Anchor the acknowledgement to the SAME issue you close " +
+              "(e.g. \"delivers #N's full stated scope\" / \"every acceptance criterion of #N\"); a " +
+              "marker for a different issue, or one attributed to siblings, does not count. Otherwise " +
+              "reference the issue non-blockingly (`Part of #N` / `Refs #N`) and leave it open.",
+            code: "partial-scope-close",
           });
         }
         // #548: register a converge-connector / pr-wait as a PR-binding consumer (pass 4 validates the

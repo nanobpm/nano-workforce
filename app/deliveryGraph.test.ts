@@ -10,9 +10,12 @@ import {
   DELIVERY_NODE_KINDS,
   type DeliveryGraphError,
   type DeliveryGraphErrorCode,
+  drainClauseScanSteps,
   redactConnectorValue,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 /** The single error in the result, asserting there is exactly one. */
 function only(errors: DeliveryGraphError[]): DeliveryGraphError {
@@ -1349,4 +1352,1751 @@ test("#548 a converge connector with MULTIPLE incoming `pr` facts is rejected as
   };
   const err = hasCode(validateDeliveryGraph(g), "unbound-pr");
   assert(err.message.includes("disambiguate"), err.message);
+});
+
+// Issue #858: the deterministic compile/lint-time guard for the partial-scope-close defect class.
+// The field case (delivery graph `5e36636255ab`, node `i12`) paired a brief scoped to ONE of an
+// issue's three acceptance criteria with "…open a PR that closes it", so the agent wrote `Closes #N`
+// and the remainder was silently dropped. `validateDeliveryGraph` must now reject an `agent.prompt`
+// that closes an issue WITHOUT an explicit full-scope acknowledgement marker.
+test("#858 an agent prompt that closes an issue with NO full-scope marker is rejected (partial-scope-close)", () => {
+  const g = {
+    name: "partial close",
+    nodes: [
+      {
+        id: "i12",
+        kind: "agent",
+        agent: {
+          jobType: "senior:feature",
+          // The exact field-case shape: scoped to one criterion, told to close the parent.
+          prompt: "Implement criterion 1 of nanobpm/nano-supervisor#12 and open a PR that closes #12.",
+        },
+      },
+    ],
+    edges: [],
+  };
+  const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+  assertEquals(err.path, "nodes[0].agent.prompt");
+});
+
+test("#858 the closing-keyword families (closes/fixes/resolves, owner/repo#N, issue URL, and the pronoun form `closes it`) are all detected", () => {
+  const closers = [
+    "open a PR that closes #12",
+    "this fixes nanobpm/nano-supervisor#12",
+    "Resolves https://github.com/nanobpm/nano-supervisor/issues/12",
+    "resolve #12 when done",
+    // The LITERAL field case (delivery graph `5e36636255ab`, node `i12`): the issue is referenced by
+    // name (`nano-supervisor#12`) and the closing verb uses the pronoun `it`, NOT a bare `#N`.
+    "Implement nanobpm/nano-supervisor#12 and open a PR that closes it",
+    "Implement #12 and close the issue",
+  ];
+  for (const prompt of closers) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+test("#858 round-16: the duplicate closing-language prefilter is gone (one canonical closing grammar)", () => {
+  // Finding (review 5407092970): a second `CLOSING_ACTION_PATTERN` prefilter duplicated the whole
+  // active+passive closing grammar of `CLOSING_TARGET_PATTERN`, violating the one-canonical rule — any
+  // syntax added only to the authoritative pattern was unreachable through the prefilter and failed
+  // OPEN. It was removed so `isPartialScopeClose` derives "is there an active close?" from the single
+  // `closingTargets` grammar. Guard against the drift surface being reintroduced.
+  const src = readFileSync(join(import.meta.dirname, "deliveryGraph.ts"), "utf8");
+  assert(
+    !/const\s+CLOSING_ACTION_PATTERN\b/.test(src) && !/CLOSING_ACTION_PATTERN\s*\.\s*test\b/.test(src),
+    "deliveryGraph.ts must not reintroduce a duplicate CLOSING_ACTION_PATTERN prefilter — the single " +
+      "authoritative closing grammar is CLOSING_TARGET_PATTERN (via closingTargets)",
+  );
+  // And the behaviour it used to gate must still hold through the one grammar: a passive, issue-first
+  // close with no full-scope marker (a form only CLOSING_TARGET_PATTERN parses) is still rejected.
+  const g = {
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "Implement criterion 1 of #12; ensure #12 is closed by the PR." } }],
+    edges: [],
+  };
+  const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+  assertEquals(err.path, "nodes[0].agent.prompt");
+});
+
+test("#858 a closing keyword WITH an explicit full-scope marker validates (the legitimate final closer)", () => {
+  const ok = [
+    "Implement nanobpm/nano-supervisor#12 — this brief delivers #12's full stated scope (every acceptance criterion) — and open a PR that closes #12.",
+    "Own the whole issue: deliver every acceptance criterion of #12, then close #12.",
+    "This slice covers the full scope of #12; open a PR with Closes #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The marker list must also recognise the NATURAL issue-anchored whole-scope paraphrases a planner
+// writes when it genuinely scopes a slice to the whole issue — not only the exact phrases the
+// contract happens to use verbatim. A legitimately full-scope closer phrased "the whole issue" /
+// "all of #N" / "the entire issue" must NOT be rejected (the under-inclusive-marker false positive).
+test("#858 a closing keyword WITH a natural issue-anchored whole-scope paraphrase validates", () => {
+  const ok = [
+    "Deliver the whole issue #12 and close it.",
+    "Implement all of #12 and close it.",
+    "Own the entire issue #12, then close it.",
+    "This slice covers the complete issue #12; open a PR with Closes #12.",
+    "Implement all of the issue #12 and resolve it.",
+    "Deliver the whole of #12 and close it.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse guard: a bare adverb of completeness (`fully` / `completely` / `end-to-end` /
+// `in full` / `in its entirety`) is NOT a full-scope marker, because it can modify a PARTIAL
+// deliverable ("implement one criterion fully"). Only an issue-anchored whole-scope phrase licenses
+// a closing keyword — a partial brief dressed in an adverb must still be rejected.
+test("#858 a bare completeness adverb on a partial brief is STILL rejected (not a full-scope marker)", () => {
+  const partials = [
+    "Implement one criterion of #12 fully, then close #12.",
+    "Do the parser slice of #12 completely; close #12.",
+    "Implement part of #12 end-to-end and close it.",
+    "This slice covers the login part of #12 in full; close it.",
+    "Implement the backend portion of #12 in its entirety; close it.",
+  ];
+  for (const prompt of partials) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+test("#858 a non-closing reference (Part of / Refs) is NOT flagged, and a prompt with no issue ref is NOT flagged", () => {
+  const ok = [
+    "Implement criterion 1 of #12 and reference it as Part of #12.", // non-closing ref
+    "Refs #12 — work on the first slice.",
+    "un-draft + merge #B", // the WELL_FORMED prompt: `#B` is not a numeric issue ref
+    "close the door behind you", // prose "close" with no issue ref
+    "fix the bug in the parser", // closing verb but no issue ref
+    "resolve conflicts in #12 merge", // closing verb not applied to the issue (intervening word)
+    "closes the loop on #12 feedback", // closing verb not applied to the issue
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+test("#858 a non-agent node (human) carrying a closing keyword is NOT flagged — the guard is agent-scoped", () => {
+  const g = {
+    nodes: [{ id: "h", kind: "human", human: { prompt: "verify then close #12" } }],
+    edges: [],
+  };
+  assertEquals(validateDeliveryGraph(g), []);
+});
+
+// Issue #858 (round-3 review): the full-scope acknowledgement must be TIED to the issue the brief
+// closes, not accepted as a global substring anywhere in the prompt. Two bypass classes slip a
+// partial-scope-close past a global-substring check and MUST be rejected:
+//   (1) cross-issue — the marker acknowledges a DIFFERENT issue's scope than the one being closed
+//       (e.g. acknowledge #11's full scope, but close #12);
+//   (2) attributed-to-others — the whole-scope phrase assigns the scope to SIBLINGS/others, not to
+//       this brief (e.g. "the full scope of #12 is handled by siblings; … close #12").
+test("#858 a full-scope marker for a DIFFERENT issue than the one closed is rejected (cross-issue bypass)", () => {
+  const bypasses = [
+    // Marker anchored to #11, but the brief closes #12.
+    "Acknowledge #11's full stated scope; implement criterion 1 of #12 and close #12.",
+    "This covers the whole issue #11. Implement part of #12 and open a PR with Closes #12.",
+    "Deliver every acceptance criterion of #11, then fix #12.",
+    // SAME clause mixes a whole-scope marker for #11 with a partial reference to the closed #12 —
+    // proximity anchoring must credit #11 (adjacent to the marker), not #12.
+    "Covers the whole issue #11 and the parser part of #12. Closes #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+test("#858 a whole-scope phrase ATTRIBUTED to siblings/others does not licence a close (attribution bypass)", () => {
+  const bypasses = [
+    "The full scope of #12 is handled by siblings; implement criterion 1 and close #12.",
+    "Every acceptance criterion of #12 is delivered by the other slices; do the parser part and close #12.",
+    "The whole issue #12 is covered by sibling slices; implement criterion 2 and open a PR with Closes #12.",
+    // Generic (un-numbered) marker attributed to others, single issue — still must not licence it.
+    "The full scope is owned by another slice; implement part of #12 and close it.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-3 adversarial review): a whole-scope marker immediately followed by a
+// PART-QUALIFIER scopes the acknowledgement DOWN to a part, so it must NOT licence a close. The
+// marker-credit loop matched a bare substring, so "the whole issue's parser slice" / "all of #12's
+// backend" / "every acceptance criterion's auth half" all credited the marker even though each
+// describes a PARTIAL deliverable — the exact defect class the guard exists to catch. The occurrence
+// is disqualified when the text right after the marker is `'s <part>` / `of <part>` (a possessive or
+// partitive that narrows the whole to one slice).
+test("#858 a whole-scope marker immediately qualified DOWN to a part is rejected (possessive/partitive bypass)", () => {
+  const bypasses = [
+    "Deliver the whole issue's parser slice. Closes #12.",
+    "Implement all of #12's backend. Closes #12.",
+    "Covers every acceptance criterion's auth half. Closes #12.",
+    "Implement the complete issue's backend only. Closes #12.",
+    "Deliver the whole issue's first half. Closes #12.",
+    // Sibling-marker overlap: a prefix marker ("own the whole") ends before the connective "issue",
+    // so the qualifier is not adjacent to THAT marker — the walk must see past the connective.
+    "Own the whole issue #12's parser. Close it.",
+    "Owns the whole issue's backend. Close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: the part-qualifier disqualifier must not over-fire on a legitimate whole-scope
+// acknowledgement that merely has a part-word LATER in the clause (not immediately after the marker),
+// or where the marker is at a clause boundary. A genuine full-scope closer must still validate.
+test("#858 a whole-scope marker NOT immediately qualified down still validates", () => {
+  const ok = [
+    // Part-word appears later in the clause, NOT immediately after the marker.
+    "Deliver the whole issue #12, including the parser slice, and close it.",
+    // Marker at a clause boundary (next char is a delimiter / end).
+    "Own the whole issue #12. Then close it.",
+    "Implement all of #12 and close it.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: a marker genuinely tied to the closed issue (anchored to it, or the sole issue the
+// prompt references) and asserting THIS brief owns it must still validate — the target-association
+// tightening must not regress the legitimate single-issue and issue-anchored closers.
+test("#858 a full-scope marker tied to the closed issue still validates after the target-association tightening", () => {
+  const ok = [
+    // Anchored to the SAME issue that is closed.
+    "Acknowledge #11 is out of scope; this brief delivers all of #12 and opens a PR with Closes #12.",
+    // Generic marker, but the prompt references exactly one issue (#12) — unambiguous.
+    "This slice covers the full stated scope; implement every acceptance criterion of #12 and close #12.",
+    "Own the whole issue #12 — deliver every checkbox — then close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-4 review): issue identity must preserve the REPOSITORY, not collapse to the bare
+// number. The accepted syntax includes `owner/repo#N` and issue URLs, and the validator supports
+// cross-repository graphs, so an acknowledgement anchored to `owner/alpha#12` must NOT licence closing
+// a DIFFERENT issue `owner/beta#12` — both used to become `12`. Each explicit-repo closing target
+// requires its own repo-matched acknowledgement; a bare `#N` (the implicit node/run repo) is a third,
+// distinct identity.
+test("#858 a full-scope marker for one repo's issue does not licence closing a different repo's same-numbered issue (cross-repo collision)", () => {
+  const bypasses = [
+    // Acknowledge owner/alpha#12's full scope, but ALSO close owner/beta#12 (partial) — the collapse-to-12
+    // bug credited beta from alpha's acknowledgement.
+    "Deliver owner/alpha#12's full stated scope and close owner/alpha#12. Implement only criterion 1 of owner/beta#12 and close owner/beta#12.",
+    // Marker anchored (after) to owner/alpha, close targets owner/beta.
+    "Deliver the full scope of owner/alpha#12 and close owner/beta#12.",
+    // A bare #12 acknowledgement must not licence closing an explicitly-qualified owner/alpha#12.
+    "Deliver #12's full stated scope; implement part of owner/alpha#12 and close owner/alpha#12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a repo-qualified marker genuinely tied to the SAME repo-qualified issue it closes must
+// still validate — the repository-identity tightening must not regress a legitimate `owner/repo#N`
+// closer, nor a bare `#N` closer (unchanged).
+test("#858 a repo-qualified full-scope marker tied to the SAME repo-qualified issue it closes still validates", () => {
+  const ok = [
+    "Deliver owner/alpha#12's full stated scope and close owner/alpha#12.",
+    "This slice delivers nanobpm/nano-supervisor#99's full stated scope; Closes nanobpm/nano-supervisor#99.",
+    "Own the whole issue of owner/alpha#7 — every acceptance criterion — then close owner/alpha#7.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-4 review): a whole-scope phrase whose CLAUSE explicitly NEGATES or disclaims it
+// ("this slice does NOT deliver the full scope of #12", "we won't cover every acceptance criterion")
+// asserts the opposite of ownership, yet the bare `full scope` substring is still present. Such an
+// occurrence must NOT licence a close — the negated clause reopens the exact partial-close bypass.
+test("#858 a NEGATED/disclaimed full-scope acknowledgement does not licence a close (negation bypass)", () => {
+  const bypasses = [
+    "This slice does not deliver the full scope of #12; implement criterion 1 and close #12.",
+    "We won't cover every acceptance criterion of #12 — just the parser. Close #12.",
+    "This does not own the whole issue #12; close it.",
+    "Implement part of #12; this is not the full scope of #12. Closes #12.",
+    "Deliver everything other than the full scope of #12, then close #12.",
+    // The "but"-as-exception idiom — a direct sibling of "other than"/"apart from": "all but X" /
+    // "everything but X" mean "everything EXCEPT X", so the marker is disclaimed even though no
+    // explicit negation token is present (adversarial review, issue #858 round 4).
+    "Deliver all but the full scope of #12; close #12.",
+    "This slice delivers everything but the full scope of #12. Closes #12.",
+    "Implement all but one acceptance criterion of #12 — the full scope of #12 is NOT delivered here. Close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-14 review, thread deliveryGraph.ts:1392): the `SCOPE_NEGATED_PREFIX` memo was
+// keyed by `clauseStart` even though the tested text is the marker's BEFORE-MARKER prefix
+// (`slice(clauseStart, i)`), which grows with each marker's offset `i`. For TWO markers in one
+// (delimiter-free) clause, the FIRST (shortest-prefix) marker decided the SECOND: an affirmative lead
+// marker cached `false`, then a trailing marker whose OWN prefix contains an exception negator
+// (`excluding …`) was wrongly credited — reopening the exact partial-close bypass. The prefix test is
+// monotonic in `i`, so a negator sitting between the two markers must disqualify ONLY the later one.
+test("#858 a later marker in the same clause disclaimed by a PREFIX negator after an earlier affirmative marker is rejected (per-marker prefix negation, not one cached boolean)", () => {
+  const bypasses = [
+    // The review's own example: #11 affirmative, then `excluding the parser` disclaims #12 before close.
+    "Deliver the full scope of #11 and excluding the parser implement the full scope of #12 and close #12.",
+    // Other exception prefixes between the two markers, same clause, no delimiter.
+    "Deliver the full scope of #11 and other than the parser the full scope of #12 is here so close #12.",
+    "Own the whole issue #11 and without the migration path the full scope of #12 then close #12.",
+    "Cover the whole issue #11 and aside from the docs deliver every acceptance criterion of #12 and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse of the per-marker prefix fix: an affirmative lead marker must NOT be dragged down by a
+// negator that sits AFTER it but still BEFORE a later marker — the lead marker's own (shorter) prefix is
+// clean, so a brief that fully acknowledges the issue it closes must still validate even when a LATER,
+// unrelated marker in the same clause is prefixed by an exception word.
+test("#858 an earlier affirmative marker is NOT disqualified by a prefix negator that only precedes a LATER marker (per-marker prefix must not back-propagate)", () => {
+  const ok = [
+    // Closes #11 (fully acknowledged, clean prefix); #12 is merely referenced with `excluding` and never closed.
+    "Deliver the full scope of #11 and excluding the parser the #12 follow-up is deferred so close #11.",
+    "Own the whole issue #11 and aside from the stretch goals of #12 ship it then close #11.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: the negation disqualifier must not over-fire on an AFFIRMATIVE whole-scope closer that
+// merely contains an innocuous "no …" phrase ("with no gaps", "leaving nothing deferred") — those are
+// not negations of the delivery. A genuine full-scope closer must still validate.
+test("#858 an affirmative whole-scope closer with an innocuous 'no' phrase still validates (negation must not over-fire)", () => {
+  const ok = [
+    "Deliver the whole issue #12 with no gaps; close it.",
+    "Own the whole issue #12, leaving nothing deferred, and close #12.",
+    "This slice covers the full stated scope of #12 — no part is out of scope — then Closes #12.",
+    // An affirmative "but" is NOT an exception disclaimer: "…, but split across two commits" and
+    // "all but identical" do not disclaim the whole-scope marker in the same clause.
+    "Deliver the full scope of #12, but split the work across two commits. Closes #12.",
+    "Own the whole issue #12 — the plan is all but identical to the reference slice — then close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+
+// Issue #858 (round-15 review, deliveryGraph.ts:318): the closing grammar ordered the optional
+// `issues?` noun BEFORE the quantifier, so a natural multi-target directive worded quantifier-first —
+// `close both issues #12 and #13` — matched neither the `CLOSING_ACTION_PATTERN` prefilter nor
+// `CLOSING_TARGET_PATTERN`, so a partial-scope prompt phrased that way received NO `partial-scope-close`
+// error (fail-open). The quantifier/determiner must be admitted on EITHER side of the `issues?` noun,
+// and EVERY coordinated target must still be acknowledged.
+test("#858 a quantifier-before-noun close (`close both issues #12 and #13`) is detected and each target needs its own acknowledgement", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12 and close both issues #12 and #13.",
+    "Deliver part of #12; close all issues #12 and #13.",
+    "Fix each issue #12 and #13 after implementing one criterion.",
+    // Only one of the two coordinated targets is acknowledged — the other still fails.
+    "Deliver the full scope of #12; close both issues #12 and #13.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a quantifier-before-noun close whose EVERY coordinated target is fully acknowledged must
+// still validate — the widened grammar must not regress a legitimate multi-issue closer.
+test("#858 a quantifier-before-noun close whose every target is acknowledged still validates", () => {
+  const ok = [
+    "Deliver the full scope of #12 and the full scope of #13; close both issues #12 and #13.",
+    "Own the whole issue #7 and the whole issue #8 — every acceptance criterion — then close all issues #7 and #8.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-15 review, deliveryGraph.ts:1202): a TRAILING scope exclusion that sits AFTER the
+// marker's issue anchor and past the clause comma (`Deliver the full scope of #12, excluding the parser;
+// close #12.`) narrows the whole scope down to "the whole MINUS a part", yet the comma ended the marker's
+// clause before the exclusion and the before-marker `SCOPE_NEGATED_PREFIX` only examined text BEFORE the
+// marker — so the explicitly-partial brief validated (fail-open). A trailing `except`/`excluding`/
+// `other than`/`apart from`/`aside from`/`but not`/`minus` phrase after the anchor must disqualify the
+// marker just like a before-marker exception prefix does.
+test("#858 a TRAILING exclusion after the issue anchor narrows a full-scope marker and is rejected (post-marker exclusion bypass)", () => {
+  const bypasses = [
+    "Deliver the full scope of #12, excluding the parser; close #12.",
+    "Deliver the full scope of #12, except the migration path; close #12.",
+    "Cover every acceptance criterion of #12, other than the docs. Close #12.",
+    "Own the whole issue #12, apart from the parser, and close it.",
+    "Deliver the full scope of #12, aside from the UI; close #12.",
+    "Deliver the full scope of #12, but not the parser; close #12.",
+    "Deliver the full scope of #12, omitting the parser; close #12.",
+    "Deliver the full scope of #12, excluded the parser; close #12.",
+    // Exclusion directly adjacent (no comma) still disqualifies.
+    "Deliver the full scope of #12 excluding the parser; close #12.",
+    // Sole-issue fallback: marker has no adjacent anchor but the prompt references exactly one issue.
+    "Deliver the full scope, excluding the parser; close #12.",
+    "Deliver the full scope of owner/alpha#12, excluding the parser; close owner/alpha#12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: the trailing-exclusion disqualifier must not over-fire. An EXCLUSION OF NOTHING
+// (`excluding nothing`/`except none`) still delivers the whole scope; a bare affirmative `but`, an
+// `including` continuation, a trailing `without <noun>` constraint, and an `and`-coordinated unrelated
+// action are all affirmative closers that must still validate.
+test("#858 an exclusion-of-nothing or an affirmative trailing phrase does not disqualify a full-scope closer", () => {
+  const ok = [
+    "Deliver the full scope of #12, excluding nothing; close #12.",
+    "Cover every acceptance criterion of #12, excluding none of them; close #12.",
+    "Deliver the full scope of #12, including the parser slice, and close it.",
+    "Deliver the full scope of #12, but split the work across two commits. Closes #12.",
+    "Own the whole issue #12, leaving nothing deferred, and close #12.",
+    "Deliver the full scope of #12 without regressions; close #12.",
+    "Deliver the full scope of #12, and separately update the changelog; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+
+// Issue #858 (round-5 review, thread deliveryGraph.ts:453): a PART-QUALIFIER can narrow a whole-scope
+// marker from EITHER side. The after-side was already caught (`the whole issue's parser`), but a PREFIX
+// partitive ("half of every acceptance criterion of #12") slipped through — `every acceptance criterion`
+// was credited to #12 while the preceding `half of` was never examined. Qualification must be detected
+// on BOTH sides of the marker, so a prefix partitive disqualifies the occurrence just like a suffix one.
+test("#858 a whole-scope marker narrowed by a PREFIX partitive is rejected (both-sides qualifier bypass)", () => {
+  const bypasses = [
+    "Implement half of every acceptance criterion of #12, then close #12.",
+    "Deliver part of the whole issue #12 and close it.",
+    "Cover some of every acceptance criterion of #12; Closes #12.",
+    "Deliver a subset of every acceptance criterion of #12. Closes #12.",
+    "Do a portion of the whole issue #12 and close #12.",
+    "Ship a fraction of the full scope of #12 and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a whole-quantifier prefix ("all of" / "the whole of") is NOT a part-qualifier, and a
+// marker merely preceded by an unrelated "… of …" phrase in the same clause must still validate.
+test("#858 a whole-scope marker with a whole/benign prefix still validates (prefix-partitive must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and close #12.",
+    "Implement all of #12 and close it.",
+    "As part of the milestone, deliver the full scope of #12 and close #12.",
+    "On behalf of the team, deliver every acceptance criterion of #12; Closes #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-5 review, thread deliveryGraph.ts:369): an EXCEPTION/REDIRECTION preposition
+// (`without`, `rather than`, `other than`, `instead of`, …) negates the full-scope phrase only when it
+// GOVERNS it — i.e. it sits BEFORE the marker. A TRAILING occurrence governs some OTHER phrase, so an
+// affirmative closer with an unrelated trailing constraint ("the full scope of #12 WITHOUT regressions",
+// "… RATHER THAN a piecemeal split") must NOT be read as scope negation and must still validate.
+test("#858 an affirmative whole-scope closer with a TRAILING exception constraint still validates (negation must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 without regressions; close #12.",
+    "Deliver the full scope of #12 rather than a piecemeal split. Closes #12.",
+    "Own the whole issue #12 instead of a thin vertical slice; close #12.",
+    "Deliver every acceptance criterion of #12 with no feature left aside from the stretch goals noted elsewhere; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse of the above: a LEADING exception preposition that genuinely governs (negates) the
+// marker must STILL disqualify — the trailing-is-benign fix must not reopen the leading-negation bypass.
+test("#858 a LEADING exception preposition that governs the marker still disqualifies the close", () => {
+  const bypasses = [
+    "Deliver this slice without covering the full scope of #12; close #12.",
+    "Implement #12's parser rather than the full scope of #12. Closes #12.",
+    "Do the auth part instead of the whole issue #12 and close #12.",
+    "Ship everything other than the full scope of #12, then close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-12 adversarial review, app/deliveryGraph.ts clauseBeforeMarker): the round-12
+// complexity fix capped the before-marker text `SCOPE_NEGATED_PREFIX` is tested against to the last
+// `PREFIX_WINDOW` (96) chars. That is sound ONLY for a `$`-anchored SUFFIX pattern
+// (`PART_QUALIFIER_BEFORE_MARKER`), but `SCOPE_NEGATED_PREFIX` is an UNANCHORED "contains" test — so a
+// scope-narrowing negator sitting MORE than 96 chars before the marker (inside one long delimiter-free
+// clause) fell outside the window and was silently dropped, failing the guard OPEN. The negator must be
+// tested against the WHOLE before-clause (it is a per-clause "contains", so it is memoised per clause
+// start to stay linear); only the genuinely `$`-anchored part-qualifier may use the bounded window.
+test("#858 a leading exception preposition >96 chars before the marker still disqualifies the close (prefix-window fail-open regression)", () => {
+  // One long DELIMITER-FREE clause (no `.`/`;`/`:`) so the negator and the marker share a clause, with
+  // the negator pushed >96 chars before the marker by filler. At roundEntryHead (whole before-clause)
+  // this was flagged; the round-12 window let it through.
+  const filler = "word ".repeat(20); // pushes the negator ~130 chars before the marker
+  const bypasses = [
+    `excluding the parser only ${filler}the full scope of #12 so close #12`,
+    `apart from the auth slice ${filler}deliver the whole issue #12 and close #12`,
+    `other than the parser ${filler}own the entire issue #12 then close #12`,
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+  // …but a long clause with NO negator and an affirmative full-scope acknowledgement must still VALIDATE
+  // (testing the whole before-clause must not over-fire and break a legitimate closer).
+  const genuine = `deliver ${filler}the full scope of #12 then close #12`;
+  const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: genuine } }], edges: [] };
+  assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${genuine}`);
+});
+
+// Issue #858 (round-5 review, "Allow current-slice ownership in passive attribution",
+// deliveryGraph.ts:354): a whole-scope phrase attributed to THIS slice ("delivered by this slice",
+// "owned by the current slice") is an AFFIRMATIVE ownership assertion and must licence a close. Only
+// attribution to SIBLINGS/OTHERS disqualifies. The old `<verb> by` alternative fired regardless of who
+// followed `by`, wrongly rejecting first-person/current-slice passive phrasing.
+test("#858 a whole-scope phrase attributed to THIS slice (passive self-ownership) still validates", () => {
+  const ok = [
+    "The full scope of #12 is delivered by this slice; close #12.",
+    "Every acceptance criterion of #12 is covered by the current slice; Closes #12.",
+    "The whole issue #12 is owned by me here; close it.",
+    "The full stated scope of #12 is handled by this brief, so close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: attribution to SIBLINGS/OTHERS (or a non-self team) must STILL disqualify — the
+// self-ownership fix must not reopen the "handled by others" bypass.
+test("#858 a whole-scope phrase attributed to OTHERS (incl. a non-self team) still disqualifies the close", () => {
+  const bypasses = [
+    "The full scope of #12 is handled by siblings; implement criterion 1 and close #12.",
+    "Every acceptance criterion of #12 is delivered by the other slices; do the parser part and close #12.",
+    "The full scope of #12 is delivered by the backend team; implement the UI and close #12.",
+    "The whole issue #12 is owned by another slice; implement part and close it.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-5 review, "Support issue URLs in scope-anchor detection", deliveryGraph.ts:490):
+// `issueRefsIn`/`closingTargets` parse issue URLs, but the whole-scope ANCHOR only recognised `#N` /
+// `owner/repo#N`. So when a second issue reference made the sole-issue fallback unavailable, a
+// URL-anchored full-scope acknowledgement was never credited and a legitimate closer was rejected.
+test("#858 a full-scope marker anchored to an issue URL licences closing that URL's issue (multi-ref, no sole fallback)", () => {
+  const ok = [
+    "Deliver the full scope of https://github.com/acme/a/issues/12; note acme/b#7 is out of scope; close https://github.com/acme/a/issues/12.",
+    "This brief covers the full scope of https://github.com/acme/a/issues/12 (acme/b#7 is handled elsewhere); Closes https://github.com/acme/a/issues/12.",
+    // URL anchored AFTER the marker, with a second issue reference defeating the sole-issue fallback.
+    "acme/b#7 is out of scope. The full scope of https://github.com/acme/a/issues/12 is delivered here; close https://github.com/acme/a/issues/12.",
+    // URL anchored BEFORE the marker (possessive-style proximity): https://…/issues/12's full scope.
+    "Deliver https://github.com/acme/a/issues/12's full scope; acme/b#7 is out of scope; close https://github.com/acme/a/issues/12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: a URL-anchored acknowledgement for ONE issue must NOT licence closing a DIFFERENT
+// issue (URL repo identity is preserved exactly like `owner/repo#N`).
+test("#858 a full-scope marker anchored to one issue URL does not licence closing a different issue", () => {
+  const bypasses = [
+    "Deliver the full scope of https://github.com/acme/a/issues/12; implement part of acme/b#7 and close acme/b#7.",
+    "Deliver the full scope of https://github.com/acme/a/issues/12 and close https://github.com/acme/b/issues/12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-5 adversarial review): the prefix-partitive guard required a literal `of` after the
+// partitive, so the most common English partitive — `half the X` (NO `of`) — bypassed it: `half of the
+// full scope` was caught but `half the full scope` was credited. The `of` is optional in English
+// ("half the …", "part the …", "half my …"), so the qualifier must narrow the marker with or without it.
+test("#858 a whole-scope marker narrowed by a prefix partitive with NO `of` is rejected (half-the bypass)", () => {
+  const bypasses = [
+    "Deliver half the full scope of #12; close #12.",
+    "Deliver half the whole issue #12; close #12.",
+    "Implement part the whole issue #12 and close it.",
+    "Deliver half my full scope of #12; close #12.",
+    "Cover half its full scope of #12. Closes #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: making the partitive `of` optional must not over-fire on a plain whole-scope marker, a
+// whole-quantifier prefix, or a part-word used non-partitively earlier in the clause.
+test("#858 a whole-scope marker with no partitive prefix still validates (optional-`of` must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and close #12.",
+    "Implement all of #12 and close it.",
+    "As part of the milestone, deliver the full scope of #12 and close #12.",
+    // A part-word used NON-partitively (not governing the marker) must not disqualify.
+    "Deliver the full scope of #12 from the halfway house; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-5 adversarial review): the self-exclusion lookahead added `our`/`us`/`my` to the
+// self list, which opened an attribution-to-others hole — `delivered by OUR siblings` / `handled by OUR
+// peers` were credited because the `<verb> by` alternative's lookahead failed on the leading `our` and
+// the sibling/peer alternative didn't allow an intervening possessive. A possessive before a
+// sibling/peer/other noun is still attribution to OTHERS, so it must disqualify.
+test("#858 a whole-scope phrase attributed to OUR/THEIR siblings or peers does not licence a close (possessive attribution bypass)", () => {
+  const bypasses = [
+    "The full scope of #12 is delivered by our siblings; implement criterion 1 and close #12.",
+    "The full scope of #12 is handled by our peers; implement criterion 1 and close #12.",
+    "The full scope of #12 is delivered by our sibling slices; implement criterion 1 and close #12.",
+    "The full scope of #12 is delivered by our other slices; implement criterion 1 and close #12.",
+    "The full scope of #12 is delivered by their siblings; implement criterion 1 and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a possessive before a SELF noun ("our team", "our slice") is still self-ownership and
+// must NOT be disqualified — the possessive allowance is scoped to the sibling/peer/other nouns only.
+test("#858 a whole-scope phrase attributed to a SELF possessive (our team/slice) still validates", () => {
+  const ok = [
+    "The full scope of #12 is delivered by our team; close #12.",
+    "The full scope of #12 is delivered by our slice; close #12.",
+    "The full scope of #12 is delivered by this slice; close #12.",
+    "The full scope of #12 is delivered by us; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-5 adversarial review): splitting `without` into a before-marker-only prefix check
+// was a fail-open regression for a TRAILING delivery-negating `without` — `Deliver the full scope of #12
+// WITHOUT COVERING the edge cases; close #12.` genuinely disclaims completeness yet was credited. The
+// benign carve-out is `without <noun>` ("without regressions"); a trailing `without <delivery gerund>`
+// (covering/delivering/finishing/implementing the scope) is still a disclaimer and must disqualify.
+test("#858 a TRAILING `without <delivery gerund>` still disqualifies the close (trailing-negation regression)", () => {
+  const bypasses = [
+    "Deliver the full scope of #12 without covering the edge cases; close #12.",
+    "Deliver the full scope of #12 without delivering the auth work; close #12.",
+    "Deliver the full scope of #12 without finishing the parser; close #12.",
+    "Deliver the full scope of #12 without implementing criterion 3; close #12.",
+    "Deliver the full scope of #12 without completing the migration; close #12.",
+    "Deliver the full scope of #12 without shipping the docs; close #12.",
+    "Deliver the full scope of #12 without addressing the feedback; close #12.",
+    // An adverb between `without` and the gerund still negates.
+    "Deliver the full scope of #12 without fully covering the edge cases; close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a trailing `without <noun>` (the benign carve-out the round-5 split was FOR) must still
+// validate — only a trailing `without <delivery gerund>` negates, not every trailing `without`.
+test("#858 a TRAILING `without <noun>` (benign constraint) still validates (gerund-only negation must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 without regressions; close #12.",
+    "Deliver the full scope of #12 without tests; close #12.",
+    "Deliver the full scope of #12 without any regressions; close #12.",
+    "Deliver the full scope of #12 without breaking changes; close #12.",
+    "Deliver the full scope of #12 rather than a piecemeal split. Closes #12.",
+    // A benign NOUN that merely looks like a delivery gerund ("a covering letter", "the building
+    // blocks", "meeting notes") is an unrelated trailing constraint, NOT a scope disclaimer — the
+    // article/determiner (or the noun sense) keeps it affirmative.
+    "Deliver the full scope of #12 without a covering letter; close #12.",
+    "Deliver the full scope of #12 without the building blocks; close #12.",
+    "Deliver the full scope of #12 without meeting notes; close #12.",
+    "Deliver the full scope of #12 without a finishing touch; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-6 review, thread deliveryGraph.ts:294): the closing-action/target grammar only
+// accepted a closing verb directly adjacent to `#N`, a URL, or a pronoun — it MISSED the common
+// explicit `issue #N` / `GitHub issue #N` noun phrase (`…open a PR that closes issue #12`). That still
+// tells a partial node to close #12, so it must be detected (and its target extracted as #12).
+test("#858 a partial brief that closes via an `issue #N` noun phrase is rejected (issue-#N closing form)", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12 and open a PR that closes issue #12.",
+    "Implement the parser part of #12; fixes GitHub issue #12.",
+    "Do the auth slice of #12 and resolve issue #12.",
+    // Plural `issues #N` noun phrase.
+    "Implement one criterion of #12 and close issues #12.",
+    // Repo-qualified noun-phrase target: acknowledge nothing, close owner/repo#12.
+    "Implement part of owner/repo#12 and close issue owner/repo#12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a FULL-scope closer phrased with the `issue #N` noun phrase must still validate — the
+// new grammar must recognise the target so the marker's acknowledgement is correctly credited to it.
+test("#858 a full-scope closer using the `issue #N` noun phrase still validates (issue-#N form must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and close issue #12.",
+    "Own the whole issue #12, then open a PR that closes GitHub issue #12.",
+    "This slice covers the full scope of owner/repo#12; resolve issue owner/repo#12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-6 review, thread deliveryGraph.ts:606): the core-negation check tested the marker's
+// whole comma-bounded clause, so a negator governing an UNRELATED constraint coordinated onto the clause
+// by `and` (`…full scope of #12 AND do not introduce regressions`) wrongly disqualified an affirmative
+// full-scope closer. The check is now scoped to the marker's `and`-coordinated delivery assertion, so
+// such a closer validates — while a negator in the marker's own segment still disqualifies.
+test("#858 an affirmative closer whose `and`-coordinated constraint is negated still validates (unrelated-negation must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and do not introduce regressions; close #12.",
+    "Deliver the full scope of #12 and never break the build; close #12.",
+    "Own the whole issue #12 and do not add new dependencies, then close #12.",
+    "Deliver every acceptance criterion of #12 and ensure it cannot be bypassed; close #12.",
+    // The WITHOUT_DELIVERY disqualifier is scoped the same way: a trailing delivery gerund in an
+    // `and`-coordinated sibling constraint governs that constraint, not the marker.
+    "Deliver the full scope of #12 and refactor without breaking the build; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse of the above: a negator that GOVERNS the marker (in its own `and`-segment, or with no
+// coordinator between it and the marker) must STILL disqualify — the assertion-scoping fix must not
+// reopen the negation bypass. Likewise a `but without <gerund>` trailing disclaimer stays in-segment.
+test("#858 a negator governing the marker still disqualifies after assertion-scoping (no reopened bypass)", () => {
+  const bypasses = [
+    "This slice does not deliver the full scope of #12 and close #12.",
+    "Do the parser and never cover the full scope of #12; close #12.",
+    "Deliver the full scope of #12 but without covering the auth; close #12.",
+    "Implement one criterion and do not own the whole issue #12; close it.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-6 adversarial review, app/deliveryGraph.ts:666): the ATTRIBUTION disqualifier was
+// still tested against the marker's WHOLE comma-bounded clause while its two negation siblings were
+// scoped to the marker's `and`-coordinated delivery assertion — the SAME false-positive class round-6
+// fixed for them. A legit full-scope closer carrying an UNRELATED `and`-coordinated attribution
+// (`…full scope of #12 AND the regression suite is handled by another team`) was falsely flagged. The
+// attribution check is now scoped to the delivery assertion too, so such a closer validates — while an
+// attribution in the marker's OWN segment still disqualifies.
+test("#858 an affirmative closer whose `and`-coordinated attribution is unrelated still validates (attribution scoped to the assertion)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and the regression suite is handled by another team; close #12.",
+    "Own the whole issue #12 and the docs are owned by a sibling slice, then close #12.",
+    "Deliver every acceptance criterion of #12 and the migration is covered by our peers; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: an attribution that GOVERNS the marker (in its own `and`-segment, or with no
+// coordinator between it and the marker) must STILL disqualify — assertion-scoping the attribution
+// check must not reopen the attribution bypass.
+test("#858 an attribution governing the marker still disqualifies after assertion-scoping (no reopened bypass)", () => {
+  const bypasses = [
+    "The full scope of #12 is handled by siblings and close #12.",
+    "The full scope of #12 is delivered by another team and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-6 adversarial review, app/deliveryGraph.ts:671): scoping the core-negation check
+// to the marker's `and`-segment opened a fail-open regression — a GENUINE disclaimer that sits AFTER
+// the marker in an `and`-segment (`…full scope of #12 AND it is not fully delivered`) was shed from
+// the segment and no longer disqualified, where the pre-round whole-clause test caught it. An
+// after-marker negation that REFERENCES DELIVERY (a delivery verb / `it` referring back to the scope)
+// still disclaims the marker and must disqualify — while an after-marker negation of an UNRELATED
+// constraint (`…AND do not introduce regressions`) stays affirmative.
+test("#858 an after-marker negation that references delivery still disqualifies (fail-open regression closed)", () => {
+  const bypasses = [
+    "Deliver the full scope of #12 and it is not fully delivered; close #12.",
+    "Deliver the full scope of #12 and we cannot deliver the edge cases; close #12.",
+    "Own the whole issue #12 and it is never fully covered, then close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-7 review, app/deliveryGraph.ts:298/342 — "Exclude negated closing actions"): the
+// closing-action detector matched a closing verb even when it was DIRECTLY NEGATED, so a safe
+// partial-slice brief that explicitly forbids the close (`Implement criterion 1 of #12. Do not close
+// #12; use Part of #12.`) — which follows the partial-slice contract — was wrongly rejected as
+// `partial-scope-close`, blocking a legitimate graph at compile/dispatch time. A directly-negated close
+// (`do not close`, `don't close`, `never close`) is the OPPOSITE of the defect (a part-scope node told
+// TO close), so it must not count as a closing action.
+test("#858 a directly-negated close is not a partial-scope-close (safe partial-slice brief validates)", () => {
+  const ok = [
+    "Implement criterion 1 of nanobpm/nano-supervisor#12. Do not close #12; use Part of #12.",
+    "Implement criterion 1 of #12. Don't close #12.",
+    "Work on one slice of #12; never close #12 — that is the epic's job.",
+    "Implement part of #12. Do not resolve #12. Do not fix #12.",
+    "Scope: one criterion of #12. Do not simply close it; leave the parent open.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: negating ONE close must not blind the guard to a DIFFERENT active close, and a
+// double-negative idiom (`do not forget to close`) is still an active close instruction. Both must stay
+// flagged — the negation refinement must not reopen the partial-scope-close bypass.
+test("#858 a negated close must not mask a sibling active close (no reopened bypass)", () => {
+  const bypasses = [
+    // #34 is actively closed with no full-scope marker; the negated #12 must not suppress detection.
+    "Implement criterion 1 of #12. Do not close #12, but close #34.",
+    // "do not forget to close" INSTRUCTS the close — a double negative, still a partial-scope-close.
+    "Implement criterion 1 of #12. Do not forget to close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-7 review, app/deliveryGraph.ts:378 — "Distinguish implementation methods from
+// alternate ownership"): the broad `<completion verb> by <non-self>` attribution branch mistook an
+// implementation METHOD (a gerund describing HOW the scope is delivered) for attribution to another
+// owner, because the method word is not on the self allowlist. `The full scope of #12 is implemented by
+// updating the parser; close #12.` was wrongly rejected. A `by <gerund>` means-clause is the slice's
+// own method, not another actor, so it must stay a valid full-scope acknowledgement.
+test("#858 a `by <implementation method>` gerund is the slice's own method, not attribution (validates)", () => {
+  const ok = [
+    "The full scope of #12 is implemented by updating the parser; close #12.",
+    "Deliver the full scope of #12, satisfied by adding the missing migration; close #12.",
+    "The whole issue #12 is delivered by carefully refactoring the module, then close #12.",
+    "Own the full scope of #12, completed by wiring up the remaining handlers; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: attribution to another ACTOR (not a gerund method) must STILL disqualify — the
+// gerund-method carve-out must not reopen the attribution bypass. A determiner before an `-ing` word
+// (`by the training team`) makes it an actor noun phrase, not a method, so it still disqualifies.
+test("#858 attribution to another actor still disqualifies after the gerund-method carve-out (no reopened bypass)", () => {
+  const bypasses = [
+    "The full scope of #12 is handled by siblings; close #12.",
+    "The full scope of #12 is delivered by the other slices; close #12.",
+    "The full scope of #12 is implemented by the platform team; close #12.",
+    "The full scope of #12 is delivered by the training team; close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 adversarial review, app/deliveryGraph.ts:411 — "gerund-method lookahead fails
+// open on a bare `-ing` noun actor"): the round-7 lookahead `(?!(?:\w+ly\s+)?\w+ing\b)` excluded ANY
+// bare `-ing` word after `by`, so attribution to a real actor whose name ends in `-ing` (`owned by
+// engineering`, `handled by marketing`, `covered by staffing`) no longer disqualified — a fail-OPEN
+// regression vs. round-6 (no lookahead). The carve-out must exclude only a gerund that GOVERNS an
+// object (a means-clause like `by updating the parser`), not a bare terminal `-ing` noun.
+test("#858 a bare `-ing` noun actor still disqualifies after the gerund-method carve-out (no fail-open regression)", () => {
+  const bypasses = [
+    "The full scope of #12 is owned by engineering; close #12.",
+    "The full scope of #12 is handled by marketing; close #12.",
+    "The full scope of #12 is covered by staffing; close #12.",
+    "The full scope of #12 is delivered by engineering; close #12.",
+    "The full scope of #12 is owned by engineering and product; close #12.",
+    "The full scope of #12 is handled by marketing or sales; close #12.",
+    "The full scope of #12 is provided by consulting; close #12.",
+    "The full scope of #12 is owned by engineering that reports to product; close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while a genuine means-clause — a gerund GOVERNING an object — is still the slice's own method and
+// must validate (the round-7 carve-out's intent, preserved).
+test("#858 a gerund governing an object is still a method, not attribution (validates)", () => {
+  const ok = [
+    "The full scope of #12 is implemented by updating the parser; close #12.",
+    "The full scope of #12 is satisfied by doing it; close #12.",
+    "The full scope of #12 is addressed by filing tickets; close #12.",
+    "The full scope of #12 is met by quietly shipping it; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 adversarial review, app/deliveryGraph.ts:361 — "NEGATED_CLOSE_PREFIX misses the
+// `not to close` infinitive"): the negator→verb gap admitted only adverbs, so the `to` of the
+// infinitive (`Remember not to close #12.`, `Be sure not to close #12.`) was not admitted and a brief
+// that forbids the close this way was still rejected. The gap now admits an optional `to`.
+test("#858 a `not to close` infinitive is a negated close, not a partial-scope-close (validates)", () => {
+  const ok = [
+    "Implement criterion 1 of #12. Remember not to close #12; use Part of #12.",
+    "Implement one slice of #12. Be sure not to close #12.",
+    "Implement criterion 1 of #12. Do not simply blindly close it.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// …and admitting `to` must not reopen the double-negative bypass: `do not forget to close` still
+// INSTRUCTS the close (a verb sits between the negator and `to`), so it stays flagged.
+test("#858 admitting `to` keeps `do not forget to close` an active close (no reopened bypass)", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Do not forget to close #12.",
+    "Implement criterion 1 of #12. Do not hesitate to close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 review, "Support optional colon after closing keywords", deliveryGraph.ts:301 and
+// the mirrored target regex / scope-classify.md): GitHub also closes on the colon form (`Closes: #12`),
+// but the prefilter and target regex required the issue target immediately after whitespace, so a
+// partial brief using the colon form produced NO `partial-scope-close` error even though GitHub would
+// close the issue. Both patterns now accept the optional colon.
+test("#858 the colon closing form (`Closes: #12`) is detected as a partial-scope-close", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Closes: #12.",
+    "Implement the parser slice of #12. Fixes: #12.",
+    "Do the UI part of nanobpm/nano-supervisor#12. Resolves: nanobpm/nano-supervisor#12.",
+    "Implement one criterion of #12. Closes:#12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …and the colon form carrying a genuine full-scope acknowledgement still validates (the colon change
+// must widen detection, not over-fire on a legitimate full-scope closer).
+test("#858 the colon closing form with a full-scope acknowledgement validates", () => {
+  const ok = [
+    "Deliver the full scope of #12. Closes: #12.",
+    "This slice owns the whole issue #12. Fixes: #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 review, app/deliveryGraph.ts:366 — "Distinguish additive not-just constructions
+// from negation"): the negator gap admitted `just`/`only`, so an ADDITIVE `not just/only … ; also …`
+// correlative (`Do not just close #12; also add a release note` — the close STILL happens) was treated as
+// a negated close and the partial brief validated. The additive correlative now re-activates the close.
+// (Round-8 adversarial review narrowed the trigger: the additive signal is the `also`/`as well`/`too`
+// continuation, never a bare `but`, so these cases all carry an explicit additive word.)
+test("#858 an additive `not just/only … ; also/but …` close is a partial-scope-close (not a negation)", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Do not just close #12; also add a release note.",
+    "Implement one slice of #12. Do not only close #12, but also update the docs.",
+    "Do the parser part of #12. Don't just close #12; also open a follow-up.",
+    "Implement part of #12. Do not only close #12 but also notify the team.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …but a genuine negated close with a merely/simply/just manner-adverb and NO additive continuation
+// stays a safe partial-slice brief (the additive carve-out must not reopen the negated-close false
+// positive the round-7 fix closed).
+test("#858 a `not simply/just/merely close` with no additive continuation stays a safe negated close", () => {
+  const ok = [
+    "Scope: one criterion of #12. Do not simply close it; leave the parent open.",
+    "Implement criterion 1 of #12. Do not just close #12.",
+    "Implement one slice of #12. Do not merely close #12 — leave it open.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 review, app/deliveryGraph.ts:427 — "Detect active-voice sibling ownership
+// attribution"): the attribution check only detected the PASSIVE `delivered by siblings`. An active-voice
+// `Siblings deliver the full scope of #12; … close #12.` credited the marker even though siblings — not
+// this node — own the scope, restoring the attribution bypass. Active-voice sibling/other ownership now
+// disqualifies the marker too.
+test("#858 active-voice sibling/other ownership disqualifies the full-scope marker (no attribution bypass)", () => {
+  const bypasses = [
+    "Siblings deliver the full scope of #12; implement criterion 1 and close #12.",
+    "The other slices own every acceptance criterion of #12; do the parser part and close #12.",
+    "Peers handle the full scope of #12; implement the UI and close #12.",
+    "Another slice covers the whole issue #12; implement part and close it.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while active-voice ownership by THIS slice is an affirmative assertion and must still validate (the
+// active-voice check must fire only on OTHERS, never reopen a self-ownership false positive).
+test("#858 active-voice self ownership still validates (active-voice check fires only on others)", () => {
+  const ok = [
+    "This slice delivers the full scope of #12; close #12.",
+    "This brief covers every acceptance criterion of #12, so close #12.",
+    "I own the whole issue #12; close it.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 adversarial review): the round-8 additive trigger admitted a BARE `but` as an
+// additive continuation. A genuine CONTRASTIVE `but` after a negated close (`Do not just close it; but
+// leave the parent open`) is a SAFE negated close — the `but` introduces a contrast, not an added action
+// — yet it was re-activated and flagged, a FALSE-POSITIVE REGRESSION vs. round-7. The additive signal is
+// the correlative `also`, never a bare `but`, so a bare `but` must NOT reinstate the close.
+test("#858 a contrastive `but` after a negated close is NOT an additive continuation (no false positive)", () => {
+  const ok = [
+    "Scope: one criterion of #12. Do not just close it; but leave the parent open.",
+    "Do not only close #12, but never reopen it.",
+    "Implement one slice of #12. Do not just close #12; but do add a note.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// …while the correlative `not only X but ALSO Y` still instructs the close — the additive signal is the
+// `also`, so requiring it keeps the cited bypass flagged without the bare-`but` false positive.
+test("#858 the correlative `not only … but also …` close still flags (additive via `also`)", () => {
+  const bypasses = [
+    "Implement one slice of #12. Do not only close #12, but also update the docs.",
+    "Implement criterion 1 of #12. Do not just close #12; but also add a release note.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 adversarial review): the correlative re-activation fired only on `just`/`only`, so
+// the SAME additive construction with another manner adverb (`merely`/`simply`/`basically`) + an `also`
+// continuation stayed a false negation and the partial close validated. The additive signal is the `also`
+// continuation, not the specific adverb, so the correlative class now spans the manner-adverb family.
+test("#858 an additive `not merely/simply/basically … ; also …` close is a partial-scope-close", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Do not merely close #12; also add a note.",
+    "Implement one slice of #12. Do not simply close #12; also update the docs.",
+    "Do the parser part of #12. Do not basically close #12; also open a follow-up.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while the synonymous additive continuation `as well` (in place of `also`) still instructs the close —
+// `Do not just close #12; add a note as well.` performs the close AND adds a note. (A bare `too` is NOT
+// treated as additive: it is also the intensifier `too risky/early`, which would over-fire on a safe
+// negated close — a fail-closed tradeoff that keeps `too` a safe negation.)
+test("#858 an additive `not just/only … ; … as well` close is a partial-scope-close", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Do not just close #12; add a note as well.",
+    "Implement one slice of #12. Do not only close #12; update the docs as well.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …and a bare `too` is the INTENSIFIER (`too risky`/`too early`) as often as the additive (`add a note
+// too`), so it is deliberately NOT an additive trigger — a safe negated close followed by a `too <adj>`
+// constraint stays a safe negated close (the additive widening must not over-fire on the intensifier).
+test("#858 a `too <adjective>` intensifier after a negated close is NOT additive (no false positive)", () => {
+  const ok = [
+    "Implement criterion 1 of #12. Do not just close #12; it is too risky.",
+    "Implement one slice of #12. Do not only close #12; it is too early to ship.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 adversarial review): the active-voice attribution subject allowlist omitted the
+// common actor nouns, so an active-voice `The team / another team / the upstream slice delivers the full
+// scope of #12` bypassed — asymmetric with the passive `handled by the team`, which already disqualifies.
+test("#858 active-voice team/upstream-slice ownership disqualifies the full-scope marker", () => {
+  const bypasses = [
+    "The team delivers the full scope of #12; implement criterion 1 and close #12.",
+    "Another team owns the whole issue #12; implement criterion 1 and close #12.",
+    "The upstream slice delivers the full scope of #12; implement criterion 1 and close #12.",
+    "Other teams handle every acceptance criterion of #12; do the parser part and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 adversarial review): the colon fix admitted only a single optional colon, so a
+// doubled colon (`Closes:: #12` / `Closes: : #12`) — which GitHub's trailing-colon trim still closes —
+// was not detected and the partial close validated.
+test("#858 the double-colon closing form (`Closes:: #12`) is detected as a partial-scope-close", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Closes:: #12.",
+    "Implement the parser slice of #12. Fixes: : #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-9 review, app/deliveryGraph.ts:660 — "Preserve subjects when splitting compound
+// predicates"): `deliveryAssertionAround` splits the marker's clause at EVERY `and`, so a compound
+// predicate (`Siblings plan and deliver the full scope of #12`) drops the segment containing the
+// grammatical SUBJECT (`Siblings plan`) and leaves only `deliver the full scope…` in the assertion —
+// `SCOPE_ACTIVE_VOICE_OTHERS` then cannot see the `Siblings` actor and the attribution bypass returns.
+// A compound predicate shares ONE subject across both verbs, so the subject must be retained when the
+// post-`and` segment is a bare verb phrase (no new subject of its own).
+test("#858 a compound-predicate subject is retained for active-voice attribution (no bypass)", () => {
+  const bypasses = [
+    "Siblings plan and deliver the full scope of #12; implement criterion 1 and close #12.",
+    "The other slices design and own the whole issue #12; implement part and close it.",
+    "Peers build and handle the full scope of #12; implement the UI and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while an `and` that coordinates an INDEPENDENT constraint (its own subject + verb) still splits the
+// assertion, so a disqualifier governing that OTHER constraint does not disqualify the marker (the
+// round-6 scoping guarantee is preserved — only a shared-subject compound predicate retains the subject).
+test("#858 an independent `and`-coordinated constraint still splits the assertion (no over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and the regression suite is handled by another team; close #12.",
+    "Deliver the full scope of #12 and do not introduce regressions; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-13 review, app/deliveryGraph.ts `compoundAtToken`): the per-coordinator threshold
+// scanned EVERY later token until some suffix reached a completion verb, so an INDEPENDENT clause whose
+// verb merely sits later (`… and this slice delivers the full scope of #12`) was misclassified as a
+// compound-predicate continuation. The `and` then did NOT split, so the marker's assertion retained the
+// prior segment's unrelated negation/attribution and a legitimate full-scope acknowledgement was
+// rejected. The compound test must ask only whether the coordinator's INTRODUCED text is verb-LED
+// (`leadVerbReach[te]`), not whether any later suffix reaches a verb.
+test("#858 an independent clause after `and` is not a compound predicate (verb-led lead test)", () => {
+  const ok = [
+    // Copilot's cited shape: an unrelated negation before `and`, then an independent self-assertion.
+    "The team must not regress and this slice delivers the full scope of #12. Close #12.",
+    "The team must not regress and the slice delivers the full scope of #12. Close #12.",
+    // The same misclassification via an unrelated ATTRIBUTION retained across the unsplit `and`.
+    "The parser is handled by siblings and this slice delivers the full scope of #12. Close #12.",
+    // A multi-word subject pushes the verb even later; the lead test must still see a non-verb lead.
+    "The team must not regress and the parser subsystem carefully delivers the full scope of #12. Close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// …while a genuinely verb-led (or adverb-led) compound predicate still SHARES the prior subject, so an
+// others-subject / negation governing it still disqualifies the marker (the round-9 retention is kept).
+test("#858 a verb-led compound predicate still shares the subject (no fail-open)", () => {
+  const bypasses = [
+    "Siblings plan and deliver the full scope of #12; implement criterion 1 and close #12.",
+    "The team must not regress and deliver the full scope of #12. Close #12.",
+    "The team must not regress and quickly deliver the full scope of #12. Close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-13 review, app/deliveryGraph.ts `SCOPE_NEGATED_AFTER_MARKER_DELIVERY`): the
+// re-catch scanned the marker's WHOLE clause, so a negator that PRECEDES the marker (`The tests must not
+// regress and this slice delivers the full scope of #12`) matched `not … delivers` inside the four-word
+// window and rejected a legitimate acknowledgement — the negation governs the unrelated earlier
+// constraint, not the marker. The check must run against the marker-RELATIVE suffix (from the marker to
+// the clause end), not the whole clause.
+test("#858 an after-marker delivery negation must sit AFTER the marker (marker-relative suffix)", () => {
+  const ok = [
+    "The tests must not regress and this slice delivers the full scope of #12. Close #12.",
+    "We never skip tests and this slice delivers the full scope of #12. Close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// …while a negator that genuinely sits AFTER the marker and references delivery still disclaims it
+// (the round-6 fail-open the re-catch exists to close stays closed).
+test("#858 a genuine after-marker delivery negation still disqualifies (no fail-open)", () => {
+  const bypasses = [
+    "Deliver the full scope of #12 and it is not fully delivered. Close #12.",
+    "Deliver the full scope of #12 and that scope is never delivered. Close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-9 review, app/deliveryGraph.ts:478 — "Treat our team as self-ownership in active
+// voice"): the others-subject pattern admitted an optional `our` before `team`, so `Our team delivers the
+// full scope of #12` was classified as EXTERNAL ownership and rejected — even though the passive
+// equivalent `delivered by our team` is explicitly treated as valid SELF-ownership. `our team` is the
+// current slice, so it must NOT disqualify; `the/another/other team` still do.
+test("#858 active-voice `our team` is self-ownership and validates (active check fires only on others)", () => {
+  const ok = [
+    "Our team delivers the full scope of #12; close #12.",
+    "Our team owns the whole issue #12; close it.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// …while `the team` / `another team` / `other teams` (no self-possessive) remain OTHERS and still
+// disqualify — the self-carve-out is only for the `our`-possessive self-reference.
+test("#858 active-voice `the/another/other team` still disqualifies (not self)", () => {
+  const bypasses = [
+    "The team delivers the full scope of #12; implement criterion 1 and close #12.",
+    "Another team delivers the full scope of #12; implement criterion 1 and close #12.",
+    "Other teams deliver the full scope of #12; implement criterion 1 and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-9 review, "Previously missed", app/deliveryGraph.ts:303 — "Recognize possessive
+// pronouns in closing targets"): the closing grammar accepted `it`/`the issue`/`that issue`/`this issue`
+// but not the POSSESSIVE `its issue`, so `…open a PR that closes its issue.` produced no
+// `partial-scope-close`. The possessive-pronoun form is now an (unresolved/pronoun) closing target in
+// both the prefilter and `CLOSING_TARGET_PATTERN`.
+test("#858 the possessive-pronoun close (`closes its issue`) is detected as a partial-scope-close", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12 and open a PR that closes its issue.",
+    "Implement the parser slice of #12; a follow-up PR resolves its issue.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while a full-scope marker still licenses the possessive-pronoun close (the new target is only a
+// detection widening — the legitimate final closer that owns the whole scope still validates).
+test("#858 a full-scope marker licenses the `closes its issue` form (no false positive)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and open a PR that closes its issue.",
+    "This slice covers every acceptance criterion of #12; the PR resolves its issue.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-9 adversarial review, app/deliveryGraph.ts:715): the compound-predicate
+// subject-retention heuristic (`COMPOUND_PREDICATE_LEAD`) admits an ADVERB-LED continuation
+// (`(?:\w+ly\s+)?`), so `deliveryAssertionAround` correctly retains the subject for `Siblings plan and
+// carefully deliver the full scope of #12` — but the retained assertion then failed
+// `SCOPE_ACTIVE_VOICE_OTHERS`, whose verb had to sit within `(?:\w+\s+){0,2}?` of the subject and so
+// could not reach across the `and carefully` coordinator gap. The exact active-voice attribution bypass
+// the compound-predicate fix exists to close still worked the moment one adverb was inserted. The
+// subject-to-verb window now also spans a coordinator (`and`/`or`/`then`) plus adverbs.
+test("#858 an adverb-led compound predicate still attributes the scope to its others-subject", () => {
+  const bypasses = [
+    "Siblings plan and carefully deliver the full scope of #12; implement criterion 1 and close #12.",
+    "The other slices design and quickly own the whole issue #12; implement part and close it.",
+    "Peers build and then handle the full scope of #12; implement the UI and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while widening that window must NOT over-fire onto an affirmative SELF assertion that merely has a
+// coordinator+adverb before its verb, nor re-admit an independent `and`-coordinated constraint (the
+// round-6 scoping guarantee).
+test("#858 the widened subject-to-verb window does not over-fire on self or independent constraints", () => {
+  const ok = [
+    "This slice plans and carefully delivers the full scope of #12; close #12.",
+    "We design and then implement every acceptance criterion of #12; close #12.",
+    "Deliver the full scope of #12 and the regression suite is carefully maintained by another team; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-9 adversarial review, app/deliveryGraph.ts:482): the `our team` self-carve-out
+// restructured the team alternative to REQUIRE a determiner (`(?:(?:the|their|another|other)\s+)teams?`),
+// so the previously-flagged BARE `Team delivers the full scope of #12` / `Teams deliver …` (no
+// determiner) regressed to validating — a fail-open regression vs. the round-entry code, whose optional
+// determiner `(?:(?:the|our|their)\s+)?` still covered the bare form. The determiner is optional again
+// but now excludes `our` specifically, so bare `team`/`teams` is others-attribution while `our team`
+// stays self-ownership.
+test("#858 active-voice BARE `team`/`teams` (no determiner) still disqualifies (not self)", () => {
+  const bypasses = [
+    "Team delivers the full scope of #12; implement criterion 1 and close #12.",
+    "Teams deliver the full scope of #12; implement criterion 1 and close #12.",
+    "Team owns the whole issue #12; implement part and close it.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-10 review, app/deliveryGraph.ts:303 — "Handle issue-first and passive closing
+// directives"): the closing grammar recognised only VERB-BEFORE-OBJECT forms (`close #12`,
+// `closes issue #12`), so a partial brief that phrases the SAME instruction with the issue as the
+// SUBJECT of a passive/participial close — `Implement criterion 1 of #12 and ensure issue #12 is
+// closed by the PR` — produced no error and validated. That is still a direct instruction to close
+// the issue from a part-scope node, so the issue-first/passive form must be detected (and its target
+// extracted) exactly like the active form.
+test("#858 a partial brief that closes via an issue-first/passive directive is rejected (passive closing form)", () => {
+  const bypasses = [
+    // The cited case.
+    "Implement criterion 1 of #12 and ensure issue #12 is closed by the PR.",
+    // Bare-#N subject, auxiliaries, and the `get`-passive.
+    "Implement criterion 1 of #12; #12 is closed by the PR.",
+    "Implement criterion 1 of #12; #12 will be closed by the PR.",
+    "Implement criterion 1 of #12; make sure #12 gets closed.",
+    // Participial directive with no auxiliary.
+    "Implement criterion 1 of #12; see #12 closed.",
+    "Implement criterion 1 of #12 and mark #12 as resolved.",
+    "Implement criterion 1 of #12; with #12 closed by the PR.",
+    // Pronoun / `the issue` subjects and the other verb families.
+    "Implement criterion 1 of #12; the issue is closed by the PR.",
+    "Implement criterion 1 of #12; it is closed by the PR.",
+    "Implement criterion 1 of #12; issue #12 is fixed by the PR.",
+    "Implement criterion 1 of #12; GitHub issue #12 is resolved by the PR.",
+    // Repo-qualified and URL subjects attribute the close to THAT issue.
+    "Implement criterion 1 of owner/repo#12; issue owner/repo#12 is closed by the PR.",
+    "Implement criterion 1 of #12; the issue at https://github.com/o/r/issues/12 is closed by the PR.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: the passive arm's subject is an issue REFERENCE, never a bare noun, so a benign
+// passive about a non-issue subject must NOT be read as a closing directive — and a negated passive
+// close (a safe partial-slice brief that forbids the close) must not over-fire either.
+test("#858 a benign or negated passive does not over-fire the issue-first close detection (validates)", () => {
+  const ok = [
+    // Benign passives about a non-issue subject.
+    "Implement criterion 1 of #12; the door is closed by the latch.",
+    "Implement criterion 1 of #12; the PR is closed by the merge queue.",
+    "Implement criterion 1 of #12; the ticket status is closed by automation.",
+    "Implement criterion 1 of #12; the milestone is closed by the bot.",
+    "Implement criterion 1 of #12; the window is fixed by the frame.",
+    "Implement criterion 1 of #12; the door gets closed.",
+    "Work on #12; the loop is closed by the feedback.",
+    // A directly-negated passive close is a SAFE partial-slice brief, not a partial-scope-close.
+    "Implement criterion 1 of #12 and ensure issue #12 is not closed by the PR.",
+    "Implement criterion 1 of #12; issue #12 will not be closed by the PR.",
+    "Implement criterion 1 of #12; the issue is never closed by this PR.",
+    "Implement criterion 1 of #12; #12 isn't closed by this PR.",
+    "Implement criterion 1 of #12; ensure the issue is not closed yet.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// A negator in an UNRELATED earlier clause must not mask an ACTIVE passive close — the passive
+// negation check reads only the match's own auxiliary window, so a preceding `do not …` cannot
+// suppress detection of a real close.
+test("#858 an unrelated earlier negation does not mask an active passive close (no reopened bypass)", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12; do not introduce regressions; issue #12 is closed by the PR.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-10 adversarial review, app/deliveryGraph.ts:318/379 — the passive arm's auxiliary
+// window): the window capped at THREE words, so a periphrastic-future passive close of the node's own
+// issue — `#12 is going to be closed` / `#12 is expected to be closed` (`is/going/to/be` and
+// `is/expected/to/be` are FOUR window words) — slipped past BOTH mirrored patterns (prefilter +
+// extractor) and validated. That is the fail-OPEN direction (a real close missed); over-firing is this
+// guard's safe/fail-closed direction, so the window is widened to four words to catch the whole class.
+test("#858 a partial brief that closes via a periphrastic-future passive directive is rejected", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12; #12 is going to be closed by the PR.",
+    "Implement criterion 1 of #12; #12 is expected to be closed by the PR.",
+    "Implement criterion 1 of #12 and ensure issue #12 is going to be closed by the PR.",
+    "Implement criterion 1 of #12; the issue is expected to be closed by the PR.",
+    "Implement criterion 1 of owner/repo#12; issue owner/repo#12 is going to be closed by the PR.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The widened window must not swallow a negated periphrastic close (a SAFE partial-slice brief) nor a
+// benign passive about a non-issue subject.
+test("#858 a benign or negated periphrastic-future passive does not over-fire (validates)", () => {
+  const ok = [
+    "Implement criterion 1 of #12; the door is going to be closed by the janitor.",
+    "Implement criterion 1 of #12; the PR is expected to be closed by the merge queue.",
+    "Implement criterion 1 of #12; issue #12 is not going to be closed by the PR.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// A FULL-scope closer phrased with the passive/issue-first form must still validate — the new grammar
+// must recognise the target so the marker's acknowledgement is correctly credited to it.
+test("#858 a full-scope closer using the issue-first/passive form still validates (must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12; issue #12 is closed by this PR.",
+    "Deliver the full scope of #12; #12 is closed by this PR.",
+    "Deliver the full scope of #12; #12 gets closed by this PR.",
+    "Deliver the full scope of owner/repo#12; issue owner/repo#12 is closed by this PR.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-11 review, app/deliveryGraph.ts:379 — the active closing arm): the extractor
+// captured only the FIRST target of a COORDINATED close, so `Deliver the full scope of #12; implement
+// only criterion 1 of #13; close #12 and #13.` validated — #13 entered `numbered` only via the
+// un-anchored sole-issue fallback, never as a checked target, and its under-delivery was never
+// guarded. Every issue a prompt directs the agent to close must be extracted and acknowledged.
+test("#858 a coordinated close extracts and validates EVERY target (close #12 and #13)", () => {
+  const bypasses = [
+    // The cited case: #13 is a part-scope node told to close, but only #12 was checked.
+    "Deliver the full scope of #12; implement only criterion 1 of #13; close #12 and #13.",
+    // The `both`/`and` and comma-list forms, and a repo-qualified extra target.
+    "Deliver the full scope of #12; implement criterion 1 of #13; close both #12 and #13.",
+    "Deliver the full scope of #12; do one slice of #13 and one of #14; close #12, #13, and #14.",
+    "Deliver the full scope of #12; implement criterion 1 of owner/repo#13; close #12 and owner/repo#13.",
+    "Deliver the full scope of #12; implement criterion 1 of #13; close #12 and #13 and #14.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: when EVERY coordinated target is genuinely acknowledged full-scope, the close is
+// licensed — extracting the extra targets must not over-fire on a legitimate full-scope close.
+test("#858 a coordinated close of fully-acknowledged issues still validates (must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and the full scope of #13; close #12 and #13.",
+    "Own the whole issue #12 and the whole issue #13; close both #12 and #13.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-18 review, app/deliveryGraph.ts — the issue-first/PASSIVE closing arm): the
+// round-11 fix extracted every target of a coordinated ACTIVE close (`close #12 and #13`) from the
+// active arm's coordination tail, but the passive arm captured only its FIRST subject — so `Deliver
+// the full scope of #13; implement only criterion 1 of #12; ensure issues #12 and #13 are closed by
+// the PR.` validated: the match started at `#13`, checked only that acknowledged target, and never
+// treated `#12` as closed. The passive subject now carries the same coordination tail, re-scanned
+// for every extra numbered target so each passively-closed issue needs its own acknowledgement.
+test("#858 a coordinated passive close extracts and validates EVERY target (issues #12 and #13 are closed)", () => {
+  const bypasses = [
+    // The cited case: #12 is a part-scope node passively closed, but only #13 was checked.
+    "Deliver the full scope of #13; implement only criterion 1 of #12; ensure issues #12 and #13 are closed by the PR.",
+    // The `both`-quantified form, and a comma-list of three.
+    "Deliver the full scope of #13; implement only criterion 1 of #12; ensure both issues #12 and #13 are closed by the PR.",
+    "Deliver the full scope of #14; implement criterion 1 of #12 and one of #13; issues #12, #13, and #14 are closed by the PR.",
+    // A repo-qualified extra target, and the other verb families.
+    "Deliver the full scope of #13; implement criterion 1 of owner/repo#12; issues owner/repo#12 and #13 are closed by the PR.",
+    "Deliver the full scope of #13; implement only criterion 1 of #12; issues #12 and #13 will be fixed by the PR.",
+    "Deliver the full scope of #13; implement only criterion 1 of #12; issues #12 and #13 get resolved by the PR.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: when EVERY coordinated passive target is genuinely acknowledged full-scope, the
+// close is licensed — and a coordinated passive whose own auxiliary window is NEGATED stays a safe
+// partial-slice brief (the negation drop must still fire with the new tail present).
+test("#858 a coordinated passive close of fully-acknowledged issues still validates (must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and the full scope of #13; ensure issues #12 and #13 are closed by the PR.",
+    "Deliver the full scope of #12 and the full scope of #13; issues #12 and #13 will be closed by the PR.",
+    // A negated coordinated passive is a SAFE partial-slice brief, not a partial-scope-close.
+    "Implement criterion 1 of #12 and criterion 1 of #13; issues #12 and #13 are not closed by the PR.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-11 suppressed advisory, app/deliveryGraph.ts:392 — `NEGATED_CLOSE_PREFIX`): the
+// negation gap admitted only ADVERBS and `to`, so the safe, contract-compliant meta-instruction
+// `Do not include Closes #12; use Part of #12` was treated as an ACTIVE close (`include` is not an
+// adverb) and the graph was wrongly rejected. A negated `use`/`write`/`include`/`add` of a closing
+// keyword is a SAFE partial-slice brief — explicitly telling the agent NOT to close — so it must
+// validate. A meaning-flipping verb (`do not forget to close`) still stays ACTIVE.
+test("#858 a negated use/write/include/add of a closing keyword is a safe partial-slice brief (validates)", () => {
+  const ok = [
+    "Implement criterion 1 of #12. Do not include Closes #12; use Part of #12.",
+    "Implement criterion 1 of #12. Do not use Closes #12; use Part of #12.",
+    "Implement criterion 1 of #12. Do not write Fixes #12 in the commit body.",
+    "Implement criterion 1 of #12. Do not add a Closes #12 line; reference Part of #12.",
+    "Implement criterion 1 of #12. Never include Resolves #12 in the PR description.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Widening the negation gap to admit `use`/`write`/`include`/`add` must NOT reopen the bypass for a
+// meaning-flipping verb — `do not forget/hesitate to close #12` still INSTRUCTS the close.
+test("#858 a meaning-flipping verb still keeps the close active (no reopened bypass)", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Do not forget to close #12.",
+    "Implement criterion 1 of #12. Do not hesitate to close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-11 + round-12 review, app/deliveryGraph.ts full-scope scan): every marker occurrence
+// re-scanned back/forward to its clause boundaries AND re-ran the coordinator/compound-predicate scan per
+// marker, so a long prompt repeating a marker — worst case a single DELIMITER-FREE clause interleaving
+// `full scope … and …` (where `scope` makes every `and` a compound predicate, so all markers share one
+// growing segment) — made validation quadratic and could monopolise the event loop across the 256 allowed
+// nodes. The scan is now a per-clause single forward pass (precomputed boundaries + coordinator
+// thresholds + a far/near split + monotone disqualifier memoisation). These tests assert CORRECTNESS on
+// the worst-case shape and assert LINEAR scaling via a deterministic operation count
+// (`drainClauseScanSteps`) — never a wall-clock threshold, which is nondeterministic under CI load
+// (issue #858 round-12 review).
+test("#858 a long prompt with repeated full-scope markers validates correctly (period-delimited)", () => {
+  const filler = "Deliver the full scope of #12. ".repeat(400); // ~12k chars, one clause per repetition
+  const g = {
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: `${filler}Close #12.` } }],
+    edges: [],
+  };
+  // Every occurrence is an affirmative full-scope acknowledgement of #12, so the close is licensed.
+  assertEquals(validateDeliveryGraph(g), []);
+});
+
+test("#858 the full-scope scan is linear on the worst-case delimiter-free clause (deterministic op count)", () => {
+  // The worst-case clause shape the review cited: ONE delimiter-free clause repeating `full scope … and
+  // …`, so every coordinator is a compound predicate and every marker shares one growing segment. The
+  // operation counter measures coordinator-threshold sweep steps + near-window coordinator examinations —
+  // the two former quadratic drivers. (The assertion-segment disqualifiers are memoised per segment-start
+  // group, so they are not per-marker on this shape either.)
+  const worstCase = (reps: number) =>
+    `Deliver ${"full scope of #12 and ".repeat(reps)}the whole issue. Close #12.`;
+  const stepsFor = (reps: number): number => {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: worstCase(reps) } }], edges: [] };
+    drainClauseScanSteps();
+    // Every occurrence is an affirmative full-scope acknowledgement of #12, so the close is licensed.
+    assertEquals(validateDeliveryGraph(g), []);
+    return drainClauseScanSteps();
+  };
+  const small = stepsFor(100);
+  const large = stepsFor(800); // 8× the markers/coordinators/clause-length
+  // Linear scaling: 8× the input must cost ≤ 8× the operations (plus a small constant slack for the
+  // fixed per-clause setup). A quadratic scan would cost ~64×.
+  assert(small > 0, "expected the small input to do non-zero scan work");
+  assert(
+    large <= small * 8 + 64,
+    `expected linear scaling, but ops(800)=${large} vs 8×ops(100)+slack=${small * 8 + 64} — the scan is superlinear`,
+  );
+});
+
+// Issue #858 (round-12 review, app/deliveryGraph.ts clauseBoundaries): treating every `:` (and `.`) as a
+// clause boundary split an issue URL at `https:` / `github.com`, so the attribution/negation checks saw
+// only the fragment before the URL and a sibling-attributed scope validated. Delimiters INSIDE a URL span
+// are not clause boundaries.
+test("#858 an issue URL is not split at its scheme colon / interior delimiters (attribution still seen)", () => {
+  // The full scope of the URL-named issue is attributed to siblings — must NOT licence the close.
+  const attributed =
+    "The full scope of https://github.com/acme/a/issues/12 is handled by siblings; implement criterion 1 and close https://github.com/acme/a/issues/12.";
+  const g1 = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: attributed } }], edges: [] };
+  assertEquals(hasCode(validateDeliveryGraph(g1), "partial-scope-close").code, "partial-scope-close");
+
+  // …but a genuine full-scope acknowledgement anchored to a URL, with no sibling attribution, must still
+  // VALIDATE (the URL-span fix must not over-fire and break legitimate closers).
+  const genuine =
+    "Deliver the full scope of #12. See https://github.com/acme/a/issues/12 for the checklist. Close #12.";
+  const g2 = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: genuine } }], edges: [] };
+  assertEquals(validateDeliveryGraph(g2), []);
+});
+
+// Issue #858 (round-12 "previously missed" advisory, app/deliveryGraph.ts PART_QUALIFIER_AFTER_MARKER /
+// anchoredIssueKey): the possessive qualifier only accepted an ASCII apostrophe, so typographic text
+// (`issue’s`, U+2019) bypassed the part-narrowing guard. Accept both apostrophe forms (the negation
+// regexes already do).
+test("#858 a typographic-apostrophe possessive still narrows the scope to a part (rejected)", () => {
+  const ascii = "Deliver the whole issue's parser slice. Closes #12.";
+  const typographic = "Deliver the whole issue’s parser slice. Closes #12.";
+  for (const prompt of [ascii, typographic]) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(
+      hasCode(validateDeliveryGraph(g), "partial-scope-close").code,
+      "partial-scope-close",
+      `expected rejection for: ${prompt}`,
+    );
+  }
 });
