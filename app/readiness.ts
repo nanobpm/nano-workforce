@@ -840,7 +840,17 @@ export function parsePrTarget(target: string): { repo: string; number: string } 
  * fine there, so it is rejected by shape, not by a stricter regex. */
 export function parsePlanKey(target: string): { planKey: string } | null {
   const pr = parsePr(target);
-  return pr && pr.prKey === target.trim() ? { planKey: pr.prKey } : null;
+  // Canonical-key discriminator: `pr.prKey === target.trim()` alone only proves the value ROUND-TRIPS
+  // through `parsePr`, not that it is an `owner/repo#N` key. The shorthand branch's repo capture
+  // (`[^/]+/[^#]+`) admits EXTRA `/` characters, so a URL-shaped value (`https://example.com/o/r#7`,
+  // `//host/o/r#7`) or a multi-slash path (`a/b/c#9`) parses and round-trips to an identical `prKey`,
+  // and was accepted here — the epic probe then queried that URL-shaped value as a lineage root and
+  // could only time out (#857 review, the exact failure this helper exists to prevent). A canonical
+  // planKey's repo is EXACTLY `owner/repo` — one `/`, no scheme/host/path — so require the parsed repo
+  // to carry exactly one slash. This keeps the legitimate `owner/github.com#42` (a repo literally named
+  // `github.com`, one slash) while failing closed on every URL-shaped/multi-slash impersonator.
+  const slashCount = (pr?.repo.match(/\//g) ?? []).length;
+  return pr && pr.prKey === target.trim() && slashCount === 1 ? { planKey: pr.prKey } : null;
 }
 
 /** Build the `gh pr view` command that reads a PR's merge-state fields. `gh` reads its token from the

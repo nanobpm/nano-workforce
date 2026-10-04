@@ -37,9 +37,14 @@ function walk(dir: string, out: string[]) {
 }
 
 // The spellings of a duplicate reference-shape grammar, matched against a module's SOURCE TEXT. Each
-// is matched DIGIT-CLASS- and ANCHOR-AGNOSTICALLY — pinned to a capture group opening on a digit atom
-// (`\d` or `[0-9]`), NOT to one verbatim `#(\d+)$` spelling — so a drifted duplicate (`#(\d+)`,
-// `#([0-9]+)$`, `#(\d+)\b`, `issues/([0-9]+)`) cannot stay green (#857):
+// is matched DIGIT-CLASS-, ANCHOR-, and CAPTURE-SPELLING-AGNOSTICALLY — pinned to a capture group
+// (plain OR named) opening on a digit atom (`\d` or `[0-9]`), NOT to one verbatim `#(\d+)$` spelling —
+// so a drifted duplicate cannot stay green by respelling the capture (#857 review): `#(\d+)`,
+// `#([0-9]+)$`, `#(\d+)\b`, `issues/([0-9]+)`, AND the named-capture forms `#(?<number>\d+)`,
+// `/pull/(?<number>\d+)`, `/issues/(?<n>[0-9]+)` are ALL caught. Pinning the scan to a BARE `(` before
+// the digit atom was the fail-open gap: a named capture inserts `?<name>` between the `(` and the
+// digit, so the old `…\(${DIGITS}` patterns never matched it and a duplicate grammar in that spelling
+// regressed the single-grammar invariant while every guard stayed green:
 //  1. the PR-URL branch — a `/pull/(<digits>` capture regex (`github\.com/…/pull/(\d+)`);
 //  2. the PR shorthand branch — a `#(<digits>` capture regex (`^([^/]+/[^#]+)#(\d+)$`), the exact
 //     duplicate that caused #856 — matched with no trailing `)$` so any drifted spelling is caught;
@@ -47,9 +52,15 @@ function walk(dir: string, out: string[]) {
 // Written per-branch so this guard's own pattern stays self-consistent with the ban it enforces (a
 // combined `#(\d+)` scan would flag the pattern text).
 const DIGITS = /(?:\\d|\[0-9\])/.source; // `\d` or `[0-9]` as it appears in regex SOURCE text
-const PULL_URL_REGEX = new RegExp(`\\\\/pull\\\\/\\(${DIGITS}`);
-const HASH_NUMBER_REGEX = new RegExp(`#\\(${DIGITS}`);
-const ISSUES_URL_REGEX = new RegExp(`\\\\/issues\\\\/\\(${DIGITS}`);
+// A capture-group OPENING in regex source: a bare `(` OR a named capture `(?<name>` — the `?<name>`
+// prefix is what the old bare-`\(` scan missed. `(?:\?<[A-Za-z_][A-Za-z0-9_]*>)?` is the optional
+// named-capture tag, so both `(\d+)` and `(?<number>\d+)` match. (Lookahead/lookbehind `(?=…)`/`(?<=…)`
+// and non-capturing `(?:…)` openers are not capture groups a parser extracts a number from, so they are
+// intentionally out of scope — the guard bans a duplicate *capture* of the digits.)
+const CAPTURE_OPEN = `\\((?:\\?<[A-Za-z_][A-Za-z0-9_]*>)?`;
+const PULL_URL_REGEX = new RegExp(`\\\\/pull\\\\/${CAPTURE_OPEN}${DIGITS}`);
+const HASH_NUMBER_REGEX = new RegExp(`#${CAPTURE_OPEN}${DIGITS}`);
+const ISSUES_URL_REGEX = new RegExp(`\\\\/issues\\\\/${CAPTURE_OPEN}${DIGITS}`);
 
 function collectProductionFiles(): string[] {
   const files: string[] = [];
@@ -108,4 +119,36 @@ test("#857: only app/plan.ts defines the issue-URL regex (`/issues/<digits>`) �
     [],
     "use parseIssue from app/plan.ts instead of a local /issues/<n> regex",
   );
+});
+
+test("#857: the guard's scan catches a duplicate grammar in ANY capture spelling (mutation fixtures)", () => {
+  // The scan must be CAPTURE-SPELLING-AGNOSTIC: a duplicate parser that respells the capture group
+  // (named capture, `[0-9]` for `\d`, a drifted anchor) must still be flagged, or the single-grammar
+  // invariant regresses behind a green guard. These are the regex SOURCE fragments a duplicate parser
+  // would carry; each must match its branch's scan regex. (The canonical modules' own real spellings
+  // are covered by the allowlist in the tests above — these fixtures prove the *detector* fires on the
+  // drifted forms a copy-paste would actually produce.)
+  // Fixtures are written as the duplicate's regex SOURCE TEXT appears in a `.ts` module — slashes
+  // escaped (`\/`) and the digit atom as `\d` / `[0-9]` — exactly what `readFileSync` reads and the
+  // scan regexes are built to match.
+  const dupSpellings: Array<{ branch: RegExp; src: string; why: string }> = [
+    // PR-URL branch — plain, named-capture, and [0-9] spellings of `/pull/(<digits>`:
+    { branch: PULL_URL_REGEX, src: "github\\.com\\/([^/]+)\\/([^/]+)\\/pull\\/(\\d+)", why: "plain /pull/(\\d+)" },
+    { branch: PULL_URL_REGEX, src: "\\/pull\\/(?<number>\\d+)", why: "named /pull/(?<number>\\d+)" },
+    { branch: PULL_URL_REGEX, src: "\\/pull\\/([0-9]+)", why: "[0-9] /pull/([0-9]+)" },
+    // PR shorthand branch — plain and named-capture spellings of `#(<digits>`:
+    { branch: HASH_NUMBER_REGEX, src: "^([^/]+\\/[^#]+)#(\\d+)$", why: "plain #(\\d+)" },
+    { branch: HASH_NUMBER_REGEX, src: "#(?<number>\\d+)", why: "named #(?<number>\\d+)" },
+    { branch: HASH_NUMBER_REGEX, src: "#([0-9]+)\\b", why: "[0-9] #([0-9]+)" },
+    // Issue-URL branch — plain and named-capture spellings of `/issues/(<digits>`:
+    { branch: ISSUES_URL_REGEX, src: "\\/issues\\/(\\d+)", why: "plain /issues/(\\d+)" },
+    { branch: ISSUES_URL_REGEX, src: "\\/issues\\/(?<n>[0-9]+)", why: "named /issues/(?<n>[0-9]+)" },
+  ];
+  for (const { branch, src, why } of dupSpellings) {
+    assert.ok(branch.test(src), `the guard must flag a duplicate spelled as ${why} (${src})`);
+  }
+  // And a NON-capturing numeric match (no capture group — `(?:\d+)` or a bare `\d+`) is NOT a parser
+  // extraction and must NOT be flagged, so the guard does not false-positive on innocent digit matches.
+  assert.ok(!HASH_NUMBER_REGEX.test("#(?:\\d+)"), "a non-capturing #(?:\\d+) is not a duplicate parser");
+  assert.ok(!PULL_URL_REGEX.test("\\/pull\\/(?:\\d+)"), "a non-capturing /pull/(?:\\d+) is not a duplicate parser");
 });

@@ -34,6 +34,7 @@ import {
   type EpicObservation,
   isFactRefTarget,
   parseEpicLineage,
+  parsePlanKey,
   summariseCapabilityCandidates,
   parsePrView,
   parseReleases,
@@ -597,6 +598,40 @@ test("#857 probeOnce epic: the lineage read is keyed by the CANONICAL planKey ev
   const r = await probeOnce(parseProbe({ kind: "epic", target: " o/r#7 " }), exec, { NANO_WORKFORCE_BASE_URL: "http://host:3000" });
   assert(r.ready, "a fully-merged epic goes green");
   assertStringIncludes(capture.url ?? "", "/app/api/lineage?root=o%2Fr%237");
+});
+
+// ── #857 review: parsePlanKey must FAIL CLOSED on URL-shaped / multi-slash impersonators ──────────
+// `pr.prKey === target.trim()` only proves the value ROUND-TRIPS through `parsePr`; the shorthand
+// branch's repo capture admits extra `/`, so a URL-shaped value round-trips to an identical prKey and
+// was wrongly accepted as a canonical planKey (the epic probe then queried it as a lineage root and
+// could only time out). The discriminator must require EXACTLY `owner/repo` (one slash).
+test("#857 parsePlanKey: REJECTS a URL-shaped value that round-trips through parsePr (https://example.com/o/r#7)", () => {
+  // The exact advisory case: not github.com, but the shorthand branch still parses it (extra `/` in
+  // the repo capture) and `prKey === target` held — so it slipped past the old discriminator.
+  assertEquals(parsePlanKey("https://example.com/o/r#7"), null);
+});
+
+test("#857 parsePlanKey: REJECTS a scheme-relative URL-shaped value (//host/o/r#7)", () => {
+  assertEquals(parsePlanKey("//host/o/r#7"), null);
+});
+
+test("#857 parsePlanKey: REJECTS a multi-slash path that is not owner/repo (a/b/c#9)", () => {
+  assertEquals(parsePlanKey("a/b/c#9"), null);
+});
+
+test("#857 parsePlanKey: still REJECTS a real GitHub PR URL (prKey never equals the URL)", () => {
+  assertEquals(parsePlanKey("https://github.com/o/r/pull/7"), null);
+});
+
+test("#857 parsePlanKey: still ACCEPTS the canonical owner/repo#N key (exactly one slash)", () => {
+  assertEquals(parsePlanKey("owner/repo#7"), { planKey: "owner/repo#7" });
+});
+
+test("#857 parsePlanKey: still ACCEPTS a repo literally named github.com (owner/github.com#42 — one slash)", () => {
+  // Regression guard: the discriminator keys on the slash COUNT, not the host substring, so the
+  // legitimate `owner/github.com#42` shorthand (which `parseIssue`/`parsePr` deliberately allow) is
+  // not collateral damage.
+  assertEquals(parsePlanKey("owner/github.com#42"), { planKey: "owner/github.com#42" });
 });
 
 // ── #570: a fact-bound pr/epic target DISPATCHES (late-binding), a malformed literal still fails ──
