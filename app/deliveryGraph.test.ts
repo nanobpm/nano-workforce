@@ -1616,6 +1616,12 @@ test("#858 a NEGATED/disclaimed full-scope acknowledgement does not licence a cl
     "This does not own the whole issue #12; close it.",
     "Implement part of #12; this is not the full scope of #12. Closes #12.",
     "Deliver everything other than the full scope of #12, then close #12.",
+    // The "but"-as-exception idiom — a direct sibling of "other than"/"apart from": "all but X" /
+    // "everything but X" mean "everything EXCEPT X", so the marker is disclaimed even though no
+    // explicit negation token is present (adversarial review, issue #858 round 4).
+    "Deliver all but the full scope of #12; close #12.",
+    "This slice delivers everything but the full scope of #12. Closes #12.",
+    "Implement all but one acceptance criterion of #12 — the full scope of #12 is NOT delivered here. Close #12.",
   ];
   for (const prompt of bypasses) {
     const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
@@ -1632,6 +1638,10 @@ test("#858 an affirmative whole-scope closer with an innocuous 'no' phrase still
     "Deliver the whole issue #12 with no gaps; close it.",
     "Own the whole issue #12, leaving nothing deferred, and close #12.",
     "This slice covers the full stated scope of #12 — no part is out of scope — then Closes #12.",
+    // An affirmative "but" is NOT an exception disclaimer: "…, but split across two commits" and
+    // "all but identical" do not disclaim the whole-scope marker in the same clause.
+    "Deliver the full scope of #12, but split the work across two commits. Closes #12.",
+    "Own the whole issue #12 — the plan is all but identical to the reference slice — then close #12.",
   ];
   for (const prompt of ok) {
     const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };

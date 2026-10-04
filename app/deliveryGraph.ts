@@ -361,9 +361,12 @@ const SCOPE_ATTRIBUTED_TO_OTHERS =
  * token anywhere in the marker's own clause (clause-scoped via `clauseAround`, so a negation elsewhere in
  * the prompt is irrelevant). Conservative/fail-closed: the planner contract (plan.md) directs a genuine
  * full-scope closer to carry a plain AFFIRMATIVE acknowledgement, so negating the marker's clause is a
- * disclaimer, not an assertion. */
+ * disclaimer, not an assertion. The exception idiom covers `but` only in its narrow "except" phrases
+ * (`all but` / `everything but` / `anything but` / `nothing but`) — a BARE `but` is left out
+ * deliberately: it is a common affirmative conjunction ("the full scope of #12, but split across two
+ * commits"), so matching it would over-fire on legitimate closers. */
 const SCOPE_NEGATED =
-  /\b(?:not|never|without|cannot|exclud(?:e|es|ing|ed)|omit(?:s|ting|ted)?|aside\s+from|apart\s+from|other\s+than|rather\s+than|instead\s+of|short\s+of|fail(?:s|ing|ed)?\s+to|unable\s+to)\b|n['’]t\b/i;
+  /\b(?:not|never|without|cannot|exclud(?:e|es|ing|ed)|omit(?:s|ting|ted)?|aside\s+from|apart\s+from|other\s+than|rather\s+than|instead\s+of|short\s+of|all\s+but|everything\s+but|anything\s+but|nothing\s+but|fail(?:s|ing|ed)?\s+to|unable\s+to)\b|n['’]t\b/i;
 
 /** The explicit full-scope acknowledgement markers that licence a closing keyword. These are the
  * phrases the planner contract (resources/prompts/plan.md) directs a full-scope slice to carry, so a
