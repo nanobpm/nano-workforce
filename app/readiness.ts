@@ -19,6 +19,7 @@
 // declared {@link EnvKey}; ADR 0004 pinned decision 2) and is redacted from every log line.
 import { isEnvKey, readEnv, readEnvOr } from "./contracts.ts";
 import { allCheckNames, checkConclusions, classifyMergeability, failingCheckNames, type PrState, pendingCheckNames } from "./github.ts";
+import { parsePr } from "./prParse.ts";
 import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
 
 /** The built-in readiness sources. `command` is the escape hatch that subsumes the long tail
@@ -276,7 +277,7 @@ export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean
   // compiler rewrite, so a fact-ref target there can never resolve — it must fail loudly at submit.
   if (kind === "pr" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePrTarget(target)) {
     throw new Error(
-      `readiness probe (pr): 'target' ('${target}') must be an 'owner/repo#<number>' PR reference (e.g. 'nanobpm/nano-workforce#377')`,
+      `readiness probe (pr): 'target' ('${target}') must be an 'owner/repo#<number>' PR reference or a GitHub PR URL (e.g. 'nanobpm/nano-workforce#377')`,
     );
   }
   // An epic edge is keyed by the durable `planKey` (`owner/repo#NN`, the epic issue) — the stable
@@ -813,19 +814,16 @@ export function matchPr(match: ProbeMatch | undefined, pr: PrObservation): Probe
   }
 }
 
-/** Split an `owner/repo#123` PR reference into its repo + numeric PR number, or `null` when it
- * carries no numeric id (so `parseProbe` can reject a never-resolvable target loudly). The `#`
- * separator is the canonical — and only — PR handle: an `@N` form is deliberately NOT accepted, as
- * `owner/repo@<ref>` is the repo-ref syntax used elsewhere (`parseRepoRef`), so a numeric `@N` there
- * would ambiguously mis-parse a git ref as a PR number. Matches the OpenAPI contract + `parseProbe`
- * error, both of which document `owner/repo#N` only. */
+/** Split a PR reference into its repo + numeric PR number, or `null` when it is not one (so
+ * `parseProbe` can reject a never-resolvable target loudly). A THIN ADAPTER over the canonical
+ * {@link parsePr} (`app/prParse.ts`) — the single PR-shape grammar — so every surface agrees on what a PR
+ * reference is: `owner/repo#N` or a GitHub PR URL (`https://github.com/owner/repo/pull/N`). The agent
+ * contract tells producers to return "a URL or `owner/repo#N`" and the converge-merge connector accepts
+ * both; a second, stricter regex here made the downstream `wait[pr merged]` incident on a URL (#856).
+ * An `@N` form is still NOT a PR (`owner/repo@<ref>` is the repo-ref syntax, `parseRepoRef`). */
 export function parsePrTarget(target: string): { repo: string; number: string } | null {
-  const t = target.trim();
-  const m = t.match(/^(.+?)#(\d+)$/);
-  if (!m) return null;
-  const repo = m[1].trim();
-  if (repo === "") return null;
-  return { repo, number: m[2] };
+  const pr = parsePr(target);
+  return pr ? { repo: pr.repo, number: String(pr.number) } : null;
 }
 
 /** Build the `gh pr view` command that reads a PR's merge-state fields. `gh` reads its token from the
