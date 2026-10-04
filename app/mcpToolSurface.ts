@@ -116,8 +116,14 @@ export const MCP_TOOL_COUNT_BUDGET = 60;
  * `startFeature` body variants (`FeatureStartByIssue`/`FeatureStartByUrl`) — the Feature tab's
  * "Human approval before merge" checkbox. Measured 87,293 bytes serialized (86,862 → 87,293 — over
  * the old ceiling's 138-byte headroom). Deliberate, documented growth — not schema fat.
+ *
+ * RAISE PROVENANCE — 87_500 → 88_000 (#857): the `pr`-kind probe now also accepts a GitHub PR URL
+ * (`https://github.com/owner/repo/pull/123`) alongside the `owner/repo#123` shorthand, so the shared
+ * `target` description in `openapi.yaml` documents the new accepted handle. Measured 87,559 bytes
+ * serialized (87,497 → 87,559 — over the old ceiling's 3-byte headroom). Deliberate, documented
+ * growth of a real new accepted input format — not schema fat.
  */
-export const MCP_SURFACE_BYTES_BUDGET = 87_500;
+export const MCP_SURFACE_BYTES_BUDGET = 88_000;
 
 /**
  * The eagerly-loaded curated subset MUST stay materially smaller than the full surface — otherwise it

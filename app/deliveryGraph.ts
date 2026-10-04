@@ -23,7 +23,7 @@ import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
-import { BACKOFFS, hasEmbeddedCredential, hasEmbeddedUrl, hasSchemeRelativeAuthority, isBackoff, isUrlShaped, parsePrTarget, redactEmbeddedCredentialUrl, redactEmbeddedSchemeRelativeUrl, redactEmbeddedUrl, redactString } from "./readiness.ts";
+import { BACKOFFS, hasEmbeddedCredential, hasEmbeddedUrl, hasSchemeRelativeAuthority, isBackoff, isUrlShaped, redactEmbeddedCredentialUrl, redactEmbeddedSchemeRelativeUrl, redactEmbeddedUrl, redactString } from "./readiness.ts";
 import { isResolvableRepo } from "./repoEnvelope.ts";
 
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
@@ -164,7 +164,7 @@ export function hasXmlInvalidChars(value: string): boolean {
  * scheme-relative `//authority` form ({@link isUrlShaped}), either of which can hide a credential in
  * userinfo/query/fragment (`redactString` redacts both) — is redacted in FULL (userinfo AND
  * `?query`/`#fragment`). But an embedded `//<userinfo>@` credential can also ride AFTER a non-URL
- * prefix in a free-form value that later parsers accept (`parsePrTarget` takes any prefix before
+ * prefix in a free-form value that keeps a meaningful `#<digits>` PR-number handle (any prefix before
  * `#<digits>`, so `prefix //user:pass@host#42`), which the anchored {@link isUrlShaped} check misses.
  * Because a `//<userinfo>@` span is UNAMBIGUOUSLY a credential wherever it sits (an opaque id never
  * contains one), a scheme-relative `//<userinfo>@authority…` run is treated as an embedded URL and
@@ -189,14 +189,14 @@ export function redactConnectorValue(value: string): string {
   const cleaned = stripXmlInvalidChars(value);
   // A whole-value URL gets the full redact (userinfo + query/fragment) — EXCEPT a whole-value opaque
   // scheme-relative PR ref (`//host#42`: no explicit scheme, no `//…@` credential, no `?query`), whose
-  // only URL-ish payload is a MEANINGFUL `#<digits>` fragment (a `parsePrTarget` PR ref). `isUrlShaped`
+  // only URL-ish payload is a MEANINGFUL `#<digits>` fragment (a PR-number handle). `isUrlShaped`
   // matches such a ref (scheme-relative `//authority`), so the whole-value branch would `redactString`
   // its `#42` → `#***` — yet the EMBEDDED contract deliberately PRESERVES the same `//host#42` (the
   // embedded redactors leave a userinfo-/query-less `//host#42` untouched). Route it through the embedded
   // path so a whole-value `//host#42` keeps its `#42` exactly like `prefix //host#42`, closing that
   // whole-value/embedded inconsistency (issue #778 review — thread deliveryGraph.ts:198). Only a
-  // NUMERIC `#<digits>` fragment is a valid `parsePrTarget` PR handle — `//host#access-token` is an
-  // ordinary URL fragment that can hide a secret, so the exception REQUIRES `parsePrTarget` to accept
+  // NUMERIC `#<digits>` fragment is a valid PR-number handle — `//host#access-token` is an
+  // ordinary URL fragment that can hide a secret, so the exception REQUIRES the `//host#<digits>` shape to match
   // the whole (trimmed) value; a non-numeric fragment falls to the full whole-value redact like any
   // other URL fragment (issue #778 review — thread deliveryGraph.ts:206). An explicit
   // `scheme://host#42`, a `//user:pass@host#…` credential, or a userinfo-less `//host?token=…` query all
@@ -212,7 +212,10 @@ export function redactConnectorValue(value: string): string {
     cleaned.trim().startsWith("//") &&
     !hasEmbeddedCredential(cleaned) &&
     !cleaned.includes("?") &&
-    parsePrTarget(cleaned) !== null;
+    // A NUMERIC `#<digits>` fragment after a non-empty authority (`//host#42`). Deliberately a local
+    // fragment-shape test, not the PR parser: this is a redaction exemption over a free-form value,
+    // and `parsePrTarget` now follows the canonical `parsePr` grammar (#856), which has no `//host` form.
+    /^\/\/[^#]+#\d+$/.test(cleaned.trim());
   return isUrlShaped(cleaned) && !isOpaqueSchemeRelativePrRef
     ? redactString(cleaned)
     : redactEmbeddedSchemeRelativeUrl(redactEmbeddedCredentialUrl(redactEmbeddedUrl(cleaned)));

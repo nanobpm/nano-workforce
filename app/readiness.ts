@@ -19,6 +19,7 @@
 // declared {@link EnvKey}; ADR 0004 pinned decision 2) and is redacted from every log line.
 import { isEnvKey, readEnv, readEnvOr } from "./contracts.ts";
 import { allCheckNames, checkConclusions, classifyMergeability, failingCheckNames, type PrState, pendingCheckNames } from "./github.ts";
+import { parsePr } from "./prParse.ts";
 import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
 
 /** The built-in readiness sources. `command` is the escape hatch that subsumes the long tail
@@ -276,14 +277,18 @@ export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean
   // compiler rewrite, so a fact-ref target there can never resolve — it must fail loudly at submit.
   if (kind === "pr" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePrTarget(target)) {
     throw new Error(
-      `readiness probe (pr): 'target' ('${target}') must be an 'owner/repo#<number>' PR reference (e.g. 'nanobpm/nano-workforce#377')`,
+      `readiness probe (pr): 'target' ('${target}') must be an 'owner/repo#<number>' PR reference or a GitHub PR URL (e.g. 'nanobpm/nano-workforce#377')`,
     );
   }
   // An epic edge is keyed by the durable `planKey` (`owner/repo#NN`, the epic issue) — the stable
   // business id, so a resubmit/replay still resolves (issue #568). Validate it as a literal planKey,
   // exempting a fact-bound reference for the same #548 late-binding reason as `pr` above (and gated
   // on the same `allowLateBoundTarget` opt-in, so a non-delivery-graph caller still fails loudly).
-  if (kind === "epic" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePrTarget(target)) {
+  // The validator is the CANONICAL-KEY-ONLY {@link parsePlanKey}, NOT `parsePrTarget`: `parsePr`'s
+  // grammar includes GitHub PR URLs, but a lineage root is only ever stored as `owner/repo#N`, so a
+  // URL target here would pass a `parsePrTarget` check and then query `/lineage?root=<the URL>`,
+  // matching nothing — the probe could only time out instead of failing loudly at submission (#857).
+  if (kind === "epic" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePlanKey(target)) {
     throw new Error(
       `readiness probe (epic): 'target' ('${target}') must be an 'owner/repo#<number>' planKey (the epic issue, e.g. 'nanobpm/nano-workforce#374')`,
     );
@@ -813,19 +818,36 @@ export function matchPr(match: ProbeMatch | undefined, pr: PrObservation): Probe
   }
 }
 
-/** Split an `owner/repo#123` PR reference into its repo + numeric PR number, or `null` when it
- * carries no numeric id (so `parseProbe` can reject a never-resolvable target loudly). The `#`
- * separator is the canonical — and only — PR handle: an `@N` form is deliberately NOT accepted, as
- * `owner/repo@<ref>` is the repo-ref syntax used elsewhere (`parseRepoRef`), so a numeric `@N` there
- * would ambiguously mis-parse a git ref as a PR number. Matches the OpenAPI contract + `parseProbe`
- * error, both of which document `owner/repo#N` only. */
+/** Split a PR reference into its repo + numeric PR number, or `null` when it is not one (so
+ * `parseProbe` can reject a never-resolvable target loudly). A THIN ADAPTER over the canonical
+ * {@link parsePr} (`app/prParse.ts`) — the single PR-shape grammar — so every surface agrees on what a PR
+ * reference is: `owner/repo#N` or a GitHub PR URL (`https://github.com/owner/repo/pull/N`). The agent
+ * contract tells producers to return "a URL or `owner/repo#N`" and the converge-merge connector accepts
+ * both; a second, stricter regex here made the downstream `wait[pr merged]` incident on a URL (#856).
+ * An `@N` form is still NOT a PR (`owner/repo@<ref>` is the repo-ref syntax, `parseRepoRef`). */
 export function parsePrTarget(target: string): { repo: string; number: string } | null {
-  const t = target.trim();
-  const m = t.match(/^(.+?)#(\d+)$/);
-  if (!m) return null;
-  const repo = m[1].trim();
-  if (repo === "") return null;
-  return { repo, number: m[2] };
+  const pr = parsePr(target);
+  return pr ? { repo: pr.repo, number: String(pr.number) } : null;
+}
+
+/** Split an epic probe target into its canonical planKey, or `null` when it is not one. Unlike
+ * {@link parsePrTarget} this accepts ONLY the canonical `owner/repo#<number>` key shape — never a
+ * GitHub URL. An epic probe is keyed by the durable lineage root (`owner/repo#N`, the epic issue's
+ * planKey, issue #568), and the lineage read-model stores roots in exactly that shape: admitting a
+ * URL here (via `parsePr`'s wider grammar) would let `probeOnce` query `/lineage?root=<the URL>`,
+ * which matches no root, so the probe could only time out instead of failing loudly at submission
+ * (#857). Derived from the canonical {@link parsePr} (no second grammar): a URL-shaped input parses
+ * fine there, so it is rejected by shape, not by a stricter regex. */
+export function parsePlanKey(target: string): { planKey: string } | null {
+  const pr = parsePr(target);
+  // Canonical-key discriminator: `pr.prKey === target.trim()` proves the value ROUND-TRIPS through
+  // `parsePr` to EXACTLY the submitted string, which only the bare `owner/repo#N` shorthand does — a
+  // URL parses to a *different* prKey (`…/pull/7` → `o/r#7`), so it is rejected by shape. No extra
+  // slash-count check is needed: the shorthand branch's repo capture is now exactly one `/`
+  // (`[^/#]+/[^/#]+`, #857 review), so a URL-shaped/multi-slash value no longer parses at all and the
+  // round-trip test alone is the discriminator. The legitimate `owner/github.com#42` (a repo
+  // literally named `github.com`, one slash) still round-trips.
+  return pr && pr.prKey === target.trim() ? { planKey: pr.prKey } : null;
 }
 
 /** Build the `gh pr view` command that reads a PR's merge-state fields. `gh` reads its token from the
@@ -957,12 +979,16 @@ export async function probeOnce(
       // "Fully merged" is the app's AGGREGATE, not a GitHub read — observe it over the app's own
       // lineage read-model (level-triggered, same poll machinery as `pr`). A fact-bound target that is
       // still unresolved (`<node>.<fact>`) is not a literal planKey, so treat it as "not ready" and
-      // keep waiting rather than issue a malformed request.
-      if (!parsePrTarget(probe.target)) return { ready: false, detail: "epic: unresolved/unparseable planKey (not ready)" };
-      const url = epicLineageUrl(probe.target, readEnvOr("NANO_WORKFORCE_BASE_URL", "", env));
+      // keep waiting rather than issue a malformed request. Key the read (and the thread match) by the
+      // CANONICAL planKey from {@link parsePlanKey} — the shape lineage roots are stored under — never
+      // the raw target string, so a padded literal cannot silently miss every thread and burn the wait
+      // budget, and a URL-shaped value is rejected here rather than queried as a root (#857).
+      const key = parsePlanKey(probe.target);
+      if (!key) return { ready: false, detail: "epic: unresolved/unparseable planKey (not ready)" };
+      const url = epicLineageUrl(key.planKey, readEnvOr("NANO_WORKFORCE_BASE_URL", "", env));
       const resp = await exec.httpGet(url, { accept: "application/json" });
       if (resp.status < 200 || resp.status >= 300) return { ready: false, detail: `epic: lineage read HTTP ${resp.status} (not ready)` };
-      return matchEpic(probe.match, parseEpicLineage(parseJson(resp.body), probe.target));
+      return matchEpic(probe.match, parseEpicLineage(parseJson(resp.body), key.planKey));
     }
   }
 }

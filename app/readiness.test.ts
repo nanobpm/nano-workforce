@@ -4,6 +4,7 @@
 // pure surface: descriptor parse/validation, each kind's matcher, the injectable `probeOnce`
 // dispatch (no network / subprocess), backoff, the ms→ISO timeout derivation, and log redaction.
 import { test } from "node:test";
+import { parsePr } from "./prParse.ts";
 import { assert, assertEquals, assertRejects, assertStringIncludes, assertThrows } from "#test-assert";
 import {
   type CommandResult,
@@ -33,6 +34,7 @@ import {
   type EpicObservation,
   isFactRefTarget,
   parseEpicLineage,
+  parsePlanKey,
   summariseCapabilityCandidates,
   parsePrView,
   parseReleases,
@@ -523,6 +525,113 @@ test("parseProbe: a pr probe with an unknown match.prState throws (mistyped stat
 test("parseProbe: a valid pr probe round-trips its prState", () => {
   const p = parseProbe({ kind: "pr", target: "o/r#12", match: { prState: "mergeable" } });
   assertEquals(p.match?.prState, "mergeable");
+});
+
+// ── #856: a PR URL is a valid pr target — the agent contract allows "a URL or owner/repo#N" ──────────
+// Field incident (merlin, graph 5e36636255ab): an agent returned its `pr` as a GitHub URL — explicitly
+// allowed by the injected agent contract — the converge-merge connector accepted it (canonical
+// `parsePr`), but the downstream `wait[pr merged]` probe threw at parse (a second, stricter PR regex)
+// and the job incidented with no retries.
+test("#856 parseProbe: a PR URL target parses (same shapes as the canonical parsePr)", () => {
+  const p = parseProbe({ kind: "pr", target: "https://github.com/nanobpm/nano-supervisor/pull/32", match: { prState: "merged" } });
+  assertEquals(p.kind, "pr");
+});
+
+test("#856 probeOnce pr: a PR URL target reads the right repo + number", async () => {
+  const cap: { cmd?: string } = {};
+  const exec = stubExec({ command: { code: 0, stdout: JSON.stringify({ state: "MERGED", mergedAt: "2026-01-01T00:00:00Z" }), stderr: "" }, capture: cap });
+  const p = parseProbe({ kind: "pr", target: "https://github.com/nanobpm/nano-supervisor/pull/32", match: { prState: "merged" } });
+  await probeOnce(p, exec, {});
+  assertStringIncludes(cap.cmd ?? "", "gh pr view '32'");
+  assertStringIncludes(cap.cmd ?? "", "--repo 'nanobpm/nano-supervisor'");
+});
+
+test("#856 parsePrTarget agrees with the canonical parsePr on every PR shape (no second PR-shape grammar)", () => {
+  const cases = ["o/r#12", "https://github.com/o/r/pull/12", "github.com/o/r/pull/12", " o/r#12 ", "o/r@12", "o/r", "#12", "o/r/pull/12"];
+  for (const c of cases) {
+    const canon = parsePr(c);
+    assertEquals(parsePrTarget(c), canon ? { repo: canon.repo, number: String(canon.number) } : null, c);
+  }
+});
+
+// ── #857: an epic target is a CANONICAL planKey (`owner/repo#N`) — never a URL ────────────────────
+// The epic probe keys off the durable lineage root (`owner/repo#N`, `parseIssue`'s `planKey` shape).
+// Delegating its validation to `parsePr` (whose grammar includes GitHub PR URLs) let a URL pass the
+// epic check; `probeOnce` then queried `/lineage?root=<the URL>`, which matches no lineage root, so
+// the probe could only time out instead of failing loudly at submission. Epic targets stay
+// canonical-key-only; URLs are a `pr`-kind-only shape.
+test("#857 parseProbe: an epic probe REJECTS a GitHub PR URL target (a planKey is owner/repo#N, never a URL)", () => {
+  assertThrows(
+    () => parseProbe({ kind: "epic", target: "https://github.com/nanobpm/nano-ide/pull/488", match: { epicState: "merged" } }),
+    Error,
+    "planKey",
+  );
+});
+
+test("#857 parseProbe: an epic probe REJECTS an issue-URL target too (only the canonical key shape)", () => {
+  assertThrows(
+    () => parseProbe({ kind: "epic", target: "https://github.com/nanobpm/nano-ide/issues/488", match: { epicState: "merged" } }),
+    Error,
+    "planKey",
+  );
+});
+
+test("#857 parseProbe: an epic probe still accepts the canonical owner/repo#N planKey", () => {
+  const p = parseProbe({ kind: "epic", target: "nanobpm/nano-ide#488", match: { epicState: "merged" } });
+  assertEquals(p.kind, "epic");
+});
+
+test("#857 probeOnce epic: the lineage read is keyed by the CANONICAL planKey even when the target is padded", async () => {
+  // probeOnce must query `/lineage?root=<owner/repo#N>` — the shape lineage roots are stored under —
+  // derived from the parsed key, not the raw target string, so a padded/oddly-cased literal cannot
+  // silently miss every lineage thread and burn the whole wait budget as a timeout.
+  const capture: { url?: string } = {};
+  const exec: ProbeExec = {
+    async httpGet(url) {
+      capture.url = url;
+      return { status: 200, body: JSON.stringify({ count: 1, threads: [{ rootRequestKey: "o/r#7", stage: "merged", active: false, prCount: 1 }] }) };
+    },
+    async run() {
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+  const r = await probeOnce(parseProbe({ kind: "epic", target: " o/r#7 " }), exec, { NANO_WORKFORCE_BASE_URL: "http://host:3000" });
+  assert(r.ready, "a fully-merged epic goes green");
+  assertStringIncludes(capture.url ?? "", "/app/api/lineage?root=o%2Fr%237");
+});
+
+// ── #857 review: parsePlanKey must FAIL CLOSED on URL-shaped / multi-slash impersonators ──────────
+// `pr.prKey === target.trim()` only proves the value ROUND-TRIPS through `parsePr`; the shorthand
+// branch's repo capture admits extra `/`, so a URL-shaped value round-trips to an identical prKey and
+// was wrongly accepted as a canonical planKey (the epic probe then queried it as a lineage root and
+// could only time out). The discriminator must require EXACTLY `owner/repo` (one slash).
+test("#857 parsePlanKey: REJECTS a URL-shaped value that round-trips through parsePr (https://example.com/o/r#7)", () => {
+  // The exact advisory case: not github.com, but the shorthand branch still parses it (extra `/` in
+  // the repo capture) and `prKey === target` held — so it slipped past the old discriminator.
+  assertEquals(parsePlanKey("https://example.com/o/r#7"), null);
+});
+
+test("#857 parsePlanKey: REJECTS a scheme-relative URL-shaped value (//host/o/r#7)", () => {
+  assertEquals(parsePlanKey("//host/o/r#7"), null);
+});
+
+test("#857 parsePlanKey: REJECTS a multi-slash path that is not owner/repo (a/b/c#9)", () => {
+  assertEquals(parsePlanKey("a/b/c#9"), null);
+});
+
+test("#857 parsePlanKey: still REJECTS a real GitHub PR URL (prKey never equals the URL)", () => {
+  assertEquals(parsePlanKey("https://github.com/o/r/pull/7"), null);
+});
+
+test("#857 parsePlanKey: still ACCEPTS the canonical owner/repo#N key (exactly one slash)", () => {
+  assertEquals(parsePlanKey("owner/repo#7"), { planKey: "owner/repo#7" });
+});
+
+test("#857 parsePlanKey: still ACCEPTS a repo literally named github.com (owner/github.com#42 — one slash)", () => {
+  // Regression guard: the discriminator keys on the slash COUNT, not the host substring, so the
+  // legitimate `owner/github.com#42` shorthand (which `parseIssue`/`parsePr` deliberately allow) is
+  // not collateral damage.
+  assertEquals(parsePlanKey("owner/github.com#42"), { planKey: "owner/github.com#42" });
 });
 
 // ── #570: a fact-bound pr/epic target DISPATCHES (late-binding), a malformed literal still fails ──

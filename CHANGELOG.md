@@ -1,3 +1,15 @@
+## [0.200.4](https://github.com/nanobpm/nano-workforce/compare/v0.200.3...v0.200.4) (2026-10-04)
+
+### Bug Fixes
+
+* **deps:** update dependency @nanobpm/urban to ^0.96.0 ([#862](https://github.com/nanobpm/nano-workforce/issues/862)) ([206375b](https://github.com/nanobpm/nano-workforce/commit/206375ba4eedd4c1f83b1477a543e0cb8262b9cf))
+
+## [0.200.3](https://github.com/nanobpm/nano-workforce/compare/v0.200.2...v0.200.3) (2026-10-04)
+
+### Bug Fixes
+
+* **readiness:** accept a PR URL in the pr probe via the canonical parsePr ([#857](https://github.com/nanobpm/nano-workforce/issues/857)) ([cc194b7](https://github.com/nanobpm/nano-workforce/commit/cc194b74265392a4fbc5c1166e50f8e40068dee5)), closes [/host#N](https://github.com/nanobpm//host/issues/N) [#856](https://github.com/nanobpm/nano-workforce/issues/856) [owner/repo#N](https://github.com/owner/repo/issues/N) [#856](https://github.com/nanobpm/nano-workforce/issues/856) [owner/repo#N](https://github.com/owner/repo/issues/N) [owner/repo#N](https://github.com/owner/repo/issues/N) [owner/github.com#42](https://github.com/owner/github.com/issues/42) [owner/repo#N](https://github.com/owner/repo/issues/N) [owner/github.com#N](https://github.com/owner/github.com/issues/N) [owner/repo#123](https://github.com/owner/repo/issues/123)
+
 ## [0.200.2](https://github.com/nanobpm/nano-workforce/compare/v0.200.1...v0.200.2) (2026-10-03)
 
 ### Documentation
