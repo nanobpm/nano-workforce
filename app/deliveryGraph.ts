@@ -281,17 +281,22 @@ const NODE_ID_MAX_LENGTH = 128;
  *
  * Closing-keyword detection mirrors the scope gate's contract (resources/prompts/scope-classify.md):
  * a closing verb (`close/closes/closed`, `fix/fixes/fixed`, `resolve/resolves/resolved`) applied to an
- * issue — either directly (`closes #N`, `fixes owner/repo#N`, `resolves <issue-url>`) or by pronoun
+ * issue — either directly (`closes #N`, `fixes owner/repo#N`, `resolves <issue-url>`), via an
+ * `issue #N` / `GitHub issue #N` noun phrase (`closes issue #12` — the common explicit form where the
+ * word `issue` sits between the verb and the number; issue #858 round-6 review), or by pronoun
  * (`closes it` / `close the issue` / `resolve that issue`, the literal field-case phrasing). The
  * prompt must ALSO reference an issue somewhere (so a bare prose "close the door" never matches), and
  * the verb must reach its object with no intervening clause (so "resolve conflicts in #12" / "closes
  * the loop on #12" do not match). Case-insensitive and conservative: a prompt that mentions closing
  * the issue at all — even negated ("do NOT close it") — is flagged, because an agent brief that
- * discusses closing should carry the full-scope marker regardless. */
+ * discusses closing should carry the full-scope marker regardless. The optional `(?:github\s+)?issues?\s+`
+ * sits before BOTH the `owner/repo` prefix and the bare `#N` (and tolerates the plural `issues #N`), so
+ * `closes issue #12` and `fixes GitHub issue owner/repo#12` both match; `close the issue` (no number)
+ * still resolves via the pronoun alternative, not this prefix. */
 const ISSUE_REF_PATTERN =
   /(?:#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+)/i;
 const CLOSING_ACTION_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|the issue\b|that issue\b|this issue\b|them\b)/i;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|the issue\b|that issue\b|this issue\b|them\b)/i;
 
 /** A repo-qualified issue IDENTITY key (issue #858 round-4 review). The accepted issue syntax includes
  * `owner/repo#N` and issue URLs, and this validator supports cross-repository graphs, so collapsing an
@@ -326,13 +331,14 @@ function issueRefsIn(text: string): string[] {
 
 /** The closing TARGETS of a prompt: which issue the closing verb actually acts on, as repo-qualified
  * identity keys (see `issueKey`). A numbered target (`closes #N`, `fixes owner/repo#N`, `resolves
- * <url>/.../issues/N`) yields its key; a pronoun target (`closes it` / `close the issue`) can't name an
- * issue, so it is reported via `pronoun` and the caller falls back to "the sole issue referenced".
- * Mirrors `CLOSING_ACTION_PATTERN`'s verb+object grammar so detection and targeting never disagree, and
- * preserves the `owner/repo` prefix (or URL repo) so a close of `owner/beta#12` is NOT satisfied by an
- * acknowledgement anchored to `owner/alpha#12`. */
+ * <url>/.../issues/N`, or the `issue #N` / `GitHub issue #N` noun-phrase form) yields its key; a pronoun
+ * target (`closes it` / `close the issue`) can't name an issue, so it is reported via `pronoun` and the
+ * caller falls back to "the sole issue referenced". Mirrors `CLOSING_ACTION_PATTERN`'s verb+object
+ * grammar (including the optional `(?:github\s+)?issue\s+` before the number) so detection and targeting
+ * never disagree, and preserves the `owner/repo` prefix (or URL repo) so a close of `owner/beta#12` is
+ * NOT satisfied by an acknowledgement anchored to `owner/alpha#12`. */
 const CLOSING_TARGET_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
 function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean } {
   const numbered: string[] = [];
   let pronoun = false;
@@ -373,9 +379,15 @@ const SCOPE_ATTRIBUTED_TO_OTHERS =
  * not mistaken for scope negation (issue #858 round-5 review — `Deliver the full scope of #12 without
  * regressions; close #12.` must validate):
  *  - `SCOPE_NEGATED_CORE` — core negators (`not`/`never`/`cannot`/`n't`) and the delivery-failure
- *    idioms (`fails to`/`unable to`) that negate the assertion wherever they sit in the clause,
- *    including AFTER the marker (`…full scope… is NOT delivered`, `…full scope… fails to cover the
- *    edge cases`). Tested against the whole clause.
+ *    idioms (`fails to`/`unable to`) that negate the assertion wherever they sit in it, including
+ *    AFTER the marker (`…full scope… is NOT delivered`, `…full scope… fails to cover the edge cases`).
+ *    Tested against the marker's DELIVERY ASSERTION, not its whole comma-bounded clause (see
+ *    `deliveryAssertionAround`): a core negator governing an UNRELATED constraint coordinated onto the
+ *    clause by `and` (`Deliver the full scope of #12 AND do NOT introduce regressions; close #12.`)
+ *    negates that other constraint, not the marker, so it must NOT disqualify the close (issue #858
+ *    round-6 review). The assertion is the clause narrowed to the `and`-bounded segment the marker sits
+ *    in, so a negator in a sibling coordinated segment is excluded while one in the marker's own segment
+ *    (`does not deliver the full scope`) still disqualifies.
  *  - `SCOPE_NEGATED_PREFIX` — exception/redirection PREFIXES (`without`, `other than`, `rather than`,
  *    `instead of`, `apart from`, `all but`, `excluding`, …) that negate only the phrase they GOVERN,
  *    i.e. the one that FOLLOWS them. They disqualify the marker only when they sit BEFORE it in the
@@ -383,11 +395,14 @@ const SCOPE_ATTRIBUTED_TO_OTHERS =
  *    `…full scope… RATHER THAN a piecemeal split`) and is an affirmative closer.
  *
  * Conservative/fail-closed: the planner contract (plan.md) directs a genuine full-scope closer to
- * carry a plain AFFIRMATIVE acknowledgement, so negating the marker's clause is a disclaimer, not an
+ * carry a plain AFFIRMATIVE acknowledgement, so negating the marker's assertion is a disclaimer, not an
  * assertion. The exception idiom covers `but` only in its narrow "except" phrases (`all but` /
  * `everything but` / `anything but` / `nothing but`) — a BARE `but` is left out deliberately: it is a
  * common affirmative conjunction ("the full scope of #12, but split across two commits"), so matching
- * it would over-fire on legitimate closers. */
+ * it would over-fire on legitimate closers. The assertion-narrowing coordinator is `and`/`plus` ONLY
+ * (NOT `but`/`or`): `but` is the exception idiom's own keyword (`but without covering X` must stay a
+ * disclaimer of the marker, so its segment must still include the trailing negation), and `and` is the
+ * unambiguous "independent additional constraint" conjunction the round-6 false positive turned on. */
 const SCOPE_NEGATED_CORE = /\b(?:not|never|cannot|fail(?:s|ing|ed)?\s+to|unable\s+to)\b|n['’]t\b/i;
 const SCOPE_NEGATED_PREFIX =
   /\b(?:without|exclud(?:e|es|ing|ed)|omit(?:s|ting|ted)?|aside\s+from|apart\s+from|other\s+than|rather\s+than|instead\s+of|short\s+of|all\s+but|everything\s+but|anything\s+but|nothing\s+but)\b/i;
@@ -401,8 +416,13 @@ const SCOPE_NEGATED_PREFIX =
  * pattern distinguishes the two by what `without` GOVERNS: a delivery gerund (covering / delivering /
  * implementing / finishing / …) means part of the scope is left undelivered, so the marker is
  * disqualified; a plain noun (regressions / tests / breaking changes) is an unrelated trailing
- * constraint and stays affirmative. Tested against the WHOLE clause (the gerund sits AFTER the
- * marker). Two guards keep it from over-firing on a benign noun that merely LOOKS like a gerund:
+ * constraint and stays affirmative. Tested against the marker's DELIVERY ASSERTION (the gerund sits
+ * AFTER the marker; see `deliveryAssertionAround`) — like `SCOPE_NEGATED_CORE`, a `without <gerund>`
+ * coordinated onto the clause by `and` (`Deliver the full scope of #12 AND refactor without breaking
+ * the build; close #12.`) governs that other constraint, not the marker, and must NOT disqualify
+ * (issue #858 round-6 review). A `but without covering X` stays IN the marker's assertion (`but` is not
+ * an assertion-splitting coordinator), so that trailing disclaimer still disqualifies. Two guards keep
+ * it from over-firing on a benign noun that merely LOOKS like a gerund:
  *  - an article/determiner between `without` and the word ("without A covering letter", "without THE
  *    building blocks") makes the word a NOUN, so the lookbehinds exclude it; and
  *  - `meeting` is deliberately left OUT of the gerund list — "without meeting notes" (a benign noun)
@@ -491,6 +511,47 @@ function clauseBeforeMarker(prompt: string, idx: number): string {
   let start = idx;
   while (start > 0 && !CLAUSE_DELIMITERS.has(prompt.charAt(start - 1))) start--;
   return prompt.slice(start, idx);
+}
+
+/** A coordinating conjunction that joins an INDEPENDENT additional constraint onto a clause. Only `and`
+ * (and its `plus`/`&` kin) qualifies: it is the unambiguous "and also do X" additive conjunction, so a
+ * negation in the segment it introduces (`…full scope of #12 AND do not introduce regressions`) governs
+ * that other constraint, not the marker. `but`/`or`/`nor` are deliberately EXCLUDED — `but` is the
+ * exception idiom's own keyword (`but without covering X` must keep the trailing negation inside the
+ * marker's assertion so it still disqualifies), and `or` rarely coordinates an independent constraint in
+ * a planner brief. (issue #858 round-6 review) */
+const ASSERTION_COORDINATOR = /\b(?:and|plus)\b|&&?/gi;
+
+/** The marker's DELIVERY ASSERTION: its own comma-bounded clause, further narrowed to the
+ * `and`-coordinated segment the marker occurrence at `[markerStart,markerEnd)` sits in. Used by the
+ * whole-assertion negation disqualifiers (`SCOPE_NEGATED_CORE`, `SCOPE_NEGATED_WITHOUT_DELIVERY`) so a
+ * negator governing an UNRELATED constraint coordinated onto the clause by `and` does not disqualify the
+ * marker, while a negator in the marker's own segment still does (issue #858 round-6 review). A negator
+ * directly on the marker (`does not deliver the full scope`) has no coordinator between it and the
+ * marker, so it stays in-segment and still disqualifies; the fail-closed default is the whole clause
+ * when no coordinator splits it. */
+function deliveryAssertionAround(prompt: string, markerStart: number, markerEnd: number): string {
+  let cStart = markerStart;
+  while (cStart > 0 && !CLAUSE_DELIMITERS.has(prompt.charAt(cStart - 1))) cStart--;
+  let cEnd = markerEnd;
+  while (cEnd < prompt.length && !CLAUSE_DELIMITERS.has(prompt.charAt(cEnd))) cEnd++;
+  const clause = prompt.slice(cStart, cEnd);
+  const relStart = markerStart - cStart;
+  const relEnd = markerEnd - cStart;
+  let segStart = 0;
+  let segEnd = clause.length;
+  const re = new RegExp(ASSERTION_COORDINATOR.source, "gi");
+  for (let m = re.exec(clause); m !== null; m = re.exec(clause)) {
+    const bStart = m.index;
+    const bEnd = m.index + m[0].length;
+    if (bEnd <= relStart) {
+      if (bEnd > segStart) segStart = bEnd;
+    } else if (bStart >= relEnd) {
+      segEnd = bStart;
+      break;
+    }
+  }
+  return clause.slice(segStart, segEnd);
 }
 
 /** A whole-scope marker narrowed by a PREFIX PARTITIVE ("half of every acceptance criterion", "part of
@@ -603,8 +664,12 @@ function isPartialScopeClose(prompt: string): boolean {
       if (isPartQualified(prompt, i + marker.length)) continue;
       const clause = clauseAround(prompt, i);
       if (SCOPE_ATTRIBUTED_TO_OTHERS.test(clause)) continue;
-      if (SCOPE_NEGATED_CORE.test(clause)) continue;
-      if (SCOPE_NEGATED_WITHOUT_DELIVERY.test(clause)) continue;
+      // The negation disqualifiers test the marker's DELIVERY ASSERTION (its `and`-coordinated segment),
+      // not the whole clause, so a negator governing an UNRELATED constraint coordinated by `and`
+      // (`…full scope of #12 AND do not introduce regressions`) does not disqualify (issue #858 round-6).
+      const assertion = deliveryAssertionAround(prompt, i, i + marker.length);
+      if (SCOPE_NEGATED_CORE.test(assertion)) continue;
+      if (SCOPE_NEGATED_WITHOUT_DELIVERY.test(assertion)) continue;
       const before = clauseBeforeMarker(prompt, i);
       if (SCOPE_NEGATED_PREFIX.test(before)) continue;
       if (PART_QUALIFIER_BEFORE_MARKER.test(before)) continue;

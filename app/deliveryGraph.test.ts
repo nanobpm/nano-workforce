@@ -1903,3 +1903,76 @@ test("#858 a TRAILING `without <noun>` (benign constraint) still validates (geru
     assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
   }
 });
+
+// Issue #858 (round-6 review, thread deliveryGraph.ts:294): the closing-action/target grammar only
+// accepted a closing verb directly adjacent to `#N`, a URL, or a pronoun — it MISSED the common
+// explicit `issue #N` / `GitHub issue #N` noun phrase (`…open a PR that closes issue #12`). That still
+// tells a partial node to close #12, so it must be detected (and its target extracted as #12).
+test("#858 a partial brief that closes via an `issue #N` noun phrase is rejected (issue-#N closing form)", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12 and open a PR that closes issue #12.",
+    "Implement the parser part of #12; fixes GitHub issue #12.",
+    "Do the auth slice of #12 and resolve issue #12.",
+    // Plural `issues #N` noun phrase.
+    "Implement one criterion of #12 and close issues #12.",
+    // Repo-qualified noun-phrase target: acknowledge nothing, close owner/repo#12.
+    "Implement part of owner/repo#12 and close issue owner/repo#12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a FULL-scope closer phrased with the `issue #N` noun phrase must still validate — the
+// new grammar must recognise the target so the marker's acknowledgement is correctly credited to it.
+test("#858 a full-scope closer using the `issue #N` noun phrase still validates (issue-#N form must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and close issue #12.",
+    "Own the whole issue #12, then open a PR that closes GitHub issue #12.",
+    "This slice covers the full scope of owner/repo#12; resolve issue owner/repo#12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-6 review, thread deliveryGraph.ts:606): the core-negation check tested the marker's
+// whole comma-bounded clause, so a negator governing an UNRELATED constraint coordinated onto the clause
+// by `and` (`…full scope of #12 AND do not introduce regressions`) wrongly disqualified an affirmative
+// full-scope closer. The check is now scoped to the marker's `and`-coordinated delivery assertion, so
+// such a closer validates — while a negator in the marker's own segment still disqualifies.
+test("#858 an affirmative closer whose `and`-coordinated constraint is negated still validates (unrelated-negation must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and do not introduce regressions; close #12.",
+    "Deliver the full scope of #12 and never break the build; close #12.",
+    "Own the whole issue #12 and do not add new dependencies, then close #12.",
+    "Deliver every acceptance criterion of #12 and ensure it cannot be bypassed; close #12.",
+    // The WITHOUT_DELIVERY disqualifier is scoped the same way: a trailing delivery gerund in an
+    // `and`-coordinated sibling constraint governs that constraint, not the marker.
+    "Deliver the full scope of #12 and refactor without breaking the build; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse of the above: a negator that GOVERNS the marker (in its own `and`-segment, or with no
+// coordinator between it and the marker) must STILL disqualify — the assertion-scoping fix must not
+// reopen the negation bypass. Likewise a `but without <gerund>` trailing disclaimer stays in-segment.
+test("#858 a negator governing the marker still disqualifies after assertion-scoping (no reopened bypass)", () => {
+  const bypasses = [
+    "This slice does not deliver the full scope of #12 and close #12.",
+    "Do the parser and never cover the full scope of #12; close #12.",
+    "Deliver the full scope of #12 but without covering the auth; close #12.",
+    "Implement one criterion and do not own the whole issue #12; close it.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
