@@ -226,10 +226,16 @@ So, when you author each slice's `prompt`:
   before it emits `Closes #N`.
   **The validator (`validateDeliveryGraph`) enforces this deterministically:** an
   `agent.prompt` that closes an issue is rejected unless the brief also carries an
-  explicit **issue-anchored whole-scope acknowledgement**. Anchor the
-  acknowledgement to the issue's whole scope — e.g. "delivers #N's full stated
-  scope", "every acceptance criterion", "all checkboxes", "the whole issue", "the
-  entire issue", "all of #N". A **bare adverb of completeness does not count** —
+  explicit **issue-anchored whole-scope acknowledgement TIED TO THE ISSUE IT
+  CLOSES**. Anchor the acknowledgement to the **same** issue — e.g. "delivers #N's
+  full stated scope", "every acceptance criterion of #N", "all of #N", "the whole
+  issue #N". A marker that names a **different** issue than the one you close
+  (acknowledge #11's scope, but `Closes #12`), or one that attributes the scope to
+  **siblings/other slices** ("the full scope of #N is handled by siblings"), does
+  **not** count — the validator credits a whole-scope phrase to issue #N only when it
+  sits in the same clause as #N (or when the prompt references exactly one issue) and
+  is not attributed to others. When a prompt closes more than one issue, give **each**
+  closing target its own anchored acknowledgement. A **bare adverb of completeness does not count** —
   "fully", "completely", "end-to-end", "in full", "in its entirety" can modify a
   *partial* deliverable ("implement one criterion fully"), so the validator
   ignores them; always name the issue's whole scope, not just an adverb.

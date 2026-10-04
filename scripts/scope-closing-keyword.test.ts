@@ -25,6 +25,16 @@ const read = (name: string): string => readFileSync(join(PROMPTS_DIR, name), "ut
 // is any of these; a non-closing ref (`Part of`, `Refs`, `Follow-up`) is explicitly NOT.
 const CLOSING_KEYWORDS = ["close", "fix", "resolve"];
 
+// The closing-keyword SYNTAX each prompt must document for EVERY verb family — the canonical
+// instruction triplet `Closes/Fixes/Resolves` (or the inflected `close/closes/closed …
+// fix/fixes/fixed … resolve/resolves/resolved` listing). Asserting the syntax (not a bare
+// `includes("fix")`, which passes for unrelated reasons) means dropping a family from a contract —
+// e.g. removing `Fixes` — turns the test red instead of leaving it green.
+const CLOSING_SYNTAX = [
+  /closes?\/fixes?\/resolves?/i,
+  /close\/closes\/closed[\s\S]*fix\/fixes\/fixed[\s\S]*resolve\/resolves\/resolved/i,
+];
+
 test("feature.md: the closing-keyword rule covers COMMIT MESSAGES, not just the PR body", () => {
   const feature = read("feature.md").toLowerCase();
   // The agent contract must tell the agent a closing keyword in a commit body closes the issue on
@@ -67,5 +77,23 @@ test("all three prompts recognise the full set of GitHub closing keywords", () =
     for (const kw of CLOSING_KEYWORDS) {
       assert(lower.includes(kw), `${name} must reference the closing keyword family "${kw}"`);
     }
+  }
+});
+
+// Stronger than the substring check above: pin the closing-keyword SYNTAX in each prompt, so a future
+// edit that drops a verb family from the contract (e.g. `Closes/Resolves` with `Fixes` removed) fails
+// loudly instead of staying green because the word "fix" still appears somewhere unrelated.
+test("all three prompts document the closing-keyword SYNTAX for every verb family (close/fix/resolve)", () => {
+  for (const name of ["feature.md", "plan.md", "scope-classify.md"]) {
+    const text = read(name);
+    assert(
+      CLOSING_SYNTAX.some((re) => re.test(text)),
+      `${name} must document the Closes/Fixes/Resolves closing-keyword triplet (or the inflected ` +
+        `close/closes/closed … listing), not merely the bare substrings`,
+    );
+    assert(
+      /\bcloses?\s+#(?:n|\d)/i.test(text),
+      `${name} must show the actionable \`Closes #N\` instruction form`,
+    );
   }
 });

@@ -54,11 +54,17 @@ result.
    `Part of #N`, `Depends-on #N`, `Follow-up: #N`) does **not** close an issue —
    ignore those for the closing-scope check (but note the follow-up links; see below).
 
-   **Then scan the PR's commit messages for the same closing keywords** —
-   `gh pr view <prNumber> --repo <repo> --json commits --jq '.commits[].messageBody, .commits[].messageHeadline'`
-   (or `git log origin/<base>..<head>`). Do **not** use `gh pr diff` here — it
-   returns only the patch, not the commit subjects/bodies, so it cannot detect a
-   closing keyword and would incorrectly clear the PR. This matters because this repo
+   **Then scan the PR's commit messages for the same closing keywords.** Use the
+   **full commit history** — fetch base and head, then
+   `git log --format='%H%n%B' origin/<base>..<head>` (or `git log origin/<base>..<head>`).
+   **Do NOT rely on `gh pr view <prNumber> --repo <repo> --json commits` for this:**
+   the GitHub CLI silently truncates the `commits` field at **100 entries**, so on a
+   101–250-commit PR it can miss an offending `Closes #N` in a later commit and
+   incorrectly clear the scope gate. If you must use the API instead of `git log`,
+   page it explicitly (`gh api --paginate .../pulls/<prNumber>/commits`) rather than
+   the capped `--json commits`. Likewise do **not** use `gh pr diff` here — it returns
+   only the patch, not the commit subjects/bodies, so it cannot detect a closing
+   keyword and would incorrectly clear the PR. This matters because this repo
    family **squash-merges with `COMMIT_MESSAGES`**: the squash commit concatenates
    every commit body, so a `Closes #N` left in **any commit body closes #N on
    merge** even when the PR body was later corrected to `Part of #N`. Treat a

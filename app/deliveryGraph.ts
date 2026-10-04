@@ -293,6 +293,47 @@ const ISSUE_REF_PATTERN =
 const CLOSING_ACTION_PATTERN =
   /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|the issue\b|that issue\b|this issue\b|them\b)/i;
 
+/** Every issue NUMBER referenced in `text`, in any accepted form (`#N`, `owner/repo#N`, or an issue
+ * URL `…/issues/N`). Used to (a) anchor a full-scope acknowledgement to the issue it names and (b)
+ * decide whether a prompt is single-issue (so a generic, un-numbered marker is unambiguous). The
+ * `owner/repo#N` form is covered by the `#(\d+)` branch (it ends in `#N`). */
+const ISSUE_NUMBER_PATTERN = /#([0-9]+)|\/issues\/([0-9]+)/g;
+function issueNumbersIn(text: string): number[] {
+  const out: number[] = [];
+  for (const m of text.matchAll(ISSUE_NUMBER_PATTERN)) {
+    const raw = m[1] ?? m[2];
+    if (raw !== undefined) out.push(Number(raw));
+  }
+  return out;
+}
+
+/** The closing TARGETS of a prompt: which issue the closing verb actually acts on. A numbered target
+ * (`closes #N`, `fixes owner/repo#N`, `resolves <url>/issues/N`) yields `N`; a pronoun target
+ * (`closes it` / `close the issue`) can't name a number, so it is reported via `pronoun` and the
+ * caller falls back to "the sole issue referenced". Mirrors `CLOSING_ACTION_PATTERN`'s verb+object
+ * grammar so detection and targeting never disagree. */
+const CLOSING_TARGET_PATTERN =
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#([0-9]+)|https?:\/\/[^\s)]*\/issues\/([0-9]+)|it\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
+function closingTargets(prompt: string): { numbered: number[]; pronoun: boolean } {
+  const numbered: number[] = [];
+  let pronoun = false;
+  for (const m of prompt.matchAll(CLOSING_TARGET_PATTERN)) {
+    const raw = m[1] ?? m[2];
+    if (raw !== undefined) numbered.push(Number(raw));
+    else pronoun = true;
+  }
+  return { numbered, pronoun };
+}
+
+/** A whole-scope phrase ATTRIBUTED to someone other than this brief ("…is handled BY siblings",
+ * "delivered BY the other slices", "owned BY another slice") does NOT acknowledge that THIS brief
+ * owns the scope — it says the opposite. Such an occurrence is disqualified so it cannot licence a
+ * close (issue #858 round-3: the full-scope marker must assert this node's ownership of the closing
+ * target, not merely mention the scope). Matches a completion verb immediately followed by `by`, or a
+ * `by <sibling/other/peer/the rest>` agent phrase. */
+const SCOPE_ATTRIBUTED_TO_OTHERS =
+  /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\b|\bby\s+(?:the\s+)?(?:siblings?|other|others|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
+
 /** The explicit full-scope acknowledgement markers that licence a closing keyword. These are the
  * phrases the planner contract (resources/prompts/plan.md) directs a full-scope slice to carry, so a
  * legitimately-closing brief already contains one and is NOT rejected. Matching is case-insensitive
@@ -305,7 +346,11 @@ const CLOSING_ACTION_PATTERN =
  * deliberately NOT a marker: it can modify a PARTIAL deliverable ("implement one criterion of #12
  * fully, then close #12"), so accepting it would silently disable the guard for exactly the partial
  * brief it exists to catch. The contract (plan.md) tells the planner to anchor the acknowledgement
- * to the issue's whole scope, so a legitimate closer always has an anchored form available. */
+ * to the issue's whole scope, so a legitimate closer always has an anchored form available.
+ *
+ * These phrases are whole-scope LANGUAGE only; `isPartialScopeClose` decides, per closing target,
+ * whether a phrase occurrence is actually TIED to the issue being closed (same clause / sole issue)
+ * and not attributed to others — a phrase alone, anywhere in the prompt, is NOT sufficient. */
 const FULL_SCOPE_MARKERS: readonly string[] = [
   "full stated scope",
   "full scope",
@@ -331,16 +376,85 @@ const FULL_SCOPE_MARKERS: readonly string[] = [
   "the whole of the issue",
 ];
 
-/** True when `prompt` pairs a GitHub closing action with NO explicit full-scope acknowledgement
- * marker — the partial-scope-close defect class (issue #858). Requires BOTH a closing action (a
- * closing verb applied to an issue, directly or by pronoun) AND an issue reference somewhere in the
- * prompt, so a bare prose "close the door" (no issue) or "Part of #12" (no closing verb) never
- * matches. */
+/** True when `prompt` pairs a GitHub closing action with NO full-scope acknowledgement TIED to the
+ * issue it closes — the partial-scope-close defect class (issue #858). Requires BOTH a closing action
+ * and an issue reference (so a bare prose "close the door" or "Part of #12" never matches).
+ *
+ * The acknowledgement is TARGET-ASSOCIATED, not a global substring (issue #858 round-3): a whole-scope
+ * phrase is credited to issue `N` only when `#N` is ANCHORED to that phrase (immediately adjacent —
+ * "all of #N", "the whole issue #N", "full scope of #N", "#N's full scope"), or — when the whole
+ * prompt references exactly one issue — to that sole issue (unambiguous). A marker anchored to a
+ * DIFFERENT issue than the one closed (acknowledge #11's scope, close #12), or one ATTRIBUTED to
+ * others ("the full scope of #12 is handled by siblings; … close #12"), does NOT licence the close.
+ * Every numbered closing target must be acknowledged; a pronoun close ("close it") requires every
+ * referenced issue to be acknowledged (we can't tell which "it" means, so fail closed).
+ *
+ * This is a lexical lint that cannot read the issue body, so it is the first of a two-layer guard:
+ * the scope-classify gate (resources/prompts/scope-classify.md) reads each closed issue's checkboxes
+ * at PR time and catches an under-delivery that is semantically — not lexically — a partial close. */
+const CLAUSE_DELIMITERS = new Set([".", ";", ":", ",", "\n", "—"]);
+
+/** The clause (delimiter-bounded span) of `prompt` that contains index `idx` — used to test whether a
+ * whole-scope phrase is attributed to others within its own clause. */
+function clauseAround(prompt: string, idx: number): string {
+  let start = idx;
+  while (start > 0 && !CLAUSE_DELIMITERS.has(prompt.charAt(start - 1))) start--;
+  let end = idx;
+  while (end < prompt.length && !CLAUSE_DELIMITERS.has(prompt.charAt(end))) end++;
+  return prompt.slice(start, end);
+}
+
+/** The issue number ANCHORED to a whole-scope phrase occupying `[start,end)` in `prompt`, or null if
+ * none is adjacent. Checks, in order: a `#N` immediately AFTER the phrase (through at most a few
+ * connective words — "of", "the", "issue"; or directly, for markers that already end in `#`), then a
+ * possessive `#N's`/`#N` immediately BEFORE it. Proximity is what ties the acknowledgement to a
+ * specific issue, so a phrase next to #11 cannot license closing #12 in the same clause. */
+function anchoredIssueNumber(prompt: string, start: number, end: number): number | null {
+  const after = prompt.slice(end, end + 32);
+  const afterMatch =
+    prompt[end - 1] === "#"
+      ? after.match(/^([0-9]+)/)
+      : after.match(/^\s*(?:(?:of|the|issue)\s+){0,3}#([0-9]+)/i);
+  if (afterMatch) return Number(afterMatch[1]);
+  const before = prompt.slice(Math.max(0, start - 32), start);
+  const beforeMatch = before.match(/#([0-9]+)(?:'s|s'|')?\s*(?:of\s+)?$/i);
+  if (beforeMatch) return Number(beforeMatch[1]);
+  return null;
+}
+
 function isPartialScopeClose(prompt: string): boolean {
   if (!CLOSING_ACTION_PATTERN.test(prompt)) return false;
   if (!ISSUE_REF_PATTERN.test(prompt)) return false;
+
+  const distinct = new Set(issueNumbersIn(prompt));
+  const sole = distinct.size === 1 ? [...distinct][0] : null;
+
+  // Which issues does the brief genuinely acknowledge owning the FULL scope of? Scan each whole-scope
+  // phrase occurrence, anchor it to the issue immediately adjacent to it (or the sole issue), and skip
+  // any occurrence whose clause attributes the scope to others.
   const lower = prompt.toLowerCase();
-  return !FULL_SCOPE_MARKERS.some((marker) => lower.includes(marker));
+  const acknowledged = new Set<number>();
+  for (const marker of FULL_SCOPE_MARKERS) {
+    for (let i = lower.indexOf(marker); i >= 0; i = lower.indexOf(marker, i + marker.length)) {
+      if (SCOPE_ATTRIBUTED_TO_OTHERS.test(clauseAround(prompt, i))) continue;
+      const anchored = anchoredIssueNumber(prompt, i, i + marker.length);
+      if (anchored !== null) acknowledged.add(anchored);
+      else if (sole !== null) acknowledged.add(sole);
+    }
+  }
+
+  const { numbered, pronoun } = closingTargets(prompt);
+  for (const n of numbered) {
+    if (!acknowledged.has(n)) return true;
+  }
+  // A pronoun close (or a closing verb with no resolvable numbered target) can't name its issue, so
+  // every referenced issue must be acknowledged for the close to be licensed.
+  if (pronoun || numbered.length === 0) {
+    for (const n of distinct) {
+      if (!acknowledged.has(n)) return true;
+    }
+  }
+  return false;
 }
 
 /** The graph's optional top-level `name` must match openapi's `DeliveryGraph.name` `maxLength: 255`.
@@ -870,10 +984,11 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
           errors.push({
             path: `${path}.${configKey}.prompt`,
             message:
-              "`agent.prompt` closes an issue (`Closes/Fixes/Resolves #N`) but carries no explicit " +
-              "full-scope acknowledgement — a brief scoped to PART of an issue must not be told to " +
-              "close it (issue #858). Either scope the brief to the issue's FULL stated scope and say " +
-              "so (e.g. \"delivers #N's full stated scope\" / \"every acceptance criterion\"), or " +
+              "`agent.prompt` closes an issue (`Closes/Fixes/Resolves #N`) but carries no full-scope " +
+              "acknowledgement TIED to that issue — a brief scoped to PART of an issue must not be " +
+              "told to close it (issue #858). Anchor the acknowledgement to the SAME issue you close " +
+              "(e.g. \"delivers #N's full stated scope\" / \"every acceptance criterion of #N\"); a " +
+              "marker for a different issue, or one attributed to siblings, does not count. Otherwise " +
               "reference the issue non-blockingly (`Part of #N` / `Refs #N`) and leave it open.",
             code: "partial-scope-close",
           });

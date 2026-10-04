@@ -1468,3 +1468,59 @@ test("#858 a non-agent node (human) carrying a closing keyword is NOT flagged �
   assertEquals(validateDeliveryGraph(g), []);
 });
 
+// Issue #858 (round-3 review): the full-scope acknowledgement must be TIED to the issue the brief
+// closes, not accepted as a global substring anywhere in the prompt. Two bypass classes slip a
+// partial-scope-close past a global-substring check and MUST be rejected:
+//   (1) cross-issue — the marker acknowledges a DIFFERENT issue's scope than the one being closed
+//       (e.g. acknowledge #11's full scope, but close #12);
+//   (2) attributed-to-others — the whole-scope phrase assigns the scope to SIBLINGS/others, not to
+//       this brief (e.g. "the full scope of #12 is handled by siblings; … close #12").
+test("#858 a full-scope marker for a DIFFERENT issue than the one closed is rejected (cross-issue bypass)", () => {
+  const bypasses = [
+    // Marker anchored to #11, but the brief closes #12.
+    "Acknowledge #11's full stated scope; implement criterion 1 of #12 and close #12.",
+    "This covers the whole issue #11. Implement part of #12 and open a PR with Closes #12.",
+    "Deliver every acceptance criterion of #11, then fix #12.",
+    // SAME clause mixes a whole-scope marker for #11 with a partial reference to the closed #12 —
+    // proximity anchoring must credit #11 (adjacent to the marker), not #12.
+    "Covers the whole issue #11 and the parser part of #12. Closes #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+test("#858 a whole-scope phrase ATTRIBUTED to siblings/others does not licence a close (attribution bypass)", () => {
+  const bypasses = [
+    "The full scope of #12 is handled by siblings; implement criterion 1 and close #12.",
+    "Every acceptance criterion of #12 is delivered by the other slices; do the parser part and close #12.",
+    "The whole issue #12 is covered by sibling slices; implement criterion 2 and open a PR with Closes #12.",
+    // Generic (un-numbered) marker attributed to others, single issue — still must not licence it.
+    "The full scope is owned by another slice; implement part of #12 and close it.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a marker genuinely tied to the closed issue (anchored to it, or the sole issue the
+// prompt references) and asserting THIS brief owns it must still validate — the target-association
+// tightening must not regress the legitimate single-issue and issue-anchored closers.
+test("#858 a full-scope marker tied to the closed issue still validates after the target-association tightening", () => {
+  const ok = [
+    // Anchored to the SAME issue that is closed.
+    "Acknowledge #11 is out of scope; this brief delivers all of #12 and opens a PR with Closes #12.",
+    // Generic marker, but the prompt references exactly one issue (#12) — unambiguous.
+    "This slice covers the full stated scope; implement every acceptance criterion of #12 and close #12.",
+    "Own the whole issue #12 — deliver every checkbox — then close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
