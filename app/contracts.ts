@@ -296,9 +296,9 @@ export const ENV_CONTRACTS = {
   NANO_PR_AGENT_SLA_TIMEOUT: {
     category: "env",
     name: "NANO_PR_AGENT_SLA_TIMEOUT",
-    owner: "app/service.ts",
+    owner: "app/agentSla.ts",
     semantics:
-      "SLA timeout for an agent (service) task before its boundary timer fires and the PR escalates for human attention (ISO-8601 duration). A malformed value falls back to the default.",
+      "SLA timeout for an external agent (service) task before its interrupting boundary timer fires and the process escalates for human attention (ISO-8601 duration). Seeded as the `agentSlaTimeout` process variable at every process start that hosts an external agent task (issue #849): convergence-loop (service.ts `submitPr`), merge-loop (service.ts `startMerge`), feature (feature.ts), plan-fanout (plan.ts), retro (retro.ts), and delivery-graph runs (deliveryRunner.ts). A malformed value falls back to the default.",
     default: "PT2H",
   },
   NANO_CAPS_WAIT_TIMEOUT: {

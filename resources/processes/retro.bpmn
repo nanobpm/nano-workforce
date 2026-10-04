@@ -54,6 +54,12 @@
       <bpmn:incoming>f_toConformance</bpmn:incoming>
       <bpmn:outgoing>f_toRecordConformance</bpmn:outgoing>
     </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_conformance_sla" name="Agent SLA elapsed" attachedToRef="conformance">
+      <bpmn:outgoing>f_conformanceSla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_conformance_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
     <bpmn:serviceTask id="record-conformance" name="Record conformance">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.conformance-record" />
@@ -104,6 +110,12 @@
       <bpmn:incoming>f_ackToSynthesize</bpmn:incoming>
       <bpmn:outgoing>f_toRecord</bpmn:outgoing>
     </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_synthesize_sla" name="Agent SLA elapsed" attachedToRef="synthesize">
+      <bpmn:outgoing>f_synthesizeSla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_synthesize_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
     <bpmn:serviceTask id="record" name="Record retro">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.retro-record" />
@@ -119,6 +131,8 @@
     </bpmn:endEvent>
     <bpmn:sequenceFlow id="f_start" sourceRef="Start" targetRef="gather" />
     <bpmn:sequenceFlow id="f_toConformance" sourceRef="gather" targetRef="conformance" />
+    <bpmn:sequenceFlow id="f_conformanceSla" name="conformance agent SLA elapsed" sourceRef="be_conformance_sla" targetRef="conformance-escalation" />
+    <bpmn:sequenceFlow id="f_synthesizeSla" name="synthesize agent SLA elapsed" sourceRef="be_synthesize_sla" targetRef="conformance-escalation" />
     <bpmn:sequenceFlow id="f_toRecordConformance" sourceRef="conformance" targetRef="record-conformance" />
     <bpmn:sequenceFlow id="f_toDeviationsGw" sourceRef="record-conformance" targetRef="gw-deviations" />
     <bpmn:sequenceFlow id="f_deviations" name="deviations" sourceRef="gw-deviations" targetRef="conformance-escalation">
@@ -171,6 +185,18 @@
           <dc:Bounds x="1744" y="143" width="80" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_conformance_sla" bpmnElement="be_conformance_sla">
+        <dc:Bounds x="448" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="370" y="183" width="72" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_synthesize_sla" bpmnElement="be_synthesize_sla">
+        <dc:Bounds x="1398" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1320" y="183" width="72" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_f_start" bpmnElement="f_start">
         <di:waypoint x="116" y="120" />
         <di:waypoint x="216" y="120" />
@@ -212,9 +238,26 @@
         <di:waypoint x="1166" y="280" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_ackToSynthesize" bpmnElement="f_ackToSynthesize">
-        <di:waypoint x="1266" y="280" />
-        <di:waypoint x="1416" y="280" />
-        <di:waypoint x="1416" y="160" />
+        <di:waypoint x="1216" y="240" />
+        <di:waypoint x="1216" y="120" />
+        <di:waypoint x="1366" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_conformanceSla" bpmnElement="f_conformanceSla">
+        <di:waypoint x="466" y="178" />
+        <di:waypoint x="466" y="280" />
+        <di:waypoint x="966" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="471" y="208" width="84" height="42" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_synthesizeSla" bpmnElement="f_synthesizeSla">
+        <di:waypoint x="1416" y="178" />
+        <di:waypoint x="1416" y="340" />
+        <di:waypoint x="1016" y="340" />
+        <di:waypoint x="1016" y="320" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1179" y="345" width="74" height="42" />
+        </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>

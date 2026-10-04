@@ -10,6 +10,7 @@
 // the process. Data access goes through the record gateway (`data.table`), never
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import {
   InvalidBaseBranchError,
   isPlausibleBranchName,
@@ -1021,6 +1022,13 @@ export async function startPlan(
       // `operators` candidate group); an operator/agent can claim/reassign via the task inbox.
       escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
       escalationAssignee: null,
+      // Agent-task liveness SLA (issue #849): bounds every external agent task in the fan-out —
+      // the planner (`plan`), the plan reviewer (`review-plan`), the wave trial-merge agent, and
+      // (via the implement-cell callActivity's all-variables propagation) each slice's
+      // implementation agent. Each carries an interrupting timer boundary whose
+      // `=agentSlaTimeout` FEEL duration is evaluated at timer creation, so a hung or looping
+      // agent escalates to a human instead of parking the epic forever.
+      agentSlaTimeout: AGENT_SLA_TIMEOUT,
       // Capability-barrier bound (#289): the validated ISO-8601 duration read by the
       // `wait-caps-timeout` timer arm of the `wait-caps-resolved` event-based gateway. A task whose
       // declared cross-repo capabilities never resolve (most acutely an unresolvable capabilityRef the

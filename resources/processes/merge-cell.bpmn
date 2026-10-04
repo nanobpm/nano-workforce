@@ -24,6 +24,12 @@
       <bpmn:incoming>mc_sla</bpmn:incoming>
       <bpmn:outgoing>mc_toRecord</bpmn:outgoing>
     </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_trial_agent_sla" name="Agent SLA elapsed" attachedToRef="trial-merge">
+      <bpmn:outgoing>mc_agentSla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_trial_agent_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
     <bpmn:serviceTask id="record-trial-merge" name="Record trial merge">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.record-trial-merge" />
@@ -94,6 +100,7 @@
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="mc_rerun" name="rebase" sourceRef="gw-trial-answer" targetRef="trial-merge" />
     <bpmn:sequenceFlow id="mc_sla" name="SLA auto-rerun" sourceRef="be_trial_sla" targetRef="trial-merge" />
+    <bpmn:sequenceFlow id="mc_agentSla" name="agent SLA elapsed" sourceRef="be_trial_agent_sla" targetRef="trial-merge-decision" />
   </bpmn:process>
   <bpmndi:BPMNDiagram id="BPMNDiagram_merge-cell">
     <bpmndi:BPMNPlane id="BPMNPlane_merge-cell" bpmnElement="merge-cell">
@@ -139,10 +146,16 @@
           <dc:Bounds x="1300" y="463" width="69" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_trial_agent_sla" bpmnElement="be_trial_agent_sla">
+        <dc:Bounds x="248" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="290" y="183" width="72" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_be_trial_sla" bpmnElement="be_trial_sla">
         <dc:Bounds x="798" y="302" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="774" y="383" width="84" height="14" />
+          <dc:Bounds x="774" y="363" width="84" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_mc_toTrial" bpmnElement="mc_toTrial">
@@ -165,12 +178,12 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_mc_rerun" bpmnElement="mc_rerun">
-        <di:waypoint x="1191" y="305" />
-        <di:waypoint x="1191" y="360" />
-        <di:waypoint x="266" y="360" />
-        <di:waypoint x="266" y="160" />
+        <di:waypoint x="1191" y="255" />
+        <di:waypoint x="1191" y="60" />
+        <di:waypoint x="266" y="60" />
+        <di:waypoint x="266" y="80" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="706" y="338" width="46" height="14" />
+          <dc:Bounds x="706" y="38" width="46" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_mc_escalate" bpmnElement="mc_escalate">
@@ -194,7 +207,7 @@
         <di:waypoint x="1191" y="440" />
         <di:waypoint x="1316" y="440" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1196" y="393" width="53" height="14" />
+          <dc:Bounds x="1196" y="366" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_mc_toResolve" bpmnElement="mc_toResolve">
@@ -205,13 +218,21 @@
         <di:waypoint x="1066" y="280" />
         <di:waypoint x="1166" y="280" />
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_agentSla" bpmnElement="mc_agentSla">
+        <di:waypoint x="266" y="178" />
+        <di:waypoint x="266" y="280" />
+        <di:waypoint x="766" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="271" y="235" width="70" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_mc_sla" bpmnElement="mc_sla">
         <di:waypoint x="816" y="338" />
         <di:waypoint x="816" y="358" />
-        <di:waypoint x="266" y="358" />
-        <di:waypoint x="266" y="160" />
+        <di:waypoint x="241" y="358" />
+        <di:waypoint x="241" y="160" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="504" y="325" width="74" height="28" />
+          <dc:Bounds x="492" y="325" width="74" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>

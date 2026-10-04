@@ -214,3 +214,43 @@ export function agentTaskTypesOptedOutMissingExternalMarker(xml: string): string
   }
   return offending;
 }
+
+// A `<bpmn:boundaryEvent>` block with an interrupting TIMER definition attached to a given task.
+// The SLA bound is only real when the boundary carries a `<bpmn:timerEventDefinition>` (a message
+// or signal boundary would not bound a hung agent) and is interrupting (`cancelActivity` absent —
+// interrupting is the BPMN default — or explicitly `"true"`); a non-interrupting boundary would
+// leave the stuck job running.
+const BOUNDARY_EVENT = /<(?:\w+:)?boundaryEvent\b[^>]*>[\s\S]*?<\/(?:\w+:)?boundaryEvent>/g;
+const BOUNDARY_ATTACHED_TO = /\battachedToRef="([^"]*)"/;
+const TIMER_DEFINITION = /<(?:\w+:)?timerEventDefinition\b/;
+const NON_INTERRUPTING = /\bcancelActivity="false"/;
+const SERVICE_TASK_ID = /<(?:\w+:)?serviceTask\b[^>]*\bid="([^"]*)"/;
+
+/**
+ * DEFECT-CLASS GUARD (issue #849): scan one BPMN document for the ids of EXTERNAL agent service
+ * tasks (`<zeebe:agentDefinition agentType="external" />`) that have NO interrupting timer
+ * boundary event attached. An external agent task is a durable wait on an external actor — the
+ * worker renews the job's deadline for as long as the agent process is alive, so a hung or
+ * looping agent parks the token forever with no incident and no escalation (the
+ * nanobpm/nano-bpm#1308 incident: `classify-scope` ran 7h27m unbounded). Every external agent
+ * task must carry an interrupting timer boundary (conventionally
+ * `<bpmn:timeDuration>=agentSlaTimeout</bpmn:timeDuration>`, seeded at instance start) that routes
+ * to the process's escalation path. Returns the offending task ids in first-occurrence order
+ * (empty when every external agent task is bounded).
+ */
+export function externalAgentTasksMissingSlaBoundary(xml: string): string[] {
+  const bounded = new Set<string>();
+  for (const [block] of xml.matchAll(BOUNDARY_EVENT)) {
+    if (!TIMER_DEFINITION.test(block) || NON_INTERRUPTING.test(block)) continue;
+    const attached = block.match(BOUNDARY_ATTACHED_TO)?.[1];
+    if (attached) bounded.add(attached);
+  }
+  const missing: string[] = [];
+  for (const [block] of xml.matchAll(SERVICE_TASK)) {
+    if (!EXTERNAL_AGENT_MARKER.test(extensionElementsOf(block))) continue;
+    const id = block.match(SERVICE_TASK_ID)?.[1];
+    if (id === undefined || id.length === 0 || bounded.has(id)) continue;
+    missing.push(id);
+  }
+  return missing;
+}
