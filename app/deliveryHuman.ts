@@ -76,11 +76,38 @@ export function isDeliveryHumanElement(elementId: string): boolean {
 export function deliveryHumanContextQuestion(
   humanLabels: Record<string, string> | undefined,
   elementId: string,
+  livePrompt?: string | null,
 ): string {
   const labels = humanLabels ?? {};
   const base = elementId.replace(/__esc$/, "");
   const label = (labels[elementId] ?? labels[base] ?? "").trim();
-  return label || "A scheduled delivery-graph step is waiting to be completed.";
+  return label || (livePrompt ?? "").trim() || "A scheduled delivery-graph step is waiting to be completed.";
+}
+
+/** Whether a parked delivery task needs its LIVE engine prompt for the "Decision context": an
+ *  `__esc`/`__contract` escalation twin of a bounded agent/wait/connector node has no stamped
+ *  `human_labels` entry, so without the compiler's per-task `prompt` (node, reported status, missing
+ *  emits, the agent's own report/question/transcript, and how to resolve) the operator saw only the
+ *  static fallback — the "no actionable information" escalations of instance 171774. A real human
+ *  node (or its `__esc` twin) keeps its authored instruction label. */
+export function needsLiveDeliveryPrompt(humanLabels: Record<string, string> | undefined, elementId: string): boolean {
+  if (!/__(esc|contract)$/.test(elementId)) return false;
+  const labels = humanLabels ?? {};
+  const base = elementId.replace(/__esc$/, "");
+  return !(labels[elementId] ?? labels[base] ?? "").trim();
+}
+
+/** Decode a `prompt` variable as the engine's variable search reports it (a JSON-encoded value) into
+ *  plain text; `null` for an absent, non-string, or truncated preview (never show a clipped prompt as
+ *  if it were whole — the caller falls back). */
+export function decodeLivePrompt(row: { value: string; isTruncated?: boolean } | undefined): string | null {
+  if (!row || row.isTruncated) return null;
+  try {
+    const v: unknown = JSON.parse(row.value);
+    return typeof v === "string" && v.trim() ? v.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The clickable link for a parked delivery-graph `human` node's Tasks-inbox row (issue #813): the

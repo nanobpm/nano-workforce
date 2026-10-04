@@ -169,6 +169,63 @@ function contractEscalationTaskElement(element: string): string {
   return `${DELIVERY_HUMAN_ELEMENT}__${element}__contract`;
 }
 
+/** The escalation-completion variable that chooses how a parked `agent`/`connector` node resumes
+ * (retry-node resolution). Completing a `__esc` / `__contract` escalation with
+ * `{ decision: "retry" }` re-runs the node's job (any `note` is appended to the agent prompt as operator
+ * guidance); any other value — or none — continues past the node exactly as before. */
+export const ESCALATION_DECISION_VAR = "decision";
+export const ESCALATION_DECISION_RETRY = "retry";
+
+/** Variables an escalation completion writes (the decision, the generic form's `value` + `note`). They
+ * are declared node-LOCAL on the node's subProcess so a completion never leaks into the shared root
+ * scope, where a sibling node's escalation would read a stale value (the generic form's `value` resumes
+ * a required emit — a stale root `value` could resume the WRONG node). */
+const ESCALATION_LOCAL_VARS = [ESCALATION_DECISION_VAR, "value", "note"] as const;
+
+/** The flat result variables a fleet agent worker returns on job completion (the blocked-outcome
+ * fallback `{status, summary, question}`, the free-form result fields agents commonly emit, and the PR
+ * identity fields). Nano propagates job-completion variables to the NEAREST scope that defines each
+ * name, else the ROOT — so without a local declaration every parallel agent node overwrote ONE shared
+ * root `status`/`summary`/`pr`: an escalation read whichever node finished last (instance 171774: three
+ * escalations with no usable report), and a timed-out node's `<el>_pr` output would bind a SIBLING's
+ * PR. Declaring these `null` on the node's subProcess keeps each node's report node-local; the declared
+ * emits and `transcriptUrl` still publish onward through the subProcess output mappings. */
+const AGENT_RESULT_LOCAL_VARS = [
+  "status",
+  "summary",
+  "question",
+  "output",
+  "error",
+  "pr",
+  "prUrl",
+  "pullRequest",
+  "branch",
+  "commits",
+  "exitCode",
+  "next_steps",
+  "issue",
+  "completed",
+  "pushed",
+  "truncated",
+  "agentCheckpoint",
+  "transcriptUrl",
+] as const;
+
+/** The node-local boolean the preflight input mapping binds (see {@link nodeInputsPreflightFeel}). */
+const NODE_INPUTS_PREFLIGHT_VAR = "nodeInputsPresent";
+
+/** FEEL for the per-node preflight guard: `true` when the runner-seeded `nodeInputs.<el>` config is
+ * present, else a FEEL `assert` failure — an input-mapping incident on the node whose message names the
+ * cause and the fix, instead of a node that runs with null config and escalates with no explanation. */
+export function nodeInputsPreflightFeel(el: string): string {
+  const present = `is defined(nodeInputs) and nodeInputs != null and is defined(nodeInputs.${el}) and nodeInputs.${el} != null`;
+  const cause =
+    `delivery-graph node ${el}: its runner-seeded config nodeInputs.${el} is missing from the process ` +
+    "instance (lost root variables?). Restore the instance's root variables (nodeInputs), then resolve " +
+    "this incident to re-run the node.";
+  return `=assert(true, ${present}, ${feelStr(cause)})`;
+}
+
 /** The self-reported completion statuses an `agent` node's job may return that count as a TERMINAL
  * SUCCESS and are allowed to route their result onward (issue #731). Everything else — the pathological
  * `in_progress` an agent that delegated/returned-before-finishing reports (instance 10746), a `blocked`/
@@ -1773,6 +1830,23 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       return assertNever(node, "ioMappingLines");
   }
 
+  // Node-local result scope (see AGENT_RESULT_LOCAL_VARS / ESCALATION_LOCAL_VARS): declare the variables a
+  // job completion / escalation completion writes as `null` on THIS subProcess, so Nano's nearest-scope
+  // propagation lands them here instead of the shared root. An agent also localises each declared emit's
+  // source variable (an agent fact's source is the fact's own name), so a sibling's same-named emit can
+  // never satisfy this node's contract gate or publish through this node's `<el>_<fact>` output.
+  if (node.kind === "agent" || node.kind === "connector") {
+    const locals = new Set<string>(ESCALATION_LOCAL_VARS);
+    if (node.kind === "agent") {
+      for (const v of AGENT_RESULT_LOCAL_VARS) locals.add(v);
+      for (const fact of normaliseEmits(node)) locals.add(factSourceVar(node.kind, fact));
+    }
+    const taken = new Set(inputs.map((i) => i.target));
+    for (const v of locals) {
+      if (!taken.has(v)) inputs.push({ source: "=null", target: v });
+    }
+  }
+
   // Late-binding: a deterministic FEEL list literal of the upstream producers' emitted facts, keyed
   // exactly as the edge references them (`<producerNode>.<fact>`), read from the flat parent variable
   // each producer publishes. Guarded so an as-yet-unobserved fact threads as null, not a FEEL error.
@@ -1819,7 +1893,8 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // self-reported `status` AND a non-null value for every declared emit a downstream consumer binds
       // as a required data dependency. A broken producer (returns `in_progress`, or omits a required
       // emit) escalates AT this node instead of threading an incomplete result onward.
-      const contractGate = { requiredEmits: normaliseEmits(node).filter((f) => requiredEmits.has(f.name)) };
+      const nodeEmits = normaliseEmits(node);
+      const contractGate = { requiredEmits: nodeEmits.filter((f) => requiredEmits.has(f.name)), emits: nodeEmits };
       // The executable `<zeebe:taskDefinition type=…>` MUST carry the raw `jobType` verbatim for worker
       // routing (validateDeliveryGraph rejects a URL-shaped/credential-bearing jobType, so it can never
       // be a leak here), but the `descriptor` is embedded by `serviceBodyLines` into the operator-visible
@@ -1893,6 +1968,18 @@ function agentContractContextFeel(nodeId: string, descriptor: string, requiredEm
     const present = `(is defined(${f.name}) and ${f.name} != null)`;
     feel += ` + " Required emit '${f.name}': " + (if ${present} then "present" else "MISSING (null)") + "."`;
   }
+  // The node's OWN agent report (node-local since the result vars are declared on the subProcess): what
+  // the agent said it did / why it stopped, its question for the operator, and the transcript link — the
+  // actionable content the bare status line above never carried (171774's three report-less escalations).
+  const text = (v: string): string => `(is defined(${v}) and ${v} != null and string(${v}) != "")`;
+  // Each fragment reads as its own sentence on the plain-text "Decision context" (terminal period added
+  // unless the agent's text already ends in punctuation).
+  const sentence = (v: string): string => `string(${v}) + (if matches(string(${v}), "[.!?]\\s*$") then "" else ".")`;
+  feel += ` + (if ${text("summary")} then " Agent report: " + ${sentence("summary")} else " Agent report: (the agent returned no summary).")`;
+  feel += ` + (if ${text("question")} and (not(${text("summary")}) or string(question) != string(summary)) then " Agent question: " + ${sentence("question")} else "")`;
+  feel += ` + (if ${text("error")} then " Error: " + ${sentence("error")} else "")`;
+  feel += ` + (if ${text("transcriptUrl")} then " Transcript: " + string(transcriptUrl) else "")`;
+  feel += ` + ${feelStr(escalationResolutionHint(requiredEmits, true))}`;
   return feel;
 }
 
@@ -1914,36 +2001,61 @@ function serviceBodyLines(
   taskDefAttr: string,
   taskProps: readonly string[],
   descriptor: string,
-  contractGate?: { requiredEmits: readonly DeliveryFact[] },
+  contractGate?: { requiredEmits: readonly DeliveryFact[]; emits: readonly DeliveryFact[] },
   taskHeaders: readonly string[] = [],
   taskName: string = nodeId,
 ): string[] {
   const esc = escalationTaskElement(el);
+  const isAgent = contractGate !== undefined;
+  // Gateway decisions are computed INSIDE the node's scope and published as a node-UNIQUE root boolean,
+  // because Nano evaluates exclusive-gateway conditions against the ROOT variables only (not the
+  // gateway's scope, as Zeebe does). The node's result vars are node-local (see ioMappingLines), so a
+  // gateway reading `status`/`<emit>` directly would never see them; reading `<el>_contractMet` /
+  // `<el>_retryRequested` works on either engine semantics and can never collide across nodes.
+  const contractMetVar = `${el}_contractMet`;
   const taskExt = [
     "        <bpmn:extensionElements>",
     `          <zeebe:taskDefinition ${taskDefAttr} />`,
     ...(taskProps.length > 0 ? ["          <zeebe:properties>", ...taskProps, "          </zeebe:properties>"] : []),
     ...taskHeaders,
+    "          <zeebe:ioMapping>",
+    // Preflight guard: the node body is configured from the runner-seeded root `nodeInputs.<el>`. If that
+    // seed is missing (lost root variables — nano-bpm#1331 wiped them on 171774/171309), every `cfg(...)`
+    // on the subProcess silently evaluated to null and the agent ran BLIND (no prompt/timeout), reporting
+    // `blocked` into an unexplained producer-contract escalation. Fail LOUD instead: a FEEL `assert` makes
+    // this input raise an incident naming the cause, BEFORE a job exists; once the root variables are
+    // restored, resolving the incident re-applies the inputs and the job is created. It sits on the inner
+    // LEAF task, not the subProcess: a leaf input incident parks the token on every engine (#946), whereas
+    // a subProcess input incident was completed past its body by the drain sweep (nano-bpm#1334).
+    `            <zeebe:input ${attr("source", nodeInputsPreflightFeel(el))} target="${NODE_INPUTS_PREFLIGHT_VAR}" />`,
+    ...(contractGate !== undefined
+      ? [`            <zeebe:output ${attr("source", agentContractProceedCondition(contractGate.requiredEmits))} target="${contractMetVar}" />`]
+      : []),
+    "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
   ];
+  // The timeout escalation is resumable with the agent's declared emits too: work finished out of band
+  // (or a draft PR the stalled agent already opened) can be handed onward instead of threading null.
+  const allEmits = contractGate?.emits ?? [];
   const timeoutEscalation = escalationTaskLines(
     esc,
     nodeId,
     [`${el}_i2`],
     `${el}_i3`,
-    escalationContextFeel(
+    `${escalationContextFeel(
       nodeId,
       descriptor,
       "nodeTimeout",
       "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
-    ),
-    { displayName: taskName },
+    )} + ${feelStr(escalationResolutionHint(allEmits, isAgent))}`,
+    { ...(allEmits.length > 0 ? { resume: { kind: "agent" as const, emits: allEmits } } : {}), displayName: taskName, retryElement: el },
   );
   const head = [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
     `      <bpmn:serviceTask id="${el}_task" name="${escapeXml(taskName)}">`,
     ...taskExt,
     `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
+    `        <bpmn:incoming>${el}_r1</bpmn:incoming>`,
     `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
     "      </bpmn:serviceTask>",
     `      <bpmn:boundaryEvent id="${el}_be" name="Node timed out" attachedToRef="${el}_task">`,
@@ -1952,22 +2064,25 @@ function serviceBodyLines(
     "      </bpmn:boundaryEvent>",
     ...timeoutEscalation,
   ];
+  const escalationIncoming = [`${el}_i3`, ...(isAgent ? [`${el}_g2`] : [])];
+  const tail = retryResolutionLines(el, escalationIncoming, isAgent ? allEmits : [], isAgent);
 
   if (contractGate === undefined) {
     return [
       ...head,
-      `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming><bpmn:incoming>${el}_i3</bpmn:incoming></bpmn:endEvent>`,
+      ...tail,
+      `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming><bpmn:incoming>${el}_r2</bpmn:incoming></bpmn:endEvent>`,
       flow(`${el}_i0`, `${el}_start`, `${el}_task`),
       flow(`${el}_i1`, `${el}_task`, `${el}_end`),
       flow(`${el}_i2`, `${el}_be`, esc),
-      flow(`${el}_i3`, esc, `${el}_end`),
+      flow(`${el}_i3`, esc, `${el}_rg`),
     ];
   }
 
   // Producer-contract gate (issue #731): task → gate → (proceed | contract-escalation) → end.
   const contractEsc = contractEscalationTaskElement(el);
   const emits = contractGate.requiredEmits;
-  const proceedCondition = agentContractProceedCondition(emits);
+  const proceedCondition = `=${contractMetVar} = true`;
   const contractEscalation = escalationTaskLines(
     contractEsc,
     nodeId,
@@ -1977,7 +2092,7 @@ function serviceBodyLines(
     // Resumable when the producer owes a required emit: a human/agent supplies the missing fact, which
     // the subProcess output ioMapping then publishes as `<el>_<fact>` (agent emit source = fact name),
     // so the downstream consumer late-binds a real value instead of the null that poisoned it (#731).
-    { ...(emits.length > 0 ? { resume: { kind: "agent" as const, emits } } : {}), displayName: taskName },
+    { ...(emits.length > 0 ? { resume: { kind: "agent" as const, emits } } : {}), displayName: taskName, retryElement: el },
   );
   return [
     ...head,
@@ -1987,14 +2102,78 @@ function serviceBodyLines(
     `        <bpmn:outgoing>${el}_g1</bpmn:outgoing>`,
     "      </bpmn:exclusiveGateway>",
     ...contractEscalation,
-    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_g0</bpmn:incoming><bpmn:incoming>${el}_i3</bpmn:incoming><bpmn:incoming>${el}_g2</bpmn:incoming></bpmn:endEvent>`,
+    ...tail,
+    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_g0</bpmn:incoming><bpmn:incoming>${el}_r2</bpmn:incoming></bpmn:endEvent>`,
     flow(`${el}_i0`, `${el}_start`, `${el}_task`),
     flow(`${el}_i1`, `${el}_task`, `${el}_gate`),
     `      <bpmn:sequenceFlow id="${el}_g0" name="contract met" sourceRef="${el}_gate" targetRef="${el}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${proceedCondition}</bpmn:conditionExpression></bpmn:sequenceFlow>`,
     `      <bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="${contractEsc}" />`,
-    flow(`${el}_g2`, contractEsc, `${el}_end`),
+    flow(`${el}_g2`, contractEsc, `${el}_rg`),
     flow(`${el}_i2`, `${el}_be`, esc),
-    flow(`${el}_i3`, esc, `${el}_end`),
+    flow(`${el}_i3`, esc, `${el}_rg`),
+  ];
+}
+
+/** The operator-facing "how do I resolve this" sentence appended to a service node's escalation
+ * prompt (retry-node resolution): every escalation names its two exits so the task is actionable on
+ * its own, without reading the BPMN. */
+function escalationResolutionHint(resumeEmits: readonly DeliveryFact[], isAgent: boolean): string {
+  const retry =
+    ` To resolve: choose Resolution "Retry this step" (${ESCALATION_DECISION_VAR}="${ESCALATION_DECISION_RETRY}") to re-run this node` +
+    (isAgent ? " — the note is passed to the agent as guidance for the retry" : "");
+  const proceed =
+    resumeEmits.length > 0
+      ? `; or choose "Continue" and put the ${resumeEmits.map((e) => `'${e.name}'`).join("/")} value in the value field (e.g. work finished out of band)`
+      : '; or choose "Continue" to proceed past this node';
+  return `${retry}${proceed}.`;
+}
+
+/** The node-unique ROOT boolean an escalation completion publishes for the retry gateway (see the
+ * gateway-scope note in {@link serviceBodyLines}). */
+function retryRequestedVar(el: string): string {
+  return `${el}_retryRequested`;
+}
+
+/** The retry-node resolution tail shared by a service node's escalations (`__esc`, and an agent's
+ * `__contract`): `escalation → retry? ─retry→ reset → task` / `─default→ end`. The reset (a none
+ * intermediate throw event carrying output mappings only — the compiler never emits a scriptTask) clears the node-local decision and — for an agent — the previous attempt's self-reported status and
+ * emits (a rerun that succeeds may report no status at all; a stale `blocked` would fail the contract
+ * gate again), and appends the operator's `note` to the agent prompt as retry guidance. All targets are
+ * node-local (declared on the subProcess by `ioMappingLines`), so nothing leaks to the root. */
+function retryResolutionLines(el: string, incoming: readonly string[], emits: readonly DeliveryFact[], isAgent: boolean): string[] {
+  const outputs: { source: string; target: string }[] = [];
+  if (isAgent) {
+    const cleared = new Set<string>(["status", "summary", "question", "output", "error"]);
+    for (const f of emits) cleared.add(factSourceVar("agent", f));
+    for (const v of cleared) outputs.push({ source: "=null", target: v });
+    const hasNote = `(is defined(note) and note != null and string(note) != "")`;
+    const base = `(if (is defined(appendPrompt) and appendPrompt != null) then appendPrompt + "\n\n" else "")`;
+    outputs.push({
+      source: `=if ${hasNote} then ${base} + "Operator guidance for this retry: " + string(note) else (if (is defined(appendPrompt)) then appendPrompt else null)`,
+      target: "appendPrompt",
+    });
+  }
+  outputs.push({ source: "=null", target: "note" });
+  outputs.push({ source: "=null", target: "value" });
+  outputs.push({ source: "=null", target: ESCALATION_DECISION_VAR });
+  return [
+    `      <bpmn:exclusiveGateway id="${el}_rg" name="retry node?" default="${el}_r2">`,
+    ...incoming.map((id) => `        <bpmn:incoming>${id}</bpmn:incoming>`),
+    `        <bpmn:outgoing>${el}_r0</bpmn:outgoing>`,
+    `        <bpmn:outgoing>${el}_r2</bpmn:outgoing>`,
+    "      </bpmn:exclusiveGateway>",
+    `      <bpmn:intermediateThrowEvent id="${el}_retry" name="Reset for retry">`,
+    "        <bpmn:extensionElements>",
+    "          <zeebe:ioMapping>",
+    ...outputs.map((o) => `            <zeebe:output ${attr("source", o.source)} target="${o.target}" />`),
+    "          </zeebe:ioMapping>",
+    "        </bpmn:extensionElements>",
+    `        <bpmn:incoming>${el}_r0</bpmn:incoming>`,
+    `        <bpmn:outgoing>${el}_r1</bpmn:outgoing>`,
+    "      </bpmn:intermediateThrowEvent>",
+    `      <bpmn:sequenceFlow id="${el}_r0" name="retry" sourceRef="${el}_rg" targetRef="${el}_retry"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${retryRequestedVar(el)} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+    flow(`${el}_r1`, `${el}_retry`, `${el}_task`),
+    flow(`${el}_r2`, `${el}_rg`, `${el}_end`),
   ];
 }
 
@@ -2187,6 +2366,9 @@ function escalationTaskLines(
     resume?: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[] };
     diagnosticInputs?: readonly { source: string; target: string }[];
     displayName?: string;
+    /** The node element whose retry gateway this escalation feeds: the completion publishes the
+     * node-unique `<el>_retryRequested` boolean from the node-local `decision`. */
+    retryElement?: string;
   },
 ): string[] {
   const emits = opts?.resume?.emits ?? [];
@@ -2221,6 +2403,11 @@ function escalationTaskLines(
         `            <zeebe:output ${attr("source", `=if (is defined(value)) then value else null`)} target="${target}" />`,
       );
     }
+  }
+  if (opts?.retryElement !== undefined) {
+    outputs.push(
+      `            <zeebe:output ${attr("source", `=is defined(${ESCALATION_DECISION_VAR}) and ${ESCALATION_DECISION_VAR} = ${feelStr(ESCALATION_DECISION_RETRY)}`)} target="${retryRequestedVar(opts.retryElement)}" />`,
+    );
   }
   // The escalation user task shows the node's DESCRIPTIVE display name (issue #778 review) so a
   // timed-out / contract-broken node is legible in the explorer/inbox instead of an opaque bare id;

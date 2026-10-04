@@ -8,6 +8,8 @@ import { readFileSync } from "node:fs";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import type { DeliveryFact } from "../nano-generated/api-io.d.ts";
 import {
+  decodeLivePrompt,
+  needsLiveDeliveryPrompt,
   bindHumanEmits,
   DELIVERY_HUMAN_ELEMENT,
   deliveryHumanContextQuestion,
@@ -503,4 +505,27 @@ test("form-structure guard: delivery-human-generic.form has no task-variable-dep
     !parsed.components.some((c) => c.key === "prompt"),
     "the never-seeded readonly `prompt` control must not reappear on the Tasks surface",
   );
+});
+
+// ── 171774: agent/connector escalation twins surface their LIVE compiler prompt ─────────────────────
+
+test("needsLiveDeliveryPrompt: an unlabeled __esc/__contract twin reads its live prompt; human nodes keep their label", () => {
+  assert(needsLiveDeliveryPrompt({}, "delivery-human-task__n1__contract"), "agent contract twin");
+  assert(needsLiveDeliveryPrompt(undefined, "delivery-human-task__n12__esc"), "agent timeout twin");
+  assert(!needsLiveDeliveryPrompt({ "delivery-human-task__n3": "Approve" }, "delivery-human-task__n3__esc"), "human node __esc twin keeps its label");
+  assert(!needsLiveDeliveryPrompt({}, "delivery-human-task__n3"), "a human node itself is never a twin");
+});
+
+test("decodeLivePrompt: decodes the engine's JSON-encoded string; null for missing, non-string, or truncated", () => {
+  assertEquals(decodeLivePrompt({ value: JSON.stringify("Node i10 blocked. Agent report: no repo."), isTruncated: false }), "Node i10 blocked. Agent report: no repo.");
+  assertEquals(decodeLivePrompt(undefined), null);
+  assertEquals(decodeLivePrompt({ value: "42" }), null);
+  assertEquals(decodeLivePrompt({ value: JSON.stringify("partial…"), isTruncated: true }), null, "never show a clipped prompt as whole");
+  assertEquals(decodeLivePrompt({ value: "{not json" }), null);
+});
+
+test("deliveryHumanContextQuestion: a live prompt replaces the static fallback but never a human label", () => {
+  assertEquals(deliveryHumanContextQuestion({}, "delivery-human-task__n1__contract", "Node a blocked."), "Node a blocked.");
+  assertEquals(deliveryHumanContextQuestion({ "delivery-human-task__n3": "Approve" }, "delivery-human-task__n3__esc", "nag"), "Approve");
+  assertStringIncludes(deliveryHumanContextQuestion({}, "delivery-human-task__n1__contract", null), "waiting to be completed");
 });

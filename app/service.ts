@@ -34,7 +34,7 @@ import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./deliver
 import { DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
 import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
-import { deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement } from "./deliveryHuman.ts";
+import { decodeLivePrompt, deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement, needsLiveDeliveryPrompt } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
 import { deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun } from "./feature.ts";
@@ -3285,7 +3285,21 @@ export async function pollUserTasks(
     // null), so this is the only link a delivery human task can offer.
     let deliverySubjectUrl: string | null = null;
     if (question === null && isDeliveryHumanElement(elementId)) {
-      question = deliveryHumanContextQuestion(subj?.humanLabels, elementId);
+      let livePrompt: string | null = null;
+      if (needsLiveDeliveryPrompt(subj?.humanLabels, elementId)) {
+        // An agent/wait/connector escalation twin: read the task's OWN compiler-rendered `prompt`, local
+        // to the user task's element instance (fail-open to the static fallback on any read error).
+        try {
+          const [ei] = await engine.searchElementInstances({ processInstanceKey, elementId, state: "ACTIVE" });
+          if (ei) {
+            const [row] = await engine.searchVariables({ scopeKey: String(ei.elementInstanceKey), name: "prompt" });
+            livePrompt = decodeLivePrompt(row);
+          }
+        } catch (err) {
+          console.error(`[poller] delivery escalation prompt (${processInstanceKey}/${elementId}): ${err}`);
+        }
+      }
+      question = deliveryHumanContextQuestion(subj?.humanLabels, elementId, livePrompt);
       deliverySubjectUrl = deliveryHumanContextUrl(subj?.humanLabels, elementId);
     }
     return { userTaskKey, elementId, subjectType, subjectKey, subjectTitle: subj?.title ?? null, subjectUrl: subj?.url ?? deliverySubjectUrl, question, processKey: processInstanceKey, formKey: resolvedFormKey };

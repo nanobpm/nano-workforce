@@ -99,7 +99,7 @@ test("#543 transcript correlation: only an agent node seeds transcriptUrlBase an
   );
   // RELEASE_RUNBOOK has exactly ONE agent node — wait/human/connector must NOT carry the mapping.
   assertEquals(
-    (r.bpmn.match(/target="transcriptUrl"/g) ?? []).length,
+    (r.bpmn.match(/<zeebe:output [^>]*target="transcriptUrl"/g) ?? []).length,
     1,
     "only the agent node emits transcriptUrl (non-agent kinds do not)",
   );
@@ -341,7 +341,13 @@ test("#514 Defect B: a service-node escalation (agent) stays inert — no emit f
   const r = await compileOk(CAP_GATE);
   const esc = escBlockForNode(r.bpmn, "gv");
   assert(esc.includes('="none"') && esc.includes('target="emitMode"'), "an agent-node escalation keeps its emit field hidden");
-  assert(!esc.includes("<bpmn:output") && !esc.includes("<zeebe:output"), "an agent-node escalation carries no emit-source output mapping");
+  assert(!/then value else null/.test(esc), "an emit-less agent-node escalation carries no emit-source output mapping");
+  // Its only output is the retry-node decision, published as the node-unique root boolean.
+  const el = elementForNode(r.bpmn, "gv");
+  assert(
+    esc.includes(`source='=is defined(decision) and decision = "retry"' target="${el}_retryRequested"`),
+    "the escalation publishes the retry decision for the node's retry gateway",
+  );
 });
 
 
@@ -888,6 +894,14 @@ const PRODUCER_GATE = {
   edges: [{ from: "open.pr", to: "land" }],
 };
 
+/** The producer-contract expression an agent task publishes as `<el>_contractMet` (evaluated in the
+ * node's scope; the gate's success flow reads only that node-unique boolean). */
+function contractMetExpr(bpmn: string, el: string): string {
+  const m = bpmn.match(new RegExp(`<zeebe:output source='([^']*)' target="${el}_contractMet" />`));
+  assert(m, `the ${el} task publishes ${el}_contractMet`);
+  return m![1].replaceAll("&quot;", '"');
+}
+
 test("#731 producer status gate: an agent node inserts a post-completion contract gate that escalates a non-terminal status AT the producer", async () => {
   const r = await compileOk(PRODUCER_GATE);
   const el = elementForNode(r.bpmn, "open");
@@ -907,8 +921,10 @@ test("#731 producer status gate: an agent node inserts a post-completion contrac
   // `in_progress`/`blocked`/`failed` self-report falls through to the default → escalation.
   const g0 = r.bpmn.match(new RegExp(`<bpmn:sequenceFlow id="${el}_g0"[^>]*>(.*?)</bpmn:sequenceFlow>`, "s"));
   assert(g0, "the contract-met success flow exists");
-  assert(g0![1].includes('list contains(["done", "opened", "skipped"], status)'), "the success flow gates on the terminal-success status allowlist");
-  assert(g0![1].includes("not(is defined(status)) or status = null"), "an absent/null status is not itself the failure mode — it still proceeds");
+  assert(g0![1].includes(`=${el}_contractMet = true`), "the success flow reads the node-unique contract decision");
+  const cond = contractMetExpr(r.bpmn, el);
+  assert(cond.includes('list contains(["done", "opened", "skipped"], status)'), "the success flow gates on the terminal-success status allowlist");
+  assert(cond.includes("not(is defined(status)) or status = null"), "an absent/null status is not itself the failure mode — it still proceeds");
   // The contract escalation's read-only context names the node and its reported status (#731).
   const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
   assert(esc.includes("did not satisfy its producer contract"), "the contract escalation explains WHY it parked");
@@ -922,7 +938,7 @@ test("#731 required-emit gate: a producer's declared emit consumed as a required
   assert(g0, "the contract-met success flow exists");
   // `pr` is threaded to `land`'s connector payload as a required data dependency — so the gate proceeds
   // only when it is actually populated non-null (a null `pr`, as in instance 10746, escalates here).
-  assert(g0![1].includes("(is defined(pr) and pr != null)"), "a required-emit non-null clause gates the success flow on the populated fact");
+  assert(contractMetExpr(r.bpmn, el).includes("(is defined(pr) and pr != null)"), "a required-emit non-null clause gates the success flow on the populated fact");
   const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
   assert(esc.includes("Required emit &apos;pr&apos;"), "the escalation NAMES the required fact that was not emitted");
   // Resumable (#514 Defect-B mirror): a human/agent supplies the missing fact, mapped onto the agent
@@ -951,8 +967,9 @@ test("#731 routing-only emits stay optional: a fact referenced ONLY by an edge `
   const g0 = r.bpmn.match(new RegExp(`<bpmn:sequenceFlow id="${el}_g0"[^>]*>(.*?)</bpmn:sequenceFlow>`, "s"));
   assert(g0, "the contract-met success flow exists");
   // The status gate is still present, but there is NO `result` non-null clause — routing stays optional.
-  assert(g0![1].includes("list contains"), "the status gate is still present for the agent node");
-  assert(!g0![1].includes("result"), `a routing-only emit is NOT gated as a required data dependency, got: ${g0![1]}`);
+  const cond = contractMetExpr(r.bpmn, el);
+  assert(cond.includes("list contains"), "the status gate is still present for the agent node");
+  assert(!cond.includes("result"), `a routing-only emit is NOT gated as a required data dependency, got: ${cond}`);
   // The contract escalation for a status-only gate is inert (no emit resume field).
   const esc = escBlockForNodeSuffix(r.bpmn, "classify", "contract");
   assert(esc.includes('="none"') && esc.includes('target="emitMode"'), "a status-only contract escalation keeps its emit field hidden");
@@ -2335,4 +2352,52 @@ test("#778 redactFreeText: redacts a URL query/fragment orphaned across a smuggl
   // Ordinary prose after a real whitespace break is not over-redacted.
   const prose = redactFreeText("visit //example.com then\nis this ok? yes");
   assert(prose.includes("is this ok? yes"), `prose after a whitespace break is intact: ${prose}`);
+});
+
+// ── node-scope hardening (instance 171774: three escalations with no actionable information) ────────
+
+test("node scope: an agent node declares its result vars node-local so parallel siblings never share a root status/pr", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  for (const v of ["status", "summary", "question", "error", "pr", "transcriptUrl", "decision", "value", "note"]) {
+    assert(io.includes(`source="=null" target="${v}"`), `'${v}' is declared node-local on the subProcess`);
+  }
+});
+
+test("preflight: the inner service task asserts its runner-seeded nodeInputs before any job exists (leaf, not the subProcess)", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const task = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:serviceTask id="${el}_task"`));
+  const taskIo = task.slice(0, task.indexOf("</bpmn:serviceTask>"));
+  assert(taskIo.includes(`target="nodeInputsPresent"`), "the leaf task carries the preflight input");
+  assert(taskIo.includes(`nodeInputs.${el} is missing`), "the assert names the missing config so the incident is actionable");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  assert(!sub.slice(0, sub.indexOf("<bpmn:startEvent")).includes("nodeInputsPresent"), "never on the subProcess (nano-bpm#1334 skip)");
+});
+
+test("retry-node: both escalations route decision=retry through a reset back to the task; the reset is not a scriptTask", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  assert(r.bpmn.includes(`<bpmn:exclusiveGateway id="${el}_rg"`), "a retry gateway follows the escalations");
+  assert(r.bpmn.includes(`=${el}_retryRequested = true`), "it reads the node-unique retry decision");
+  assert(r.bpmn.includes(`<bpmn:intermediateThrowEvent id="${el}_retry" name="Reset for retry">`), "the reset is a none throw event");
+  for (const suffix of ["esc", "contract"]) {
+    const esc = escBlockForNodeSuffix(r.bpmn, "open", suffix);
+    assert(esc.includes(`target="${el}_retryRequested"`), `the __${suffix} escalation publishes the retry decision`);
+  }
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  for (const v of ["status", "summary", "question", "pr", "decision", "note", "value"]) {
+    assert(new RegExp(`target="${v}"`).test(reset), `the reset clears '${v}' from the previous attempt`);
+  }
+  assert(reset.includes(`target="appendPrompt"`), "the reset passes the operator note to the agent");
+});
+
+test("contract escalation context: carries the agent's own report, question, error, transcript and how to resolve", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  for (const s of ["Agent report: ", "Agent question: ", "Error: ", "Transcript: ", "Retry this step", "Continue"]) {
+    assert(esc.includes(s), `the context includes '${s}'`);
+  }
 });
