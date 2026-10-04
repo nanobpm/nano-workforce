@@ -294,10 +294,12 @@ export async function dispatchDeliveryGraphRun(
         app.log.warn("dispatch-delivery-graph cancelled a still-running original instance before relaunch", { runKey, cancelled });
       }
     } catch (err) {
-      // A reconciliation read/cancel failure must not strand the claim OR waive a blind relaunch
-      // through: revert to the pre-claim STALE launch-claim so the reconcile is retried (by the next
-      // dispatch or the poller) BEFORE any replacement launches, rather than retiring to `failed`
-      // (which a later dispatch would short-circuit past into a possible double-launch).
+      // A reconciliation read/cancel failure — OR a fail-closed `ReconcileConflictError` (an ACTIVE
+      // same-definition instance with no readable run-root `runKey`, e.g. a pre-upgrade legacy original)
+      // — must not strand the claim OR waive a blind relaunch through: revert to the pre-claim STALE
+      // launch-claim so the reconcile is retried (by the next dispatch or the poller) BEFORE any
+      // replacement launches, rather than retiring to `failed` (which a later dispatch would
+      // short-circuit past into a possible double-launch).
       await revertToStaleClaim();
       app.log.error("dispatch-delivery-graph reconcile-before-relaunch threw", { runKey });
       throw err;

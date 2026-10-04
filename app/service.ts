@@ -3082,7 +3082,9 @@ export async function pollDeliveryGraphPhase(
       //     cancel's duration (the flipped `failed` row fails the dispatch's `status <> 'running'` guard).
       // Best-effort: a reconcile read failure must not wedge the pass — `finalize` throws, the
       // transaction rolls back (the row stays stale-claim `running`), we log and skip the retire this
-      // pass, and the next pass retries.
+      // pass, and the next pass retries. A fail-closed `ReconcileConflictError` (an ACTIVE
+      // same-definition instance with no readable run-root `runKey`, e.g. a pre-upgrade legacy original)
+      // takes this same path: the retire is deferred rather than relaunching a possible duplicate.
       const cancelOriginal = async () => {
         if (!run.digest) return;
         const cancelled = await reconcileOriginalInstanceBeforeRelaunch(engine, {

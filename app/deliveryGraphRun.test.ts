@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { assert, assertEquals, assertStringIncludes } from "#test-assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
 import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
@@ -25,6 +25,7 @@ import {
   isStaleLaunchClaim,
   LAUNCH_CLAIM_TTL_MS,
   parseHumanLabels,
+  ReconcileConflictError,
   reconcileOriginalInstanceBeforeRelaunch,
   reconcileStaleLaunchClaim,
 } from "./deliveryGraphRun.ts";
@@ -342,7 +343,7 @@ test("#852 reconcileStaleLaunchClaim: a non-stale claim (launched, or within TTL
  * variables, and records cancels. Each instance's `runKey` is seeded at the RUN-ROOT scope (scopeKey ===
  * processInstanceKey); an optional `childRunKey` seeds a SAME-NAMED variable at a DIFFERENT (child) scope
  * to exercise the scope-restriction guard. */
-function reconcileEngine(instances: { processInstanceKey: string; runKey?: string; childRunKey?: string }[]) {
+function reconcileEngine(instances: { processInstanceKey: string; runKey?: string; childRunKey?: string; truncated?: boolean }[]) {
   const cancelled: string[] = [];
   const engine = {
     searchProcessInstances: async (filter?: { processDefinitionId?: string; state?: string }) =>
@@ -354,7 +355,7 @@ function reconcileEngine(instances: { processInstanceKey: string; runKey?: strin
       if (!inst || filter?.name !== "runKey") return [];
       const out: { variableKey: string; name: string; value: string; scopeKey: string; processInstanceKey: string; isTruncated: boolean }[] = [];
       if (inst.runKey !== undefined) {
-        out.push({ variableKey: "v", name: "runKey", value: JSON.stringify(inst.runKey), scopeKey: inst.processInstanceKey, processInstanceKey: inst.processInstanceKey, isTruncated: false });
+        out.push({ variableKey: "v", name: "runKey", value: JSON.stringify(inst.runKey), scopeKey: inst.processInstanceKey, processInstanceKey: inst.processInstanceKey, isTruncated: inst.truncated ?? false });
       }
       if (inst.childRunKey !== undefined) {
         out.push({ variableKey: "vc", name: "runKey", value: JSON.stringify(inst.childRunKey), scopeKey: `${inst.processInstanceKey}-child`, processInstanceKey: inst.processInstanceKey, isTruncated: false });
@@ -384,11 +385,42 @@ test("#852 reconcileOriginalInstanceBeforeRelaunch: an ACTIVE instance of the SA
   assertEquals(cancelled, [], "a different run's instance is never cancelled");
 });
 
-test("#852 reconcileOriginalInstanceBeforeRelaunch: a candidate whose runKey variable is absent is NOT cancelled (unproven ownership)", async () => {
-  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-noseed" }]);
-  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
-  assertEquals(cancelledKeys, []);
+test("#853 reconcileOriginalInstanceBeforeRelaunch: an ACTIVE same-definition candidate with NO run-root runKey (pre-upgrade legacy) fails CLOSED — throws rather than waiving a blind relaunch", async () => {
+  // A legacy instance launched before this PR seeded the correlation variable has no readable run-root
+  // `runKey`. Treating that as "not ours → relaunch" would double-run its side-effecting nodes during
+  // the upgrade window (thread deliveryGraphRun.ts:328). We can neither cancel it (unproven) nor rule it
+  // out, so we fail closed: throw ReconcileConflictError so the stale claim stays reconcile-pending.
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-legacy" }]);
+  await assertRejects(
+    () => reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" }),
+    ReconcileConflictError,
+    "PI-legacy",
+  );
   assertEquals(cancelled, [], "never cancel an instance we cannot prove belongs to this run");
+});
+
+test("#853 reconcileOriginalInstanceBeforeRelaunch: a TRUNCATED run-root runKey value also fails CLOSED (unreadable ≠ not ours)", async () => {
+  // The engine capped the returned root value, so a byte compare would spuriously differ and fail OPEN.
+  // Same class as the absent case: unreadable must not be treated as a different run.
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-trunc", runKey: "rk", truncated: true }]);
+  await assertRejects(
+    () => reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" }),
+    ReconcileConflictError,
+    "PI-trunc",
+  );
+  assertEquals(cancelled, [], "a truncated root value is unclassifiable, not a cancel");
+});
+
+test("#853 reconcileOriginalInstanceBeforeRelaunch: an unclassifiable candidate does NOT block once we positively matched and cancelled our own original", async () => {
+  // We found and cancelled our run-root match, so we KNOW which instance is ours; an unclassifiable
+  // sibling (a different legacy run of the same graph) must not block our relaunch.
+  const { engine, cancelled } = reconcileEngine([
+    { processInstanceKey: "PI-legacy" },
+    { processInstanceKey: "PI-orig", runKey: "rk" },
+  ]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, ["PI-orig"]);
+  assertEquals(cancelled, ["PI-orig"], "a positive match resolves the reconcile; the unclassifiable sibling is a different run");
 });
 
 test("#852 reconcileOriginalInstanceBeforeRelaunch: no ACTIVE instances → nothing to cancel", async () => {

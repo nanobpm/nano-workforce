@@ -268,6 +268,22 @@ export async function reconcileStaleLaunchClaim(
  * definition, per-instance variable read, and cancel. */
 type ReconcileEngine = Pick<EngineClient, "searchProcessInstances" | "searchVariables" | "cancelInstance">;
 
+/** An ACTIVE instance of this run's content-addressed definition carried no readable RUN-ROOT `runKey`
+ * (absent or truncated), so {@link reconcileOriginalInstanceBeforeRelaunch} could neither cancel it as
+ * ours nor rule it out as a different run. Thrown (only when no candidate positively matched) to fail
+ * CLOSED: the callers leave the stale claim reconcile-pending and retry rather than relaunching a
+ * possible duplicate past an unclassifiable (e.g. pre-upgrade legacy) original. */
+export class ReconcileConflictError extends Error {
+  readonly runKey: string;
+  readonly unclassifiable: string[];
+  constructor(runKey: string, unclassifiable: string[]) {
+    super(`reconcile-before-relaunch: ${unclassifiable.length} ACTIVE instance(s) of run ${runKey}'s definition carry no readable run-root runKey (${unclassifiable.join(", ")}) — cannot prove they are not a live original; failing closed`);
+    this.name = "ReconcileConflictError";
+    this.runKey = runKey;
+    this.unclassifiable = unclassifiable;
+  }
+}
+
 /** Reconcile a still-running ORIGINAL instance of this run before a stale-claim relaunch starts a
  * second one — the at-most-once recovery the Copilot review on issue #852 asked for (thread
  * deliveryGraphRun.ts:180).
@@ -282,8 +298,21 @@ type ReconcileEngine = Pick<EngineClient, "searchProcessInstances" | "searchVari
  * Returns the process keys of any live original instances it cancelled (normally ≤1). A candidate is a
  * live duplicate iff it is an ACTIVE instance of this content-addressed `processDefinitionId` whose
  * seeded RUN-ROOT `runKey` variable equals ours (a child-scoped same-named variable is ignored — see
- * the match below). A candidate whose `runKey` variable is absent/unreadable is
- * treated as NOT ours (left running) — we never cancel an instance we cannot prove belongs to this run.
+ * the match below). We never CANCEL an instance we cannot prove belongs to this run.
+ *
+ * Fail CLOSED on an UNCLASSIFIABLE candidate (thread deliveryGraphRun.ts:328): an ACTIVE instance of
+ * this exact content-addressed definition whose RUN-ROOT `runKey` is absent or truncated (unreadable)
+ * cannot be proven to be a DIFFERENT run — a PRE-UPGRADE (legacy) instance launched before this PR
+ * started seeding the correlation variable has exactly this shape, and so does a run whose root value
+ * came back truncated. Treating "unreadable" as "not ours" would fail OPEN: during the upgrade window a
+ * stale claim whose live original is a legacy instance would be relaunched alongside it, double-running
+ * the side-effecting nodes — the very duplicate this reconcile exists to prevent. So when NO candidate
+ * positively matches our run key AND at least one is unclassifiable, we throw {@link
+ * ReconcileConflictError} instead of returning a clean "nothing to cancel". Both callers (dispatch +
+ * poller) treat that throw exactly like a reconcile read failure — the stale claim is left
+ * reconcile-pending and retried — so recovery waits until the unclassifiable original terminates rather
+ * than launching a duplicate past it. When we DID positively identify and cancel our own original, an
+ * unclassifiable sibling is necessarily a DIFFERENT (legacy) run and never blocks our relaunch.
  *
  * Accepted limitation (nanobpm/nano-ide#588, PR #853 review): the candidate search below is a
  * definition+state query, and the `@nanobpm/urban` 0.96 seam returns only a single finite default page
@@ -303,6 +332,7 @@ export async function reconcileOriginalInstanceBeforeRelaunch(
     state: "ACTIVE",
   });
   const cancelled: string[] = [];
+  const unclassifiable: string[] = [];
   for (const candidate of candidates) {
     const processInstanceKey = String(candidate.processInstanceKey);
     // Match the seeded `runKey` variable, not just the definition: two DISTINCT runs of the same graph
@@ -310,24 +340,38 @@ export async function reconcileOriginalInstanceBeforeRelaunch(
     // definition filter alone would cancel a DIFFERENT run's live instance. The variable read is the
     // per-instance proof that this candidate is THIS run.
     const vars = await engine.searchVariables({ processInstanceKey, name: "runKey" });
-    const match = vars.some((v) => {
-      // Only the RUN-ROOT scope's `runKey` proves ownership. `searchVariables` returns same-named
-      // variables from EVERY scope inside the instance — a delivery graph may legally emit a fact named
-      // `runKey`, and an agent may surface a top-level `runKey` field in its job scope — so a CHILD
-      // scope whose value coincidentally equals this run key would otherwise mark an unrelated live run
-      // as ours and cancel it (thread deliveryGraphRun.ts:318). The run-root variable (seeded by
-      // `runDeliveryGraph`) is the one whose `scopeKey` IS the process instance key; restrict the match
-      // to it so a child-scoped coincidence can never trigger a cancel.
-      if (String(v.scopeKey) !== processInstanceKey) return false;
-      try {
-        return JSON.parse(v.value) === run.runKey;
-      } catch {
-        return v.value === run.runKey;
-      }
-    });
+    // Only the RUN-ROOT scope's `runKey` proves ownership. `searchVariables` returns same-named
+    // variables from EVERY scope inside the instance — a delivery graph may legally emit a fact named
+    // `runKey`, and an agent may surface a top-level `runKey` field in its job scope — so a CHILD scope
+    // whose value coincidentally equals this run key would otherwise mark an unrelated live run as ours
+    // and cancel it (thread deliveryGraphRun.ts:318). The run-root variable (seeded by
+    // `runDeliveryGraph`) is the one whose `scopeKey` IS the process instance key; restrict the match
+    // to it so a child-scoped coincidence can never trigger a cancel.
+    const rootVar = vars.find((v) => String(v.scopeKey) === processInstanceKey);
+    // Unreadable run-root `runKey`: absent (a pre-upgrade legacy instance, or a non-run-root candidate)
+    // or TRUNCATED (the engine capped the returned value, so a byte compare would spuriously differ).
+    // Either way we cannot prove this ACTIVE same-definition candidate is a DIFFERENT run, so record it
+    // as unclassifiable and fail closed below rather than fail OPEN by treating it as "not ours" (thread
+    // deliveryGraphRun.ts:328).
+    if (rootVar === undefined || rootVar.isTruncated) {
+      unclassifiable.push(processInstanceKey);
+      continue;
+    }
+    let match: boolean;
+    try {
+      match = JSON.parse(rootVar.value) === run.runKey;
+    } catch {
+      match = rootVar.value === run.runKey;
+    }
     if (!match) continue;
     await engine.cancelInstance({ processInstanceKey });
     cancelled.push(processInstanceKey);
+  }
+  // Fail closed ONLY when we did not positively identify our own original: an unclassifiable candidate
+  // could BE our (legacy) live original, so refuse the blind relaunch. If we cancelled a positive match
+  // we KNOW which instance is ours, so an unclassifiable sibling is a different run and must not block.
+  if (cancelled.length === 0 && unclassifiable.length > 0) {
+    throw new ReconcileConflictError(run.runKey, unclassifiable);
   }
   return cancelled;
 }
