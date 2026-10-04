@@ -339,8 +339,10 @@ test("#852 reconcileStaleLaunchClaim: a non-stale claim (launched, or within TTL
 // side-effecting graph (thread deliveryGraphRun.ts:180).
 
 /** A minimal engine stub for the reconcile seam: serves the configured ACTIVE instances, their `runKey`
- * variables, and records cancels. */
-function reconcileEngine(instances: { processInstanceKey: string; runKey?: string }[]) {
+ * variables, and records cancels. Each instance's `runKey` is seeded at the RUN-ROOT scope (scopeKey ===
+ * processInstanceKey); an optional `childRunKey` seeds a SAME-NAMED variable at a DIFFERENT (child) scope
+ * to exercise the scope-restriction guard. */
+function reconcileEngine(instances: { processInstanceKey: string; runKey?: string; childRunKey?: string }[]) {
   const cancelled: string[] = [];
   const engine = {
     searchProcessInstances: async (filter?: { processDefinitionId?: string; state?: string }) =>
@@ -349,8 +351,15 @@ function reconcileEngine(instances: { processInstanceKey: string; runKey?: strin
         : [],
     searchVariables: async (filter?: { processInstanceKey?: string; name?: string }) => {
       const inst = instances.find((i) => i.processInstanceKey === filter?.processInstanceKey);
-      if (!inst || filter?.name !== "runKey" || inst.runKey === undefined) return [];
-      return [{ variableKey: "v", name: "runKey", value: JSON.stringify(inst.runKey), scopeKey: inst.processInstanceKey, processInstanceKey: inst.processInstanceKey, isTruncated: false }];
+      if (!inst || filter?.name !== "runKey") return [];
+      const out: { variableKey: string; name: string; value: string; scopeKey: string; processInstanceKey: string; isTruncated: boolean }[] = [];
+      if (inst.runKey !== undefined) {
+        out.push({ variableKey: "v", name: "runKey", value: JSON.stringify(inst.runKey), scopeKey: inst.processInstanceKey, processInstanceKey: inst.processInstanceKey, isTruncated: false });
+      }
+      if (inst.childRunKey !== undefined) {
+        out.push({ variableKey: "vc", name: "runKey", value: JSON.stringify(inst.childRunKey), scopeKey: `${inst.processInstanceKey}-child`, processInstanceKey: inst.processInstanceKey, isTruncated: false });
+      }
+      return out;
     },
     cancelInstance: async (req: { processInstanceKey: string }) => {
       cancelled.push(req.processInstanceKey);
@@ -387,6 +396,26 @@ test("#852 reconcileOriginalInstanceBeforeRelaunch: no ACTIVE instances → noth
   const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
   assertEquals(cancelledKeys, []);
   assertEquals(cancelled, []);
+});
+
+test("#853 reconcileOriginalInstanceBeforeRelaunch: a CHILD-scoped runKey equal to ours does NOT mark an unrelated run as ours (scope-restricted match)", async () => {
+  // The candidate's ROOT runKey is a DIFFERENT run; it only happens to carry a same-named `runKey`
+  // variable in a CHILD scope (a graph-emitted fact, or an agent job-scope field) whose value equals
+  // our run key. Matching that child value would cancel an unrelated live run (thread
+  // deliveryGraphRun.ts:318). The match is restricted to the run-root scope, so this is left running.
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-other", runKey: "other-run", childRunKey: "rk" }]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, []);
+  assertEquals(cancelled, [], "a child-scoped coincidental runKey never triggers a cancel of another run");
+});
+
+test("#853 reconcileOriginalInstanceBeforeRelaunch: our run is still cancelled when it ALSO carries a differing child-scoped runKey", async () => {
+  // The run-root scope carries OUR run key (a true original) while a child scope carries a different
+  // value. The scope-restricted match must still find the root variable and cancel the original.
+  const { engine, cancelled } = reconcileEngine([{ processInstanceKey: "PI-orig", runKey: "rk", childRunKey: "something-else" }]);
+  const cancelledKeys = await reconcileOriginalInstanceBeforeRelaunch(engine as never, { runKey: "rk", processDefinitionId: "delivery-graph-d" });
+  assertEquals(cancelledKeys, ["PI-orig"]);
+  assertEquals(cancelled, ["PI-orig"], "a true root-scope match is still cancelled despite a noisy child variable");
 });
 
 // ── pollDeliveryGraphPhase: engine-key coercion ───────────────────────────────

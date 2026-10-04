@@ -281,7 +281,8 @@ type ReconcileEngine = Pick<EngineClient, "searchProcessInstances" | "searchVari
  *
  * Returns the process keys of any live original instances it cancelled (normally ≤1). A candidate is a
  * live duplicate iff it is an ACTIVE instance of this content-addressed `processDefinitionId` whose
- * seeded `runKey` variable equals ours. A candidate whose `runKey` variable is absent/unreadable is
+ * seeded RUN-ROOT `runKey` variable equals ours (a child-scoped same-named variable is ignored — see
+ * the match below). A candidate whose `runKey` variable is absent/unreadable is
  * treated as NOT ours (left running) — we never cancel an instance we cannot prove belongs to this run.
  *
  * Accepted limitation (nanobpm/nano-ide#588, PR #853 review): the candidate search below is a
@@ -310,6 +311,14 @@ export async function reconcileOriginalInstanceBeforeRelaunch(
     // per-instance proof that this candidate is THIS run.
     const vars = await engine.searchVariables({ processInstanceKey, name: "runKey" });
     const match = vars.some((v) => {
+      // Only the RUN-ROOT scope's `runKey` proves ownership. `searchVariables` returns same-named
+      // variables from EVERY scope inside the instance — a delivery graph may legally emit a fact named
+      // `runKey`, and an agent may surface a top-level `runKey` field in its job scope — so a CHILD
+      // scope whose value coincidentally equals this run key would otherwise mark an unrelated live run
+      // as ours and cancel it (thread deliveryGraphRun.ts:318). The run-root variable (seeded by
+      // `runDeliveryGraph`) is the one whose `scopeKey` IS the process instance key; restrict the match
+      // to it so a child-scoped coincidence can never trigger a cancel.
+      if (String(v.scopeKey) !== processInstanceKey) return false;
       try {
         return JSON.parse(v.value) === run.runKey;
       } catch {
