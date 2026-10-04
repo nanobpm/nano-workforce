@@ -2534,3 +2534,93 @@ test("#858 active-voice BARE `team`/`teams` (no determiner) still disqualifies (
     assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
   }
 });
+
+// Issue #858 (round-10 review, app/deliveryGraph.ts:303 — "Handle issue-first and passive closing
+// directives"): the closing grammar recognised only VERB-BEFORE-OBJECT forms (`close #12`,
+// `closes issue #12`), so a partial brief that phrases the SAME instruction with the issue as the
+// SUBJECT of a passive/participial close — `Implement criterion 1 of #12 and ensure issue #12 is
+// closed by the PR` — produced no error and validated. That is still a direct instruction to close
+// the issue from a part-scope node, so the issue-first/passive form must be detected (and its target
+// extracted) exactly like the active form.
+test("#858 a partial brief that closes via an issue-first/passive directive is rejected (passive closing form)", () => {
+  const bypasses = [
+    // The cited case.
+    "Implement criterion 1 of #12 and ensure issue #12 is closed by the PR.",
+    // Bare-#N subject, auxiliaries, and the `get`-passive.
+    "Implement criterion 1 of #12; #12 is closed by the PR.",
+    "Implement criterion 1 of #12; #12 will be closed by the PR.",
+    "Implement criterion 1 of #12; make sure #12 gets closed.",
+    // Participial directive with no auxiliary.
+    "Implement criterion 1 of #12; see #12 closed.",
+    "Implement criterion 1 of #12 and mark #12 as resolved.",
+    "Implement criterion 1 of #12; with #12 closed by the PR.",
+    // Pronoun / `the issue` subjects and the other verb families.
+    "Implement criterion 1 of #12; the issue is closed by the PR.",
+    "Implement criterion 1 of #12; it is closed by the PR.",
+    "Implement criterion 1 of #12; issue #12 is fixed by the PR.",
+    "Implement criterion 1 of #12; GitHub issue #12 is resolved by the PR.",
+    // Repo-qualified and URL subjects attribute the close to THAT issue.
+    "Implement criterion 1 of owner/repo#12; issue owner/repo#12 is closed by the PR.",
+    "Implement criterion 1 of #12; the issue at https://github.com/o/r/issues/12 is closed by the PR.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: the passive arm's subject is an issue REFERENCE, never a bare noun, so a benign
+// passive about a non-issue subject must NOT be read as a closing directive — and a negated passive
+// close (a safe partial-slice brief that forbids the close) must not over-fire either.
+test("#858 a benign or negated passive does not over-fire the issue-first close detection (validates)", () => {
+  const ok = [
+    // Benign passives about a non-issue subject.
+    "Implement criterion 1 of #12; the door is closed by the latch.",
+    "Implement criterion 1 of #12; the PR is closed by the merge queue.",
+    "Implement criterion 1 of #12; the ticket status is closed by automation.",
+    "Implement criterion 1 of #12; the milestone is closed by the bot.",
+    "Implement criterion 1 of #12; the window is fixed by the frame.",
+    "Implement criterion 1 of #12; the door gets closed.",
+    "Work on #12; the loop is closed by the feedback.",
+    // A directly-negated passive close is a SAFE partial-slice brief, not a partial-scope-close.
+    "Implement criterion 1 of #12 and ensure issue #12 is not closed by the PR.",
+    "Implement criterion 1 of #12; issue #12 will not be closed by the PR.",
+    "Implement criterion 1 of #12; the issue is never closed by this PR.",
+    "Implement criterion 1 of #12; #12 isn't closed by this PR.",
+    "Implement criterion 1 of #12; ensure the issue is not closed yet.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// A negator in an UNRELATED earlier clause must not mask an ACTIVE passive close — the passive
+// negation check reads only the match's own auxiliary window, so a preceding `do not …` cannot
+// suppress detection of a real close.
+test("#858 an unrelated earlier negation does not mask an active passive close (no reopened bypass)", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12; do not introduce regressions; issue #12 is closed by the PR.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// A FULL-scope closer phrased with the passive/issue-first form must still validate — the new grammar
+// must recognise the target so the marker's acknowledgement is correctly credited to it.
+test("#858 a full-scope closer using the issue-first/passive form still validates (must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12; issue #12 is closed by this PR.",
+    "Deliver the full scope of #12; #12 is closed by this PR.",
+    "Deliver the full scope of #12; #12 gets closed by this PR.",
+    "Deliver the full scope of owner/repo#12; issue owner/repo#12 is closed by this PR.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});

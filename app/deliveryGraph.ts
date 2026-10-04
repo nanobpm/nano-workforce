@@ -289,7 +289,20 @@ const NODE_ID_MAX_LENGTH = 128;
  * the verb must reach its object with no intervening clause (so "resolve conflicts in #12" / "closes
  * the loop on #12" do not match). An OPTIONAL colon between the keyword and its target (`Closes: #12`)
  * is admitted — GitHub recognises the colon form, so a partial brief using it must still be caught
- * (issue #858 round-8 review). Case-insensitive and conservative. This pattern is only a cheap
+ * (issue #858 round-8 review). The grammar ALSO recognises the ISSUE-FIRST / PASSIVE closing directive
+ * — `<issue-ref> [auxiliaries] closed|fixed|resolved [by …]` (`ensure issue #12 is closed by the PR`,
+ * `#12 will be closed by the PR`, `see #12 closed`, `mark #12 as resolved`, `the issue gets fixed`) —
+ * the same instruction with the issue as SUBJECT instead of object (issue #858 round-10 review). The
+ * passive arm's subject is an issue REFERENCE (a `#N` / `owner/repo#N` / issue URL / `the issue` /
+ * `it` / `them`), never a bare noun, so a benign passive about a non-issue subject (`the door is
+ * closed by the latch`, `the PR is closed by the merge queue`, `the milestone is closed by the bot`)
+ * never matches. A leading `\b` cannot anchor a `#N` subject (`#` is a non-word char, so there is no
+ * boundary before it), so the `#N` alternative carries a `(?<![A-Za-z0-9_.-])` lookbehind instead —
+ * the same "not part of a larger token" guarantee for a subject that starts with `#`. The auxiliary
+ * window is at most three words plus an optional `get(s)`, so an unrelated later verb (`#12 is closed
+ * and deployed`) still reads as a close of #12 (fail-closed), and a verb-first close keeps priority
+ * (the first arm is ordered before the passive arm, so `close #12` never re-reads `#12` as a passive
+ * subject). Case-insensitive and conservative. This pattern is only a cheap
  * PRE-FILTER for closing LANGUAGE: it still matches a negated close ("do NOT close it"), so the brief
  * proceeds to the authoritative, negation-aware `closingTargets`, which drops a DIRECTLY-NEGATED close
  * (a safe partial-slice brief that forbids the close is NOT the defect; issue #858 round-7 review). The
@@ -300,7 +313,7 @@ const NODE_ID_MAX_LENGTH = 128;
 const ISSUE_REF_PATTERN =
   /(?:#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+)/i;
 const CLOSING_ACTION_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)/i;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+\b|https?:\/\/[^\s)]*\/issues\/[0-9]+|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+(?:\w+\s+){0,3}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b/i;
 
 /** A repo-qualified issue IDENTITY key (issue #858 round-4 review). The accepted issue syntax includes
  * `owner/repo#N` and issue URLs, and this validator supports cross-repository graphs, so collapsing an
@@ -350,9 +363,18 @@ function issueRefsIn(text: string): string[] {
  * no longer contributes a target. The negator→verb gap admits only ADVERBS (`do not simply close`), not
  * arbitrary words, so a meaning-flipping idiom (`do not forget to close #12` — "forget to" is a verb,
  * not an adverb) stays an ACTIVE close and is still flagged; and negating ONE close never masks a
- * DIFFERENT active close in the same prompt (`do not close #12, but close #34` still targets #34). */
+ * DIFFERENT active close in the same prompt (`do not close #12, but close #34` still targets #34).
+ *
+ * The SECOND alternative is the ISSUE-FIRST / PASSIVE mirror of the verb-first grammar (issue #858
+ * round-10 review): `<issue-ref> [auxiliaries] closed|fixed|resolved` — `ensure issue #12 is closed by
+ * the PR`, `#12 will be closed by the PR`, `see #12 closed`, `mark #12 as resolved`, `the issue gets
+ * fixed`. It captures the SAME target shapes (groups 5/6 = repo/number for `#N`, 7/8 for a URL, a
+ * bare pronoun subject otherwise) so a passive close is attributed to its issue exactly like the
+ * active form, and captures the auxiliary window (group 9) so a negator INSIDE it (`#12 is NOT
+ * closed`) can drop the match — see `NEGATED_PASSIVE_WINDOW`. Detection and targeting never disagree:
+ * `CLOSING_ACTION_PATTERN` carries the identical passive arm as a non-capturing pre-filter. */
 const CLOSING_TARGET_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)\b|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+((?:\w+\s+){0,3}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)/gi;
 /** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
  * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
  * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
@@ -392,6 +414,18 @@ const CORRELATIVE_NEGATED_CLOSE_PREFIX =
  * a safe negated close followed by a `too <adj>` constraint — a fail-closed tradeoff that keeps `too` a
  * safe negation. Tested on the text immediately AFTER the matched close. */
 const ADDITIVE_CONTINUATION = /^[^.\n]*?\b(?:also|as\s+well)\b/i;
+/** A negator inside the AUXILIARY WINDOW of an issue-first/passive close (`issue #12 is NOT closed by
+ * the PR`, `#12 will NEVER be fixed by the PR`, `the issue is not getting resolved`) — the passive
+ * mirror of `NEGATED_CLOSE_PREFIX` (issue #858 round-10 review). A brief that explicitly forbids the
+ * passive close (`Implement criterion 1 of #12; issue #12 is NOT closed by this PR`) is a SAFE
+ * partial-slice brief, exactly like its active-voice sibling (`do not close #12`), so the match is
+ * dropped. The negator is searched only inside the match's own captured auxiliary window (group 9 of
+ * `CLOSING_TARGET_PATTERN`) — never across the whole prompt — so an unrelated earlier negation
+ * (`do not introduce regressions; issue #12 is closed by the PR`) cannot mask an ACTIVE passive close,
+ * and a `not` AFTER the participle (`#12 is closed, not merely referenced`) is not read as negating
+ * the close. The window is at most three words plus an optional `get(s)`, so a plain substring test
+ * suffices — no anchoring needed. */
+const NEGATED_PASSIVE_WINDOW = /\b(?:not|never|cannot)\b|\b\w+n['’]t\b/i;
 function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean } {
   const numbered: string[] = [];
   let pronoun = false;
@@ -407,8 +441,15 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
         ADDITIVE_CONTINUATION.test(prompt.slice(m.index + m[0].length));
       if (!additive) continue;
     }
+    // The issue-first/passive arm (groups 5-9) carries its negation INSIDE the match's auxiliary
+    // window (`#12 is NOT closed`), which the before-verb prefix check above cannot see — the negator
+    // sits AFTER the arm's issue-ref start, so the text ending at `m.index` does not reach it. Drop a
+    // passive close whose own window is negated (issue #858 round-10 review).
+    if (m[9] !== undefined && NEGATED_PASSIVE_WINDOW.test(m[9])) continue;
     if (m[2] !== undefined) numbered.push(issueKey(m[1], m[2]));
     else if (m[4] !== undefined) numbered.push(issueKey(m[3], m[4]));
+    else if (m[6] !== undefined) numbered.push(issueKey(m[5], m[6]));
+    else if (m[8] !== undefined) numbered.push(issueKey(m[7], m[8]));
     else pronoun = true;
   }
   return { numbered, pronoun };
