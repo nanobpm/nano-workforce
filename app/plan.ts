@@ -484,8 +484,11 @@ export interface ParsedIssue {
  * plan deps) to accept a PR URL — resolvable-by-accident (issues and PRs share GitHub's number space)
  * but undocumented and off-contract (#857). So only the bare `owner/repo#N` shorthand is delegated: a
  * GitHub URL that is not the `/issues/` spelling handled above (a PR URL, a commit URL, …) fails closed
- * here. The shorthand never contains `github.com`, so gating the delegation on its absence rejects
- * every non-issue GitHub URL while leaving the shorthand to the one canonical grammar. */
+ * here. The gate keys on the `github.com/` HOST spelling (host + path separator), which every GitHub
+ * URL carries but the `owner/repo#N` shorthand never does — NOT the bare `github.com` substring, which
+ * a valid shorthand CAN carry as a repository name (`owner/github.com#42`, which `parsePr` accepts).
+ * So the host-spelling gate rejects every non-issue GitHub URL while leaving the shorthand — including
+ * a repo literally named `github.com` — to the one canonical grammar. */
 export function parseIssue(input: string): ParsedIssue | null {
   const s = input.trim();
   const m = s.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/i);
@@ -494,7 +497,7 @@ export function parseIssue(input: string): ParsedIssue | null {
     const number = Number(m[3]);
     return { repo, number, url: `https://github.com/${repo}/issues/${number}`, planKey: `${repo}#${number}` };
   }
-  if (/github\.com/i.test(s)) return null;
+  if (/github\.com\//i.test(s)) return null;
   const pr = parsePr(s);
   if (pr) {
     return { repo: pr.repo, number: pr.number, url: `https://github.com/${pr.repo}/issues/${pr.number}`, planKey: pr.prKey };

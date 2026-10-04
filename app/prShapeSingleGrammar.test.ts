@@ -12,6 +12,11 @@ import { test } from "node:test";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const DIRS = ["app", "workers", "operations", "actions"];
+// The scan must cover EVERY production source file, not only the package subdirs above: the repo's
+// production entrypoint + host glue (`main.ts`) lives at the repo ROOT, so a duplicate grammar added
+// there would leave all three guards green while reopening the #856 class. Include every root-level
+// `.ts` module (not just a hardcoded `main.ts`) so any future root production source is covered too.
+const ROOT_FILES_FILTER = (f: string) => f.endsWith(".ts") && !f.endsWith(".test.ts");
 // The canonical home of each single-source grammar: the PR-shape parser lives in app/prParse.ts, and
 // the issue-shape parser (its `/issues/<n>` URL branch) lives in app/plan.ts `parseIssue`.
 const PARSE_PR = "app/prParse.ts";
@@ -46,14 +51,32 @@ const PULL_URL_REGEX = new RegExp(`\\\\/pull\\\\/\\(${DIGITS}`);
 const HASH_NUMBER_REGEX = new RegExp(`#\\(${DIGITS}`);
 const ISSUES_URL_REGEX = new RegExp(`\\\\/issues\\\\/\\(${DIGITS}`);
 
-function offenders(regex: RegExp, allowed: string): string[] {
+function collectProductionFiles(): string[] {
   const files: string[] = [];
   for (const d of DIRS) walk(join(ROOT, d), files);
-  return files
+  // Root-level production modules (e.g. main.ts) are not under any package dir — scan them too.
+  for (const e of readdirSync(ROOT)) {
+    const p = join(ROOT, e);
+    if (!statSync(p).isDirectory() && ROOT_FILES_FILTER(e)) files.push(p);
+  }
+  return files;
+}
+
+function offenders(regex: RegExp, allowed: string): string[] {
+  return collectProductionFiles()
     .map((f) => relative(ROOT, f))
     .filter((rel) => rel !== allowed)
     .filter((rel) => regex.test(readFileSync(join(ROOT, rel), "utf8")));
 }
+
+test("#856/#857: the grammar guard scans the root production entrypoint (main.ts), not only the package dirs", () => {
+  // A duplicate grammar in the root entrypoint/host glue must not slip past the three guards below.
+  const scanned = collectProductionFiles().map((f) => relative(ROOT, f));
+  assert.ok(
+    scanned.includes("main.ts"),
+    "the guard's scanned set must include the root main.ts production entrypoint",
+  );
+});
 
 test("#856: only app/prParse.ts defines a PR-URL regex (`/pull/<digits>`) — everyone else calls parsePr", () => {
   assert.deepEqual(

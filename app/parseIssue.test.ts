@@ -29,6 +29,17 @@ test("parseIssue: accepts the bare owner/repo#N shorthand (delegated to the cano
   assertEquals(parseIssue("  o/r#7  ")?.planKey, "o/r#7");
 });
 
+test("parseIssue: accepts shorthand whose repo is literally named github.com (host-spelling gate, not bare substring) (#857)", () => {
+  // The non-issue-URL gate keys on the `github.com/` HOST spelling, so a valid shorthand carrying
+  // `github.com` as a REPO NAME still parses — parsePr accepts `owner/github.com#N`, so parseIssue must.
+  assertEquals(parseIssue("owner/github.com#42"), {
+    repo: "owner/github.com",
+    number: 42,
+    url: "https://github.com/owner/github.com/issues/42",
+    planKey: "owner/github.com#42",
+  });
+});
+
 test("parseIssue: REJECTS a PR URL — parsePr would accept it, but a PR URL is not an issue target (#857)", () => {
   assertEquals(parseIssue("https://github.com/o/r/pull/7"), null);
   // even with a trailing path segment or embedded in prose, the non-issue GitHub URL is rejected
