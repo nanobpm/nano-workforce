@@ -218,22 +218,48 @@ export async function claimRunForLaunch(
  * could then re-claim it mid-layout and double-launch. So the flip is a compare-and-swap GUARDED on the
  * exact snapshot the caller observed (`status='running'`, `process_key IS NULL`, the SAME `updated_at`):
  * a row a concurrent dispatch has touched no longer matches and is left untouched. Returns `true` iff
- * THIS caller flipped the row (issue #852 review — thread service.ts:3065). */
+ * THIS caller flipped the row (issue #852 review — thread service.ts:3065).
+ *
+ * RECONCILIATION LEASE (`finalize`, issue #853 review — thread service.ts:3077): the poller must cancel
+ * a still-running ORIGINAL engine instance BEFORE the row is retired, but that engine cancellation must
+ * be FENCED by this same stale-row CAS — otherwise two races open up:
+ *   • a FRESH `running`/NULL-key claim (still within its TTL) would otherwise enter the cancel branch
+ *     and cancel a legitimate instance whose `createInstance` just succeeded but whose key stamp has not
+ *     landed yet; and
+ *   • a concurrent dispatch could RE-CLAIM the stale row and start its replacement BEFORE the cancel
+ *     runs, so the poller would cancel the live replacement and only afterwards discover its CAS lost.
+ * So the caller passes the engine cancellation as `finalize`, and it is run INSIDE the CAS transaction,
+ * ONLY after the lease flip succeeds (`changed === 1`). The flip atomically acquires a reconciliation
+ * lease on the observed snapshot: once it lands the row is `failed`, so a concurrent dispatch's
+ * `claimRunForLaunch` guard (`status <> 'running'`) can no longer reclaim it — the lease is
+ * non-reclaimable for the duration of the cancel. And because `finalize` runs only when THIS caller won
+ * the flip, a concurrent dispatch that already reclaimed the row (refreshing `updated_at`) makes the CAS
+ * match zero rows, so `finalize` never runs and the live replacement is never cancelled. The retire to
+ * `failed` is thus finalized only for the lease owner. If `finalize` throws, the transaction rolls back
+ * (the row stays stale-claim `running`) so the pass retries next tick rather than waving a re-dispatch
+ * through into a possible double-launch. */
 export async function reconcileStaleLaunchClaim(
   data: DataLayer,
   run: Pick<DeliveryGraphRun, "run_key" | "status" | "process_key" | "updated_at">,
+  finalize?: () => Promise<void>,
   nowMs: number = Date.now(),
 ): Promise<boolean> {
   // Non-stale rows (launched, terminal, or a claim still within its TTL) are never retired here — the
   // staleness decision is owned HERE, not re-derived by each caller, so the CAS guard below and this
-  // predicate can never drift apart.
+  // predicate can never drift apart. This also fences the engine cancel: a fresh in-flight claim never
+  // reaches the flip, so `finalize` (the cancellation) never runs against it.
   if (!isStaleLaunchClaim(run, nowMs)) return false;
   const res = await data.open().tx(async (t) => {
     const flip = await t.exec(
       `UPDATE "delivery_graph_runs" SET "status" = 'failed', "phase" = ?, "phase_node_id" = NULL, "updated_at" = ? WHERE "run_key" = ? AND "status" = 'running' AND "process_key" IS NULL AND "updated_at" = ?`,
       [DELIVERY_PHASE.FAILED, new Date(nowMs).toISOString(), run.run_key, run.updated_at],
     );
-    return flip.changed === 1;
+    if (flip.changed !== 1) return false;
+    // We hold the reconciliation lease (the row is now `failed`, non-reclaimable by a dispatch). Run the
+    // fenced engine cancellation BEFORE committing, so a concurrent dispatch can neither be cancelled by
+    // us nor reclaim the row out from under the cancel.
+    await finalize?.();
+    return true;
   });
   return res;
 }

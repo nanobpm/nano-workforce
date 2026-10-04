@@ -226,6 +226,70 @@ test("#852 pollDeliveryGraphPhase: a reconcile read failure leaves the stale cla
   });
 });
 
+test("#853 pollDeliveryGraphPhase: a FRESH in-flight claim (within TTL) is never engine-cancelled — the cancel is fenced behind the staleness CAS", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    // A launch that is still in flight: running, no process key yet, but WELL within the launch TTL.
+    // `createInstance` may have just succeeded (a legitimate live instance) with the key stamp still
+    // pending. The poller must NOT cancel that instance — the row is not stale, so the reconcile lease
+    // is never acquired and `finalize` (the cancel) never runs.
+    await runs.insert({ ...claimRow("running"), run_key: "fresh", digest: "d", updated_at: ago(1000) });
+    const cancelled: string[] = [];
+    const engine = {
+      searchProcessInstances: async (filter?: { state?: string }) =>
+        filter?.state === "ACTIVE" ? [{ processInstanceKey: "PI-legit", state: "ACTIVE" }] : [],
+      searchVariables: async (filter?: { processInstanceKey?: string; name?: string }) =>
+        filter?.name === "runKey" && filter.processInstanceKey === "PI-legit"
+          ? [{ variableKey: "v", name: "runKey", value: JSON.stringify("fresh"), scopeKey: "PI-legit", processInstanceKey: "PI-legit", isTruncated: false }]
+          : [],
+      cancelInstance: async (req: { processInstanceKey: string }) => {
+        cancelled.push(req.processInstanceKey);
+      },
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    assertEquals(cancelled, [], "a fresh in-flight claim's legitimate instance is never cancelled");
+    assertEquals((await runs.get("fresh"))?.status, "running", "the fresh claim is left running, not retired");
+  });
+});
+
+test("#853 reconcileStaleLaunchClaim: a concurrent dispatch that re-claims the stale row first is NOT cancelled — the finalize cancel runs only for the lease owner", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    // The poller read this row as a stale launch claim …
+    const observed = { ...claimRow("running"), updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) };
+    await runs.insert(observed);
+    // … but before the poller's CAS, a concurrent dispatch atomically RE-CLAIMS the stale row
+    // (refreshing `updated_at`) and starts its replacement instance.
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), true, "concurrent dispatch re-claims the stale row");
+    let cancelled = false;
+    // The poller now reconciles off its STALE snapshot, passing the engine cancel as `finalize`. The CAS
+    // matches zero rows (updated_at moved), so the lease is not acquired and `finalize` must NOT run —
+    // the live replacement is never cancelled.
+    const flipped = await reconcileStaleLaunchClaim(data, observed, async () => {
+      cancelled = true;
+    });
+    assertEquals(flipped, false, "the stale snapshot no longer matches → no flip");
+    assertEquals(cancelled, false, "the cancel is fenced: it never runs against a claim the poller did not win");
+    assertEquals((await runs.get("rk"))?.status, "running", "the renewed claim is left running");
+  });
+});
+
+test("#853 reconcileStaleLaunchClaim: the lease holder's finalize cancel DOES run, and the row is retired to failed only for the lease owner", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    const observed = { ...claimRow("running"), updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000) };
+    await runs.insert(observed);
+    let cancelled = false;
+    const flipped = await reconcileStaleLaunchClaim(data, observed, async () => {
+      cancelled = true;
+    });
+    assertEquals(flipped, true, "the unchanged stale claim is flipped (lease acquired)");
+    assertEquals(cancelled, true, "the lease owner's finalize cancel runs");
+    assertEquals((await runs.get("rk"))?.status, "failed", "the row is retired to failed");
+  });
+});
+
 test("#852 reconcileStaleLaunchClaim: the retire-to-failed flip is a CAS on the OBSERVED snapshot — a claim a concurrent dispatch re-claimed (refreshing updated_at) between the poller's read and the write is NOT clobbered", async () => {
   await withData(async (data) => {
     const runs = deliveryGraphRuns(data);

@@ -3069,21 +3069,35 @@ export async function pollDeliveryGraphPhase(
       // id is derived from the row's `digest` (`delivery-graph-<digest>`), NOT the `process_definition_id`
       // column — that column is stamped only AFTER a successful launch, so it is NULL on exactly the
       // crashed-mid-launch claim this path exists to recover.
-      if (run.digest) {
-        try {
-          const cancelled = await reconcileOriginalInstanceBeforeRelaunch(engine, {
-            runKey: run.run_key,
-            processDefinitionId: `${DELIVERY_GRAPH_PROCESS_ID}-${run.digest}`,
-          });
-          if (cancelled.length > 0) {
-            console.error(`[poller] delivery graph ${run.run_key}: cancelled a still-running original instance before retiring the stale claim: ${cancelled.join(", ")}`);
-          }
-        } catch (err) {
-          console.error(`[poller] delivery graph ${run.run_key}: reconcile-before-retire failed, leaving the claim for next pass: ${err}`);
-          continue;
+      //
+      // Fence the engine cancellation with the stale-claim CAS lease (issue #853 review — thread
+      // service.ts:3077): the cancel is passed to `reconcileStaleLaunchClaim` as `finalize`, run INSIDE
+      // the CAS transaction ONLY after the lease flip lands. Two races close:
+      //   • a FRESH `running`/NULL-key claim (still within its TTL) is non-stale, so
+      //     `reconcileStaleLaunchClaim` returns before the flip and the cancel never runs — a legitimate
+      //     just-launched instance (createInstance succeeded, key stamp pending) is never cancelled; and
+      //   • a concurrent dispatch that RE-CLAIMS the row first (refreshing `updated_at`) makes the CAS
+      //     match zero rows, so `finalize` never runs and the live replacement is never cancelled — the
+      //     retire is finalized only for the lease owner, and the lease is non-reclaimable for the
+      //     cancel's duration (the flipped `failed` row fails the dispatch's `status <> 'running'` guard).
+      // Best-effort: a reconcile read failure must not wedge the pass — `finalize` throws, the
+      // transaction rolls back (the row stays stale-claim `running`), we log and skip the retire this
+      // pass, and the next pass retries.
+      const cancelOriginal = async () => {
+        if (!run.digest) return;
+        const cancelled = await reconcileOriginalInstanceBeforeRelaunch(engine, {
+          runKey: run.run_key,
+          processDefinitionId: `${DELIVERY_GRAPH_PROCESS_ID}-${run.digest}`,
+        });
+        if (cancelled.length > 0) {
+          console.error(`[poller] delivery graph ${run.run_key}: cancelled a still-running original instance before retiring the stale claim: ${cancelled.join(", ")}`);
         }
+      };
+      try {
+        await reconcileStaleLaunchClaim(data, run, cancelOriginal);
+      } catch (err) {
+        console.error(`[poller] delivery graph ${run.run_key}: reconcile-before-retire failed, leaving the claim for next pass: ${err}`);
       }
-      await reconcileStaleLaunchClaim(data, run);
       continue;
     }
     const processKey = run.process_key;

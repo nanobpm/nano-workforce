@@ -186,11 +186,18 @@ export async function dispatchDeliveryGraphRun(
 
   // Idempotency short-circuit — a re-dispatch onto a still-running run does NOT double-launch.
   const existing = await runs.get(runKey);
-  // Capture staleness NOW, off the pre-claim snapshot: the claim CAS below rewrites `updated_at`, so a
-  // staleness check after it would read the fresh claim and never fire. Only a STALE re-claim needs
-  // reconcile-before-relaunch (a fresh claim or a terminal-row re-run has no possibly-live original).
+  // Capture staleness NOW, off the pre-claim snapshot, and reuse that ONE decision below: the claim
+  // CAS below rewrites `updated_at`, so a staleness check after it would read the fresh claim and
+  // never fire. Only a STALE re-claim needs reconcile-before-relaunch (a fresh claim or a terminal-row
+  // re-run has no possibly-live original). Re-deriving staleness a second time here would race the TTL
+  // boundary: `isStaleLaunchClaim` reads `Date.now()` afresh, so the row can cross the TTL between this
+  // capture and a second check — the short-circuit would then stop firing while `reclaimingStaleClaim`
+  // stays false, the CAS below would still reclaim the (now-stale) row, and the reconcile block would
+  // be skipped, relaunching WITHOUT cancelling a possibly-live original. One captured decision keeps
+  // the short-circuit and the reconcile in lock-step (issue #853 review — thread
+  // deliveryGraphDispatch.ts:193).
   const reclaimingStaleClaim = existing != null && isStaleLaunchClaim(existing);
-  if (existing && existing.status === "running" && !isStaleLaunchClaim(existing)) {
+  if (existing && existing.status === "running" && !reclaimingStaleClaim) {
     app.log.info("dispatch-delivery-graph short-circuit: already running", { runKey });
     return {
       ok: true,
