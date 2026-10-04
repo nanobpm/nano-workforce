@@ -404,6 +404,43 @@ function clauseAround(prompt: string, idx: number): string {
   return prompt.slice(start, end);
 }
 
+/** A whole-scope marker immediately followed by a PART-QUALIFIER scopes the acknowledgement DOWN to a
+ * part, so it must NOT licence a close (issue #858 round-3 adversarial review). Matching is a bare
+ * substring, so "the whole issue's parser slice", "all of #12's backend", and "every acceptance
+ * criterion's auth half" all credit the marker even though each describes a PARTIAL deliverable — the
+ * exact defect class the guard exists to catch. This pattern matches the text IMMEDIATELY after a
+ * marker occurrence when that text is a possessive (`'s <part>`) or partitive (`of <part>` / `of the
+ * <part>`) that narrows the whole to one slice. The marker is anchored at its end (`end`), so the
+ * qualifier must be adjacent — a part-word appearing LATER in the clause ("the whole issue #12,
+ * including the parser slice") does NOT disqualify. The part-word list is the vocabulary a planner
+ * uses to name a sub-scope; it is deliberately broad (any of these words right after the marker means
+ * the acknowledgement is not whole-scope). */
+const PART_QUALIFIER_AFTER_MARKER =
+  /^(?:'s|of)\s+(?:(?:the|a|an|one|first|second|third|single|only|just)\s+){0,2}(?:parser|slice|part|portion|half|backend|frontend|auth|criteri(?:on|a)|checkbox|front|back|ui|api|db|database|server|client|component|module|piece|section|stage|step|phase|bit|chunk|segment|subset|subpart|aspect|layer|tier|side|edge|corner|fragment|shard|sliver|remnant|rest|remainder)\b/i;
+
+/** True when the text immediately after a whole-scope marker occurrence (at `[start,end)`) is a
+ * part-qualifier that scopes the acknowledgement DOWN to a part — disqualifying the occurrence so it
+ * cannot licence a close. The qualifier can follow the marker directly ("the whole issue's parser
+ * slice"), follow a connective word the marker is a prefix of ("own the whole issue's backend" — the
+ * marker "own the whole" ends before "issue"), or follow the `#N` anchor the marker attaches to ("all
+ * of #12's backend"). So we first consume any run of connective/anchor tokens (whitespace, `issue`,
+ * `scope`, `of`, `the`, `#N`) and then test for the part-qualifier at each step. */
+function isPartQualified(prompt: string, end: number): boolean {
+  const rest = prompt.slice(end, end + 64);
+  if (PART_QUALIFIER_AFTER_MARKER.test(rest)) return true;
+  // Walk past one connective/anchor token at a time, re-testing for the qualifier after each, so a
+  // qualifier that follows "issue" / "scope" / "#N" (etc.) right after the marker still disqualifies.
+  const step = /^(\s+|issue\b|scope\b|of\b|the\b|#[0-9]+|[0-9]+)/i;
+  let offset = 0;
+  for (let n = 0; n < 4; n++) {
+    const m = rest.slice(offset).match(step);
+    if (!m) break;
+    offset += m[0].length;
+    if (PART_QUALIFIER_AFTER_MARKER.test(rest.slice(offset))) return true;
+  }
+  return false;
+}
+
 /** The issue number ANCHORED to a whole-scope phrase occupying `[start,end)` in `prompt`, or null if
  * none is adjacent. Checks, in order: a `#N` immediately AFTER the phrase (through at most a few
  * connective words — "of", "the", "issue"; or directly, for markers that already end in `#`), then a
@@ -431,11 +468,13 @@ function isPartialScopeClose(prompt: string): boolean {
 
   // Which issues does the brief genuinely acknowledge owning the FULL scope of? Scan each whole-scope
   // phrase occurrence, anchor it to the issue immediately adjacent to it (or the sole issue), and skip
-  // any occurrence whose clause attributes the scope to others.
+  // any occurrence whose clause attributes the scope to others — or that is immediately qualified DOWN
+  // to a part ("the whole issue's parser slice"), which is a partial acknowledgement, not a whole one.
   const lower = prompt.toLowerCase();
   const acknowledged = new Set<number>();
   for (const marker of FULL_SCOPE_MARKERS) {
     for (let i = lower.indexOf(marker); i >= 0; i = lower.indexOf(marker, i + marker.length)) {
+      if (isPartQualified(prompt, i + marker.length)) continue;
       if (SCOPE_ATTRIBUTED_TO_OTHERS.test(clauseAround(prompt, i))) continue;
       const anchored = anchoredIssueNumber(prompt, i, i + marker.length);
       if (anchored !== null) acknowledged.add(anchored);

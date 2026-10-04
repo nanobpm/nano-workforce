@@ -1507,6 +1507,49 @@ test("#858 a whole-scope phrase ATTRIBUTED to siblings/others does not licence a
   }
 });
 
+// Issue #858 (round-3 adversarial review): a whole-scope marker immediately followed by a
+// PART-QUALIFIER scopes the acknowledgement DOWN to a part, so it must NOT licence a close. The
+// marker-credit loop matched a bare substring, so "the whole issue's parser slice" / "all of #12's
+// backend" / "every acceptance criterion's auth half" all credited the marker even though each
+// describes a PARTIAL deliverable — the exact defect class the guard exists to catch. The occurrence
+// is disqualified when the text right after the marker is `'s <part>` / `of <part>` (a possessive or
+// partitive that narrows the whole to one slice).
+test("#858 a whole-scope marker immediately qualified DOWN to a part is rejected (possessive/partitive bypass)", () => {
+  const bypasses = [
+    "Deliver the whole issue's parser slice. Closes #12.",
+    "Implement all of #12's backend. Closes #12.",
+    "Covers every acceptance criterion's auth half. Closes #12.",
+    "Implement the complete issue's backend only. Closes #12.",
+    "Deliver the whole issue's first half. Closes #12.",
+    // Sibling-marker overlap: a prefix marker ("own the whole") ends before the connective "issue",
+    // so the qualifier is not adjacent to THAT marker — the walk must see past the connective.
+    "Own the whole issue #12's parser. Close it.",
+    "Owns the whole issue's backend. Close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: the part-qualifier disqualifier must not over-fire on a legitimate whole-scope
+// acknowledgement that merely has a part-word LATER in the clause (not immediately after the marker),
+// or where the marker is at a clause boundary. A genuine full-scope closer must still validate.
+test("#858 a whole-scope marker NOT immediately qualified down still validates", () => {
+  const ok = [
+    // Part-word appears later in the clause, NOT immediately after the marker.
+    "Deliver the whole issue #12, including the parser slice, and close it.",
+    // Marker at a clause boundary (next char is a delimiter / end).
+    "Own the whole issue #12. Then close it.",
+    "Implement all of #12 and close it.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
 // The converse: a marker genuinely tied to the closed issue (anchored to it, or the sole issue the
 // prompt references) and asserting THIS brief owns it must still validate — the target-association
 // tightening must not regress the legitimate single-issue and issue-anchored closers.
