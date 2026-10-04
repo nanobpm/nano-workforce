@@ -282,7 +282,17 @@ type ReconcileEngine = Pick<EngineClient, "searchProcessInstances" | "searchVari
  * Returns the process keys of any live original instances it cancelled (normally ≤1). A candidate is a
  * live duplicate iff it is an ACTIVE instance of this content-addressed `processDefinitionId` whose
  * seeded `runKey` variable equals ours. A candidate whose `runKey` variable is absent/unreadable is
- * treated as NOT ours (left running) — we never cancel an instance we cannot prove belongs to this run. */
+ * treated as NOT ours (left running) — we never cancel an instance we cannot prove belongs to this run.
+ *
+ * Accepted limitation (nanobpm/nano-ide#588, PR #853 review): the candidate search below is a
+ * definition+state query, and the `@nanobpm/urban` 0.96 seam returns only a single finite default page
+ * for it — it paginates key-based searches, exposes no cursor, and offers no server-side
+ * variable-correlation filter. So if MORE simultaneously-ACTIVE instances of one byte-identical
+ * content-addressed graph exist than that page size, this run's live original can fall outside the page
+ * and be missed, permitting a duplicate launch. That tail needs BOTH a dispatch crash mid-launch (a
+ * stale claim) AND >page-size concurrent active runs of the exact same graph. Accepted rather than
+ * fixed here because closing it requires extending the engine seam/adapter (cursor pagination or
+ * correlation filtering) — tracked upstream at nanobpm/nano-ide#588. */
 export async function reconcileOriginalInstanceBeforeRelaunch(
   engine: ReconcileEngine,
   run: { runKey: string; processDefinitionId: string },
