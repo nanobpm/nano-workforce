@@ -1,3 +1,9 @@
+## [0.200.6](https://github.com/nanobpm/nano-workforce/compare/v0.200.5...v0.200.6) (2026-10-04)
+
+### Bug Fixes
+
+* **delivery-graph:** dispatch large graphs without UI timeout or a stranded phantom run ([#853](https://github.com/nanobpm/nano-workforce/issues/853)) ([d1adc47](https://github.com/nanobpm/nano-workforce/commit/d1adc4752690a91cb764ec3a49015f5a46ac7378)), closes [#852](https://github.com/nanobpm/nano-workforce/issues/852) [#852](https://github.com/nanobpm/nano-workforce/issues/852)
+
 ## [0.200.5](https://github.com/nanobpm/nano-workforce/compare/v0.200.4...v0.200.5) (2026-10-04)
 
 ### Bug Fixes
