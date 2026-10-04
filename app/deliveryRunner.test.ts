@@ -485,6 +485,28 @@ test("runDeliveryGraph coerces a numeric engine processInstanceKey to a string h
   assertEquals(typeof r.handle.processInstanceKey, "string");
 });
 
+test("runDeliveryGraph seeds the prepared runKey as the createInstance correlation variable (stale-claim recovery handle)", async () => {
+  // Regression guard (Copilot review 5408224485, "previously missed"): the stale-claim recovery in
+  // `reconcileOriginalInstanceBeforeRelaunch` finds a still-running ORIGINAL instance by correlating on
+  // the engine `runKey` variable. The reconciliation tests stub `searchVariables` independently, so
+  // deleting this seed would leave every recovery test green while production silently misses the
+  // original instance and relaunches a duplicate. Capture the `variables` argument and assert the
+  // seeded `runKey` IS the prepared/returned run key.
+  let captured: Record<string, unknown> | undefined;
+  const engine = {
+    deployResources: async () => [],
+    createInstance: async (args: { variables: Record<string, unknown> }) => {
+      captured = args.variables;
+      return { processInstanceKey: "555" };
+    },
+  };
+  const r = await runDeliveryGraph(engine, GRAPH, { repoless: true });
+  assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
+  assert(captured, "createInstance was called with a variables argument");
+  assert(r.handle.runKey, "the prepared run key is non-empty");
+  assertEquals(captured.runKey, r.handle.runKey, "the engine correlation variable carries the prepared run key");
+});
+
 // Per-node repository isolation (issue #739): the delivery-graph runner seeds the canonical
 // `io.nanobpm.agentTask.repository` isolation envelope PER agent cell as flattened `<zeebe:taskHeaders>`
 // (`io.nanobpm.agentTask.repository.url`, …) injected into the deployable BPMN — NOT as a single
