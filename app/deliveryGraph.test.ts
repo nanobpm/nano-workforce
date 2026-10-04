@@ -1631,6 +1631,45 @@ test("#858 a NEGATED/disclaimed full-scope acknowledgement does not licence a cl
   }
 });
 
+// Issue #858 (round-14 review, thread deliveryGraph.ts:1392): the `SCOPE_NEGATED_PREFIX` memo was
+// keyed by `clauseStart` even though the tested text is the marker's BEFORE-MARKER prefix
+// (`slice(clauseStart, i)`), which grows with each marker's offset `i`. For TWO markers in one
+// (delimiter-free) clause, the FIRST (shortest-prefix) marker decided the SECOND: an affirmative lead
+// marker cached `false`, then a trailing marker whose OWN prefix contains an exception negator
+// (`excluding …`) was wrongly credited — reopening the exact partial-close bypass. The prefix test is
+// monotonic in `i`, so a negator sitting between the two markers must disqualify ONLY the later one.
+test("#858 a later marker in the same clause disclaimed by a PREFIX negator after an earlier affirmative marker is rejected (per-marker prefix negation, not one cached boolean)", () => {
+  const bypasses = [
+    // The review's own example: #11 affirmative, then `excluding the parser` disclaims #12 before close.
+    "Deliver the full scope of #11 and excluding the parser implement the full scope of #12 and close #12.",
+    // Other exception prefixes between the two markers, same clause, no delimiter.
+    "Deliver the full scope of #11 and other than the parser the full scope of #12 is here so close #12.",
+    "Own the whole issue #11 and without the migration path the full scope of #12 then close #12.",
+    "Cover the whole issue #11 and aside from the docs deliver every acceptance criterion of #12 and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse of the per-marker prefix fix: an affirmative lead marker must NOT be dragged down by a
+// negator that sits AFTER it but still BEFORE a later marker — the lead marker's own (shorter) prefix is
+// clean, so a brief that fully acknowledges the issue it closes must still validate even when a LATER,
+// unrelated marker in the same clause is prefixed by an exception word.
+test("#858 an earlier affirmative marker is NOT disqualified by a prefix negator that only precedes a LATER marker (per-marker prefix must not back-propagate)", () => {
+  const ok = [
+    // Closes #11 (fully acknowledged, clean prefix); #12 is merely referenced with `excluding` and never closed.
+    "Deliver the full scope of #11 and excluding the parser the #12 follow-up is deferred so close #11.",
+    "Own the whole issue #11 and aside from the stretch goals of #12 ship it then close #11.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
 // The converse: the negation disqualifier must not over-fire on an AFFIRMATIVE whole-scope closer that
 // merely contains an innocuous "no …" phrase ("with no gaps", "leaving nothing deferred") — those are
 // not negations of the delivery. A genuine full-scope closer must still validate.

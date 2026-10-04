@@ -587,6 +587,11 @@ const SCOPE_ACTIVE_VOICE_OTHERS =
 const SCOPE_NEGATED_CORE = /\b(?:not|never|cannot|fail(?:s|ing|ed)?\s+to|unable\s+to)\b|n['’]t\b/i;
 const SCOPE_NEGATED_PREFIX =
   /\b(?:without|exclud(?:e|es|ing|ed)|omit(?:s|ting|ted)?|aside\s+from|apart\s+from|other\s+than|rather\s+than|instead\s+of|short\s+of|all\s+but|everything\s+but|anything\s+but|nothing\s+but)\b/i;
+/** Global-flag twin of `SCOPE_NEGATED_PREFIX`, derived from its `source` so the two never drift. Used by
+ * `earliestNegatorEnd` to find, in ONE left-to-right scan of a clause, the earliest offset at which a
+ * prefix negator completes (so each marker can be tested against its OWN before-marker prefix without
+ * re-running the regex per marker — issue #858 round-14 review). */
+const SCOPE_NEGATED_PREFIX_G = new RegExp(SCOPE_NEGATED_PREFIX.source, "gi");
 
 /** A TRAILING `without <delivery gerund>` ("Deliver the full scope of #12 WITHOUT COVERING the edge
  * cases") still disclaims completeness — it is a negation, not the benign `without <noun>` constraint
@@ -762,6 +767,30 @@ function clauseEndAt(b: number[], idx: number, len: number): number {
   return lo === b.length ? len : b[lo];
 }
 
+/** The earliest absolute offset in `[start, end)` at which a `SCOPE_NEGATED_PREFIX` exception/redirection
+ * negator COMPLETES, or `+Infinity` when the span holds none. `SCOPE_NEGATED_PREFIX` disqualifies a
+ * marker only when a negator sits fully BEFORE it, and it is an UNANCHORED "contains" test monotonic in
+ * the marker offset `i` (once a negator is inside `slice(start, i)` it stays inside as `i` grows). So a
+ * marker at offset `i` in this clause is prefix-negated iff this value is `<= i` — computing it ONCE per
+ * clause (via a single global-regex scan, taking the minimum match-END over every match) lets each of
+ * the clause's markers be judged against its OWN prefix, instead of reusing one clause-wide boolean that
+ * let the first (shortest-prefix) marker decide every later one (issue #858 round-14 review). The single
+ * scan keeps the per-clause cost linear — no O(markers · clause-length) quadratic on a long
+ * delimiter-free clause. */
+function earliestNegatorEnd(prompt: string, start: number, end: number): number {
+  const clause = prompt.slice(start, end);
+  SCOPE_NEGATED_PREFIX_G.lastIndex = 0;
+  let min = Number.POSITIVE_INFINITY;
+  let m: RegExpExecArray | null = SCOPE_NEGATED_PREFIX_G.exec(clause);
+  while (m !== null) {
+    const matchEnd = start + m.index + m[0].length;
+    if (matchEnd < min) min = matchEnd;
+    if (m[0].length === 0) SCOPE_NEGATED_PREFIX_G.lastIndex++; // defensive: never loop on a zero-width match
+    m = SCOPE_NEGATED_PREFIX_G.exec(clause);
+  }
+  return min;
+}
+
 /** The bounded text of the marker's own clause that lies BEFORE the marker occurrence at `idx`, used to
  * test the part-qualifier `PART_QUALIFIER_BEFORE_MARKER` — which narrows only the phrase that FOLLOWS it,
  * so it disqualifies the marker only when it precedes it (issue #858 round-5 review).
@@ -777,8 +806,9 @@ function clauseEndAt(b: number[], idx: number, len: number): number {
  * `SCOPE_NEGATED_PREFIX`, is an UNANCHORED "contains" test (a negator anywhere in the before-clause
  * disqualifies), so capping it to this window silently drops a negator sitting more than `PREFIX_WINDOW`
  * chars before the marker — a fail-open regression (issue #858 round-12 adversarial review). That
- * consumer therefore tests the WHOLE before-clause, memoised per clause start (see
- * `negatedPrefixByClause` in `isPartialScopeClose`); it does NOT use this bounded window. */
+ * consumer therefore tests the WHOLE before-marker text, with the earliest negator offset cached per
+ * clause start (see `negatedPrefixEndByClause` / `earliestNegatorEnd` in `isPartialScopeClose`); it does
+ * NOT use this bounded window. */
 const PREFIX_WINDOW = 96;
 function clauseBeforeMarker(prompt: string, idx: number, b: number[]): string {
   const start = clauseStartAt(b, idx);
@@ -1288,15 +1318,18 @@ function isPartialScopeClose(prompt: string): boolean {
   // offset `i` — re-running the backtracking regex per marker over a long clause would be O(markers ·
   // clause-length), quadratic on a long delimiter-free clause (issue #858 round-12 review).
   const negatedAfterMarkerByMarker = new Map<number, boolean>();
-  // `SCOPE_NEGATED_PREFIX` is an UNANCHORED "contains" test over the marker's WHOLE before-clause (a
-  // negator anywhere before the marker disqualifies it), so it must NOT be capped to the bounded
-  // `clauseBeforeMarker` window — that window is sound only for the `$`-anchored
+  // `SCOPE_NEGATED_PREFIX` is an UNANCHORED "contains" test over the marker's BEFORE-MARKER text
+  // (`slice(clauseStart, i)`, a negator anywhere before the marker disqualifies it), so it must NOT be
+  // capped to the bounded `clauseBeforeMarker` window — that window is sound only for the `$`-anchored
   // `PART_QUALIFIER_BEFORE_MARKER`, and capping the contains test to it silently dropped a negator
   // sitting more than `PREFIX_WINDOW` chars before the marker, failing the guard open (issue #858
-  // round-12 adversarial review). The whole before-clause is identical for every marker in a clause, so
-  // test it ONCE per clause and cache the boolean keyed by clause start — re-running it per marker over a
-  // long clause would be O(markers · clause-length), quadratic on a long delimiter-free clause.
-  const negatedPrefixByClause = new Map<number, boolean>();
+  // round-12 adversarial review). The before-marker text is NOT identical across a clause's markers — it
+  // GROWS with each marker's offset `i` — so a single boolean keyed by clause start let the first
+  // (shortest-prefix) marker decide every later one, crediting a disclaimed trailing marker whose own
+  // prefix DOES hold a negator (issue #858 round-14 review). Because the test is monotonic in `i`, cache
+  // instead the earliest absolute offset at which a negator completes (one O(clause-length) scan per
+  // clause, via `earliestNegatorEnd`); a marker at `i` is negated iff that offset `<= i`.
+  const negatedPrefixEndByClause = new Map<number, number>();
   // The four assertion disqualifiers (`SCOPE_ATTRIBUTED_TO_OTHERS`, `SCOPE_ACTIVE_VOICE_OTHERS`,
   // `SCOPE_NEGATED_CORE`, `SCOPE_NEGATED_WITHOUT_DELIVERY`) are "contains" tests over the marker's
   // assertion segment. Occurrences that share a segment START sit in nested segments (same start, growing
@@ -1383,15 +1416,17 @@ function isPartialScopeClose(prompt: string): boolean {
       }
       if (negatedAfterMarker) continue;
       // `SCOPE_NEGATED_PREFIX` is an unanchored "contains" test, so it must run against the WHOLE
-      // before-clause (memoised per clause start) — not the bounded window, which would drop a negator
-      // sitting more than `PREFIX_WINDOW` chars before the marker (issue #858 round-12 adversarial
-      // review). Only the genuinely `$`-anchored `PART_QUALIFIER_BEFORE_MARKER` may use the window.
-      let negatedPrefix = negatedPrefixByClause.get(clauseStart);
-      if (negatedPrefix === undefined) {
-        negatedPrefix = SCOPE_NEGATED_PREFIX.test(prompt.slice(clauseStart, i));
-        negatedPrefixByClause.set(clauseStart, negatedPrefix);
+      // before-marker text — not the bounded window, which would drop a negator sitting more than
+      // `PREFIX_WINDOW` chars before the marker (issue #858 round-12 adversarial review). The earliest
+      // negator offset is cached per clause and compared with THIS marker's own `i` (issue #858 round-14
+      // review): a clause-wide boolean let the first marker's clean prefix credit a later disclaimed one.
+      // Only the genuinely `$`-anchored `PART_QUALIFIER_BEFORE_MARKER` may use the window.
+      let negatedPrefixEnd = negatedPrefixEndByClause.get(clauseStart);
+      if (negatedPrefixEnd === undefined) {
+        negatedPrefixEnd = earliestNegatorEnd(prompt, clauseStart, clauseEndAt(bounds, i, prompt.length));
+        negatedPrefixEndByClause.set(clauseStart, negatedPrefixEnd);
       }
-      if (negatedPrefix) continue;
+      if (negatedPrefixEnd <= i) continue;
       if (PART_QUALIFIER_BEFORE_MARKER.test(clauseBeforeMarker(prompt, i, bounds))) continue;
       const anchored = anchoredIssueKey(prompt, i, markerEnd);
       if (anchored !== null) acknowledged.add(anchored);
