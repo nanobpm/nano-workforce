@@ -1649,3 +1649,140 @@ test("#858 an affirmative whole-scope closer with an innocuous 'no' phrase still
   }
 });
 
+
+// Issue #858 (round-5 review, thread deliveryGraph.ts:453): a PART-QUALIFIER can narrow a whole-scope
+// marker from EITHER side. The after-side was already caught (`the whole issue's parser`), but a PREFIX
+// partitive ("half of every acceptance criterion of #12") slipped through — `every acceptance criterion`
+// was credited to #12 while the preceding `half of` was never examined. Qualification must be detected
+// on BOTH sides of the marker, so a prefix partitive disqualifies the occurrence just like a suffix one.
+test("#858 a whole-scope marker narrowed by a PREFIX partitive is rejected (both-sides qualifier bypass)", () => {
+  const bypasses = [
+    "Implement half of every acceptance criterion of #12, then close #12.",
+    "Deliver part of the whole issue #12 and close it.",
+    "Cover some of every acceptance criterion of #12; Closes #12.",
+    "Deliver a subset of every acceptance criterion of #12. Closes #12.",
+    "Do a portion of the whole issue #12 and close #12.",
+    "Ship a fraction of the full scope of #12 and close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a whole-quantifier prefix ("all of" / "the whole of") is NOT a part-qualifier, and a
+// marker merely preceded by an unrelated "… of …" phrase in the same clause must still validate.
+test("#858 a whole-scope marker with a whole/benign prefix still validates (prefix-partitive must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and close #12.",
+    "Implement all of #12 and close it.",
+    "As part of the milestone, deliver the full scope of #12 and close #12.",
+    "On behalf of the team, deliver every acceptance criterion of #12; Closes #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-5 review, thread deliveryGraph.ts:369): an EXCEPTION/REDIRECTION preposition
+// (`without`, `rather than`, `other than`, `instead of`, …) negates the full-scope phrase only when it
+// GOVERNS it — i.e. it sits BEFORE the marker. A TRAILING occurrence governs some OTHER phrase, so an
+// affirmative closer with an unrelated trailing constraint ("the full scope of #12 WITHOUT regressions",
+// "… RATHER THAN a piecemeal split") must NOT be read as scope negation and must still validate.
+test("#858 an affirmative whole-scope closer with a TRAILING exception constraint still validates (negation must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 without regressions; close #12.",
+    "Deliver the full scope of #12 rather than a piecemeal split. Closes #12.",
+    "Own the whole issue #12 instead of a thin vertical slice; close #12.",
+    "Deliver every acceptance criterion of #12 with no feature left aside from the stretch goals noted elsewhere; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse of the above: a LEADING exception preposition that genuinely governs (negates) the
+// marker must STILL disqualify — the trailing-is-benign fix must not reopen the leading-negation bypass.
+test("#858 a LEADING exception preposition that governs the marker still disqualifies the close", () => {
+  const bypasses = [
+    "Deliver this slice without covering the full scope of #12; close #12.",
+    "Implement #12's parser rather than the full scope of #12. Closes #12.",
+    "Do the auth part instead of the whole issue #12 and close #12.",
+    "Ship everything other than the full scope of #12, then close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-5 review, "Allow current-slice ownership in passive attribution",
+// deliveryGraph.ts:354): a whole-scope phrase attributed to THIS slice ("delivered by this slice",
+// "owned by the current slice") is an AFFIRMATIVE ownership assertion and must licence a close. Only
+// attribution to SIBLINGS/OTHERS disqualifies. The old `<verb> by` alternative fired regardless of who
+// followed `by`, wrongly rejecting first-person/current-slice passive phrasing.
+test("#858 a whole-scope phrase attributed to THIS slice (passive self-ownership) still validates", () => {
+  const ok = [
+    "The full scope of #12 is delivered by this slice; close #12.",
+    "Every acceptance criterion of #12 is covered by the current slice; Closes #12.",
+    "The whole issue #12 is owned by me here; close it.",
+    "The full stated scope of #12 is handled by this brief, so close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: attribution to SIBLINGS/OTHERS (or a non-self team) must STILL disqualify — the
+// self-ownership fix must not reopen the "handled by others" bypass.
+test("#858 a whole-scope phrase attributed to OTHERS (incl. a non-self team) still disqualifies the close", () => {
+  const bypasses = [
+    "The full scope of #12 is handled by siblings; implement criterion 1 and close #12.",
+    "Every acceptance criterion of #12 is delivered by the other slices; do the parser part and close #12.",
+    "The full scope of #12 is delivered by the backend team; implement the UI and close #12.",
+    "The whole issue #12 is owned by another slice; implement part and close it.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-5 review, "Support issue URLs in scope-anchor detection", deliveryGraph.ts:490):
+// `issueRefsIn`/`closingTargets` parse issue URLs, but the whole-scope ANCHOR only recognised `#N` /
+// `owner/repo#N`. So when a second issue reference made the sole-issue fallback unavailable, a
+// URL-anchored full-scope acknowledgement was never credited and a legitimate closer was rejected.
+test("#858 a full-scope marker anchored to an issue URL licences closing that URL's issue (multi-ref, no sole fallback)", () => {
+  const ok = [
+    "Deliver the full scope of https://github.com/acme/a/issues/12; note acme/b#7 is out of scope; close https://github.com/acme/a/issues/12.",
+    "This brief covers the full scope of https://github.com/acme/a/issues/12 (acme/b#7 is handled elsewhere); Closes https://github.com/acme/a/issues/12.",
+    // URL anchored AFTER the marker, with a second issue reference defeating the sole-issue fallback.
+    "acme/b#7 is out of scope. The full scope of https://github.com/acme/a/issues/12 is delivered here; close https://github.com/acme/a/issues/12.",
+    // URL anchored BEFORE the marker (possessive-style proximity): https://…/issues/12's full scope.
+    "Deliver https://github.com/acme/a/issues/12's full scope; acme/b#7 is out of scope; close https://github.com/acme/a/issues/12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// The converse: a URL-anchored acknowledgement for ONE issue must NOT licence closing a DIFFERENT
+// issue (URL repo identity is preserved exactly like `owner/repo#N`).
+test("#858 a full-scope marker anchored to one issue URL does not licence closing a different issue", () => {
+  const bypasses = [
+    "Deliver the full scope of https://github.com/acme/a/issues/12; implement part of acme/b#7 and close acme/b#7.",
+    "Deliver the full scope of https://github.com/acme/a/issues/12 and close https://github.com/acme/b/issues/12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});

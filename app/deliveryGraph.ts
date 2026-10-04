@@ -348,25 +348,43 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
  * "delivered BY the other slices", "owned BY another slice") does NOT acknowledge that THIS brief
  * owns the scope — it says the opposite. Such an occurrence is disqualified so it cannot licence a
  * close (issue #858 round-3: the full-scope marker must assert this node's ownership of the closing
- * target, not merely mention the scope). Matches a completion verb immediately followed by `by`, or a
- * `by <sibling/other/peer/the rest>` agent phrase. */
+ * target, not merely mention the scope). Matches a completion verb immediately followed by `by` SOME
+ * OTHER agent, or a `by <sibling/other/peer/the rest>` agent phrase. Attribution to the CURRENT slice
+ * is an AFFIRMATIVE ownership assertion, not a disclaimer, so the `<verb> by` alternative excludes a
+ * self-reference agent (`by this slice` / `by the current slice` / `by me` / `by us` / `by me here`)
+ * via a negative lookahead — only attribution to a non-self agent disqualifies (issue #858 round-5
+ * review: "allow current-slice ownership in passive attribution"). */
 const SCOPE_ATTRIBUTED_TO_OTHERS =
-  /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\b|\bby\s+(?:the\s+)?(?:siblings?|other|others|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
+  /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\s+(?!(?:the\s+)?(?:this|current|present|me|us|our|my|myself|ourselves|here)\b)|\bby\s+(?:the\s+)?(?:siblings?|other|others|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
 
 /** A whole-scope phrase whose CLAUSE explicitly NEGATES or DISCLAIMS it ("this slice does NOT deliver
- * the full scope of #12", "we won't cover every acceptance criterion", "without delivering the whole
- * issue") does NOT acknowledge that this brief owns the scope — it asserts the opposite, yet the bare
- * substring `full scope` is still present (issue #858 round-4 review). Such an occurrence is disqualified
- * so a negated clause cannot licence a close and re-open the partial-close bypass. Matches a negation
- * token anywhere in the marker's own clause (clause-scoped via `clauseAround`, so a negation elsewhere in
- * the prompt is irrelevant). Conservative/fail-closed: the planner contract (plan.md) directs a genuine
- * full-scope closer to carry a plain AFFIRMATIVE acknowledgement, so negating the marker's clause is a
- * disclaimer, not an assertion. The exception idiom covers `but` only in its narrow "except" phrases
- * (`all but` / `everything but` / `anything but` / `nothing but`) — a BARE `but` is left out
- * deliberately: it is a common affirmative conjunction ("the full scope of #12, but split across two
- * commits"), so matching it would over-fire on legitimate closers. */
-const SCOPE_NEGATED =
-  /\b(?:not|never|without|cannot|exclud(?:e|es|ing|ed)|omit(?:s|ting|ted)?|aside\s+from|apart\s+from|other\s+than|rather\s+than|instead\s+of|short\s+of|all\s+but|everything\s+but|anything\s+but|nothing\s+but|fail(?:s|ing|ed)?\s+to|unable\s+to)\b|n['’]t\b/i;
+ * the full scope of #12", "we won't cover every acceptance criterion", "the full scope of #12 is NOT
+ * delivered here") does NOT acknowledge that this brief owns the scope — it asserts the opposite, yet
+ * the bare substring `full scope` is still present (issue #858 round-4 review). Such an occurrence is
+ * disqualified so a negated clause cannot licence a close and re-open the partial-close bypass.
+ *
+ * Negation comes in TWO grammatical shapes, handled separately so an UNRELATED trailing constraint is
+ * not mistaken for scope negation (issue #858 round-5 review — `Deliver the full scope of #12 without
+ * regressions; close #12.` must validate):
+ *  - `SCOPE_NEGATED_CORE` — core negators (`not`/`never`/`cannot`/`n't`) and the delivery-failure
+ *    idioms (`fails to`/`unable to`) that negate the assertion wherever they sit in the clause,
+ *    including AFTER the marker (`…full scope… is NOT delivered`, `…full scope… fails to cover the
+ *    edge cases`). Tested against the whole clause.
+ *  - `SCOPE_NEGATED_PREFIX` — exception/redirection PREFIXES (`without`, `other than`, `rather than`,
+ *    `instead of`, `apart from`, `all but`, `excluding`, …) that negate only the phrase they GOVERN,
+ *    i.e. the one that FOLLOWS them. They disqualify the marker only when they sit BEFORE it in the
+ *    clause; a TRAILING occurrence governs some other phrase (`…full scope… WITHOUT regressions`,
+ *    `…full scope… RATHER THAN a piecemeal split`) and is an affirmative closer.
+ *
+ * Conservative/fail-closed: the planner contract (plan.md) directs a genuine full-scope closer to
+ * carry a plain AFFIRMATIVE acknowledgement, so negating the marker's clause is a disclaimer, not an
+ * assertion. The exception idiom covers `but` only in its narrow "except" phrases (`all but` /
+ * `everything but` / `anything but` / `nothing but`) — a BARE `but` is left out deliberately: it is a
+ * common affirmative conjunction ("the full scope of #12, but split across two commits"), so matching
+ * it would over-fire on legitimate closers. */
+const SCOPE_NEGATED_CORE = /\b(?:not|never|cannot|fail(?:s|ing|ed)?\s+to|unable\s+to)\b|n['’]t\b/i;
+const SCOPE_NEGATED_PREFIX =
+  /\b(?:without|exclud(?:e|es|ing|ed)|omit(?:s|ting|ted)?|aside\s+from|apart\s+from|other\s+than|rather\s+than|instead\s+of|short\s+of|all\s+but|everything\s+but|anything\s+but|nothing\s+but)\b/i;
 
 /** The explicit full-scope acknowledgement markers that licence a closing keyword. These are the
  * phrases the planner contract (resources/prompts/plan.md) directs a full-scope slice to carry, so a
@@ -438,6 +456,28 @@ function clauseAround(prompt: string, idx: number): string {
   return prompt.slice(start, end);
 }
 
+/** The text of the marker's own clause that lies BEFORE the marker occurrence at `idx` (from the
+ * clause's delimiter boundary up to `idx`). Used to test the GRAMMATICALLY PREFIX disqualifiers —
+ * an exception/redirection preposition (`SCOPE_NEGATED_PREFIX`) or a part-qualifier
+ * (`PART_QUALIFIER_BEFORE_MARKER`) — which negate/narrow only the phrase that FOLLOWS them, so they
+ * disqualify the marker only when they precede it (issue #858 round-5 review). */
+function clauseBeforeMarker(prompt: string, idx: number): string {
+  let start = idx;
+  while (start > 0 && !CLAUSE_DELIMITERS.has(prompt.charAt(start - 1))) start--;
+  return prompt.slice(start, idx);
+}
+
+/** A whole-scope marker narrowed by a PREFIX PARTITIVE ("half of every acceptance criterion", "part of
+ * the whole issue", "a subset of the full scope") scopes the acknowledgement DOWN to a part, so it must
+ * NOT licence a close — the mirror of `PART_QUALIFIER_AFTER_MARKER` on the LEADING side (issue #858
+ * round-5 review: "detect partial-scope qualifiers before the issue marker"). Matches a partitive
+ * quantifier + `of` at the END of the marker's before-clause text, so it is adjacent to the marker.
+ * Whole quantifiers (`all of`, `the whole of`) are deliberately excluded — they denote the WHOLE, not a
+ * part — and an unrelated earlier "… of …" ("as part of the milestone, deliver the full scope …") is
+ * not adjacent to the marker, so it does not disqualify. */
+const PART_QUALIFIER_BEFORE_MARKER =
+  /\b(?:(?:a|one|two|three|four|five)\s+)?(?:half|part|portion|some|subset|fraction|piece|bit|chunk|segment|slice|section|fragment|sliver|handful|couple|number|few|several|most|many|much|majority|minority|remainder|rest)\s+of(?:\s+(?:the|its|this|that|each|every|all|a))?\s+$/i;
+
 /** A whole-scope marker immediately followed by a PART-QUALIFIER scopes the acknowledgement DOWN to a
  * part, so it must NOT licence a close (issue #858 round-3 adversarial review). Matching is a bare
  * substring, so "the whole issue's parser slice", "all of #12's backend", and "every acceptance
@@ -477,13 +517,22 @@ function isPartQualified(prompt: string, end: number): boolean {
 
 /** The repo-qualified issue KEY (see `issueKey`) ANCHORED to a whole-scope phrase occupying
  * `[start,end)` in `prompt`, or null if none is adjacent. Checks, in order: a `#N` (optionally
- * `owner/repo#N`) immediately AFTER the phrase (through at most a few connective words — "of", "the",
- * "issue"; or directly, for markers that already end in `#`), then a possessive `owner/repo#N's`/`#N`
- * immediately BEFORE it. Proximity is what ties the acknowledgement to a specific issue, so a phrase
- * next to `owner/alpha#12` cannot license closing `owner/beta#12` (or a bare `#12`) in the same
- * clause — the repository prefix is preserved, not collapsed to the bare number. */
+ * `owner/repo#N`) or an issue URL (`…/owner/repo/issues/N`) immediately AFTER the phrase (through at
+ * most a few connective words — "of", "the", "issue"; or directly, for markers that already end in
+ * `#`), then a possessive/adjacent `owner/repo#N`, bare `#N`, or issue URL immediately BEFORE it.
+ * Issue URLs are a first-class issue reference (parsed by `issueRefsIn`/`closingTargets`), so the
+ * anchor must recognise them too — otherwise a prompt whose only full-scope acknowledgement is
+ * URL-anchored, and which references a second issue (so the sole-issue fallback is unavailable), is
+ * wrongly rejected (issue #858 round-5 review). Proximity is what ties the acknowledgement to a
+ * specific issue, so a phrase next to `owner/alpha#12` (or its URL) cannot license closing
+ * `owner/beta#12` (or a bare `#12`) in the same clause — the repository prefix is preserved, not
+ * collapsed to the bare number. */
 function anchoredIssueKey(prompt: string, start: number, end: number): string | null {
-  const after = prompt.slice(end, end + 48);
+  const after = prompt.slice(end, end + 96);
+  const afterUrl = after.match(
+    /^\s*(?:(?:of|the|issue)\s+){0,3}https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)/i,
+  );
+  if (afterUrl) return issueKey(afterUrl[1], afterUrl[2]);
   const afterMatch =
     prompt[end - 1] === "#"
       ? after.match(/^([0-9]+)/)
@@ -495,7 +544,11 @@ function anchoredIssueKey(prompt: string, start: number, end: number): string | 
       ? issueKey(null, afterMatch[1])
       : issueKey(afterMatch[1], afterMatch[2]);
   }
-  const before = prompt.slice(Math.max(0, start - 48), start);
+  const before = prompt.slice(Math.max(0, start - 96), start);
+  const beforeUrl = before.match(
+    /https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)\/?(?:'s|s'|')?\s*(?:of\s+)?$/i,
+  );
+  if (beforeUrl) return issueKey(beforeUrl[1], beforeUrl[2]);
   const beforeMatch = before.match(/(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#([0-9]+)(?:'s|s'|')?\s*(?:of\s+)?$/i);
   if (beforeMatch) return issueKey(beforeMatch[1], beforeMatch[2]);
   return null;
@@ -520,7 +573,10 @@ function isPartialScopeClose(prompt: string): boolean {
       if (isPartQualified(prompt, i + marker.length)) continue;
       const clause = clauseAround(prompt, i);
       if (SCOPE_ATTRIBUTED_TO_OTHERS.test(clause)) continue;
-      if (SCOPE_NEGATED.test(clause)) continue;
+      if (SCOPE_NEGATED_CORE.test(clause)) continue;
+      const before = clauseBeforeMarker(prompt, i);
+      if (SCOPE_NEGATED_PREFIX.test(before)) continue;
+      if (PART_QUALIFIER_BEFORE_MARKER.test(before)) continue;
       const anchored = anchoredIssueKey(prompt, i, i + marker.length);
       if (anchored !== null) acknowledged.add(anchored);
       else if (sole !== null) acknowledged.add(sole);

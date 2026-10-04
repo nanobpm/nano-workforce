@@ -63,9 +63,20 @@ test("scope-classify.md: the scope gate scans COMMIT bodies for closing keywords
   const lower = gate.toLowerCase();
   // The gate must read the PR's commits (not only its body) for closing keywords.
   assert(lower.includes("commit"), "scope-classify.md must mention commits");
+  // It must name the commit body/message as the thing to scan…
   assert(
-    lower.includes("--json commits") || lower.includes("git log") || lower.includes("commit bod") || lower.includes("commit message"),
+    lower.includes("commit bod") || lower.includes("commit message"),
     "scope-classify.md must instruct reading commit bodies/messages",
+  );
+  // …AND prescribe an actual FULL-HISTORY retrieval mechanism the contract permits (`git log` or an
+  // explicitly `--paginate`d API call). Merely mentioning "commit bodies" — or the capped, explicitly
+  // FORBIDDEN `--json commits` — is not enough: deleting the real retrieval instruction would leave a
+  // substring-only check green while the gate silently loses its ability to see a `Closes #N` in a
+  // later commit of a >100-commit PR (issue #858 round-5 review).
+  assert(
+    /git\s+log/.test(lower) || lower.includes("--paginate"),
+    "scope-classify.md must prescribe a full-history commit retrieval (`git log` or a `--paginate`d " +
+      "API call), not the capped `--json commits`",
   );
   // It must explain WHY: the COMMIT_MESSAGES squash carries a commit-body closing keyword to merge.
   assert(lower.includes("commit_messages"), "scope-classify.md must name the COMMIT_MESSAGES squash behaviour");
