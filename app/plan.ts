@@ -477,7 +477,15 @@ export interface ParsedIssue {
 /** Parse "owner/repo#123" or a canonical issue URL into its parts. The URL branch is the /issues/
  * spelling; the shorthand branch DELEGATES to the canonical {@link parsePr} (`app/prParse.ts`) — the
  * single source of truth for the `owner/repo#N` shape — rather than carrying a second copy of its
- * regex (#856/#857: a duplicated shorthand grammar is exactly the drift the single-grammar guard bans). */
+ * regex (#856/#857: a duplicated shorthand grammar is exactly the drift the single-grammar guard bans).
+ *
+ * `parseIssue` admits an ISSUE reference, and `parsePr` ALSO accepts a `/pull/<n>` URL, so delegating
+ * raw input to it would silently widen every issue-target door (startPlan/startFeature/startEpicSet,
+ * plan deps) to accept a PR URL — resolvable-by-accident (issues and PRs share GitHub's number space)
+ * but undocumented and off-contract (#857). So only the bare `owner/repo#N` shorthand is delegated: a
+ * GitHub URL that is not the `/issues/` spelling handled above (a PR URL, a commit URL, …) fails closed
+ * here. The shorthand never contains `github.com`, so gating the delegation on its absence rejects
+ * every non-issue GitHub URL while leaving the shorthand to the one canonical grammar. */
 export function parseIssue(input: string): ParsedIssue | null {
   const s = input.trim();
   const m = s.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/i);
@@ -486,6 +494,7 @@ export function parseIssue(input: string): ParsedIssue | null {
     const number = Number(m[3]);
     return { repo, number, url: `https://github.com/${repo}/issues/${number}`, planKey: `${repo}#${number}` };
   }
+  if (/github\.com/i.test(s)) return null;
   const pr = parsePr(s);
   if (pr) {
     return { repo: pr.repo, number: pr.number, url: `https://github.com/${pr.repo}/issues/${pr.number}`, planKey: pr.prKey };
