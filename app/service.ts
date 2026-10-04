@@ -31,6 +31,7 @@ import { envContract, readEnvOr } from "./contracts.ts";
 import { makeDefaultReadHead } from "./currentHead.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
+import { DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
 import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
 import { deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement } from "./deliveryHuman.ts";
@@ -3064,12 +3065,15 @@ export async function pollDeliveryGraphPhase(
       // re-dispatch relaunch would then double-run those nodes. Cancel any still-ACTIVE instance of THIS
       // run (matched by its seeded `runKey` variable) BEFORE retiring the claim, so the recovery stays
       // at-most-once. Best-effort: a reconcile read failure must not wedge the pass — log and skip the
-      // retire this pass (the row stays stale-claim `running` and is retried next pass).
-      if (run.process_definition_id) {
+      // retire this pass (the row stays stale-claim `running` and is retried next pass). The definition
+      // id is derived from the row's `digest` (`delivery-graph-<digest>`), NOT the `process_definition_id`
+      // column — that column is stamped only AFTER a successful launch, so it is NULL on exactly the
+      // crashed-mid-launch claim this path exists to recover.
+      if (run.digest) {
         try {
           const cancelled = await reconcileOriginalInstanceBeforeRelaunch(engine, {
             runKey: run.run_key,
-            processDefinitionId: run.process_definition_id,
+            processDefinitionId: `${DELIVERY_GRAPH_PROCESS_ID}-${run.digest}`,
           });
           if (cancelled.length > 0) {
             console.error(`[poller] delivery graph ${run.run_key}: cancelled a still-running original instance before retiring the stale claim: ${cancelled.join(", ")}`);

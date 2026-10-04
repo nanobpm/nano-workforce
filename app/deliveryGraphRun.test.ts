@@ -177,11 +177,12 @@ test("#852 pollDeliveryGraphPhase: retiring a stale claim cancels a still-runnin
   await withData(async (data) => {
     const runs = deliveryGraphRuns(data);
     // A stale claim whose dispatch died AFTER createInstance but BEFORE stamping the key: the row has a
-    // process_definition_id but NULL process_key, and a LIVE instance of this run (runKey "rk") is ACTIVE.
+    // NULL process_key AND a NULL process_definition_id (the stamp never landed) — the poller derives the
+    // definition id from the row's `digest` (`delivery-graph-d`). A LIVE instance of this run is ACTIVE.
     await runs.insert({
       ...claimRow("running"),
       run_key: "rk",
-      process_definition_id: "delivery-graph-d",
+      digest: "d",
       updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000),
     });
     const cancelled: string[] = [];
@@ -209,7 +210,7 @@ test("#852 pollDeliveryGraphPhase: a reconcile read failure leaves the stale cla
     await runs.insert({
       ...claimRow("running"),
       run_key: "rk",
-      process_definition_id: "delivery-graph-d",
+      digest: "d",
       updated_at: ago(LAUNCH_CLAIM_TTL_MS + 1000),
     });
     const engine = {
