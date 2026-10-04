@@ -1690,6 +1690,91 @@ test("#858 an affirmative whole-scope closer with an innocuous 'no' phrase still
 });
 
 
+// Issue #858 (round-15 review, deliveryGraph.ts:318): the closing grammar ordered the optional
+// `issues?` noun BEFORE the quantifier, so a natural multi-target directive worded quantifier-first —
+// `close both issues #12 and #13` — matched neither the `CLOSING_ACTION_PATTERN` prefilter nor
+// `CLOSING_TARGET_PATTERN`, so a partial-scope prompt phrased that way received NO `partial-scope-close`
+// error (fail-open). The quantifier/determiner must be admitted on EITHER side of the `issues?` noun,
+// and EVERY coordinated target must still be acknowledged.
+test("#858 a quantifier-before-noun close (`close both issues #12 and #13`) is detected and each target needs its own acknowledgement", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12 and close both issues #12 and #13.",
+    "Deliver part of #12; close all issues #12 and #13.",
+    "Fix each issue #12 and #13 after implementing one criterion.",
+    // Only one of the two coordinated targets is acknowledged — the other still fails.
+    "Deliver the full scope of #12; close both issues #12 and #13.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: a quantifier-before-noun close whose EVERY coordinated target is fully acknowledged must
+// still validate — the widened grammar must not regress a legitimate multi-issue closer.
+test("#858 a quantifier-before-noun close whose every target is acknowledged still validates", () => {
+  const ok = [
+    "Deliver the full scope of #12 and the full scope of #13; close both issues #12 and #13.",
+    "Own the whole issue #7 and the whole issue #8 — every acceptance criterion — then close all issues #7 and #8.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-15 review, deliveryGraph.ts:1202): a TRAILING scope exclusion that sits AFTER the
+// marker's issue anchor and past the clause comma (`Deliver the full scope of #12, excluding the parser;
+// close #12.`) narrows the whole scope down to "the whole MINUS a part", yet the comma ended the marker's
+// clause before the exclusion and the before-marker `SCOPE_NEGATED_PREFIX` only examined text BEFORE the
+// marker — so the explicitly-partial brief validated (fail-open). A trailing `except`/`excluding`/
+// `other than`/`apart from`/`aside from`/`but not`/`minus` phrase after the anchor must disqualify the
+// marker just like a before-marker exception prefix does.
+test("#858 a TRAILING exclusion after the issue anchor narrows a full-scope marker and is rejected (post-marker exclusion bypass)", () => {
+  const bypasses = [
+    "Deliver the full scope of #12, excluding the parser; close #12.",
+    "Deliver the full scope of #12, except the migration path; close #12.",
+    "Cover every acceptance criterion of #12, other than the docs. Close #12.",
+    "Own the whole issue #12, apart from the parser, and close it.",
+    "Deliver the full scope of #12, aside from the UI; close #12.",
+    "Deliver the full scope of #12, but not the parser; close #12.",
+    "Deliver the full scope of #12, omitting the parser; close #12.",
+    "Deliver the full scope of #12, excluded the parser; close #12.",
+    // Exclusion directly adjacent (no comma) still disqualifies.
+    "Deliver the full scope of #12 excluding the parser; close #12.",
+    // Sole-issue fallback: marker has no adjacent anchor but the prompt references exactly one issue.
+    "Deliver the full scope, excluding the parser; close #12.",
+    "Deliver the full scope of owner/alpha#12, excluding the parser; close owner/alpha#12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: the trailing-exclusion disqualifier must not over-fire. An EXCLUSION OF NOTHING
+// (`excluding nothing`/`except none`) still delivers the whole scope; a bare affirmative `but`, an
+// `including` continuation, a trailing `without <noun>` constraint, and an `and`-coordinated unrelated
+// action are all affirmative closers that must still validate.
+test("#858 an exclusion-of-nothing or an affirmative trailing phrase does not disqualify a full-scope closer", () => {
+  const ok = [
+    "Deliver the full scope of #12, excluding nothing; close #12.",
+    "Cover every acceptance criterion of #12, excluding none of them; close #12.",
+    "Deliver the full scope of #12, including the parser slice, and close it.",
+    "Deliver the full scope of #12, but split the work across two commits. Closes #12.",
+    "Own the whole issue #12, leaving nothing deferred, and close #12.",
+    "Deliver the full scope of #12 without regressions; close #12.",
+    "Deliver the full scope of #12, and separately update the changelog; close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+
 // Issue #858 (round-5 review, thread deliveryGraph.ts:453): a PART-QUALIFIER can narrow a whole-scope
 // marker from EITHER side. The after-side was already caught (`the whole issue's parser`), but a PREFIX
 // partitive ("half of every acceptance criterion of #12") slipped through — `every acceptance criterion`

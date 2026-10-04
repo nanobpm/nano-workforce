@@ -311,11 +311,15 @@ const NODE_ID_MAX_LENGTH = 128;
  * optional `(?:github\s+)?issues?\s+`
  * sits before BOTH the `owner/repo` prefix and the bare `#N` (and tolerates the plural `issues #N`), so
  * `closes issue #12` and `fixes GitHub issue owner/repo#12` both match; `close the issue` (no number)
- * still resolves via the pronoun alternative, not this prefix. */
+ * still resolves via the pronoun alternative, not this prefix. A quantifier/determiner
+ * (`both`/`all`/`each`/`every`/`the`) is admitted on EITHER side of the `issues?` noun, so the natural
+ * multi-target directive `close both issues #12 and #13` (quantifier BEFORE the noun) matches as well as
+ * `close issues #12` — otherwise a partial-scope prompt worded that way slipped past the prefilter AND
+ * `CLOSING_TARGET_PATTERN` and received no `partial-scope-close` error (issue #858 round-15 review). */
 const ISSUE_REF_PATTERN =
   /(?:#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+)/i;
 const CLOSING_ACTION_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)(?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+))*|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+\b|https?:\/\/[^\s)]*\/issues\/[0-9]+|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+(?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b/i;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)(?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+))*|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+\b|https?:\/\/[^\s)]*\/issues\/[0-9]+|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+(?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b/i;
 
 /** A repo-qualified issue IDENTITY key (issue #858 round-4 review). The accepted issue syntax includes
  * `owner/repo#N` and issue URLs, and this validator supports cross-repository graphs, so collapsing an
@@ -376,7 +380,7 @@ function issueRefsIn(text: string): string[] {
  * closed`) can drop the match — see `NEGATED_PASSIVE_WINDOW`. Detection and targeting never disagree:
  * `CLOSING_ACTION_PATTERN` carries the identical passive arm as a non-capturing pre-filter. */
 const CLOSING_TARGET_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+))*)*)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)\b|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+((?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)/gi;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+))*)*)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)\b|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+((?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)/gi;
 /** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
  * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
  * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
@@ -1224,6 +1228,44 @@ function isPartQualified(prompt: string, end: number): boolean {
   return false;
 }
 
+/** A TRAILING scope-EXCLUSION connective (`except`/`excluding`/`excluded`/`omitting`/`other than`/
+ * `apart from`/`aside from`/`but not`/`save for`/`with the exception of`/`minus`) that narrows a whole-scope marker DOWN to "the
+ * whole MINUS a named part" — so it must NOT licence a close (issue #858 round-15 review). This is the
+ * AFTER-anchor mirror of the before-marker `SCOPE_NEGATED_PREFIX` exception vocabulary: in `Deliver the
+ * full scope of #12, excluding the parser; close #12.` the exclusion sits AFTER the marker's `#12`
+ * anchor and the comma ends the marker's clause before it, so neither the clause-bounded
+ * `SCOPE_NEGATED_AFTER_MARKER_DELIVERY` re-catch nor the before-marker `SCOPE_NEGATED_PREFIX` ever sees
+ * it, and the explicitly-partial brief validated. Keyed `^\s*,?\s*…` so it may cross at most ONE comma
+ * (the clause boundary the exclusion typically follows); the negative lookahead keeps an EXCLUSION OF
+ * NOTHING (`excluding nothing`, `except none`, `other than no part`) affirmative — that still delivers
+ * the whole scope. A BARE trailing `but` (`…, but split across two commits`) is deliberately NOT here —
+ * only the `but not` exception idiom is — mirroring `SCOPE_NEGATED_PREFIX`, which leaves bare `but` out
+ * as a common affirmative conjunction. Trailing `without`/`rather than`/`instead of` are likewise
+ * excluded: those govern a manner/constraint and stay affirmative (the `without <delivery gerund>` case
+ * is already caught by `SCOPE_NEGATED_WITHOUT_DELIVERY`). */
+const SCOPE_EXCLUSION_LEAD =
+  /^\s*,?\s*\b(?:except(?:ing|\s+for)?|exclud(?:e|es|ed|ing)|omit(?:s|ted|ting)?|other\s+than|apart\s+from|aside\s+from|save\s+for|but\s+not|with\s+the\s+exception\s+of|minus)\b\s+(?!nothing\b|none\b|no\b|any\s+other\b)\S/i;
+
+/** True when a whole-scope marker ending at `end` is narrowed by a TRAILING exclusion phrase that sits
+ * after the marker's issue anchor (and at most one comma). We walk past the anchor run — whitespace,
+ * `of`/`the`/`issue`/`scope`/`'s`, a bare or repo-qualified `#N`, or an issue URL — re-testing for the
+ * exclusion connective after each token, so `full scope of #12, excluding the parser` disqualifies even
+ * though the exclusion is several anchor tokens and a comma past the marker. The walk is bounded (at
+ * most 8 anchor tokens) and `SCOPE_EXCLUSION_LEAD` crosses at most one comma, so a distant `excluding`
+ * governing an unrelated later phrase cannot reach back and disqualify this marker. */
+function isExclusionQualified(prompt: string, end: number): boolean {
+  const rest = prompt.slice(end, end + 96);
+  const step = /^(?:\s+|['’]s|of\b|the\b|issue\b|scope\b|#?\s*[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+|https?:\/\/[^\s)]+)/i;
+  let offset = 0;
+  for (let n = 0; n < 8; n++) {
+    if (SCOPE_EXCLUSION_LEAD.test(rest.slice(offset))) return true;
+    const m = rest.slice(offset).match(step);
+    if (!m || m[0].length === 0) break;
+    offset += m[0].length;
+  }
+  return false;
+}
+
 /** The repo-qualified issue KEY (see `issueKey`) ANCHORED to a whole-scope phrase occupying
  * `[start,end)` in `prompt`, or null if none is adjacent. Checks, in order: a `#N` (optionally
  * `owner/repo#N`) or an issue URL (`…/owner/repo/issues/N`) immediately AFTER the phrase (through at
@@ -1360,6 +1402,7 @@ function isPartialScopeClose(prompt: string): boolean {
   const groups = new Map<number, Occurrence[]>();
   for (const [i, markerEnd] of occurrences) {
     if (isPartQualified(prompt, markerEnd)) continue;
+    if (isExclusionQualified(prompt, markerEnd)) continue;
     const assertion = deliveryAssertionAround(prompt, i, markerEnd, bounds, assertionCache);
     const occ: Occurrence = { i, markerEnd, absStart: assertion.absStart, absEnd: assertion.absEnd, text: assertion.text };
     const g = groups.get(assertion.absStart);
