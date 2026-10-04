@@ -159,6 +159,47 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
     assert.ok(flows.some((f) => f.to === "End"), "the graph completed");
   });
 
+  test("retry-node: consecutive retries never accumulate stale operator notes in the prompt", async () => {
+    // Regression (PR #863 adversarial review): the retry reset must re-derive `appendPrompt` from the
+    // runner-seeded `nodeInputs` baseline — building on the live var carried retry 1's note into retry
+    // 2's prompt, growing one stale "Operator guidance…" paragraph per consecutive retry.
+    const app = await boot();
+    await observeConnectors(app);
+    await app.engine.registerWorker("senior:a", async () => ({ status: "done", pr: PR_A }));
+    const bPrompts: unknown[] = [];
+    await app.engine.registerWorker(
+      "senior:b",
+      async (job) => {
+        bPrompts.push((job.variables as Record<string, unknown>).appendPrompt);
+        // Every attempt reports blocked until the THIRD, which succeeds — forcing TWO retries.
+        return bPrompts.length < 3 ? { status: "blocked", summary: "no repo" } : { pr: PR_B };
+      },
+      { fetchVariables: ["appendPrompt"] },
+    );
+
+    const run = await runDeliveryGraph(app.engine, TWO_CHAINS, { repoless: true });
+    assert.ok(run.ok, JSON.stringify(run));
+    await app.settle();
+
+    const first = await openTask(app, "__contract");
+    assert.ok(first, "b parked on its contract escalation");
+    await app.engine.completeUserTask(first.userTaskKey, { decision: "retry", note: "first note" });
+    await app.settle();
+    assert.equal(bPrompts.length, 2, "retry 1 re-ran b's job");
+
+    const second = await openTask(app, "__contract");
+    assert.ok(second, "b parked again after retry 1 reported blocked");
+    await app.engine.completeUserTask(second.userTaskKey, { decision: "retry", note: "second note" });
+    await app.settle();
+    assert.equal(bPrompts.length, 3, "retry 2 re-ran b's job");
+
+    assert.match(String(bPrompts[1]), /Operator guidance for this retry: first note/);
+    assert.match(String(bPrompts[2]), /Operator guidance for this retry: second note/, "retry 2 carries its own note");
+    assert.doesNotMatch(String(bPrompts[2]), /first note/, "retry 2's prompt does NOT accumulate retry 1's note");
+    assert.equal((String(bPrompts[2]).match(/Operator guidance for this retry:/g) ?? []).length, 1, "exactly one guidance paragraph");
+    assert.equal(await openTask(app, "__contract"), undefined, "the third attempt passed the contract gate");
+  });
+
   test("a continue resolution (no decision) supplies the missing emit and does not loop", async () => {
     const app = await boot();
     const connectors = await observeConnectors(app);

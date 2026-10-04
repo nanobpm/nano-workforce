@@ -48,7 +48,7 @@ import {
   stripXmlInvalidChars,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
-import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
+import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
 import { layoutBpmnOffThread } from "./layoutOffThread.ts";
 import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactEmbeddedCredential, redactString } from "./readiness.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
@@ -176,9 +176,9 @@ function contractEscalationTaskElement(element: string): string {
 export const ESCALATION_DECISION_VAR = "decision";
 export const ESCALATION_DECISION_RETRY = "retry";
 
-/** Variables an escalation completion writes (the decision, the generic form's `value` + `note`). They
+/** Variables an escalation completion writes (the decision, the escalation form's `value` + `note`). They
  * are declared node-LOCAL on the node's subProcess so a completion never leaks into the shared root
- * scope, where a sibling node's escalation would read a stale value (the generic form's `value` resumes
+ * scope, where a sibling node's escalation would read a stale value (the escalation form's `value` resumes
  * a required emit — a stale root `value` could resume the WRONG node). */
 const ESCALATION_LOCAL_VARS = [ESCALATION_DECISION_VAR, "value", "note"] as const;
 
@@ -2147,9 +2147,15 @@ function retryResolutionLines(el: string, incoming: readonly string[], emits: re
     for (const f of emits) cleared.add(factSourceVar("agent", f));
     for (const v of cleared) outputs.push({ source: "=null", target: v });
     const hasNote = `(is defined(note) and note != null and string(note) != "")`;
-    const base = `(if (is defined(appendPrompt) and appendPrompt != null) then appendPrompt + "\n\n" else "")`;
+    // Re-derive from the RUNNER-SEEDED BASELINE (`nodeInputs.<el>.appendPrompt`), never the live
+    // `appendPrompt`: the subProcess input seeds `appendPrompt` from `nodeInputs` only at subProcess
+    // ENTRY, so on a retry re-entry the task still reads this var as the last reset left it — building
+    // on the live value would carry the previous retry's note forward and ACCUMULATE one stale
+    // "Operator guidance…" paragraph per consecutive retry.
+    const seeded = `nodeInputs.${el}.appendPrompt`;
+    const base = `(if (is defined(${seeded}) and ${seeded} != null) then ${seeded} + "\n\n" else "")`;
     outputs.push({
-      source: `=if ${hasNote} then ${base} + "Operator guidance for this retry: " + string(note) else (if (is defined(appendPrompt)) then appendPrompt else null)`,
+      source: `=if ${hasNote} then ${base} + "Operator guidance for this retry: " + string(note) else (if (is defined(${seeded})) then ${seeded} else null)`,
       target: "appendPrompt",
     });
   }
@@ -2394,7 +2400,7 @@ function escalationTaskLines(
       const target = factSourceVar(opts.resume.kind, fact);
       if (seen.has(target)) continue;
       seen.add(target);
-      // The generic escalation form (`GENERIC_HUMAN_FORM`) captures the operator's answer in a single
+      // The escalation form (`ESCALATION_FORM`) captures the operator's answer in a single
       // `value` field — it has NO `resolvedArtifact` field — so every emit type resumes from `value`,
       // mapped onto that fact's emit-source var (artifact→resolvedArtifact, version→detail, …). Sourcing
       // an artifact from a `resolvedArtifact` form field the form never sets would publish null and make
@@ -2413,10 +2419,15 @@ function escalationTaskLines(
   // timed-out / contract-broken node is legible in the explorer/inbox instead of an opaque bare id;
   // `nodeId` is still threaded as the `nodeId` input above for runtime correlation.
   const escLabel = trimmedOrEmpty(opts?.displayName) || nodeId;
+  // The retry-capable `decision` select lives ONLY on the service-escalation form (`ESCALATION_FORM`).
+  // A wait-gate escalation carries no `retryElement` — its resolution is "supply the awaited value and
+  // continue", never "re-run the probe loop" — so it keeps the select-less generic form rather than
+  // render a "Retry this step" option that would be silently ignored.
+  const form = opts?.retryElement !== undefined ? ESCALATION_FORM : GENERIC_HUMAN_FORM;
   return [
     `      <bpmn:userTask id="${esc}" name="Escalate: ${escapeXml(escLabel)}">`,
     "        <bpmn:extensionElements>",
-    `          <zeebe:formDefinition formId="${GENERIC_HUMAN_FORM}" />`,
+    `          <zeebe:formDefinition formId="${form}" />`,
     "          <zeebe:userTask />",
     '          <zeebe:assignmentDefinition candidateGroups="operators" />',
     "          <zeebe:ioMapping>",

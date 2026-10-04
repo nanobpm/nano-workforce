@@ -2394,6 +2394,46 @@ test("retry-node: both escalations route decision=retry through a reset back to 
   assert(reset.includes(`target="appendPrompt"`), "the reset passes the operator note to the agent");
 });
 
+test("retry-node: the reset re-derives appendPrompt from the runner-seeded nodeInputs baseline, so retry notes never accumulate", async () => {
+  // Regression guard (PR #863 adversarial review): the reset previously built on the LIVE
+  // `appendPrompt`, which the subProcess seeds from `nodeInputs` only at ENTRY — so a second retry's
+  // note appended onto the first retry's already-appended prompt, growing one stale "Operator
+  // guidance…" paragraph per retry. The reset must read ONLY the runner-seeded baseline.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  const appendLine = reset.split("\n").find((l) => l.includes(`target="appendPrompt"`));
+  assert(appendLine, "the reset writes appendPrompt");
+  assert(appendLine.includes(`nodeInputs.${el}.appendPrompt`), "it builds on the runner-seeded baseline, not the live (note-carrying) appendPrompt");
+  assert(!/is defined\(appendPrompt\)/.test(appendLine), "it never reads the live appendPrompt var");
+});
+
+test("escalation forms: service-node escalations attach delivery-escalation (retry select); human + wait-gate tasks keep the generic form", async () => {
+  // Regression guard (PR #863 adversarial review): the retry Resolution select must render ONLY where
+  // retry semantics exist. The wait-gate escalation (no retryElement) and the plain human node share
+  // the generic form; the service timeout/contract escalations carry the select-bearing form.
+  const r = await compileOk(PRODUCER_GATE);
+  for (const suffix of ["esc", "contract"]) {
+    const esc = escBlockForNodeSuffix(r.bpmn, "open", suffix);
+    assert(esc.includes('formId="delivery-escalation"'), `the __${suffix} escalation attaches the retry-capable form`);
+    assert(!esc.includes('formId="delivery-human-generic"'), `the __${suffix} escalation no longer shares the generic human form`);
+  }
+  const waitGraph = await compileOk({
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:open" }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: "open.pr", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "open.pr", to: "merged" }],
+  });
+  const waitEsc = escBlockForNodeSuffix(waitGraph.bpmn, "merged", "esc");
+  assert(waitEsc.includes('formId="delivery-human-generic"'), "the wait-gate escalation keeps the generic form (no retry semantics)");
+  assert(!waitEsc.includes('formId="delivery-escalation"'), "no retry select on a wait-gate escalation");
+  const humanGraph = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "approve" } }], edges: [] });
+  const humanTask = humanGraph.bpmn.slice(humanGraph.bpmn.indexOf("<bpmn:userTask"), humanGraph.bpmn.indexOf("</bpmn:userTask>"));
+  assert(humanTask.includes('formId="delivery-human-generic"'), "the plain human node keeps the generic form");
+  assert(!humanTask.includes('formId="delivery-escalation"'), "no retry select on a plain human step");
+});
+
 test("contract escalation context: carries the agent's own report, question, error, transcript and how to resolve", async () => {
   const r = await compileOk(PRODUCER_GATE);
   const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");

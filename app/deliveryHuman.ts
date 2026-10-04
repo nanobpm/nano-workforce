@@ -206,6 +206,12 @@ export function firstHttpUrl(text: string | undefined | null): string | null {
  *  declared emitted fact, so a human node with no explicit/category form can STILL emit downstream. */
 export const GENERIC_HUMAN_FORM = "delivery-human-generic";
 
+/** The bounded service-node ESCALATION form (retry-node resolution): like the generic form plus the
+ *  `decision` Resolution select (Continue / Retry this step). Kept SEPARATE from {@link GENERIC_HUMAN_FORM}
+ *  — that form is shared with plain scheduled human steps and wait-gate escalations, which have no
+ *  retry semantics and never read `decision`, so the select must not render there. */
+export const ESCALATION_FORM = "delivery-escalation";
+
 /** The "click done" category form: a degenerate no-emit acknowledgement ("now do X" → done). */
 export const HUMAN_ACK_FORM = "delivery-human-ack";
 

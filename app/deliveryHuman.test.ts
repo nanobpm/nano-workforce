@@ -453,13 +453,25 @@ test("deliveryHumanContextQuestion: a human node whose id itself ends in __esc r
 const genericForm = readFileSync("resources/forms/delivery-human-generic.form", "utf8");
 
 test("form-structure guard: delivery-human-generic.form uses node-neutral wording", () => {
-  // This shared form is also attached to the `__esc`/`__contract` escalation tasks that bounded
-  // agent/wait/connector nodes create (`app/deliveryGraphCompiler.ts`), not only scheduled `human`
-  // nodes. Copy that calls the task a "scheduled human step" is inaccurate for the escalation family
-  // and can obscure that the task is an escalation, so the static text must stay node-neutral.
+  // This shared form serves scheduled `human` nodes (the standalone `delivery-human.bpmn` and the
+  // compiler's `human` body). The bounded service-node escalation tasks (`__esc`/`__contract`) moved to
+  // their own `delivery-escalation.form` when the retry-node Resolution select landed — the select has
+  // no meaning on a plain human step, so it must not leak back onto this shared form.
   assert(
     !/scheduled human step/i.test(genericForm),
-    "the shared generic form must use node-neutral wording (it also serves escalation tasks)",
+    "the shared generic form must use node-neutral wording",
+  );
+});
+
+test("form-structure guard: delivery-human-generic.form carries NO retry `decision` select (that lives on delivery-escalation.form)", () => {
+  // Regression guard (PR #863 adversarial review): the retry-node Resolution select was first added to
+  // THIS shared form, where it also rendered on plain scheduled human steps and wait-gate escalations —
+  // neither has retry semantics nor reads `decision`, so an operator could pick "Retry this step" and
+  // have it silently ignored. The select lives only on the service-escalation form now.
+  const parsed = JSON.parse(genericForm) as { components: { key?: string }[] };
+  assert(
+    !parsed.components.some((c) => c.key === "decision"),
+    "the retry `decision` select belongs on delivery-escalation.form, not the shared human form",
   );
 });
 
