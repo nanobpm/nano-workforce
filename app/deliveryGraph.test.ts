@@ -10,6 +10,7 @@ import {
   DELIVERY_NODE_KINDS,
   type DeliveryGraphError,
   type DeliveryGraphErrorCode,
+  drainClauseScanSteps,
   redactConnectorValue,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
@@ -2729,19 +2730,84 @@ test("#858 a meaning-flipping verb still keeps the close active (no reopened byp
   }
 });
 
-// Issue #858 (round-11 suppressed advisory, app/deliveryGraph.ts:910 — the full-scope scan): every
-// marker occurrence re-scanned back/forward to its clause boundaries, so a long prompt repeating a
-// marker made validation quadratic and could monopolise the event loop across the 256 allowed nodes.
-// The boundaries are now precomputed once and binary-searched. A long prompt heavy with repeated
-// markers must still validate correctly (and return promptly).
-test("#858 a long prompt with repeated full-scope markers validates correctly (bounded scan)", () => {
+// Issue #858 (round-11 + round-12 review, app/deliveryGraph.ts full-scope scan): every marker occurrence
+// re-scanned back/forward to its clause boundaries AND re-ran the coordinator/compound-predicate scan per
+// marker, so a long prompt repeating a marker — worst case a single DELIMITER-FREE clause interleaving
+// `full scope … and …` (where `scope` makes every `and` a compound predicate, so all markers share one
+// growing segment) — made validation quadratic and could monopolise the event loop across the 256 allowed
+// nodes. The scan is now a per-clause single forward pass (precomputed boundaries + coordinator
+// thresholds + a far/near split + monotone disqualifier memoisation). These tests assert CORRECTNESS on
+// the worst-case shape and assert LINEAR scaling via a deterministic operation count
+// (`drainClauseScanSteps`) — never a wall-clock threshold, which is nondeterministic under CI load
+// (issue #858 round-12 review).
+test("#858 a long prompt with repeated full-scope markers validates correctly (period-delimited)", () => {
   const filler = "Deliver the full scope of #12. ".repeat(400); // ~12k chars, one clause per repetition
   const g = {
     nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: `${filler}Close #12.` } }],
     edges: [],
   };
-  const start = performance.now();
   // Every occurrence is an affirmative full-scope acknowledgement of #12, so the close is licensed.
   assertEquals(validateDeliveryGraph(g), []);
-  assert(performance.now() - start < 1000, "validation should be bounded, not quadratic");
+});
+
+test("#858 the full-scope scan is linear on the worst-case delimiter-free clause (deterministic op count)", () => {
+  // The worst-case clause shape the review cited: ONE delimiter-free clause repeating `full scope … and
+  // …`, so every coordinator is a compound predicate and every marker shares one growing segment. The
+  // operation counter measures coordinator-threshold sweep steps + near-window coordinator examinations —
+  // the two former quadratic drivers. (The assertion-segment disqualifiers are memoised per segment-start
+  // group, so they are not per-marker on this shape either.)
+  const worstCase = (reps: number) =>
+    `Deliver ${"full scope of #12 and ".repeat(reps)}the whole issue. Close #12.`;
+  const stepsFor = (reps: number): number => {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: worstCase(reps) } }], edges: [] };
+    drainClauseScanSteps();
+    // Every occurrence is an affirmative full-scope acknowledgement of #12, so the close is licensed.
+    assertEquals(validateDeliveryGraph(g), []);
+    return drainClauseScanSteps();
+  };
+  const small = stepsFor(100);
+  const large = stepsFor(800); // 8× the markers/coordinators/clause-length
+  // Linear scaling: 8× the input must cost ≤ 8× the operations (plus a small constant slack for the
+  // fixed per-clause setup). A quadratic scan would cost ~64×.
+  assert(small > 0, "expected the small input to do non-zero scan work");
+  assert(
+    large <= small * 8 + 64,
+    `expected linear scaling, but ops(800)=${large} vs 8×ops(100)+slack=${small * 8 + 64} — the scan is superlinear`,
+  );
+});
+
+// Issue #858 (round-12 review, app/deliveryGraph.ts clauseBoundaries): treating every `:` (and `.`) as a
+// clause boundary split an issue URL at `https:` / `github.com`, so the attribution/negation checks saw
+// only the fragment before the URL and a sibling-attributed scope validated. Delimiters INSIDE a URL span
+// are not clause boundaries.
+test("#858 an issue URL is not split at its scheme colon / interior delimiters (attribution still seen)", () => {
+  // The full scope of the URL-named issue is attributed to siblings — must NOT licence the close.
+  const attributed =
+    "The full scope of https://github.com/acme/a/issues/12 is handled by siblings; implement criterion 1 and close https://github.com/acme/a/issues/12.";
+  const g1 = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: attributed } }], edges: [] };
+  assertEquals(hasCode(validateDeliveryGraph(g1), "partial-scope-close").code, "partial-scope-close");
+
+  // …but a genuine full-scope acknowledgement anchored to a URL, with no sibling attribution, must still
+  // VALIDATE (the URL-span fix must not over-fire and break legitimate closers).
+  const genuine =
+    "Deliver the full scope of #12. See https://github.com/acme/a/issues/12 for the checklist. Close #12.";
+  const g2 = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: genuine } }], edges: [] };
+  assertEquals(validateDeliveryGraph(g2), []);
+});
+
+// Issue #858 (round-12 "previously missed" advisory, app/deliveryGraph.ts PART_QUALIFIER_AFTER_MARKER /
+// anchoredIssueKey): the possessive qualifier only accepted an ASCII apostrophe, so typographic text
+// (`issue’s`, U+2019) bypassed the part-narrowing guard. Accept both apostrophe forms (the negation
+// regexes already do).
+test("#858 a typographic-apostrophe possessive still narrows the scope to a part (rejected)", () => {
+  const ascii = "Deliver the whole issue's parser slice. Closes #12.";
+  const typographic = "Deliver the whole issue’s parser slice. Closes #12.";
+  for (const prompt of [ascii, typographic]) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(
+      hasCode(validateDeliveryGraph(g), "partial-scope-close").code,
+      "partial-scope-close",
+      `expected rejection for: ${prompt}`,
+    );
+  }
 });

@@ -690,16 +690,49 @@ const FULL_SCOPE_MARKERS: readonly string[] = [
  * at PR time and catches an under-delivery that is semantically — not lexically — a partial close. */
 const CLAUSE_DELIMITERS = new Set([".", ";", ":", ",", "\n", "—"]);
 
+/** An `http(s)://…` URL span. The body runs to whitespace or `)`; trailing clause-delimiter punctuation
+ * (`.`/`,`/`;`/`:`/`!`/`?`) is trimmed because it is sentence punctuation, not URL structure (a URL
+ * written at the end of a clause must not swallow that clause's boundary). Delimiters INSIDE the trimmed
+ * span (the `.` in `github.com`, the `:` in `https:`) are part of the URL, not clause boundaries. */
+const URL_SPAN = /https?:\/\/[^\s)]+/gi;
+const URL_TRAILING_PUNCT = /[.;:,!?]+$/;
+
+/** The `[start,end)` spans of every URL in `prompt`, with trailing sentence punctuation excluded. */
+function urlSpans(prompt: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  const re = new RegExp(URL_SPAN.source, "gi");
+  let m = re.exec(prompt);
+  while (m !== null) {
+    let end = m.index + m[0].length;
+    const trailing = m[0].match(URL_TRAILING_PUNCT);
+    if (trailing) end -= trailing[0].length;
+    out.push([m.index, end]);
+    m = re.exec(prompt);
+  }
+  return out;
+}
+
 /** The sorted clause-delimiter POSITIONS in `prompt`, computed once in a single O(n) pass. The
  * full-scope acknowledgement scan tests each marker occurrence against its surrounding clause; locating
  * that clause by scanning back/forward per occurrence makes the whole scan QUADRATIC in prompt length
  * when a prompt repeats a marker (issue #858 round-11 review — a valid 20,000-char prompt with repeated
  * `full scope` markers was rescanned thousands of times, monopolising the event loop across the
  * allowed 256 nodes). Precomputing the boundaries once and binary-searching them per occurrence keeps
- * the aggregate scan O(n log n) regardless of marker count. */
+ * the aggregate scan O(n log n) regardless of marker count.
+ *
+ * A delimiter INSIDE a URL is NOT a boundary (issue #858 round-12 review): treating the `:` in `https:`
+ * or the `.` in `github.com` as a boundary split an issue URL, so the attribution/negation checks saw
+ * only the fragment before the URL (`The full scope of https`) and missed the assertion that followed it
+ * (`… is handled by siblings`). URL spans are detected once and their interior delimiters skipped. */
 function clauseBoundaries(prompt: string): number[] {
+  const spans = urlSpans(prompt);
+  let spanIdx = 0;
   const out: number[] = [];
   for (let i = 0; i < prompt.length; i++) {
+    // Advance past any span that ends at/before i (spans are non-overlapping and in order).
+    while (spanIdx < spans.length && spans[spanIdx][1] <= i) spanIdx++;
+    const inUrl = spanIdx < spans.length && i >= spans[spanIdx][0] && i < spans[spanIdx][1];
+    if (inUrl) continue;
     if (CLAUSE_DELIMITERS.has(prompt.charAt(i))) out.push(i);
   }
   return out;
@@ -733,9 +766,23 @@ function clauseEndAt(b: number[], idx: number, len: number): number {
  * clause's delimiter boundary up to `idx`). Used to test the GRAMMATICALLY PREFIX disqualifiers —
  * an exception/redirection preposition (`SCOPE_NEGATED_PREFIX`) or a part-qualifier
  * (`PART_QUALIFIER_BEFORE_MARKER`) — which negate/narrow only the phrase that FOLLOWS them, so they
- * disqualify the marker only when they precede it (issue #858 round-5 review). */
+ * disqualify the marker only when they precede it (issue #858 round-5 review).
+ *
+ * Both consumers are `$`-anchored SUFFIX patterns matching a bounded handful of words (a negation plus up
+ * to three adverbs and an article, or a partitive plus `of` and a determiner). Only the trailing few
+ * words can match, so return at most the last `PREFIX_WINDOW` chars — cut at a word boundary so the
+ * leading `\b` never sees a spliced token. Testing the WHOLE growing before-clause per marker made the
+ * `$`-anchored regex scan O(clause-length) per marker — O(markers · clause) overall, quadratic on a long
+ * delimiter-free clause (issue #858 round-12 review). */
+const PREFIX_WINDOW = 96;
 function clauseBeforeMarker(prompt: string, idx: number, b: number[]): string {
-  return prompt.slice(clauseStartAt(b, idx), idx);
+  const start = clauseStartAt(b, idx);
+  if (idx - start <= PREFIX_WINDOW) return prompt.slice(start, idx);
+  // Cut at a whitespace boundary at/after `idx - PREFIX_WINDOW` so no token is spliced (a mid-token cut
+  // could create a spurious `\b` for the consumer's leading anchor).
+  let cut = idx - PREFIX_WINDOW;
+  while (cut < idx && !/\s/.test(prompt.charAt(cut))) cut++;
+  return prompt.slice(cut, idx);
 }
 
 /** A coordinating conjunction that joins an INDEPENDENT additional constraint onto a clause. Only `and`
@@ -747,6 +794,189 @@ function clauseBeforeMarker(prompt: string, idx: number, b: number[]): string {
  * a planner brief. (issue #858 round-6 review) */
 const ASSERTION_COORDINATOR = /\b(?:and|plus)\b|&&?/gi;
 
+/** Test-only instrumentation: the number of clause-scan steps (coordinator-threshold sweep iterations +
+ * per-marker coordinator examinations) performed by the full-scope acknowledgement scan since the last
+ * `resetClauseScanSteps()`. This lets the complexity regression test assert the scan is LINEAR in clause
+ * size with a deterministic operation count instead of a nondeterministic wall-clock threshold (issue
+ * #858 round-12 review). Not read in production logic. */
+let clauseScanSteps = 0;
+
+/** Test-only: read and reset the clause-scan step counter. Returns the count since the previous reset. */
+export function drainClauseScanSteps(): number {
+  const n = clauseScanSteps;
+  clauseScanSteps = 0;
+  return n;
+}
+
+/** Precomputed, per-clause data that lets each marker's delivery-assertion segment be located WITHOUT
+ * re-scanning the clause. Round-11 precomputed the delimiter boundaries once and binary-searched them,
+ * but `deliveryAssertionAround` still re-ran the coordinator regex over the whole clause and re-derived
+ * every coordinator's compound-predicate status for EACH marker — so a long delimiter-free clause with M
+ * markers and C coordinators cost O(M·C) slice+scan work, and the old O(tokens²)
+ * `isCompoundPredicateContinuation` made it worse (issue #858 round-12 review: a valid 20,000-char
+ * `full scope … and …` prompt took minutes across the 256 allowed nodes). This precompute is built ONCE
+ * per clause in a single forward pass; each marker then costs O(number of coordinators in its clause)
+ * with O(1) compound lookups and no re-slicing. */
+interface ClauseAssertionData {
+  /** The clause text (delimiter-bounded). */
+  clause: string;
+  /** Coordinator occurrences in order: `[bStart, bEnd]` char offsets within `clause`. */
+  coords: Array<[number, number]>;
+  /** Per coordinator, the minimal MARKER token index at which the text it introduces (`bEnd` up to the
+   * marker) becomes a compound-predicate continuation — i.e. the coordinator stops splitting. `Infinity`
+   * when the introduced text never leads with a verb. Lets the per-marker compound test be O(1). */
+  compoundAtToken: number[];
+  /** Token start offsets within `clause` (for mapping a marker char offset to its token index). */
+  tokenStarts: number[];
+  /** Per token `t`, the smallest token index `s` such that every token in `[s, t)` is an
+   * adverb/coordinator (`isSkip`). The "near window" before a marker at token `t` is `[s, t)`; a
+   * coordinator ending inside it has an empty/adverbs-only `introduced`, which is exactly when the
+   * marker-lead compound test applies. */
+  nearStart: number[];
+  /** Per coordinator, `tokenIndexAt(bEnd)` — the first token at/after the coordinator's end. */
+  coordTok: number[];
+  /** Whether each token is an adverb/coordinator (`quickly`/`and`/`or`/`then`/`-ly`). */
+  isSkip: boolean[];
+  /** The first token index at/after a char offset (binary search over `tokenStarts`). */
+  tokenIndexAt: (pos: number) => number;
+  // --- Mutable ascending-sweep state (reset per clause; markers are fed in ascending position order) ---
+  /** Index into `coords` of the next coordinator not yet pushed onto the far heap. */
+  farPtr: number;
+  /** Max-heap (by `bEnd`) of far coordinators' `[bEnd, compoundAtToken]`, with lazy expiry. */
+  farHeap: Array<[number, number]>;
+}
+
+/** A token that can lead a compound predicate's adverb/coordinator run (`quickly`, `and`, `or`, `then`). */
+const COMPOUND_SKIP_TOKEN = /^(?:\w+ly|and|or|then)$/i;
+/** A token that is a delivery/completion verb lead (the compound predicate's head). Mirrors the verb
+ * alternation in `COMPOUND_PREDICATE_LEAD`; matched against a whole token so a trailing `\b` inside the
+ * token (e.g. `handle-bar`) still counts, exactly as the sticky lead pattern does. */
+const COMPOUND_VERB_TOKEN =
+  /^(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship|plan|design|scope|close|fix|resolve|add|update|open|write|create|land|merge|test|verify|document)(?:s|es|ed|ing)?\b/i;
+
+/** Build the per-clause precompute in ONE forward pass (see `ClauseAssertionData`). Pure string/regex
+ * tokenisation plus a monotonic sweep — O(tokens + coordinators) per clause. */
+function buildClauseAssertionData(clause: string): ClauseAssertionData {
+  // Tokenise once (whitespace-separated runs), recording each token's start offset.
+  const tokenStarts: number[] = [];
+  const isSkip: boolean[] = [];
+  const isVerb: boolean[] = [];
+  {
+    const re = /\S+/g;
+    let m = re.exec(clause);
+    while (m !== null) {
+      tokenStarts.push(m.index);
+      isSkip.push(COMPOUND_SKIP_TOKEN.test(m[0]));
+      isVerb.push(COMPOUND_VERB_TOKEN.test(m[0]));
+      m = re.exec(clause);
+    }
+  }
+  const T = tokenStarts.length;
+  // nextContent[k] = smallest token index >= k that is NOT an adverb/coordinator (the lead candidate of
+  // the suffix starting at k); T when the rest is all adverbs/coordinators.
+  const nextContent = new Array<number>(T + 1).fill(T);
+  for (let k = T - 1; k >= 0; k--) nextContent[k] = isSkip[k] ? nextContent[k + 1] : k;
+  // leadVerbReach[k] = the verb's token index when the suffix starting at k leads with a verb, else Infinity.
+  const leadVerbReach = new Array<number>(T).fill(Number.POSITIVE_INFINITY);
+  for (let k = 0; k < T; k++) {
+    const nc = nextContent[k];
+    if (nc < T && isVerb[nc]) leadVerbReach[k] = nc;
+  }
+  // Coordinator occurrences in order.
+  const coords: Array<[number, number]> = [];
+  {
+    const re = new RegExp(ASSERTION_COORDINATOR.source, "gi");
+    let m = re.exec(clause);
+    while (m !== null) {
+      coords.push([m.index, m.index + m[0].length]);
+      m = re.exec(clause);
+    }
+  }
+  // The first token index at/after a char offset (binary search over tokenStarts).
+  const tokenIndexAt = (pos: number): number => {
+    let lo = 0;
+    let hi = T;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (tokenStarts[mid] < pos) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  // Per coordinator, the minimal marker token index `tm` at which the introduced text (tokens from the
+  // coordinator's end up to the marker) leads with a verb. `isCompoundPredicateContinuation` over the
+  // introduced tokens [te..tm-1] is true iff some token-suffix in that range leads with a verb, i.e. iff
+  // min(leadVerbReach[k] for k in [te..tm-1]) <= tm-1. That predicate is monotonic in `tm` (marker
+  // positions are token-aligned, so `tm` only advances by whole tokens — verified by differential fuzz),
+  // so a single forward sweep per coordinator finds the threshold.
+  const compoundAtToken = coords.map(([, bEnd]) => {
+    const te = tokenIndexAt(bEnd);
+    let minReach = Number.POSITIVE_INFINITY;
+    for (let u = te; u < T; u++) {
+      clauseScanSteps++; // test instrumentation: one threshold-sweep step
+      if (leadVerbReach[u] < minReach) minReach = leadVerbReach[u];
+      if (minReach <= u) return u + 1; // marker token index u+1 ⇒ introduced covers tokens te..u
+    }
+    return Number.POSITIVE_INFINITY;
+  });
+  // nearStart[t] = smallest token index `s` such that tokens [s, t) are all adverb/coordinator (`isSkip`).
+  // Computed in one forward pass: as t advances, the window's left edge resets to t whenever token t-1 is
+  // NOT a skip token, and otherwise extends.
+  const nearStart = new Array<number>(T + 1).fill(0);
+  {
+    let left = 0;
+    for (let t = 0; t <= T; t++) {
+      if (t > 0 && !isSkip[t - 1]) left = t;
+      nearStart[t] = left;
+    }
+  }
+  const coordTok = coords.map(([, bEnd]) => tokenIndexAt(bEnd));
+  return {
+    clause,
+    coords,
+    compoundAtToken,
+    tokenStarts,
+    nearStart,
+    coordTok,
+    isSkip,
+    tokenIndexAt,
+    farPtr: 0,
+    farHeap: [],
+  };
+}
+
+/** Max-heap (by element `[0]`, the coordinator `bEnd`) operations for the far-coordinator sweep. A tiny
+ * binary heap; expiry of compound coordinators is LAZY (skipped at the top on read), so a coordinator is
+ * pushed/popped at most once per clause — keeping the ascending marker sweep O((markers + coordinators)
+ * log coordinators) per clause instead of O(markers · coordinators). */
+function heapPush(heap: Array<[number, number]>, item: [number, number]): void {
+  heap.push(item);
+  let i = heap.length - 1;
+  while (i > 0) {
+    const parent = (i - 1) >> 1;
+    if (heap[parent][0] >= heap[i][0]) break;
+    [heap[parent], heap[i]] = [heap[i], heap[parent]];
+    i = parent;
+  }
+}
+
+function heapPop(heap: Array<[number, number]>): void {
+  const last = heap.pop();
+  if (heap.length === 0 || last === undefined) return;
+  heap[0] = last;
+  let i = 0;
+  for (;;) {
+    const l = 2 * i + 1;
+    const r = 2 * i + 2;
+    let m = i;
+    if (l < heap.length && heap[l][0] > heap[m][0]) m = l;
+    if (r < heap.length && heap[r][0] > heap[m][0]) m = r;
+    if (m === i) break;
+    [heap[m], heap[i]] = [heap[i], heap[m]];
+    i = m;
+  }
+}
+
 /** The marker's DELIVERY ASSERTION: its own comma-bounded clause, further narrowed to the
  * `and`-coordinated segment the marker occurrence at `[markerStart,markerEnd)` sits in. Used by the
  * whole-assertion negation disqualifiers (`SCOPE_NEGATED_CORE`, `SCOPE_NEGATED_WITHOUT_DELIVERY`) so a
@@ -754,51 +984,102 @@ const ASSERTION_COORDINATOR = /\b(?:and|plus)\b|&&?/gi;
  * marker, while a negator in the marker's own segment still does (issue #858 round-6 review). A negator
  * directly on the marker (`does not deliver the full scope`) has no coordinator between it and the
  * marker, so it stays in-segment and still disqualifies; the fail-closed default is the whole clause
- * when no coordinator splits it. */
-function deliveryAssertionAround(prompt: string, markerStart: number, markerEnd: number, b: number[]): string {
+ * when no coordinator splits it.
+ *
+ * `cache` memoises `buildClauseAssertionData` per clause start so the many markers sharing one clause do
+ * not each rebuild it (issue #858 round-12 review).
+ *
+ * Returns the segment text AND its absolute (`prompt`-relative) `[absStart, absEnd)` bounds. The bounds
+ * let the caller group occurrences that share a segment start: those segments are nested prefixes
+ * (same start, growing end), so a "contains" disqualifier regex over them is MONOTONIC in the end offset
+ * — the basis for the per-group memoisation in `isPartialScopeClose` (issue #858 round-12 review). */
+function deliveryAssertionAround(
+  prompt: string,
+  markerStart: number,
+  markerEnd: number,
+  b: number[],
+  cache: Map<number, ClauseAssertionData>,
+): { text: string; absStart: number; absEnd: number } {
   const cStart = clauseStartAt(b, markerStart);
-  const clause = prompt.slice(cStart, clauseEndAt(b, markerStart, prompt.length));
+  let data = cache.get(cStart);
+  if (data === undefined) {
+    data = buildClauseAssertionData(prompt.slice(cStart, clauseEndAt(b, markerStart, prompt.length)));
+    cache.set(cStart, data);
+  }
+  const { clause, coords, compoundAtToken, nearStart, coordTok, tokenIndexAt } = data;
   // The clause spans the marker; locate the marker's offset within it (the clause start is the first
   // delimiter boundary at or before markerStart).
   const relStart = markerStart - cStart;
   const relEnd = markerEnd - cStart;
-  let segStart = 0;
-  let segEnd = clause.length;
-  const re = new RegExp(ASSERTION_COORDINATOR.source, "gi");
-  for (let m = re.exec(clause); m !== null; m = re.exec(clause)) {
-    const bStart = m.index;
-    const bEnd = m.index + m[0].length;
-    if (bEnd <= relStart) {
-      // A coordinator BEFORE the marker normally splits the assertion (the marker sits in the segment
-      // the coordinator introduces). But when the segment the coordinator introduces is a COMPOUND
-      // PREDICATE — a bare verb phrase with NO new subject of its own — the coordinator shares the PRIOR
-      // segment's subject across both verbs, so splitting here would drop that subject and blind the
-      // active-voice attribution check (issue #858 round-9 review). Two shapes:
-      //  - `Siblings plan AND deliver the full scope` — the text between `and` and the marker is the
-      //    verb phrase `deliver`.
-      //  - `The other slices design AND own the whole` — the marker `own the whole` starts right at the
-      //    post-`and` verb, so the in-between text is empty and the marker's OWN lead is the verb.
-      // In both, retain the subject by NOT advancing segStart past the coordinator. An `and` that
-      // introduces an INDEPENDENT constraint (its own subject + verb, e.g. `… AND the suite is handled
-      // by another team`) leads with a noun/determiner, so it still splits.
-      const introduced = clause.slice(bEnd, relStart);
-      // The marker's OWN lead is the continuation when the coordinator sits right at the marker
-      // (`… and OWN the whole`, `introduced` empty) OR when only adverbs/coordinators intervene
-      // (`… and QUICKLY own the whole` — `introduced` is ` quickly `, the verb `own` is the marker's
-      // lead). In both the predicate's head verb is inside the marker, so test the marker's lead.
-      const markerLeadIsCompound =
-        (introduced.trim() === "" || /^(?:\s*(?:\w+ly|and|or|then))*\s*$/.test(introduced)) &&
-        isCompoundPredicateContinuation(clause.slice(relStart, relEnd));
-      const compound = isCompoundPredicateContinuation(introduced) || markerLeadIsCompound;
-      if (bEnd > segStart && !compound) {
-        segStart = bEnd;
-      }
-    } else if (bStart >= relEnd) {
-      segEnd = bStart;
-      break;
+  // The marker's token index: the first token starting at/after relStart. Markers are whole words found
+  // by substring scan, so relStart is always a token start.
+  const markerToken = tokenIndexAt(relStart);
+
+  // The marker's assertion segment is `[segStart, segEnd)`: segStart is the end of the LAST coordinator
+  // before the marker that genuinely SPLITS (is not a compound-predicate continuation), segEnd the start
+  // of the first coordinator at/after the marker. A coordinator BEFORE the marker normally splits, but a
+  // coordinator introducing a COMPOUND PREDICATE — a bare verb phrase with no new subject — shares the
+  // prior segment's subject, so it must NOT split (else the active-voice attribution check loses the
+  // subject; issue #858 round-9 review).
+  //
+  // Markers are fed in ASCENDING position order, so this is a single forward sweep per clause (issue
+  // #858 round-12 review). Coordinators split into two sets relative to the marker:
+  //  - FAR coordinators end before the marker's "near window" (the trailing adverb/coordinator run), so
+  //    their introduced text contains a real (non-adverb) token and the marker-lead test canNOT apply —
+  //    their compound status is purely the precomputed threshold. The max valid far `bEnd` is tracked on
+  //    a max-heap, advanced and expired monotonically.
+  //  - NEAR coordinators end inside the near window (empty/adverbs-only introduced), so the marker-lead
+  //    test (mlc) CAN apply; there are only as many as the adverb run is long, so they are checked
+  //    individually.
+  const nStart = nearStart[markerToken];
+
+  // FAR set: coordinators with coordTok <= nStart-1 (they end at/before the near window's start, so a
+  // non-skip token lies between them and the marker). Push newly-in-range coordinators; expire those whose
+  // compound threshold the marker has passed (they no longer split). The heap top is the max valid bEnd.
+  while (data.farPtr < coords.length && coordTok[data.farPtr] <= nStart - 1) {
+    heapPush(data.farHeap, [coords[data.farPtr][1], compoundAtToken[data.farPtr]]);
+    data.farPtr++;
+  }
+  while (data.farHeap.length > 0 && data.farHeap[0][1] <= markerToken) heapPop(data.farHeap);
+  const far = data.farHeap.length > 0 ? data.farHeap[0][0] : 0;
+
+  // NEAR set: coordinators from farPtr onward whose bEnd <= relStart (they end inside the near window or
+  // right at the marker). These are few (the adverb run is short); test each with the full compound rule.
+  let near = 0;
+  for (let ci = data.farPtr; ci < coords.length; ci++) {
+    clauseScanSteps++; // test instrumentation: one near-coordinator examined per marker
+    const bEnd = coords[ci][1];
+    if (bEnd > relStart) break; // coords are ordered; past the marker
+    // The marker's OWN lead is the continuation when the coordinator sits right at the marker
+    // (`… and OWN the whole`, `introduced` empty) OR when only adverbs/coordinators intervene
+    // (`… and QUICKLY own the whole`). In both the predicate's head verb is inside the marker, so test
+    // the marker's lead.
+    const introduced = clause.slice(bEnd, relStart);
+    const markerLeadIsCompound =
+      (introduced.trim() === "" || /^(?:\s*(?:\w+ly|and|or|then))*\s*$/.test(introduced)) &&
+      isCompoundPredicateContinuation(clause.slice(relStart, relEnd));
+    const compound = markerToken >= compoundAtToken[ci] || markerLeadIsCompound;
+    if (bEnd > near && !compound) {
+      near = bEnd;
     }
   }
-  return clause.slice(segStart, segEnd);
+  const segStart = Math.max(far, near);
+
+  // segEnd: the start of the first coordinator at/after the marker's end (binary search — coords are
+  // ordered by bStart).
+  let segEnd = clause.length;
+  {
+    let lo = 0;
+    let hi = coords.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (coords[mid][0] < relEnd) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo < coords.length) segEnd = coords[lo][0];
+  }
+  // Return ABSOLUTE (prompt-relative) bounds so the caller can group occurrences sharing a segment start.
+  return { text: clause.slice(segStart, segEnd), absStart: cStart + segStart, absEnd: cStart + segEnd };
 }
 
 /** True when the text between a coordinator and the marker is a COMPOUND PREDICATE continuation — a bare
@@ -812,6 +1093,22 @@ function deliveryAssertionAround(prompt: string, markerStart: number, markerEnd:
  * splits (issue #858 round-9 review). */
 const COMPOUND_PREDICATE_LEAD =
   /^\s*(?:(?:\w+ly|and|or|then)\s+)*(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship|plan|design|scope|close|fix|resolve|add|update|open|write|create|land|merge|test|verify|document)(?:s|es|ed|ing)?\b/i;
+/** Sticky (anchored at `lastIndex`) form of the lead test, WITHOUT the leading `^\s*` — the caller
+ * positions `lastIndex` at a token start. Derived from `COMPOUND_PREDICATE_LEAD.source` (single source of
+ * truth — no divergent copy of the verb list) by stripping the leading `^\s*` anchor and adding the
+ * sticky flag. Used by the linear token scan in `isCompoundPredicateContinuation` so testing every
+ * token-suffix of a segment is O(tokens), not the O(tokens²) of re-joining and re-matching each suffix
+ * (`tokens.slice(k).join(" ")` rebuilt a fresh string per suffix — issue #858 round-12 review: on a long
+ * delimiter-free clause that per-suffix re-join made the whole full-scope scan superlinear). */
+const COMPOUND_PREDICATE_LEAD_STICKY = new RegExp(
+  // Strip the leading `^` anchor and the `\s*` run (the caller positions lastIndex at a token start).
+  COMPOUND_PREDICATE_LEAD.source.replace(/^\^/, "").replace(/^\\s\*/, ""),
+  "iy",
+);
+// Reference the anchored form so the canonical pattern stays a live symbol (the sticky derivative is the
+// one used in the hot scan); this also guards the derivation above against a source drift that drops the
+// anchor the `.replace` expects.
+void COMPOUND_PREDICATE_LEAD;
 function isCompoundPredicateContinuation(between: string): boolean {
   // A compound predicate is a bare VERB PHRASE with no subject of its own. It can be verb-led
   // (`and deliver …`), adverb-led (`and carefully deliver …`), or a coordinator+adverb chain whose
@@ -820,10 +1117,19 @@ function isCompoundPredicateContinuation(between: string): boolean {
   // boundary: if any suffix leads with a completion verb, the segment is a compound continuation and
   // the coordinator shares the prior subject (issue #858 round-9 adversarial review — requiring the
   // verb first dropped the subject for `design and quickly own`, re-opening the attribution bypass).
-  if (COMPOUND_PREDICATE_LEAD.test(between)) return true;
-  const tokens = between.split(/\s+/).filter((t) => t.length > 0);
-  for (let k = 1; k < tokens.length; k++) {
-    if (COMPOUND_PREDICATE_LEAD.test(tokens.slice(k).join(" "))) return true;
+  //
+  // Test each token start with the STICKY lead pattern (O(1) per position, O(tokens) total) instead of
+  // rebuilding every suffix string (O(tokens²)). Behaviour-identical to the suffix-join form: the lead
+  // pattern only inspects a leading run of adverb/coordinator tokens then one verb, so anchoring it at
+  // each token start matches exactly the suffixes the old loop re-joined (verified by differential fuzz).
+  const n = between.length;
+  let i = 0;
+  while (i < n) {
+    while (i < n && /\s/.test(between.charAt(i))) i++; // skip whitespace to the next token start
+    if (i >= n) break;
+    COMPOUND_PREDICATE_LEAD_STICKY.lastIndex = i;
+    if (COMPOUND_PREDICATE_LEAD_STICKY.test(between)) return true;
+    while (i < n && !/\s/.test(between.charAt(i))) i++; // advance past this token
   }
   return false;
 }
@@ -855,7 +1161,7 @@ const PART_QUALIFIER_BEFORE_MARKER =
  * uses to name a sub-scope; it is deliberately broad (any of these words right after the marker means
  * the acknowledgement is not whole-scope). */
 const PART_QUALIFIER_AFTER_MARKER =
-  /^(?:'s|of)\s+(?:(?:the|a|an|one|first|second|third|single|only|just)\s+){0,2}(?:parser|slice|part|portion|half|backend|frontend|auth|criteri(?:on|a)|checkbox|front|back|ui|api|db|database|server|client|component|module|piece|section|stage|step|phase|bit|chunk|segment|subset|subpart|aspect|layer|tier|side|edge|corner|fragment|shard|sliver|remnant|rest|remainder)\b/i;
+  /^(?:['’]s|of)\s+(?:(?:the|a|an|one|first|second|third|single|only|just)\s+){0,2}(?:parser|slice|part|portion|half|backend|frontend|auth|criteri(?:on|a)|checkbox|front|back|ui|api|db|database|server|client|component|module|piece|section|stage|step|phase|bit|chunk|segment|subset|subpart|aspect|layer|tier|side|edge|corner|fragment|shard|sliver|remnant|rest|remainder)\b/i;
 
 /** True when the text immediately after a whole-scope marker occurrence (at `[start,end)`) is a
  * part-qualifier that scopes the acknowledgement DOWN to a part — disqualifying the occurrence so it
@@ -911,10 +1217,10 @@ function anchoredIssueKey(prompt: string, start: number, end: number): string | 
   }
   const before = prompt.slice(Math.max(0, start - 96), start);
   const beforeUrl = before.match(
-    /https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)\/?(?:'s|s'|')?\s*(?:of\s+)?$/i,
+    /https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)\/?(?:['’]s|s['’]|['’])?\s*(?:of\s+)?$/i,
   );
   if (beforeUrl) return issueKey(beforeUrl[1], beforeUrl[2]);
-  const beforeMatch = before.match(/(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#([0-9]+)(?:'s|s'|')?\s*(?:of\s+)?$/i);
+  const beforeMatch = before.match(/(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#([0-9]+)(?:['’]s|s['’]|['’])?\s*(?:of\s+)?$/i);
   if (beforeMatch) return issueKey(beforeMatch[1], beforeMatch[2]);
   return null;
 }
@@ -946,29 +1252,118 @@ function isPartialScopeClose(prompt: string): boolean {
   // occurrence makes the whole scan quadratic in prompt length when a marker repeats. Binary-searching
   // the precomputed boundaries keeps it O(n log n).
   const bounds = clauseBoundaries(prompt);
+  // Per-clause coordinator/segment precompute, built lazily ONCE per clause and shared across every
+  // marker occurrence in that clause (issue #858 round-12 review): without it, a long delimiter-free
+  // clause with many markers re-derives each coordinator's compound-predicate status per marker, which is
+  // quadratic in clause length.
+  const assertionCache = new Map<number, ClauseAssertionData>();
+  // Collect every whole-scope marker occurrence across all marker phrases, then process them in
+  // ASCENDING position order. The per-clause sweeper (`deliveryAssertionAround`) advances a coordinator
+  // pointer and a far/near split monotonically as the marker position advances, so feeding occurrences
+  // in ascending order keeps the whole scan LINEAR in clause size (issue #858 round-12 review); feeding
+  // them phrase-by-phrase (all of one marker, then the next) would revisit earlier positions and break
+  // the monotonic sweep.
+  const occurrences: Array<[number, number]> = [];
   for (const marker of FULL_SCOPE_MARKERS) {
     for (let i = lower.indexOf(marker); i >= 0; i = lower.indexOf(marker, i + marker.length)) {
-      if (isPartQualified(prompt, i + marker.length)) continue;
-      // The attribution and negation disqualifiers test the marker's DELIVERY ASSERTION (its
-      // `and`-coordinated segment), not the whole clause, so a disqualifier governing an UNRELATED
-      // constraint coordinated by `and` (`…full scope of #12 AND do not introduce regressions`,
-      // `…full scope of #12 AND the regression suite is handled by another team`) does not disqualify
-      // (issue #858 round-6 + round-6 adversarial review).
-      const assertion = deliveryAssertionAround(prompt, i, i + marker.length, bounds);
-      if (SCOPE_ATTRIBUTED_TO_OTHERS.test(assertion)) continue;
-      if (SCOPE_ACTIVE_VOICE_OTHERS.test(assertion)) continue;
-      if (SCOPE_NEGATED_CORE.test(assertion)) continue;
-      if (SCOPE_NEGATED_WITHOUT_DELIVERY.test(assertion)) continue;
+      occurrences.push([i, i + marker.length]);
+    }
+  }
+  occurrences.sort((a, b) => a[0] - b[0]);
+  // `SCOPE_NEGATED_AFTER_MARKER_DELIVERY` is tested against the marker's WHOLE clause, which is identical
+  // for every marker in that clause — so evaluate it ONCE per clause and cache the boolean (keyed by
+  // clause start). Re-running the backtracking regex over a long clause for every marker was itself
+  // O(markers · clause-length) — quadratic on a long delimiter-free clause (issue #858 round-12 review).
+  const negatedAfterMarkerByClause = new Map<number, boolean>();
+  // The four assertion disqualifiers (`SCOPE_ATTRIBUTED_TO_OTHERS`, `SCOPE_ACTIVE_VOICE_OTHERS`,
+  // `SCOPE_NEGATED_CORE`, `SCOPE_NEGATED_WITHOUT_DELIVERY`) are "contains" tests over the marker's
+  // assertion segment. Occurrences that share a segment START sit in nested segments (same start, growing
+  // end — e.g. a delimiter-free clause where every coordinator is a compound predicate), so each such test
+  // is MONOTONIC in the segment end: a prefix that matches stays matching as it grows, and a prefix that
+  // does NOT match means no shorter prefix in the group matches either. So, per absStart-group, test each
+  // regex ONCE against the group's LONGEST segment: if it does not match, no occurrence in the group is
+  // disqualified by it; if it does match, only the occurrences at/past the minimal matching end are
+  // disqualified (found by a binary search over the group's sorted ends). This collapses the per-marker
+  // regex work on a pathological clause from O(markers · segment) to O(segment) per group (issue #858
+  // round-12 review).
+  const ASSERTION_DISQUALIFIERS: ReadonlyArray<RegExp> = [
+    SCOPE_ATTRIBUTED_TO_OTHERS,
+    SCOPE_ACTIVE_VOICE_OTHERS,
+    SCOPE_NEGATED_CORE,
+    SCOPE_NEGATED_WITHOUT_DELIVERY,
+  ];
+
+  // First pass: compute each surviving occurrence's assertion segment and group occurrences by segment
+  // start (occurrences are already in ascending position order, so each group's ends come out sorted).
+  interface Occurrence {
+    i: number;
+    markerEnd: number;
+    absStart: number;
+    absEnd: number;
+    text: string;
+  }
+  const groups = new Map<number, Occurrence[]>();
+  for (const [i, markerEnd] of occurrences) {
+    if (isPartQualified(prompt, markerEnd)) continue;
+    const assertion = deliveryAssertionAround(prompt, i, markerEnd, bounds, assertionCache);
+    const occ: Occurrence = { i, markerEnd, absStart: assertion.absStart, absEnd: assertion.absEnd, text: assertion.text };
+    const g = groups.get(assertion.absStart);
+    if (g === undefined) groups.set(assertion.absStart, [occ]);
+    else g.push(occ);
+  }
+
+  // Per group + per regex, the minimal segment-end that matches (Infinity if the longest segment is
+  // clean). Computed once per group against the longest segment, refined by binary search only on a hit.
+  const groupMinMatch = new Map<number, number[]>();
+  for (const [absStart, group] of groups) {
+    const longest = group[group.length - 1]; // ascending ends ⇒ last is longest
+    const minMatch = ASSERTION_DISQUALIFIERS.map((re) => {
+      if (!re.test(longest.text)) return Number.POSITIVE_INFINITY; // clean for the whole group
+      // The regex matches somewhere in the longest segment. Find the minimal group-end that still matches
+      // (monotonic ⇒ binary search over the group's sorted absEnd values).
+      let lo = 0;
+      let hi = group.length - 1; // invariant: group[hi] matches, group[lo-1] (virtual) does not
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (re.test(group[mid].text)) hi = mid;
+        else lo = mid + 1;
+      }
+      return group[lo].absEnd;
+    });
+    groupMinMatch.set(absStart, minMatch);
+  }
+
+  for (const [, group] of groups) {
+    const minMatch = groupMinMatch.get(group[0].absStart);
+    for (const occ of group) {
+      const { i, markerEnd, absEnd } = occ;
+      // Disqualified iff ANY assertion disqualifier matches at a segment-end <= this occurrence's end.
+      let disqualified = false;
+      if (minMatch !== undefined) {
+        for (const m of minMatch) {
+          if (m <= absEnd) {
+            disqualified = true;
+            break;
+          }
+        }
+      }
+      if (disqualified) continue;
       // …but a negator AFTER the marker that REFERENCES DELIVERY (`…full scope of #12 AND it is not
       // fully delivered`) still disclaims the marker even though the `and`-coordinator splits it into a
       // sibling segment the assertion above never sees — re-catch it against the marker's whole
       // comma-bounded clause so the assertion-scoping does not fail open (issue #858 round-6
       // adversarial review).
-      if (SCOPE_NEGATED_AFTER_MARKER_DELIVERY.test(prompt.slice(clauseStartAt(bounds, i), clauseEndAt(bounds, i, prompt.length)))) continue;
+      const clauseStart = clauseStartAt(bounds, i);
+      let negatedAfterMarker = negatedAfterMarkerByClause.get(clauseStart);
+      if (negatedAfterMarker === undefined) {
+        negatedAfterMarker = SCOPE_NEGATED_AFTER_MARKER_DELIVERY.test(prompt.slice(clauseStart, clauseEndAt(bounds, i, prompt.length)));
+        negatedAfterMarkerByClause.set(clauseStart, negatedAfterMarker);
+      }
+      if (negatedAfterMarker) continue;
       const before = clauseBeforeMarker(prompt, i, bounds);
       if (SCOPE_NEGATED_PREFIX.test(before)) continue;
       if (PART_QUALIFIER_BEFORE_MARKER.test(before)) continue;
-      const anchored = anchoredIssueKey(prompt, i, i + marker.length);
+      const anchored = anchoredIssueKey(prompt, i, markerEnd);
       if (anchored !== null) acknowledged.add(anchored);
       else if (sole !== null) acknowledged.add(sole);
     }
