@@ -50,7 +50,9 @@ result.
    `gh pr view <prNumber> --repo <repo> --json body,title`.
    Extract every issue the body **closes with a GitHub closing keyword** —
    `close/closes/closed`, `fix/fixes/fixed`, `resolve/resolves/resolved` followed by
-   `#N`, `owner/repo#N`, or a full issue URL. A **non-closing** reference (`Refs #N`,
+   `#N`, `owner/repo#N`, or a full issue URL. GitHub also recognises an **optional colon**
+   between the keyword and its target (`Closes: #12`, `Fixes: owner/repo#12`), so treat the
+   colon form as a closing reference too. A **non-closing** reference (`Refs #N`,
    `Part of #N`, `Depends-on #N`, `Follow-up: #N`) does **not** close an issue —
    ignore those for the closing-scope check (but note the follow-up links; see below).
 

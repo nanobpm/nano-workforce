@@ -287,7 +287,9 @@ const NODE_ID_MAX_LENGTH = 128;
  * (`closes it` / `close the issue` / `resolve that issue`, the literal field-case phrasing). The
  * prompt must ALSO reference an issue somewhere (so a bare prose "close the door" never matches), and
  * the verb must reach its object with no intervening clause (so "resolve conflicts in #12" / "closes
- * the loop on #12" do not match). Case-insensitive and conservative. This pattern is only a cheap
+ * the loop on #12" do not match). An OPTIONAL colon between the keyword and its target (`Closes: #12`)
+ * is admitted — GitHub recognises the colon form, so a partial brief using it must still be caught
+ * (issue #858 round-8 review). Case-insensitive and conservative. This pattern is only a cheap
  * PRE-FILTER for closing LANGUAGE: it still matches a negated close ("do NOT close it"), so the brief
  * proceeds to the authoritative, negation-aware `closingTargets`, which drops a DIRECTLY-NEGATED close
  * (a safe partial-slice brief that forbids the close is NOT the defect; issue #858 round-7 review). The
@@ -298,7 +300,7 @@ const NODE_ID_MAX_LENGTH = 128;
 const ISSUE_REF_PATTERN =
   /(?:#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+)/i;
 const CLOSING_ACTION_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|the issue\b|that issue\b|this issue\b|them\b)/i;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s*(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|the issue\b|that issue\b|this issue\b|them\b)/i;
 
 /** A repo-qualified issue IDENTITY key (issue #858 round-4 review). The accepted issue syntax includes
  * `owner/repo#N` and issue URLs, and this validator supports cross-repository graphs, so collapsing an
@@ -350,7 +352,7 @@ function issueRefsIn(text: string): string[] {
  * not an adverb) stays an ACTIVE close and is still flagged; and negating ONE close never masks a
  * DIFFERENT active close in the same prompt (`do not close #12, but close #34` still targets #34). */
 const CLOSING_TARGET_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s*(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|the issue\b|that issue\b|this issue\b|them\b)/gi;
 /** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
  * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
  * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
@@ -364,13 +366,38 @@ const CLOSING_TARGET_PATTERN =
  * adversarial review). */
 const NEGATED_CLOSE_PREFIX =
   /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|just|simply|only|then|also|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,3}$/i;
+/** The CORRELATIVE merely-adverb negation `not just …` / `not only …` is ADDITIVE, not prohibitive:
+ * `Do not just close #12; also add a release note` still INSTRUCTS the close (`not only X but/also Y`
+ * keeps X), so treating it as a negated close drops a real close and lets the partial brief validate
+ * (issue #858 round-8 review). This prefix matches a negator whose gap is governed by the correlative
+ * adverb `just`/`only` immediately before the verb; paired with a following additive continuation
+ * (`ADDITIVE_CONTINUATION`) it RE-ACTIVATES the close in `closingTargets`. Only `just`/`only` qualify —
+ * they are the correlative-additive adverbs. `simply`/`merely` are MANNER negations (`do not simply
+ * close it; leave the parent open` genuinely forbids the close), so they stay a negated close and this
+ * prefix deliberately excludes them — which also confines the contrastive-`but` ambiguity to a branch
+ * this pattern never reaches. */
+const CORRELATIVE_NEGATED_CLOSE_PREFIX =
+  /(?:\b(?:do|does|did|will|would|shall|should|must|may|might)\s+not|\b(?:don|doesn|didn|won|wouldn|shouldn|mustn|mightn|shan|can)['’]t|\bcannot|\bnever|\bnot|\bno\s+need\s+to)\s+(?:(?:\w+ly|ever|then|also|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,2}(?:just|only)\s+(?:(?:\w+ly|ever|then|now|yet|automatically|silently|blindly|actually|really|to)\s+){0,2}$/i;
+/** The additive continuation that reinstates a `not just/only` close: the additive `also`, or — for a
+ * `just`/`only` negation specifically — the correlative `but` (`… but also …`, `… but notify …`), within
+ * the SAME sentence after the close (bounded at `.`/newline so an unrelated later sentence never
+ * re-activates the close). Tested on the text immediately AFTER the matched close. */
+const ADDITIVE_CONTINUATION = /^[^.\n]*?\b(?:also|but)\b/i;
 function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean } {
   const numbered: string[] = [];
   let pronoun = false;
   for (const m of prompt.matchAll(CLOSING_TARGET_PATTERN)) {
     // A directly-negated close (`do not close #12`) is not a close TARGET — skip it. The negation never
-    // masks a sibling ACTIVE close: each match is judged on the text before its OWN verb.
-    if (NEGATED_CLOSE_PREFIX.test(prompt.slice(0, m.index))) continue;
+    // masks a sibling ACTIVE close: each match is judged on the text before its OWN verb. EXCEPTION: an
+    // additive `not just/only … ; also/but …` correlative still INSTRUCTS the close, so it stays a target
+    // (issue #858 round-8 review).
+    const before = prompt.slice(0, m.index);
+    if (NEGATED_CLOSE_PREFIX.test(before)) {
+      const additive =
+        CORRELATIVE_NEGATED_CLOSE_PREFIX.test(before) &&
+        ADDITIVE_CONTINUATION.test(prompt.slice(m.index + m[0].length));
+      if (!additive) continue;
+    }
     if (m[2] !== undefined) numbered.push(issueKey(m[1], m[2]));
     else if (m[4] !== undefined) numbered.push(issueKey(m[3], m[4]));
     else pronoun = true;
@@ -425,6 +452,21 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
  * disqualifies. */
 const SCOPE_ATTRIBUTED_TO_OTHERS =
   /(?:handled|delivered|covered|owned|done|provided|implemented|built|completed|satisfied|addressed|met)\s+by\s+(?!(?:the\s+)?(?:this|current|present|me|us|our|my|myself|ourselves|here)\b)(?!(?:\w+ly\s+)?\w+ing\s+(?:[^\w\s]|(?!and\b|or\b|then\b|that\b|which\b|who\b)\w))|\bby\s+(?:(?:the|our|their|its|his|her)\s+)?(?:siblings?|others?|another|peers?|other\s+slices?|sibling\s+slices?|the\s+rest|the\s+others?)\b/i;
+
+/** ACTIVE-VOICE attribution to others: a sibling/other-slice SUBJECT performing a completion verb on the
+ * scope (`Siblings deliver the full scope of #12`, `the other slices own every criterion`, `another
+ * slice covers the whole issue`) credits OTHERS with the delivery exactly as the passive `delivered by
+ * siblings` does, so it must disqualify the marker too (issue #858 round-8 review: the passive-only
+ * `SCOPE_ATTRIBUTED_TO_OTHERS` let an active-voice sibling-ownership sentence restore the attribution
+ * bypass, contradicting the per-node ownership invariant). Matches an OTHERS-noun subject (siblings /
+ * peers / another slice / other slices / the rest / the others, optionally possessive) followed within a
+ * couple of words by a completion verb — the active voice of `SCOPE_ATTRIBUTED_TO_OTHERS`'s verb list.
+ * The subject allowlist is OTHERS only (never `this`/`current` slice, `I`, `we`), so active-voice SELF
+ * ownership (`this slice delivers the full scope`) stays an affirmative assertion. Tested against the
+ * marker's DELIVERY ASSERTION (like the passive check), so a sibling clause coordinated onto an
+ * UNRELATED constraint by `and`, or sitting in a different comma/`;`-bounded clause, does not over-fire. */
+const SCOPE_ACTIVE_VOICE_OTHERS =
+  /\b(?:(?:the|our|their)\s+)?(?:siblings?|other\s+slices?|sibling\s+slices?|peers?|another\s+slice|the\s+rest|the\s+others?|others)\s+(?:\w+\s+){0,2}?(?:handle|deliver|cover|own|provide|implement|build|complete|satisfy|address|meet|do|finish|ship)(?:s|es|ed|ing)?\b/i;
 
 /** A whole-scope phrase whose CLAUSE explicitly NEGATES or DISCLAIMS it ("this slice does NOT deliver
  * the full scope of #12", "we won't cover every acceptance criterion", "the full scope of #12 is NOT
@@ -753,6 +795,7 @@ function isPartialScopeClose(prompt: string): boolean {
       // (issue #858 round-6 + round-6 adversarial review).
       const assertion = deliveryAssertionAround(prompt, i, i + marker.length);
       if (SCOPE_ATTRIBUTED_TO_OTHERS.test(assertion)) continue;
+      if (SCOPE_ACTIVE_VOICE_OTHERS.test(assertion)) continue;
       if (SCOPE_NEGATED_CORE.test(assertion)) continue;
       if (SCOPE_NEGATED_WITHOUT_DELIVERY.test(assertion)) continue;
       // …but a negator AFTER the marker that REFERENCES DELIVERY (`…full scope of #12 AND it is not

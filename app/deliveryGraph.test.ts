@@ -2173,3 +2173,101 @@ test("#858 admitting `to` keeps `do not forget to close` an active close (no reo
     assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
   }
 });
+
+// Issue #858 (round-8 review, "Support optional colon after closing keywords", deliveryGraph.ts:301 and
+// the mirrored target regex / scope-classify.md): GitHub also closes on the colon form (`Closes: #12`),
+// but the prefilter and target regex required the issue target immediately after whitespace, so a
+// partial brief using the colon form produced NO `partial-scope-close` error even though GitHub would
+// close the issue. Both patterns now accept the optional colon.
+test("#858 the colon closing form (`Closes: #12`) is detected as a partial-scope-close", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Closes: #12.",
+    "Implement the parser slice of #12. Fixes: #12.",
+    "Do the UI part of nanobpm/nano-supervisor#12. Resolves: nanobpm/nano-supervisor#12.",
+    "Implement one criterion of #12. Closes:#12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …and the colon form carrying a genuine full-scope acknowledgement still validates (the colon change
+// must widen detection, not over-fire on a legitimate full-scope closer).
+test("#858 the colon closing form with a full-scope acknowledgement validates", () => {
+  const ok = [
+    "Deliver the full scope of #12. Closes: #12.",
+    "This slice owns the whole issue #12. Fixes: #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 review, app/deliveryGraph.ts:366 — "Distinguish additive not-just constructions
+// from negation"): the negator gap admitted `just`/`only`, so an ADDITIVE `not just/only … ; also/but …`
+// correlative (`Do not just close #12; also add a release note` — the close STILL happens) was treated as
+// a negated close and the partial brief validated. The additive correlative now re-activates the close.
+test("#858 an additive `not just/only … ; also/but …` close is a partial-scope-close (not a negation)", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12. Do not just close #12; also add a release note.",
+    "Implement one slice of #12. Do not only close #12, but also update the docs.",
+    "Do the parser part of #12. Don't just close #12; also open a follow-up.",
+    "Implement part of #12. Do not only close #12 but notify the team.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …but a genuine negated close with a merely/simply/just manner-adverb and NO additive continuation
+// stays a safe partial-slice brief (the additive carve-out must not reopen the negated-close false
+// positive the round-7 fix closed).
+test("#858 a `not simply/just/merely close` with no additive continuation stays a safe negated close", () => {
+  const ok = [
+    "Scope: one criterion of #12. Do not simply close it; leave the parent open.",
+    "Implement criterion 1 of #12. Do not just close #12.",
+    "Implement one slice of #12. Do not merely close #12 — leave it open.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-8 review, app/deliveryGraph.ts:427 — "Detect active-voice sibling ownership
+// attribution"): the attribution check only detected the PASSIVE `delivered by siblings`. An active-voice
+// `Siblings deliver the full scope of #12; … close #12.` credited the marker even though siblings — not
+// this node — own the scope, restoring the attribution bypass. Active-voice sibling/other ownership now
+// disqualifies the marker too.
+test("#858 active-voice sibling/other ownership disqualifies the full-scope marker (no attribution bypass)", () => {
+  const bypasses = [
+    "Siblings deliver the full scope of #12; implement criterion 1 and close #12.",
+    "The other slices own every acceptance criterion of #12; do the parser part and close #12.",
+    "Peers handle the full scope of #12; implement the UI and close #12.",
+    "Another slice covers the whole issue #12; implement part and close it.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// …while active-voice ownership by THIS slice is an affirmative assertion and must still validate (the
+// active-voice check must fire only on OTHERS, never reopen a self-ownership false positive).
+test("#858 active-voice self ownership still validates (active-voice check fires only on others)", () => {
+  const ok = [
+    "This slice delivers the full scope of #12; close #12.",
+    "This brief covers every acceptance criterion of #12, so close #12.",
+    "I own the whole issue #12; close it.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
