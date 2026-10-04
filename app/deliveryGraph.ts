@@ -908,21 +908,24 @@ function buildClauseAssertionData(clause: string): ClauseAssertionData {
     }
     return lo;
   };
-  // Per coordinator, the minimal marker token index `tm` at which the introduced text (tokens from the
-  // coordinator's end up to the marker) leads with a verb. `isCompoundPredicateContinuation` over the
-  // introduced tokens [te..tm-1] is true iff some token-suffix in that range leads with a verb, i.e. iff
-  // min(leadVerbReach[k] for k in [te..tm-1]) <= tm-1. That predicate is monotonic in `tm` (marker
-  // positions are token-aligned, so `tm` only advances by whole tokens — verified by differential fuzz),
-  // so a single forward sweep per coordinator finds the threshold.
+  // Per coordinator, the marker token index at which it stops splitting when its introduced text is a
+  // compound-predicate continuation. The introduced text must be VERB-LED — its FIRST content token,
+  // after skipping a leading adverb/coordinator run, is a completion verb (`and deliver …`, `and quickly
+  // own …`). `leadVerbReach[te]` answers exactly that lead question for the suffix starting at the
+  // coordinator's first introduced token `te`: it is the verb's token index (finite) iff the introduced
+  // text leads with a verb, else `Infinity`.
+  //
+  // Testing only the LEAD (not any later suffix) is the correct semantics (issue #858 round-13 review):
+  // scanning every later token until SOME suffix reaches a verb misclassifies an INDEPENDENT clause whose
+  // verb merely sits later (`… and this slice delivers the full scope of #12`) as a compound predicate,
+  // retaining an unrelated earlier negation/attribution; and that nested scan was itself O(coords ·
+  // tokens) on a clause whose introduced text never leads with a verb. When the introduced text leads
+  // with a verb the coordinator shares the prior subject for EVERY marker at/after the first introduced
+  // token, so the threshold is the constant `te + 1` (the marker sits at/after token `te`); when it does
+  // not, the coordinator always splits (`Infinity`). This is O(1) per coordinator — no sweep.
   const compoundAtToken = coords.map(([, bEnd]) => {
     const te = tokenIndexAt(bEnd);
-    let minReach = Number.POSITIVE_INFINITY;
-    for (let u = te; u < T; u++) {
-      clauseScanSteps++; // test instrumentation: one threshold-sweep step
-      if (leadVerbReach[u] < minReach) minReach = leadVerbReach[u];
-      if (minReach <= u) return u + 1; // marker token index u+1 ⇒ introduced covers tokens te..u
-    }
-    return Number.POSITIVE_INFINITY;
+    return te < T && leadVerbReach[te] !== Number.POSITIVE_INFINITY ? te + 1 : Number.POSITIVE_INFINITY;
   });
   // nearStart[t] = smallest token index `s` such that tokens [s, t) are all adverb/coordinator (`isSkip`).
   // Computed in one forward pass: as t advances, the window's left edge resets to t whenever token t-1 is
@@ -1275,11 +1278,16 @@ function isPartialScopeClose(prompt: string): boolean {
     }
   }
   occurrences.sort((a, b) => a[0] - b[0]);
-  // `SCOPE_NEGATED_AFTER_MARKER_DELIVERY` is tested against the marker's WHOLE clause, which is identical
-  // for every marker in that clause — so evaluate it ONCE per clause and cache the boolean (keyed by
-  // clause start). Re-running the backtracking regex over a long clause for every marker was itself
-  // O(markers · clause-length) — quadratic on a long delimiter-free clause (issue #858 round-12 review).
-  const negatedAfterMarkerByClause = new Map<number, boolean>();
+  // `SCOPE_NEGATED_AFTER_MARKER_DELIVERY` re-catches a negator that sits AFTER the marker yet still
+  // disclaims its scope (`…full scope of #12 AND it is not fully delivered`). It must therefore run
+  // against the MARKER-RELATIVE SUFFIX — the text from the marker to the clause end — NOT the whole
+  // clause: scanning the text BEFORE the marker matched a negator that PRECEDES it (`The tests must not
+  // regress and this slice delivers the full scope of #12` matches `not … delivers`), rejecting a
+  // legitimate acknowledgement for a negation that governs an unrelated earlier constraint (issue #858
+  // round-13 review). The suffix differs per marker, so memoise the boolean keyed by the marker's own
+  // offset `i` — re-running the backtracking regex per marker over a long clause would be O(markers ·
+  // clause-length), quadratic on a long delimiter-free clause (issue #858 round-12 review).
+  const negatedAfterMarkerByMarker = new Map<number, boolean>();
   // `SCOPE_NEGATED_PREFIX` is an UNANCHORED "contains" test over the marker's WHOLE before-clause (a
   // negator anywhere before the marker disqualifies it), so it must NOT be capped to the bounded
   // `clauseBeforeMarker` window — that window is sound only for the `$`-anchored
@@ -1364,14 +1372,14 @@ function isPartialScopeClose(prompt: string): boolean {
       if (disqualified) continue;
       // …but a negator AFTER the marker that REFERENCES DELIVERY (`…full scope of #12 AND it is not
       // fully delivered`) still disclaims the marker even though the `and`-coordinator splits it into a
-      // sibling segment the assertion above never sees — re-catch it against the marker's whole
-      // comma-bounded clause so the assertion-scoping does not fail open (issue #858 round-6
-      // adversarial review).
+      // sibling segment the assertion above never sees — re-catch it against the marker-relative suffix
+      // (the text from the marker to the clause end) so the assertion-scoping does not fail open, without
+      // matching a negator that PRECEDES the marker (issue #858 round-6 + round-13 adversarial reviews).
       const clauseStart = clauseStartAt(bounds, i);
-      let negatedAfterMarker = negatedAfterMarkerByClause.get(clauseStart);
+      let negatedAfterMarker = negatedAfterMarkerByMarker.get(i);
       if (negatedAfterMarker === undefined) {
-        negatedAfterMarker = SCOPE_NEGATED_AFTER_MARKER_DELIVERY.test(prompt.slice(clauseStart, clauseEndAt(bounds, i, prompt.length)));
-        negatedAfterMarkerByClause.set(clauseStart, negatedAfterMarker);
+        negatedAfterMarker = SCOPE_NEGATED_AFTER_MARKER_DELIVERY.test(prompt.slice(i, clauseEndAt(bounds, i, prompt.length)));
+        negatedAfterMarkerByMarker.set(i, negatedAfterMarker);
       }
       if (negatedAfterMarker) continue;
       // `SCOPE_NEGATED_PREFIX` is an unanchored "contains" test, so it must run against the WHOLE

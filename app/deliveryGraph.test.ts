@@ -2449,6 +2449,75 @@ test("#858 an independent `and`-coordinated constraint still splits the assertio
   }
 });
 
+// Issue #858 (round-13 review, app/deliveryGraph.ts `compoundAtToken`): the per-coordinator threshold
+// scanned EVERY later token until some suffix reached a completion verb, so an INDEPENDENT clause whose
+// verb merely sits later (`… and this slice delivers the full scope of #12`) was misclassified as a
+// compound-predicate continuation. The `and` then did NOT split, so the marker's assertion retained the
+// prior segment's unrelated negation/attribution and a legitimate full-scope acknowledgement was
+// rejected. The compound test must ask only whether the coordinator's INTRODUCED text is verb-LED
+// (`leadVerbReach[te]`), not whether any later suffix reaches a verb.
+test("#858 an independent clause after `and` is not a compound predicate (verb-led lead test)", () => {
+  const ok = [
+    // Copilot's cited shape: an unrelated negation before `and`, then an independent self-assertion.
+    "The team must not regress and this slice delivers the full scope of #12. Close #12.",
+    "The team must not regress and the slice delivers the full scope of #12. Close #12.",
+    // The same misclassification via an unrelated ATTRIBUTION retained across the unsplit `and`.
+    "The parser is handled by siblings and this slice delivers the full scope of #12. Close #12.",
+    // A multi-word subject pushes the verb even later; the lead test must still see a non-verb lead.
+    "The team must not regress and the parser subsystem carefully delivers the full scope of #12. Close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// …while a genuinely verb-led (or adverb-led) compound predicate still SHARES the prior subject, so an
+// others-subject / negation governing it still disqualifies the marker (the round-9 retention is kept).
+test("#858 a verb-led compound predicate still shares the subject (no fail-open)", () => {
+  const bypasses = [
+    "Siblings plan and deliver the full scope of #12; implement criterion 1 and close #12.",
+    "The team must not regress and deliver the full scope of #12. Close #12.",
+    "The team must not regress and quickly deliver the full scope of #12. Close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// Issue #858 (round-13 review, app/deliveryGraph.ts `SCOPE_NEGATED_AFTER_MARKER_DELIVERY`): the
+// re-catch scanned the marker's WHOLE clause, so a negator that PRECEDES the marker (`The tests must not
+// regress and this slice delivers the full scope of #12`) matched `not … delivers` inside the four-word
+// window and rejected a legitimate acknowledgement — the negation governs the unrelated earlier
+// constraint, not the marker. The check must run against the marker-RELATIVE suffix (from the marker to
+// the clause end), not the whole clause.
+test("#858 an after-marker delivery negation must sit AFTER the marker (marker-relative suffix)", () => {
+  const ok = [
+    "The tests must not regress and this slice delivers the full scope of #12. Close #12.",
+    "We never skip tests and this slice delivers the full scope of #12. Close #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+// …while a negator that genuinely sits AFTER the marker and references delivery still disclaims it
+// (the round-6 fail-open the re-catch exists to close stays closed).
+test("#858 a genuine after-marker delivery negation still disqualifies (no fail-open)", () => {
+  const bypasses = [
+    "Deliver the full scope of #12 and it is not fully delivered. Close #12.",
+    "Deliver the full scope of #12 and that scope is never delivered. Close #12.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
 // Issue #858 (round-9 review, app/deliveryGraph.ts:478 — "Treat our team as self-ownership in active
 // voice"): the others-subject pattern admitted an optional `our` before `team`, so `Our team delivers the
 // full scope of #12` was classified as EXTERNAL ownership and rejected — even though the passive
