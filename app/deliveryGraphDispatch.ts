@@ -251,13 +251,18 @@ export async function dispatchDeliveryGraphRun(
   // create". Now that the engine seam exposes it, close the window: cancel any still-ACTIVE instance of
   // this run (matched by its seeded `runKey` variable) BEFORE we launch a replacement, so the relaunch
   // stays at-most-once. Only a STALE re-claim needs this — a fresh claim or a terminal-row re-run has no
-  // possibly-live original. The content-addressed definition id is derived from the same digest the
-  // runner deploys under (`delivery-graph-<digest>`).
+  // possibly-live original. The content-addressed definition id is derived from the STALE ROW's own
+  // `digest` (`existing.digest`), NOT the freshly-compiled `digest` of THIS dispatch: under an explicit
+  // idempotency key the re-dispatched graph can differ (digest drift), and the original was deployed
+  // under `delivery-graph-<existing.digest>`. Searching under the new digest would miss the original and
+  // strand it live — the exact double-launch this reconcile exists to prevent. Mirrors the poller, which
+  // uses the stored `run.digest` (service.ts). `existing` is non-null whenever `reclaimingStaleClaim`.
   if (reclaimingStaleClaim) {
+    const originalDigest = existing?.digest ?? digest;
     try {
       const cancelled = await reconcileOriginalInstanceBeforeRelaunch(app.engine, {
         runKey,
-        processDefinitionId: `${DELIVERY_GRAPH_PROCESS_ID}-${digest}`,
+        processDefinitionId: `${DELIVERY_GRAPH_PROCESS_ID}-${originalDigest}`,
       });
       if (cancelled.length > 0) {
         app.log.warn("dispatch-delivery-graph cancelled a still-running original instance before relaunch", { runKey, cancelled });

@@ -353,3 +353,30 @@ test("#852 dispatchDeliveryGraphRun: re-claiming a STALE claim whose only ACTIVE
   assertEquals(cancelled, [], "a different run's live instance is never cancelled");
   assertEquals(started.length, 1, "the relaunch still proceeds");
 });
+
+test("#852 dispatchDeliveryGraphRun: an explicit-key stale re-claim whose graph DRIFTED still cancels the original (matched by the STALE ROW's digest, not the new one)", async () => {
+  // Under an explicit idempotencyKey the re-dispatched graph can differ from the original, so the
+  // freshly-compiled digest (d2) diverges from the stale row's digest (d1). The original live instance
+  // was deployed under `delivery-graph-d1`; matching it under the NEW digest d2 would miss it and strand
+  // it live — a double-launch of side-effecting nodes. Reconcile MUST search under the stale row's own
+  // digest. Learn both digests on throwaway apps.
+  const probeOrig = await dispatchDeliveryGraphRun(makeApp().app, SIDE_EFFECTING, { runKey: "run-z", repoless: true });
+  const probeDrift = await dispatchDeliveryGraphRun(makeApp().app, HUMAN_ONLY, { runKey: "run-z", repoless: true });
+  assert(probeOrig.ok && probeDrift.ok);
+  if (!probeOrig.ok || !probeDrift.ok) return;
+  assert(probeOrig.digest !== probeDrift.digest, "the two graphs must have different digests for this test to bite");
+
+  // The live original is deployed under the ORIGINAL digest's definition id — NOT the re-dispatched one.
+  const { app, started, cancelled } = makeApp({
+    liveOriginal: { processInstanceKey: "PI-orig", runKey: "run-z", processDefinitionId: `delivery-graph-${probeOrig.digest}` },
+  });
+  await seedStaleClaim(app, "run-z", probeOrig.digest);
+
+  // Re-dispatch the DRIFTED graph under the same explicit key.
+  const res = await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { runKey: "run-z", repoless: true });
+  assertEquals(res.ok, true);
+  if (!res.ok) return;
+  assertEquals(res.alreadyRunning, false, "the stale claim is re-claimed, not short-circuited");
+  assertEquals(cancelled, ["PI-orig"], "the original (under the stale row's digest) is cancelled despite the graph drift");
+  assertEquals(started.length, 1, "exactly one replacement instance launches");
+});
