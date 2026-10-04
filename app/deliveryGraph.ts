@@ -299,7 +299,9 @@ const NODE_ID_MAX_LENGTH = 128;
  * never matches. A leading `\b` cannot anchor a `#N` subject (`#` is a non-word char, so there is no
  * boundary before it), so the `#N` alternative carries a `(?<![A-Za-z0-9_.-])` lookbehind instead —
  * the same "not part of a larger token" guarantee for a subject that starts with `#`. The auxiliary
- * window is at most three words plus an optional `get(s)`, so an unrelated later verb (`#12 is closed
+ * window is at most four words plus an optional `get(s)` — wide enough for periphrastic-future passives
+ * (`#12 is going to be closed`, `#12 is expected to be closed`, where `is/going/to/be` is four window
+ * words; issue #858 round-10 adversarial review) — so an unrelated later verb (`#12 is closed
  * and deployed`) still reads as a close of #12 (fail-closed), and a verb-first close keeps priority
  * (the first arm is ordered before the passive arm, so `close #12` never re-reads `#12` as a passive
  * subject). Case-insensitive and conservative. This pattern is only a cheap
@@ -313,7 +315,7 @@ const NODE_ID_MAX_LENGTH = 128;
 const ISSUE_REF_PATTERN =
   /(?:#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+)/i;
 const CLOSING_ACTION_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+\b|https?:\/\/[^\s)]*\/issues\/[0-9]+|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+(?:\w+\s+){0,3}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b/i;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+\b|https?:\/\/[^\s)]*\/issues\/[0-9]+|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+(?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b/i;
 
 /** A repo-qualified issue IDENTITY key (issue #858 round-4 review). The accepted issue syntax includes
  * `owner/repo#N` and issue URLs, and this validator supports cross-repository graphs, so collapsing an
@@ -374,7 +376,7 @@ function issueRefsIn(text: string): string[] {
  * closed`) can drop the match — see `NEGATED_PASSIVE_WINDOW`. Detection and targeting never disagree:
  * `CLOSING_ACTION_PATTERN` carries the identical passive arm as a non-capturing pre-filter. */
 const CLOSING_TARGET_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)\b|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+((?:\w+\s+){0,3}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)/gi;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:github\s+)?issues?\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)\b|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+((?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)/gi;
 /** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
  * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
  * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
@@ -423,7 +425,7 @@ const ADDITIVE_CONTINUATION = /^[^.\n]*?\b(?:also|as\s+well)\b/i;
  * `CLOSING_TARGET_PATTERN`) — never across the whole prompt — so an unrelated earlier negation
  * (`do not introduce regressions; issue #12 is closed by the PR`) cannot mask an ACTIVE passive close,
  * and a `not` AFTER the participle (`#12 is closed, not merely referenced`) is not read as negating
- * the close. The window is at most three words plus an optional `get(s)`, so a plain substring test
+ * the close. The window is at most four words plus an optional `get(s)`, so a plain substring test
  * suffices — no anchoring needed. */
 const NEGATED_PASSIVE_WINDOW = /\b(?:not|never|cannot)\b|\b\w+n['’]t\b/i;
 function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean } {

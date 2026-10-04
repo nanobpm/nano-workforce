@@ -2610,6 +2610,41 @@ test("#858 an unrelated earlier negation does not mask an active passive close (
   }
 });
 
+// Issue #858 (round-10 adversarial review, app/deliveryGraph.ts:318/379 — the passive arm's auxiliary
+// window): the window capped at THREE words, so a periphrastic-future passive close of the node's own
+// issue — `#12 is going to be closed` / `#12 is expected to be closed` (`is/going/to/be` and
+// `is/expected/to/be` are FOUR window words) — slipped past BOTH mirrored patterns (prefilter +
+// extractor) and validated. That is the fail-OPEN direction (a real close missed); over-firing is this
+// guard's safe/fail-closed direction, so the window is widened to four words to catch the whole class.
+test("#858 a partial brief that closes via a periphrastic-future passive directive is rejected", () => {
+  const bypasses = [
+    "Implement criterion 1 of #12; #12 is going to be closed by the PR.",
+    "Implement criterion 1 of #12; #12 is expected to be closed by the PR.",
+    "Implement criterion 1 of #12 and ensure issue #12 is going to be closed by the PR.",
+    "Implement criterion 1 of #12; the issue is expected to be closed by the PR.",
+    "Implement criterion 1 of owner/repo#12; issue owner/repo#12 is going to be closed by the PR.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The widened window must not swallow a negated periphrastic close (a SAFE partial-slice brief) nor a
+// benign passive about a non-issue subject.
+test("#858 a benign or negated periphrastic-future passive does not over-fire (validates)", () => {
+  const ok = [
+    "Implement criterion 1 of #12; the door is going to be closed by the janitor.",
+    "Implement criterion 1 of #12; the PR is expected to be closed by the merge queue.",
+    "Implement criterion 1 of #12; issue #12 is not going to be closed by the PR.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
 // A FULL-scope closer phrased with the passive/issue-first form must still validate — the new grammar
 // must recognise the target so the marker's acknowledgement is correctly credited to it.
 test("#858 a full-scope closer using the issue-first/passive form still validates (must not over-fire)", () => {
