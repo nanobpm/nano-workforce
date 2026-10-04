@@ -2943,6 +2943,48 @@ test("#858 a coordinated close of fully-acknowledged issues still validates (mus
   }
 });
 
+// Issue #858 (round-18 review, app/deliveryGraph.ts — the issue-first/PASSIVE closing arm): the
+// round-11 fix extracted every target of a coordinated ACTIVE close (`close #12 and #13`) from the
+// active arm's coordination tail, but the passive arm captured only its FIRST subject — so `Deliver
+// the full scope of #13; implement only criterion 1 of #12; ensure issues #12 and #13 are closed by
+// the PR.` validated: the match started at `#13`, checked only that acknowledged target, and never
+// treated `#12` as closed. The passive subject now carries the same coordination tail, re-scanned
+// for every extra numbered target so each passively-closed issue needs its own acknowledgement.
+test("#858 a coordinated passive close extracts and validates EVERY target (issues #12 and #13 are closed)", () => {
+  const bypasses = [
+    // The cited case: #12 is a part-scope node passively closed, but only #13 was checked.
+    "Deliver the full scope of #13; implement only criterion 1 of #12; ensure issues #12 and #13 are closed by the PR.",
+    // The `both`-quantified form, and a comma-list of three.
+    "Deliver the full scope of #13; implement only criterion 1 of #12; ensure both issues #12 and #13 are closed by the PR.",
+    "Deliver the full scope of #14; implement criterion 1 of #12 and one of #13; issues #12, #13, and #14 are closed by the PR.",
+    // A repo-qualified extra target, and the other verb families.
+    "Deliver the full scope of #13; implement criterion 1 of owner/repo#12; issues owner/repo#12 and #13 are closed by the PR.",
+    "Deliver the full scope of #13; implement only criterion 1 of #12; issues #12 and #13 will be fixed by the PR.",
+    "Deliver the full scope of #13; implement only criterion 1 of #12; issues #12 and #13 get resolved by the PR.",
+  ];
+  for (const prompt of bypasses) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+// The converse: when EVERY coordinated passive target is genuinely acknowledged full-scope, the
+// close is licensed — and a coordinated passive whose own auxiliary window is NEGATED stays a safe
+// partial-slice brief (the negation drop must still fire with the new tail present).
+test("#858 a coordinated passive close of fully-acknowledged issues still validates (must not over-fire)", () => {
+  const ok = [
+    "Deliver the full scope of #12 and the full scope of #13; ensure issues #12 and #13 are closed by the PR.",
+    "Deliver the full scope of #12 and the full scope of #13; issues #12 and #13 will be closed by the PR.",
+    // A negated coordinated passive is a SAFE partial-slice brief, not a partial-scope-close.
+    "Implement criterion 1 of #12 and criterion 1 of #13; issues #12 and #13 are not closed by the PR.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
 // Issue #858 (round-11 suppressed advisory, app/deliveryGraph.ts:392 — `NEGATED_CLOSE_PREFIX`): the
 // negation gap admitted only ADVERBS and `to`, so the safe, contract-compliant meta-instruction
 // `Do not include Closes #12; use Part of #12` was treated as an ACTIVE close (`include` is not an

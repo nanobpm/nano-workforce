@@ -353,11 +353,14 @@ function issueRefsIn(text: string): string[] {
  * the PR`, `#12 will be closed by the PR`, `see #12 closed`, `mark #12 as resolved`, `the issue gets
  * fixed`. It captures the SAME target shapes (groups 5/6 = repo/number for `#N`, 7/8 for a URL, a
  * bare pronoun subject otherwise) so a passive close is attributed to its issue exactly like the
- * active form, and captures the auxiliary window (group 9) so a negator INSIDE it (`#12 is NOT
- * closed`) can drop the match — see `NEGATED_PASSIVE_WINDOW`. This passive arm lives ONLY here, in the
+ * active form, and captures the auxiliary window (group 19) so a negator INSIDE it (`#12 is NOT
+ * closed`) can drop the match — see `NEGATED_PASSIVE_WINDOW`. The passive subject carries the SAME
+ * coordination tail as the active arm (group 14, re-scanned in `closingTargets`), so a coordinated
+ * passive close (`issues #12 and #13 are closed`) attributes the close to EVERY subject, not just the
+ * first (issue #858 round-18 review). This passive arm lives ONLY here, in the
  * one authoritative grammar — there is no duplicate pre-filter carrying a second copy of it. */
 const CLOSING_TARGET_PATTERN =
-  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+))*)*)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)\b|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)\s+((?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)/gi;
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?::\s*){0,2}(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|it\b|its\s+issue\b|the issue\b|that issue\b|this issue\b|them\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+))*)*)|(?:(?<![A-Za-z0-9_.-])(?:(?:github\s+)?issues?\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)\b|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+)|\b(?:the|that|this|its)\s+issue\b|\bit\b|\bthem\b)((?:\s*(?:,|and\b|&|\+|along\s+with|as\s+well\s+as|plus)\s*(?:(?:(?:both|all|each|every|the)\s+)?(?:(?:github\s+)?issues?\s+)?(?:(?:both|all|each|every|the)\s+)?(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s*)?#([0-9]+)|https?:\/\/[^\s)]+?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([0-9]+))*)*)\s+((?:\w+\s+){0,4}(?:gets?\s+|get\s+)?(?:closed|fixed|resolved)\b)/gi;
 /** A negator DIRECTLY governing a closing verb, anchored (`$`) to the text ending right before the verb.
  * Covers auxiliary+not (`do/does/did/will/would/shall/should/must/may/might not`), the common
  * contractions, bare `not`/`never`/`cannot`, and `no need to`. Between the negator and the verb only
@@ -402,7 +405,7 @@ const ADDITIVE_CONTINUATION = /^[^.\n]*?\b(?:also|as\s+well)\b/i;
  * mirror of `NEGATED_CLOSE_PREFIX` (issue #858 round-10 review). A brief that explicitly forbids the
  * passive close (`Implement criterion 1 of #12; issue #12 is NOT closed by this PR`) is a SAFE
  * partial-slice brief, exactly like its active-voice sibling (`do not close #12`), so the match is
- * dropped. The negator is searched only inside the match's own captured auxiliary window (group 9 of
+ * dropped. The negator is searched only inside the match's own captured auxiliary window (group 19 of
  * `CLOSING_TARGET_PATTERN`) — never across the whole prompt — so an unrelated earlier negation
  * (`do not introduce regressions; issue #12 is closed by the PR`) cannot mask an ACTIVE passive close,
  * and a `not` AFTER the participle (`#12 is closed, not merely referenced`) is not read as negating
@@ -424,11 +427,11 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
         ADDITIVE_CONTINUATION.test(prompt.slice(m.index + m[0].length));
       if (!additive) continue;
     }
-    // The issue-first/passive arm (groups 10-14) carries its negation INSIDE the match's auxiliary
+    // The issue-first/passive arm (groups 10-13) carries its negation INSIDE the match's auxiliary
     // window (`#12 is NOT closed`), which the before-verb prefix check above cannot see — the negator
     // sits AFTER the arm's issue-ref start, so the text ending at `m.index` does not reach it. Drop a
     // passive close whose own window is negated (issue #858 round-10 review).
-    if (m[14] !== undefined && NEGATED_PASSIVE_WINDOW.test(m[14])) continue;
+    if (m[19] !== undefined && NEGATED_PASSIVE_WINDOW.test(m[19])) continue;
     if (m[2] !== undefined) numbered.push(issueKey(m[1], m[2]));
     else if (m[4] !== undefined) numbered.push(issueKey(m[3], m[4]));
     else if (m[11] !== undefined) numbered.push(issueKey(m[10], m[11]));
@@ -440,6 +443,17 @@ function closingTargets(prompt: string): { numbered: string[]; pronoun: boolean 
     // review — `close #12 and #13` previously validated with only #12 acknowledged, a fail-open bypass).
     if (m[5] !== undefined && m[5] !== "") {
       for (const e of m[5].matchAll(ISSUE_REF_GLOBAL)) {
+        if (e[2] !== undefined) numbered.push(issueKey(e[1], e[2]));
+        else if (e[4] !== undefined) numbered.push(issueKey(e[3], e[4]));
+        else if (e[5] !== undefined) numbered.push(issueKey(null, e[5]));
+      }
+    }
+    // The issue-first/passive arm's subject is coordinated the same way (`issues #12 and #13 are
+    // closed`); group 14 is ITS whole coordinated tail, re-scanned identically so a passive close of
+    // several issues checks every one (issue #858 round-18 review — `issues #12 and #13 are closed`
+    // previously checked only the first subject, the same fail-open bypass one arm over).
+    if (m[14] !== undefined && m[14] !== "") {
+      for (const e of m[14].matchAll(ISSUE_REF_GLOBAL)) {
         if (e[2] !== undefined) numbered.push(issueKey(e[1], e[2]));
         else if (e[4] !== undefined) numbered.push(issueKey(e[3], e[4]));
         else if (e[5] !== undefined) numbered.push(issueKey(null, e[5]));
