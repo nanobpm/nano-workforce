@@ -214,8 +214,14 @@ So, when you author each slice's `prompt`:
   across slices, the parent issue is **broader** than any one slice — so **no
   slice** closes it with a bare brief: instruct each partial slice to reference the
   parent non-blockingly (`Part of #N` / `Refs #N`) and **leave #N open**, OR
-  designate one final slice that genuinely delivers the remaining scope and depends
-  (`dependsOn`) on the others to carry the `Closes #N`.
+  designate one final slice that carries the `Closes #N`. That final slice is the
+  exception only when its brief makes it **own and verify #N's COMPLETE stated
+  scope** — every acceptance criterion, not just the remainder. `dependsOn` on the
+  sibling slices orders the merges, but it does **not** by itself make the final
+  slice's brief full-scope: a final slice scoped only to "the remaining criterion"
+  is still a partial brief and must **not** close #N. Scope the final closer to
+  re-verify the whole issue (its brief must direct it to check every checkbox and
+  confirm the siblings' merged work satisfies them) before it emits `Closes #N`.
 - **The remainder must be tracked, never dropped.** Every acceptance criterion of
   the split issue must be covered by **some** slice in this plan (collectively the
   slices must deliver #N's whole scope). Do not emit a slice set that silently

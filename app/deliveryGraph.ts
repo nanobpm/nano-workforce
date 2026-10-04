@@ -108,7 +108,8 @@ export type DeliveryGraphErrorCode =
   | "scheme-relative-url-in-job-type"
   | "invalid-credential-env"
   | "invalid-backoff"
-  | "unbound-pr";
+  | "unbound-pr"
+  | "partial-scope-close";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
  * input (`nodes[2].kind`, `edges[1].from`, `nodes[0].emits[1].name`), `message` is human-actionable,
@@ -263,6 +264,64 @@ export const FACT_NAME_MAX_LENGTH = 128;
  * resolvable while dot-free fact names keep `<nodeId>.<fact>` unambiguous. */
 const NODE_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 const NODE_ID_MAX_LENGTH = 128;
+
+/** Issue #858: a delivery-graph `agent` node's `prompt` is PLANNER/authored free text — no code path
+ * injects a `Closes #N` for it (unlike the single-issue `feature.ts` path, which owns its whole
+ * issue). The field case (delivery graph `5e36636255ab`, node `i12`) paired a brief scoped to ONE of
+ * an issue's three acceptance criteria with "…and open a PR that closes it", so the agent wrote
+ * `Closes #N` and the remainder was silently dropped. The planner/feature/scope-gate prompt contracts
+ * (resources/prompts/{plan,feature,scope-classify}.md) carry the prose rule; THIS is the deterministic
+ * compile/lint-time guard the issue asks for ("validate this at graph compile/lint time: an agent
+ * prompt that says 'close(s) #N' must cover all of #N's checkboxes, or carry an explicit partial-scope
+ * marker"). The validator is pure — it cannot read the GitHub issue to count its checkboxes — so the
+ * enforceable, self-contained form is: a prompt that closes an issue must ALSO carry an explicit
+ * full-scope acknowledgement marker (the exact phrase the planner is told to write when a slice
+ * legitimately closes, e.g. "full stated scope" / "every acceptance criterion"). A closing keyword
+ * with NO such marker is the defect class — a partial brief told to close — and is rejected.
+ *
+ * Closing-keyword detection mirrors the scope gate's contract (resources/prompts/scope-classify.md):
+ * a closing verb (`close/closes/closed`, `fix/fixes/fixed`, `resolve/resolves/resolved`) applied to an
+ * issue — either directly (`closes #N`, `fixes owner/repo#N`, `resolves <issue-url>`) or by pronoun
+ * (`closes it` / `close the issue` / `resolve that issue`, the literal field-case phrasing). The
+ * prompt must ALSO reference an issue somewhere (so a bare prose "close the door" never matches), and
+ * the verb must reach its object with no intervening clause (so "resolve conflicts in #12" / "closes
+ * the loop on #12" do not match). Case-insensitive and conservative: a prompt that mentions closing
+ * the issue at all — even negated ("do NOT close it") — is flagged, because an agent brief that
+ * discusses closing should carry the full-scope marker regardless. */
+const ISSUE_REF_PATTERN =
+  /(?:#[0-9]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+)/i;
+const CLOSING_ACTION_PATTERN =
+  /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?\s*(?:#[0-9]+|https?:\/\/[^\s)]*\/issues\/[0-9]+|it\b|the issue\b|that issue\b|this issue\b|them\b)/i;
+
+/** The explicit full-scope acknowledgement markers that licence a closing keyword. These are the
+ * phrases the planner contract (resources/prompts/plan.md) directs a full-scope slice to carry, so a
+ * legitimately-closing brief already contains one and is NOT rejected. Matching is case-insensitive
+ * substring (not a bareword regex) so inflections ("full stated scope", "the full scope", "every
+ * acceptance criterion", "all acceptance criteria", "owns the whole issue") all count. */
+const FULL_SCOPE_MARKERS: readonly string[] = [
+  "full stated scope",
+  "full scope",
+  "every acceptance criterion",
+  "all acceptance criteria",
+  "every checkbox",
+  "all checkboxes",
+  "owns the whole",
+  "own the whole",
+  "complete stated scope",
+  "entire scope",
+];
+
+/** True when `prompt` pairs a GitHub closing action with NO explicit full-scope acknowledgement
+ * marker — the partial-scope-close defect class (issue #858). Requires BOTH a closing action (a
+ * closing verb applied to an issue, directly or by pronoun) AND an issue reference somewhere in the
+ * prompt, so a bare prose "close the door" (no issue) or "Part of #12" (no closing verb) never
+ * matches. */
+function isPartialScopeClose(prompt: string): boolean {
+  if (!CLOSING_ACTION_PATTERN.test(prompt)) return false;
+  if (!ISSUE_REF_PATTERN.test(prompt)) return false;
+  const lower = prompt.toLowerCase();
+  return !FULL_SCOPE_MARKERS.some((marker) => lower.includes(marker));
+}
 
 /** The graph's optional top-level `name` must match openapi's `DeliveryGraph.name` `maxLength: 255`.
  * Re-enforced here INDEPENDENTLY of the OpenAPI shape gate because later steps trust it: the compiler
@@ -779,6 +838,24 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "`agent.baseBranch`, when present, must be a plausible git branch name (no whitespace, shell " +
               `metacharacters, leading \`-\`, \`..\`/\`//\`, etc.) — got ${JSON.stringify(config.baseBranch)} (#739)`,
             code: "invalid-node-base-branch",
+          });
+        }
+        // Issue #858: the deterministic compile/lint-time guard for the partial-scope-close defect
+        // class. An `agent` node's `prompt` is planner/authored free text; when it pairs a GitHub
+        // closing keyword (`Closes/Fixes/Resolves #N`) with NO explicit full-scope acknowledgement
+        // marker, it is the field-case defect (a brief scoped to PART of an issue told to close it).
+        // Reject it path-qualified so the planner must either scope the brief to the issue's FULL
+        // stated scope (and say so) or reference the issue non-blockingly (`Part of #N` / `Refs #N`).
+        if (kind === "agent" && typeof config.prompt === "string" && isPartialScopeClose(config.prompt)) {
+          errors.push({
+            path: `${path}.${configKey}.prompt`,
+            message:
+              "`agent.prompt` closes an issue (`Closes/Fixes/Resolves #N`) but carries no explicit " +
+              "full-scope acknowledgement — a brief scoped to PART of an issue must not be told to " +
+              "close it (issue #858). Either scope the brief to the issue's FULL stated scope and say " +
+              "so (e.g. \"delivers #N's full stated scope\" / \"every acceptance criterion\"), or " +
+              "reference the issue non-blockingly (`Part of #N` / `Refs #N`) and leave it open.",
+            code: "partial-scope-close",
           });
         }
         // #548: register a converge-connector / pr-wait as a PR-binding consumer (pass 4 validates the

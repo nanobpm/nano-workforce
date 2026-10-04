@@ -1350,3 +1350,83 @@ test("#548 a converge connector with MULTIPLE incoming `pr` facts is rejected as
   const err = hasCode(validateDeliveryGraph(g), "unbound-pr");
   assert(err.message.includes("disambiguate"), err.message);
 });
+
+// Issue #858: the deterministic compile/lint-time guard for the partial-scope-close defect class.
+// The field case (delivery graph `5e36636255ab`, node `i12`) paired a brief scoped to ONE of an
+// issue's three acceptance criteria with "…open a PR that closes it", so the agent wrote `Closes #N`
+// and the remainder was silently dropped. `validateDeliveryGraph` must now reject an `agent.prompt`
+// that closes an issue WITHOUT an explicit full-scope acknowledgement marker.
+test("#858 an agent prompt that closes an issue with NO full-scope marker is rejected (partial-scope-close)", () => {
+  const g = {
+    name: "partial close",
+    nodes: [
+      {
+        id: "i12",
+        kind: "agent",
+        agent: {
+          jobType: "senior:feature",
+          // The exact field-case shape: scoped to one criterion, told to close the parent.
+          prompt: "Implement criterion 1 of nanobpm/nano-supervisor#12 and open a PR that closes #12.",
+        },
+      },
+    ],
+    edges: [],
+  };
+  const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+  assertEquals(err.path, "nodes[0].agent.prompt");
+});
+
+test("#858 the closing-keyword families (closes/fixes/resolves, owner/repo#N, issue URL, and the pronoun form `closes it`) are all detected", () => {
+  const closers = [
+    "open a PR that closes #12",
+    "this fixes nanobpm/nano-supervisor#12",
+    "Resolves https://github.com/nanobpm/nano-supervisor/issues/12",
+    "resolve #12 when done",
+    // The LITERAL field case (delivery graph `5e36636255ab`, node `i12`): the issue is referenced by
+    // name (`nano-supervisor#12`) and the closing verb uses the pronoun `it`, NOT a bare `#N`.
+    "Implement nanobpm/nano-supervisor#12 and open a PR that closes it",
+    "Implement #12 and close the issue",
+  ];
+  for (const prompt of closers) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    const err = hasCode(validateDeliveryGraph(g), "partial-scope-close");
+    assertEquals(err.path, "nodes[0].agent.prompt", `expected rejection for: ${prompt}`);
+  }
+});
+
+test("#858 a closing keyword WITH an explicit full-scope marker validates (the legitimate final closer)", () => {
+  const ok = [
+    "Implement nanobpm/nano-supervisor#12 — this brief delivers #12's full stated scope (every acceptance criterion) — and open a PR that closes #12.",
+    "Own the whole issue: deliver every acceptance criterion of #12, then close #12.",
+    "This slice covers the full scope of #12; open a PR with Closes #12.",
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+test("#858 a non-closing reference (Part of / Refs) is NOT flagged, and a prompt with no issue ref is NOT flagged", () => {
+  const ok = [
+    "Implement criterion 1 of #12 and reference it as Part of #12.", // non-closing ref
+    "Refs #12 — work on the first slice.",
+    "un-draft + merge #B", // the WELL_FORMED prompt: `#B` is not a numeric issue ref
+    "close the door behind you", // prose "close" with no issue ref
+    "fix the bug in the parser", // closing verb but no issue ref
+    "resolve conflicts in #12 merge", // closing verb not applied to the issue (intervening word)
+    "closes the loop on #12 feedback", // closing verb not applied to the issue
+  ];
+  for (const prompt of ok) {
+    const g = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+    assertEquals(validateDeliveryGraph(g), [], `expected no errors for: ${prompt}`);
+  }
+});
+
+test("#858 a non-agent node (human) carrying a closing keyword is NOT flagged — the guard is agent-scoped", () => {
+  const g = {
+    nodes: [{ id: "h", kind: "human", human: { prompt: "verify then close #12" } }],
+    edges: [],
+  };
+  assertEquals(validateDeliveryGraph(g), []);
+});
+

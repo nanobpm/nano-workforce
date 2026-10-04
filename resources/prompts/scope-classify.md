@@ -56,7 +56,9 @@ result.
 
    **Then scan the PR's commit messages for the same closing keywords** —
    `gh pr view <prNumber> --repo <repo> --json commits --jq '.commits[].messageBody, .commits[].messageHeadline'`
-   (or `gh pr diff`/`git log origin/<base>..<head>`). This matters because this repo
+   (or `git log origin/<base>..<head>`). Do **not** use `gh pr diff` here — it
+   returns only the patch, not the commit subjects/bodies, so it cannot detect a
+   closing keyword and would incorrectly clear the PR. This matters because this repo
    family **squash-merges with `COMMIT_MESSAGES`**: the squash commit concatenates
    every commit body, so a `Closes #N` left in **any commit body closes #N on
    merge** even when the PR body was later corrected to `Part of #N`. Treat a
