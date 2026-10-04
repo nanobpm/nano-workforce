@@ -553,6 +553,52 @@ test("#856 parsePrTarget agrees with the canonical parsePr on every PR shape (no
   }
 });
 
+// ── #857: an epic target is a CANONICAL planKey (`owner/repo#N`) — never a URL ────────────────────
+// The epic probe keys off the durable lineage root (`owner/repo#N`, `parseIssue`'s `planKey` shape).
+// Delegating its validation to `parsePr` (whose grammar includes GitHub PR URLs) let a URL pass the
+// epic check; `probeOnce` then queried `/lineage?root=<the URL>`, which matches no lineage root, so
+// the probe could only time out instead of failing loudly at submission. Epic targets stay
+// canonical-key-only; URLs are a `pr`-kind-only shape.
+test("#857 parseProbe: an epic probe REJECTS a GitHub PR URL target (a planKey is owner/repo#N, never a URL)", () => {
+  assertThrows(
+    () => parseProbe({ kind: "epic", target: "https://github.com/nanobpm/nano-ide/pull/488", match: { epicState: "merged" } }),
+    Error,
+    "planKey",
+  );
+});
+
+test("#857 parseProbe: an epic probe REJECTS an issue-URL target too (only the canonical key shape)", () => {
+  assertThrows(
+    () => parseProbe({ kind: "epic", target: "https://github.com/nanobpm/nano-ide/issues/488", match: { epicState: "merged" } }),
+    Error,
+    "planKey",
+  );
+});
+
+test("#857 parseProbe: an epic probe still accepts the canonical owner/repo#N planKey", () => {
+  const p = parseProbe({ kind: "epic", target: "nanobpm/nano-ide#488", match: { epicState: "merged" } });
+  assertEquals(p.kind, "epic");
+});
+
+test("#857 probeOnce epic: the lineage read is keyed by the CANONICAL planKey even when the target is padded", async () => {
+  // probeOnce must query `/lineage?root=<owner/repo#N>` — the shape lineage roots are stored under —
+  // derived from the parsed key, not the raw target string, so a padded/oddly-cased literal cannot
+  // silently miss every lineage thread and burn the whole wait budget as a timeout.
+  const capture: { url?: string } = {};
+  const exec: ProbeExec = {
+    async httpGet(url) {
+      capture.url = url;
+      return { status: 200, body: JSON.stringify({ count: 1, threads: [{ rootRequestKey: "o/r#7", stage: "merged", active: false, prCount: 1 }] }) };
+    },
+    async run() {
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+  const r = await probeOnce(parseProbe({ kind: "epic", target: " o/r#7 " }), exec, { NANO_WORKFORCE_BASE_URL: "http://host:3000" });
+  assert(r.ready, "a fully-merged epic goes green");
+  assertStringIncludes(capture.url ?? "", "/app/api/lineage?root=o%2Fr%237");
+});
+
 // ── #570: a fact-bound pr/epic target DISPATCHES (late-binding), a malformed literal still fails ──
 test("parseProbe: a FACT-BOUND pr target (`<node>.<fact>`) parses (resolved at dispatch, not a literal here) — #570", () => {
   // The documented canonical `agent → converge-merge → wait[pr merged]` shape wires the wait's

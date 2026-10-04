@@ -284,7 +284,11 @@ export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean
   // business id, so a resubmit/replay still resolves (issue #568). Validate it as a literal planKey,
   // exempting a fact-bound reference for the same #548 late-binding reason as `pr` above (and gated
   // on the same `allowLateBoundTarget` opt-in, so a non-delivery-graph caller still fails loudly).
-  if (kind === "epic" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePrTarget(target)) {
+  // The validator is the CANONICAL-KEY-ONLY {@link parsePlanKey}, NOT `parsePrTarget`: `parsePr`'s
+  // grammar includes GitHub PR URLs, but a lineage root is only ever stored as `owner/repo#N`, so a
+  // URL target here would pass a `parsePrTarget` check and then query `/lineage?root=<the URL>`,
+  // matching nothing — the probe could only time out instead of failing loudly at submission (#857).
+  if (kind === "epic" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePlanKey(target)) {
     throw new Error(
       `readiness probe (epic): 'target' ('${target}') must be an 'owner/repo#<number>' planKey (the epic issue, e.g. 'nanobpm/nano-workforce#374')`,
     );
@@ -826,6 +830,19 @@ export function parsePrTarget(target: string): { repo: string; number: string } 
   return pr ? { repo: pr.repo, number: String(pr.number) } : null;
 }
 
+/** Split an epic probe target into its canonical planKey, or `null` when it is not one. Unlike
+ * {@link parsePrTarget} this accepts ONLY the canonical `owner/repo#<number>` key shape — never a
+ * GitHub URL. An epic probe is keyed by the durable lineage root (`owner/repo#N`, the epic issue's
+ * planKey, issue #568), and the lineage read-model stores roots in exactly that shape: admitting a
+ * URL here (via `parsePr`'s wider grammar) would let `probeOnce` query `/lineage?root=<the URL>`,
+ * which matches no root, so the probe could only time out instead of failing loudly at submission
+ * (#857). Derived from the canonical {@link parsePr} (no second grammar): a URL-shaped input parses
+ * fine there, so it is rejected by shape, not by a stricter regex. */
+export function parsePlanKey(target: string): { planKey: string } | null {
+  const pr = parsePr(target);
+  return pr && pr.prKey === target.trim() ? { planKey: pr.prKey } : null;
+}
+
 /** Build the `gh pr view` command that reads a PR's merge-state fields. `gh` reads its token from the
  * ambient env (like `github-check`/`capability`) — no `credentialEnv`. */
 export function prViewCommand(repo: string, number: string): string {
@@ -955,12 +972,16 @@ export async function probeOnce(
       // "Fully merged" is the app's AGGREGATE, not a GitHub read — observe it over the app's own
       // lineage read-model (level-triggered, same poll machinery as `pr`). A fact-bound target that is
       // still unresolved (`<node>.<fact>`) is not a literal planKey, so treat it as "not ready" and
-      // keep waiting rather than issue a malformed request.
-      if (!parsePrTarget(probe.target)) return { ready: false, detail: "epic: unresolved/unparseable planKey (not ready)" };
-      const url = epicLineageUrl(probe.target, readEnvOr("NANO_WORKFORCE_BASE_URL", "", env));
+      // keep waiting rather than issue a malformed request. Key the read (and the thread match) by the
+      // CANONICAL planKey from {@link parsePlanKey} — the shape lineage roots are stored under — never
+      // the raw target string, so a padded literal cannot silently miss every thread and burn the wait
+      // budget, and a URL-shaped value is rejected here rather than queried as a root (#857).
+      const key = parsePlanKey(probe.target);
+      if (!key) return { ready: false, detail: "epic: unresolved/unparseable planKey (not ready)" };
+      const url = epicLineageUrl(key.planKey, readEnvOr("NANO_WORKFORCE_BASE_URL", "", env));
       const resp = await exec.httpGet(url, { accept: "application/json" });
       if (resp.status < 200 || resp.status >= 300) return { ready: false, detail: `epic: lineage read HTTP ${resp.status} (not ready)` };
-      return matchEpic(probe.match, parseEpicLineage(parseJson(resp.body), probe.target));
+      return matchEpic(probe.match, parseEpicLineage(parseJson(resp.body), key.planKey));
     }
   }
 }

@@ -29,6 +29,7 @@ import {
 } from "./github.ts";
 import { derivedTrackingTable } from "./instanceTracking.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
+import { parsePr } from "./prParse.ts";
 import type { ReadinessProbe } from "./readiness.ts";
 import { requireRepoEnvelopeVars } from "./repoEnvelope.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
@@ -473,21 +474,21 @@ export interface ParsedIssue {
   planKey: string;
 }
 
-/** Parse "owner/repo#123" or a canonical issue URL into its parts. Mirrors parsePr
- * (app/service.ts) but for the /issues/ path. */
+/** Parse "owner/repo#123" or a canonical issue URL into its parts. The URL branch is the /issues/
+ * spelling; the shorthand branch DELEGATES to the canonical {@link parsePr} (`app/prParse.ts`) — the
+ * single source of truth for the `owner/repo#N` shape — rather than carrying a second copy of its
+ * regex (#856/#857: a duplicated shorthand grammar is exactly the drift the single-grammar guard bans). */
 export function parseIssue(input: string): ParsedIssue | null {
   const s = input.trim();
-  let m = s.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/i);
+  const m = s.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/i);
   if (m) {
     const repo = `${m[1]}/${m[2]}`;
     const number = Number(m[3]);
     return { repo, number, url: `https://github.com/${repo}/issues/${number}`, planKey: `${repo}#${number}` };
   }
-  m = s.match(/^([^/]+\/[^#]+)#(\d+)$/);
-  if (m) {
-    const repo = m[1];
-    const number = Number(m[2]);
-    return { repo, number, url: `https://github.com/${repo}/issues/${number}`, planKey: `${repo}#${number}` };
+  const pr = parsePr(s);
+  if (pr) {
+    return { repo: pr.repo, number: pr.number, url: `https://github.com/${pr.repo}/issues/${pr.number}`, planKey: pr.prKey };
   }
   return null;
 }
