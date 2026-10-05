@@ -277,14 +277,36 @@ test("#876 review: a DOTTED command target (e.g. check.sh) is NOT an unresolved 
 
 test("#872: a NULL/blank late-bound target still fails closed (the gate parks and escalates, never probes a null handle)", async () => {
   for (const target of [null, undefined, "  "]) {
+    // Intermediate poll activation (no lastAttempt): fails closed, logs at INFO, never WARNs — the
+    // boundary-only WARN policy (PR #876 review) keeps a 30-minute gate from emitting ~120 WARN lines.
     const job = { variables: { probe: { kind: "command", target }, gateKey: "g1", probeTimeout: "PT30M" } };
+    const infos: string[] = [];
     const warnings: string[] = [];
-    const app = { log: { info() {}, warn(msg: string) { warnings.push(msg); } }, engine: { async publishMessage() { throw new Error("must never publish"); } } };
+    const app = {
+      log: { info(msg: string) { infos.push(msg); }, warn(msg: string) { warnings.push(msg); } },
+      engine: { async publishMessage() { throw new Error("must never publish"); } },
+    };
     // biome-ignore lint/suspicious/noExplicitAny: minimal job/app stub over the real handler.
     const out = await handler(job as any, app as any);
     assertEquals(out.ready, false, `a ${JSON.stringify(target)} target is not ready`);
     assert(String(out.detail).includes("unresolved target"), "the detail names the unresolved target");
-    assertEquals(warnings.length, 1, "the fail-closed park is logged");
+    assertEquals(warnings.length, 0, `an intermediate ${JSON.stringify(target)} activation must NOT WARN`);
+    assertEquals(infos.length, 1, "the fail-closed park is logged at info on intermediate attempts");
+
+    // Final (boundary) activation: the SAME fail-closed park, but now it IS the escalation trigger, so
+    // it WARNs exactly once (and does not duplicate at info).
+    const lastJob = { variables: { ...job.variables, lastAttempt: true } };
+    const lastInfos: string[] = [];
+    const lastWarnings: string[] = [];
+    const lastApp = {
+      log: { info(msg: string) { lastInfos.push(msg); }, warn(msg: string) { lastWarnings.push(msg); } },
+      engine: { async publishMessage() { throw new Error("must never publish"); } },
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal job/app stub over the real handler.
+    const lastOut = await handler(lastJob as any, lastApp as any);
+    assertEquals(lastOut.ready, false, `a ${JSON.stringify(target)} target is not ready on the last attempt`);
+    assertEquals(lastWarnings.length, 1, "the boundary (lastAttempt) fail-closed park WARNs exactly once");
+    assertEquals(lastInfos.length, 0, "the boundary park does not also log at info");
   }
 });
 

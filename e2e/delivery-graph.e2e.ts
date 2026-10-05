@@ -822,8 +822,10 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
     await app.settle();
 
-    // The upstream connector completed (no gate), threading `up_cmd = null`. The wait's target stays the
-    // unresolved `up.cmd` fact-ref → the worker fails closed → the gate NEVER resolves to ready.
+    // The upstream connector completed (no gate), threading `up_cmd = null`. Because the fact resolved
+    // to null, the compiler writes a literal `null` into the wait probe's `target` (it does NOT preserve
+    // the authored `up.cmd` fact-reference), so the worker receives a null target → fails closed → the
+    // gate NEVER resolves to ready.
     assert.ok(!takenFlows(app).some((f) => f.endsWith("->End")), "a gate with a null target must NOT pass through to End");
 
     // Bounded, not wedged: the gate escalates once its poll budget elapses.
@@ -873,5 +875,55 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     await app.advanceTime(2_100);
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.endsWith("__esc"));
     assert.ok(esc.length >= 1, `the fallback SLA eventually escalates the parked node, got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`);
+  });
+
+  test("#872 a legacy instance with BOTH timeouts absent falls back to the literal PT1H default — not a zero-length timer", async () => {
+    const app = track(await boot(freshDir()));
+
+    // Covers the FINAL `else PT1H` branch of the bounded-timeout ioMapping, the compatibility path for
+    // legacy / hand-seeded instances that predate the runner seeding `runNodeTimeout`. The prior test
+    // seeds `runNodeTimeout` (PT2S), so it only exercises the run-level fallback; here we null the
+    // per-node timeout AND omit `runNodeTimeout` from the instance entirely, so `=nodeTimeout` resolves
+    // to the literal `DELIVERY_NODE_DEFAULT_TIMEOUT` (PT1H). If the literal default did not apply, a null
+    // duration would fire the boundary timer instantly during `settle()`.
+    await app.engine.registerWorker("senior:demo", async () => ({}));
+
+    const graph: DeliveryGraph = {
+      name: "e2e absent timeouts default PT1H SLA",
+      nodes: [{ id: "solo", kind: "agent", agent: { jobType: "never-registered-so-it-parks" } }],
+      edges: [],
+    };
+
+    const prep = await prepareDeliveryGraph(graph, { nodeTimeout: "PT2S", repoless: true });
+    assert.ok(prep.ok, `prepare should succeed, got ${JSON.stringify(prep)}`);
+    const { processDefinitionId, bpmn, nodeInputs, runKey } = prep.prepared;
+    const agentElement = Object.keys(nodeInputs).find((el) => "jobType" in (nodeInputs[el] as Record<string, unknown>));
+    assert.ok(agentElement, "the agent node's element input exists");
+    (nodeInputs[agentElement] as Record<string, unknown>).timeout = null;
+
+    await app.engine.deployResources([{ name: `${processDefinitionId}.bpmn`, content: bpmn, contentType: "application/xml" }]);
+    // Deliberately OMIT `runNodeTimeout` to model a legacy/hand-seeded instance — so neither the per-node
+    // nor the run-level source is defined and the FEEL falls to the literal PT1H.
+    await app.engine.createInstance({ processDefinitionId, variables: { nodeInputs, runKey } });
+    await app.settle();
+
+    // Both timeout sources absent must NOT fire a zero-length timer: with the literal PT1H default there
+    // is no escalation yet. (Pre-fix, the `=nodeTimeout` null duration fired here during settle.)
+    assert.ok(
+      (await app.engine.searchUserTasks({ state: "CREATED" })).every((t) => !t.elementId?.endsWith("__esc")),
+      "both timeouts absent must fall back to the literal PT1H default, NOT fire the boundary instantly",
+    );
+
+    // Not fired well before PT1H either (a real hour-long SLA, not an almost-instant timer).
+    await app.advanceTime(2_100);
+    assert.ok(
+      (await app.engine.searchUserTasks({ state: "CREATED" })).every((t) => !t.elementId?.endsWith("__esc")),
+      "the literal default is a real PT1H SLA — it has not fired a couple of seconds in",
+    );
+
+    // Elapse past the literal PT1H → the boundary fires exactly as a real hour-long timer would.
+    await app.advanceTime(3_600_000);
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.endsWith("__esc"));
+    assert.ok(esc.length >= 1, `the literal PT1H default eventually escalates the parked node, got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`);
   });
 });

@@ -730,6 +730,13 @@ declared facts, which downstream edges bind.
 > it — extend the gate's `poll.timeoutMs` and re-dispatch, or abandon the run. (Same for
 > `onTimeout: "continue"`, which proceeds past the gate as not-ready with **no** human stop
 > at all.)
+>
+> **Exception — a `wait` that declares `emits` now requires a valid resume value (#872).** If
+> the gate declares output facts, a downstream edge binds them, so releasing with a missing or
+> malformed value would thread `null` onto that consumer. Such an escalation is therefore
+> **validated**: an omitted/invalid operator value **re-parks** the task (the gate does not
+> proceed) rather than releasing as not-ready — you must supply a usable value to complete it.
+> The "proceeds as not-ready" behavior above applies to a `wait` with **no** declared emits.
 
 > **Why the split?** Making the compile door the end of the agent surface closes a
 > self-approval hole: the old flow handed the same caller a content-addressed approval token
@@ -923,7 +930,11 @@ Semantics:
   259200000 }` (re-probe every 5 minutes, budget 3 days). **Omitting `poll` inherits the
   30-minute default** (§9.1) — the gate would escalate long before the epic lands, and (per
   §9.2) completing that escalation would release `start-b` **as not-ready**, launching feature
-  B before its dependency merged. Size `timeoutMs` to how long the epic realistically takes.
+  B before its dependency merged. (Because this gate binds `prCount` (below), that timed-out
+  escalation is **validated** per §9.2's emit exception — an operator cannot clear it without
+  supplying a valid `prCount`; it re-parks otherwise — but sizing `timeoutMs` correctly is still
+  how you avoid reaching that escalation at all.) Size `timeoutMs` to how long the epic
+  realistically takes.
 - On a fully-merged match it binds **`prCount`** (how many slice PRs the epic landed) as an
   output fact, so a downstream node can consume it (parity with the `pr` kind's `mergedSha`).
 - **It also gates a single-PR *feature run*, not just a plan-fanout epic.** The gate resolves the

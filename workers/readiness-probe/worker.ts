@@ -177,7 +177,15 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // `check.sh` command — is never unresolved and reaches `parseProbe` verbatim, PR #876 review.)
   const unresolved = unresolvedTargetDetail(job.variables.probe);
   if (unresolved !== null) {
-    app.log.warn(`readiness gate not ready: ${unresolved}`);
+    // Boundary-only WARN policy (mirrors probeSingleShot, PR #876 review): an unresolved late-bound
+    // target stays unresolved for the WHOLE bounded wait, so the engine re-activates this job on every
+    // poll tick. Warning on each activation would emit ~120 WARN lines over a 30-minute gate at the
+    // 15s default cadence and drown the one that matters. Reserve WARN for the final attempt (the
+    // escalation trigger) and log intermediate activations at info — the same boundary-only policy
+    // probeSingleShot applies to a not-ready probe.
+    const msg = `readiness gate not ready: ${unresolved}`;
+    if (job.variables.lastAttempt === true) app.log.warn(msg);
+    else app.log.info(msg);
     return { ready: false, detail: unresolved };
   }
   const probe = parseProbe(job.variables.probe);
