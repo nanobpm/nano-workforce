@@ -13,7 +13,7 @@
       "key": "decision",
       "label": "Resolution",
       "defaultValue": "continue",
-      "description": "Escalation of an agent or connector step: Retry re-runs the step (the note below is passed to the agent as guidance). Continue completes it as resolved — supply the emitted value if the step was finished out of band.",
+      "description": "Escalation of an agent or connector step: Retry re-runs the step (for an agent step, the note below is passed to the agent as guidance; a connector step ignores the note). Continue completes it as resolved — supply the emitted value if the step was finished out of band.",
       "values": [
         {
           "label": "Continue",
@@ -35,7 +35,7 @@
       "type": "textarea",
       "key": "note",
       "label": "Note (optional)",
-      "description": "Optional. On Retry, passed to the agent as guidance for the next attempt."
+      "description": "Optional. On Retry of an AGENT step, passed to the agent as guidance for the next attempt. A connector-step retry ignores this note."
     }
   ]
 }

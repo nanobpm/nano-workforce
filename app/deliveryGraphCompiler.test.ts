@@ -2497,6 +2497,46 @@ test("connector timeout escalation is resumable with the connector's declared em
   assert(reset.includes(`target="ack"`), "the retry reset clears the connector's 'ack' emit source var");
 });
 
+test("#863 node scope: a connector's fixed result metadata (connectorOutcome/connectorDedupeKey/connectorDetail) is node-local and cleared on retry, so parallel connectors never overwrite one another's root-scoped result", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4180856788): the delivery-connector worker returns
+  // `connectorOutcome`/`connectorDedupeKey`/`connectorDetail` on EVERY completion (app/deliveryConnector.ts).
+  // Nano propagates job-completion vars to the nearest scope that defines the name, else ROOT — so without a
+  // node-local declaration two parallel connectors overwrite ONE shared root result and an escalation /
+  // downstream read sees whichever connector finished last. They must be declared node-local AND cleared on retry.
+  const graph = {
+    name: "two-connectors-result",
+    nodes: [
+      { id: "notifyA", kind: "connector", connector: { target: "slack:#a", payload: { pr: null } } },
+      { id: "notifyB", kind: "connector", connector: { target: "slack:#b", payload: { pr: null } } },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  for (const nodeId of ["notifyA", "notifyB"]) {
+    const el = elementForNode(r.bpmn, nodeId);
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+    for (const v of ["connectorOutcome", "connectorDedupeKey", "connectorDetail"]) {
+      assert(io.includes(`source="=null" target="${v}"`), `connector '${nodeId}' declares '${v}' node-local on the subProcess`);
+      assert(new RegExp(`<zeebe:output source="=null" target="${v}" />`).test(reset), `connector '${nodeId}' clears '${v}' on retry`);
+    }
+  }
+});
+
+test("node scope: an agent node never declares the connector-only result metadata (no cross-kind leakage of CONNECTOR_RESULT_LOCAL_VARS)", async () => {
+  // Fail-closed guard: the connector result vars are connector-specific; an agent node must not declare
+  // them node-local (they are not part of an agent's completion contract), so the two localisation sets
+  // stay disjoint-by-kind.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  for (const v of ["connectorOutcome", "connectorDedupeKey", "connectorDetail"]) {
+    assert(!io.includes(`target="${v}"`), `the agent node does not declare connector-only '${v}'`);
+  }
+});
+
 test("preflight: the inner service task asserts its runner-seeded nodeInputs before any job exists (leaf, not the subProcess)", async () => {
   const r = await compileOk(PRODUCER_GATE);
   const el = elementForNode(r.bpmn, "open");
@@ -2554,6 +2594,25 @@ test("retry-node: the reset re-derives appendPrompt from the runner-seeded nodeI
   assert(appendLine, "the reset writes appendPrompt");
   assert(appendLine.includes(`nodeInputs.${el}.appendPrompt`), "it builds on the runner-seeded baseline, not the live (note-carrying) appendPrompt");
   assert(!/is defined\(appendPrompt\)/.test(appendLine), "it never reads the live appendPrompt var");
+});
+
+test("escalation form structure: the delivery-escalation form has a `decision` select defaulting to `continue` with `continue`/`retry` options (so Retry is reachable in the Tasks UI)", async () => {
+  // Regression guard (PR #863 Copilot "Previously missed", delivery-escalation.form:16): the compiled
+  // tasks only reference the form by ID and the E2E completes tasks programmatically, so renaming/
+  // removing the `decision` key or its `retry` option would leave the suite green yet make Retry
+  // unavailable in the Tasks UI. Parse the actual form and assert its select key, values, and default —
+  // the same contract the compiler's retry gateway reads (`decision = "retry"`).
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const formPath = fileURLToPath(new URL("../resources/forms/delivery-escalation.form", import.meta.url));
+  const form = JSON.parse(readFileSync(formPath, "utf8")) as {
+    components: { type: string; key?: string; defaultValue?: string; values?: { value: string }[] }[];
+  };
+  const select = form.components.find((c) => c.type === "select" && c.key === "decision");
+  assert(select, "the form exposes a `decision` select the retry gateway keys off");
+  assertEquals(select?.defaultValue, "continue", "the select defaults to `continue` (safe non-retry default)");
+  const optionValues = (select?.values ?? []).map((v) => v.value).sort();
+  assertEquals(optionValues.join(","), "continue,retry", "the select offers exactly `continue` and `retry`");
 });
 
 test("escalation forms: service-node escalations attach delivery-escalation (retry select); human + wait-gate tasks keep the generic form", async () => {

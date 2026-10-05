@@ -213,6 +213,20 @@ const AGENT_RESULT_LOCAL_VARS = [
   "delta",
 ] as const;
 
+/** The fixed result metadata the delivery-connector worker returns on every job completion
+ * (`connectorOutcome`/`connectorDedupeKey`/`connectorDetail` — see `dispatchConnector` in
+ * app/deliveryConnector.ts). Like the agent result set, Nano propagates these to the NEAREST scope that
+ * defines each name, else the ROOT — so without a node-local declaration two parallel connectors
+ * overwrite ONE shared root `connectorOutcome`/`connectorDedupeKey`/`connectorDetail`, and an escalation
+ * or downstream read sees whichever connector finished last. Declaring them `null` on the node's
+ * subProcess (and clearing them on a retry reset) keeps each connector's result metadata node-local,
+ * just as {@link AGENT_RESULT_LOCAL_VARS} does for agents. */
+const CONNECTOR_RESULT_LOCAL_VARS = [
+  "connectorOutcome",
+  "connectorDedupeKey",
+  "connectorDetail",
+] as const;
+
 /** The node-local boolean the preflight input mapping binds (see {@link nodeInputsPreflightFeel}). */
 const NODE_INPUTS_PREFLIGHT_VAR = "nodeInputsPresent";
 
@@ -1840,13 +1854,19 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
   // propagation lands them here instead of the shared root. BOTH service-node kinds (agent AND connector)
   // also localise each declared emit's source variable (an agent/connector fact's source is the fact's
   // own name — see factSourceVar), so a sibling's same-named emit can never satisfy this node's contract
-  // gate or publish through this node's `<el>_<fact>` output. A `DeliveryNodeConnector` permits `emits`
-  // too, so WITHOUT this a timed-out connector could publish a parallel sibling connector's root-scoped
-  // result through its own output mapping (Copilot review #863, thread r4179717614).
+  // gate or publish through this node's `<el>_<fact>` output. A connector ALSO returns fixed result
+  // metadata (`connectorOutcome`/`connectorDedupeKey`/`connectorDetail`); without localising those too,
+  // parallel connectors overwrite each other's root-scoped result (Copilot review #863, thread
+  // r4180856788) exactly as parallel agents once overwrote one shared root status/pr.
+  // A `DeliveryNodeConnector` permits `emits` too, so WITHOUT this a timed-out connector could publish a
+  // parallel sibling connector's root-scoped result through its own output mapping (Copilot review #863,
+  // thread r4179717614).
   if (node.kind === "agent" || node.kind === "connector") {
     const locals = new Set<string>(ESCALATION_LOCAL_VARS);
     if (node.kind === "agent") {
       for (const v of AGENT_RESULT_LOCAL_VARS) locals.add(v);
+    } else {
+      for (const v of CONNECTOR_RESULT_LOCAL_VARS) locals.add(v);
     }
     for (const fact of normaliseEmits(node)) locals.add(factSourceVar(node.kind, fact));
     const taken = new Set(inputs.map((i) => i.target));
@@ -2186,9 +2206,10 @@ function retryResolutionLines(el: string, incoming: readonly string[], emits: re
   // (AGENT_RESULT_LOCAL_VARS — every field declared node-local, not just the five self-reported status
   // fields) so a retried worker that omits an optional field (transcriptUrl, agentCheckpoint, a PR
   // alias, exitCode, …) cannot let the previous attempt's value republish downstream or surface in the
-  // next escalation. The status/summary fields and prompt-guidance are agent-specific (a connector has
+  // next escalation. For a connector, clear its fixed result metadata (CONNECTOR_RESULT_LOCAL_VARS) for
+  // the same reason. The status/summary fields and prompt-guidance are agent-specific (a connector has
   // no self-reported status contract or prompt).
-  const cleared = new Set<string>(isAgent ? AGENT_RESULT_LOCAL_VARS : []);
+  const cleared = new Set<string>(isAgent ? AGENT_RESULT_LOCAL_VARS : CONNECTOR_RESULT_LOCAL_VARS);
   for (const f of emits) cleared.add(factSourceVar(kind, f));
   for (const v of cleared) outputs.push({ source: "=null", target: v });
   if (isAgent) {

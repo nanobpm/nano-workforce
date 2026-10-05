@@ -988,7 +988,9 @@ escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
   `value`/`note`, and (for an agent) the **full declared result set**
   (`AGENT_RESULT_LOCAL_VARS` — the self-reported `status`/`summary`/… **and** every other
   node-local result field such as `transcriptUrl`, `agentCheckpoint`, and the PR aliases)
-  plus the previous attempt's emits — and appends the operator's `note` to the agent
+  — or, **for a connector**, its fixed result metadata (`CONNECTOR_RESULT_LOCAL_VARS` —
+  `connectorOutcome`/`connectorDedupeKey`/`connectorDetail`) — plus the previous attempt's
+  emits — and appends the operator's `note` to the agent
   prompt as guidance for the next attempt (re-derived from the runner-seeded
   `nodeInputs.<el>.appendPrompt` baseline, so consecutive retries never accumulate stale
   guidance). Clearing the whole declared set (not just the status fields) stops a retried
