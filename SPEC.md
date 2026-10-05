@@ -975,14 +975,19 @@ escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
 `decision` select):
 
 - **Continue** (`decision="continue"`, the default) completes the node as resolved. If
-  the node declares `emits`, the form presents a typed-value field and maps the
-  operator-supplied `value` onto the node's emit-source var (`factSourceVar`), so the
+  the node declares **exactly one** emit, the form presents a typed-value field and maps
+  the operator-supplied `value` onto the node's emit-source var (`factSourceVar`), so the
   subProcess output publishes the same `<el>_<fact>` a normal completion would —
   letting work finished out of band (a draft PR the stalled agent already opened) be
   handed onward instead of threading a null downstream. This applies to **both** `agent`
   and `connector` emits: a connector has no producer-contract gate, so its resume keys
   off the node's **own** declared `emits` (emit source = the fact's own name), never the
-  agent-only gate metadata.
+  agent-only gate metadata. The single-emit boundary is a hard cardinality rule: the
+  form captures ONE value, so a node declaring **zero** emits has nothing to resume (the
+  field stays blank) and a node declaring **two or more** emits is **not** value-resumable
+  — one value cannot satisfy multiple distinct typed facts without corrupting them, so
+  Continue writes no facts and the downstream guarded split takes its deadlock-safe
+  default; **Retry this step** is the way to actually produce the facts.
 - **Retry this step** (`decision="retry"`) re-runs the node. A none intermediate throw
   event (never a scriptTask) resets the node-local scratch — the decision, the captured
   `value`/`note`, and (for an agent) the **full declared result set**

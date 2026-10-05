@@ -28,8 +28,8 @@
     {
       "type": "textfield",
       "key": "value",
-      "label": "Emitted value (only if this step emits a fact)",
-      "description": "The typed value this step hands forward to its downstream dependents. Leave blank for a click-done step that emits nothing."
+      "label": "Emitted value (only when this step emits exactly one fact)",
+      "description": "The typed value this step hands forward to its downstream dependents, applied on Continue. It is applied ONLY when the step emits exactly one fact: leave it blank for a click-done step that emits nothing, and for a step emitting more than one fact any entry here is discarded (a single value cannot satisfy several distinct facts) — choose \"Retry this step\" to actually produce those facts."
     },
     {
       "type": "textarea",

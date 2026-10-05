@@ -2651,6 +2651,28 @@ test("escalation form structure: the delivery-escalation form has a `decision` s
   assertEquals(optionValues.join(","), "continue,retry", "the select offers exactly `continue` and `retry`");
 });
 
+test("escalation form structure: the delivery-escalation value field states its single-emit boundary (a zero/multi-emit entry is discarded)", async () => {
+  // Regression guard (PR #863 Copilot "Previously missed", delivery-escalation.form:32): the compiler
+  // maps the operator's `value` onto an emit source ONLY when the node declares exactly one emit
+  // (`resumableEmit` — with zero emits there is nothing to resume; with >1 a single value cannot
+  // satisfy multiple distinct typed facts without corrupting them). The Tasks surface seeds no form
+  // variables, so a `conditional.hide` on `emitMode` cannot fire (issue #772) — the static form cannot
+  // disable the field per node. Its copy must therefore STATE the cardinality boundary, so an operator
+  // never enters a value that is silently discarded.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const formPath = fileURLToPath(new URL("../resources/forms/delivery-escalation.form", import.meta.url));
+  const form = JSON.parse(readFileSync(formPath, "utf8")) as {
+    components: { key?: string; label?: string; description?: string }[];
+  };
+  const value = form.components.find((c) => c.key === "value");
+  assert(value, "the escalation form keeps its single `value` field");
+  const copy = `${value?.label ?? ""}\n${value?.description ?? ""}`;
+  assert(/exactly one (emitted )?fact/i.test(copy), "the value field copy states the single-emit boundary");
+  assert(/more than one/i.test(copy) && /[Rr]etry/.test(copy), "the copy steers a multi-emit resolution to Retry (its value would be discarded)");
+  assert(/emits nothing/i.test(copy), "the copy tells a zero-emit step to leave the field blank");
+});
+
 test("escalation forms: service-node escalations attach delivery-escalation (retry select); human + wait-gate tasks keep the generic form", async () => {
   // Regression guard (PR #863 adversarial review): the retry Resolution select must render ONLY where
   // retry semantics exist. The wait-gate escalation (no retryElement) and the plain human node share
