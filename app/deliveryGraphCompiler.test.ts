@@ -488,6 +488,28 @@ test("#863 human multi-emit: a human node publishing several non-artifact facts 
   assert(/<zeebe:output source="=if \(is defined\(humanEmitValue\)\) then humanEmitValue else null" target="[^"]+_verdict" \/>/.test(sSub), "a single-emit human node still publishes its one fact from humanEmitValue");
 });
 
+test("#863 human mixed emits: the discard boundary counts NON-ARTIFACT emits, so one scalar + one artifact still publishes the scalar", async () => {
+  // Regression guard (PR #863 adversarial finding): the value-field boundary is a NON-ARTIFACT-emit
+  // cardinality rule, not a TOTAL-emit one. A human node emitting ONE scalar plus ONE artifact has two
+  // emits in total, yet its single scalar IS published from the captured `humanEmitValue` (one value
+  // satisfies one scalar fact) and the artifact reads the distinct `humanEmitArtifact` — NEITHER is
+  // discarded. The form copy must describe exactly this boundary (see the form-structure guard), so
+  // pin the compiler side: a mixed node does NOT discard its scalar.
+  const mixed = await compileOk({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }, { name: "report", type: "artifact" }] },
+    ],
+    edges: [],
+  });
+  const el = elementForNode(mixed.bpmn, "h");
+  const sub = mixed.bpmn.slice(mixed.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</bpmn:subProcess>"));
+  // The single NON-ARTIFACT emit IS sourced from the captured value (NOT discarded)…
+  assert(/<zeebe:output source="=if \(is defined\(humanEmitValue\)\) then humanEmitValue else null" target="[^"]+_verdict" \/>/.test(io), "a mixed artifact+scalar human node still publishes its one scalar fact from humanEmitValue");
+  // …and the artifact emit reads the distinct artifact capture, never the scalar value.
+  assert(/<zeebe:output source="=if \(is defined\(humanEmitArtifact\)\) then humanEmitArtifact else null" target="[^"]+_report" \/>/.test(io), "the artifact emit reads humanEmitArtifact, not the shared humanEmitValue");
+});
+
 
 test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", async () => {
   const errors = await compileFail({
@@ -2745,16 +2767,21 @@ test("escalation form structure: the delivery-escalation value field states its 
   assert(/emits nothing/i.test(copy), "the copy tells a zero-emit step to leave the field blank");
 });
 
-test("human form structure: the delivery-human-generic value field states its single-emit boundary (a zero/multi-emit entry is discarded)", async () => {
+test("human form structure: the delivery-human-generic value field states its single-VALUE boundary (a zero/multi-VALUE entry is discarded)", async () => {
   // Regression guard (PR #863 adversarial review — sibling of the delivery-escalation.form:32 fix):
   // the SHARED generic human form carries the same single unconditional `value` field. The compiled
   // human body (humanBodyLines) and delivery-human.bpmn map it onto `humanEmitValue` unconditionally,
-  // and the wait-gate escalation maps it onto an emit source ONLY for a single-emit node — so for a
-  // zero- or multi-emit task an operator entry is silently discarded (or cannot satisfy several
-  // distinct typed facts). The Tasks surface seeds no form variables, so a `conditional.hide` on
-  // `emitMode` cannot fire (issue #772) — the static form cannot disable the field per task. Its copy
-  // must therefore STATE the cardinality boundary. Unlike the escalation form there is no Retry
-  // select here, so the copy must NOT steer to Retry.
+  // and the subProcess output (ioMappingLines) sources a non-artifact emit from it ONLY when the node
+  // declares EXACTLY ONE non-artifact emit — so for a zero- or multi-VALUE task an operator entry is
+  // silently discarded (one value cannot satisfy several distinct typed facts). The boundary counts
+  // NON-ARTIFACT (value) emits, NOT total emits: an `artifact` emit is captured by a SEPARATE field
+  // (`humanEmitArtifact`), so a step emitting one value plus one artifact still applies this field.
+  // The copy must say exactly that, or it misleads the operator of a mixed artifact+scalar step into
+  // thinking their entry is discarded when it is published (the drift this guard regresses). The Tasks
+  // surface seeds no form variables, so a `conditional.hide` on `emitMode` cannot fire (issue #772) —
+  // the static form cannot disable the field per task. Its copy must therefore STATE the cardinality
+  // boundary. Unlike the escalation form there is no Retry select here, so the copy must NOT steer to
+  // Retry.
   const { readFileSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const formPath = fileURLToPath(new URL("../resources/forms/delivery-human-generic.form", import.meta.url));
@@ -2764,9 +2791,10 @@ test("human form structure: the delivery-human-generic value field states its si
   const value = form.components.find((c) => c.key === "value");
   assert(value, "the generic human form keeps its single `value` field");
   const copy = `${value?.label ?? ""}\n${value?.description ?? ""}`;
-  assert(/exactly one (emitted )?fact/i.test(copy), "the value field copy states the single-emit boundary");
-  assert(/more than one/i.test(copy) && /discarded/i.test(copy), "the copy warns that a multi-emit entry is discarded");
-  assert(/emits nothing/i.test(copy), "the copy tells a zero-emit step to leave the field blank");
+  assert(/exactly one value-emitting \(non-artifact\) fact/i.test(copy), "the value field copy states the single-VALUE (non-artifact) boundary");
+  assert(/more than one/i.test(copy) && /discarded/i.test(copy), "the copy warns that a multi-value entry is discarded");
+  assert(/emits no value-emitting fact/i.test(copy), "the copy tells a zero-value step to leave the field blank");
+  assert(/artifact/i.test(copy), "the copy names the artifact carve-out (an artifact emit is captured separately)");
   assert(!/[Rr]etry/.test(copy), "the generic form has no Retry select, so its copy must not steer to one");
 });
 
