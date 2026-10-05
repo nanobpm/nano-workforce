@@ -136,16 +136,19 @@ const reportedStatusLead = (status: string, delivery: string): string =>
 // "no adoptable PR was found on the base branch" (it does NOT verify branch existence — a wrong-base PR
 // leaves the branch pushed, so it never claims "no branch"); an unverified delivery says so instead of
 // asserting an absence never checked. The automatic-adoption promise is likewise evidence-gated (#865
-// review round 6): only a VERIFIED lookup may say a delivered PR "would have been adopted automatically"
-// — an UNVERIFIED outcome (a reported non-completion status such as `failed`/`needs_input`/`escalated`
-// with no answerable question bypasses reconciliation, so NO lookup ran) must not promise an adoption
-// that never happened; it asks the operator to check for an existing PR before re-running.
+// review round 6): only a VERIFIED lookup may say a delivered PR "would have been adopted automatically".
+// An UNVERIFIED outcome — the SAME three `deliveryVerified === false` cases `deliveryClause` names (a
+// reported non-completion status with no answerable question bypasses reconciliation so no lookup ran,
+// OR the lookup threw, OR the transport was unavailable) — must not promise an adoption that never
+// happened. Because the thrown/unavailable paths DID attempt a lookup, the wording says a lookup never
+// CONFIRMED delivery (not the false "no lookup ran"), and asks the operator to check for an existing PR
+// before re-running (#865 review round 6).
 function recoveryTail(pr: string | undefined, deliveryVerified: boolean): string {
   const absence = pr
     ? `A pull request may already be open as ${pr} — check and retarget or adopt it before re-running`
     : deliveryVerified
       ? "A delivered PR on the slice's `feat/<task.id>` branch targeting this run's base would have been adopted automatically; no adoptable PR was found on the base branch (the branch may still be pushed — e.g. a PR targeting a different base — so check and retarget it before re-running)"
-      : "No GitHub lookup ran for this outcome, so a delivered PR on the slice's `feat/<task.id>` branch would NOT have been adopted automatically — check whether one already exists (and retarget or adopt it) before re-running";
+      : "No GitHub lookup confirmed delivery for this outcome, so a delivered PR on the slice's `feat/<task.id>` branch would NOT have been adopted automatically — check whether one already exists (and retarget or adopt it) before re-running";
   return `${absence} (if the agent worked OUTSIDE its run workspace — e.g. \`cd /tmp/<repo>\` — those edits were discarded on teardown). Choose "Answer" and give guidance to re-run the slice — or choose "Abandon" to skip it and continue.`;
 }
 

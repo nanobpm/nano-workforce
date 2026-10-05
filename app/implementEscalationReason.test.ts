@@ -188,6 +188,18 @@ test("implementEscalationQuestion: an UNVERIFIED delivery never promises automat
   }
 });
 
+test("implementEscalationQuestion: an UNVERIFIED delivery never falsely claims 'no lookup ran' (#865 review round 6b)", () => {
+  // `deliveryVerified === false` covers THREE paths in reconcileImplement: the reconciliation bypass
+  // (no lookup ran), the catch where the lookup THREW, and a `null` listing (transport unavailable). On
+  // the latter two a lookup WAS attempted, so the recovery text must say a lookup never CONFIRMED
+  // delivery — never the false blanket "no lookup ran" for an outcome where one did run.
+  for (const status of ["failed", "needs_input", "escalated", "completed"]) {
+    const q = implementEscalationQuestion({ status, deliveryVerified: false });
+    assertEquals(q.includes("No GitHub lookup ran"), false, `status=${status} must not claim no lookup ran`);
+    assertEquals(q.includes("No GitHub lookup confirmed delivery"), true, `status=${status} must frame the absence as unconfirmed`);
+  }
+});
+
 test("implementEscalationQuestion: a VERIFIED absence still promises automatic adoption (the lookup ran) (#865 review round 6)", () => {
   // The verified branch is the one place the adoption promise IS accurate: a lookup ran and confirmed no
   // adoptable PR, so a delivered PR on the right base genuinely would have been adopted. Guard the
