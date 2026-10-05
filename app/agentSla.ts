@@ -1,5 +1,6 @@
-// Agent-task liveness SLA policy — kept as a pure module (no env, no I/O beyond the one env read
-// for the canonical constant) so it is trivially testable, mirroring app/escalationSla.ts. Every
+// Agent-task liveness SLA policy — kept as a pure module (the only I/O is the single canonical
+// env read for the constant, through the ONE typed env schema) so it is trivially testable,
+// mirroring app/escalationSla.ts. Every
 // process start that hosts an external agent task seeds the validated `agentSlaTimeout` process
 // variable (issue #849): `app/service.ts` for the convergence- and merge-loops, `app/feature.ts`
 // for a single-issue feature run, `app/plan.ts` for the epic plan-fanout, `app/retro.ts` for the
@@ -20,6 +21,7 @@
 // escalation path so a human is pulled in. It is a durable, in-process backstop — no external
 // watchdog required.
 
+import { readEnv } from "./contracts.ts";
 import { isoDuration } from "./reviewWait.ts";
 
 /** Default agent-task SLA (ISO-8601 duration): how long an external agent service task may sit
@@ -45,5 +47,8 @@ export function agentSlaTimeout(
  * (issue #849). Lives in this leaf module (not `app/service.ts`) so every seeder — service,
  * feature, plan, retro, deliveryRunner — imports it without an import cycle. Seeding is universal,
  * but only the bounded subset (implement-cell, merge-cell, merge-loop, retro) evaluates it via a
- * boundary timer today; convergence-loop / plan-fanout are pre-seeded for #868. */
-export const AGENT_SLA_TIMEOUT = agentSlaTimeout(process.env.NANO_PR_AGENT_SLA_TIMEOUT);
+ * boundary timer today; convergence-loop / plan-fanout are pre-seeded for #868. The env key is read
+ * through the ONE typed env schema (`readEnv` over the `NANO_PR_AGENT_SLA_TIMEOUT` registry entry,
+ * AGENTS.md issue #227) — never `process.env` directly — so a synonym/typo is a compile-time error,
+ * not a silent runtime fallback. */
+export const AGENT_SLA_TIMEOUT = agentSlaTimeout(readEnv("NANO_PR_AGENT_SLA_TIMEOUT"));

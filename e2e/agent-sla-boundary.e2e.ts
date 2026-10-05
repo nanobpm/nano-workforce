@@ -278,7 +278,7 @@ describe("agent-task SLA boundary — rerouted recorder→escalation arms (#849 
       await advancePastTimer(app, UNDER_AGENT_SLA_MS);
       let flows = takenFlows(app);
       assert.ok(
-        !flows.includes("be_trial_agent_sla->record-trial-merge"),
+        !flows.includes("be_trial_agent_sla->record-trial-merge-sla"),
         "under the SLA the trial-merge agent boundary has NOT fired",
       );
       assert.ok(
@@ -286,15 +286,16 @@ describe("agent-task SLA boundary — rerouted recorder→escalation arms (#849 
         "no trial-merge decision task before the SLA elapses",
       );
 
-      // Past the SLA the interrupting boundary cancels the hung agent and routes through the recorder.
+      // Past the SLA the interrupting boundary cancels the hung agent and routes through the
+      // dedicated SLA recorder (record-trial-merge-sla) — NOT the shared normal-path recorder.
       await advancePastTimer(app, PAST_AGENT_SLA_MS);
       flows = takenFlows(app);
       assert.ok(
-        flows.includes("be_trial_agent_sla->record-trial-merge"),
-        `the agent SLA boundary fired into record-trial-merge (flows: ${flows.join(", ")})`,
+        flows.includes("be_trial_agent_sla->record-trial-merge-sla"),
+        `the agent SLA boundary fired into the SLA recorder (flows: ${flows.join(", ")})`,
       );
       assert.ok(
-        flows.includes("record-trial-merge->gw-trial"),
+        flows.includes("record-trial-merge-sla->gw-trial"),
         "the SLA recorder handed off to the trial-red gateway",
       );
       assert.ok(
@@ -303,6 +304,108 @@ describe("agent-task SLA boundary — rerouted recorder→escalation arms (#849 
       );
       const task = await openTaskById(app, processKey, "trial-merge-decision");
       assert.ok(task?.userTaskKey, "the merge-cell parked a completable trial-merge decision task");
+    } finally {
+      await app.stop();
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  // Regression for PR #864 review r3: on an SLA during a RERUN the recorder must not replay the
+  // prior COMPLETED attempt's process-scope `result`/`summary`/`conflicts`/`failing`. The
+  // `=null` ioMapping on `trial-merge` is task-local, so without a dedicated SLA recorder the
+  // interrupted second attempt would inherit attempt one's stale verdict. Drive ONE instance: a
+  // suite-failed first attempt escalates, the human answers "rebase" to rerun, the second agent
+  // parks, the SLA fires — then assert on the durable audit (`plan_trial_merges`): the SLA row must
+  // carry the TIMEOUT verdict (and cleared conflicts/failing), while the first attempt's row keeps
+  // the agent's real output (the normal path is not clobbered by the SLA literals).
+  test("merge-cell: an SLA on a rerun does NOT replay the prior attempt's stale result/summary", async () => {
+    const { app, dbDir } = await bootApp();
+    try {
+      // First dispatch completes SUITE-FAILED with a distinctive stale summary (seeding process
+      // scope); the rerun's dispatch parks (the `firstDone` flag flips the mock to no-match → the
+      // job stays locked → the SLA boundary fires).
+      let firstDone = false;
+      app.engine
+        .mockWorker("senior:trial-merge")
+        .when(() => !firstDone)
+        .completeWith({
+          result: "suite-failed",
+          summary: "stale prior-attempt summary",
+          conflicts: ["stale-conflict"],
+          failing: ["stale-spec"],
+        });
+
+      const { processInstanceKey } = await app.engine.createInstance({
+        processDefinitionId: "merge-cell",
+        variables: {
+          planKey: "owner/repo#1",
+          repo: "owner/repo",
+          trialMergeWave: 1,
+          agentSlaTimeout: AGENT_SLA_TIMEOUT,
+          escalationSlaTimeout: DEFAULT_ESCALATION_SLA_TIMEOUT,
+        },
+      });
+      const processKey = String(processInstanceKey);
+      await settleFully(app);
+
+      // Attempt 1 escalates to the human decision; its audit row keeps the AGENT's real output
+      // (proving the dedicated SLA recorder's literals do NOT clobber the normal path).
+      let flows = takenFlows(app);
+      assert.ok(
+        flows.includes("trial-merge->record-trial-merge") && flows.includes("gw-trial->trial-merge-decision"),
+        `a suite-failed first attempt records normally and escalates (flows: ${flows.join(", ")})`,
+      );
+      const auditsAfterFirst = await app.db
+        .table<{ id: number; plan_key: string; summary: string | null }>("plan_trial_merges", "id")
+        .find({ plan_key: "owner/repo#1" });
+      assert.equal(auditsAfterFirst.length, 1, "one audit row after the first attempt");
+      assert.equal(
+        auditsAfterFirst[0].summary,
+        "stale prior-attempt summary",
+        "the normal path records the agent's real summary (not the SLA literal)",
+      );
+      const first = await openTaskById(app, processKey, "trial-merge-decision");
+      assert.ok(first?.userTaskKey, "the first attempt parked a trial-merge decision task");
+
+      // The human answers "rebase" → the cell reruns trial-merge. Park the second agent.
+      firstDone = true;
+      await app.engine.completeUserTask(first!.userTaskKey, { action: "rebase" });
+      await settleFully(app);
+      flows = takenFlows(app);
+      assert.ok(
+        flows.includes("gw-trial-answer->trial-merge"),
+        `the rebase answer reran the trial-merge agent (flows: ${flows.join(", ")})`,
+      );
+
+      // The second agent hangs; the SLA fires. The DEDICATED SLA recorder must pin the TIMEOUT verdict.
+      await advancePastTimer(app, PAST_AGENT_SLA_MS);
+      flows = takenFlows(app);
+      assert.ok(
+        flows.includes("be_trial_agent_sla->record-trial-merge-sla"),
+        `the rerun's agent SLA boundary fired into the dedicated SLA recorder (flows: ${flows.join(", ")})`,
+      );
+      assert.ok(
+        flows.includes("record-trial-merge-sla->gw-trial") && flows.includes("gw-trial->trial-merge-decision"),
+        "the SLA timeout verdict (suite-failed) routes through the gateway to the human decision again",
+      );
+
+      // The decisive assertion: the SLA audit row carries the TIMEOUT summary with CLEARED
+      // conflicts/failing — NOT the stale first-attempt values a shared recorder would have replayed.
+      const audits = await app.db
+        .table<{ id: number; plan_key: string; result: string; summary: string | null; conflicts: string | null; failing: string | null }>(
+          "plan_trial_merges",
+          "id",
+        )
+        .find({ plan_key: "owner/repo#1" });
+      const slaRow = audits.sort((a, b) => b.id - a.id)[0];
+      assert.equal(slaRow.result, "suite-failed", "the SLA row records the timeout verdict");
+      assert.equal(
+        slaRow.summary,
+        `The trial-merge agent exceeded its time budget (SLA ${AGENT_SLA_TIMEOUT}) without returning a machine-readable result — it is hung or looping. Acknowledge to record the timeout and decide whether to rerun the trial merge.`,
+        "the SLA row pins the timeout summary, not the stale prior-attempt summary",
+      );
+      assert.equal(slaRow.conflicts, null, "the SLA row clears the stale prior-attempt conflicts");
+      assert.equal(slaRow.failing, null, "the SLA row clears the stale prior-attempt failing list");
     } finally {
       await app.stop();
       rmSync(dbDir, { recursive: true, force: true });
