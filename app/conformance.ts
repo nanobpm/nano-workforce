@@ -350,6 +350,16 @@ export async function markConformanceSynthesisSla(
   }
   // Preserve the filed verdict: only flip review_status and append the synthesis-timeout context to
   // the existing summary (never replace it — it may carry the audit's own text + an operator ack).
+  // At-least-once worker semantics can retry `record-synthesize-sla` after it already updated the
+  // row but before the job completes; the append below is NOT idempotent, so a retry would duplicate
+  // the identical timeout paragraph. If the row is already parked at `reviewing` and its summary
+  // already ends with this exact reason, the update already landed — short-circuit so the retry is a
+  // no-op (mirrors acknowledgeConformance's idempotency guard). A genuinely later timeout only
+  // recurs after the operator ack flips status back to `reviewed`, so that path still appends afresh.
+  const existingSummary = typeof existing.summary === "string" ? existing.summary : "";
+  if (existing.review_status === CONFORMANCE_REVIEWING_STATUS && existingSummary.endsWith(input.summary)) {
+    return;
+  }
   const prior = typeof existing.summary === "string" && existing.summary.trim() ? existing.summary : null;
   const summary = prior ? `${prior}\n\n${input.summary}` : input.summary;
   await conformanceTbl(data).update(planKey, {

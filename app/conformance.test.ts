@@ -376,6 +376,48 @@ test("markConformanceSynthesisSla: inserts a minimal reviewing placeholder when 
   assertEquals(row.summary, "synthesis timed out");
 });
 
+// At-least-once worker delivery can retry `record-synthesize-sla` after it already updated the row
+// but before the job completes. The preserve-append must be idempotent: a retry carrying the same
+// timeout text must NOT append a duplicate paragraph to the audit trail.
+test("markConformanceSynthesisSla: is idempotent on an at-least-once retry (no duplicate SLA paragraph)", async () => {
+  const { data, stores } = memData();
+  await recordConformance(data, PLAN, {
+    status: "filed",
+    commentUrl: "https://x/7#issuecomment-1",
+    slicesMet: 4,
+    slicesReduced: 1,
+    slicesNotVerified: 0,
+    deviationsRaised: 1,
+    deviationsUnraised: 0,
+    hasDeviations: true,
+    summary: "6 items, 4 met",
+    report: "full conformance report",
+  });
+  const sla = {
+    summary: "The retrospective-synthesis agent exceeded its time budget without completing.",
+    processKey: "p9",
+  };
+  await markConformanceSynthesisSla(data, PLAN, sla);
+  await markConformanceSynthesisSla(data, PLAN, sla); // retry
+  const row = stores["plan_conformance"][0];
+  assertEquals(
+    row.summary,
+    "6 items, 4 met\n\nThe retrospective-synthesis agent exceeded its time budget without completing.",
+    "a retry must not append the timeout paragraph twice",
+  );
+});
+
+// The placeholder-insert branch is likewise retry-safe: a retry finds the row it inserted and must
+// not append a second copy of the reason it already carries.
+test("markConformanceSynthesisSla: placeholder insert is idempotent on retry", async () => {
+  const { data, stores } = memData();
+  const sla = { summary: "synthesis timed out", processKey: "p3" };
+  await markConformanceSynthesisSla(data, PLAN, sla);
+  await markConformanceSynthesisSla(data, PLAN, sla); // retry
+  assertEquals(stores["plan_conformance"].length, 1);
+  assertEquals(stores["plan_conformance"][0].summary, "synthesis timed out", "no duplicate reason on retry");
+});
+
 test("markConformanceSynthesisSla: rejects an untrackable reviewing row with a null processKey", async () => {
   const { data } = memData();
   await assertRejects(

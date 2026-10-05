@@ -22,6 +22,9 @@
 //
 // Run with `npm run e2e`.
 
+// MUST be the FIRST import: pins `NANO_PR_AGENT_SLA_TIMEOUT` before `app/agentSla.ts` freezes its
+// import-time `AGENT_SLA_TIMEOUT` const, so the suite is isolated from ambient config (see module).
+import { PAST_AGENT_SLA_MS, UNDER_AGENT_SLA_MS } from "./support/pin-agent-sla.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,12 +44,12 @@ const GITHUB_ENV_OVERRIDES: Record<string, string> = {
   GITHUB_TOKEN: "",
 };
 
-// The canonical agent SLA is PT2H (app/agentSla.ts DEFAULT_AGENT_SLA_TIMEOUT). Advance just past it
-// so the AGENT boundary fires but the downstream human-escalation SLA (PT24H) does NOT — isolating
-// the agent-SLA arm. The short advance (under PT2H) proves the boundary is genuinely armed on the
-// seeded duration, not firing spuriously.
-const PAST_AGENT_SLA_MS = 3 * 60 * 60 * 1000; // 3h > PT2H
-const UNDER_AGENT_SLA_MS = 30 * 60 * 1000; // 30m < PT2H
+// The agent SLA is pinned to a fixed duration (PT2H) for this suite via ./support/pin-agent-sla.ts,
+// so `AGENT_SLA_TIMEOUT` is deterministic regardless of the ambient `NANO_PR_AGENT_SLA_TIMEOUT`.
+// `PAST_AGENT_SLA_MS` (1.5×) advances just past it so the AGENT boundary fires while the downstream
+// human-escalation SLA (PT24H) stays dormant — isolating the agent-SLA arm; `UNDER_AGENT_SLA_MS`
+// (0.25×) proves the boundary is genuinely armed on the seeded duration, not firing spuriously.
+// Both thresholds derive from the SAME pinned duration, so they cannot drift from the seeded SLA.
 
 interface TakenFlow {
   from: string;
