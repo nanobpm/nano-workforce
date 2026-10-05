@@ -1,3 +1,9 @@
+## [0.200.7](https://github.com/nanobpm/nano-workforce/compare/v0.200.6...v0.200.7) (2026-10-05)
+
+### Documentation
+
+* **agent-guide:** document the feature-run start endpoint ([#874](https://github.com/nanobpm/nano-workforce/issues/874)) ([faa01f2](https://github.com/nanobpm/nano-workforce/commit/faa01f28da943dcd5fd8695cb18bd8054d08c3f1))
+
 ## [0.200.6](https://github.com/nanobpm/nano-workforce/compare/v0.200.5...v0.200.6) (2026-10-04)
 
 ### Bug Fixes
