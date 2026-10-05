@@ -196,6 +196,41 @@ test("extractFiles: strips URL spans so a citation link's path is not mined as a
   assertEquals(detectChurn(rounds).churning, false);
 });
 
+test("extractFiles: rejects scheme-less citation links so their path is not mined as a repo file", () => {
+  // A citation link WITHOUT a scheme (`github.com/o/r/blob/main/docs/guide.md`) survives the
+  // scheme-required URL strip, yet its host+path looks exactly like a nested repo file — so it must be
+  // rejected too, or four summaries citing the same bare link while fixing different files
+  // false-escalate as churn (#870, Copilot "Previously missed" review of #875). Sweep the whole class:
+  // bare-host, `www.`, and multi-label-host forms.
+  const schemeless = extractFiles(
+    "Per github.com/o/r/blob/main/docs/guide.md I fixed src/analyze.ts for the IIFE case.",
+  );
+  assertEquals(schemeless.has("github.com/o/r/blob/main/docs/guide.md"), false);
+  assertEquals(schemeless.has("docs/guide.md"), false);
+  assert(schemeless.has("src/analyze.ts"));
+  // `www.`-prefixed and deep-subdomain hosts are the same class.
+  assertEquals(extractFiles("see www.example.com/a/b/c.md").has("www.example.com/a/b/c.md"), false);
+  assertEquals(
+    extractFiles("raw.githubusercontent.com/o/r/main/pkg/x.ts here").has(
+      "raw.githubusercontent.com/o/r/main/pkg/x.ts",
+    ),
+    false,
+  );
+  // A genuine nested repo file (no dotted host segment) must still be mined — the reject is surgical.
+  assert(extractFiles("fixed docs/guide.md this round").has("docs/guide.md"));
+  assert(extractFiles("fixed src/foo.ts this round").has("src/foo.ts"));
+  // A leading-dot dotfile directory is NOT a host (no label before the dot), so it is still mined.
+  assert(extractFiles("edited .github/workflows/ci.yml").has(".github/workflows/ci.yml"));
+  // The URL is the ONLY shared token across rounds that otherwise fix different files — once it is
+  // rejected, detectChurn must NOT escalate.
+  const rounds: ChurnRound[] = Array.from({ length: CHURN_WINDOW }, (_, i) => ({
+    roundNo: i + 1,
+    status: "addressed",
+    summary: `See github.com/o/r/blob/main/docs/guide.md — fixed src/g${i}.ts this round.`,
+  }));
+  assertEquals(detectChurn(rounds).churning, false);
+});
+
 test("extractFiles: the scan is structurally capped at MAX_SCAN (no wall-clock dependence)", () => {
   // Structural cap check — deterministic regardless of machine speed (AGENTS.md:21-29 forbids a
   // nondeterministic wall-clock assertion). A valid path placed JUST PAST the 20,000-char MAX_SCAN

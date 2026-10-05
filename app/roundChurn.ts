@@ -136,6 +136,21 @@ const ROOT_BASENAME_RE =
 // paths remain. `\S+` is linear (no backtracking).
 const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/\S+/giu;
 
+// A SCHEME-LESS citation URL's host+path (`github.com/o/r/blob/main/docs/guide.md`), ANCHORED at a
+// candidate run's start. URL_RE only strips spans with an explicit `scheme://`; a bare `host.tld/path`
+// citation survives it and then satisfies NESTED_PATH_RE (dir segments + an allowlisted `guide.md`), so
+// four summaries that cite the SAME link while fixing DIFFERENT real files would intersect on the URL
+// and falsely escalate as churn (Copilot review of #870). A repo-relative path's FIRST segment is a
+// plain directory name — a dotfile dir (`.github/…`) has a LEADING dot (no label before it, so this
+// `(?:label\.)+` prefix can't match) and an ordinary dir (`src/…`) has no dot at all — whereas a URL
+// host is `label(.label)*.tld/`, so a leading dot-containing host segment followed by `/` reliably
+// marks a citation URL, not a file. Tested ONCE per bounded run (like NESTED_PATH_RE), the
+// `(?:[\w-]+\.)+` prefix is linear: the `\.` delimiter makes label boundaries unambiguous, so there is
+// no catastrophic backtracking even on an adversarial dotted run. REJECTING (not truncating) the whole
+// token is fail-open: the rare real path whose first directory literally contains a dot only MISSES a
+// churn signal, never fabricates one — the same safe direction the extension allowlist already favours.
+const SCHEMELESS_URL_RE = /^(?:[\w-]+\.)+[a-z]{2,}\/[\w.@~+-]/i;
+
 // Defensive cap on the free text scanned. The matcher above is linear, so this is belt-and-suspenders
 // (bounding Set growth and any unforeseen pathological input), not the primary perf guard; real round
 // summaries are far shorter, and truncating one only ever drops a churn SIGNAL (fail-open), never
@@ -160,6 +175,10 @@ export function extractFiles(summary: string | null | undefined): Set<string> {
     // `(?![\w.@~+-])` lookahead), instead of a `\b` that also fired before that trailing dot.
     const token = run[0].replace(/[),.;:'"`\]]+$/u, "").trim();
     if (token === "") continue;
+    // Reject a scheme-less citation URL (`github.com/o/r/blob/main/docs/guide.md`) before mining: its
+    // host+path otherwise looks exactly like a nested repo file (see SCHEMELESS_URL_RE). URL_RE already
+    // removed any `scheme://` span, so this closes the remaining citation-URL hole.
+    if (SCHEMELESS_URL_RE.test(token)) continue;
     const hit = token.match(NESTED_PATH_RE) ?? token.match(ROOT_FILE_RE) ?? token.match(ROOT_BASENAME_RE);
     if (hit === null) continue;
     const path = hit[0].trim();
