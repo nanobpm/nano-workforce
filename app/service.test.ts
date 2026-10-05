@@ -205,6 +205,9 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
           last_progress_job_key: "old-job-key-from-prior-run",
           last_progress_result: "{\"progressed\":false,\"huskRetries\":0}",
           last_progress_agent_watermark: "999",
+          // The run-scoped churn-reset watermark names a round number in the PRIOR run's numbering
+          // (issue #870); a fresh run must clear it (see the assertion below).
+          churn_escalated_round: 2,
         }],
         key: "pr_key",
       },
@@ -247,6 +250,10 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
     assertEquals(pr.last_progress_job_key, null);
     assertEquals(pr.last_progress_result, null);
     assertEquals(pr.last_progress_agent_watermark, null);
+    // The run-scoped churn-reset watermark is ALSO run-scoped and must be cleared: it names a round
+    // number in the PRIOR run's numbering, so a carried-over watermark could drop the fresh run's
+    // early rounds from the churn window and silently suppress its first churn escalation (#870).
+    assertEquals(pr.churn_escalated_round, null);
     assertEquals(pr.open_escalation_id, undefined);
     assertEquals(pr.open_escalation_question, undefined);
     assertEquals(pr.process_key, "PI-9");
