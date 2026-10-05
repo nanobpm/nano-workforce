@@ -1832,15 +1832,18 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
 
   // Node-local result scope (see AGENT_RESULT_LOCAL_VARS / ESCALATION_LOCAL_VARS): declare the variables a
   // job completion / escalation completion writes as `null` on THIS subProcess, so Nano's nearest-scope
-  // propagation lands them here instead of the shared root. An agent also localises each declared emit's
-  // source variable (an agent fact's source is the fact's own name), so a sibling's same-named emit can
-  // never satisfy this node's contract gate or publish through this node's `<el>_<fact>` output.
+  // propagation lands them here instead of the shared root. BOTH service-node kinds (agent AND connector)
+  // also localise each declared emit's source variable (an agent/connector fact's source is the fact's
+  // own name — see factSourceVar), so a sibling's same-named emit can never satisfy this node's contract
+  // gate or publish through this node's `<el>_<fact>` output. A `DeliveryNodeConnector` permits `emits`
+  // too, so WITHOUT this a timed-out connector could publish a parallel sibling connector's root-scoped
+  // result through its own output mapping (Copilot review #863, thread r4179717614).
   if (node.kind === "agent" || node.kind === "connector") {
     const locals = new Set<string>(ESCALATION_LOCAL_VARS);
     if (node.kind === "agent") {
       for (const v of AGENT_RESULT_LOCAL_VARS) locals.add(v);
-      for (const fact of normaliseEmits(node)) locals.add(factSourceVar(node.kind, fact));
     }
+    for (const fact of normaliseEmits(node)) locals.add(factSourceVar(node.kind, fact));
     const taken = new Set(inputs.map((i) => i.target));
     for (const v of locals) {
       if (!taken.has(v)) inputs.push({ source: "=null", target: v });

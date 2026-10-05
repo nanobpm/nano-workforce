@@ -2366,6 +2366,30 @@ test("node scope: an agent node declares its result vars node-local so parallel 
   }
 });
 
+test("node scope: a connector node localises every declared emit source var so two parallel connectors with the same emit never cross-publish", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4179717614): a `DeliveryNodeConnector` permits
+  // `emits` too, and its emit source is the fact's own name. Without localising it on the connector's
+  // subProcess, two parallel connectors declaring the same field read/write it at ROOT scope, so a
+  // timed-out connector could publish a sibling connector's result through its own `<el>_<fact>` output.
+  const graph = {
+    name: "two-connectors",
+    nodes: [
+      { id: "notifyA", kind: "connector", connector: { target: "slack:#a", payload: { pr: null } }, emits: [{ name: "ack", type: "string" }] },
+      { id: "notifyB", kind: "connector", connector: { target: "slack:#b", payload: { pr: null } }, emits: [{ name: "ack", type: "string" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  for (const nodeId of ["notifyA", "notifyB"]) {
+    const el = elementForNode(r.bpmn, nodeId);
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    assert(io.includes(`source="=null" target="ack"`), `connector '${nodeId}' declares its 'ack' emit source var node-local on the subProcess`);
+    // And it still publishes its own node's value onward under the flat node-unique name.
+    assert(io.includes(`target="${el}_ack"`), `connector '${nodeId}' still publishes its emit as the node-unique ${el}_ack`);
+  }
+});
+
 test("preflight: the inner service task asserts its runner-seeded nodeInputs before any job exists (leaf, not the subProcess)", async () => {
   const r = await compileOk(PRODUCER_GATE);
   const el = elementForNode(r.bpmn, "open");
