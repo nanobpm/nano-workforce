@@ -144,6 +144,12 @@ const DELEGATE_TASK_TYPE: Record<Exclude<DeliveryNode["kind"], "agent" | "human"
  * truth so the runner never hardcodes the literal it substitutes. */
 export const DELIVERY_GRAPH_PROCESS_ID = "delivery-graph";
 
+/** The run-level node SLA fallback (`PT1H`) — the SINGLE SOURCE OF TRUTH shared by the compiler's
+ * bounded-timeout ioMapping and the runner's `DEFAULTS.nodeTimeout` (PR #876 review). A node released
+ * with no per-node and no run-level timeout falls back to THIS one constant, so the two code paths can
+ * never drift to two different "default SLA" values (derivation-over-duplication). */
+export const DELIVERY_NODE_DEFAULT_TIMEOUT = "PT1H";
+
 /** The BPMN element id a `human` node's inlined user task carries. One user task per human node (the
  * compiled one-shot inlines each), so the id is per-node (`delivery-human-task__<element>`) — the
  * `isDeliveryHumanElement` convention (single source of truth in `deliveryHuman.ts`) is what keeps it
@@ -167,6 +173,16 @@ function escalationTaskElement(element: string): string {
  * OR an agent. */
 function contractEscalationTaskElement(element: string): string {
   return `${DELIVERY_HUMAN_ELEMENT}__${element}__contract`;
+}
+
+/** The internal FEEL variable the resume-validation gateway routes on (PR #876 review). Derived from
+ * the escalation task's compiler-generated element id (sanitised to a FEEL-safe identifier) — NOT from
+ * the user fact-name space — so it can never collide with a user-declared emit fact bound into the same
+ * escalation subprocess scope (an `agent`/`connector` emit binds under its own `fact.name`). This
+ * removes the need to RESERVE a user-visible fact name (`resumeValid`) and the recompilation break that
+ * reserving it would impose on durable rows that already carry a fact of that name. */
+export function resumeValidVar(esc: string): string {
+  return `${esc.replace(/[^A-Za-z0-9_]/g, "_")}__resumeValid`;
 }
 
 /** The self-reported completion statuses an `agent` node's job may return that count as a TERMINAL
@@ -1710,11 +1726,12 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
   // Null-safe bounded-timeout source (issue #872): the node's boundary timer is `=nodeTimeout`, so a
   // null `nodeInputs.<el>.timeout` seeds a null duration and the engine fires the timer IMMEDIATELY
   // (a ~0.5s escalation that looks like an instant SLA breach). Fall back to the run-level
-  // `runNodeTimeout` (seeded by the runner), then to the `DEFAULTS.nodeTimeout` literal `PT1H` — so a
-  // node released with no per-node timeout always gets a real SLA instead of a zero-length timer.
+  // `runNodeTimeout` (seeded by the runner), then to the shared `DELIVERY_NODE_DEFAULT_TIMEOUT`
+  // constant (`PT1H`) — the SAME default the runner seeds, so the two never drift (PR #876 review) —
+  // so a node released with no per-node timeout always gets a real SLA instead of a zero-length timer.
   const timeoutSource = (): string => {
     const perNode = cfg("timeout").slice(1);
-    return `=if (is defined(${perNode}) and ${perNode} != null) then ${perNode} else (if (is defined(runNodeTimeout) and runNodeTimeout != null) then runNodeTimeout else "PT1H")`;
+    return `=if (is defined(${perNode}) and ${perNode} != null) then ${perNode} else (if (is defined(runNodeTimeout) and runNodeTimeout != null) then runNodeTimeout else ${feelStr(DELIVERY_NODE_DEFAULT_TIMEOUT)})`;
   };
 
   switch (node.kind) {
@@ -2270,32 +2287,42 @@ function escalationTaskLines(
   // Defect B + PR #876 review: the operator's captured typed value is VALIDATED on this task's OWN
   // output mapping (reading the form's `value` field), which the pinned engine evaluates reliably —
   // unlike a downstream gateway's ioMapping, whose inputs/outputs are NOT visible downstream (verified
-  // engine-native). Each required emit's emit-source var is bound from `value` ONLY when it is present
-  // and type-valid (`resumeValueCondition`), else null; a `resumeValid` boolean flags the aggregate.
-  // The post-escalation gateway then routes on the SIMPLE `resumeValid = true` (a complex FEEL
+  // engine-native). The required emit's emit-source var is bound from `value` ONLY when it is present
+  // and type-valid (`resumeValueCondition`), else null; a validity boolean flags the resume.
+  // The post-escalation gateway then routes on the SIMPLE `<resumeValidVar> = true` (a complex FEEL
   // condition on the gateway mis-evaluates — verified), looping an invalid resume back onto a fresh
   // escalation task (fail closed) so it can never thread null/garbage onto the emit the subProcess
   // output ioMapping republishes downstream. The generic escalation form (`GENERIC_HUMAN_FORM`)
   // captures the operator's answer in a single `value` field — it has NO `resolvedArtifact` field — so
-  // every emit type resumes from `value`, validated per its fact type (artifact→resolvedArtifact,
+  // a single emit resumes from `value`, validated per its fact type (artifact→resolvedArtifact,
   // version→detail, …). Sourcing an artifact from a `resolvedArtifact` form field the form never sets
   // would publish null and make an artifact wait-node escalation non-resumable via the UI.
+  //
+  // MULTI-EMIT (PR #876 review): the generic form's SINGLE `value` cannot supply a distinct value per
+  // fact, so a node owing more than one required emit CANNOT be resumed from it. Copying the one
+  // `value` into every emit-source var would release duplicate/garbage facts downstream; instead we
+  // FAIL CLOSED — bind nothing and hard-set the validity flag to `false`, so the post-escalation gate
+  // always loops back (the operator re-parks) and no single value is ever threaded onto several
+  // distinct emits. (Per-fact resume would need a per-fact form, which the generic form does not have.)
   const outputs: string[] = [];
-  if (resume !== undefined && emits.length > 0) {
-    const seen = new Set<string>();
-    for (const fact of emits) {
-      const target = factSourceVar(resume.kind, fact);
-      if (seen.has(target)) continue;
-      seen.add(target);
-      outputs.push(
-        `            <zeebe:output ${attr("source", `=if ${resumeValueCondition(fact, "value")} then value else null`)} target="${target}" />`,
-      );
-    }
+  const flagVar = resume !== undefined && emits.length > 0 ? resumeValidVar(esc) : "";
+  if (resume !== undefined && emits.length === 1) {
+    const fact = emits[0];
+    const target = factSourceVar(resume.kind, fact);
     outputs.push(
-      // The aggregate validity flag the post-escalation gateway routes on. `resumeValid` is a RESERVED
-      // fact name (the validator rejects a user-declared emit with this name — see deliveryGraph.ts),
-      // so the flag can never collide with (or be shadowed by) a declared emit.
-      `            <zeebe:output ${attr("source", `=if ${emits.map((f) => `(${resumeValueCondition(f, "value")})`).join(" and ")} then true else false`)} target="resumeValid" />`,
+      `            <zeebe:output ${attr("source", `=if ${resumeValueCondition(fact, "value")} then value else null`)} target="${target}" />`,
+    );
+    outputs.push(
+      // The validity flag the post-escalation gateway routes on — an internal, compiler-generated
+      // variable name (`resumeValidVar`), never a reserved user-visible fact name, so it can neither
+      // collide with nor be shadowed by a declared emit.
+      `            <zeebe:output ${attr("source", `=if ${resumeValueCondition(fact, "value")} then true else false`)} target="${flagVar}" />`,
+    );
+  } else if (resume !== undefined && emits.length > 1) {
+    outputs.push(
+      // Fail closed: more than one required emit cannot be resumed from the generic form's single
+      // `value`, so the resume is never valid and the gate always re-parks (see the comment above).
+      `            <zeebe:output ${attr("source", "=false")} target="${flagVar}" />`,
     );
   }
   // The escalation user task shows the node's DESCRIPTIVE display name (issue #778 review) so a
@@ -2325,8 +2352,10 @@ function escalationTaskLines(
   // re-parks with an explanation instead of releasing a null/invalid fact downstream (fail closed on
   // the default). The gateway is a PLAIN exclusive gateway (NO ioMapping — a gateway's ioMapping is not
   // visible downstream in the pinned engine, verified): the per-emit validation already ran on the
-  // escalation task's OWN output mapping (binding each emit-source var + the `resumeValid` flag), so
-  // the gateway only routes on the simple `resumeValid = true` boolean.
+  // escalation task's OWN output mapping (binding the emit-source var + the validity flag), so
+  // the gateway only routes on the simple `<resumeValidVar> = true` boolean. For a multi-emit node the
+  // flag is hard-`false` (unresumable via the single-value form — see the outputs comment above), so
+  // the gate always takes its default (invalid) branch and re-parks.
   const validTarget = opts?.validTarget;
   if (validTarget === undefined) {
     throw new Error(`escalationTaskLines(${esc}): a resumable escalation requires opts.validTarget (the node end its valid resume flows to)`);
@@ -2341,7 +2370,7 @@ function escalationTaskLines(
     `        <bpmn:outgoing>${vok}</bpmn:outgoing>`,
     `        <bpmn:outgoing>${vbad}</bpmn:outgoing>`,
     "      </bpmn:exclusiveGateway>",
-    `      <bpmn:sequenceFlow id="${vok}" name="valid" sourceRef="${vg}" targetRef="${validTarget}"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resumeValid = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+    `      <bpmn:sequenceFlow id="${vok}" name="valid" sourceRef="${vg}" targetRef="${validTarget}"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${flagVar} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
     `      <bpmn:sequenceFlow id="${vbad}" name="invalid" sourceRef="${vg}" targetRef="${esc}" />`,
   ];
 }
