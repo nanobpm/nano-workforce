@@ -228,10 +228,16 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
     let seed: unknown;
     await app.engine.registerWorker("senior:a", async () => ({ status: "done", pr: PR_A, nodeInputs: null }));
     let bRuns = 0;
-    await app.engine.registerWorker("senior:b", async () => {
-      bRuns++;
-      return { status: "done", pr: PR_B };
-    });
+    const bJobTypes: unknown[] = [];
+    await app.engine.registerWorker(
+      "senior:b",
+      async (job) => {
+        bRuns++;
+        bJobTypes.push((job.variables as Record<string, unknown>).jobType);
+        return { status: "done", pr: PR_B };
+      },
+      { fetchVariables: ["jobType"] },
+    );
     const graph = {
       name: "preflight e2e",
       nodes: [
@@ -256,6 +262,20 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
     await app.engine.resolveIncident({ incidentKey: String(inc.incidentKey) });
     await app.settle();
     assert.equal(bRuns, 1, "b ran once its inputs were restored");
+    // Do NOT bless leaf-only resolution as a CONFIGURED recovery (PR #863 Copilot Medium, thread
+    // r4181322055). The KNOWN LIMITATION (nano-workforce#866) is that resolving the leaf incident
+    // re-evaluates ONLY the leaf's inputs — the subProcess-level config mappings ran once at subProcess
+    // entry and are NOT re-mapped on resolve — so this leaf-only path runs b BLIND (`jobType` is null).
+    // Assert that honestly: this scenario proves the preflight incident PREVENTS the blind run up front
+    // (bRuns stayed 0 while the config was missing) and that resolution unblocks the node — NOT that
+    // leaf-resolution restores the config. The correct recovery (re-entering the sub-process so its
+    // input mappings re-evaluate) is a separate operator action the testkit cannot drive via
+    // resolveIncident; SPEC documents it as the required workaround.
+    assert.equal(
+      bJobTypes[0] ?? null,
+      null,
+      "leaf-only resolution re-runs b BLIND (the #866 known limitation) — the preflight's value is blocking the blind run BEFORE a job exists, not restoring config on resolve",
+    );
     const flows = (app.snapshot().takenSequenceFlows ?? []) as { to: string }[];
     assert.ok(flows.some((f) => f.to === "End"), "the graph completed");
   });

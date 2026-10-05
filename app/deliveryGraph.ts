@@ -277,7 +277,7 @@ export const FACT_NAME_MAX_LENGTH = 128;
  * canonical `agent → connector[converge] → wait[pr]` shape emits the PR it opened under `pr`). The
  * worker's result write and the emit publish the SAME node-local value, so they agree; the retry reset
  * clearing both is correct (the retry must re-produce the fact). Only the escalation controls and the
- * config variables the reset would wrongly null are reserved — see {@link RESERVED_DELIVERY_FACT_NAMES}. */
+ * config variables the reset would wrongly null are reserved — see {@link reservedDeliveryFactNames}. */
 export const AGENT_RESULT_LOCAL_VARS = [
   "status",
   "summary",
@@ -307,6 +307,24 @@ export const AGENT_RESULT_LOCAL_VARS = [
   "slicesNotVerified",
   "deviationsRaised",
   "deviationsUnraised",
+  // The remaining built-in prompt result contracts (issue #863 review — thread r4181321969). Each is a
+  // documented output of a `resources/prompts/*.md` agent that a delivery node may run; omitted here it
+  // would write at the shared ROOT, where a parallel node overwrites it and a retry retains a stale
+  // value:
+  //   • `dependsOn` — fix-ci.md / rebase.md: the PR(s) that must merge first (`waiting-on-pr`).
+  //   • `adversarialFindings` / `adversarialSummary` — adversarial-review.md.
+  //   • `scopeBlocked` / `scopeBlockReason` — scope-classify.md.
+  //   • `tasks` — plan.md (the decomposed task list).
+  //   • `result` / `conflicts` / `failing` — trial-merge.md.
+  "dependsOn",
+  "adversarialFindings",
+  "adversarialSummary",
+  "scopeBlocked",
+  "scopeBlockReason",
+  "tasks",
+  "result",
+  "conflicts",
+  "failing",
 ] as const;
 
 /** The fixed result metadata the delivery-connector worker returns on every job completion
@@ -334,25 +352,24 @@ export const ESCALATION_DECISION_RETRY = "retry";
  * stale value. Defined HERE so the validator's reserved set can derive from it without a cycle. */
 export const ESCALATION_LOCAL_VARS = [ESCALATION_DECISION_VAR, "value", "note"] as const;
 
-/** The per-kind subProcess **config** variable names a node's compiled `ioMappingLines` seeds from the
- * runner's `nodeInputs.<el>` (agent `jobType`/`appendPrompt`/`nodeTimeout`/`transcriptUrlBase`,
- * connector `target`/`dedupeKey`/`payload`/`nodeTimeout`, wait `gateKey`/`probe`/`probeTimeout`/
- * `probePollEvery`, human `escalationSlaTimeout`/`escalationAssignee`/`prompt`/`nodeId`/`emitMode`/
- * `emitLabel`). These live in the SAME node-local subProcess scope an `agent`/`connector` emit's source
+/** The subProcess **config** variable names an `agent` node's compiled `ioMappingLines` seeds from the
+ * runner's `nodeInputs.<el>`. These live in the SAME node-local subProcess scope the emit's source
  * variable occupies (a service-node fact's source is the fact's own name), so an emit named after one
  * collides with the node's own configuration. */
-export const DELIVERY_CONFIG_VARS = [
-  "jobType",
-  "appendPrompt",
-  "nodeTimeout",
-  TRANSCRIPT_URL_BASE_VAR,
-  "target",
-  "dedupeKey",
-  "payload",
-  "gateKey",
-  "probe",
-  "probeTimeout",
-  "probePollEvery",
+export const AGENT_CONFIG_VARS = ["jobType", "appendPrompt", "nodeTimeout", TRANSCRIPT_URL_BASE_VAR] as const;
+
+/** The subProcess **config** variables a `connector` node seeds (see {@link AGENT_CONFIG_VARS}). */
+export const CONNECTOR_CONFIG_VARS = ["target", "dedupeKey", "payload", "nodeTimeout"] as const;
+
+/** The subProcess **config** variables a `wait` node seeds. A `wait` emit's source is NOT the fact's own
+ * name ({@link factSourceVar} maps it to `mergedSha`/`prCount`/`resolvedArtifact`/`detail`), so these do
+ * NOT collide with a wait emit — listed for completeness/derivation, not reserved against a wait emit. */
+export const WAIT_CONFIG_VARS = ["gateKey", "probe", "probeTimeout", "probePollEvery"] as const;
+
+/** The subProcess **config** variables a `human` node seeds. A `human` emit's source is NOT the fact's
+ * own name ({@link factSourceVar} maps it to `humanEmitValue`/`humanEmitArtifact`), so these do NOT
+ * collide with a human emit — listed for completeness/derivation, not reserved against a human emit. */
+export const HUMAN_CONFIG_VARS = [
   "escalationSlaTimeout",
   "escalationAssignee",
   "prompt",
@@ -361,36 +378,44 @@ export const DELIVERY_CONFIG_VARS = [
   "emitLabel",
 ] as const;
 
-/** The RESERVED variable names an `agent`/`connector` node's emitted-fact name must NOT collide with
- * (issue #863 review — threads r4181027093 / r4181027147). A service node's emit source is the fact's
- * own name, declared node-local on the subProcess. Two reserved categories occupy that SAME scope and
- * are genuinely broken by a colliding emit:
- *   • **Escalation controls** ({@link ESCALATION_LOCAL_VARS} — `decision`/`value`/`note`, r4181027093):
- *     the escalation form WRITES these on completion, so an agent emitting `decision` has its node-local
- *     fact overwritten by a Continue (`decision="continue"`), publishing `<el>_decision="continue"`
- *     instead of the agent's routing value.
- *   • **Config variables** ({@link DELIVERY_CONFIG_VARS}, r4181027147): the retry reset clears every
- *     declared emit source var, so a connector emitting `target`/`payload`/`dedupeKey`/`nodeTimeout` has
- *     its CONFIG nulled without re-entering the subProcess input mappings — the retried node activates
- *     unconfigured. (`appendPrompt` is doubly config AND a retry-reset target.)
- * The shared late-binding/preflight scaffolding (`boundFacts`/`nodeInputs`/`nodeInputsPresent`) is
- * reserved for the same in-scope-collision reason.
+/** The shared late-binding/preflight scaffolding variables every node's subProcess occupies. An emit
+ * named after one collides with the node's own wiring regardless of kind, so it is reserved for ALL
+ * kinds. */
+export const DELIVERY_SCAFFOLDING_VARS = ["boundFacts", "nodeInputs", "nodeInputsPresent"] as const;
+
+/** The RESERVED variable names an emitted-fact name must not collide with, **kind-aware** (issue #863
+ * review — threads r4181027093 / r4181027147 / r4181322008). A reserved name is one a colliding emit
+ * would genuinely break, and what breaks depends on the node kind:
+ *
+ *   • **Escalation controls** ({@link ESCALATION_LOCAL_VARS} — `decision`/`value`/`note`) and the shared
+ *     **scaffolding** ({@link DELIVERY_SCAFFOLDING_VARS}) are reserved for EVERY kind: they occupy the
+ *     node's subProcess scope and an escalation Continue / the late-binding wiring writes them no matter
+ *     how the emit's source is mapped.
+ *
+ *   • **Config variables** are reserved ONLY for the kind whose own config they are — and only for
+ *     `agent`/`connector`, the kinds whose emit source IS the fact's own name ({@link factSourceVar}).
+ *     The retry reset clears every declared emit source var, so an `agent` emitting `appendPrompt`/
+ *     `jobType`/`nodeTimeout`/`transcriptUrlBase`, or a `connector` emitting `target`/`payload`/
+ *     `dedupeKey`/`nodeTimeout`, has its CONFIG nulled without re-entering the input mappings — the
+ *     retried node activates unconfigured. An `agent` emitting `target` (a connector-only config var) is
+ *     NOT a collision: an agent seeds no `target`. A cross-kind name is therefore allowed.
+ *
+ *   • A `wait`/`human` emit's source is a FIXED intermediate (`detail`/`mergedSha`/`prCount`/
+ *     `resolvedArtifact`, `humanEmitValue`/`humanEmitArtifact`), never the fact's own name, so its config
+ *     vars cannot collide with an emit source — a `wait` emitting `target` or a `human` emitting `prompt`
+ *     is fine. (`decision`/`value`/`note` stay reserved for these kinds via the escalation controls.)
  *
  * The node-local RESULT sets ({@link AGENT_RESULT_LOCAL_VARS} / {@link CONNECTOR_RESULT_LOCAL_VARS})
  * are deliberately NOT reserved: an agent emitting `pr` (the canonical converge shape) writes the same
  * node-local value the result field holds, so they agree, and the retry reset correctly clears both.
  * Reserving them would forbid the flagship `agent → connector[converge] → wait[pr]` pattern.
- * {@link validateDeliveryGraph} rejects a reserved name (fail-closed at authoring time); this is the
- * single canonical list, derived from the same source-of-truth sets so it can never drift from them. */
-export const RESERVED_DELIVERY_FACT_NAMES: readonly string[] = [
-  ...new Set<string>([
-    ...ESCALATION_LOCAL_VARS,
-    ...DELIVERY_CONFIG_VARS,
-    "boundFacts",
-    "nodeInputs",
-    "nodeInputsPresent",
-  ]),
-];
+ * {@link validateDeliveryGraph} rejects a reserved name (fail-closed at authoring time); derived from
+ * the same source-of-truth sets so it can never drift from them. */
+export function reservedDeliveryFactNames(kind: DeliveryNodeKind): readonly string[] {
+  const config =
+    kind === "agent" ? AGENT_CONFIG_VARS : kind === "connector" ? CONNECTOR_CONFIG_VARS : [];
+  return [...new Set<string>([...ESCALATION_LOCAL_VARS, ...DELIVERY_SCAFFOLDING_VARS, ...config])];
+}
 
 /** A node `id` must match openapi's `DeliveryNodeCommon.id` `^[A-Za-z_][A-Za-z0-9_.-]*$` and stay
  * within its 128-char cap. Re-enforced here INDEPENDENTLY of the OpenAPI shape gate because later
@@ -2275,22 +2300,27 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
             });
             return;
           }
-          if (RESERVED_DELIVERY_FACT_NAMES.includes(rawFact.name)) {
+          if (isDeliveryNodeKind(kind) && reservedDeliveryFactNames(kind).includes(rawFact.name)) {
             // Fail CLOSED on a reserved-name collision (issue #863 review — threads r4181027093 /
-            // r4181027147). A fact name is an otherwise-unrestricted identifier, but an
+            // r4181027147 / r4181322008). A fact name is an otherwise-unrestricted identifier, but an
             // `agent`/`connector` node's emit source IS the fact's own name, declared node-local on the
-            // subProcess — the SAME scope the escalation form controls (`decision`/`value`/`note`), the
-            // node-local result sets, and the subProcess config variables occupy. An emit named
-            // `decision` is overwritten by an escalation Continue (publishing `<el>_decision="continue"`
-            // instead of the agent's routing value); an emit named `target`/`payload`/`dedupeKey`/
-            // `nodeTimeout` is NULLED by the retry reset, so the retried node activates unconfigured.
-            // Reject the whole CLASS at authoring time rather than patch one name.
+            // subProcess — the SAME scope the escalation form controls (`decision`/`value`/`note`) and
+            // the node's OWN seeded config variables occupy. An emit named `decision` is overwritten by
+            // an escalation Continue (publishing `<el>_decision="continue"` instead of the agent's
+            // routing value); an emit named after the node's OWN config (`target`/`payload`/`dedupeKey`/
+            // `nodeTimeout` on a connector, `appendPrompt`/`jobType`/… on an agent) is NULLED by the
+            // retry reset, so the retried node activates unconfigured. The set is KIND-AWARE
+            // (`reservedDeliveryFactNames`): only the kinds whose emit source is the fact's own name
+            // reserve their own config, so a `wait` emitting `target` or a `human` emitting `prompt`
+            // (whose sources are fixed intermediates) is NOT rejected. Reject the whole CLASS at
+            // authoring time rather than patch one name.
             errors.push({
               path: `${path}.emits[${j}].name`,
               message:
                 `emitted fact name "${rawFact.name}" collides with a reserved delivery variable ` +
-                "(an escalation control, a node-local result field, or a subProcess config variable) — " +
-                "an escalation Continue would overwrite it or a Retry would null the node's config. " +
+                `(an escalation control, the shared scaffolding, or a ${kind} node's own subProcess ` +
+                "config variable) — an escalation Continue would overwrite it or a Retry would null " +
+                "the node's config. " +
                 "Rename the fact (e.g. `decision` → `verdict`, `target` → `targetRef`).",
               code: "invalid-fact-name",
             });

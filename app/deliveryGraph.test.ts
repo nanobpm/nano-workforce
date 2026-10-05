@@ -532,6 +532,54 @@ test("a node-local RESULT field is NOT a reserved emit name — an agent may emi
   assertEquals(errors.length, 0, `an agent emitting 'pr' validates, got: ${JSON.stringify(errors)}`);
 });
 
+test("invalid-fact-name is KIND-AWARE: an agent may emit a connector-only config name (`target`), and vice versa (r4181322008)", () => {
+  // Regression guard (PR #863 Copilot Medium, thread r4181322008): the reserved set reserves only the
+  // node's OWN kind's config. An agent seeds no `target`/`payload`/`dedupeKey` (connector-only), so an
+  // agent emitting `target` collides with nothing; symmetrically a connector seeds no `jobType`/
+  // `appendPrompt` (agent-only). Only the shared `nodeTimeout` is reserved for both.
+  const agentTarget = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "target", type: "string" }] }],
+  });
+  assertEquals(agentTarget.length, 0, `an agent emitting 'target' validates, got: ${JSON.stringify(agentTarget)}`);
+  const connectorJobType = validateDeliveryGraph({
+    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#a" }, emits: [{ name: "jobType", type: "string" }] }],
+  });
+  assertEquals(connectorJobType.length, 0, `a connector emitting 'jobType' validates, got: ${JSON.stringify(connectorJobType)}`);
+  // …but each kind's OWN config is still reserved (the collision is real there).
+  const agentAppend = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "appendPrompt", type: "string" }] }],
+  });
+  assertEquals(hasCode(agentAppend, "invalid-fact-name").path, "nodes[0].emits[0].name", "an agent emitting its OWN config 'appendPrompt' is rejected");
+  const connectorTarget = validateDeliveryGraph({
+    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#a" }, emits: [{ name: "target", type: "string" }] }],
+  });
+  assertEquals(hasCode(connectorTarget, "invalid-fact-name").path, "nodes[0].emits[0].name", "a connector emitting its OWN config 'target' is rejected");
+});
+
+test("invalid-fact-name does NOT apply a config restriction to wait/human emits, whose source is a fixed intermediate (r4181322008)", () => {
+  // A wait/human emit's source is NOT the fact's own name (factSourceVar maps it to `detail`/
+  // `humanEmitValue`/…), so its config vars can't collide with an emit source — a wait emitting
+  // `target`/`probe` or a human emitting `prompt`/`emitMode` is fine. Only the escalation
+  // controls + shared scaffolding stay reserved for these kinds.
+  const waitTarget = validateDeliveryGraph({
+    nodes: [{ id: "w", kind: "wait", wait: { kind: "github-check", target: "o/r@main" }, emits: [{ name: "target", type: "string" }, { name: "probe", type: "string" }] }],
+  });
+  assertEquals(waitTarget.length, 0, `a wait emitting 'target'/'probe' validates, got: ${JSON.stringify(waitTarget)}`);
+  const humanPrompt = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "prompt", type: "string" }, { name: "emitMode", type: "string" }] }],
+  });
+  assertEquals(humanPrompt.length, 0, `a human emitting 'prompt'/'emitMode' validates, got: ${JSON.stringify(humanPrompt)}`);
+  // …but the escalation controls + scaffolding are STILL reserved for wait/human.
+  const humanDecision = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "decision", type: "string" }] }],
+  });
+  assertEquals(hasCode(humanDecision, "invalid-fact-name").path, "nodes[0].emits[0].name", "a human emitting 'decision' (escalation control) is still rejected");
+  const waitScaffold = validateDeliveryGraph({
+    nodes: [{ id: "w", kind: "wait", wait: { kind: "github-check", target: "o/r@main" }, emits: [{ name: "nodeInputs", type: "string" }] }],
+  });
+  assertEquals(hasCode(waitScaffold, "invalid-fact-name").path, "nodes[0].emits[0].name", "a wait emitting 'nodeInputs' (scaffolding) is still rejected");
+});
+
 test("a non-reserved emit name still validates (the reserved guard does not over-reject)", () => {
   const errors = validateDeliveryGraph({
     nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "verdict", type: "string" }, { name: "targetRef", type: "string" }] }],

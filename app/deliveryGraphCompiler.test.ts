@@ -2463,6 +2463,25 @@ test("#863 node scope: every documented review/audit result field (plan-review/c
   }
 });
 
+test("#863 node scope: the remaining built-in prompt result contracts (fix-ci/rebase/adversarial-review/scope-classify/plan/trial-merge) are node-local and cleared on retry (r4181321969)", async () => {
+  // Regression guard (PR #863 Copilot High, thread r4181321969): the "canonical" result contract was
+  // incomplete relative to the built-in prompts it covers — `fix-ci.md`/`rebase.md` return `dependsOn`,
+  // `adversarial-review.md` returns `adversarialFindings`/`adversarialSummary`, `scope-classify.md`
+  // returns `scopeBlocked`/`scopeBlockReason`, `plan.md` returns `tasks`, `trial-merge.md` returns
+  // `result`/`conflicts`/`failing`. A delivery node using one of those shapes wrote the field at the
+  // shared ROOT, where a parallel node overwrites it and a retry retains a stale value. Each must be
+  // declared node-local AND cleared on retry.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  for (const v of ["dependsOn", "adversarialFindings", "adversarialSummary", "scopeBlocked", "scopeBlockReason", "tasks", "result", "conflicts", "failing"]) {
+    assert(io.includes(`source="=null" target="${v}"`), `the documented result field '${v}' is declared node-local`);
+    assert(new RegExp(`<zeebe:output source="=null" target="${v}" />`).test(reset), `the retry reset clears a stale '${v}'`);
+  }
+});
+
 test("node scope: a connector node localises every declared emit source var so two parallel connectors with the same emit never cross-publish", async () => {
   // Regression guard (PR #863 Copilot review, thread r4179717614): a `DeliveryNodeConnector` permits
   // `emits` too, and its emit source is the fact's own name. Without localising it on the connector's

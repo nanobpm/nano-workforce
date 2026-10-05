@@ -176,7 +176,7 @@ function contractEscalationTaskElement(element: string): string {
 
 // ESCALATION_DECISION_VAR / ESCALATION_DECISION_RETRY / ESCALATION_LOCAL_VARS / AGENT_RESULT_LOCAL_VARS /
 // CONNECTOR_RESULT_LOCAL_VARS are imported from ./deliveryGraph.ts (their canonical home — the
-// validator's RESERVED_DELIVERY_FACT_NAMES derives from them there without an import cycle).
+// validator's reservedDeliveryFactNames derives from them there without an import cycle).
 // ESCALATION_LOCAL_VARS is [ESCALATION_DECISION_VAR,"value","note"]; AGENT_RESULT_LOCAL_VARS is the
 // canonical node-local agent result contract (every resources/prompts/*.md output field);
 // CONNECTOR_RESULT_LOCAL_VARS the connector's fixed result metadata. All three are declared node-local

@@ -1009,24 +1009,38 @@ overwrite the root `transcriptUrl` — acceptable, since it is a display-only co
 not a result a downstream node binds. A **preflight `assert`** on the inner leaf
 task's input fails LOUD (raising an incident naming the missing `nodeInputs.<el>`)
 before any job exists when the runner-seeded config was lost — see the `KNOWN
-LIMITATION` in `serviceBodyLines` (fail-loud-only, nano-workforce#866): resolving that
-incident re-evaluates only the leaf's inputs, so the operator must **re-run** the node
-(re-enter the sub-process / "Retry this step"), not merely resolve, to re-map the
-subProcess-level config.
+LIMITATION` in `serviceBodyLines` (fail-loud-only, nano-workforce#866). Resolving that
+incident re-evaluates **only the leaf's inputs** — the subProcess-level config mappings
+(`prompt`/`appendPrompt`/`nodeTimeout`, connector `target`/`payload`/`dedupeKey`) ran once
+at subProcess entry and are **not** re-mapped on a leaf resolve, so the node would
+activate **unconfigured**. The in-subprocess **"Retry this step"** loop does **not**
+help here either: it loops directly back to the inner service task (to reset the
+node-local scratch), bypassing the subProcess entry mappings, so it too leaves the
+config null. **Recovery therefore requires re-entering the sub-process from OUTSIDE —
+relaunch/re-enter the node so its subProcess input mappings re-evaluate against the
+restored `nodeInputs`** — not merely resolving the incident or using "Retry this step".
+The correct in-model fix is to run this check at sub-process *entry* (Camunda parity,
+nano-bpm#1336); until then the preflight fails loud so the node never runs blind
+*without* an incident, and the operator re-enters the sub-process to recover.
 
 Because an `agent`/`connector` node's emit source **is the fact's own name**, declared
 node-local in the same subProcess scope as the escalation form controls and the node's
 seeded config, a fact name is not fully unrestricted: `validateDeliveryGraph` rejects an
-emit named after a **reserved delivery variable** (`RESERVED_DELIVERY_FACT_NAMES`,
-app/deliveryGraph.ts) fail-closed at authoring time. Two reserved categories occupy that
-scope: the **escalation controls** (`decision`/`value`/`note` — an escalation Continue
-would overwrite the fact, publishing `<el>_decision="continue"` instead of the agent's
-routing value) and the **config variables** (`target`/`payload`/`dedupeKey`/`nodeTimeout`/
-`appendPrompt`/… — the retry reset's clear-the-emits pass would null the node's
-configuration, so the retried node activates unconfigured), plus the shared
-late-binding/preflight scaffolding (`boundFacts`/`nodeInputs`/`nodeInputsPresent`). The
-node-local **result** fields (`AGENT_RESULT_LOCAL_VARS`/`CONNECTOR_RESULT_LOCAL_VARS`) are
-deliberately **not** reserved: an agent emitting `pr` (the canonical
+emit named after a **reserved delivery variable** (`reservedDeliveryFactNames(kind)`,
+app/deliveryGraph.ts) fail-closed at authoring time. The reserved set is **kind-aware**
+(issue #863 review): the **escalation controls** (`decision`/`value`/`note` — an escalation
+Continue would overwrite the fact, publishing `<el>_decision="continue"` instead of the
+agent's routing value) and the shared late-binding/preflight **scaffolding**
+(`boundFacts`/`nodeInputs`/`nodeInputsPresent`) are reserved for **every** kind, while a
+**config variable** is reserved only for the kind whose own config it is — and only for
+`agent`/`connector`, the kinds whose emit source is the fact's own name (the retry reset's
+clear-the-emits pass would null the node's own configuration, so the retried node activates
+unconfigured). A `wait`/`human` emit's source is a fixed intermediate (`detail`/
+`humanEmitValue`/…), never the fact's own name, so those kinds reserve only the escalation
+controls + scaffolding — a `wait` emitting `target` or a `human` emitting `prompt` is
+allowed. The node-local **result** fields
+(`AGENT_RESULT_LOCAL_VARS`/`CONNECTOR_RESULT_LOCAL_VARS`) are deliberately **not**
+reserved: an agent emitting `pr` (the canonical
 `agent → connector[converge] → wait[pr]` shape) writes the same node-local value the
 result field holds, and the retry reset correctly clears both — reserving them would
 forbid that flagship pattern.
