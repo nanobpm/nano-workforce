@@ -135,13 +135,17 @@ const reportedStatusLead = (status: string, delivery: string): string =>
 // on. The delivery-absence clause is EVIDENCE-BASED (issue #865 review): only a verified lookup says
 // "no adoptable PR was found on the base branch" (it does NOT verify branch existence — a wrong-base PR
 // leaves the branch pushed, so it never claims "no branch"); an unverified delivery says so instead of
-// asserting an absence never checked.
+// asserting an absence never checked. The automatic-adoption promise is likewise evidence-gated (#865
+// review round 6): only a VERIFIED lookup may say a delivered PR "would have been adopted automatically"
+// — an UNVERIFIED outcome (a reported non-completion status such as `failed`/`needs_input`/`escalated`
+// with no answerable question bypasses reconciliation, so NO lookup ran) must not promise an adoption
+// that never happened; it asks the operator to check for an existing PR before re-running.
 function recoveryTail(pr: string | undefined, deliveryVerified: boolean): string {
   const absence = pr
     ? `A pull request may already be open as ${pr} — check and retarget or adopt it before re-running`
     : deliveryVerified
       ? "A delivered PR on the slice's `feat/<task.id>` branch targeting this run's base would have been adopted automatically; no adoptable PR was found on the base branch (the branch may still be pushed — e.g. a PR targeting a different base — so check and retarget it before re-running)"
-      : "A delivered PR on the slice's `feat/<task.id>` branch would have been adopted automatically, but no lookup confirmed whether one exists";
+      : "No GitHub lookup ran for this outcome, so a delivered PR on the slice's `feat/<task.id>` branch would NOT have been adopted automatically — check whether one already exists (and retarget or adopt it) before re-running";
   return `${absence} (if the agent worked OUTSIDE its run workspace — e.g. \`cd /tmp/<repo>\` — those edits were discarded on teardown). Choose "Answer" and give guidance to re-run the slice — or choose "Abandon" to skip it and continue.`;
 }
 

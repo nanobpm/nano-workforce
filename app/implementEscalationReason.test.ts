@@ -174,6 +174,28 @@ test("implementEscalationQuestion: a SUCCESSFUL lookup with no adoptable PR asse
   assertEquals(q.includes("(and pushed no branch)"), false);
 });
 
+test("implementEscalationQuestion: an UNVERIFIED delivery never promises automatic adoption (#865 review round 6)", () => {
+  // For `failed`/`needs_input`/`escalated` with no answerable question and no reported PR,
+  // `shouldReconcileImplement()` skips the GitHub lookup entirely — so `deliveryVerified` is false and NO
+  // adoption attempt ran. The recovery text must NOT claim a delivered PR "would have been adopted
+  // automatically" (it was never even looked for, so a valid PR can sit unadopted). Instead it must ask
+  // the operator to check for an existing PR before re-running. This covers every non-affirmative
+  // reported status that bypasses reconciliation.
+  for (const status of ["failed", "needs_input", "escalated"]) {
+    const q = implementEscalationQuestion({ status, deliveryVerified: false });
+    assertEquals(q.includes("would have been adopted automatically"), false, `status=${status} must not promise automatic adoption`);
+    assertEquals(q.includes("check"), true, `status=${status} must direct the operator to check for an existing PR`);
+  }
+});
+
+test("implementEscalationQuestion: a VERIFIED absence still promises automatic adoption (the lookup ran) (#865 review round 6)", () => {
+  // The verified branch is the one place the adoption promise IS accurate: a lookup ran and confirmed no
+  // adoptable PR, so a delivered PR on the right base genuinely would have been adopted. Guard the
+  // round-6 fix from over-correcting the verified wording away.
+  const q = implementEscalationQuestion({ status: "completed", deliveryVerified: true });
+  assertEquals(q.includes("adopted automatically"), true);
+});
+
 test("implementEscalationQuestion: default (no evidence supplied) stays unverified — no false verified absence", () => {
   // Back-compat / safest default: with no delivery evidence the reason must not assert a verified
   // absence. (The builder is pure; a caller that has not run a lookup passes no evidence.)
