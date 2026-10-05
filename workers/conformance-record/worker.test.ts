@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { assertEquals, assertRejects } from "#test-assert";
+import { fileURLToPath } from "node:url";
+import { assert, assertEquals, assertRejects } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 
@@ -283,4 +286,42 @@ test("conformance-record: an agent-SLA timeout with no processKey fails loudly (
     "no processInstanceKey",
   );
   assertEquals(stores.plan_conformance.length, 0);
+});
+
+// DEFECT-CLASS GUARD (PR #864 review r4181010853): the SLA-control flags `agentSlaElapsed` and
+// `preserveConformance` share the process-variable namespace the external conformance agent's
+// result-JSON is hoisted into. If a `pr.conformance-record` task does NOT pin both flags to a
+// literal via ioMapping, a completed agent that emits `agentSlaElapsed:true` / `preserveConformance:true`
+// could make the NORMAL recorder persist `review_status='reviewing'` (or take the preserve branch)
+// while `gw-deviations` routes away from the ack task — leaving the row permanently stuck. Every
+// recorder task must therefore pin BOTH flags to a constant so agent output can never select this
+// internal control path. This structural guard fails if any recorder (now or a future one) forgets.
+const RETRO_BPMN = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../resources/processes/retro.bpmn",
+);
+const SERVICE_TASK = /<bpmn:serviceTask\b[\s\S]*?<\/bpmn:serviceTask>/g;
+
+test("DEFECT-CLASS GUARD: every pr.conformance-record task pins agentSlaElapsed + preserveConformance to a literal (agent output cannot select SLA control path)", () => {
+  const xml = readFileSync(RETRO_BPMN, "utf8");
+  const recorders: string[] = [];
+  for (const [block] of xml.matchAll(SERVICE_TASK)) {
+    if (!/type="pr\.conformance-record"/.test(block)) continue;
+    const id = block.match(/<bpmn:serviceTask\b[^>]*\bid="([^"]*)"/)?.[1] ?? "(unknown)";
+    recorders.push(id);
+    for (const flag of ["agentSlaElapsed", "preserveConformance"]) {
+      // A literal pin is `<zeebe:input source="=true|false" target="<flag>" />` — the source must be
+      // a boolean constant, NOT a process-variable reference (which would read hoisted agent output).
+      const pin = new RegExp(
+        `<zeebe:input\\s+source="=(?:true|false)"\\s+target="${flag}"\\s*/>`,
+      );
+      assert(
+        pin.test(block),
+        `retro.bpmn: record task "${id}" does not pin "${flag}" to a literal — agent output could ` +
+          `select the internal SLA/preserve control path (PR #864 review r4181010853)`,
+      );
+    }
+  }
+  // Sanity: there really are recorder tasks (guard is not vacuously green) — normal + 2 SLA arms.
+  assert(recorders.length >= 3, `expected >=3 pr.conformance-record tasks, found ${recorders.length}`);
 });

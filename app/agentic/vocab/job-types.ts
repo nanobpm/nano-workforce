@@ -218,13 +218,15 @@ export function agentTaskTypesOptedOutMissingExternalMarker(xml: string): string
 // A `<bpmn:boundaryEvent>` block with an interrupting TIMER definition attached to a given task.
 // The SLA bound is only real when the boundary carries a `<bpmn:timerEventDefinition>` (a message
 // or signal boundary would not bound a hung agent) and is interrupting (`cancelActivity` absent —
-// interrupting is the BPMN default — or explicitly `"true"`); a non-interrupting boundary would
-// leave the stuck job running.
+// interrupting is the BPMN default — or explicitly `"true"`/`"1"`); a non-interrupting boundary would
+// leave the stuck job running. `cancelActivity` is an XSD boolean, so BOTH false lexical forms
+// (`"false"` and `"0"`) mark it non-interrupting — reject either, or the guard would bless a
+// `cancelActivity="0"` boundary that leaves the hung agent running.
 const BOUNDARY_EVENT = /<(?:\w+:)?boundaryEvent\b[^>]*>[\s\S]*?<\/(?:\w+:)?boundaryEvent>/g;
 const BOUNDARY_ATTACHED_TO = /\battachedToRef="([^"]*)"/;
 const BOUNDARY_ID = /<(?:\w+:)?boundaryEvent\b[^>]*\bid="([^"]*)"/;
 const TIMER_DEFINITION = /<(?:\w+:)?timerEventDefinition\b/;
-const NON_INTERRUPTING = /\bcancelActivity="false"/;
+const NON_INTERRUPTING = /\bcancelActivity="(?:false|0)"/;
 const SERVICE_TASK_ID = /<(?:\w+:)?serviceTask\b[^>]*\bid="([^"]*)"/;
 // The boundary must actually arm the seeded SLA: a `<bpmn:timeDuration>` whose FEEL expression is
 // `=agentSlaTimeout`. A timer with no duration (or a hard-coded/other expression) does not bound the

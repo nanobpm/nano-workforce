@@ -73,8 +73,23 @@ test("externalAgentTasksMissingSlaBoundary rejects a non-timer boundary and a no
       <bpmn:timerEventDefinition id="ted_ni">
         <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
       </bpmn:timerEventDefinition>
-    </bpmn:boundaryEvent>`;
-  assertEquals(externalAgentTasksMissingSlaBoundary(xml), ["msgBounded", "nonInterrupting"]);
+    </bpmn:boundaryEvent>
+    <bpmn:serviceTask id="nonInterruptingZero">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:c" />
+        <zeebe:agentDefinition agentType="external" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_ni0" attachedToRef="nonInterruptingZero" cancelActivity="0">
+      <bpmn:outgoing>f_ni0</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_ni0">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:sequenceFlow id="f_ni0" sourceRef="be_ni0" targetRef="esc" />`;
+  // cancelActivity="0" is the OTHER XSD-boolean false form — it is just as non-interrupting as
+  // "false", so the guard must reject it too (else a hung agent runs on past the boundary).
+  assertEquals(externalAgentTasksMissingSlaBoundary(xml), ["msgBounded", "nonInterrupting", "nonInterruptingZero"]);
 });
 
 // The defect class a too-loose scanner would bless (review finding): an interrupting TIMER boundary

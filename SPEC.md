@@ -815,7 +815,7 @@ durable, in-process backstop — no external watchdog.
   wave slice — and each parent's callActivity maps `agentSlaTimeout` into the child explicitly.
 - **Pre-seeded, not yet bounded:** the convergence-loop (`review-round` / `adversarial-review` /
   `classify-scope`) and plan-fanout (`plan` / `review-plan`) agent tasks sit on a back-edge loop
-  whose boundary the auto-layouter cannot yet route (nano-ide #867), so their SLA boundaries are
+  whose boundary the auto-layouter cannot yet route (#867), so their SLA boundaries are
   intentionally deferred to #868. Plan-fanout's **inline** wave `trial-merge`
   (`plan-fanout.bpmn:524-542`) — distinct from the standalone `merge-cell` process, which has no
   callActivity caller — is likewise an external agent task with rerun back-edges and no
