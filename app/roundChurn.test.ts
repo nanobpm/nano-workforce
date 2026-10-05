@@ -50,6 +50,39 @@ test("extractFiles: prose dots are NOT mined as root files (version strings, abb
   }
 });
 
+test("extractFiles: dotted API symbols and domains are NOT mined as root files (#870 review)", () => {
+  // A permissive extension mines dotted identifiers/domains as fake root files: `z.object`'s "extension"
+  // is `object`, `example.com`'s is `com`. Four rounds that each mention the same `z.object` schema
+  // while fixing DIFFERENT real files would otherwise intersect on `z.object` and falsely escalate.
+  // The extension allowlist rejects every one of these (their trailing word is not a file extension).
+  for (const s of [
+    "validated z.object while changing the schema",
+    "fixed z.string and z.number",
+    "used io.nanobpm.agentResult in the worker",
+    "called object.keys on the result",
+    "see example.com or Deno.land for docs",
+  ]) {
+    assertEquals(extractFiles(s).size, 0, `dotted symbol/domain should yield no file in ${JSON.stringify(s)}`);
+  }
+  // The real file alongside a dotted symbol is still mined; only the symbol is dropped.
+  const mixed = extractFiles("validated z.object while changing src/a.ts");
+  assert(mixed.has("src/a.ts"), "the real nested file is still mined");
+  assertEquals(mixed.has("z.object"), false, "the dotted API symbol is not mined");
+});
+
+test("extractFiles: a repeated dotted-symbol loop does NOT escalate as churn (#870 review)", () => {
+  // The acceptance counter-case: four rounds that all mention the SAME dotted API symbol (z.object)
+  // while fixing DIFFERENT real files must NOT be declared churn — the shared token is prose, not a
+  // contested file. With the symbol correctly un-mined, the rounds have no common file and the loop
+  // continues.
+  const rounds: ChurnRound[] = Array.from({ length: CHURN_WINDOW }, (_, i) => ({
+    roundNo: i + 1,
+    status: "addressed",
+    summary: `validated z.object again; fixed src/f${i}.ts this round`,
+  }));
+  assertEquals(detectChurn(rounds).churning, false);
+});
+
 test("extractFiles: ignores bare words and paths without a slash or extension", () => {
   const files = extractFiles("addressed the zod concern and fail-closed on undefined (no file here) README");
   assertEquals(files.size, 0);

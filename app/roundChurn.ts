@@ -65,13 +65,33 @@ const NESTED_PATH_RE = /^(?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z0-9]+/;
 // `README.md`, `tsconfig.json`, `nano.app.json` — are legitimate churn surfaces too, but the nested
 // form above excludes them because it REQUIRES a slash, so a loop repeatedly editing `package.json`
 // would never escalate (issue #870 follow-up). Matching a bare `name.ext` re-admits the prose that the
-// required slash kept out, so this form is deliberately STRICTER on the extension to compensate: the
-// extension must be at least two ALPHABETIC characters, which excludes version strings (`4.8`),
-// sentence-ending abbreviations (`e.g`, `i.e`), and initialisms (`U.S`) that a permissive
-// `[A-Za-z0-9]+` extension would mine as fake root files. Tried only AFTER the nested form, and like it
-// anchored at the run start (no global re-scan), so it adds no backtracking cost — it only ever ADDS
-// real root-level files, never removes a nested path the form above already mines.
-const ROOT_FILE_RE = /^[\w@~+-][\w.@~+-]*\.[A-Za-z]{2,}[A-Za-z0-9]*/;
+// required slash kept out, so this form is deliberately STRICTER to compensate, on two axes:
+//
+//  1. The extension must be a KNOWN source/config/doc/build extension (ROOT_FILE_EXT below), not just
+//     "any letters". A permissive `[A-Za-z]{2,}` extension mines dotted API symbols and prose as fake
+//     root files — `z.object`, `z.string`, `object.keys`, `example.com`, `Deno.land` all match it — so
+//     four rounds that each mention the same `z.object` schema while fixing DIFFERENT real files would
+//     intersect on `z.object` and falsely escalate (Copilot review of #870). Restricting the extension
+//     to a real-file allowlist rejects those (their "extension" — `object`, `string`, `keys`, `com`,
+//     `land` — is not a file extension) while keeping every genuine root file. It is fail-open in the
+//     safe direction: an exotic-but-real extension it omits (`.svelte` is listed; a brand-new one is
+//     not) only ever MISSES a churn signal, never fabricates one.
+//  2. The extension must still be at least two ALPHABETIC characters (the allowlist contains no digits
+//     or single letters), which keeps excluding version strings (`4.8`), sentence-ending abbreviations
+//     (`e.g`, `i.e`), and initialisms (`U.S`).
+//
+// The stem is greedy and MAY contain dots (`foo.test.ts`, `nano.app.json`): backtracking lets the LAST
+// dot be the separator so a multi-dot root file matches whole, while the allowlisted final extension
+// still anchors the match. Tried only AFTER the nested form, and like it anchored at the run start (no
+// global re-scan), so it adds no backtracking cost — it only ever ADDS real root-level files, never
+// removes a nested path the form above already mines.
+const ROOT_FILE_EXT =
+  "(?:ts|tsx|js|jsx|mjs|cjs|mts|cts|json|jsonc|json5|md|markdown|yml|yaml|toml|xml|html|css|scss|" +
+  "less|sql|sh|bash|zsh|py|rb|go|rs|java|kt|kts|swift|c|h|cc|hh|cpp|cxx|hpp|cs|fs|vue|svelte|php|" +
+  "pl|pm|lua|dart|ex|exs|erl|hrl|clj|cljs|scala|groovy|gradle|properties|ini|cfg|conf|config|env|" +
+  "lock|mod|sum|mk|cmake|txt|dockerfile|gitignore|gitattributes|editorconfig|bpmn|form|dmn|proto|" +
+  "graphql|gql|prisma|tf|hcl)";
+const ROOT_FILE_RE = new RegExp(`^[\\w@~+-][\\w.@~+-]*\\.${ROOT_FILE_EXT}(?=\\b|$)`, "i");
 
 // A whole URL span (`scheme://…host/path…`). A citation link's path (e.g.
 // `github.com/o/r/blob/main/docs/guide.md`) otherwise looks exactly like a repo-relative file, so a
