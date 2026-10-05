@@ -183,7 +183,8 @@ export const ESCALATION_DECISION_RETRY = "retry";
 const ESCALATION_LOCAL_VARS = [ESCALATION_DECISION_VAR, "value", "note"] as const;
 
 /** The flat result variables a fleet agent worker returns on job completion (the blocked-outcome
- * fallback `{status, summary, question}`, the free-form result fields agents commonly emit, and the PR
+ * fallback `{status, summary, question}`, the free-form result fields agents commonly emit, the
+ * optional structured `delta` an implementer reports (resources/prompts/feature.md), and the PR
  * identity fields). Nano propagates job-completion variables to the NEAREST scope that defines each
  * name, else the ROOT — so without a local declaration every parallel agent node overwrote ONE shared
  * root `status`/`summary`/`pr`: an escalation read whichever node finished last (instance 171774: three
@@ -209,6 +210,7 @@ const AGENT_RESULT_LOCAL_VARS = [
   "truncated",
   "agentCheckpoint",
   "transcriptUrl",
+  "delta",
 ] as const;
 
 /** The node-local boolean the preflight input mapping binds (see {@link nodeInputsPreflightFeel}). */
@@ -2151,9 +2153,13 @@ function escalationResolutionHint(resumeEmits: readonly DeliveryFact[], isAgent:
     ` To resolve: choose Resolution "Retry this step" (${ESCALATION_DECISION_VAR}="${ESCALATION_DECISION_RETRY}") to re-run this node` +
     (isAgent ? " — the note is passed to the agent as guidance for the retry" : "");
   const proceed =
-    resumeEmits.length > 0
-      ? `; or choose "Continue" and put the ${resumeEmits.map((e) => `'${e.name}'`).join("/")} value in the value field (e.g. work finished out of band)`
-      : '; or choose "Continue" to proceed past this node';
+    resumeEmits.length === 1
+      ? `; or choose "Continue" and put the '${resumeEmits[0].name}' value in the value field (e.g. work finished out of band)`
+      : resumeEmits.length > 1
+        ? `; or choose "Continue" to proceed past this node to its default (fallback) branch — the single value field cannot supply its ${resumeEmits
+            .map((e) => `'${e.name}'`)
+            .join("/")} facts, so "Retry this step" to actually produce them`
+        : '; or choose "Continue" to proceed past this node';
   return `${retry}${proceed}.`;
 }
 
@@ -2418,37 +2424,43 @@ function escalationTaskLines(
   },
 ): string[] {
   const emits = opts?.resume?.emits ?? [];
-  const emitMode = emits.length > 0 ? "typed" : "none";
-  const emitLabel = emits.map((e) => `${e.name} (${e.type})`).join(", ");
+  // The escalation form (`ESCALATION_FORM` / `GENERIC_HUMAN_FORM`) captures the operator's answer in a
+  // SINGLE `value` field, so it can resume AT MOST ONE emit. With >1 declared emit, one value cannot
+  // satisfy multiple distinct typed facts — mapping it onto every emit-source var writes the SAME value
+  // to each, corrupting all of them (and coercing one string into differently-typed facts; #863 review
+  // r4180629319). So Continue-with-value is offered ONLY for a single emit; with multiple, the value
+  // field is inert ("none") and NO emit source is published, leaving the downstream guarded split to
+  // take its deadlock-safe default — re-running the node ("Retry this step") stays the way to actually
+  // produce the facts.
+  const resumableEmit = emits.length === 1 ? emits[0] : undefined;
+  const emitMode = resumableEmit !== undefined ? "typed" : "none";
   const inputs: string[] = [
     `            <zeebe:input ${attr("source", contextFeel)} target="prompt" />`,
     `            <zeebe:input ${attr("source", `=${feelStr(nodeId)}`)} target="nodeId" />`,
     `            <zeebe:input ${attr("source", `=${feelStr(emitMode)}`)} target="emitMode" />`,
   ];
-  if (emits.length > 0) {
-    inputs.push(`            <zeebe:input ${attr("source", `=${feelStr(emitLabel)}`)} target="emitLabel" />`);
+  if (resumableEmit !== undefined) {
+    inputs.push(
+      `            <zeebe:input ${attr("source", `=${feelStr(`${resumableEmit.name} (${resumableEmit.type})`)}`)} target="emitLabel" />`,
+    );
   }
   for (const di of opts?.diagnosticInputs ?? []) {
     inputs.push(`            <zeebe:input ${attr("source", di.source)} target="${di.target}" />`);
   }
   // Defect B: map the operator's captured typed value onto the node's emit-source var, so the
   // subProcess output ioMapping publishes the SAME `<el>_<fact>` shape a normally-completing node does.
+  // Only a single-emit node is resumable this way (see `resumableEmit` above).
   const outputs: string[] = [];
-  if (opts?.resume) {
-    const seen = new Set<string>();
-    for (const fact of emits) {
-      const target = factSourceVar(opts.resume.kind, fact);
-      if (seen.has(target)) continue;
-      seen.add(target);
-      // The escalation form (`ESCALATION_FORM`) captures the operator's answer in a single
-      // `value` field — it has NO `resolvedArtifact` field — so every emit type resumes from `value`,
-      // mapped onto that fact's emit-source var (artifact→resolvedArtifact, version→detail, …). Sourcing
-      // an artifact from a `resolvedArtifact` form field the form never sets would publish null and make
-      // an artifact wait-node escalation non-resumable via the UI.
-      outputs.push(
-        `            <zeebe:output ${attr("source", `=if (is defined(value)) then value else null`)} target="${target}" />`,
-      );
-    }
+  if (opts?.resume && resumableEmit !== undefined) {
+    const target = factSourceVar(opts.resume.kind, resumableEmit);
+    // The escalation form captures the operator's answer in a single `value` field — it has NO
+    // `resolvedArtifact` field — so the single emit resumes from `value`, mapped onto that fact's
+    // emit-source var (artifact→resolvedArtifact, version→detail, …). Sourcing an artifact from a
+    // `resolvedArtifact` form field the form never sets would publish null and make an artifact
+    // wait-node escalation non-resumable via the UI.
+    outputs.push(
+      `            <zeebe:output ${attr("source", `=if (is defined(value)) then value else null`)} target="${target}" />`,
+    );
   }
   if (opts?.retryElement !== undefined) {
     outputs.push(

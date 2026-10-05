@@ -364,6 +364,58 @@ test("#514 Defect B: a service-node escalation (agent) stays inert — no emit f
   );
 });
 
+// The escalation form (`delivery-escalation.form` / generic) has a SINGLE `value` field, so it can
+// resume AT MOST ONE emit. A node declaring >1 emit must NOT map that single value onto every emit
+// source var (it would write the same value to each, corrupting both outputs and coercing one string
+// into differently-typed facts — #863 review r4180629319). Continue is inert for multi-emit; Retry
+// produces the facts.
+const MULTI_EMIT = {
+  name: "multi-emit-required",
+  nodes: [
+    {
+      id: "open",
+      kind: "agent",
+      agent: { jobType: "senior:feature" },
+      emits: [
+        { name: "pr", type: "pr" },
+        { name: "mergedSha", type: "string" },
+      ],
+    },
+    { id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "open.pr", sha: "open.mergedSha" }, dedupeKey: "land-1" } },
+  ],
+  edges: [
+    { from: "open.pr", to: "land" },
+    { from: "open.mergedSha", to: "land" },
+  ],
+};
+
+test("#863 multi-emit escalation is inert: a node declaring >1 emit cannot resume through the single value field (no cross-emit corruption)", async () => {
+  const r = await compileOk(MULTI_EMIT);
+  // The timeout escalation (`__esc`) carries the node's OWN declared emits — both would otherwise map
+  // from the one `value` field. With >1 emit the field is hidden ("none") and NO value→emit output is
+  // written, so Continue falls through to the downstream default (deadlock-safe) instead of corrupting
+  // both `pr` and `mergedSha` with the same operator string.
+  const escTimeout = escBlockForNodeSuffix(r.bpmn, "open", "esc");
+  assert(escTimeout.includes('="none"') && escTimeout.includes('target="emitMode"'), "a multi-emit timeout escalation hides its value field");
+  assert(!/then value else null/.test(escTimeout), "a multi-emit timeout escalation writes NO value→emit mapping (would corrupt both)");
+  assert(!/target="emitLabel"/.test(escTimeout), "a multi-emit timeout escalation emits no single emitLabel");
+  // The producer-contract escalation requires BOTH emits — it too must stay inert rather than resume
+  // both from one value.
+  const escContract = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  assert(escContract.includes('="none"') && escContract.includes('target="emitMode"'), "a multi-emit contract escalation hides its value field");
+  assert(!/then value else null/.test(escContract), "a multi-emit contract escalation writes NO value→emit mapping");
+  // The resolution hint tells the operator Continue takes the default branch and Retry produces the facts.
+  assert(escContract.includes("default (fallback) branch") && escContract.includes("Retry this step"), "the hint steers a multi-emit resolution to Retry, not a single-value Continue");
+});
+
+test("#863 single-emit escalation still resumes: exactly one emit maps the operator value onto its source var", async () => {
+  // Guard the boundary: the multi-emit fix must NOT regress the single-emit resume path.
+  const r = await compileOk(PRODUCER_GATE);
+  const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  assert(esc.includes('="typed"') && esc.includes('target="emitMode"'), "a single-emit contract escalation PRESENTS its value field");
+  assert(/source="=if \(is defined\(value\)\) then value else null" target="pr"/.test(esc), "the single emit resumes from the value field onto its source var");
+});
+
 
 test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", async () => {
   const errors = await compileFail({
@@ -2375,9 +2427,23 @@ test("node scope: an agent node declares its result vars node-local so parallel 
   const el = elementForNode(r.bpmn, "open");
   const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
   const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
-  for (const v of ["status", "summary", "question", "error", "pr", "transcriptUrl", "decision", "value", "note"]) {
+  for (const v of ["status", "summary", "question", "error", "pr", "transcriptUrl", "delta", "decision", "value", "note"]) {
     assert(io.includes(`source="=null" target="${v}"`), `'${v}' is declared node-local on the subProcess`);
   }
+});
+
+test("#863 node scope: an agent's documented optional `delta` result is node-local, so parallel senior:feature nodes never overwrite one another's delta at root", async () => {
+  // Regression guard (#863 review r4180629336): `delta` is a documented top-level implementer-result
+  // field (resources/prompts/feature.md). Omitted from AGENT_RESULT_LOCAL_VARS, a delivery node using
+  // `senior:feature` would write `delta` at ROOT scope, where a parallel node overwrites it and a retry
+  // leaves it stale. It must be declared node-local and cleared on retry.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  assert(io.includes(`source="=null" target="delta"`), "the agent's `delta` result is declared node-local");
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  assert(/<zeebe:output source="=null" target="delta" \/>/.test(reset), "the retry reset clears a stale `delta` from the previous attempt");
 });
 
 test("node scope: a connector node localises every declared emit source var so two parallel connectors with the same emit never cross-publish", async () => {
@@ -2471,7 +2537,7 @@ test("retry-node: the reset clears the FULL declared agent result set, not only 
   const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
   // These are declared in AGENT_RESULT_LOCAL_VARS but are NOT emits of the fixture and NOT among the
   // old five-field hardcode, so each is a field the old reset left stale across a retry.
-  for (const v of ["transcriptUrl", "agentCheckpoint", "prUrl", "pullRequest", "branch", "commits", "exitCode", "next_steps", "issue", "completed", "pushed", "truncated"]) {
+  for (const v of ["transcriptUrl", "agentCheckpoint", "prUrl", "pullRequest", "branch", "commits", "exitCode", "next_steps", "issue", "completed", "pushed", "truncated", "delta"]) {
     assert(new RegExp(`<zeebe:output source="=null" target="${v}" />`).test(reset), `the reset clears '${v}' from the previous attempt`);
   }
 });
