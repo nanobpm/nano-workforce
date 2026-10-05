@@ -406,15 +406,24 @@ export const DELIVERY_SCAFFOLDING_VARS = ["boundFacts", "nodeInputs", "nodeInput
  *     is fine. (`decision`/`value`/`note` stay reserved for these kinds via the escalation controls.)
  *
  * The node-local RESULT sets ({@link AGENT_RESULT_LOCAL_VARS} / {@link CONNECTOR_RESULT_LOCAL_VARS})
- * are deliberately NOT reserved: an agent emitting `pr` (the canonical converge shape) writes the same
- * node-local value the result field holds, so they agree, and the retry reset correctly clears both.
- * Reserving them would forbid the flagship `agent → connector[converge] → wait[pr]` pattern.
+ * are deliberately NOT reserved — with ONE exception. An agent emitting `pr` (the canonical converge
+ * shape) writes the same node-local value the result field holds, so they agree, and the retry reset
+ * correctly clears both. Reserving the whole set would forbid the flagship
+ * `agent → connector[converge] → wait[pr]` pattern. The exception is the agent completion-control
+ * `status`: the producer status gate reads that SAME node-local field as the node's completion status
+ * and accepts only `done`/`opened`/`skipped`, so an agent emit named `status` whose routing value is
+ * anything else (`approved`, …) ALWAYS escalates, and `status="done"` can never take an `approved`
+ * branch — the emit contract and the gate conflict. `status` is therefore reserved for an `agent`
+ * (a connector has no producer status gate, so its `status` emit collides with nothing and stays
+ * allowed); the rest of the result set (`pr`, `summary`, …) remains unreserved.
  * {@link validateDeliveryGraph} rejects a reserved name (fail-closed at authoring time); derived from
  * the same source-of-truth sets so it can never drift from them. */
 export function reservedDeliveryFactNames(kind: DeliveryNodeKind): readonly string[] {
   const config =
     kind === "agent" ? AGENT_CONFIG_VARS : kind === "connector" ? CONNECTOR_CONFIG_VARS : [];
-  return [...new Set<string>([...ESCALATION_LOCAL_VARS, ...DELIVERY_SCAFFOLDING_VARS, ...config])];
+  // `status` is reserved ONLY for an agent (the producer-gate completion control — see the doc above).
+  const completionControl = kind === "agent" ? ["status"] : [];
+  return [...new Set<string>([...ESCALATION_LOCAL_VARS, ...DELIVERY_SCAFFOLDING_VARS, ...config, ...completionControl])];
 }
 
 /** A node `id` must match openapi's `DeliveryNodeCommon.id` `^[A-Za-z_][A-Za-z0-9_.-]*$` and stay

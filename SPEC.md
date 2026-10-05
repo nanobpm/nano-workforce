@@ -987,7 +987,14 @@ escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
   field stays blank) and a node declaring **two or more** emits is **not** value-resumable
   — one value cannot satisfy multiple distinct typed facts without corrupting them, so
   Continue writes no facts and the downstream guarded split takes its deadlock-safe
-  default; **Retry this step** is the way to actually produce the facts.
+  default; **Retry this step** is the way to actually produce the facts. Because the form
+  captures `value` as textfield **text**, the single-emit resume **coerces/validates it to
+  the emit's declared type** before publishing (`escalationResumeValueFeel`): a `boolean`
+  emit accepts only `"true"`/`"false"` and publishes a real boolean, a `number` emit parses
+  via `number(value)`, and any other (text-valued) type passes through. An **invalid** entry
+  publishes `null` — the defined failure path — so a required-emit producer gate escalates
+  and a guarded split takes its default rather than routing on a mistyped value (a raw
+  `"true"` string would silently skip a `= true` guard).
 - **Retry this step** (`decision="retry"`) re-runs the node. A none intermediate throw
   event (never a scriptTask) resets the node-local scratch — the decision, the captured
   `value`/`note`, and (for an agent) the **full declared result set**
@@ -1045,10 +1052,16 @@ unconfigured). A `wait`/`human` emit's source is a fixed intermediate (`detail`/
 controls + scaffolding — a `wait` emitting `target` or a `human` emitting `prompt` is
 allowed. The node-local **result** fields
 (`AGENT_RESULT_LOCAL_VARS`/`CONNECTOR_RESULT_LOCAL_VARS`) are deliberately **not**
-reserved: an agent emitting `pr` (the canonical
+reserved — with **one exception**: an agent emitting `pr` (the canonical
 `agent → connector[converge] → wait[pr]` shape) writes the same node-local value the
 result field holds, and the retry reset correctly clears both — reserving them would
-forbid that flagship pattern.
+forbid that flagship pattern. The exception is the agent completion-control **`status`**:
+the producer status gate reads that same node-local field as the node's completion status
+and accepts only `done`/`opened`/`skipped`, so an agent emit named `status` carrying any
+other routing value (`approved`, …) always escalates, and `status="done"` can never take an
+`approved` branch — the emit contract and the gate conflict. `status` is therefore reserved
+for an **`agent`** (a connector has no producer status gate, so a connector `status` emit
+stays allowed); the rest of the result set remains unreserved.
 
 ## 14. Open questions / future
 

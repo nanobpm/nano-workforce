@@ -1844,8 +1844,19 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
   }
 
   // Outputs: publish each declared emit into `<element>_<fact>` for a downstream consumer to bind.
+  // A `human` node's non-artifact emits ALL share the one captured `humanEmitValue` (the generic form has
+  // a single `value` field — see humanBodyLines). Publishing that one value into SEVERAL distinct facts
+  // would corrupt them (PR #863 Copilot Low, thread r4182488264), so only a SINGLE non-artifact human
+  // emit is sourced from `humanEmitValue`; with two or more, every non-artifact emit publishes null
+  // (discarded — matching the form's "a multi-emit entry is discarded" copy). Artifact emits are
+  // unaffected (they read the distinct `humanEmitArtifact`).
+  const humanNonArtifactEmits =
+    node.kind === "human" ? normaliseEmits(node).filter((f) => f.type !== "artifact") : [];
+  const humanValueEmit = humanNonArtifactEmits.length === 1 ? humanNonArtifactEmits[0] : undefined;
   for (const fact of normaliseEmits(node)) {
-    outputs.push({ source: guarded(factSourceVar(node.kind, fact)), target: `${el}_${fact.name}` });
+    const discardHumanValue =
+      node.kind === "human" && fact.type !== "artifact" && humanValueEmit === undefined;
+    outputs.push({ source: discardHumanValue ? "=null" : guarded(factSourceVar(node.kind, fact)), target: `${el}_${fact.name}` });
   }
 
   // Stage 0 transcript correlation (#543): propagate the completing worker's `transcriptUrl` (built
@@ -2389,6 +2400,34 @@ function humanBodyLines(el: string, displayName: string): string[] {
  * mapping a naive resume publishes `<el>_<fact> = null`, silently starving the downstream consumer.
  * `opts.diagnosticInputs` seeds read-only probe context (issue #514 Defect A) onto the same task so the
  * operator can see WHY the gate escalated (its last probe detail + observed candidate releases). */
+
+/** The FEEL output source that publishes the escalation form's captured `value` onto a single-emit
+ * node's emit-source var, COERCED/VALIDATED to the emit's declared type (PR #863 Copilot High, thread
+ * r4182488193). The form captures `value` from a TEXTFIELD, so it is always a string — but a
+ * `boolean`/`number` fact's downstream guarded split compares against a TYPED FEEL literal
+ * (`= true` / `= 1`), so publishing the raw string `"true"`/`"1"` would skip the guarded branch.
+ * Coerce by {@link DeliveryFact.type}:
+ *   • `boolean` — accept only the literal `"true"`/`"false"` (case-insensitive, via `lower case()`);
+ *     anything else is invalid and publishes null. (The pinned engine's FEEL `matches` does not
+ *     support an inline `(?i:…)` flag — verified against the WASM engine — so case-insensitivity is
+ *     done by lower-casing the input, not the pattern.)
+ *   • `number` — `number(value)` parses the numeric text; an unparseable entry yields null.
+ *   • every other type (`string`/`url`/`version`/`pr`/`artifact`) is text-valued already — pass through.
+ * The defined FAILURE PATH for invalid input is `null`: the emit source publishes null, so a
+ * required-emit producer gate escalates and a guarded split takes its deadlock-safe default rather than
+ * routing on a mistyped value. */
+function escalationResumeValueFeel(fact: DeliveryFact): string {
+  const defined = "is defined(value)";
+  switch (fact.type) {
+    case "boolean":
+      return `=if (${defined} and value != null and matches(lower case(string(value)), "^(true|false)$")) then lower case(string(value)) = "true" else null`;
+    case "number":
+      return `=if (${defined} and value != null) then number(value) else null`;
+    default:
+      return `=if (${defined}) then value else null`;
+  }
+}
+
 function escalationTaskLines(
   esc: string,
   nodeId: string,
@@ -2438,9 +2477,11 @@ function escalationTaskLines(
     // `resolvedArtifact` field — so the single emit resumes from `value`, mapped onto that fact's
     // emit-source var (artifact→resolvedArtifact, version→detail, …). Sourcing an artifact from a
     // `resolvedArtifact` form field the form never sets would publish null and make an artifact
-    // wait-node escalation non-resumable via the UI.
+    // wait-node escalation non-resumable via the UI. The captured `value` is TEXTFIELD text (always a
+    // string), so it is coerced/validated to the emit's declared type before publishing — see
+    // {@link escalationResumeValueFeel}.
     outputs.push(
-      `            <zeebe:output ${attr("source", `=if (is defined(value)) then value else null`)} target="${target}" />`,
+      `            <zeebe:output ${attr("source", escalationResumeValueFeel(resumableEmit))} target="${target}" />`,
     );
   }
   if (opts?.retryElement !== undefined) {

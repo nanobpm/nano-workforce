@@ -416,6 +416,78 @@ test("#863 single-emit escalation still resumes: exactly one emit maps the opera
   assert(/source="=if \(is defined\(value\)\) then value else null" target="pr"/.test(esc), "the single emit resumes from the value field onto its source var");
 });
 
+test("#863 typed Continue: a single-emit escalation coerces/validates the textfield `value` to the emit's declared type before publishing (r4182488193)", async () => {
+  // Regression guard (PR #863 Copilot High, thread r4182488193): the escalation form captures `value`
+  // from a TEXTFIELD (always a string), but the single-emit resume published it unchanged for every
+  // declared fact type. A Continue on a `boolean`/`number` emit therefore wrote the STRINGS
+  // `"true"`/`"1"`, while a downstream guarded split compares against typed FEEL literals
+  // (`= true`/`= 1`), so the guarded branch was skipped. The resume must coerce/validate using
+  // `resumableEmit.type` before writing the emit source, with a defined failure path (an unparseable
+  // entry publishes null → the required-emit gate / deadlock-safe default) for invalid input.
+  const boolGraph = await compileOk({
+    nodes: [{ id: "gate", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "ok", type: "boolean" }] }],
+    edges: [],
+  });
+  const boolEsc = escBlockForNodeSuffix(boolGraph.bpmn, "gate", "esc");
+  const boolOut = boolEsc.match(/<zeebe:output source='([^']*)' target="ok"/);
+  assert(boolOut, "the boolean emit's escalation resume maps value onto its source var");
+  const boolFeel = boolOut[1].replaceAll("&quot;", '"');
+  assert(/lower case\(string\(value\)\)\s*=\s*"true"/.test(boolFeel), `a boolean emit coerces the text to a real boolean (… = "true"), got: ${boolFeel}`);
+  assert(/matches\(lower case\(string\(value\)\)/.test(boolFeel), "a boolean emit validates the text is true/false before coercing");
+  assert(/else null/.test(boolFeel), "an unparseable boolean entry publishes null (the defined failure path), not the raw string");
+
+  const numGraph = await compileOk({
+    nodes: [{ id: "n", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "count", type: "number" }] }],
+    edges: [],
+  });
+  const numEsc = escBlockForNodeSuffix(numGraph.bpmn, "n", "esc");
+  const numOut = numEsc.match(/<zeebe:output source=["']([^"']*)["'] target="count"/);
+  assert(numOut, "the number emit's escalation resume maps value onto its source var");
+  const numFeel = numOut[1].replaceAll("&quot;", '"');
+  assert(/number\(value\)/.test(numFeel), `a number emit coerces the text via number(value), got: ${numFeel}`);
+  assert(/else null/.test(numFeel), "an unparseable number entry publishes null");
+
+  // A string-typed emit passes the text through unchanged (no coercion needed).
+  const strGraph = await compileOk({
+    nodes: [{ id: "s", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "verdict", type: "string" }] }],
+    edges: [],
+  });
+  const strEsc = escBlockForNodeSuffix(strGraph.bpmn, "s", "esc");
+  assert(/source="=if \(is defined\(value\)\) then value else null" target="verdict"/.test(strEsc), "a string emit passes the text value through unchanged");
+});
+
+test("#863 human multi-emit: a human node publishing several non-artifact facts does NOT copy one captured value into every fact (r4182488264)", async () => {
+  // Regression guard (PR #863 Copilot Low, thread r4182488264): `humanBodyLines` always maps the form's
+  // single `value` to `humanEmitValue`, and the subProcess output mapped EVERY non-artifact human emit
+  // from that same variable — so a multi-scalar human node published the entered value into EVERY fact
+  // rather than discarding it (contradicting the form's "a multi-emit entry is discarded" copy). One
+  // captured value cannot satisfy several distinct typed facts; only a SINGLE non-artifact emit may be
+  // published from `humanEmitValue`, and any additional non-artifact emit must publish null (discarded).
+  const multi = await compileOk({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "a", type: "string" }, { name: "b", type: "string" }] },
+    ],
+    edges: [],
+  });
+  const el = elementForNode(multi.bpmn, "h");
+  const sub = multi.bpmn.slice(multi.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</bpmn:subProcess>"));
+  // With TWO non-artifact emits, NEITHER may be sourced from the shared `humanEmitValue` (that would
+  // copy one value into both) — both publish null (discarded), matching the form copy.
+  assert(!/<zeebe:output source="=if \(is defined\(humanEmitValue\)\) then humanEmitValue else null" target="[^"]+_a" \/>/.test(io), "a multi-emit human node does NOT source fact 'a' from the shared humanEmitValue");
+  assert(!/<zeebe:output source="=if \(is defined\(humanEmitValue\)\) then humanEmitValue else null" target="[^"]+_b" \/>/.test(io), "a multi-emit human node does NOT source fact 'b' from the shared humanEmitValue");
+
+  // …but a SINGLE non-artifact human emit still resumes from humanEmitValue (the boundary must not
+  // regress the single-emit path).
+  const single = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }] }],
+    edges: [],
+  });
+  const sEl = elementForNode(single.bpmn, "h");
+  const sSub = single.bpmn.slice(single.bpmn.indexOf(`<bpmn:subProcess id="${sEl}"`));
+  assert(/<zeebe:output source="=if \(is defined\(humanEmitValue\)\) then humanEmitValue else null" target="[^"]+_verdict" \/>/.test(sSub), "a single-emit human node still publishes its one fact from humanEmitValue");
+});
+
 
 test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", async () => {
   const errors = await compileFail({

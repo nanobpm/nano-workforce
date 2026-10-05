@@ -220,6 +220,33 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
     assert.deepEqual(connectors.get("cb-1"), [{ from: "b", name: "pr", value: PR_B }], "the supplied PR resumes b");
   });
 
+  test("a boolean single-emit Continue coerces the textfield string to a real boolean (typed-resume regression)", async () => {
+    // Regression guard (PR #863 Copilot High, thread r4182488193): the escalation form captures `value`
+    // as textfield TEXT, but a `boolean` emit's downstream guard compares against a typed `= true`. The
+    // single-emit resume must coerce the string to a real boolean — a raw `"true"` string would skip the
+    // guard. Verified end-to-end against the WASM engine (the FEEL `matches` has no inline `(?i:)` flag,
+    // so the coercion lower-cases the input).
+    const app = await boot();
+    const connectors = await observeConnectors(app);
+    const graph = {
+      name: "bool-coerce",
+      nodes: [
+        { id: "b", kind: "agent", agent: { jobType: "senior:b" }, emits: [{ name: "ok", type: "boolean" }] },
+        { id: "cb", kind: "connector", connector: { target: "slack", dedupeKey: "cb-1", payload: { ok: "b.ok" } } },
+      ],
+      edges: [{ from: "b.ok", to: "cb" }],
+    } as never;
+    await app.engine.registerWorker("senior:b", async () => ({ status: "blocked", summary: "no repo" }));
+    const run = await runDeliveryGraph(app.engine, graph, { repoless: true });
+    assert.ok(run.ok, JSON.stringify(run));
+    await app.settle();
+    const esc = await openTask(app, "__contract");
+    assert.ok(esc);
+    await app.engine.completeUserTask(esc.userTaskKey, { value: "true" });
+    await app.settle();
+    assert.deepEqual(connectors.get("cb-1"), [{ from: "b", name: "ok", value: true }], "the textfield \"true\" resumes b as a real boolean");
+  });
+
   test("preflight: a node whose nodeInputs were lost raises an incident naming the cause, and proceeds once restored", async () => {
     const app = await boot();
     await observeConnectors(app);

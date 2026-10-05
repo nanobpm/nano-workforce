@@ -532,6 +532,28 @@ test("a node-local RESULT field is NOT a reserved emit name — an agent may emi
   assertEquals(errors.length, 0, `an agent emitting 'pr' validates, got: ${JSON.stringify(errors)}`);
 });
 
+test("invalid-fact-name: an AGENT emit named `status` is reserved — the producer gate reads that node-local field as its completion status", () => {
+  // Regression guard (PR #863 Copilot Medium "Previously missed", deliveryGraph.ts:418): the result-set
+  // exemption was too broad for an agent emit named `status`. The producer status gate
+  // (`agentContractProceedCondition`) interprets that same node-local field as the completion status and
+  // accepts only `done`/`opened`/`skipped`, while the emit contract may require a different routing
+  // value — `status="approved"` always escalates, and `status="done"` can never take an `approved`
+  // branch. Unlike an aligned result fact such as `pr` (whose emit value and result field agree),
+  // `status` is CONSTRAINED by the gate, so the two uses conflict. Reserve the agent completion-control
+  // `status` while continuing to allow aligned result facts such as `pr`.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "status", type: "string" }] }],
+  });
+  const err = hasCode(errors, "invalid-fact-name");
+  assertEquals(err.path, "nodes[0].emits[0].name", "an agent emitting 'status' is rejected");
+  assert(err.message.includes("reserved"), `emit 'status' names the reserved collision, got: ${err.message}`);
+  // A CONNECTOR has no producer status gate, so its `status` emit collides with nothing — allowed.
+  const connector = validateDeliveryGraph({
+    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#a" }, emits: [{ name: "status", type: "string" }] }],
+  });
+  assertEquals(connector.length, 0, `a connector emitting 'status' validates (no producer gate), got: ${JSON.stringify(connector)}`);
+});
+
 test("invalid-fact-name is KIND-AWARE: an agent may emit a connector-only config name (`target`), and vice versa (r4181322008)", () => {
   // Regression guard (PR #863 Copilot Medium, thread r4181322008): the reserved set reserves only the
   // node's OWN kind's config. An agent seeds no `target`/`payload`/`dedupeKey` (connector-only), so an
