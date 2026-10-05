@@ -445,6 +445,7 @@
             <zeebe:input source="=planKey" target="subjectKey" />
             <zeebe:input source="=baseBranch" target="baseBranch" />
             <zeebe:input source="=escalationSlaTimeout" target="escalationSlaTimeout" />
+            <zeebe:input source="=agentSlaTimeout" target="agentSlaTimeout" />
             <zeebe:input source="=if (is defined(escalationAssignee)) then escalationAssignee else null" target="escalationAssignee" />
             <zeebe:input source="=if (is defined(baseBranchBrief)) then baseBranchBrief else null" target="baseBranchBrief" />
             <zeebe:input source="=if (is defined(blackboardBrief)) then blackboardBrief else null" target="blackboardBrief" />

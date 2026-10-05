@@ -16,6 +16,7 @@
 // SQL — matching app/plan.ts and app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
+import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { derivedTrackingTable } from "./instanceTracking.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
@@ -531,6 +532,10 @@ export async function startFeature(
       // `feature-escalation` user task's interrupting timer boundary and assignment definition.
       escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
       escalationAssignee: null,
+      // Agent-task liveness SLA (issue #849): bounds the implement-cell's external agent task
+      // (`implement-task`) — its interrupting timer boundary evaluates `=agentSlaTimeout` at timer
+      // creation, so a hung or looping implementation agent escalates instead of parking forever.
+      agentSlaTimeout: AGENT_SLA_TIMEOUT,
       // Base branch (ADR 0003): the branch the agent branches off and opens its PR against. The
       // brief rides `appendPrompt` in the implement task, exactly like the epic implementer.
       baseBranch: base,

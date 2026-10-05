@@ -133,7 +133,20 @@ export const retroFlow: DeclarativeFlow = defineFlow(
       jobType: "senior:conformance",
       prompt: { resourceId: "prompts/conformance.md", bindingType: "latest", append: "=conformanceDigest" },
     });
-    w.task("record-conformance", { jobType: "pr.conformance-record" });
+    w.task("record-conformance", {
+      jobType: "pr.conformance-record",
+      // The golden pins both SLA-mode control flags to `=false` on this NORMAL-path recorder
+      // (round-7 review, PR #864): the flags share the external conformance agent's result
+      // namespace, so a hoisted agent output must never select the SLA/preserve branch. The port
+      // reproduces those pins so the parity diagnostic's only residual is the class-3 marker +
+      // SLA boundaries.
+      io: {
+        input: [
+          { source: "=false", target: "agentSlaElapsed" },
+          { source: "=false", target: "preserveConformance" },
+        ],
+      },
+    });
     w.branch("hasDeviations = true", {
       then: (b) => {
         b.human("conformance-escalation", {

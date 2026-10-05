@@ -173,33 +173,57 @@ test("loop() inserts a gateway head, so back-edges cannot merge into a task", ()
 // structured topology (clears class 2), but issue #745 added the engine-native
 // AgentTask marker `<zeebe:agentDefinition agentType="external" />` to its two
 // prompt-bearing `senior:*` tasks and the published compiler cannot emit it.
-// Prove the blocker is real AND that it is the ONLY divergence, so the parked
-// entry is a complete, verified port held ready — not an abandoned one.
-test("retro's complete port differs from its golden by ONLY the agent-task marker", () => {
+// Issue #849 then added an interrupting `agentSlaTimeout` timer boundary to each
+// of those tasks (routing to the `conformance-escalation` user task) — the
+// code-first builder cannot express a boundary event on a task either (its
+// `FlowNode` union has no such node; AGENTS.md). Prove the blockers are real AND
+// that they are the ONLY divergence, so the parked entry is a complete, verified
+// port held ready — not an abandoned one.
+test("retro's complete port differs from its golden by ONLY the agent-task marker + SLA boundaries", () => {
   const golden = readFileSync(goldenPath("retro"), "utf8");
   const derived = declarativeToBpmn(retroFlow);
   const markers = (xml: string): number =>
     (xml.match(/<(?:\w+:)?agentDefinition\b[^>]*\bagentType="external"/g) ?? []).length;
+  const boundaries = (xml: string): number =>
+    (xml.match(/<(?:\w+:)?boundaryEvent\b/g) ?? []).length;
 
   // (a) the golden really carries the marker, on BOTH of its agent tasks — and it
   //     cannot simply be dropped: app/agentic/vocab/agent-marker.test.ts is a
   //     defect-class guard requiring it on every deployed prompt-bearing agent task.
   assertEquals(markers(golden), 2, "retro's golden should mark senior:conformance and senior:retro");
+  //     …and each marked task is SLA-bounded (issue #849; the defect-class guard is
+  //     app/agentic/vocab/agent-sla-boundary.test.ts).
+  assertEquals(boundaries(golden), 2, "retro's golden should SLA-bound both agent tasks");
 
-  // (b) the published compiler emits none of it — the blocker is real, not a guess.
-  //     When this starts failing, upstream task() grew marker support: un-park retro
-  //     by threading `retroFlow` back into its PORTS entry in ./flows.ts.
+  // (b) the published compiler emits none of it — the blockers are real, not a guess.
+  //     When the marker assertion starts failing, upstream task() grew marker support;
+  //     when the boundary assertion starts failing, the builder grew boundary events:
+  //     un-park retro by threading `retroFlow` back into its PORTS entry in ./flows.ts.
   assertEquals(markers(derived), 0, "@nanobpm/workflow can now emit <zeebe:agentDefinition/> — un-park retro");
+  assertEquals(boundaries(derived), 0, "@nanobpm/workflow can now emit boundary events — un-park retro");
 
-  // (c) strip exactly the marker lines from the golden and the port derives the
-  //     WHOLE model green, through the shared harness's own normalize/equality —
-  //     so nothing but the marker diverges.
-  const unmarked = golden.replace(/^[ \t]*<(?:\w+:)?agentDefinition\b[^>]*\/>[ \t]*\r?\n/gm, "");
+  // (c) strip exactly the marker lines AND the SLA boundary blocks (plus their
+  //     sequence flows, the two SLA recorder service tasks they feed, and the
+  //     extra incomings on the escalation user task) from the golden and the port
+  //     derives the WHOLE model green, through the shared harness's own
+  //     normalize/equality — so nothing but the marker + SLA-escalation apparatus
+  //     diverges.
+  const unmarked = golden
+    .replace(/^[ \t]*<(?:\w+:)?agentDefinition\b[^>]*\/>[ \t]*\r?\n/gm, "")
+    .replace(/^[ \t]*<(?:\w+:)?boundaryEvent\b[\s\S]*?<\/(?:\w+:)?boundaryEvent>\r?\n/gm, "")
+    // the SLA recorder service tasks (record-conformance-sla / record-synthesize-sla) and the
+    // `<!-- Agent-SLA recorders: … -->` comment block immediately preceding them
+    .replace(/^[ \t]*<!--[\s\S]*?-->[ \t]*\r?\n(?=[ \t]*<(?:\w+:)?serviceTask\b[^>]*\bid="record-(?:conformance|synthesize)-sla")/gm, "")
+    .replace(/^[ \t]*<(?:\w+:)?serviceTask\b[^>]*\bid="record-(?:conformance|synthesize)-sla"[\s\S]*?<\/(?:\w+:)?serviceTask>\r?\n/gm, "")
+    .replace(/^[ \t]*<(?:\w+:)?sequenceFlow\b[^>]*\bsourceRef="be_[^"]*"[^>]*\/>[ \t]*\r?\n/gm, "")
+    .replace(/^[ \t]*<(?:\w+:)?sequenceFlow\b[^>]*\bsourceRef="record-(?:conformance|synthesize)-sla"[^>]*\/>[ \t]*\r?\n/gm, "")
+    .replace(/^[ \t]*<(?:\w+:)?incoming>f_(?:conformanceSla|synthesizeSla)(?:ToEsc)?<\/(?:\w+:)?incoming>[ \t]*\r?\n/gm, "");
   assertEquals(markers(unmarked), 0, "the strip must remove every marker line");
+  assertEquals(boundaries(unmarked), 0, "the strip must remove every SLA boundary");
   const expected = normalize(unmarked);
   const actual = normalize(derived);
   assert(
     modelsEqual(expected, actual),
-    `retro's port must derive its golden once the agent-task marker is stripped — residual drift:\n${diffModels(expected, actual)}`,
+    `retro's port must derive its golden once the agent-task marker and SLA boundaries are stripped — residual drift:\n${diffModels(expected, actual)}`,
   );
 });

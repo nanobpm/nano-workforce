@@ -18,6 +18,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
+import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { isPlausibleBranchName } from "./baseBranch.ts";
 import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, redactFreeText } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
@@ -239,6 +240,10 @@ export async function runDeliveryGraph(
       // node ioMapping in deliveryGraphCompiler). Seeded once at the run root — the same value for
       // every node — and read down into each agent job via `=transcriptUrlBase`.
       [TRANSCRIPT_URL_BASE_VAR]: transcriptUrlBaseFor(),
+      // Agent-task liveness SLA (issue #849): the compiled graph's per-node `=nodeTimeout` boundary
+      // bounds a node's whole retry budget; this seeds the shared `agentSlaTimeout` knob so any
+      // agent cell modelled with the fleet-wide SLA boundary resolves it too.
+      agentSlaTimeout: AGENT_SLA_TIMEOUT,
     },
   });
   // The engine can yield a numeric key; `DeliveryRunHandle.processInstanceKey` is typed `string` and

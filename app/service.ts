@@ -11,7 +11,7 @@ import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { matchAdjudication, prAdjudications, resetAdjudications } from "./adjudications.ts";
 import { completeEscalationAutoApplied, escalationFormId } from "./agentCompletion.ts";
-import { agentSlaTimeout } from "./agentSla.ts";
+import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import {
   CAPS_RESOLVED_MESSAGE,
   type CapabilityNeed,
@@ -214,13 +214,25 @@ export const MAX_ADVERSARIAL_PASSES = clampCiFixBudget(
  * (allows 0 = escalate immediately, ceiling-capped). */
 export const MAX_MERGE_STALL_ROUNDS = clampCiFixBudget(process.env.NANO_PR_MAX_MERGE_STALL_ROUNDS, 3);
 
-/** How long a merge-loop AGENT service task (rebase / fix-ci) may sit without completing before its
- * interrupting timer boundary fires and the PR escalates for human attention. Seeded as the
- * `agentSlaTimeout` process variable at merge start and evaluated by those tasks' boundary timers.
- * Unlike a human-decision escalation (PT24H), an agent task has no human in the loop — if its
- * capability is unstaffed or the agent hangs/crashes without failing the job, the token would
- * otherwise park forever. Override with `NANO_PR_AGENT_SLA_TIMEOUT` (ISO-8601 duration). */
-export const AGENT_SLA_TIMEOUT = agentSlaTimeout(process.env.NANO_PR_AGENT_SLA_TIMEOUT);
+/** How long an external AGENT service task may sit without completing before its interrupting
+ * timer boundary fires and the process escalates for human attention. Seeded as the
+ * `agentSlaTimeout` process variable at every process start that hosts an external agent task
+ * (issue #849), and evaluated by the BOUNDED subset's boundary timers
+ * (`<bpmn:timeDuration>=agentSlaTimeout`, FEEL at timer creation): the implement-cell, the
+ * merge-cell's trial-merge, the merge-loop's rebase / fix-ci, and retro's conformance / synthesize.
+ * The convergence-loop (review-round / adversarial-review / classify-scope) and plan-fanout (plan /
+ * review-plan) tasks are only PRE-SEEDED here — their boundaries are intentionally deferred to #868
+ * (a bpmn-auto-layout back-edge routing limitation, #867). Plan-fanout's inline wave `trial-merge`
+ * (`plan-fanout.bpmn:524-542`) is likewise deferred: it is a separate external agent task from the
+ * standalone `merge-cell` (which has no callActivity caller) on a rerun back-edge with no boundary
+ * yet. For all of these this seed is preparation, not yet an armed bound. Unlike a human-decision
+ * escalation (PT24H), an agent task has no human in
+ * the loop — if its capability is unstaffed or the agent hangs/crashes without failing the job, the
+ * token would otherwise park forever. Override with `NANO_PR_AGENT_SLA_TIMEOUT` (ISO-8601 duration).
+ * The canonical validated constant lives in the leaf module `app/agentSla.ts` (re-exported here) so
+ * `app/feature.ts`, `app/plan.ts`, `app/retro.ts`, and `app/deliveryRunner.ts` seed it without an
+ * import cycle. */
+export { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 
 /** How long the convergence loop waits for a fresh review before escalating to a human. Seeded as
  * the `reviewWaitTimeout` process variable at submit and evaluated by the process's
@@ -761,6 +773,13 @@ async function submitPrCritical(
       round: 1,
       maxRounds: clampRounds(maxRounds, MAX_ROUNDS),
       reviewWaitTimeout: REVIEW_WAIT_TIMEOUT,
+      // Agent-task liveness SLA (issue #849): PRE-SEED the bound for the loop's external agent
+      // tasks (review-round / adversarial-review / classify-scope). Those tasks sit on a
+      // back-edge loop whose boundary the layouter cannot yet route, so their SLA boundaries are
+      // intentionally deferred to #868 (layouter bug #867) — this seed is preparation for that
+      // follow-up, not yet an armed bound on this loop. (The merge-loop's rebase / fix-ci, seeded
+      // from the same constant, ARE bounded today.)
+      agentSlaTimeout: AGENT_SLA_TIMEOUT,
       // Bounded agent auto-ack (issue #796): the convergence loop re-dispatches the review-round
       // agent up to `ackRetryMax` times to ack suppressed advisories when the converge-gate blocks
       // solely on unacked ones, before escalating to a human. `ackRetryRound` counts those passes.
