@@ -580,6 +580,83 @@ test("#876 round-5 review: a declared emit whose name EQUALS the generated resum
   assert(escBlockForNodeSuffix(rOk.bpmn, "open", "esc").includes('target="my__flag__fact"'), "a __flag__-bearing fact name compiles and binds under its own name");
 });
 
+test("#876 round-6 review: the resume-valid flag dodges a NON-REQUIRED declared emit named exactly the flag, not only the resumed required emit", async () => {
+  // The round-5 fix grew the flag past only the SINGLE resumed required emit's source var. But every
+  // declared emit — including a NON-required one absent from `resume.emits` (a routing-only `when`-guard
+  // emit, or a declared-but-unconsumed emit) — is still republished by the node's subProcess output
+  // mapping from its own source var (for an agent that var IS the fact's own name). A node that declares
+  // a REQUIRED emit (so the escalation is resumable and a flag exists) PLUS a non-required emit named
+  // EXACTLY the generated flag would, under the old code, have the escalation write its boolean validity
+  // flag into that emit's var — and the subProcess then publishes `true`/`false` for that emit downstream
+  // (potentially selecting a guarded branch — PR #876 round-6 review). The flag must grow collision-free
+  // against ALL declared emits, so bind the extra emit to the exact flag var and assert the flag dodges.
+  //
+  // The flag is derived from `open`'s COMPILED element id; renaming/adding the extra (unconsumed) emit
+  // does not change topology, so probe-compile with the final shape to learn the element id, then name
+  // the extra emit the exact generated flag var.
+  const probe = await compileOk({
+    name: "flag non-required collision probe",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "pr", type: "pr" }, { name: "routeProbe", type: "boolean" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.pr" }, dedupeKey: "nr-p" } },
+    ],
+    edges: [{ from: "open.pr", to: "land" }],
+  });
+  const flagVar = resumeValidVar(`delivery-human-task__${elementForNode(probe.bpmn, "open")}__esc`);
+  const r = await compileOk({
+    name: "flag non-required collision tolerated",
+    nodes: [
+      // `pr` is REQUIRED (consumed by `land` below), so the timeout escalation is resumable and owns a
+      // flag; `flagVar` is a declared-but-unconsumed emit named exactly that flag — absent from the
+      // required set, so the old single-target collision check never saw it.
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "pr", type: "pr" }, { name: flagVar, type: "boolean" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.pr" }, dedupeKey: "nr-c" } },
+    ],
+    edges: [{ from: "open.pr", to: "land" }],
+  });
+  const escBlock = escBlockForNodeSuffix(r.bpmn, "open", "esc");
+  // The flag binds under the DISTINCT suffixed var, never the declared emit's own var.
+  const suffixedFlag = `${flagVar}_`;
+  assert(escBlock.includes(`target="${suffixedFlag}" />`), `the flag grows a collision-free suffix past the non-required emit, got ${escBlock}`);
+  assert(!escBlock.includes(`target="${flagVar}" />`), "the flag never binds under the non-required emit's own var");
+  // The gateway routes on that SAME suffixed flag var, so the valid branch stays wired.
+  assert(
+    r.bpmn.includes(`<bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${suffixedFlag} = true</bpmn:conditionExpression>`),
+    `the valid branch routes on the suffixed flag var, got ${r.bpmn}`,
+  );
+  // The non-required emit is still republished from its OWN (now flag-free) var by the subProcess output.
+  const el = elementForNode(r.bpmn, "open");
+  assert(
+    r.bpmn.includes(`<zeebe:output source="=if (is defined(${flagVar})) then ${flagVar} else null" target="${el}_${flagVar}" />`),
+    "the non-required emit still republishes from its own source var, uncontaminated by the flag",
+  );
+});
+
+test("#876 round-6 review: the PRODUCER-CONTRACT (`__contract`) escalation flag ALSO dodges a non-required declared emit named the flag", async () => {
+  // The same subProcess scope hosts both the timeout `__esc` and the producer-contract `__contract`
+  // escalations, so the contract flag must dodge the full declared-emit set too (PR #876 round-6 review).
+  const probe = await compileOk({
+    name: "contract flag collision probe",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "pr", type: "pr" }, { name: "cProbe", type: "boolean" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.pr" }, dedupeKey: "cr-p" } },
+    ],
+    edges: [{ from: "open.pr", to: "land" }],
+  });
+  const flagVar = resumeValidVar(`delivery-human-task__${elementForNode(probe.bpmn, "open")}__contract`);
+  const r = await compileOk({
+    name: "contract flag collision tolerated",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "pr", type: "pr" }, { name: flagVar, type: "boolean" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.pr" }, dedupeKey: "cr-c" } },
+    ],
+    edges: [{ from: "open.pr", to: "land" }],
+  });
+  const escBlock = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  const suffixedFlag = `${flagVar}_`;
+  assert(escBlock.includes(`target="${suffixedFlag}" />`), `the contract flag grows a collision-free suffix past the non-required emit, got ${escBlock}`);
+  assert(!escBlock.includes(`target="${flagVar}" />`), "the contract flag never binds under the non-required emit's own var");
+});
 
 test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", async () => {
   const errors = await compileFail({

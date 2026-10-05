@@ -1874,12 +1874,15 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // The subProcess timeout `__esc` twin resumes with the SAME required emits the contract gate
       // uses — the facts a downstream node binds, which a null (lost) result poisons (#872).
       const timeoutResume = { kind: node.kind, emits: contractGate.requiredEmits };
+      // The source var of EVERY declared emit (required + non-required), so the resume-valid flag on
+      // this node's escalations dodges all of them — not only the resumed required emit (PR #876 review).
+      const allEmitTargets = normaliseEmits(node).map((f) => factSourceVar(node.kind, f));
       // The executable `<zeebe:taskDefinition type=…>` MUST carry the raw `jobType` verbatim for worker
       // routing (validateDeliveryGraph rejects a URL-shaped/credential-bearing jobType, so it can never
       // be a leak here), but the `descriptor` is embedded by `serviceBodyLines` into the operator-visible
       // timeout / producer-contract escalation FEEL `prompt` — so it takes the SAME display redaction
       // `nodeDisplay` applies, never the raw value (issue #778 review — thread deliveryGraphCompiler.ts:1606).
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, timeoutResume);
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, timeoutResume, allEmitTargets);
     }
     case "connector": {
       // TRIM the target before building the escalation descriptor — `nodeDisplay` and the connector
@@ -1890,7 +1893,10 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // the facts a downstream node binds — so a human/agent who unsticks a timed-out connector can
       // supply the lost emit value rather than thread a null onward (#872).
       const connectorResume = { kind: node.kind, emits: normaliseEmits(node).filter((f) => requiredEmits.has(f.name)) };
-      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target.trim())}`, undefined, [], displayName, connectorResume);
+      // Every declared emit's source var, so the flag dodges a non-required (routing/unconsumed) emit
+      // named exactly the flag, not only the resumed required one (PR #876 review).
+      const allEmitTargets = normaliseEmits(node).map((f) => factSourceVar(node.kind, f));
+      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target.trim())}`, undefined, [], displayName, connectorResume, allEmitTargets);
     }
     case "wait":
       return waitBodyLines(el, node, displayName);
@@ -1984,6 +1990,12 @@ function serviceBodyLines(
   // `ok:true` yet `n3_pr` stayed null). Empty for a node with no required emit (the escalation stays
   // an inert "click done" acknowledgement, `emitMode = "none"`).
   timeoutResume?: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[] },
+  // The source var ({@link factSourceVar}) of EVERY declared emit of this node — required AND
+  // non-required — so the resume-valid flag on BOTH the timeout `__esc` and the producer-contract
+  // `__contract` escalations is grown collision-free against all of them, not only the resumed required
+  // emit (PR #876 review). Both escalations live in this node's subProcess scope, which republishes
+  // every declared emit, so both must dodge the same full target set.
+  reservedFlagTargets: readonly string[] = [],
 ): string[] {
   const esc = escalationTaskElement(el);
   const taskExt = [
@@ -2012,6 +2024,7 @@ function serviceBodyLines(
       // — a no-emit node keeps its inert acknowledgement form.
       ...(timeoutResume !== undefined && timeoutResume.emits.length > 0 ? { resume: timeoutResume, validTarget: `${el}_end` } : {}),
       displayName: taskName,
+      reservedTargets: reservedFlagTargets,
     },
   );
   const head = [
@@ -2064,7 +2077,7 @@ function serviceBodyLines(
     // so the downstream consumer late-binds a real value instead of the null that poisoned it (#731) —
     // VALIDATED by the post-escalation gate (`validTarget`) so an omitted/malformed value re-parks
     // instead of threading null downstream (PR #876 review).
-    { ...(contractResumed ? { resume: { kind: "agent" as const, emits }, validTarget: `${el}_end` } : {}), displayName: taskName },
+    { ...(contractResumed ? { resume: { kind: "agent" as const, emits }, validTarget: `${el}_end` } : {}), displayName: taskName, reservedTargets: reservedFlagTargets },
   );
   return [
     ...head,
@@ -2197,7 +2210,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
           // A resumed wait-gate escalation is VALIDATED by the post-escalation gate (`validTarget`) so
           // an omitted/malformed operator value re-parks instead of threading null onto the emit the
           // downstream consumer binds (PR #876 review).
-          { resume: { kind: node.kind, emits }, diagnosticInputs, displayName, ...(emits.length > 0 ? { validTarget: `${el}_end` } : {}) },
+          { resume: { kind: node.kind, emits }, diagnosticInputs, displayName, reservedTargets: emits.map((f) => factSourceVar(node.kind, f)), ...(emits.length > 0 ? { validTarget: `${el}_end` } : {}) },
         )),
     // On `continue`, the not-ready-at-boundary branch (`_i4`) proceeds straight to the node end (no
     // human stop, no `_i5` escalation-return flow); on `escalate` it parks on the escalation task,
@@ -2284,6 +2297,12 @@ function escalationTaskLines(
     /** The element the resume-validation gate's VALID branch flows to (the node end). Required iff
      * `resume` carries emits — a resumable escalation never routes straight to its end. */
     validTarget?: string;
+    /** The emit-source var ({@link factSourceVar}) of EVERY declared emit of this node — required AND
+     * non-required (a routing-only `when`-guard emit, or a declared-but-unconsumed one) — that shares
+     * this escalation's flat subprocess scope. The resumed required emits are reserved regardless; this
+     * reserves the REST so the generated resume-valid flag is grown collision-free against ALL of them,
+     * never only the single resumed required emit (PR #876 review). */
+    reservedTargets?: readonly string[];
   },
 ): string[] {
   const resume = opts?.resume;
@@ -2322,18 +2341,25 @@ function escalationTaskLines(
   // always loops back (the operator re-parks) and no single value is ever threaded onto several
   // distinct emits. (Per-fact resume would need a per-fact form, which the generic form does not have.)
   const outputs: string[] = [];
-  // The single emit's source var is the ONLY user-controlled variable that shares this escalation's
-  // flat engine scope with the validity flag (for a multi-emit node nothing is bound, and for
-  // `wait`/`human` kinds `factSourceVar` is a fixed internal name). So the flag only needs to be
-  // collision-free against THAT one target: a single-emit `agent`/`connector` node's target is the
-  // fact's own name ({@link factSourceVar}), which the user controls and could legally set equal to the
-  // generated flag. Grow the flag with a deterministic unused suffix until it differs — closing the
-  // collision class structurally WITHOUT reserving any part of the public fact-name space (PR #876
-  // review). `_` keeps it a legal FEEL identifier; the loop terminates because each step lengthens the
-  // flag past the fixed-length target.
-  const singleTarget = resume !== undefined && emits.length === 1 ? factSourceVar(resume.kind, emits[0]) : undefined;
+  // The resume-valid flag shares this escalation's flat engine scope with EVERY declared emit's
+  // source var — not only the single resumed required emit. For a multi-emit node nothing is bound by
+  // the gate, and for `wait`/`human` kinds `factSourceVar` is a fixed internal name; but for an
+  // `agent`/`connector` a declared emit's source var IS its own fact name, which the user controls.
+  // That emit need NOT be the resumed required one: a routing-only `when`-guard emit, or a declared-
+  // but-unconsumed emit, is absent from `resume.emits` yet is STILL republished by the subProcess
+  // output mapping from its own source var (see the `normaliseEmits(node)` output loop). So a node can
+  // legally declare such an emit named EXACTLY the generated flag; left colliding, the escalation would
+  // write its boolean validity flag into that emit's var and the subProcess would publish `true`/`false`
+  // for it downstream (potentially selecting a guarded branch — PR #876 review). Reserve the source var
+  // of every declared emit (callers thread them via `reservedTargets`) AND the resumed required emits,
+  // then grow the flag with a deterministic unused `_` suffix until it differs from ALL of them —
+  // closing the whole collision class structurally WITHOUT reserving any part of the public fact-name
+  // space. `_` keeps it a legal FEEL identifier; the loop terminates because each step lengthens the
+  // flag past every fixed-length reserved target.
+  const reservedTargets = new Set<string>(opts?.reservedTargets ?? []);
+  if (resume !== undefined) for (const f of emits) reservedTargets.add(factSourceVar(resume.kind, f));
   let flagVar = resume !== undefined && emits.length > 0 ? resumeValidVar(esc) : "";
-  while (singleTarget !== undefined && flagVar === singleTarget) flagVar = `${flagVar}_`;
+  while (flagVar !== "" && reservedTargets.has(flagVar)) flagVar = `${flagVar}_`;
   if (resume !== undefined && emits.length === 1) {
     const fact = emits[0];
     const target = factSourceVar(resume.kind, fact);
