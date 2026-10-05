@@ -1,3 +1,9 @@
+## [0.200.9](https://github.com/nanobpm/nano-workforce/compare/v0.200.8...v0.200.9) (2026-10-05)
+
+### Bug Fixes
+
+* **implement-cell:** accurate escalation reason, adopt/retry a claimed completion without delivery ([#869](https://github.com/nanobpm/nano-workforce/issues/869)) ([9d7b3a8](https://github.com/nanobpm/nano-workforce/commit/9d7b3a83a4728ca831c519ffc3ad4eade00cc45e)), closes [#865](https://github.com/nanobpm/nano-workforce/issues/865) [#863](https://github.com/nanobpm/nano-workforce/issues/863) [#865](https://github.com/nanobpm/nano-workforce/issues/865) [#865](https://github.com/nanobpm/nano-workforce/issues/865)
+
 ## [0.200.8](https://github.com/nanobpm/nano-workforce/compare/v0.200.7...v0.200.8) (2026-10-05)
 
 ### Bug Fixes
