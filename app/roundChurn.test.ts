@@ -70,6 +70,57 @@ test("extractFiles: dotted API symbols and domains are NOT mined as root files (
   assertEquals(mixed.has("z.object"), false, "the dotted API symbol is not mined");
 });
 
+test("extractFiles: the allowlisted extension must be FINAL — a trailing dotted segment is not a file (#870 review)", () => {
+  // Class: `(?=\b|$)` also succeeds BEFORE another dot, so an API chain whose head happens to look
+  // like `name.<ext>.method` (`schema.ts.parse`, `config.json.parse`, `data.yaml.load`) was mined as
+  // the truncated `name.<ext>`. Four rounds citing the same chain while fixing different real files
+  // would then intersect on the fake file and falsely escalate. The extension must be the LAST dotted
+  // component of the token.
+  for (const s of [
+    "called schema.ts.parse on the payload",
+    "ran config.json.parse then merged",
+    "invoked data.yaml.load in the loader",
+    "used app.css.modules helper",
+  ]) {
+    assertEquals(extractFiles(s).size, 0, `trailing-segment chain should yield no file in ${JSON.stringify(s)}`);
+  }
+  // But a genuine multi-dot root file whose allowlisted extension IS final still mines whole.
+  assert(extractFiles("touched foo.test.ts").has("foo.test.ts"));
+  assert(extractFiles("edited nano.app.json").has("nano.app.json"));
+  assert(extractFiles("regenerated lib.d.ts").has("lib.d.ts"));
+});
+
+test("extractFiles: mines supported dotfiles and extensionless root files (#870 review)", () => {
+  // Class: the allowlist/comment name `.gitignore`, `.env`, `Dockerfile`, `Makefile` as churn
+  // surfaces, but the `name.ext` matcher can never match a leading-dot dotfile or an extensionless
+  // basename, so genuine churn on those surfaces was silently missed. A dedicated conservative
+  // basename matcher closes that gap.
+  const cases: Array<[string, string]> = [
+    ["reworked .gitignore again", ".gitignore"],
+    ["tweaked the .env file", ".env"],
+    ["adjusted .gitattributes", ".gitattributes"],
+    ["fixed .editorconfig rules", ".editorconfig"],
+    ["rebuilt the Dockerfile layer", "Dockerfile"],
+    ["edited the Makefile target", "Makefile"],
+  ];
+  for (const [summary, want] of cases) {
+    assert(extractFiles(summary).has(want), `expected ${want} mined from ${JSON.stringify(summary)}`);
+  }
+  // Prose that merely contains the word (no leading dot / wrong form) is NOT mined.
+  for (const s of ["the environment was fine", "docker build ran", "make the change"]) {
+    assertEquals(extractFiles(s).size, 0, `prose should yield no file in ${JSON.stringify(s)}`);
+  }
+  // A repeated-dotfile loop escalates end to end.
+  const rounds: ChurnRound[] = Array.from({ length: CHURN_WINDOW }, (_, i) => ({
+    roundNo: i + 1,
+    status: "addressed",
+    summary: `round ${i}: re-ignored another build artifact in .gitignore`,
+  }));
+  const res = detectChurn(rounds);
+  assertEquals(res.churning, true);
+  assertEquals(res.file, ".gitignore");
+});
+
 test("extractFiles: a repeated dotted-symbol loop does NOT escalate as churn (#870 review)", () => {
   // The acceptance counter-case: four rounds that all mention the SAME dotted API symbol (z.object)
   // while fixing DIFFERENT real files must NOT be declared churn — the shared token is prose, not a

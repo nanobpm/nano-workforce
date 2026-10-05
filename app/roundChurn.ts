@@ -79,6 +79,12 @@ const NESTED_PATH_RE = /^(?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z0-9]+/;
 //  2. The extension must still be at least two ALPHABETIC characters (the allowlist contains no digits
 //     or single letters), which keeps excluding version strings (`4.8`), sentence-ending abbreviations
 //     (`e.g`, `i.e`), and initialisms (`U.S`).
+//  3. The allowlisted extension must be the FINAL dotted component of the token. The trailing
+//     `(?![\w.@~+-])` negative lookahead refuses any following path character — crucially another
+//     `.segment` — so an API chain like `schema.ts.parse` / `config.json.parse` is NOT truncated to a
+//     fake `schema.ts` / `config.json` root file (a `\b`-only anchor succeeds before that next dot and
+//     mined the truncation, Copilot review of #870). Trailing SENTENCE punctuation is stripped from the
+//     candidate token in {@link extractFiles} BEFORE matching, so `README.md.` still mines `README.md`.
 //
 // The stem is greedy and MAY contain dots (`foo.test.ts`, `nano.app.json`): backtracking lets the LAST
 // dot be the separator so a multi-dot root file matches whole, while the allowlisted final extension
@@ -89,9 +95,19 @@ const ROOT_FILE_EXT =
   "(?:ts|tsx|js|jsx|mjs|cjs|mts|cts|json|jsonc|json5|md|markdown|yml|yaml|toml|xml|html|css|scss|" +
   "less|sql|sh|bash|zsh|py|rb|go|rs|java|kt|kts|swift|c|h|cc|hh|cpp|cxx|hpp|cs|fs|vue|svelte|php|" +
   "pl|pm|lua|dart|ex|exs|erl|hrl|clj|cljs|scala|groovy|gradle|properties|ini|cfg|conf|config|env|" +
-  "lock|mod|sum|mk|cmake|txt|dockerfile|gitignore|gitattributes|editorconfig|bpmn|form|dmn|proto|" +
-  "graphql|gql|prisma|tf|hcl)";
-const ROOT_FILE_RE = new RegExp(`^[\\w@~+-][\\w.@~+-]*\\.${ROOT_FILE_EXT}(?=\\b|$)`, "i");
+  "lock|mod|sum|mk|cmake|txt|bpmn|form|dmn|proto|graphql|gql|prisma|tf|hcl)";
+const ROOT_FILE_RE = new RegExp(`^[\\w@~+-][\\w.@~+-]*\\.${ROOT_FILE_EXT}(?![\\w.@~+-])`, "i");
+
+// A ROOT-LEVEL dotfile or extensionless basename — the churn surfaces the `name.ext` form above can
+// NEVER match because they have a leading dot and no basename (`.gitignore`, `.env`, `.editorconfig`,
+// `.gitattributes`) or no extension at all (`Dockerfile`, `Makefile`). The allowlist/comment above
+// name these as legitimate surfaces, so a loop repeatedly editing `.gitignore` must escalate too
+// (Copilot review of #870). A CLOSED allowlist of well-known basenames — not "any dotfile" — keeps the
+// match conservative (prose like "the environment" or "docker build" is never mined), and the trailing
+// `(?![\w.@~+-])` requires an EXACT whole-token match so a dotted variant (`.env.local`,
+// `Dockerfile.prod`) is left un-mined (fail-open) rather than collapsed to the base name.
+const ROOT_BASENAME_RE =
+  /^(?:\.(?:gitignore|gitattributes|editorconfig|env|dockerignore|npmrc|nvmrc|prettierrc|eslintrc|babelrc)|Dockerfile|Makefile|Rakefile|Gemfile|Procfile|Caddyfile|CODEOWNERS)(?![\w.@~+-])/i;
 
 // A whole URL span (`scheme://…host/path…`). A citation link's path (e.g.
 // `github.com/o/r/blob/main/docs/guide.md`) otherwise looks exactly like a repo-relative file, so a
@@ -109,16 +125,24 @@ const MAX_SCAN = 20000;
 /** Mine the set of distinct file paths referenced in a round summary. A non-string / empty summary
  * yields an empty set. The summary is length-bounded and URL spans are stripped, then each maximal
  * path-char run is tested for the path shape anchored at its start (see MAX_SCAN / URL_RE /
- * PATH_RUN_RE / NESTED_PATH_RE / ROOT_FILE_RE). Paths are normalized by stripping trailing sentence punctuation and closing
- * brackets so the same file referenced with different surrounding punctuation collapses to one key. */
+ * PATH_RUN_RE / NESTED_PATH_RE / ROOT_FILE_RE / ROOT_BASENAME_RE). Each run's trailing sentence
+ * punctuation and closing brackets are stripped BEFORE matching so the same file referenced with
+ * different surrounding punctuation collapses to one key and the allowlisted extension anchors to the
+ * token end. */
 export function extractFiles(summary: string | null | undefined): Set<string> {
   const files = new Set<string>();
   if (typeof summary !== "string" || summary.trim() === "") return files;
   const scanned = summary.slice(0, MAX_SCAN).replace(URL_RE, " ");
   for (const run of scanned.matchAll(PATH_RUN_RE)) {
-    const hit = run[0].match(NESTED_PATH_RE) ?? run[0].match(ROOT_FILE_RE);
+    // Strip trailing sentence punctuation / closing brackets BEFORE matching: `.` is itself a path
+    // char, so a sentence-ending `README.md.` arrives in the run with its period attached. Removing it
+    // first lets the allowlisted extension anchor cleanly to the END of the token (ROOT_FILE_RE's
+    // `(?![\w.@~+-])` lookahead), instead of a `\b` that also fired before that trailing dot.
+    const token = run[0].replace(/[),.;:'"`\]]+$/u, "").trim();
+    if (token === "") continue;
+    const hit = token.match(NESTED_PATH_RE) ?? token.match(ROOT_FILE_RE) ?? token.match(ROOT_BASENAME_RE);
     if (hit === null) continue;
-    const path = hit[0].replace(/[),.;:'"`\]]+$/u, "").trim();
+    const path = hit[0].trim();
     if (path !== "") files.add(path);
   }
   return files;

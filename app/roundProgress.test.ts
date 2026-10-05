@@ -450,6 +450,36 @@ test("progress-check: the churn history read is SCOPED to the current run (#870)
   assertEquals(updates.at(-1)!.patch.status, "waiting_review");
 });
 
+test("projectRunScopedRounds: only CURRENT-run rows can contribute to churn (#870 review)", async () => {
+  // The SCOPED-reader test above injects a reader returning [], so it exercises only the key forwarding
+  // — the actual row-filtering would still pass if removed or inverted. This covers the pure projection
+  // directly: `rounds` is retained across resubmissions (migration 102), so the default reader MUST
+  // drop any row not stamped with the calling job's processInstanceKey, including a legacy NULL-key row.
+  const { projectRunScopedRounds } = await import("../workers/progress-check/worker.ts");
+  const rows = [
+    { round_no: 1, status: "addressed", summary: "run B edit `src/a.ts`", process_instance_key: "run-B" },
+    { round_no: 2, status: "addressed", summary: "run B edit `src/b.ts`", process_instance_key: "run-B" },
+    { round_no: 9, status: "converged", summary: "prior run finished `src/z.ts`", process_instance_key: "run-A" },
+    { round_no: 3, status: "addressed", summary: "legacy row `src/c.ts`", process_instance_key: null },
+  ];
+  // Known key: ONLY the two run-B rows survive — the prior run's terminal `converged` row (which would
+  // break the trailing addressed run) and the legacy NULL-key row are both dropped.
+  const scoped = projectRunScopedRounds(rows, "run-B");
+  assertEquals(
+    scoped.map((r) => r.roundNo).sort((a, b) => a - b),
+    [1, 2],
+    "a prior run's rows and a legacy NULL-key row never leak into this run's window",
+  );
+  assertEquals(scoped.every((r) => r.status === "addressed"), true);
+  // Absent key (testkit/synthetic job that persisted no key): fall back to the WHOLE history, matching
+  // persist-round's own null-key fallback.
+  assertEquals(projectRunScopedRounds(rows, null).length, rows.length, "absent key falls back to full history");
+  assertEquals(projectRunScopedRounds(rows, undefined).length, rows.length, "undefined key falls back to full history");
+  // A numeric processInstanceKey is coerced to string before comparison.
+  const numeric = [{ round_no: 1, status: "addressed", summary: "x", process_instance_key: "42" }];
+  assertEquals(projectRunScopedRounds(numeric, 42 as unknown as string).length, 1, "numeric key is coerced to string");
+});
+
 test("progress-check: a churn escalation STAMPS the run-scoped churn-reset watermark (#870)", async () => {
   // When churn fires, the worker must persist `churn_escalated_round = roundNo` so the human-answer
   // resume (which re-enters the same numeric round and writes no `blocked` row) restarts the clock.

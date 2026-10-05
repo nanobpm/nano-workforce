@@ -244,18 +244,34 @@ function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
  * default binds the app's `rounds` table and filters by the calling job's `processInstanceKey`. */
 export type RoundsReader = (prKey: string, processInstanceKey: string | null | undefined) => Promise<ChurnRound[]>;
 
-/** Default round-history reader — the canonical `rounds` table over `app.data`, SCOPED to the current
- * convergence run. `rounds` history is retained across resubmissions (`submitPr` re-opens a PR at
- * `current_round = 1` in a NEW process instance WITHOUT deleting prior-run rows — `migration 102`,
- * `workers/persist-round/worker.ts`), so a bare `pr_key` read mixes runs: a prior run's higher-numbered
- * `converged`/`blocked` row could permanently break the trailing run, and a prior run's trailing
- * `addressed` streak could fabricate an early churn escalation. So when the caller's
- * `processInstanceKey` is known, keep ONLY rows stamped with it; a legacy NULL-key row (pre-`102`
- * history) or any other run's row is dropped — a fail-OPEN policy, since dropping a row only ever
+/** Project raw `rounds` rows to the {@link ChurnRound} shape {@link detectChurn} consumes, SCOPED to
+ * one convergence run. Pure and exported so the run-scoping rule can be tested directly (with
+ * current-run, prior-run, and legacy NULL-key rows) without a datasource — the injectable reader in
+ * {@link detectChurn}'s tests returns a canned array and so never exercises this filter.
+ *
+ * When `processInstanceKey` is known, keep ONLY rows stamped with it; a legacy NULL-key row (pre-`102`
+ * history) or any OTHER run's row is dropped — a fail-OPEN policy, since dropping a row only ever
  * REDUCES the churn signal (it can never fabricate one). When the key is absent (a testkit/synthetic
- * job that persisted no key), fall back to the whole history, matching `persist-round`'s own
- * null-key fallback. Any read failure surfaces as a rejected promise the caller `.catch`es to an empty
- * history (churn then never fires, failing OPEN exactly like the head read). */
+ * job that persisted no key), fall back to the whole history, matching `persist-round`'s own null-key
+ * fallback. */
+export function projectRunScopedRounds(
+  rows: ReadonlyArray<{ round_no: number; status: string; summary?: string | null; process_instance_key?: string | null }>,
+  processInstanceKey: string | null | undefined,
+): ChurnRound[] {
+  const key = processInstanceKey != null ? String(processInstanceKey) : null;
+  const scoped = key === null ? rows : rows.filter((r) => r.process_instance_key === key);
+  return scoped.map((r) => ({ roundNo: r.round_no, status: r.status, summary: r.summary ?? null }));
+}
+
+/** Default round-history reader — the canonical `rounds` table over `app.data`, SCOPED to the current
+ * convergence run via {@link projectRunScopedRounds}. `rounds` history is retained across resubmissions
+ * (`submitPr` re-opens a PR at `current_round = 1` in a NEW process instance WITHOUT deleting prior-run
+ * rows — `migration 102`, `workers/persist-round/worker.ts`), so a bare `pr_key` read mixes runs: a
+ * prior run's higher-numbered `converged`/`blocked` row could permanently break the trailing run, and a
+ * prior run's trailing `addressed` streak could fabricate an early churn escalation. The projection
+ * drops every row not stamped with the caller's `processInstanceKey` (and falls back to the whole
+ * history when the key is absent). Any read failure surfaces as a rejected promise the caller `.catch`es
+ * to an empty history (churn then never fires, failing OPEN exactly like the head read). */
 function defaultReadRounds(app: AppApi): RoundsReader {
   return async (prKey, processInstanceKey) => {
     const tbl = app.data.table<{
@@ -266,9 +282,7 @@ function defaultReadRounds(app: AppApi): RoundsReader {
       process_instance_key?: string | null;
     }>("rounds", "id");
     const rows = await tbl.find({ pr_key: prKey });
-    const key = processInstanceKey != null ? String(processInstanceKey) : null;
-    const scoped = key === null ? rows : rows.filter((r) => r.process_instance_key === key);
-    return scoped.map((r) => ({ roundNo: r.round_no, status: r.status, summary: r.summary ?? null }));
+    return projectRunScopedRounds(rows, processInstanceKey);
   };
 }
 
