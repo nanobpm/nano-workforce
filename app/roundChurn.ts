@@ -44,21 +44,49 @@ export interface ChurnResult {
   readonly question?: string;
 }
 
-// Matches a repository-relative file path inside free text: one or more `dir/` segments followed by a
-// `name.ext`. Requiring at least one slash AND an extension keeps bare words ("addressed", "zod") and
-// prose out, so only genuine file references are mined. Backticks/quotes are not in the class, so a
-// `` `hooks/post/720-pure-zod-schemas.ts` `` span yields the inner path; trailing punctuation is
-// trimmed below so `foo.ts,` and `foo.ts)` normalize to `foo.ts`.
-const PATH_RE = /(?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z0-9]+/g;
+// A maximal run of path characters (`\w`, plus `.@~+/-`). Splitting the summary into these runs
+// first — a single linear scan — isolates each candidate token (a non-path char like a space, comma,
+// backtick, or `:` ends a run), so the path shape below is only ever tested ANCHORED at a run's start
+// and never re-tried at every offset of the whole summary. The trailing `-` keeps that metacharacter
+// literal (a filename hyphen) rather than a range.
+const PATH_RUN_RE = /[\w.@~+/-]+/g;
+
+// A repository-relative file path, ANCHORED at the start of a candidate run: one or more `dir/`
+// segments followed by a `name.ext`. Requiring at least one slash AND an extension keeps bare words
+// ("addressed", "zod") and prose out, so only genuine file references are mined. Because it is matched
+// against one bounded run (not scanned across the whole text), the inner `(?:…\/)+` backtracking on a
+// long UNTERMINATED `dir/` run (e.g. `"a/".repeat(n)` with no closing `name.ext`) is paid ONCE at a
+// single start position — linear in the run length — rather than the O(n²) a global re-scan would
+// cost, which would otherwise let an adversarial summary (a long directory listing, minified stack
+// trace, or base64/data-URI blob) stall the `pr.progress-check` worker inside the convergence loop.
+const PATH_RE = /^(?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z0-9]+/;
+
+// A whole URL span (`scheme://…host/path…`). A citation link's path (e.g.
+// `github.com/o/r/blob/main/docs/guide.md`) otherwise looks exactly like a repo-relative file, so a
+// summary that cites the SAME link every round while fixing DIFFERENT real files would false-escalate
+// as churn naming the URL as the contested file. Strip URL spans before mining so only genuine repo
+// paths remain. `\S+` is linear (no backtracking).
+const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/\S+/giu;
+
+// Defensive cap on the free text scanned. The matcher above is linear, so this is belt-and-suspenders
+// (bounding Set growth and any unforeseen pathological input), not the primary perf guard; real round
+// summaries are far shorter, and truncating one only ever drops a churn SIGNAL (fail-open), never
+// fabricates one.
+const MAX_SCAN = 20000;
 
 /** Mine the set of distinct file paths referenced in a round summary. A non-string / empty summary
- * yields an empty set. Paths are normalized by stripping trailing sentence punctuation and closing
+ * yields an empty set. The summary is length-bounded and URL spans are stripped, then each maximal
+ * path-char run is tested for the path shape anchored at its start (see MAX_SCAN / URL_RE /
+ * PATH_RUN_RE / PATH_RE). Paths are normalized by stripping trailing sentence punctuation and closing
  * brackets so the same file referenced with different surrounding punctuation collapses to one key. */
 export function extractFiles(summary: string | null | undefined): Set<string> {
   const files = new Set<string>();
   if (typeof summary !== "string" || summary.trim() === "") return files;
-  for (const match of summary.matchAll(PATH_RE)) {
-    const path = match[0].replace(/[),.;:'"`\]]+$/u, "").trim();
+  const scanned = summary.slice(0, MAX_SCAN).replace(URL_RE, " ");
+  for (const run of scanned.matchAll(PATH_RUN_RE)) {
+    const hit = run[0].match(PATH_RE);
+    if (hit === null) continue;
+    const path = hit[0].replace(/[),.;:'"`\]]+$/u, "").trim();
     if (path !== "") files.add(path);
   }
   return files;

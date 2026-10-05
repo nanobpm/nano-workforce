@@ -30,6 +30,37 @@ test("extractFiles: a blank/non-string summary yields an empty set", () => {
   for (const s of [null, undefined, "", "   "]) assertEquals(extractFiles(s).size, 0);
 });
 
+test("extractFiles: strips URL spans so a citation link's path is not mined as a repo file", () => {
+  // A scheme URL whose path mirrors a repo path must NOT be reported — otherwise a summary that cites
+  // the same link every round while fixing different real files false-escalates as churn (#870).
+  const files = extractFiles(
+    "Per https://github.com/o/r/blob/main/docs/guide.md I fixed src/analyze.ts for the IIFE case.",
+  );
+  assertEquals(files.has("github.com/o/r/blob/main/docs/guide.md"), false);
+  assertEquals(files.has("docs/guide.md"), false);
+  assert(files.has("src/analyze.ts"));
+  // The URL is the ONLY shared token across rounds that otherwise fix different files — so once it is
+  // stripped, those rounds have no common file and detectChurn must NOT escalate.
+  const rounds: ChurnRound[] = Array.from({ length: CHURN_WINDOW }, (_, i) => ({
+    roundNo: i + 1,
+    status: "addressed",
+    summary: `See https://github.com/o/r/blob/main/docs/guide.md — fixed src/f${i}.ts this round.`,
+  }));
+  assertEquals(detectChurn(rounds).churning, false);
+});
+
+test("extractFiles: a long unterminated path run is bounded (no quadratic stall)", () => {
+  // `"a/".repeat(n)` with no closing `name.ext` is PATH_RE's quadratic worst case; the length bound
+  // must keep this fast and yield no match. Guard with a wall-clock budget so a regression (removing
+  // the cap) fails loudly rather than hanging the worker inside the convergence loop.
+  const pathological = `${"a/".repeat(50_000)}b`;
+  const start = Date.now();
+  const files = extractFiles(pathological);
+  const elapsedMs = Date.now() - start;
+  assertEquals(files.size, 0);
+  assert(elapsedMs < 2500, `extractFiles took ${elapsedMs}ms on an unterminated path run — cap regressed`);
+});
+
 // ── detectChurn ──────────────────────────────────────────────────────────────
 
 /** A trailing run of `addressed` rounds whose summaries all name `file`. */
