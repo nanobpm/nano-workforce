@@ -516,6 +516,40 @@ test("#876 round-4 'Previously missed': the resume FEEL grammar ALIGNS with the 
   // The pr grammar is the disjunction of the `owner/repo#N` shorthand AND a canonical GitHub PR URL.
   assert(escP.includes("github\\\\.com/[^/]+/[^/]+/pull/"), `the pr resume grammar accepts a canonical GitHub PR URL, got ${escP}`);
   assert(escP.includes("[^/#]+/[^/#]+)#"), "the pr resume grammar still accepts the owner/repo#N shorthand");
+  // Case-INSENSITIVE like parsePr's `/i`: the tested value is folded through `lower case(...)` so a
+  // mixed-case host/scheme (`https://GitHub.com/...`) the normal completion path accepts is not
+  // rejected here. The match folds; the bound `value` stays verbatim (see the verbatim-bind test).
+  assert(
+    escP.includes("matches(lower case(trim(string(value)))"),
+    `the pr resume grammar folds the tested value to lower case for case-insensitive alignment, got ${escP}`,
+  );
+});
+
+test("#876 round-4 review: a declared emit whose name carries the reserved `__flag__` marker is REJECTED (so no user fact can ever collide with the internal resume-valid flag)", async () => {
+  // The resume-valid flag (`resumeValidVar`) is `delivery_human_task__<el>__esc__flag__resumeValid` —
+  // itself a legal fact-name string. For a single-emit agent/connector node `factSourceVar` returns the
+  // bare fact name, so a fact declared with that exact name would map BOTH the recovered value and the
+  // boolean flag onto one variable. Reserving the `__flag__` marker in the emit-name space closes the
+  // class categorically: any emit whose name contains it is rejected with a path-qualified error.
+  const collisionName = resumeValidVar("delivery-human-task__n0__esc"); // the EXACT compiled flag var
+  assert(collisionName.includes("__flag__"), "sanity: the flag var carries the reserved marker");
+  const errors = await compileFail({
+    name: "reserved flag-marker collision",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: collisionName, type: "string" }] },
+    ],
+  });
+  const e = errors.find((err) => err.path === "nodes[0].emits[0].name");
+  assert(e !== undefined, `expected a nodes[0].emits[0].name error, got ${JSON.stringify(errors)}`);
+  assert(/reserved/.test(e.message) && e.message.includes("__flag__"), `the error names the reserved marker, got ${e.message}`);
+
+  // The reservation is the WHOLE marker, not just the exact flag string: any `__flag__`-bearing name is
+  // rejected (a structural namespace reservation, not a single-instance block).
+  const anyMarker = await compileFail({
+    name: "reserved marker anywhere",
+    nodes: [{ id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "my__flag__fact", type: "string" }] }],
+  });
+  assert(anyMarker.some((err) => err.path === "nodes[0].emits[0].name" && /reserved/.test(err.message)), `any __flag__-bearing emit name is reserved, got ${JSON.stringify(anyMarker)}`);
 });
 
 

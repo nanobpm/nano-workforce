@@ -43,6 +43,7 @@ import {
   type DeliveryGraphError,
   deliveryNodeFacts,
   hasXmlInvalidChars,
+  RESERVED_FACT_NAME_MARKER,
   redactConnectorValue,
   resolveDeliveryFrom,
   stripXmlInvalidChars,
@@ -182,15 +183,18 @@ function contractEscalationTaskElement(element: string): string {
  * removes the need to RESERVE a user-visible fact name (`resumeValid`) and the recompilation break that
  * reserving it would impose on durable rows that already carry a fact of that name.
  *
- * The sanitised element id is still a legal FACT-NAME string (`^[A-Za-z_][A-Za-z0-9_]*$`), so a node
- * could legally declare an emit NAMED `delivery_human_task__<el>__esc__resumeValid` — and for an
+ * The sanitised element id is still a legal FACT-NAME string (`^[A-Za-z_][A-Za-z0-9_]*$`), so without
+ * a reserved marker a node could legally declare an emit NAMED EXACTLY this flag — and for a single-emit
  * `agent`/`connector` node that fact's emit-source var IS its own name ({@link factSourceVar}), so the
  * resume output would map the recovered fact value AND this boolean flag onto the ONE variable (the
  * valid resume then publishes `true` instead of the supplied value — PR #876 round-4 review). The
- * `__flag__` marker closes the class: the flag carries a marker no emit-source var ever carries, so it
- * can never share a variable with a declared emit no matter how the fact is named. */
+ * {@link RESERVED_FACT_NAME_MARKER} (`__flag__`) closes the class categorically: the validator REJECTS
+ * any declared emit whose name contains the marker, so no emit-source var can ever carry it — the flag
+ * can never share a variable with a declared emit no matter how the fact is named. The marker is the
+ * SINGLE SOURCE OF TRUTH shared with the validator, so the stamp here and the reservation there can
+ * never drift. */
 export function resumeValidVar(esc: string): string {
-  return `${esc.replace(/[^A-Za-z0-9_]/g, "_")}__flag__resumeValid`;
+  return `${esc.replace(/[^A-Za-z0-9_]/g, "_")}${RESERVED_FACT_NAME_MARKER}resumeValid`;
 }
 
 /** The self-reported completion statuses an `agent` node's job may return that count as a TERMINAL
@@ -2406,7 +2410,12 @@ function escalationTaskLines(
  * `[^@\s]+` (no `@`/space) preceded by an OPTIONAL leading scope `@`. `pr` mirrors `parsePr`
  * (app/prParse.ts), which accepts BOTH the `owner/repo#N` shorthand AND a canonical GitHub PR URL
  * (`https://github.com/owner/repo/pull/N`, optional scheme/`www.`, optional `/files`/`?query`/
- * `#fragment` suffix) — so the `pr` branch is the disjunction of the two anchored grammars. */
+ * `#fragment` suffix) — so the `pr` branch is the disjunction of the two anchored grammars. parsePr's
+ * URL regex carries the `/i` flag, so the `pr` branch folds the tested value through `lower case(...)`
+ * (an engine-native, null-safe builtin) before matching its lower-case literals — otherwise a mixed-
+ * case host/scheme the normal completion path accepts (`https://GitHub.com/...`, `HTTPS://...`) would be
+ * rejected here, re-parking a legitimate resume (fail-closed on a value the canonical path takes). Only
+ * the accept/reject test folds; the bound `value` stays verbatim. */
 function resumeValueCondition(fact: DeliveryFact, v: string): string {
   const present = `((is defined(${v})) = true and (${v} != null))`;
   const s = `string(${v})`;
@@ -2424,7 +2433,9 @@ function resumeValueCondition(fact: DeliveryFact, v: string): string {
     case "url":
       return `${present} and (matches(trim(${s}), "^[A-Za-z][A-Za-z0-9+.-]*://") = true)`;
     case "pr":
-      return `${present} and (matches(trim(${s}), "^(([^/#]+/[^/#]+)#(\\\\d+)|((https?://)?(www\\\\.)?github\\\\.com/[^/]+/[^/]+/pull/\\\\d+([/?#].*)?))$") = true)`;
+      // Case-INSENSITIVE like the canonical parsePr (`/i`): fold the tested value to lower case so the
+      // lower-case host/scheme literals below match a mixed-case input the normal path accepts.
+      return `${present} and (matches(lower case(trim(${s})), "^(([^/#]+/[^/#]+)#(\\\\d+)|((https?://)?(www\\\\.)?github\\\\.com/[^/]+/[^/]+/pull/\\\\d+([/?#].*)?))$") = true)`;
     default:
       return assertNever(fact.type, "resumeValueCondition");
   }

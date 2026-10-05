@@ -613,6 +613,63 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the PR-URL resume reaches End");
   });
 
+  test("#876 round-4 review: a timeout escalation resumed with a MIXED-CASE GitHub PR URL binds (the pr grammar is case-insensitive like parsePr's /i)", async () => {
+    const app = track(await boot(freshDir()));
+
+    // parsePr matches the PR URL with the `/i` flag, so a mixed-case host/scheme
+    // (`https://GitHub.com/...`, `HTTPS://...`) the NORMAL completion path accepts must ALSO resume a
+    // timed-out node — before the fix the resume FEEL matched case-sensitively and REJECTED it, re-
+    // parking a legitimate value (fail-closed on a value the canonical path takes). The bound value
+    // stays verbatim (only the accept/reject test folds to lower case).
+    let connectorBoundFacts: unknown;
+    let connectorFired = 0;
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => {
+        connectorFired++;
+        const vars = job.variables as Record<string, unknown>;
+        connectorBoundFacts = vars.boundFacts;
+        const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key (author-supplied or graph-derived) available");
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
+      },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+    );
+
+    const graph: DeliveryGraph = {
+      name: "e2e resume mixed-case pr url",
+      nodes: [
+        { id: "open", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "land", kind: "connector", connector: { target: "slack", payload: { pr: "open.pr" }, dedupeKey: "land-876mixed" } },
+      ],
+      edges: [{ from: "open.pr", to: "land" }],
+    };
+
+    const run = await runDeliveryGraph(app.engine, graph, { nodeTimeout: "PT2S", escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+    await app.advanceTime(2_100);
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
+    assert.ok(esc, "the timed-out agent parks on its timeout escalation task");
+
+    // Resume with a MIXED-CASE host + uppercase scheme — the case-insensitive pr grammar must accept it.
+    const mixed = "HTTPS://GitHub.com/owner/repo/pull/876";
+    await app.engine.completeUserTask(esc.userTaskKey, { value: mixed, humanOutcome: "completed" });
+    await app.settle();
+    assert.equal(connectorFired, 1, "a mixed-case GitHub PR URL resume unblocks the downstream connector");
+    assert.deepEqual(
+      connectorBoundFacts,
+      [{ from: "open", name: "pr", value: mixed }],
+      "the mixed-case PR URL late-binds downstream VERBATIM (only the accept test folds to lower case)",
+    );
+    assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the mixed-case PR-URL resume reaches End");
+  });
+
   test("#876 round-4 'Previously missed': a timeout escalation resumed with a SCOPED artifact binds (the artifact grammar aligns with coerceFactValue)", async () => {
     const app = track(await boot(freshDir()));
 

@@ -259,6 +259,20 @@ function isDeliveryFactType(type: unknown): type is DeliveryFactType {
 export const FACT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export const FACT_NAME_MAX_LENGTH = 128;
 
+/** The reserved variable-namespace marker the compiler stamps into INTERNAL flag variables that share
+ * a flat engine scope with user-declared emit facts — e.g. the resume-validity boolean the escalation
+ * gateway routes on (`resumeValidVar` in deliveryGraphCompiler.ts, `…__flag__resumeValid`). The flag is
+ * derived from the compiler-generated escalation element id, which is itself a legal fact-name string,
+ * so WITHOUT reserving this marker a node could declare an emit named EXACTLY the flag variable: for a
+ * single-emit `agent`/`connector` node `factSourceVar` returns the bare fact name, so the resume output
+ * would map the recovered fact value AND the boolean flag onto the ONE variable (the valid resume then
+ * publishes `true` instead of the supplied value). Reserving the marker in the emit-name space closes
+ * that class categorically — the validator REJECTS any emit whose name contains it, so no user fact can
+ * ever carry the marker and no internal flag can ever collide with a declared emit, no matter how the
+ * fact is named. This is the SINGLE SOURCE OF TRUTH both the compiler (which stamps the marker into the
+ * flag) and this validator (which reserves it) derive from, so the two can never drift. */
+export const RESERVED_FACT_NAME_MARKER = "__flag__";
+
 /** A node `id` must match openapi's `DeliveryNodeCommon.id` `^[A-Za-z_][A-Za-z0-9_.-]*$` and stay
  * within its 128-char cap. Re-enforced here INDEPENDENTLY of the OpenAPI shape gate because later
  * compile/render steps trust these ids: an id with whitespace, a leading digit, or an over-long value
@@ -2138,6 +2152,21 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
                 `emitted fact name "${rawFact.name}" must be a bare identifier ` +
                 "(`^[A-Za-z_][A-Za-z0-9_]*$`, no dots) of " +
                 `\u2264 ${FACT_NAME_MAX_LENGTH} chars so qualified edge \`from\` references stay unambiguous`,
+              code: "invalid-fact-name",
+            });
+            return;
+          }
+          if (rawFact.name.includes(RESERVED_FACT_NAME_MARKER)) {
+            // The compiler stamps this marker into internal flag variables that share a flat engine
+            // scope with the emit facts (the resume-validity flag — RESERVED_FACT_NAME_MARKER's doc).
+            // Reserving it in the emit-name space makes an internal/user-fact collision impossible by
+            // construction, no matter how the fact is named.
+            errors.push({
+              path: `${path}.emits[${j}].name`,
+              message:
+                `emitted fact name "${rawFact.name}" uses the reserved "${RESERVED_FACT_NAME_MARKER}" ` +
+                "marker (the compiler reserves it for internal flag variables that share the escalation " +
+                "scope, so a declared emit can never collide with one) — rename the fact",
               code: "invalid-fact-name",
             });
             return;
