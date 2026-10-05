@@ -70,11 +70,12 @@ const str = (v: unknown): string | undefined =>
   typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 
 /** Reconcile (look for a delivered PR) when the agent left no CLEAN, intentional result to route on:
- *  a blank/absent status (#796/#801's no-result), OR an off-vocabulary status such as `completed` that
- *  CLAIMED completion without being a recognised terminal (#865) — both may nonetheless have pushed the
- *  branch and opened a green PR. A genuine escalation (`status = "escalated"`, or ANY status carrying an
- *  answerable `question`) is honoured as the agent's own decision — never silently overridden by a
- *  branch PR that may be unrelated to the question. */
+ *  a blank/absent status (#796/#801's no-result), OR an AFFIRMATIVE-completion alias such as `completed`
+ *  that CLAIMED completion without being a recognised terminal (#865) — both may nonetheless have pushed
+ *  the branch and opened a green PR. A genuine escalation (`status = "escalated"`, or ANY status carrying
+ *  an answerable `question`), and a reported non-completion outcome (`failed`/`needs_input`/unknown), are
+ *  honoured as the agent's own decision and escalate accurately — never silently reconciled/adopted as a
+ *  success by a branch PR that may be unrelated (#865 review). */
 export function shouldReconcileImplement(status: unknown, question?: unknown): boolean {
   if (hasAnswerableQuestion(typeof question === "string" ? question : null)) return false;
   return str(status) === undefined || isClaimedCompletion(status);
@@ -137,8 +138,14 @@ export async function reconcileImplement(
   try {
     prs = await lookup(parsed.repo, branch, token);
   } catch {
-    return maybeRetry(input, alreadyRetried, escalate); // transport hiccup → retry/escalate as today
+    // GitHub is unavailable — a failed lookup does NOT establish that delivery is missing, so it must
+    // never consume the one automatic retry (issue #865 review). Escalate (best-effort, unchanged from
+    // the pre-#865 no-result behaviour); the next reconcile pass can retry/adopt once GitHub recovers.
+    return escalate;
   }
+  // A `null` listing is an unavailable transport (no token), not a confirmed "no PR" — same reasoning as
+  // the thrown case: escalate rather than retry on unconfirmed state.
+  if (prs === null) return escalate;
   const adopt = pickAdoptablePr(prs, str(input.baseBranch));
   if (adopt) {
     return {
@@ -150,12 +157,14 @@ export async function reconcileImplement(
       retried: alreadyRetried,
     };
   }
+  // The lookup SUCCEEDED and confirmed no adoptable PR — only now may a claimed completion auto-retry.
   return maybeRetry(input, alreadyRetried, escalate);
 }
 
-/** No adoptable PR was found. A claimed-completion-without-delivery (an off-vocabulary status such as
- *  `completed`) is auto-retried ONCE with a nudge (issue #865) before it escalates; everything else — a
- *  true no-result, or a slice that has already consumed its retry — escalates as today. */
+/** No adoptable PR was found on a SUCCESSFUL lookup. A claimed-completion-without-delivery (an
+ *  affirmative-completion alias such as `completed`) is auto-retried ONCE with a nudge (issue #865)
+ *  before it escalates; everything else — a true no-result, a reported non-completion status, or a slice
+ *  that has already consumed its retry — escalates as today. */
 function maybeRetry(
   input: ReconcileImplementInput,
   alreadyRetried: boolean,

@@ -119,6 +119,12 @@
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordFeatureImplementingIn" />
         </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:output source="=null" target="status" />
+          <zeebe:output source="=null" target="question" />
+          <zeebe:output source="=null" target="summary" />
+          <zeebe:output source="=null" target="transcriptUrl" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>ic_answerLoop</bpmn:incoming>
       <bpmn:incoming>ic_retry</bpmn:incoming>

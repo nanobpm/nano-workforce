@@ -239,3 +239,59 @@ test("reconcileImplement: a true no-result (blank status) with no PR escalates �
   );
   assertEquals(res.retry, false);
 });
+
+// Issue #865 review — a non-affirmative off-vocabulary status (a reported failure / input-required /
+// unknown) is NOT a claimed completion: it is never reconciled/adopted as success, never auto-retried.
+test("shouldReconcileImplement: a reported non-completion off-vocabulary status does NOT reconcile (#865 review)", () => {
+  assertEquals(shouldReconcileImplement("failed"), false);
+  assertEquals(shouldReconcileImplement("needs_input"), false);
+  assertEquals(shouldReconcileImplement("error"), false);
+});
+
+test("reconcileImplement: a reported 'failed' status + a branch PR → escalate, NOT adopted as success (#865 review)", async () => {
+  let consulted = false;
+  const res = await reconcileImplement(
+    { status: "failed", subjectKey: "owner/repo#7", taskId: "issue-7" },
+    async () => {
+      consulted = true;
+      return [openPr(9)];
+    },
+    "token",
+  );
+  // The open branch PR is never adopted as a success for a reported failure; GitHub is never consulted.
+  assertEquals(res, { reconciled: false, status: "failed", pr: null, ...tail });
+  assertEquals(consulted, false);
+});
+
+// Issue #865 review — a failed/unavailable GitHub lookup does NOT establish that delivery is missing,
+// so it must NEVER consume the one automatic retry. Only a SUCCESSFUL lookup confirming no adoptable PR
+// may retry a claimed completion.
+test("reconcileImplement: claimed-completion + a THROWN lookup → escalate, the retry is NOT consumed (#865 review)", async () => {
+  const res = await reconcileImplement(
+    { status: "completed", subjectKey: "owner/repo#41", taskId: "issue-41" },
+    async () => {
+      throw new Error("github 502");
+    },
+    "token",
+  );
+  // Escalate, retry untouched — the next pass can still retry/adopt once GitHub recovers.
+  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: false });
+});
+
+test("reconcileImplement: claimed-completion + a NULL listing (no transport) → escalate, the retry is NOT consumed (#865 review)", async () => {
+  const res = await reconcileImplement(
+    { status: "completed", subjectKey: "owner/repo#41", taskId: "issue-41" },
+    async () => null,
+    "token",
+  );
+  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: false });
+});
+
+test("reconcileImplement: a blank status + a NULL listing → escalate (unavailable transport, unchanged)", async () => {
+  const res = await reconcileImplement(
+    { status: null, subjectKey: "owner/repo#7", taskId: "issue-7", pr: "owner/repo#42" },
+    async () => null,
+    "token",
+  );
+  assertEquals(res, { reconciled: false, status: null, pr: "owner/repo#42", ...tail });
+});

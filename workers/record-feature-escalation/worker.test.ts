@@ -97,14 +97,43 @@ test("no-result: a missing status/question synthesises the #360 answerable quest
   assertEquals(app.stores.feature_escalations[0].question, NO_RESULT_QUESTION);
 });
 
-test("blank-question escalated: still synthesises the #360 question (never a dead-end task)", async () => {
+test("blank-question escalated: synthesises an ACCURATE reported-status reason, not the false no-result text (#865 review)", async () => {
+  // A reported `escalated` with a blank question reaches the builder. It must name the reported status
+  // accurately — never the false "no status was reported" (no-result) diagnosis — and never dead-end.
   const app = fakeApp([]);
   const out = await handler(
     { jobKey: "job-b", variables: { subjectKey: "owner/repo#2", status: "escalated", question: "   " } } as never,
     app,
   );
-  assertEquals(out, { question: NO_RESULT_QUESTION });
-  assertEquals(app.stores.feature_escalations[0].question, NO_RESULT_QUESTION);
+  assertEquals(out.question.includes('reported status "escalated"'), true);
+  assertEquals(out.question.includes("gave no answerable question"), true);
+  assertEquals(out.question.includes("without a machine-readable result"), false);
+  assertEquals(app.stores.feature_escalations[0].question, out.question);
+});
+
+test("escalated with a question + summary + transcript: preserves ALL context, not just the question (#865 review)", async () => {
+  // The #865-review defect: an `escalated` result carrying a question, summary, and transcript persisted
+  // ONLY the question, leaving pollUserTasks without the supporting decision context.
+  const rows = [{ feature_key: "owner/repo#9", status: "running" }];
+  const app = fakeApp(rows);
+  const out = await handler(
+    {
+      jobKey: "job-9",
+      variables: {
+        subjectKey: "owner/repo#9",
+        status: "escalated",
+        question: "Should I target the epic base or main?",
+        summary: "drafted the migration but the base is ambiguous",
+        transcriptUrl: "http://merlin.local:3000/t?stream=job%3A777",
+      },
+    } as never,
+    app,
+  );
+  assertEquals(out.question.startsWith("Should I target the epic base or main?"), true);
+  assertEquals(out.question.includes('The agent\'s own summary: "drafted the migration but the base is ambiguous".'), true);
+  assertEquals(out.question.includes("Transcript: http://merlin.local:3000/t?stream=job%3A777"), true);
+  assertEquals(rows[0].status, "escalated");
+  assertEquals(app.stores.feature_escalations[0].question, out.question);
 });
 
 test("fails fast (incident) when subjectKey is absent — never appends a corrupt undefined-keyed audit row", async () => {
