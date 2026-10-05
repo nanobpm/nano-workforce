@@ -32,6 +32,7 @@
 //      binds and pins exactly the value the human handed forward.
 import type { DeliveryFact, DeliveryNodeHuman } from "../nano-generated/api-io.d.ts";
 import { DELIVERY_FACT_TYPES, type DeliveryFactType, FACT_NAME_MAX_LENGTH, FACT_NAME_PATTERN } from "./deliveryGraph.ts";
+import { redactFreeText } from "./deliveryGraphCompiler.ts";
 
 /** The single BPMN `bpmn:userTask` element id every `human` delivery-graph node schedules its work
  *  as (`resources/processes/delivery-human.bpmn`). One reusable engine-native body, instantiated once
@@ -99,12 +100,19 @@ export function needsLiveDeliveryPrompt(humanLabels: Record<string, string> | un
 
 /** Decode a `prompt` variable as the engine's variable search reports it (a JSON-encoded value) into
  *  plain text; `null` for an absent, non-string, or truncated preview (never show a clipped prompt as
- *  if it were whole — the caller falls back). */
+ *  if it were whole — the caller falls back).
+ *
+ *  The decoded text is REDACTED ({@link redactFreeText}) before it is returned: the escalation prompt
+ *  embeds agent-controlled `summary`/`question`/`error`/`transcriptUrl` (the compiler's report
+ *  sentence), and the caller persists the result as the operator-facing `user_tasks.question`. An
+ *  agent report can carry a token-bearing URL or a credential copied into its report, so this path
+ *  redacts exactly like the static `human_labels` instruction (which `buildHumanLabels` runs through
+ *  `redactFreeText`, issue #778) — never store a live prompt raw (issue #863 review). */
 export function decodeLivePrompt(row: { value: string; isTruncated?: boolean } | undefined): string | null {
   if (!row || row.isTruncated) return null;
   try {
     const v: unknown = JSON.parse(row.value);
-    return typeof v === "string" && v.trim() ? v.trim() : null;
+    return typeof v === "string" && v.trim() ? redactFreeText(v.trim()) : null;
   } catch {
     return null;
   }

@@ -536,6 +536,23 @@ test("decodeLivePrompt: decodes the engine's JSON-encoded string; null for missi
   assertEquals(decodeLivePrompt({ value: "{not json" }), null);
 });
 
+test("decodeLivePrompt: redacts an embedded credential before the prompt is persisted as user_tasks.question (issue #863 review)", () => {
+  // The compiler embeds agent-controlled summary/question/error/transcriptUrl into the escalation
+  // prompt; an agent report can carry a token-bearing URL or credential. The static human_labels path
+  // is redacted via redactFreeText (issue #778) — the live-prompt path must redact the same way.
+  const withUserinfo = decodeLivePrompt({ value: JSON.stringify("Agent report: failed pushing to https://user:secret-token@github.com/org/repo.git — see log.") });
+  assert(withUserinfo !== null);
+  assert(!withUserinfo.includes("secret-token"), `credential must not survive: ${withUserinfo}`);
+  assertStringIncludes(withUserinfo, "//***@");
+
+  const withQueryToken = decodeLivePrompt({ value: JSON.stringify("Transcript: https://logs.example.com/t?sig=secret123") });
+  assert(withQueryToken !== null);
+  assert(!withQueryToken.includes("secret123"), `query credential must not survive: ${withQueryToken}`);
+
+  // A credential-free prompt is untouched (redaction is a no-op on ordinary prose).
+  assertEquals(decodeLivePrompt({ value: JSON.stringify("Node i10 blocked. Agent report: no repo.") }), "Node i10 blocked. Agent report: no repo.");
+});
+
 test("deliveryHumanContextQuestion: a live prompt replaces the static fallback but never a human label", () => {
   assertEquals(deliveryHumanContextQuestion({}, "delivery-human-task__n1__contract", "Node a blocked."), "Node a blocked.");
   assertEquals(deliveryHumanContextQuestion({ "delivery-human-task__n3": "Approve" }, "delivery-human-task__n3__esc", "nag"), "Approve");

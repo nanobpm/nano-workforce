@@ -192,11 +192,13 @@ export function nodeInputsPreflightFeel(el: string): string {
   const present = `is defined(nodeInputs) and nodeInputs != null and is defined(nodeInputs.${el}) and nodeInputs.${el} != null`;
   const cause =
     `delivery-graph node ${el}: its runner-seeded config nodeInputs.${el} is missing from the process ` +
-    "instance (lost root variables?). Restore the instance's root variables (nodeInputs), then RE-RUN " +
-    "the node — re-enter its sub-process or use \"Retry this step\" — so the subProcess config mappings " +
-    "re-evaluate. Do NOT only resolve this incident: resolving re-evaluates just this leaf's inputs, " +
-    "leaving the subProcess-seeded config (prompt/appendPrompt/nodeTimeout, connector " +
-    "target/payload/dedupeKey) null, and the job would run unconfigured.";
+    "instance (lost root variables?). Restore the instance's root variables (nodeInputs), then RE-ENTER " +
+    "the node's sub-process from OUTSIDE (relaunch/re-enter the node) so its subProcess input mappings " +
+    "re-evaluate against the restored config. Do NOT only resolve this incident, and do NOT use this " +
+    "node's in-subprocess \"Retry this step\" loop: resolving re-evaluates just this leaf's inputs, and " +
+    "the retry loop goes straight back to the inner service task — neither re-runs the subProcess entry " +
+    "mappings, so the subProcess-seeded config (prompt/appendPrompt/nodeTimeout, connector " +
+    "target/payload/dedupeKey) stays null and the job would run unconfigured.";
   return `=assert(true, ${present}, ${feelStr(cause)})`;
 }
 
@@ -2024,9 +2026,12 @@ function serviceBodyLines(
     // a subProcess input incident was completed past its body by the drain sweep (nano-bpm#1334).
     // KNOWN LIMITATION (fail-loud-only, nano-workforce#866): resolving this incident re-evaluates ONLY
     // this leaf's inputs — the subProcess-level config mappings (prompt/appendPrompt/nodeTimeout,
-    // connector target/payload/dedupeKey) ran ONCE at subProcess entry and are NOT re-mapped on resolve,
-    // so after restoring `nodeInputs` the operator must RE-RUN the node (re-enter the sub-process /
-    // "Retry this step"), not merely resolve, or the job activates unconfigured. The incident message
+    // connector target/payload/dedupeKey) ran ONCE at subProcess entry and are NOT re-mapped on resolve.
+    // The in-subprocess "Retry this step" loop does NOT help either: it loops directly back to the inner
+    // service task (to reset the node-local scratch), bypassing the subProcess entry mappings, so it too
+    // leaves the config null. Recovery therefore requires re-entering the sub-process from OUTSIDE —
+    // relaunch/re-enter the node so its subProcess input mappings re-evaluate against the restored
+    // `nodeInputs` — not merely resolving the incident or using "Retry this step". The incident message
     // says so. The correct fix is to run this check at sub-process ENTRY — Camunda parity, where a failed
     // sub-process input mapping parks in `activating` and resolving re-evaluates ALL inputs — which
     // nano-bpm#1336 restores; until then we fail loud here rather than risk the #1334 drain-past.
