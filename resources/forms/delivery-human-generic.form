@@ -11,8 +11,8 @@
     {
       "type": "textfield",
       "key": "value",
-      "label": "Emitted value (only when this step emits exactly one value-emitting (non-artifact) fact)",
-      "description": "The typed value this step hands forward to its downstream dependents. It is applied ONLY when the step emits exactly one value-emitting (non-artifact) fact: leave it blank for a step that emits no value-emitting fact, and for a step emitting more than one value-emitting fact any entry here is discarded (a single value cannot satisfy several distinct facts). An artifact-emitting fact is captured separately and does not count toward this boundary, so a step emitting one value plus one artifact still applies this field."
+      "label": "Emitted value (the single value-emitting (non-artifact) fact this step hands forward)",
+      "description": "The typed value this step hands forward to its downstream dependents. It captures a single value-emitting (non-artifact) fact — leave it blank for a step that emits no value-emitting fact. A step that publishes an artifact uses a dedicated form with a resolved-artifact field instead, and a step that must emit several facts is rejected at authoring time, so this field never has to carry more than one value."
     },
     {
       "type": "textarea",

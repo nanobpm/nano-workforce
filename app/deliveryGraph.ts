@@ -111,7 +111,8 @@ export type DeliveryGraphErrorCode =
   | "invalid-credential-env"
   | "invalid-backoff"
   | "unbound-pr"
-  | "partial-scope-close";
+  | "partial-scope-close"
+  | "human-unroutable-emits";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
  * input (`nodes[2].kind`, `edges[1].from`, `nodes[0].emits[1].name`), `message` is human-actionable,
@@ -2355,6 +2356,34 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     if (typeof id === "string" && id.length > 0 && !nodeFacts.has(id)) {
       nodeFacts.set(id, facts);
       nodeFactTypes.set(id, factTypes);
+    }
+
+    // Reject a `human` node whose emits no static form can capture (PR #863 review — threads
+    // deliveryGraphCompiler.ts:1859 / :2451). A human form captures ONE value: the generic form a single
+    // non-artifact `value`, the publish form a single `resolvedArtifact`. A node emitting ≥2 typed facts
+    // with no explicit `human.formKey` resolves to the agent-router (no static form holds them) — but the
+    // compiled generic form has no control for the extra facts, and a human node has no Retry path, so
+    // completing the form would publish NULL for every uncapturable emit and permanently schedule
+    // downstream consumers with missing required facts. Mirrors `needsAgentFormRouter`
+    // (`resolveHumanForm` source === "agent-router"): ≥2 validly-typed emits AND no non-blank formKey.
+    // Inlined here (not imported) because `deliveryHuman.ts` depends on this module — importing it back
+    // would form a cycle. Reject the whole CLASS at authoring time: split the emits across single-emit
+    // human nodes, or attach an explicit `human.formKey` form that captures them.
+    const explicitHumanForm =
+      isRecord(rawNode.human) &&
+      typeof rawNode.human.formKey === "string" &&
+      rawNode.human.formKey.trim().length > 0;
+    if (kind === "human" && !explicitHumanForm && factTypes.size >= 2) {
+      errors.push({
+        path: `${path}.emits`,
+        message:
+          `human node "${String(id)}" emits ${factTypes.size} typed facts but no static form can ` +
+          "capture more than one value (the generic form captures a single non-artifact `value`, the " +
+          "publish form a single `resolvedArtifact`) — completing its form would publish null for the " +
+          "uncapturable emits, and a human node has no Retry path to recover. Split the emits across " +
+          "separate single-emit human nodes, or attach an explicit `human.formKey` form that captures them.",
+        code: "human-unroutable-emits",
+      });
     }
   });
 

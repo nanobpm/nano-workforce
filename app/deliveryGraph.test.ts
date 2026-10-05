@@ -587,8 +587,14 @@ test("invalid-fact-name does NOT apply a config restriction to wait/human emits,
     nodes: [{ id: "w", kind: "wait", wait: { kind: "github-check", target: "o/r@main" }, emits: [{ name: "target", type: "string" }, { name: "probe", type: "string" }] }],
   });
   assertEquals(waitTarget.length, 0, `a wait emitting 'target'/'probe' validates, got: ${JSON.stringify(waitTarget)}`);
+  // `prompt`/`emitMode` are not reserved for a human node. Assert each as its OWN single-emit human node
+  // — a two-emit human node with no form is separately rejected (`human-unroutable-emits`, thread
+  // deliveryGraphCompiler.ts:1859), which would otherwise mask the reserved-name intent under test here.
   const humanPrompt = validateDeliveryGraph({
-    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "prompt", type: "string" }, { name: "emitMode", type: "string" }] }],
+    nodes: [
+      { id: "h1", kind: "human", human: { prompt: "do it" }, emits: [{ name: "prompt", type: "string" }] },
+      { id: "h2", kind: "human", human: { prompt: "do it" }, emits: [{ name: "emitMode", type: "string" }] },
+    ],
   });
   assertEquals(humanPrompt.length, 0, `a human emitting 'prompt'/'emitMode' validates, got: ${JSON.stringify(humanPrompt)}`);
   // …but the escalation controls + scaffolding are STILL reserved for wait/human.
@@ -600,6 +606,37 @@ test("invalid-fact-name does NOT apply a config restriction to wait/human emits,
     nodes: [{ id: "w", kind: "wait", wait: { kind: "github-check", target: "o/r@main" }, emits: [{ name: "nodeInputs", type: "string" }] }],
   });
   assertEquals(hasCode(waitScaffold, "invalid-fact-name").path, "nodes[0].emits[0].name", "a wait emitting 'nodeInputs' (scaffolding) is still rejected");
+});
+
+test("human-unroutable-emits: a human node emitting ≥2 facts with no form is rejected — no static form captures them (thread deliveryGraphCompiler.ts:1859)", () => {
+  // Class guard (PR #863 Copilot High): a human form captures ONE value and a human node has no Retry
+  // path, so a node emitting two or more facts with no explicit `human.formKey` resolves to the
+  // agent-router — no static form holds them — and completing its form would publish null for the
+  // uncapturable emits. Reject the class at authoring time rather than silently starve consumers.
+  const twoScalars = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "a", type: "string" }, { name: "b", type: "string" }] }],
+  });
+  assertEquals(hasCode(twoScalars, "human-unroutable-emits").path, "nodes[0].emits", "two non-artifact emits with no form are rejected");
+  // The carve-out the finding cites: one scalar + one artifact — the generic form has no resolvedArtifact
+  // control and the publish form no value control, so NO static form captures both. Also rejected.
+  const scalarPlusArtifact = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }, { name: "report", type: "artifact" }] }],
+  });
+  assertEquals(hasCode(scalarPlusArtifact, "human-unroutable-emits").path, "nodes[0].emits", "one scalar + one artifact with no form is rejected");
+  // An explicit `human.formKey` opts the author into a bespoke multi-capture form → NOT rejected.
+  const explicitForm = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it", formKey: "bespoke-multi" }, emits: [{ name: "a", type: "string" }, { name: "b", type: "string" }] }],
+  });
+  assertEquals(explicitForm.filter((e) => e.code === "human-unroutable-emits").length, 0, "an explicit human.formKey opts out of the rejection");
+  // Single-emit human nodes are capturable → NOT rejected (the guard must not over-reject).
+  const singleScalar = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }] }],
+  });
+  assertEquals(singleScalar.filter((e) => e.code === "human-unroutable-emits").length, 0, "a single non-artifact emit is capturable (generic form)");
+  const singleArtifact = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "art", type: "artifact" }] }],
+  });
+  assertEquals(singleArtifact.filter((e) => e.code === "human-unroutable-emits").length, 0, "a single artifact emit is capturable (publish form)");
 });
 
 test("a non-reserved emit name still validates (the reserved guard does not over-reject)", () => {

@@ -53,7 +53,7 @@ import {
   stripXmlInvalidChars,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
-import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
+import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
 import { layoutBpmnOffThread } from "./layoutOffThread.ts";
 import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactEmbeddedCredential, redactString } from "./readiness.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
@@ -1844,12 +1844,16 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
   }
 
   // Outputs: publish each declared emit into `<element>_<fact>` for a downstream consumer to bind.
-  // A `human` node's non-artifact emits ALL share the one captured `humanEmitValue` (the generic form has
-  // a single `value` field — see humanBodyLines). Publishing that one value into SEVERAL distinct facts
-  // would corrupt them (PR #863 Copilot Low, thread r4182488264), so only a SINGLE non-artifact human
-  // emit is sourced from `humanEmitValue`; with two or more, every non-artifact emit publishes null
-  // (discarded — matching the form's "a multi-emit entry is discarded" copy). Artifact emits are
-  // unaffected (they read the distinct `humanEmitArtifact`).
+  // A `human` node's non-artifact emits ALL share the one captured `humanEmitValue` (the generic/publish
+  // forms have a single value field — see humanBodyLines). Publishing that one value into SEVERAL
+  // distinct facts would corrupt them (PR #863 Copilot Low, thread r4182488264). validateDeliveryGraph
+  // now REJECTS a ≥2-emit human node that carries no form (`human-unroutable-emits`, thread
+  // deliveryGraphCompiler.ts:1859) — no static form can capture several emits, so that whole class is
+  // refused at authoring time rather than silently publishing null. This discard stays as residual
+  // defence for the remaining EXPLICIT-form multi-non-artifact path (an author opts into a bespoke
+  // form): only a SINGLE non-artifact human emit is sourced from `humanEmitValue`; with two or more,
+  // every non-artifact emit publishes null. Artifact emits are unaffected (they read the distinct
+  // `humanEmitArtifact`).
   const humanNonArtifactEmits =
     node.kind === "human" ? normaliseEmits(node).filter((f) => f.type !== "artifact") : [];
   const humanValueEmit = humanNonArtifactEmits.length === 1 ? humanNonArtifactEmits[0] : undefined;
@@ -1912,7 +1916,15 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
     case "wait":
       return waitBodyLines(el, node, displayName);
     case "human":
-      return humanBodyLines(el, displayName);
+      // Select the human node's form by DERIVING it from the canonical resolver (resolveHumanForm),
+      // never hardcoding the generic form: a 0-emit node uses the acknowledgement form, a single-artifact
+      // node uses the manual-publish form (which carries the `resolvedArtifact` control the generic form
+      // lacks, so the artifact is actually captured instead of published null), and a single-value node
+      // uses the generic typed-emit form. A ≥2-emit no-form node resolves to the agent-router (formKey
+      // null) and is REJECTED upstream by validateDeliveryGraph (`human-unroutable-emits`), so the
+      // `?? GENERIC_HUMAN_FORM` fallback here is unreachable defensive cover (PR #863 thread
+      // deliveryGraphCompiler.ts:1859).
+      return humanBodyLines(el, displayName, resolveHumanForm(node).formKey ?? GENERIC_HUMAN_FORM);
     default:
       return assertNever(node, "innerBodyLines");
   }
@@ -2348,7 +2360,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
  * — the subProcess ioMapping then publishes it as the node's fact); on SLA expiry the node records an
  * `escalated` outcome and settles (bounded — the graph cannot silently wedge). Mirrors the standalone
  * `delivery-human.bpmn` shape, reusing the S3 form + emit-var contract (`deliveryHuman.ts`). */
-function humanBodyLines(el: string, displayName: string): string[] {
+function humanBodyLines(el: string, displayName: string, formId: string): string[] {
   const task = humanTaskElement(el);
   const assignee =
     '=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != "") then escalationAssignee else null';
@@ -2356,7 +2368,7 @@ function humanBodyLines(el: string, displayName: string): string[] {
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
     `      <bpmn:userTask id="${task}" name="Delivery: human step — ${escapeXml(displayName)}">`,
     "        <bpmn:extensionElements>",
-    `          <zeebe:formDefinition formId="${GENERIC_HUMAN_FORM}" />`,
+    `          <zeebe:formDefinition formId="${formId}" />`,
     "          <zeebe:userTask />",
     `          <zeebe:assignmentDefinition candidateGroups="operators" ${attr("assignee", assignee)} />`,
     "          <zeebe:ioMapping>",

@@ -58,7 +58,7 @@ const RELEASE_RUNBOOK = {
     {
       id: "publish",
       kind: "human",
-      human: { prompt: "run the manual OTP publish", formKey: "publish-form" },
+      human: { prompt: "run the manual OTP publish" },
       emits: [{ name: "resolvedArtifact", type: "artifact" }],
     },
     { id: "consume", kind: "connector", connector: { target: "npm:install", dedupeKey: "consume-1" } },
@@ -456,29 +456,23 @@ test("#863 typed Continue: a single-emit escalation coerces/validates the textfi
   assert(/source="=if \(is defined\(value\)\) then value else null" target="verdict"/.test(strEsc), "a string emit passes the text value through unchanged");
 });
 
-test("#863 human multi-emit: a human node publishing several non-artifact facts does NOT copy one captured value into every fact (r4182488264)", async () => {
-  // Regression guard (PR #863 Copilot Low, thread r4182488264): `humanBodyLines` always maps the form's
-  // single `value` to `humanEmitValue`, and the subProcess output mapped EVERY non-artifact human emit
-  // from that same variable — so a multi-scalar human node published the entered value into EVERY fact
-  // rather than discarding it (contradicting the form's "a multi-emit entry is discarded" copy). One
-  // captured value cannot satisfy several distinct typed facts; only a SINGLE non-artifact emit may be
-  // published from `humanEmitValue`, and any additional non-artifact emit must publish null (discarded).
-  const multi = await compileOk({
+test("#863 human multi-emit: a human node emitting several facts with no form is REJECTED (no static form can capture them → would publish null) (r4182488264 / thread deliveryGraphCompiler.ts:1859)", async () => {
+  // Regression guard (PR #863 Copilot High, thread deliveryGraphCompiler.ts:1859): a human form captures
+  // ONE value, and a human node has no Retry path — so a node emitting ≥2 facts with no explicit form
+  // can never capture the extra emits and would permanently schedule downstream consumers with null
+  // required facts. Reject the whole CLASS at authoring time (`human-unroutable-emits`) rather than
+  // silently discard emits.
+  const errors = await compileFail({
     nodes: [
       { id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "a", type: "string" }, { name: "b", type: "string" }] },
     ],
     edges: [],
   });
-  const el = elementForNode(multi.bpmn, "h");
-  const sub = multi.bpmn.slice(multi.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
-  const io = sub.slice(0, sub.indexOf("</bpmn:subProcess>"));
-  // With TWO non-artifact emits, NEITHER may be sourced from the shared `humanEmitValue` (that would
-  // copy one value into both) — both publish null (discarded), matching the form copy.
-  assert(!/<zeebe:output source="=if \(is defined\(humanEmitValue\)\) then humanEmitValue else null" target="[^"]+_a" \/>/.test(io), "a multi-emit human node does NOT source fact 'a' from the shared humanEmitValue");
-  assert(!/<zeebe:output source="=if \(is defined\(humanEmitValue\)\) then humanEmitValue else null" target="[^"]+_b" \/>/.test(io), "a multi-emit human node does NOT source fact 'b' from the shared humanEmitValue");
+  const e = errors.find((err) => err.path === "nodes[0].emits" && /no static form can/.test(err.message));
+  assert(e !== undefined, `expected a human-unroutable-emits error, got ${JSON.stringify(errors)}`);
 
-  // …but a SINGLE non-artifact human emit still resumes from humanEmitValue (the boundary must not
-  // regress the single-emit path).
+  // …but a SINGLE non-artifact human emit still compiles and resumes from humanEmitValue (the rejection
+  // must not regress the single-emit path).
   const single = await compileOk({
     nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }] }],
     edges: [],
@@ -486,28 +480,41 @@ test("#863 human multi-emit: a human node publishing several non-artifact facts 
   const sEl = elementForNode(single.bpmn, "h");
   const sSub = single.bpmn.slice(single.bpmn.indexOf(`<bpmn:subProcess id="${sEl}"`));
   assert(/<zeebe:output source="=if \(is defined\(humanEmitValue\)\) then humanEmitValue else null" target="[^"]+_verdict" \/>/.test(sSub), "a single-emit human node still publishes its one fact from humanEmitValue");
+  // The single value-emit node embeds the generic typed-emit form.
+  const sTask = sSub.slice(sSub.indexOf("<bpmn:userTask"), sSub.indexOf("</bpmn:userTask>"));
+  assert(sTask.includes('formId="delivery-human-generic"'), "a single value-emit human node embeds the generic form");
 });
 
-test("#863 human mixed emits: the discard boundary counts NON-ARTIFACT emits, so one scalar + one artifact still publishes the scalar", async () => {
-  // Regression guard (PR #863 adversarial finding): the value-field boundary is a NON-ARTIFACT-emit
-  // cardinality rule, not a TOTAL-emit one. A human node emitting ONE scalar plus ONE artifact has two
-  // emits in total, yet its single scalar IS published from the captured `humanEmitValue` (one value
-  // satisfies one scalar fact) and the artifact reads the distinct `humanEmitArtifact` — NEITHER is
-  // discarded. The form copy must describe exactly this boundary (see the form-structure guard), so
-  // pin the compiler side: a mixed node does NOT discard its scalar.
-  const mixed = await compileOk({
+test("#863 human mixed emits: one scalar + one artifact (no form) is REJECTED — no static form captures both (thread deliveryGraphCompiler.ts:1859)", async () => {
+  // Regression guard (PR #863 Copilot High): the generic form has no `resolvedArtifact` control and the
+  // publish form no `value` control, so a 1-scalar+1-artifact human node (two emits) has no static form
+  // that captures BOTH — it resolves to the agent-router and must be rejected, not compiled with a
+  // half-captured result. (A SINGLE artifact resolves to the publish form; see the artifact test below.)
+  const errors = await compileFail({
     nodes: [
       { id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }, { name: "report", type: "artifact" }] },
     ],
     edges: [],
   });
-  const el = elementForNode(mixed.bpmn, "h");
-  const sub = mixed.bpmn.slice(mixed.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const e = errors.find((err) => err.path === "nodes[0].emits" && /no static form can/.test(err.message));
+  assert(e !== undefined, `expected a human-unroutable-emits error, got ${JSON.stringify(errors)}`);
+});
+
+test("#863 human single artifact: a human node emitting ONE artifact embeds the manual-publish form (which captures resolvedArtifact) — thread deliveryGraphCompiler.ts:1859", async () => {
+  // Regression guard (PR #863 Copilot High): a single-artifact human node must embed the publish form so
+  // an operator actually has a `resolvedArtifact` control — the generic form has none, so it would
+  // publish null. The compiler now DERIVES the form from resolveHumanForm instead of hardcoding generic.
+  const r = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "publish it" }, emits: [{ name: "art", type: "artifact" }] }],
+    edges: [],
+  });
+  const el = elementForNode(r.bpmn, "h");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const task = sub.slice(sub.indexOf("<bpmn:userTask"), sub.indexOf("</bpmn:userTask>"));
+  assert(task.includes('formId="delivery-human-publish"'), "a single-artifact human node embeds the manual-publish form (captures resolvedArtifact)");
+  // …and its artifact emit reads the distinct artifact capture.
   const io = sub.slice(0, sub.indexOf("</bpmn:subProcess>"));
-  // The single NON-ARTIFACT emit IS sourced from the captured value (NOT discarded)…
-  assert(/<zeebe:output source="=if \(is defined\(humanEmitValue\)\) then humanEmitValue else null" target="[^"]+_verdict" \/>/.test(io), "a mixed artifact+scalar human node still publishes its one scalar fact from humanEmitValue");
-  // …and the artifact emit reads the distinct artifact capture, never the scalar value.
-  assert(/<zeebe:output source="=if \(is defined\(humanEmitArtifact\)\) then humanEmitArtifact else null" target="[^"]+_report" \/>/.test(io), "the artifact emit reads humanEmitArtifact, not the shared humanEmitValue");
+  assert(/<zeebe:output source="=if \(is defined\(humanEmitArtifact\)\) then humanEmitArtifact else null" target="[^"]+_art" \/>/.test(io), "the artifact emit reads humanEmitArtifact");
 });
 
 
@@ -1746,7 +1753,7 @@ test("#778 the wait + human inner tasks carry the descriptive display name (not 
     name: "inner names",
     nodes: [
       { id: "gate", kind: "wait", wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" } } },
-      { id: "otp", kind: "human", human: { prompt: "Run the manual OTP publish", formKey: "publish-form" } },
+      { id: "otp", kind: "human", human: { prompt: "Run the manual OTP publish" } },
     ],
     edges: [{ from: "gate", to: "otp" }],
   };
@@ -2767,21 +2774,16 @@ test("escalation form structure: the delivery-escalation value field states its 
   assert(/emits nothing/i.test(copy), "the copy tells a zero-emit step to leave the field blank");
 });
 
-test("human form structure: the delivery-human-generic value field states its single-VALUE boundary (a zero/multi-VALUE entry is discarded)", async () => {
-  // Regression guard (PR #863 adversarial review — sibling of the delivery-escalation.form:32 fix):
-  // the SHARED generic human form carries the same single unconditional `value` field. The compiled
-  // human body (humanBodyLines) and delivery-human.bpmn map it onto `humanEmitValue` unconditionally,
-  // and the subProcess output (ioMappingLines) sources a non-artifact emit from it ONLY when the node
-  // declares EXACTLY ONE non-artifact emit — so for a zero- or multi-VALUE task an operator entry is
-  // silently discarded (one value cannot satisfy several distinct typed facts). The boundary counts
-  // NON-ARTIFACT (value) emits, NOT total emits: an `artifact` emit is captured by a SEPARATE field
-  // (`humanEmitArtifact`), so a step emitting one value plus one artifact still applies this field.
-  // The copy must say exactly that, or it misleads the operator of a mixed artifact+scalar step into
-  // thinking their entry is discarded when it is published (the drift this guard regresses). The Tasks
-  // surface seeds no form variables, so a `conditional.hide` on `emitMode` cannot fire (issue #772) —
-  // the static form cannot disable the field per task. Its copy must therefore STATE the cardinality
-  // boundary. Unlike the escalation form there is no Retry select here, so the copy must NOT steer to
-  // Retry.
+test("human form structure: the delivery-human-generic value field states its single-VALUE boundary", async () => {
+  // Regression guard (PR #863 Copilot High, thread deliveryGraphCompiler.ts:1859): the generic form is
+  // now selected (via resolveHumanForm) ONLY for a human node that emits a SINGLE value-emitting
+  // (non-artifact) fact, plus wait-gate escalations that may carry none. A ≥2-emit no-form node is
+  // rejected at authoring time (`human-unroutable-emits`) and a single-artifact node uses the
+  // publish form — so the value field never has to carry more than one value, and the copy must say
+  // exactly that rather than the old (now false) "a scalar-plus-artifact step still applies this field"
+  // carve-out. The Tasks surface seeds no form variables, so a `conditional.hide` cannot fire (issue
+  // #772); the copy must STATE the single-value boundary. Unlike the escalation form there is no Retry
+  // select here, so the copy must NOT steer to Retry.
   const { readFileSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const formPath = fileURLToPath(new URL("../resources/forms/delivery-human-generic.form", import.meta.url));
@@ -2791,10 +2793,10 @@ test("human form structure: the delivery-human-generic value field states its si
   const value = form.components.find((c) => c.key === "value");
   assert(value, "the generic human form keeps its single `value` field");
   const copy = `${value?.label ?? ""}\n${value?.description ?? ""}`;
-  assert(/exactly one value-emitting \(non-artifact\) fact/i.test(copy), "the value field copy states the single-VALUE (non-artifact) boundary");
-  assert(/more than one/i.test(copy) && /discarded/i.test(copy), "the copy warns that a multi-value entry is discarded");
+  assert(/single value-emitting \(non-artifact\) fact/i.test(copy), "the value field copy states the single-VALUE (non-artifact) boundary");
   assert(/emits no value-emitting fact/i.test(copy), "the copy tells a zero-value step to leave the field blank");
-  assert(/artifact/i.test(copy), "the copy names the artifact carve-out (an artifact emit is captured separately)");
+  assert(/rejected at authoring time/i.test(copy), "the copy notes a multi-emit step is rejected, not silently discarded");
+  assert(/resolved-artifact field/i.test(copy), "the copy directs an artifact step to the dedicated resolved-artifact form");
   assert(!/[Rr]etry/.test(copy), "the generic form has no Retry select, so its copy must not steer to one");
 });
 
@@ -2820,7 +2822,9 @@ test("escalation forms: service-node escalations attach delivery-escalation (ret
   assert(!waitEsc.includes('formId="delivery-escalation"'), "no retry select on a wait-gate escalation");
   const humanGraph = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "approve" } }], edges: [] });
   const humanTask = humanGraph.bpmn.slice(humanGraph.bpmn.indexOf("<bpmn:userTask"), humanGraph.bpmn.indexOf("</bpmn:userTask>"));
-  assert(humanTask.includes('formId="delivery-human-generic"'), "the plain human node keeps the generic form");
+  // A no-emit human node is a pure acknowledgement — resolveHumanForm selects the ack form (no value
+  // field), not the generic typed-emit form (PR #863 thread deliveryGraphCompiler.ts:1859).
+  assert(humanTask.includes('formId="delivery-human-ack"'), "a no-emit human node uses the acknowledgement form");
   assert(!humanTask.includes('formId="delivery-escalation"'), "no retry select on a plain human step");
 });
 
