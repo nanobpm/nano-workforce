@@ -471,6 +471,18 @@ test("#863 human multi-emit: a human node emitting several facts with no form is
   const e = errors.find((err) => err.path === "nodes[0].emits" && /no static form can/.test(err.message));
   assert(e !== undefined, `expected a human-unroutable-emits error, got ${JSON.stringify(errors)}`);
 
+  // An explicit `human.formKey` does NOT rescue a ≥2-emit node (PR #863 Copilot High, thread
+  // r4184443511): the compiled task ioMapping reads only the fixed value/resolvedArtifact/note controls,
+  // never a bespoke form's per-fact fields, so the extra emits would still publish null. Rejected too.
+  const explicitForm = await compileFail({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "do it", formKey: "bespoke-multi" }, emits: [{ name: "a", type: "string" }, { name: "b", type: "string" }] },
+    ],
+    edges: [],
+  });
+  const ef = explicitForm.find((err) => err.path === "nodes[0].emits" && /no static form can/.test(err.message));
+  assert(ef !== undefined, `expected a human-unroutable-emits error for an explicit-formKey multi-emit node, got ${JSON.stringify(explicitForm)}`);
+
   // …but a SINGLE non-artifact human emit still compiles and resumes from humanEmitValue (the rejection
   // must not regress the single-emit path).
   const single = await compileOk({

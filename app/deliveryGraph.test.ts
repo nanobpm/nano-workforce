@@ -623,11 +623,15 @@ test("human-unroutable-emits: a human node emitting ≥2 facts with no form is r
     nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }, { name: "report", type: "artifact" }] }],
   });
   assertEquals(hasCode(scalarPlusArtifact, "human-unroutable-emits").path, "nodes[0].emits", "one scalar + one artifact with no form is rejected");
-  // An explicit `human.formKey` opts the author into a bespoke multi-capture form → NOT rejected.
+  // An explicit `human.formKey` is NOT a workaround: the compiled human task's ioMapping reads only the
+  // fixed `value`/`resolvedArtifact`/`note` controls (humanBodyLines), never a bespoke form's per-fact
+  // fields, so a ≥2-emit explicit-form node would STILL publish null for every non-artifact emit.
+  // Reject it too (PR #863 Copilot High, thread r4184443511) — the only correct shape is single-emit
+  // human nodes.
   const explicitForm = validateDeliveryGraph({
     nodes: [{ id: "h", kind: "human", human: { prompt: "do it", formKey: "bespoke-multi" }, emits: [{ name: "a", type: "string" }, { name: "b", type: "string" }] }],
   });
-  assertEquals(explicitForm.filter((e) => e.code === "human-unroutable-emits").length, 0, "an explicit human.formKey opts out of the rejection");
+  assertEquals(hasCode(explicitForm, "human-unroutable-emits").path, "nodes[0].emits", "an explicit human.formKey does NOT make a ≥2-emit node capturable — the ioMapping cannot read its bespoke fields");
   // Single-emit human nodes are capturable → NOT rejected (the guard must not over-reject).
   const singleScalar = validateDeliveryGraph({
     nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }] }],

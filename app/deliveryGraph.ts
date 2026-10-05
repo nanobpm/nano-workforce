@@ -2359,29 +2359,27 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     }
 
     // Reject a `human` node whose emits no static form can capture (PR #863 review — threads
-    // deliveryGraphCompiler.ts:1859 / :2451). A human form captures ONE value: the generic form a single
-    // non-artifact `value`, the publish form a single `resolvedArtifact`. A node emitting ≥2 typed facts
-    // with no explicit `human.formKey` resolves to the agent-router (no static form holds them) — but the
-    // compiled generic form has no control for the extra facts, and a human node has no Retry path, so
-    // completing the form would publish NULL for every uncapturable emit and permanently schedule
-    // downstream consumers with missing required facts. Mirrors `needsAgentFormRouter`
-    // (`resolveHumanForm` source === "agent-router"): ≥2 validly-typed emits AND no non-blank formKey.
-    // Inlined here (not imported) because `deliveryHuman.ts` depends on this module — importing it back
-    // would form a cycle. Reject the whole CLASS at authoring time: split the emits across single-emit
-    // human nodes, or attach an explicit `human.formKey` form that captures them.
-    const explicitHumanForm =
-      isRecord(rawNode.human) &&
-      typeof rawNode.human.formKey === "string" &&
-      rawNode.human.formKey.trim().length > 0;
-    if (kind === "human" && !explicitHumanForm && factTypes.size >= 2) {
+    // deliveryGraphCompiler.ts:1859 / :2451 / :1927). A human form captures ONE value: the generic form a
+    // single non-artifact `value`, the publish form a single `resolvedArtifact`. A node emitting ≥2 typed
+    // facts resolves to the agent-router (no static form holds them) — but the compiled generic form has
+    // no control for the extra facts, and a human node has no Retry path, so completing the form would
+    // publish NULL for every uncapturable emit and permanently schedule downstream consumers with missing
+    // required facts. An explicit `human.formKey` is NOT a workaround (thread r4184443511): the compiled
+    // task's ioMapping (`humanBodyLines`) reads only the fixed `value`/`resolvedArtifact`/`note` controls,
+    // never a bespoke form's per-fact fields, so a ≥2-emit explicit-form node would still publish null for
+    // every non-artifact emit. Reject the whole CLASS at authoring time: split the emits across
+    // single-emit human nodes.
+    if (kind === "human" && factTypes.size >= 2) {
       errors.push({
         path: `${path}.emits`,
         message:
           `human node "${String(id)}" emits ${factTypes.size} typed facts but no static form can ` +
           "capture more than one value (the generic form captures a single non-artifact `value`, the " +
           "publish form a single `resolvedArtifact`) — completing its form would publish null for the " +
-          "uncapturable emits, and a human node has no Retry path to recover. Split the emits across " +
-          "separate single-emit human nodes, or attach an explicit `human.formKey` form that captures them.",
+          "uncapturable emits, and a human node has no Retry path to recover. An explicit `human.formKey` " +
+          "does not help: the compiled task's ioMapping reads only the fixed value/resolvedArtifact/note " +
+          "controls, never a bespoke form's per-fact fields. Split the emits across separate single-emit " +
+          "human nodes.",
         code: "human-unroutable-emits",
       });
     }

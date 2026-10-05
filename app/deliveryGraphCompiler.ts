@@ -1847,13 +1847,14 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
   // A `human` node's non-artifact emits ALL share the one captured `humanEmitValue` (the generic/publish
   // forms have a single value field — see humanBodyLines). Publishing that one value into SEVERAL
   // distinct facts would corrupt them (PR #863 Copilot Low, thread r4182488264). validateDeliveryGraph
-  // now REJECTS a ≥2-emit human node that carries no form (`human-unroutable-emits`, thread
-  // deliveryGraphCompiler.ts:1859) — no static form can capture several emits, so that whole class is
-  // refused at authoring time rather than silently publishing null. This discard stays as residual
-  // defence for the remaining EXPLICIT-form multi-non-artifact path (an author opts into a bespoke
-  // form): only a SINGLE non-artifact human emit is sourced from `humanEmitValue`; with two or more,
-  // every non-artifact emit publishes null. Artifact emits are unaffected (they read the distinct
-  // `humanEmitArtifact`).
+  // now REJECTS every ≥2-emit human node (`human-unroutable-emits`, threads
+  // deliveryGraphCompiler.ts:1859 / :1927) — no static form can capture several emits (an explicit
+  // `human.formKey` is no exception: this ioMapping reads only the fixed value/resolvedArtifact/note
+  // controls, never a bespoke form's per-fact fields), so that whole class is refused at authoring time
+  // rather than silently publishing null. This discard stays as residual defence for a ≥2-emit node that
+  // somehow reaches compile despite the validator: only a SINGLE non-artifact human emit is sourced from
+  // `humanEmitValue`; with two or more, every non-artifact emit publishes null. Artifact emits are
+  // unaffected (they read the distinct `humanEmitArtifact`).
   const humanNonArtifactEmits =
     node.kind === "human" ? normaliseEmits(node).filter((f) => f.type !== "artifact") : [];
   const humanValueEmit = humanNonArtifactEmits.length === 1 ? humanNonArtifactEmits[0] : undefined;
@@ -1920,10 +1921,11 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // never hardcoding the generic form: a 0-emit node uses the acknowledgement form, a single-artifact
       // node uses the manual-publish form (which carries the `resolvedArtifact` control the generic form
       // lacks, so the artifact is actually captured instead of published null), and a single-value node
-      // uses the generic typed-emit form. A ≥2-emit no-form node resolves to the agent-router (formKey
-      // null) and is REJECTED upstream by validateDeliveryGraph (`human-unroutable-emits`), so the
-      // `?? GENERIC_HUMAN_FORM` fallback here is unreachable defensive cover (PR #863 thread
-      // deliveryGraphCompiler.ts:1859).
+      // uses the generic typed-emit form. A ≥2-emit node resolves to the agent-router (formKey null) and
+      // is REJECTED upstream by validateDeliveryGraph (`human-unroutable-emits` — an explicit formKey is
+      // no rescue, since the task ioMapping reads only the fixed controls), so the
+      // `?? GENERIC_HUMAN_FORM` fallback here is unreachable defensive cover (PR #863 threads
+      // deliveryGraphCompiler.ts:1859 / :1927).
       return humanBodyLines(el, displayName, resolveHumanForm(node).formKey ?? GENERIC_HUMAN_FORM);
     default:
       return assertNever(node, "innerBodyLines");
