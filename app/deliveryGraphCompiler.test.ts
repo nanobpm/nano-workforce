@@ -2673,6 +2673,31 @@ test("escalation form structure: the delivery-escalation value field states its 
   assert(/emits nothing/i.test(copy), "the copy tells a zero-emit step to leave the field blank");
 });
 
+test("human form structure: the delivery-human-generic value field states its single-emit boundary (a zero/multi-emit entry is discarded)", async () => {
+  // Regression guard (PR #863 adversarial review — sibling of the delivery-escalation.form:32 fix):
+  // the SHARED generic human form carries the same single unconditional `value` field. The compiled
+  // human body (humanBodyLines) and delivery-human.bpmn map it onto `humanEmitValue` unconditionally,
+  // and the wait-gate escalation maps it onto an emit source ONLY for a single-emit node — so for a
+  // zero- or multi-emit task an operator entry is silently discarded (or cannot satisfy several
+  // distinct typed facts). The Tasks surface seeds no form variables, so a `conditional.hide` on
+  // `emitMode` cannot fire (issue #772) — the static form cannot disable the field per task. Its copy
+  // must therefore STATE the cardinality boundary. Unlike the escalation form there is no Retry
+  // select here, so the copy must NOT steer to Retry.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const formPath = fileURLToPath(new URL("../resources/forms/delivery-human-generic.form", import.meta.url));
+  const form = JSON.parse(readFileSync(formPath, "utf8")) as {
+    components: { key?: string; label?: string; description?: string }[];
+  };
+  const value = form.components.find((c) => c.key === "value");
+  assert(value, "the generic human form keeps its single `value` field");
+  const copy = `${value?.label ?? ""}\n${value?.description ?? ""}`;
+  assert(/exactly one (emitted )?fact/i.test(copy), "the value field copy states the single-emit boundary");
+  assert(/more than one/i.test(copy) && /discarded/i.test(copy), "the copy warns that a multi-emit entry is discarded");
+  assert(/emits nothing/i.test(copy), "the copy tells a zero-emit step to leave the field blank");
+  assert(!/[Rr]etry/.test(copy), "the generic form has no Retry select, so its copy must not steer to one");
+});
+
 test("escalation forms: service-node escalations attach delivery-escalation (retry select); human + wait-gate tasks keep the generic form", async () => {
   // Regression guard (PR #863 adversarial review): the retry Resolution select must render ONLY where
   // retry semantics exist. The wait-gate escalation (no retryElement) and the plain human node share
