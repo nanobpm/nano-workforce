@@ -29,6 +29,8 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { AGENT_SLA_TIMEOUT } from "../app/agentSla.ts";
+import { DEFAULT_ESCALATION_SLA_TIMEOUT } from "../app/escalationSla.ts";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
 import { advancePastTimer, settleFully } from "./support/time.ts";
 
@@ -69,6 +71,15 @@ function parkAgent(app: TestApp, jobType: string): void {
 async function openEscalationTask(app: TestApp, processKey: string) {
   const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: processKey });
   return tasks.find((t) => t.elementId === "escalation");
+}
+
+/** Find an open user task by element id on a (possibly standalone-cell) instance. Used by the
+ *  rerouted-arm scenarios below, whose human-decision tasks live directly on the cell's own
+ *  instance (`trial-merge-decision`, `conformance-escalation`) rather than on a `human-escalation`
+ *  grandchild. */
+async function openTaskById(app: TestApp, processKey: string, elementId: string) {
+  const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: processKey });
+  return tasks.find((t) => t.elementId === elementId);
 }
 
 describe("agent-task SLA boundary — runtime escalation (#849)", () => {
@@ -183,5 +194,214 @@ describe("agent-task SLA boundary — runtime escalation (#849)", () => {
         return plan!.process_key!;
       },
     );
+  });
+});
+
+// Runtime proof for the OTHER two rerouted agent-SLA arms landed this same round (#849 review r2).
+// The implement-cell boundary above is driven through its real parents; merge-cell and retro are
+// standalone cells (merge-cell is not yet composed by any callActivity, retro's trigger needs a
+// whole epic's DB state), so we create each instance directly and seed exactly the process
+// variables their real parents seed (`agentSlaTimeout`, and for merge-cell `escalationSlaTimeout`
+// for the downstream human-decision boundary). Each test parks the agent at the bounded task,
+// advances the engine clock past `agentSlaTimeout`, and asserts the token traversed the NEW
+// recorder → escalation path — so a broken edge (wrong `targetRef`, or `agentSlaTimeout` missing
+// from the recorder's scope) is caught by a red test, not at runtime. Mirrors the premise of the
+// implement-cell suite above: a structural guard proves the boundary EXISTS; only this proves it
+// ROUTES.
+describe("agent-task SLA boundary — rerouted recorder→escalation arms (#849 review r2)", () => {
+  const savedEnv = new Map<string, string | undefined>();
+  let restoreGithub: (() => void) | undefined;
+
+  before(() => {
+    for (const [k, v] of Object.entries(GITHUB_ENV_OVERRIDES)) {
+      savedEnv.set(k, process.env[k]);
+      process.env[k] = v;
+    }
+    restoreGithub = installAdmitGithub(admitGithubState("owner/repo", "main"));
+  });
+
+  after(() => {
+    restoreGithub?.();
+    for (const [k, v] of savedEnv) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  async function bootApp(): Promise<{ app: TestApp; dbDir: string }> {
+    const dbDir = mkdtempSync(join(tmpdir(), "nwf-849sla2-"));
+    const app = await bootTestApp(APP_ROOT, {
+      env: { NANO_APP_DB_URL: `file:${join(dbDir, "app.db")}` },
+    });
+    return { app, dbDir };
+  }
+
+  // The retro SLA recorders persist through `pr.conformance-record` → `recordConformance`, which
+  // inserts into `plan_conformance` whose `plan_key` has a FOREIGN KEY to `plans` (052). Seed the
+  // minimal parent row so the recorder's write doesn't violate the constraint — the real retro is
+  // only ever started (app/retro.ts) for an already-recorded plan, so this mirrors production scope.
+  async function seedPlan(app: TestApp, planKey: string): Promise<void> {
+    const ts = new Date().toISOString();
+    await app.db
+      .table<Record<string, unknown>>("plans", "plan_key")
+      .insert({
+        plan_key: planKey,
+        repo: "owner/repo",
+        issue_number: 1,
+        issue_url: "https://github.com/owner/repo/issues/1",
+        status: "done",
+        created_at: ts,
+        updated_at: ts,
+      });
+  }
+
+  test("merge-cell: a hung trial-merge agent hits be_trial_agent_sla and routes through record-trial-merge to the human decision", async () => {
+    const { app, dbDir } = await bootApp();
+    try {
+      parkAgent(app, "senior:trial-merge");
+      const { processInstanceKey } = await app.engine.createInstance({
+        processDefinitionId: "merge-cell",
+        variables: {
+          planKey: "owner/repo#1",
+          repo: "owner/repo",
+          trialMergeWave: 1,
+          agentSlaTimeout: AGENT_SLA_TIMEOUT,
+          // Arms the downstream trial-merge-decision SLA boundary (`=escalationSlaTimeout`); a long
+          // PT24H timer that must NOT fire in our 3h jump — without it the boundary's timer-creation
+          // FEEL would resolve null and incident.
+          escalationSlaTimeout: DEFAULT_ESCALATION_SLA_TIMEOUT,
+        },
+      });
+      const processKey = String(processInstanceKey);
+
+      // Under the SLA the agent is still parked: boundary not fired, no decision task yet.
+      await advancePastTimer(app, UNDER_AGENT_SLA_MS);
+      let flows = takenFlows(app);
+      assert.ok(
+        !flows.includes("be_trial_agent_sla->record-trial-merge"),
+        "under the SLA the trial-merge agent boundary has NOT fired",
+      );
+      assert.ok(
+        !(await openTaskById(app, processKey, "trial-merge-decision")),
+        "no trial-merge decision task before the SLA elapses",
+      );
+
+      // Past the SLA the interrupting boundary cancels the hung agent and routes through the recorder.
+      await advancePastTimer(app, PAST_AGENT_SLA_MS);
+      flows = takenFlows(app);
+      assert.ok(
+        flows.includes("be_trial_agent_sla->record-trial-merge"),
+        `the agent SLA boundary fired into record-trial-merge (flows: ${flows.join(", ")})`,
+      );
+      assert.ok(
+        flows.includes("record-trial-merge->gw-trial"),
+        "the SLA recorder handed off to the trial-red gateway",
+      );
+      assert.ok(
+        flows.includes("gw-trial->trial-merge-decision"),
+        "a null/absent trial-merge result is treated as suite-failed and escalates to the human decision",
+      );
+      const task = await openTaskById(app, processKey, "trial-merge-decision");
+      assert.ok(task?.userTaskKey, "the merge-cell parked a completable trial-merge decision task");
+    } finally {
+      await app.stop();
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  test("retro: a hung conformance agent hits be_conformance_sla and routes through record-conformance-sla to the human review", async () => {
+    const { app, dbDir } = await bootApp();
+    try {
+      await seedPlan(app, "owner/repo#1");
+      parkAgent(app, "senior:conformance");
+      const { processInstanceKey } = await app.engine.createInstance({
+        processDefinitionId: "retro",
+        variables: {
+          planKey: "owner/repo#1",
+          repo: "owner/repo",
+          issueUrl: "https://github.com/owner/repo/issues/1",
+          agentSlaTimeout: AGENT_SLA_TIMEOUT,
+        },
+      });
+      const processKey = String(processInstanceKey);
+      // Let `gather` (pr.retro-gather) complete and the conformance agent park before arming the clock.
+      await settleFully(app);
+
+      await advancePastTimer(app, UNDER_AGENT_SLA_MS);
+      let flows = takenFlows(app);
+      assert.ok(
+        !flows.includes("be_conformance_sla->record-conformance-sla"),
+        "under the SLA the conformance agent boundary has NOT fired",
+      );
+      assert.ok(
+        !(await openTaskById(app, processKey, "conformance-escalation")),
+        "no conformance-escalation task before the SLA elapses",
+      );
+
+      await advancePastTimer(app, PAST_AGENT_SLA_MS);
+      flows = takenFlows(app);
+      assert.ok(
+        flows.includes("be_conformance_sla->record-conformance-sla"),
+        `the conformance agent SLA boundary fired into its recorder (flows: ${flows.join(", ")})`,
+      );
+      assert.ok(
+        flows.includes("record-conformance-sla->conformance-escalation"),
+        "the SLA recorder handed off to the human conformance review",
+      );
+      const task = await openTaskById(app, processKey, "conformance-escalation");
+      assert.ok(task?.userTaskKey, "the retro parked a completable conformance-escalation task");
+    } finally {
+      await app.stop();
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  test("retro: a hung synthesize agent hits be_synthesize_sla and routes through record-synthesize-sla to the human review", async () => {
+    const { app, dbDir } = await bootApp();
+    try {
+      // Conformance completes cleanly (no deviations) so the token reaches `synthesize`; that agent hangs.
+      await app.engine.registerWorker("senior:conformance", async () => ({ status: "skipped" }));
+      parkAgent(app, "senior:retro");
+      await seedPlan(app, "owner/repo#1");
+      const { processInstanceKey } = await app.engine.createInstance({
+        processDefinitionId: "retro",
+        variables: {
+          planKey: "owner/repo#1",
+          repo: "owner/repo",
+          issueUrl: "https://github.com/owner/repo/issues/1",
+          agentSlaTimeout: AGENT_SLA_TIMEOUT,
+        },
+      });
+      const processKey = String(processInstanceKey);
+      // Let gather + conformance + record-conformance run and the synthesize agent park before arming.
+      await settleFully(app);
+
+      await advancePastTimer(app, UNDER_AGENT_SLA_MS);
+      let flows = takenFlows(app);
+      assert.ok(
+        flows.includes("gw-deviations->synthesize"),
+        `a clean conformance run reaches synthesize (flows: ${flows.join(", ")})`,
+      );
+      assert.ok(
+        !flows.includes("be_synthesize_sla->record-synthesize-sla"),
+        "under the SLA the synthesize agent boundary has NOT fired",
+      );
+
+      await advancePastTimer(app, PAST_AGENT_SLA_MS);
+      flows = takenFlows(app);
+      assert.ok(
+        flows.includes("be_synthesize_sla->record-synthesize-sla"),
+        `the synthesize agent SLA boundary fired into its recorder (flows: ${flows.join(", ")})`,
+      );
+      assert.ok(
+        flows.includes("record-synthesize-sla->conformance-escalation"),
+        "the synthesize SLA recorder handed off to the human conformance review",
+      );
+      const task = await openTaskById(app, processKey, "conformance-escalation");
+      assert.ok(task?.userTaskKey, "the retro parked a completable conformance-escalation task on the synthesize-SLA arm");
+    } finally {
+      await app.stop();
+      rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 });
