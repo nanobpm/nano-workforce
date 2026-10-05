@@ -18,6 +18,7 @@
 import type { AgentInstanceSummary, AppApi, AppJobHandler } from "@nanobpm/urban";
 import { type HeadReader, makeDefaultReadHead } from "../../app/currentHead.ts";
 import { compareCommits, fetchBranchHead, fetchPrHead, updateBranchRef } from "../../app/github.ts";
+import { type ChurnRound, detectChurn } from "../../app/roundChurn.ts";
 import { decideProgress, isAddressedStatus } from "../../app/roundProgress.ts";
 import { parsePr } from "../../app/service.ts";
 import { WorldStore } from "../../app/world/index.ts";
@@ -238,6 +239,22 @@ function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
   };
 }
 
+/** Reads a PR's durable round history (its `rounds` rows) projected to the fields {@link detectChurn}
+ * consumes. Injectable so churn tests never touch the datasource; the default binds the app's
+ * `rounds` table. */
+export type RoundsReader = (prKey: string) => Promise<ChurnRound[]>;
+
+/** Default round-history reader — the canonical `rounds` table over `app.data`. Returns the rows
+ * projected to {@link ChurnRound}; any read failure surfaces as a rejected promise the caller
+ * `.catch`es to an empty history (churn then never fires, failing OPEN exactly like the head read). */
+function defaultReadRounds(app: AppApi): RoundsReader {
+  return async (prKey) => {
+    const tbl = app.data.table<{ pr_key: string; round_no: number; status: string; summary?: string }>("rounds", "id");
+    const rows = await tbl.find({ pr_key: prKey });
+    return rows.map((r) => ({ roundNo: r.round_no, status: r.status, summary: r.summary ?? null }));
+  };
+}
+
 /** Build the handler with injectable readers (see {@link HeadReader} / {@link AgentWorkReader}). The
  * default export binds the real GitHub reader; the agent-work reader defaults to the engine's
  * AgentInstance channel when not injected. Tests inject stubs. */
@@ -245,6 +262,7 @@ export function makeHandler(deps: {
   readHead: HeadReader;
   readAgentWork?: AgentWorkReader;
   selfHeal?: SelfHealFn;
+  readRounds?: RoundsReader;
 }): AppJobHandler<In, Out> {
   return async (job, app) => {
     const { prKey, status, repo, prNumber, round, huskRetries, roundEntryHead } = job.variables;
@@ -429,6 +447,41 @@ export function makeHandler(deps: {
       return commit(out, { head: currentHead, status: "converging", agentWatermark });
     }
     if (decision.progressed) {
+      // NON-CONVERGING CHURN guard (#870). The head DID advance (real commit), so the no-progress
+      // guard correctly continues — but a contested surface whose findings never end keeps the loop
+      // "progressing" every round without ever reaching a fixed point (e.g. a fail-closed analyzer
+      // whose bypass forms are unbounded). Before parking for the next review, check the durable round
+      // history: when the trailing run of consecutive `addressed` rounds keeps landing findings in the
+      // SAME file over a window, escalate for a human SCOPE decision instead of looping to maxRounds.
+      // Only on an addressed round with a readable head (a GitHub outage fails OPEN like everywhere
+      // else — never fabricate a churn escalation); the round-history read fails open to no-churn too.
+      if (currentHead && isAddressedStatus(status)) {
+        const history: ChurnRound[] = await (deps.readRounds ?? defaultReadRounds(app))(prKey).catch(() => []);
+        const churn = detectChurn(history);
+        if (churn.churning && churn.question) {
+          app.log.info("non-converging churn detected — escalating for a human scope decision (#870)", {
+            prKey,
+            round: roundNo,
+            file: churn.file,
+            rounds: churn.rounds,
+          });
+          // Route to the SAME human escalation path the no-advance guard uses (gw-husk → default →
+          // persist-escalation-noprogress, which renders `noProgressQuestion`): progressed:false with
+          // huskRetry:false escapes the husk auto-retry straight to the human. Leave the status unset
+          // (the escalation worker owns it) and advance the baseline + watermark, exactly as the
+          // no-advance escalation `commit` below does.
+          return commit(
+            {
+              progressed: false,
+              huskRetries: 0,
+              huskRetry: false,
+              noProgressReason: "churn",
+              noProgressQuestion: churn.question,
+            },
+            { head: currentHead, agentWatermark },
+          );
+        }
+      }
       // Genuine progress → the loop parks at wait-review. THIS is the review-wait park, written only
       // once the husk retry has been ruled out, so a husk-retry round never transits `waiting_review`.
       return commit(out, { head: currentHead, status: "waiting_review", agentWatermark });
