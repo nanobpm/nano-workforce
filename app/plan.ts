@@ -1022,12 +1022,14 @@ export async function startPlan(
       // `operators` candidate group); an operator/agent can claim/reassign via the task inbox.
       escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
       escalationAssignee: null,
-      // Agent-task liveness SLA (issue #849): bounds every external agent task in the fan-out —
-      // the planner (`plan`), the plan reviewer (`review-plan`), the wave trial-merge agent, and
-      // (via the implement-cell callActivity's all-variables propagation) each slice's
-      // implementation agent. Each carries an interrupting timer boundary whose
-      // `=agentSlaTimeout` FEEL duration is evaluated at timer creation, so a hung or looping
-      // agent escalates to a human instead of parking the epic forever.
+      // Agent-task liveness SLA (issue #849): PRE-SEED the canonical bound for the fan-out's
+      // external agent tasks. The wave trial-merge agent and each slice's implementation agent (via
+      // the implement-cell callActivity's explicit `agentSlaTimeout` input mapping) are bounded
+      // today; the planner (`plan`) and plan reviewer (`review-plan`) sit on a back-edge loop whose
+      // boundary the layouter cannot yet route, so their SLA boundaries are intentionally deferred
+      // to #868 (layouter bug #867) — for those two this seed is preparation, not yet an armed
+      // bound. Each bounded task's interrupting timer boundary evaluates `=agentSlaTimeout` at
+      // timer creation, so a hung or looping agent escalates to a human instead of parking forever.
       agentSlaTimeout: AGENT_SLA_TIMEOUT,
       // Capability-barrier bound (#289): the validated ISO-8601 duration read by the
       // `wait-caps-timeout` timer arm of the `wait-caps-resolved` event-based gateway. A task whose

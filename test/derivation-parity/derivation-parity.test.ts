@@ -203,15 +203,21 @@ test("retro's complete port differs from its golden by ONLY the agent-task marke
   assertEquals(boundaries(derived), 0, "@nanobpm/workflow can now emit boundary events — un-park retro");
 
   // (c) strip exactly the marker lines AND the SLA boundary blocks (plus their
-  //     sequence flows, and the extra incomings on the escalation user task) from
-  //     the golden and the port derives the WHOLE model green, through the shared
-  //     harness's own normalize/equality — so nothing but the marker + boundaries
+  //     sequence flows, the two SLA recorder service tasks they feed, and the
+  //     extra incomings on the escalation user task) from the golden and the port
+  //     derives the WHOLE model green, through the shared harness's own
+  //     normalize/equality — so nothing but the marker + SLA-escalation apparatus
   //     diverges.
   const unmarked = golden
     .replace(/^[ \t]*<(?:\w+:)?agentDefinition\b[^>]*\/>[ \t]*\r?\n/gm, "")
     .replace(/^[ \t]*<(?:\w+:)?boundaryEvent\b[\s\S]*?<\/(?:\w+:)?boundaryEvent>\r?\n/gm, "")
+    // the SLA recorder service tasks (record-conformance-sla / record-synthesize-sla) and the
+    // `<!-- Agent-SLA recorders: … -->` comment block immediately preceding them
+    .replace(/^[ \t]*<!--[\s\S]*?-->[ \t]*\r?\n(?=[ \t]*<(?:\w+:)?serviceTask\b[^>]*\bid="record-(?:conformance|synthesize)-sla")/gm, "")
+    .replace(/^[ \t]*<(?:\w+:)?serviceTask\b[^>]*\bid="record-(?:conformance|synthesize)-sla"[\s\S]*?<\/(?:\w+:)?serviceTask>\r?\n/gm, "")
     .replace(/^[ \t]*<(?:\w+:)?sequenceFlow\b[^>]*\bsourceRef="be_[^"]*"[^>]*\/>[ \t]*\r?\n/gm, "")
-    .replace(/^[ \t]*<(?:\w+:)?incoming>f_(?:conformanceSla|synthesizeSla)<\/(?:\w+:)?incoming>[ \t]*\r?\n/gm, "");
+    .replace(/^[ \t]*<(?:\w+:)?sequenceFlow\b[^>]*\bsourceRef="record-(?:conformance|synthesize)-sla"[^>]*\/>[ \t]*\r?\n/gm, "")
+    .replace(/^[ \t]*<(?:\w+:)?incoming>f_(?:conformanceSla|synthesizeSla)(?:ToEsc)?<\/(?:\w+:)?incoming>[ \t]*\r?\n/gm, "");
   assertEquals(markers(unmarked), 0, "the strip must remove every marker line");
   assertEquals(boundaries(unmarked), 0, "the strip must remove every SLA boundary");
   const expected = normalize(unmarked);

@@ -790,6 +790,42 @@ queries skip (`merging`), so a slow pass can't double-signal.
 | `NANO_PR_MERGE_ADMIN` | 0 | pass `--admin` on merge |
 | `NANO_PR_REVIEW_WAIT_TIMEOUT` | PT30M | ISO-8601 wait before a stalled review escalates (timer arm of the `wait-review` event-based gateway); malformed → default |
 | `NANO_PR_REVIEW_NUDGE_MINUTES` | 5 | cooldown between poller Copilot re-request nudges per PR (clamped 1–1440) |
+| `NANO_PR_AGENT_SLA_TIMEOUT` | PT2H | ISO-8601 liveness bound on an external **agent** service task (see §12.1); seeded as `agentSlaTimeout` at every process start that hosts one. Malformed → default |
+
+### 12.1 Agent-task liveness SLA (issue #849)
+
+An external **agent** service task (`<zeebe:agentDefinition agentType="external"/>`) is a durable
+wait on an external actor with **no human in the loop**: the worker renews the job's deadline for as
+long as the agent process is alive, so an unstaffed capability or a hung/looping agent that never
+fails its job would otherwise park the token forever (no incident, no escalation — the
+`classify-scope` 7h27m incident, nanobpm/nano-bpm#1308). The agent-task SLA closes that gap with a
+durable, in-process backstop — no external watchdog.
+
+- **Mechanism.** Every process start that hosts an external agent task seeds the validated
+  `agentSlaTimeout` process variable (`app/agentSla.ts` `AGENT_SLA_TIMEOUT`, env
+  `NANO_PR_AGENT_SLA_TIMEOUT`, default `PT2H`). Each *bounded* agent task carries an **interrupting
+  timer boundary** whose `<bpmn:timeDuration>=agentSlaTimeout` is evaluated at timer creation
+  (FEEL-expression duration). When the SLA elapses the boundary fires, cancels the stuck job, and
+  routes the token to the process's escalation path so a human is pulled in. It is deliberately much
+  shorter than the human-decision escalation SLA (`NANO_ESCALATION_SLA_TIMEOUT`, PT24H) so a stuck
+  agent surfaces quickly without interrupting a legitimately long task.
+- **Bounded today:** the implement-cell (`implement-task`), the merge-cell's trial-merge
+  (`trial-merge`), the merge-loop's `rebase` / `fix-ci`, and retro's `conformance` / `synthesize`.
+  The implement-cell is reached by **both** parents — a standalone `feature` run and a plan-fanout
+  wave slice — and each parent's callActivity maps `agentSlaTimeout` into the child explicitly.
+- **Pre-seeded, not yet bounded:** the convergence-loop (`review-round` / `adversarial-review` /
+  `classify-scope`) and plan-fanout (`plan` / `review-plan`) agent tasks sit on a back-edge loop
+  whose boundary the auto-layouter cannot yet route (nano-ide #867), so their SLA boundaries are
+  intentionally deferred to #868. They are seeded now as preparation; the defect-class guard
+  (`app/agentic/vocab/agent-sla-boundary.test.ts`) covers exactly the bounded subset so a regression
+  on a *bounded* process is caught while the deferred two stay out.
+- **Escalation routing.** The boundary never drops the token on the floor: implement-cell routes
+  `be_implement_sla` → `record-escalation-sla` (synthesises an SLA-specific question) → the shared
+  `human-escalation` cell; merge-cell routes `be_trial_agent_sla` → `record-trial-merge` (persists a
+  trial-merge audit row + answerable question for the timed-out attempt) → `trial-merge-decision`;
+  retro routes each agent boundary → a `record-*-sla` task (persists a `plan_conformance` row at
+  `review_status='reviewing'` so the always-following `conformance-ack` settles it) →
+  `conformance-escalation`. Runtime coverage: `e2e/agent-sla-boundary.e2e.ts`.
 
 ## 13. Planning fan-out (`plan-fanout.bpmn`) — issue #14
 

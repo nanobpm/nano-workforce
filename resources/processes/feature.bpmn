@@ -182,6 +182,7 @@
           <zeebe:input source="=if (is defined(transcriptUrlBase)) then transcriptUrlBase else null" target="transcriptUrlBase" />
           <zeebe:input source="=if (is defined(escalationAssignee)) then escalationAssignee else null" target="escalationAssignee" />
           <zeebe:input source="=escalationSlaTimeout" target="escalationSlaTimeout" />
+          <zeebe:input source="=agentSlaTimeout" target="agentSlaTimeout" />
           <zeebe:input source="=featureKey" target="subjectKey" />
           <zeebe:output source="=status" target="status" />
           <zeebe:output source="=if (is defined(summary)) then summary else null" target="summary" />

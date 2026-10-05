@@ -3,10 +3,14 @@
 // process start that hosts an external agent task seeds the validated `agentSlaTimeout` process
 // variable (issue #849): `app/service.ts` for the convergence- and merge-loops, `app/feature.ts`
 // for a single-issue feature run, `app/plan.ts` for the epic plan-fanout, `app/retro.ts` for the
-// retrospective, and `app/deliveryRunner.ts` for a compiled delivery graph. Each external agent
-// service task carries an interrupting timer boundary whose
-// `<bpmn:timeDuration>=agentSlaTimeout` evaluates it at timer creation (FEEL-expression timer
-// durations, engine-native).
+// retrospective, and `app/deliveryRunner.ts` for a compiled delivery graph. Only a SUBSET of those
+// tasks is currently bounded — the implement-cell, the merge-cell's trial-merge, the merge-loop's
+// rebase / fix-ci, and retro's conformance / synthesize each carry an interrupting timer boundary
+// whose `<bpmn:timeDuration>=agentSlaTimeout` evaluates the seeded variable at timer creation
+// (FEEL-expression timer durations, engine-native). The convergence-loop and plan-fanout agent
+// tasks are only PRE-SEEDED here — their boundaries are intentionally deferred to #868 (a
+// bpmn-auto-layout back-edge routing limitation, #867), so seeding them now is preparation, not a
+// claim of effective coverage.
 //
 // This closes the agent-task liveness gap: unlike an escalation *user* task (whose SLA the
 // escalationSla policy already bounds), an AGENT service task has no human in the loop — if no
@@ -39,5 +43,7 @@ export function agentSlaTimeout(
 
 /** The one canonical, validated agent-task SLA every process start seeds as `agentSlaTimeout`
  * (issue #849). Lives in this leaf module (not `app/service.ts`) so every seeder — service,
- * feature, plan, retro, deliveryRunner — imports it without an import cycle. */
+ * feature, plan, retro, deliveryRunner — imports it without an import cycle. Seeding is universal,
+ * but only the bounded subset (implement-cell, merge-cell, merge-loop, retro) evaluates it via a
+ * boundary timer today; convergence-loop / plan-fanout are pre-seeded for #868. */
 export const AGENT_SLA_TIMEOUT = agentSlaTimeout(process.env.NANO_PR_AGENT_SLA_TIMEOUT);

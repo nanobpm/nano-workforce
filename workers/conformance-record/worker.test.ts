@@ -239,3 +239,48 @@ test("conformance-record: fails (not a silent, untrackable escalation) when ther
   // Nothing was persisted: the throw precedes the write, so no untrackable row is left behind.
   assertEquals(stores.plan_conformance.length, 0);
 });
+
+test("conformance-record: an agent-SLA timeout persists a reviewing row (so the ack finds it) with no deviations", async () => {
+  const { app, stores } = fakeApp();
+  // The retro SLA arm routes here with agentSlaElapsed=true + an SLA summary and NO agent verdict
+  // (the conformance/synthesize agent timed out). The shared conformance-escalation ack task always
+  // runs pr.conformance-ack → acknowledgeConformance, which THROWS when no plan_conformance row
+  // exists — so the SLA path must persist a `reviewing` row even though nothing was scored.
+  const out = await handler(
+    {
+      processInstanceKey: "retro-inst-13",
+      variables: {
+        planKey: "o/r#13",
+        agentSlaElapsed: true,
+        summary: "The spec-conformance agent exceeded its time budget (SLA PT2H) without returning a verdict.",
+      },
+    } as any,
+    app as any,
+  );
+  const row = stores.plan_conformance[0];
+  // A timeout produces no verdict: status coerces to skipped, all counts zeroed, has_deviations 0 …
+  assertEquals(row.status, "skipped");
+  assertEquals(row.has_deviations, 0);
+  // … but the row IS parked at `reviewing` (keyed off the instance) so acknowledgeConformance settles
+  // it instead of throwing, and the Tasks inbox shows the SLA-timeout summary as the reason.
+  assertEquals(row.review_status, "reviewing");
+  assertEquals(row.process_key, "retro-inst-13");
+  assertEquals(row.summary, "The spec-conformance agent exceeded its time budget (SLA PT2H) without returning a verdict.");
+  // The SLA arm routes to the escalation task directly (not via gw-deviations), so the returned flag
+  // stays the ground-truth `hasDeviations` (false) — it is not read on the SLA path.
+  assertEquals(out, { hasDeviations: false });
+});
+
+test("conformance-record: an agent-SLA timeout with no processKey fails loudly (untrackable escalation)", async () => {
+  const { app, stores } = fakeApp();
+  await assertRejects(
+    () =>
+      handler(
+        { variables: { planKey: "o/r#14", agentSlaElapsed: true, summary: "sla" } } as any,
+        app as any,
+      ),
+    Error,
+    "no processInstanceKey",
+  );
+  assertEquals(stores.plan_conformance.length, 0);
+});

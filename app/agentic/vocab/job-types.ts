@@ -222,9 +222,20 @@ export function agentTaskTypesOptedOutMissingExternalMarker(xml: string): string
 // leave the stuck job running.
 const BOUNDARY_EVENT = /<(?:\w+:)?boundaryEvent\b[^>]*>[\s\S]*?<\/(?:\w+:)?boundaryEvent>/g;
 const BOUNDARY_ATTACHED_TO = /\battachedToRef="([^"]*)"/;
+const BOUNDARY_ID = /<(?:\w+:)?boundaryEvent\b[^>]*\bid="([^"]*)"/;
 const TIMER_DEFINITION = /<(?:\w+:)?timerEventDefinition\b/;
 const NON_INTERRUPTING = /\bcancelActivity="false"/;
 const SERVICE_TASK_ID = /<(?:\w+:)?serviceTask\b[^>]*\bid="([^"]*)"/;
+// The boundary must actually arm the seeded SLA: a `<bpmn:timeDuration>` whose FEEL expression is
+// `=agentSlaTimeout`. A timer with no duration (or a hard-coded/other expression) does not bound the
+// agent by the canonical SLA, so it is not a real SLA boundary. Match the duration body loosely
+// (whitespace/`xsi:type` attribute agnostic) and require the `=agentSlaTimeout` reference.
+const SLA_DURATION = /<(?:\w+:)?timeDuration\b[^>]*>\s*=\s*agentSlaTimeout\s*<\/(?:\w+:)?timeDuration>/;
+// A sequence flow sourced from a node id (`sourceRef="<id>"`). The boundary must route SOMEWHERE —
+// a disconnected timer would cancel the agent without escalating, so a boundary with no outgoing
+// flow is not a valid SLA bound.
+const sequenceFlowFrom = (id: string): RegExp =>
+  new RegExp(`<(?:\\w+:)?sequenceFlow\\b[^>]*\\bsourceRef="${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`);
 
 /**
  * DEFECT-CLASS GUARD (issue #849): scan one BPMN document for the ids of EXTERNAL agent service
@@ -241,9 +252,16 @@ const SERVICE_TASK_ID = /<(?:\w+:)?serviceTask\b[^>]*\bid="([^"]*)"/;
 export function externalAgentTasksMissingSlaBoundary(xml: string): string[] {
   const bounded = new Set<string>();
   for (const [block] of xml.matchAll(BOUNDARY_EVENT)) {
+    // A real SLA bound is an INTERRUPTING TIMER boundary …
     if (!TIMER_DEFINITION.test(block) || NON_INTERRUPTING.test(block)) continue;
+    // … that arms the canonical seeded SLA (`=agentSlaTimeout`) …
+    if (!SLA_DURATION.test(block)) continue;
     const attached = block.match(BOUNDARY_ATTACHED_TO)?.[1];
-    if (attached) bounded.add(attached);
+    if (!attached) continue;
+    // … and routes somewhere (a disconnected boundary cancels the agent without escalating).
+    const boundaryId = block.match(BOUNDARY_ID)?.[1];
+    if (!boundaryId || !sequenceFlowFrom(boundaryId).test(xml)) continue;
+    bounded.add(attached);
   }
   const missing: string[] = [];
   for (const [block] of xml.matchAll(SERVICE_TASK)) {

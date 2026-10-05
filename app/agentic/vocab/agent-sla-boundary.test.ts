@@ -43,10 +43,12 @@ test("externalAgentTasksMissingSlaBoundary passes a bounded agent task and ignor
       </bpmn:extensionElements>
     </bpmn:serviceTask>
     <bpmn:boundaryEvent id="be_agent_sla" attachedToRef="agent">
+      <bpmn:outgoing>f_agent_sla</bpmn:outgoing>
       <bpmn:timerEventDefinition id="ted_agent_sla">
         <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
       </bpmn:timerEventDefinition>
-    </bpmn:boundaryEvent>`;
+    </bpmn:boundaryEvent>
+    <bpmn:sequenceFlow id="f_agent_sla" sourceRef="be_agent_sla" targetRef="somewhere" />`;
   assertEquals(externalAgentTasksMissingSlaBoundary(xml), []);
 });
 
@@ -73,6 +75,52 @@ test("externalAgentTasksMissingSlaBoundary rejects a non-timer boundary and a no
       </bpmn:timerEventDefinition>
     </bpmn:boundaryEvent>`;
   assertEquals(externalAgentTasksMissingSlaBoundary(xml), ["msgBounded", "nonInterrupting"]);
+});
+
+// The defect class a too-loose scanner would bless (review finding): an interrupting TIMER boundary
+// is necessary but NOT sufficient — it must also arm the canonical `=agentSlaTimeout` duration AND
+// route somewhere. Each case below is a boundary that LOOKS like an SLA bound but is not.
+test("externalAgentTasksMissingSlaBoundary rejects a timer with no timeDuration, a wrong expression, or no outgoing flow", () => {
+  const xml = `
+    <bpmn:serviceTask id="noDuration">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:a" />
+        <zeebe:agentDefinition agentType="external" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_no_duration" attachedToRef="noDuration">
+      <bpmn:outgoing>f_no_duration</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_no_duration" />
+    </bpmn:boundaryEvent>
+    <bpmn:sequenceFlow id="f_no_duration" sourceRef="be_no_duration" targetRef="esc" />
+    <bpmn:serviceTask id="wrongExpr">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:b" />
+        <zeebe:agentDefinition agentType="external" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_wrong_expr" attachedToRef="wrongExpr">
+      <bpmn:outgoing>f_wrong_expr</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_wrong_expr">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">PT2H</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:sequenceFlow id="f_wrong_expr" sourceRef="be_wrong_expr" targetRef="esc" />
+    <bpmn:serviceTask id="disconnected">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:c" />
+        <zeebe:agentDefinition agentType="external" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_disconnected" attachedToRef="disconnected">
+      <bpmn:timerEventDefinition id="ted_disconnected">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>`;
+  // noDuration: timer without a timeDuration never arms the SLA. wrongExpr: a hard-coded PT2H does
+  // not track the seeded `agentSlaTimeout`. disconnected: a boundary with no outgoing flow cancels
+  // the agent without escalating. All three must be flagged.
+  assertEquals(externalAgentTasksMissingSlaBoundary(xml), ["noDuration", "wrongExpr", "disconnected"]);
 });
 
 // Processes whose external agent tasks are bounded by an SLA timer boundary (issue #849).
