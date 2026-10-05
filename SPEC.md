@@ -985,10 +985,15 @@ escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
   agent-only gate metadata.
 - **Retry this step** (`decision="retry"`) re-runs the node. A none intermediate throw
   event (never a scriptTask) resets the node-local scratch — the decision, the captured
-  `value`/`note`, and (for an agent) the previous attempt's self-reported `status` and
-  emits — and appends the operator's `note` to the agent prompt as guidance for the next
-  attempt (re-derived from the runner-seeded `nodeInputs.<el>.appendPrompt` baseline, so
-  consecutive retries never accumulate stale guidance).
+  `value`/`note`, and (for an agent) the **full declared result set**
+  (`AGENT_RESULT_LOCAL_VARS` — the self-reported `status`/`summary`/… **and** every other
+  node-local result field such as `transcriptUrl`, `agentCheckpoint`, and the PR aliases)
+  plus the previous attempt's emits — and appends the operator's `note` to the agent
+  prompt as guidance for the next attempt (re-derived from the runner-seeded
+  `nodeInputs.<el>.appendPrompt` baseline, so consecutive retries never accumulate stale
+  guidance). Clearing the whole declared set (not just the status fields) stops a retried
+  worker that omits an optional field from republishing the previous attempt's value
+  downstream or surfacing it in the next escalation.
 
 All retry/reset targets are **node-local** (declared on the subProcess by
 `ioMappingLines`), so a node's result vars never leak to the root and two parallel nodes

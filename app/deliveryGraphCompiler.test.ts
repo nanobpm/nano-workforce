@@ -98,10 +98,24 @@ test("#543 transcript correlation: only an agent node seeds transcriptUrlBase an
     "an agent node propagates the worker-emitted transcriptUrl up to the instance scope",
   );
   // RELEASE_RUNBOOK has exactly ONE agent node — wait/human/connector must NOT carry the mapping.
+  // The agent node carries exactly TWO transcriptUrl outputs, BOTH agent-local: the propagate-out
+  // ioMapping (the `=if` source above) and the retry reset's `=null` clear (transcriptUrl is in
+  // AGENT_RESULT_LOCAL_VARS, so the retry reset wipes the previous attempt's value — PR #863). A
+  // non-agent kind carries neither, so splitting the count by source keeps that guarantee sharp.
+  assertEquals(
+    (r.bpmn.match(/<zeebe:output source="=if \(is defined\(transcriptUrl\)\)[^>]*target="transcriptUrl"/g) ?? []).length,
+    1,
+    "only the agent node propagates transcriptUrl out (non-agent kinds do not)",
+  );
+  assertEquals(
+    (r.bpmn.match(/<zeebe:output source="=null" target="transcriptUrl"/g) ?? []).length,
+    1,
+    "only the agent node's retry reset clears transcriptUrl (non-agent kinds have no reset for it)",
+  );
   assertEquals(
     (r.bpmn.match(/<zeebe:output [^>]*target="transcriptUrl"/g) ?? []).length,
-    1,
-    "only the agent node emits transcriptUrl (non-agent kinds do not)",
+    2,
+    "transcriptUrl outputs are exactly the agent node's propagate-out + retry-reset clear",
   );
   assertEquals(
     (r.bpmn.match(/target="transcriptUrlBase"/g) ?? []).length,
@@ -2443,6 +2457,23 @@ test("retry-node: both escalations route decision=retry through a reset back to 
     assert(new RegExp(`target="${v}"`).test(reset), `the reset clears '${v}' from the previous attempt`);
   }
   assert(reset.includes(`target="appendPrompt"`), "the reset passes the operator note to the agent");
+});
+
+test("retry-node: the reset clears the FULL declared agent result set, not only the five status fields", async () => {
+  // Regression guard (PR #863 Copilot "Previously missed"): the reset hardcoded only
+  // status/summary/question/output/error, while every field in AGENT_RESULT_LOCAL_VARS is declared
+  // node-local and persists across attempts. A retried worker that omits an optional result field
+  // (transcriptUrl, agentCheckpoint, a PR alias, exitCode, …) would otherwise let the previous
+  // attempt's value republish downstream (stale transcript/PR) or surface in the next escalation. The
+  // reset must clear the whole declared set — a class fix, not just the five named fields.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  // These are declared in AGENT_RESULT_LOCAL_VARS but are NOT emits of the fixture and NOT among the
+  // old five-field hardcode, so each is a field the old reset left stale across a retry.
+  for (const v of ["transcriptUrl", "agentCheckpoint", "prUrl", "pullRequest", "branch", "commits", "exitCode", "next_steps", "issue", "completed", "pushed", "truncated"]) {
+    assert(new RegExp(`<zeebe:output source="=null" target="${v}" />`).test(reset), `the reset clears '${v}' from the previous attempt`);
+  }
 });
 
 test("retry-node: the reset re-derives appendPrompt from the runner-seeded nodeInputs baseline, so retry notes never accumulate", async () => {

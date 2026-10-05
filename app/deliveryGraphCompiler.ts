@@ -2167,16 +2167,22 @@ function retryRequestedVar(el: string): string {
  * `__contract`): `escalation → retry? ─retry→ reset → task` / `─default→ end`. The reset (a none
  * intermediate throw event carrying output mappings only — the compiler never emits a scriptTask) clears the node-local decision and the previous attempt's emits (a rerun that succeeds may report no
  * status at all; a stale emit would otherwise be republished downstream) — plus, for an agent, its
- * self-reported status (a stale `blocked` would fail the contract gate again) — and appends the
+ * FULL declared result set (every {@link AGENT_RESULT_LOCAL_VARS} field, so a stale `blocked` status
+ * can't fail the contract gate again and a stale `transcriptUrl`/PR alias/other optional field can't
+ * republish downstream) — and appends the
  * operator's `note` to the agent prompt as retry guidance. All targets are node-local (declared on the
  * subProcess by `ioMappingLines`), so nothing leaks to the root. */
 function retryResolutionLines(el: string, incoming: readonly string[], emits: readonly DeliveryFact[], kind: "agent" | "connector"): string[] {
   const isAgent = kind === "agent";
   const outputs: { source: string; target: string }[] = [];
   // Clear the node's declared emits for ANY emitting kind (agent or connector) so a retry never
-  // republishes a stale value; the agent-only status/summary fields and prompt-guidance are
-  // agent-specific (a connector has no self-reported status contract or prompt).
-  const cleared = new Set<string>(isAgent ? ["status", "summary", "question", "output", "error"] : []);
+  // republishes a stale value; for an agent, also clear the FULL declared result set
+  // (AGENT_RESULT_LOCAL_VARS — every field declared node-local, not just the five self-reported status
+  // fields) so a retried worker that omits an optional field (transcriptUrl, agentCheckpoint, a PR
+  // alias, exitCode, …) cannot let the previous attempt's value republish downstream or surface in the
+  // next escalation. The status/summary fields and prompt-guidance are agent-specific (a connector has
+  // no self-reported status contract or prompt).
+  const cleared = new Set<string>(isAgent ? AGENT_RESULT_LOCAL_VARS : []);
   for (const f of emits) cleared.add(factSourceVar(kind, f));
   for (const v of cleared) outputs.push({ source: "=null", target: v });
   if (isAgent) {
