@@ -464,6 +464,60 @@ test("#876 review: a multi-required-emit escalation FAILS CLOSED — it binds no
   }
 });
 
+test("#876 round-4 review: the resume-valid flag is namespaced so it can NEVER share a variable with a declared emit's fact-source var", async () => {
+  // The flag is derived from the escalation element id, which is itself a legal fact-name string — so
+  // a node could declare an emit NAMED `delivery_human_task__<el>__esc__resumeValid`, and for an
+  // `agent`/`connector` node that fact's emit-source var IS its own name (factSourceVar), colliding
+  // with the flag (the valid resume would publish `true` instead of the supplied value). The `__flag__`
+  // marker closes the class: no emit-source var carries it. A graph whose single emit is named to the
+  // EXACT pre-fix flag string must still compile with a DISTINCT flag var and bind the emit under its
+  // own name.
+  const collisionName = "delivery_human_task__open__esc__resumeValid";
+  const r = await compileOk({
+    name: "resume flag namespace",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: collisionName, type: "string" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: `open.${collisionName}` }, dedupeKey: "ns-c" } },
+    ],
+    edges: [{ from: `open.${collisionName}`, to: "land" }],
+  });
+  const openEl = elementForNode(r.bpmn, "open");
+  const esc = `delivery-human-task__${openEl}__esc`;
+  const flagVar = resumeValidVar(esc);
+  // The flag carries the internal `__flag__` marker …
+  assert(flagVar.includes("__flag__"), `the resume-valid flag is namespaced with __flag__, got ${flagVar}`);
+  // … and is DISTINCT from the declared emit's fact-source var (its own name for an agent node), so the
+  // two outputs can never share one variable.
+  const escBlock = escBlockForNodeSuffix(r.bpmn, "open", "esc");
+  assert(escBlock.includes(`target="${collisionName}"`), "the declared emit binds under its own fact name");
+  assert(escBlock.includes(`target="${flagVar}"`), "the resume-valid flag binds under its distinct namespaced var");
+  assert(flagVar !== collisionName, "the flag var differs from the declared emit's source var");
+});
+
+test("#876 round-4 'Previously missed': the resume FEEL grammar ALIGNS with the canonical artifact + PR contracts", async () => {
+  // A timed-out node must be resumable with a value that works on its normal completion path. The
+  // `artifact` branch must accept a SCOPED package (`@nanobpm/urban@0.54.0` — coerceFactValue splits on
+  // the LAST `@`), and the `pr` branch must accept a canonical GitHub PR URL (parsePr) in addition to
+  // the `owner/repo#N` shorthand — otherwise the escalation rejects a value the canonical path accepts.
+  const r = await compileOk({
+    name: "resume grammar alignment",
+    nodes: [
+      { id: "pub", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "artifactRef", type: "artifact" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { a: "pub.artifactRef" }, dedupeKey: "gram-a" } },
+    ],
+    edges: [{ from: "pub.artifactRef", to: "land" }],
+  });
+  const escA = escBlockForNodeSuffix(r.bpmn, "pub", "esc");
+  // The artifact grammar permits an optional leading scope `@` before the name segment.
+  assert(escA.includes('"^@?[^@\\\\s]+@v?\\\\d[\\\\w.+-]*$"'), `the artifact resume grammar accepts a scoped package, got ${escA}`);
+
+  const rP = await compileOk(RESUME_GATE_GRAPH);
+  const escP = escBlockForNodeSuffix(rP.bpmn, "open", "esc");
+  // The pr grammar is the disjunction of the `owner/repo#N` shorthand AND a canonical GitHub PR URL.
+  assert(escP.includes("github\\\\.com/[^/]+/[^/]+/pull/"), `the pr resume grammar accepts a canonical GitHub PR URL, got ${escP}`);
+  assert(escP.includes("[^/#]+/[^/#]+)#"), "the pr resume grammar still accepts the owner/repo#N shorthand");
+});
+
 
 test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", async () => {
   const errors = await compileFail({

@@ -180,9 +180,17 @@ function contractEscalationTaskElement(element: string): string {
  * the user fact-name space — so it can never collide with a user-declared emit fact bound into the same
  * escalation subprocess scope (an `agent`/`connector` emit binds under its own `fact.name`). This
  * removes the need to RESERVE a user-visible fact name (`resumeValid`) and the recompilation break that
- * reserving it would impose on durable rows that already carry a fact of that name. */
+ * reserving it would impose on durable rows that already carry a fact of that name.
+ *
+ * The sanitised element id is still a legal FACT-NAME string (`^[A-Za-z_][A-Za-z0-9_]*$`), so a node
+ * could legally declare an emit NAMED `delivery_human_task__<el>__esc__resumeValid` — and for an
+ * `agent`/`connector` node that fact's emit-source var IS its own name ({@link factSourceVar}), so the
+ * resume output would map the recovered fact value AND this boolean flag onto the ONE variable (the
+ * valid resume then publishes `true` instead of the supplied value — PR #876 round-4 review). The
+ * `__flag__` marker closes the class: the flag carries a marker no emit-source var ever carries, so it
+ * can never share a variable with a declared emit no matter how the fact is named. */
 export function resumeValidVar(esc: string): string {
-  return `${esc.replace(/[^A-Za-z0-9_]/g, "_")}__resumeValid`;
+  return `${esc.replace(/[^A-Za-z0-9_]/g, "_")}__flag__resumeValid`;
 }
 
 /** The self-reported completion statuses an `agent` node's job may return that count as a TERMINAL
@@ -2389,7 +2397,16 @@ function escalationTaskLines(
  * by `matches(...)`/`trim(...)`, which ARE null-safe (a non-match yields false, never an error).
  * `is defined(x)` returns NULL (not false) for an absent variable, so the presence guard is anchored
  * `= true` (null-safe). The caller binds `if cond then <value> else null` on the escalation task's OWN
- * output mapping (verified: a valid value binds it, an invalid/absent one binds null — fail closed). */
+ * output mapping (verified: a valid value binds it, an invalid/absent one binds null — fail closed).
+ *
+ * CANONICAL-GRAMMAR ALIGNMENT (PR #876 round-4 "Previously missed"): the regexes below must accept
+ * exactly what the canonical contracts accept, or a timed-out node cannot resume with a value that
+ * works on its normal completion path. `artifact` mirrors `coerceFactValue`'s `pkg@version` split on
+ * the LAST `@` — so a SCOPED package (`@nanobpm/urban@0.54.0`) is accepted: the name segment is
+ * `[^@\s]+` (no `@`/space) preceded by an OPTIONAL leading scope `@`. `pr` mirrors `parsePr`
+ * (app/prParse.ts), which accepts BOTH the `owner/repo#N` shorthand AND a canonical GitHub PR URL
+ * (`https://github.com/owner/repo/pull/N`, optional scheme/`www.`, optional `/files`/`?query`/
+ * `#fragment` suffix) — so the `pr` branch is the disjunction of the two anchored grammars. */
 function resumeValueCondition(fact: DeliveryFact, v: string): string {
   const present = `((is defined(${v})) = true and (${v} != null))`;
   const s = `string(${v})`;
@@ -2403,11 +2420,11 @@ function resumeValueCondition(fact: DeliveryFact, v: string): string {
     case "version":
       return `${present} and (matches(trim(${s}), "^v?\\\\d[\\\\w.+-]*$") = true)`;
     case "artifact":
-      return `${present} and (matches(trim(${s}), "^[^@\\\\s]+@v?\\\\d[\\\\w.+-]*$") = true)`;
+      return `${present} and (matches(trim(${s}), "^@?[^@\\\\s]+@v?\\\\d[\\\\w.+-]*$") = true)`;
     case "url":
       return `${present} and (matches(trim(${s}), "^[A-Za-z][A-Za-z0-9+.-]*://") = true)`;
     case "pr":
-      return `${present} and (matches(trim(${s}), "^([^/#]+/[^/#]+)#(\\\\d+)$") = true)`;
+      return `${present} and (matches(trim(${s}), "^(([^/#]+/[^/#]+)#(\\\\d+)|((https?://)?(www\\\\.)?github\\\\.com/[^/]+/[^/]+/pull/\\\\d+([/?#].*)?))$") = true)`;
     default:
       return assertNever(fact.type, "resumeValueCondition");
   }
