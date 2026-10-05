@@ -2390,6 +2390,33 @@ test("node scope: a connector node localises every declared emit source var so t
   }
 });
 
+test("connector timeout escalation is resumable with the connector's declared emits (Continue maps `value`; Retry clears them)", async () => {
+  // Regression guard (PR #863 Copilot review, "Previously missed" — connector emits lost during timeout
+  // escalation recovery): a connector has NO producer-contract gate (`contractGate === undefined`), so
+  // keying the timeout-escalation resume off the gate dropped its `emits` — `emitMode` was "none", a
+  // Continue mapped no `value`, and a Retry never cleared the stale emit. The resume must key off the
+  // connector's OWN emits (emit source = the fact's own name).
+  const graph = {
+    name: "connector-resume",
+    nodes: [
+      { id: "notify", kind: "connector", connector: { target: "slack:#a", payload: { pr: null } }, emits: [{ name: "ack", type: "string" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "notify");
+  const esc = escBlockForNodeSuffix(r.bpmn, "notify", "esc");
+  // The typed-value field is presented (not forced to "none") and labelled with the declared emit…
+  assert(esc.includes(`target="emitMode"`), "the connector timeout escalation carries an emitMode input");
+  assert(esc.includes("typed") && !esc.includes('"none"'), "emitMode is 'typed' (the connector declares an emit), not 'none'");
+  assert(esc.includes("ack (string)"), "the emit label names the connector's declared emit");
+  // …and a Continue maps the operator's `value` onto the connector's emit-source var (the fact's name).
+  assert(esc.includes(`target="ack"`), "a Continue resume publishes the operator value under the emit source var 'ack'");
+  // The retry tail clears the connector's emit source var so a re-run never republishes a stale value.
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  assert(reset.includes(`target="ack"`), "the retry reset clears the connector's 'ack' emit source var");
+});
+
 test("preflight: the inner service task asserts its runner-seeded nodeInputs before any job exists (leaf, not the subProcess)", async () => {
   const r = await compileOk(PRODUCER_GATE);
   const el = elementForNode(r.bpmn, "open");

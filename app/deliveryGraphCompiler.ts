@@ -1906,14 +1906,19 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // be a leak here), but the `descriptor` is embedded by `serviceBodyLines` into the operator-visible
       // timeout / producer-contract escalation FEEL `prompt` — so it takes the SAME display redaction
       // `nodeDisplay` applies, never the raw value (issue #778 review — thread deliveryGraphCompiler.ts:1606).
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName);
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, "agent", nodeEmits);
     }
-    case "connector":
+    case "connector": {
       // TRIM the target before building the escalation descriptor — `nodeDisplay` and the connector
       // worker both key on the trimmed value, so an untrimmed `" converge-merge "` would fork the
       // `semanticBpmn`/digest from the trimmed-equivalent graph that dispatches identically (issue #778
       // review — thread deliveryGraphCompiler.ts:1741).
-      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target.trim())}`, undefined, [], displayName);
+      // A connector declares `emits` (its emit source is the fact's own name) but has NO
+      // producer-contract gate, so pass them explicitly as `nodeEmits` — otherwise the timeout
+      // escalation could not resume a connector's emit on Continue, nor clear it on Retry (#863).
+      const connectorEmits = normaliseEmits(node);
+      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target.trim())}`, undefined, [], displayName, "connector", connectorEmits);
+    }
     case "wait":
       return waitBodyLines(el, node, displayName);
     case "human":
@@ -2010,6 +2015,13 @@ function serviceBodyLines(
   contractGate?: { requiredEmits: readonly DeliveryFact[]; emits: readonly DeliveryFact[] },
   taskHeaders: readonly string[] = [],
   taskName: string = nodeId,
+  // The node's kind (`agent`/`connector`) and its OWN declared emits. A connector passes
+  // `contractGate = undefined` (no self-reported status contract) yet still declares `emits`, so the
+  // escalation resume / retry-clear below key off the node's OWN emits, not the agent-only gate — and
+  // map them through `factSourceVar(kind, …)` (issue #863 review — thread "Connector emits are lost
+  // during timeout escalation recovery").
+  kind: "agent" | "connector" = "agent",
+  nodeEmits: readonly DeliveryFact[] = contractGate?.emits ?? [],
 ): string[] {
   const esc = escalationTaskElement(el);
   const isAgent = contractGate !== undefined;
@@ -2048,9 +2060,12 @@ function serviceBodyLines(
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
   ];
-  // The timeout escalation is resumable with the agent's declared emits too: work finished out of band
+  // The timeout escalation is resumable with the node's declared emits too: work finished out of band
   // (or a draft PR the stalled agent already opened) can be handed onward instead of threading null.
-  const allEmits = contractGate?.emits ?? [];
+  // `nodeEmits` is the node's OWN declared emits (for an agent, the contract gate's emits; for a
+  // connector, its own — a connector declares `emits` and its emit source is the fact's own name, so
+  // keying off the absent agent-only gate would drop them and map no `value` on a Continue resume).
+  const allEmits = nodeEmits;
   const timeoutEscalation = escalationTaskLines(
     esc,
     nodeId,
@@ -2062,7 +2077,7 @@ function serviceBodyLines(
       "nodeTimeout",
       "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
     )} + ${feelStr(escalationResolutionHint(allEmits, isAgent))}`,
-    { ...(allEmits.length > 0 ? { resume: { kind: "agent" as const, emits: allEmits } } : {}), displayName: taskName, retryElement: el },
+    { ...(allEmits.length > 0 ? { resume: { kind, emits: allEmits } } : {}), displayName: taskName, retryElement: el },
   );
   const head = [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
@@ -2079,7 +2094,7 @@ function serviceBodyLines(
     ...timeoutEscalation,
   ];
   const escalationIncoming = [`${el}_i3`, ...(isAgent ? [`${el}_g2`] : [])];
-  const tail = retryResolutionLines(el, escalationIncoming, isAgent ? allEmits : [], isAgent);
+  const tail = retryResolutionLines(el, escalationIncoming, allEmits, kind);
 
   if (contractGate === undefined) {
     return [
@@ -2150,16 +2165,21 @@ function retryRequestedVar(el: string): string {
 
 /** The retry-node resolution tail shared by a service node's escalations (`__esc`, and an agent's
  * `__contract`): `escalation → retry? ─retry→ reset → task` / `─default→ end`. The reset (a none
- * intermediate throw event carrying output mappings only — the compiler never emits a scriptTask) clears the node-local decision and — for an agent — the previous attempt's self-reported status and
- * emits (a rerun that succeeds may report no status at all; a stale `blocked` would fail the contract
- * gate again), and appends the operator's `note` to the agent prompt as retry guidance. All targets are
- * node-local (declared on the subProcess by `ioMappingLines`), so nothing leaks to the root. */
-function retryResolutionLines(el: string, incoming: readonly string[], emits: readonly DeliveryFact[], isAgent: boolean): string[] {
+ * intermediate throw event carrying output mappings only — the compiler never emits a scriptTask) clears the node-local decision and the previous attempt's emits (a rerun that succeeds may report no
+ * status at all; a stale emit would otherwise be republished downstream) — plus, for an agent, its
+ * self-reported status (a stale `blocked` would fail the contract gate again) — and appends the
+ * operator's `note` to the agent prompt as retry guidance. All targets are node-local (declared on the
+ * subProcess by `ioMappingLines`), so nothing leaks to the root. */
+function retryResolutionLines(el: string, incoming: readonly string[], emits: readonly DeliveryFact[], kind: "agent" | "connector"): string[] {
+  const isAgent = kind === "agent";
   const outputs: { source: string; target: string }[] = [];
+  // Clear the node's declared emits for ANY emitting kind (agent or connector) so a retry never
+  // republishes a stale value; the agent-only status/summary fields and prompt-guidance are
+  // agent-specific (a connector has no self-reported status contract or prompt).
+  const cleared = new Set<string>(isAgent ? ["status", "summary", "question", "output", "error"] : []);
+  for (const f of emits) cleared.add(factSourceVar(kind, f));
+  for (const v of cleared) outputs.push({ source: "=null", target: v });
   if (isAgent) {
-    const cleared = new Set<string>(["status", "summary", "question", "output", "error"]);
-    for (const f of emits) cleared.add(factSourceVar("agent", f));
-    for (const v of cleared) outputs.push({ source: "=null", target: v });
     const hasNote = `(is defined(note) and note != null and string(note) != "")`;
     // Re-derive from the RUNNER-SEEDED BASELINE (`nodeInputs.<el>.appendPrompt`), never the live
     // `appendPrompt`: the subProcess input seeds `appendPrompt` from `nodeInputs` only at subProcess

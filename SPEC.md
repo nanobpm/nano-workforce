@@ -963,6 +963,43 @@ decision. The target behaviour is an **autonomy ladder**:
 A human escalation is then reserved for its one true case: **two slices that each pass
 but encode incompatible decisions about a shared contract** — a genuine design call.
 
+## 13.3 Delivery-graph node escalation — Continue / Retry / reset (PR #863)
+
+The delivery-graph compiler (`app/deliveryGraphCompiler.ts`, ADR 0005) compiles each
+`agent`/`connector` node to a `start → serviceTask → end` subProcess guarded by a
+**bounded `=nodeTimeout` boundary**. On timeout (or, for an `agent`, on a broken
+producer contract — issue #731) the stalled node parks on a **human-completable
+escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
+`__contract` twin), surfaced in the Tasks inbox and answerable by a human or an agent
+(ADR 0046). Every such escalation names **two exits** (the `delivery-escalation` form's
+`decision` select):
+
+- **Continue** (`decision="continue"`, the default) completes the node as resolved. If
+  the node declares `emits`, the form presents a typed-value field and maps the
+  operator-supplied `value` onto the node's emit-source var (`factSourceVar`), so the
+  subProcess output publishes the same `<el>_<fact>` a normal completion would —
+  letting work finished out of band (a draft PR the stalled agent already opened) be
+  handed onward instead of threading a null downstream. This applies to **both** `agent`
+  and `connector` emits: a connector has no producer-contract gate, so its resume keys
+  off the node's **own** declared `emits` (emit source = the fact's own name), never the
+  agent-only gate metadata.
+- **Retry this step** (`decision="retry"`) re-runs the node. A none intermediate throw
+  event (never a scriptTask) resets the node-local scratch — the decision, the captured
+  `value`/`note`, and (for an agent) the previous attempt's self-reported `status` and
+  emits — and appends the operator's `note` to the agent prompt as guidance for the next
+  attempt (re-derived from the runner-seeded `nodeInputs.<el>.appendPrompt` baseline, so
+  consecutive retries never accumulate stale guidance).
+
+All retry/reset targets are **node-local** (declared on the subProcess by
+`ioMappingLines`), so a node's result vars never leak to the root and two parallel nodes
+declaring the same emit never cross-publish. A **preflight `assert`** on the inner leaf
+task's input fails LOUD (raising an incident naming the missing `nodeInputs.<el>`)
+before any job exists when the runner-seeded config was lost — see the `KNOWN
+LIMITATION` in `serviceBodyLines` (fail-loud-only, nano-workforce#866): resolving that
+incident re-evaluates only the leaf's inputs, so the operator must **re-run** the node
+(re-enter the sub-process / "Retry this step"), not merely resolve, to re-map the
+subProcess-level config.
+
 ## 14. Open questions / future
 
 - **Provisioning the existing PR branch** — resolved: the `c8ctl` host-git
