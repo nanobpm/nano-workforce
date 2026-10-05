@@ -83,9 +83,12 @@ export function classifyImplementEscalation(status: unknown): ImplementEscalatio
  *    must NAME it — never the false "opened no pull request".
  *  - `deliveryVerified` is whether a GitHub lookup actually CONFIRMED the delivery state. It is `true`
  *    only when the reconcile step's lookup SUCCEEDED and found no adoptable PR — the one case where the
- *    reason may say "none was found". It is `false`/absent when no lookup ran, the lookup threw, or the
- *    transport was unavailable (a `null` listing): there the delivery state is UNVERIFIED, so the reason
- *    says the delivery "could not be confirmed" rather than asserting an absence it never checked. */
+ *    reason may say "no adoptable PR was found". It is `false`/absent when no lookup ran, the lookup
+ *    threw, or the transport was unavailable (a `null` listing): there the delivery state is UNVERIFIED,
+ *    so the reason says the delivery "could not be confirmed" rather than asserting an absence it never
+ *    checked. Note `deliveryVerified === true` verifies only the absence of an ADOPTABLE PR (an open PR
+ *    on the required base) — it does NOT check branch existence, so a wrong-base PR means the branch may
+ *    still be pushed; the reason never claims "pushed no branch" (#865 review). */
 export interface ImplementEscalationReasonInput {
   status?: unknown;
   question?: unknown;
@@ -102,12 +105,14 @@ const NO_RESULT_LEAD =
 // The delivery clause qualifies the lead with what is actually KNOWN about delivery (issue #865 review):
 //  - a preserved PR (`pr`) is NAMED — the agent may have delivered, so we never claim it opened none;
 //  - a VERIFIED absence (`deliveryVerified === true`: the reconcile lookup succeeded and found no
-//    adoptable PR) is the one case that may assert "opened no pull request (and pushed no branch)";
+//    adoptable PR) is the one case that may assert "no adoptable pull request was found". The lookup
+//    checks only for an ADOPTABLE PR (an open PR on the required base) — it does NOT check branch
+//    existence, so a wrong-base PR leaves the branch pushed; the clause never claims "pushed no branch";
 //  - anything else (no lookup ran, the lookup threw, or the transport was unavailable) is UNVERIFIED —
 //    the clause says delivery "could not be confirmed" rather than asserting an absence never checked.
 function deliveryClause(pr: string | undefined, deliveryVerified: boolean): string {
   if (pr) return `it may already have a pull request open as ${pr} (preserved from the run, not re-verified)`;
-  if (deliveryVerified) return "a GitHub lookup confirmed it opened no pull request (and pushed no branch)";
+  if (deliveryVerified) return "a GitHub lookup confirmed no adoptable pull request was found for this slice on its base branch";
   return "its delivery could not be confirmed (no GitHub lookup verified whether it opened a pull request or pushed a branch)";
 }
 
@@ -128,12 +133,14 @@ const reportedStatusLead = (status: string, delivery: string): string =>
 // The shared tail: how recovery works, the workspace-confinement hint (#865 ask 3 — edits outside the
 // run workspace are discarded on teardown), and the two answers the cell's `ic_gw_answer` gateway routes
 // on. The delivery-absence clause is EVIDENCE-BASED (issue #865 review): only a verified lookup says
-// "none was found"; an unverified delivery says so instead of asserting an absence never checked.
+// "no adoptable PR was found on the base branch" (it does NOT verify branch existence — a wrong-base PR
+// leaves the branch pushed, so it never claims "no branch"); an unverified delivery says so instead of
+// asserting an absence never checked.
 function recoveryTail(pr: string | undefined, deliveryVerified: boolean): string {
   const absence = pr
     ? `A pull request may already be open as ${pr} — check and retarget or adopt it before re-running`
     : deliveryVerified
-      ? "A delivered PR on the slice's `feat/<task.id>` branch would have been adopted automatically; none was found"
+      ? "A delivered PR on the slice's `feat/<task.id>` branch targeting this run's base would have been adopted automatically; no adoptable PR was found on the base branch (the branch may still be pushed — e.g. a PR targeting a different base — so check and retarget it before re-running)"
       : "A delivered PR on the slice's `feat/<task.id>` branch would have been adopted automatically, but no lookup confirmed whether one exists";
   return `${absence} (if the agent worked OUTSIDE its run workspace — e.g. \`cd /tmp/<repo>\` — those edits were discarded on teardown). Choose "Answer" and give guidance to re-run the slice — or choose "Abandon" to skip it and continue.`;
 }

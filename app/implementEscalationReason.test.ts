@@ -129,13 +129,19 @@ test("implementEscalationQuestion: a blank status with a summary surfaces the su
 });
 
 // --- Issue #865 review (round 3): never assert UNVERIFIED delivery -------------------------------
-// The synthesised reason must not claim "opened no pull request (and pushed no branch)" / "none was
-// found" from status alone. Two unverified cases must be worded as unverified:
+// The synthesised reason must not claim "no adoptable pull request was found" from status alone. Two
+// unverified cases must be worded as unverified:
 //   (a) a preserved PR is still in scope (an `escalated`/`failed` with a blank question retains its PR
 //       without any GitHub lookup) — the builder must NOT say "opened no pull request";
 //   (b) the GitHub lookup never confirmed delivery state (it threw, or the transport was unavailable)
-//       — the builder must NOT say "none was found".
-// Only a SUCCESSFUL lookup that found no adoptable PR may assert "none was found".
+//       — the builder must NOT assert a verified absence.
+// Only a SUCCESSFUL lookup that found no adoptable PR may assert "no adoptable pull request was found".
+//
+// --- Issue #865 review (round 4): a VERIFIED absence is only ever about an ADOPTABLE PR --------------
+// `deliveryVerified === true` means the reconcile lookup ran and found no open PR on the required base.
+// It does NOT check branch existence — a PR targeting the WRONG base leaves the `feat/<task.id>` branch
+// pushed. So the verified-absence wording must NEVER claim "pushed no branch" / "no branch" — only the
+// absence of an adoptable PR.
 
 test("implementEscalationQuestion: a preserved PR is surfaced, never the false 'opened no pull request' (#865 review)", () => {
   // An `escalated` result with a blank question retains its PR (reconcile carries it through without a
@@ -143,28 +149,34 @@ test("implementEscalationQuestion: a preserved PR is surfaced, never the false '
   const q = implementEscalationQuestion({ status: "escalated", pr: "owner/repo#42" });
   assertEquals(q.includes("owner/repo#42"), true);
   assertEquals(q.includes("opened no pull request"), false);
-  assertEquals(q.includes("none was found"), false);
+  assertEquals(q.includes("no adoptable pull request"), false);
 });
 
-test("implementEscalationQuestion: an unverified lookup (thrown / unavailable) does NOT assert 'none was found' (#865 review)", () => {
+test("implementEscalationQuestion: an unverified lookup (thrown / unavailable) does NOT assert a verified absence (#865 review)", () => {
   // `completed` reached the builder after a thrown/unavailable lookup — delivery state is UNVERIFIED,
-  // so the reason must not claim "none was found".
+  // so the reason must not claim a verified absence.
   const q = implementEscalationQuestion({ status: "completed", deliveryVerified: false });
   assertEquals(q.includes('reported status "completed"'), true);
-  assertEquals(q.includes("none was found"), false);
+  assertEquals(q.includes("no adoptable pull request"), false);
   // It still tells the human the delivery could not be confirmed.
   assertEquals(q.includes("could not be confirmed"), true);
 });
 
-test("implementEscalationQuestion: a SUCCESSFUL lookup with no adoptable PR DOES assert 'none was found' (#865 review)", () => {
-  // Only when the lookup succeeded and confirmed no adoptable PR may the reason say so.
+test("implementEscalationQuestion: a SUCCESSFUL lookup with no adoptable PR asserts the absence — but NEVER 'pushed no branch' (#865 review round 4)", () => {
+  // Only when the lookup succeeded and confirmed no adoptable PR may the reason say so. But the lookup
+  // checks only for an ADOPTABLE PR (open, on the required base) — it does NOT check branch existence,
+  // so a wrong-base PR leaves the branch pushed. The verified-absence wording must describe ONLY the
+  // missing adoptable PR, never claim the branch was not pushed.
   const q = implementEscalationQuestion({ status: "completed", deliveryVerified: true });
-  assertEquals(q.includes("none was found"), true);
+  assertEquals(q.includes("no adoptable pull request"), true);
+  // The regression the round-4 review cited: verified absence must not overstate the evidence.
+  assertEquals(q.includes("pushed no branch"), false);
+  assertEquals(q.includes("(and pushed no branch)"), false);
 });
 
-test("implementEscalationQuestion: default (no evidence supplied) stays unverified — no false 'none was found'", () => {
+test("implementEscalationQuestion: default (no evidence supplied) stays unverified — no false verified absence", () => {
   // Back-compat / safest default: with no delivery evidence the reason must not assert a verified
   // absence. (The builder is pure; a caller that has not run a lookup passes no evidence.)
   const q = implementEscalationQuestion({ status: "completed" });
-  assertEquals(q.includes("none was found"), false);
+  assertEquals(q.includes("no adoptable pull request"), false);
 });
