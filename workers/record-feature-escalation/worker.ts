@@ -73,6 +73,12 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     question: rawQuestion,
     summary: job.variables.summary,
     transcriptUrl: job.variables.transcriptUrl,
+    // Delivery EVIDENCE (#865 review): the preserved PR (an `escalated`/`failed` with a blank question
+    // retains it — never claim "opened no pull request") and whether the reconcile step's GitHub lookup
+    // actually CONFIRMED the delivery state (only then may the reason say "none was found"). Both are
+    // process variables the upstream `reconcile-implement` step emits into scope.
+    pr: job.variables.pr,
+    deliveryVerified: job.variables.deliveryVerified,
   });
 
   // Append to the canonical `feature_escalations` audit log (the surviving table `pollUserTasks` reads),

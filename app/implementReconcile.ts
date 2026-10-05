@@ -52,7 +52,10 @@ export interface ReconcileImplementInput {
  *  #865): true → re-dispatch the implement agent ONCE with `retryNudge` appended to its prompt; false →
  *  escalate as today. `retried` is the bounded-once marker re-emitted into `implementRetried` so the
  *  second pass can never retry again. `status`/`pr` are re-emitted so the cell (and its caller) route on
- *  the resolved values. */
+ *  the resolved values. `deliveryVerified` is the EVIDENCE the escalation reason needs (issue #865
+ *  review): `true` ONLY when a GitHub lookup actually ran and CONFIRMED the delivery state (an adoptable
+ *  PR, or a verified absence); `false` when no lookup ran, it threw, or the transport was unavailable —
+ *  so the reason never asserts an UNVERIFIED "no pull request / none was found". */
 export interface ReconcileImplementResult {
   reconciled: boolean;
   status: string | null;
@@ -60,6 +63,7 @@ export interface ReconcileImplementResult {
   retry: boolean;
   retryNudge: string | null;
   retried: boolean;
+  deliveryVerified: boolean;
 }
 
 /** The injected GitHub read — the canonical `listPrsForHead(repo, headBranch, token)` (so this module
@@ -82,10 +86,17 @@ export function shouldReconcileImplement(status: unknown, question?: unknown): b
 }
 
 /** The nudge appended to the implement agent's prompt on its one automatic retry (issue #865), naming
- *  exactly what was missing (a committed, pushed PR) and the workspace-confinement rule its lost attempt
- *  violated. `status` is the off-vocabulary status it reported. */
+ *  exactly what was missing (an ADOPTABLE PR on the run's base) and the workspace-confinement rule.
+ *  `status` is the off-vocabulary status it reported.
+ *
+ *  It does NOT over-assert "no branch was pushed / your work was discarded" (#865 review): this nudge
+ *  also fires when an open PR merely targets the WRONG base (a verified absence ON the run's base), where
+ *  the pushed work was NOT discarded. So it describes the missing ADOPTABLE PR and points the agent at
+ *  recovering an already-pushed branch or retargeting an existing PR — consistent with the resume
+ *  instructions in `resources/prompts/feature.md` (check `git ls-remote`, continue from an existing
+ *  branch/PR rather than restarting). */
 export function retryNudgeFor(status: string): string {
-  return `\n\n---\n\n**Automatic retry — your previous attempt claimed completion but delivered nothing.** You reported status "${status}" yet opened NO pull request and pushed NO branch, so your work was discarded. This is your FINAL automatic retry; the next failure escalates to a human. You MUST work ONLY inside your run workspace (never \`cd /tmp\` or edit files outside it — those edits are lost on teardown), then \`git commit -s\`, push \`feat/<task.id>\`, and open a PR with \`gh pr create\`. Report \`status: "opened"\` with the \`pr\` key — not "${status}".`;
+  return `\n\n---\n\n**Automatic retry — your previous attempt claimed completion but no adoptable pull request was found.** You reported status "${status}", yet a GitHub lookup confirmed there is no adoptable pull request for this slice on its base branch. Your work may NOT be lost: if you already pushed the \`feat/<task.id>\` branch, recover it — check the remote with \`git ls-remote --heads origin feat/<task.id>\`, and if a pull request exists but targets the WRONG base, retarget it onto this run's base branch with \`gh pr edit --base <base>\`. Otherwise you likely worked OUTSIDE your run workspace (e.g. \`cd /tmp\`), and those edits were discarded on teardown. This is your FINAL automatic retry; the next failure escalates to a human. Work ONLY inside your run workspace, then \`git commit -s\`, push \`feat/<task.id>\`, and open a PR on the correct base with \`gh pr create\`. Report \`status: "opened"\` with the \`pr\` key — not "${status}".`;
 }
 
 /** The cell's deterministic implement branch — `feat/<task.id>` (resources/prompts/feature.md). */
@@ -127,6 +138,10 @@ export async function reconcileImplement(
     retry: false,
     retryNudge: null,
     retried: alreadyRetried,
+    // No lookup has CONFIRMED the delivery state on any fall-through path (no lookup ran, it threw, or
+    // the transport was unavailable) — the escalation reason must not assert an unverified absence
+    // (#865 review). Only the successful-lookup paths below flip this to `true`.
+    deliveryVerified: false,
   };
   if (!shouldReconcileImplement(input.status, input.question)) return escalate;
   const taskId = str(input.taskId);
@@ -155,10 +170,13 @@ export async function reconcileImplement(
       retry: false,
       retryNudge: null,
       retried: alreadyRetried,
+      // The lookup SUCCEEDED and found the adoptable PR — delivery is verified (present).
+      deliveryVerified: true,
     };
   }
-  // The lookup SUCCEEDED and confirmed no adoptable PR — only now may a claimed completion auto-retry.
-  return maybeRetry(input, alreadyRetried, escalate);
+  // The lookup SUCCEEDED and confirmed no adoptable PR — delivery is verified (absent), so the
+  // escalation reason may say "none was found"; only now may a claimed completion auto-retry.
+  return maybeRetry(input, alreadyRetried, { ...escalate, deliveryVerified: true });
 }
 
 /** No adoptable PR was found on a SUCCESSFUL lookup. A claimed-completion-without-delivery (an
@@ -173,6 +191,9 @@ function maybeRetry(
   const status = str(input.status);
   if (!alreadyRetried && status !== undefined && isClaimedCompletion(status)) {
     return {
+      // Spread the (successful-lookup) escalate base so `deliveryVerified: true` is preserved — this
+      // arm is only reached after a lookup CONFIRMED no adoptable PR.
+      ...escalate,
       reconciled: false,
       status: escalate.status,
       pr: escalate.pr,

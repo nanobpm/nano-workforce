@@ -64,7 +64,9 @@ test("NO_RESULT_QUESTION: the blank-status reason names a true no-result, not a 
 test("implementEscalationQuestion: a claimed completion names the exact status it reported", () => {
   const q = implementEscalationQuestion({ status: "completed" });
   assertEquals(q.includes('reported status "completed"'), true);
-  assertEquals(q.includes("claimed completion without delivering"), true);
+  // It claims completion — but with no delivery evidence supplied the reason must NOT assert the
+  // unverified "...without delivering any work" (#865 review round 3).
+  assertEquals(q.includes("claimed completion"), true);
   // Distinct from the generic no-result lead.
   assertEquals(q.includes("without a machine-readable result"), false);
 });
@@ -124,4 +126,45 @@ test("implementEscalationQuestion: a blank status with a summary surfaces the su
   const q = implementEscalationQuestion({ status: null, summary: "did some work" });
   assertEquals(q.includes("without a machine-readable result"), true);
   assertEquals(q.includes('The agent\'s own summary: "did some work".'), true);
+});
+
+// --- Issue #865 review (round 3): never assert UNVERIFIED delivery -------------------------------
+// The synthesised reason must not claim "opened no pull request (and pushed no branch)" / "none was
+// found" from status alone. Two unverified cases must be worded as unverified:
+//   (a) a preserved PR is still in scope (an `escalated`/`failed` with a blank question retains its PR
+//       without any GitHub lookup) — the builder must NOT say "opened no pull request";
+//   (b) the GitHub lookup never confirmed delivery state (it threw, or the transport was unavailable)
+//       — the builder must NOT say "none was found".
+// Only a SUCCESSFUL lookup that found no adoptable PR may assert "none was found".
+
+test("implementEscalationQuestion: a preserved PR is surfaced, never the false 'opened no pull request' (#865 review)", () => {
+  // An `escalated` result with a blank question retains its PR (reconcile carries it through without a
+  // lookup). The reason must name that PR, not assert none was opened.
+  const q = implementEscalationQuestion({ status: "escalated", pr: "owner/repo#42" });
+  assertEquals(q.includes("owner/repo#42"), true);
+  assertEquals(q.includes("opened no pull request"), false);
+  assertEquals(q.includes("none was found"), false);
+});
+
+test("implementEscalationQuestion: an unverified lookup (thrown / unavailable) does NOT assert 'none was found' (#865 review)", () => {
+  // `completed` reached the builder after a thrown/unavailable lookup — delivery state is UNVERIFIED,
+  // so the reason must not claim "none was found".
+  const q = implementEscalationQuestion({ status: "completed", deliveryVerified: false });
+  assertEquals(q.includes('reported status "completed"'), true);
+  assertEquals(q.includes("none was found"), false);
+  // It still tells the human the delivery could not be confirmed.
+  assertEquals(q.includes("could not be confirmed"), true);
+});
+
+test("implementEscalationQuestion: a SUCCESSFUL lookup with no adoptable PR DOES assert 'none was found' (#865 review)", () => {
+  // Only when the lookup succeeded and confirmed no adoptable PR may the reason say so.
+  const q = implementEscalationQuestion({ status: "completed", deliveryVerified: true });
+  assertEquals(q.includes("none was found"), true);
+});
+
+test("implementEscalationQuestion: default (no evidence supplied) stays unverified — no false 'none was found'", () => {
+  // Back-compat / safest default: with no delivery evidence the reason must not assert a verified
+  // absence. (The builder is pure; a caller that has not run a lookup passes no evidence.)
+  const q = implementEscalationQuestion({ status: "completed" });
+  assertEquals(q.includes("none was found"), false);
 });

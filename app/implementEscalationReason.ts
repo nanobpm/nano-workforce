@@ -75,36 +75,68 @@ export function classifyImplementEscalation(status: unknown): ImplementEscalatio
 /** What the escalation builder needs from the implement-step outcome. `question` is the agent's OWN
  *  answerable question (when it raised a genuine escalation) — used as the lead when present; `summary`
  *  is the agent's own one-line result (always surfaced when present); `transcriptUrl` is the run's
- *  transcript link (cf. #863). */
+ *  transcript link (cf. #863).
+ *
+ *  Delivery EVIDENCE (issue #865 review — never assert an UNVERIFIED delivery claim):
+ *  - `pr` is any PR key still in scope. An `escalated`/`failed` result with a blank question RETAINS its
+ *    PR (the reconcile step carries it through without a GitHub lookup), so when `pr` is set the reason
+ *    must NAME it — never the false "opened no pull request".
+ *  - `deliveryVerified` is whether a GitHub lookup actually CONFIRMED the delivery state. It is `true`
+ *    only when the reconcile step's lookup SUCCEEDED and found no adoptable PR — the one case where the
+ *    reason may say "none was found". It is `false`/absent when no lookup ran, the lookup threw, or the
+ *    transport was unavailable (a `null` listing): there the delivery state is UNVERIFIED, so the reason
+ *    says the delivery "could not be confirmed" rather than asserting an absence it never checked. */
 export interface ImplementEscalationReasonInput {
   status?: unknown;
   question?: unknown;
   summary?: unknown;
   transcriptUrl?: unknown;
+  pr?: unknown;
+  deliveryVerified?: unknown;
 }
 
 // The lead sentence for a genuine no-result (blank status) — the agent returned nothing we can read.
 const NO_RESULT_LEAD =
   "The implementation agent finished without a machine-readable result (no status was reported), so we cannot tell whether the slice succeeded.";
 
-// The lead sentence when the agent reported an affirmative-completion alias (e.g. `completed`) but
-// delivered no PR — it claimed completion without delivering any work. Names the exact status so the
-// human sees this is distinct from a true no-result.
-const completedWithoutDeliveryLead = (status: string): string =>
-  `The implementation agent reported status "${status}" but opened no pull request (and pushed no branch) — it claimed completion without delivering any work.`;
+// The delivery clause qualifies the lead with what is actually KNOWN about delivery (issue #865 review):
+//  - a preserved PR (`pr`) is NAMED — the agent may have delivered, so we never claim it opened none;
+//  - a VERIFIED absence (`deliveryVerified === true`: the reconcile lookup succeeded and found no
+//    adoptable PR) is the one case that may assert "opened no pull request (and pushed no branch)";
+//  - anything else (no lookup ran, the lookup threw, or the transport was unavailable) is UNVERIFIED —
+//    the clause says delivery "could not be confirmed" rather than asserting an absence never checked.
+function deliveryClause(pr: string | undefined, deliveryVerified: boolean): string {
+  if (pr) return `it may already have a pull request open as ${pr} (preserved from the run, not re-verified)`;
+  if (deliveryVerified) return "a GitHub lookup confirmed it opened no pull request (and pushed no branch)";
+  return "its delivery could not be confirmed (no GitHub lookup verified whether it opened a pull request or pushed a branch)";
+}
+
+// The lead sentence when the agent reported an affirmative-completion alias (e.g. `completed`) — it
+// claimed completion. The delivery clause states only what is verified about delivery (never an
+// unverified "opened no pull request"). Names the exact status so the human sees this is distinct from
+// a true no-result.
+const completedWithoutDeliveryLead = (status: string, delivery: string): string =>
+  `The implementation agent reported status "${status}" — it claimed completion — but ${delivery}.`;
 
 // The lead sentence when the agent reported SOME other status (a recognised `escalated` with a blank
 // question, or a non-affirmative off-vocabulary failure/input-required/unknown) and left no answerable
 // question. Names the exact reported status — never the false "no status was reported" diagnosis
-// (#865 review) — and does not claim completion.
-const reportedStatusLead = (status: string): string =>
-  `The implementation agent reported status "${status}" but opened no pull request (and pushed no branch) and gave no answerable question, so we cannot tell whether the slice succeeded.`;
+// (#865 review) — and does not claim completion. The delivery clause states only what is verified.
+const reportedStatusLead = (status: string, delivery: string): string =>
+  `The implementation agent reported status "${status}" and gave no answerable question, but ${delivery}, so we cannot tell whether the slice succeeded.`;
 
-// The shared tail: how recovery works (a delivered PR on the deterministic branch would have been
-// adopted automatically), the workspace-confinement hint (#865 ask 3 — edits outside the run workspace
-// are discarded on teardown), and the two answers the cell's `ic_gw_answer` gateway routes on.
-const RECOVERY_TAIL =
-  'A delivered PR on the slice\'s `feat/<task.id>` branch would have been adopted automatically; none was found (if the agent worked OUTSIDE its run workspace — e.g. `cd /tmp/<repo>` — those edits were discarded on teardown). Choose "Answer" and give guidance to re-run the slice — or choose "Abandon" to skip it and continue.';
+// The shared tail: how recovery works, the workspace-confinement hint (#865 ask 3 — edits outside the
+// run workspace are discarded on teardown), and the two answers the cell's `ic_gw_answer` gateway routes
+// on. The delivery-absence clause is EVIDENCE-BASED (issue #865 review): only a verified lookup says
+// "none was found"; an unverified delivery says so instead of asserting an absence never checked.
+function recoveryTail(pr: string | undefined, deliveryVerified: boolean): string {
+  const absence = pr
+    ? `A pull request may already be open as ${pr} — check and retarget or adopt it before re-running`
+    : deliveryVerified
+      ? "A delivered PR on the slice's `feat/<task.id>` branch would have been adopted automatically; none was found"
+      : "A delivered PR on the slice's `feat/<task.id>` branch would have been adopted automatically, but no lookup confirmed whether one exists";
+  return `${absence} (if the agent worked OUTSIDE its run workspace — e.g. \`cd /tmp/<repo>\` — those edits were discarded on teardown). Choose "Answer" and give guidance to re-run the slice — or choose "Abandon" to skip it and continue.`;
+}
 
 /** Build the accurate, self-contained escalation reason for an implement-cell slice that reached the
  *  escalation arm. When the agent raised a GENUINE escalation (an answerable `question`), its own
@@ -128,22 +160,29 @@ export function implementEscalationQuestion(input: ImplementEscalationReasonInpu
   }
 
   // No answerable question — synthesise an accurate reason by outcome, fold in the context, then append
-  // the recovery tail (how a human recovers the slice).
+  // the recovery tail (how a human recovers the slice). The delivery evidence (`pr` still in scope, and
+  // whether a lookup VERIFIED the delivery state) qualifies every delivery claim so the reason never
+  // asserts an UNVERIFIED absence (#865 review).
   const status = str(input.status);
-  const parts = withContext([leadForKind(classifyImplementEscalation(status), status)], summary, transcriptUrl);
-  parts.push(RECOVERY_TAIL);
+  const pr = str(input.pr);
+  const deliveryVerified = input.deliveryVerified === true;
+  const delivery = deliveryClause(pr, deliveryVerified);
+  const parts = withContext([leadForKind(classifyImplementEscalation(status), status, delivery)], summary, transcriptUrl);
+  parts.push(recoveryTail(pr, deliveryVerified));
   return parts.join(" ");
 }
 
-/** The lead sentence for a synthesised (no-answerable-question) escalation, by classified kind. */
-function leadForKind(kind: ImplementEscalationKind, status: string | undefined): string {
+/** The lead sentence for a synthesised (no-answerable-question) escalation, by classified kind. The
+ *  `delivery` clause (built from the preserved PR + the verified-lookup flag) states only what is
+ *  actually known about delivery — never an unverified "opened no pull request" (#865 review). */
+function leadForKind(kind: ImplementEscalationKind, status: string | undefined, delivery: string): string {
   switch (kind) {
     case "no-result":
       return NO_RESULT_LEAD;
     case "completed-without-delivery":
-      return completedWithoutDeliveryLead(status ?? "");
+      return completedWithoutDeliveryLead(status ?? "", delivery);
     case "reported-status":
-      return reportedStatusLead(status ?? "");
+      return reportedStatusLead(status ?? "", delivery);
   }
 }
 

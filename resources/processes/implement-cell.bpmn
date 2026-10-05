@@ -9,6 +9,8 @@
           <nano:extend name="question" type="string" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
           <nano:extend name="transcriptUrl" type="string" optional="true" />
+          <nano:extend name="pr" type="string" optional="true" />
+          <nano:extend name="deliveryVerified" type="boolean" optional="true" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>
@@ -56,6 +58,7 @@
           <zeebe:output source="=retry" target="retry" />
           <zeebe:output source="=retryNudge" target="retryNudge" />
           <zeebe:output source="=retried" target="implementRetried" />
+          <zeebe:output source="=deliveryVerified" target="deliveryVerified" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>ic_escalate</bpmn:incoming>
@@ -124,6 +127,7 @@
           <zeebe:output source="=null" target="question" />
           <zeebe:output source="=null" target="summary" />
           <zeebe:output source="=null" target="transcriptUrl" />
+          <zeebe:output source="=null" target="deliveryVerified" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>ic_answerLoop</bpmn:incoming>

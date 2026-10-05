@@ -28,7 +28,7 @@ test("adopts an open PR on the branch: emits reconciled + status=opened + pr", a
       { jobKey: "j1", variables: { subjectKey: "owner/repo#801", task: { id: "issue-801" }, status: null } } as never,
       fakeApp,
     );
-    assertEquals(out, { reconciled: true, status: "opened", pr: "owner/repo#801", retry: false, retryNudge: null, retried: false });
+    assertEquals(out, { reconciled: true, status: "opened", pr: "owner/repo#801", retry: false, retryNudge: null, retried: false, deliveryVerified: true });
   } finally {
     globalThis.fetch = prevFetch;
     if (prevToken === undefined) delete process.env.GITHUB_TOKEN;
@@ -54,7 +54,7 @@ test("wires baseBranch through: a wrong-base open PR is NOT adopted → escalate
       { jobKey: "j3", variables: { subjectKey: "owner/repo#7", task: { id: "issue-7" }, status: null, baseBranch: "epic/feat-x" } } as never,
       fakeApp,
     );
-    assertEquals(out, { reconciled: false, status: null, pr: null, retry: false, retryNudge: null, retried: false });
+    assertEquals(out, { reconciled: false, status: null, pr: null, retry: false, retryNudge: null, retried: false, deliveryVerified: true });
   } finally {
     globalThis.fetch = prevFetch;
     if (prevToken === undefined) delete process.env.GITHUB_TOKEN;
@@ -76,7 +76,7 @@ test("no open PR on the branch: falls through to escalate (reconciled=false)", a
       { jobKey: "j2", variables: { subjectKey: "owner/repo#7", task: { id: "issue-7" }, status: null } } as never,
       fakeApp,
     );
-    assertEquals(out, { reconciled: false, status: null, pr: null, retry: false, retryNudge: null, retried: false });
+    assertEquals(out, { reconciled: false, status: null, pr: null, retry: false, retryNudge: null, retried: false, deliveryVerified: true });
   } finally {
     globalThis.fetch = prevFetch;
     if (prevToken === undefined) delete process.env.GITHUB_TOKEN;
