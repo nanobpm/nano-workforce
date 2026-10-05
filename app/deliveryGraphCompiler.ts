@@ -221,8 +221,11 @@ export function nodeInputsPreflightFeel(el: string): string {
   const present = `is defined(nodeInputs) and nodeInputs != null and is defined(nodeInputs.${el}) and nodeInputs.${el} != null`;
   const cause =
     `delivery-graph node ${el}: its runner-seeded config nodeInputs.${el} is missing from the process ` +
-    "instance (lost root variables?). Restore the instance's root variables (nodeInputs), then resolve " +
-    "this incident to re-run the node.";
+    "instance (lost root variables?). Restore the instance's root variables (nodeInputs), then RE-RUN " +
+    "the node — re-enter its sub-process or use \"Retry this step\" — so the subProcess config mappings " +
+    "re-evaluate. Do NOT only resolve this incident: resolving re-evaluates just this leaf's inputs, " +
+    "leaving the subProcess-seeded config (prompt/appendPrompt/nodeTimeout, connector " +
+    "target/payload/dedupeKey) null, and the job would run unconfigured.";
   return `=assert(true, ${present}, ${feelStr(cause)})`;
 }
 
@@ -2030,6 +2033,14 @@ function serviceBodyLines(
     // restored, resolving the incident re-applies the inputs and the job is created. It sits on the inner
     // LEAF task, not the subProcess: a leaf input incident parks the token on every engine (#946), whereas
     // a subProcess input incident was completed past its body by the drain sweep (nano-bpm#1334).
+    // KNOWN LIMITATION (fail-loud-only, nano-workforce#866): resolving this incident re-evaluates ONLY
+    // this leaf's inputs — the subProcess-level config mappings (prompt/appendPrompt/nodeTimeout,
+    // connector target/payload/dedupeKey) ran ONCE at subProcess entry and are NOT re-mapped on resolve,
+    // so after restoring `nodeInputs` the operator must RE-RUN the node (re-enter the sub-process /
+    // "Retry this step"), not merely resolve, or the job activates unconfigured. The incident message
+    // says so. The correct fix is to run this check at sub-process ENTRY — Camunda parity, where a failed
+    // sub-process input mapping parks in `activating` and resolving re-evaluates ALL inputs — which
+    // nano-bpm#1336 restores; until then we fail loud here rather than risk the #1334 drain-past.
     `            <zeebe:input ${attr("source", nodeInputsPreflightFeel(el))} target="${NODE_INPUTS_PREFLIGHT_VAR}" />`,
     ...(contractGate !== undefined
       ? [`            <zeebe:output ${attr("source", agentContractProceedCondition(contractGate.requiredEmits))} target="${contractMetVar}" />`]
