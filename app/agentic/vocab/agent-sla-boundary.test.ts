@@ -4,8 +4,11 @@
 // the process forever (the nanobpm/nano-bpm#1308 incident: `classify-scope` ran 7h27m unbounded
 // while the worker kept renewing the job's deadline).
 //
-// The guard parses every `resources/processes/*.bpmn` and fails if any external agent task lacks
-// an attached interrupting timer boundary — a newly-added agent task can't ship unbounded. It
+// The guard parses the BOUNDED_PROCESSES subset of `resources/processes/*.bpmn` and fails if any
+// external agent task in them lacks an attached interrupting timer boundary — a newly-added agent
+// task on a *bounded* process can't ship unbounded. The convergence-loop and plan-fanout agent
+// tasks are deliberately excluded (their back-edge-loop boundaries are deferred to #868; see
+// BOUNDED_PROCESSES below), so the guard does not yet cover the whole deployed corpus. It
 // mirrors the sibling defect-class guard for the external AgentTask marker itself
 // (`agent-marker.test.ts`, issue #745): the scan helper lives in `app/agentic/vocab/job-types.ts`
 // and this test applies it to the bounded subset of the deployed corpus (see BOUNDED_PROCESSES).

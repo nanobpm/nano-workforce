@@ -825,8 +825,9 @@ durable, in-process backstop — no external watchdog.
   on a *bounded* process is caught while the deferred ones stay out.
 - **Escalation routing.** The boundary never drops the token on the floor: implement-cell routes
   `be_implement_sla` → `record-escalation-sla` (synthesises an SLA-specific question) → the shared
-  `human-escalation` cell; merge-cell routes `be_trial_agent_sla` → `record-trial-merge` (persists a
-  trial-merge audit row + answerable question for the timed-out attempt) → `trial-merge-decision`;
+  `human-escalation` cell; merge-cell routes `be_trial_agent_sla` → `record-trial-merge-sla` (its dedicated SLA recorder,
+  distinct from the normal-path `record-trial-merge`; persists a trial-merge audit row + answerable
+  question for the timed-out attempt) → `gw-trial` → `trial-merge-decision`;
   retro routes each agent boundary → a `record-*-sla` task (persists a `plan_conformance` row at
   `review_status='reviewing'` so the always-following `conformance-ack` settles it) →
   `conformance-escalation`. Runtime coverage: `e2e/agent-sla-boundary.e2e.ts`.
