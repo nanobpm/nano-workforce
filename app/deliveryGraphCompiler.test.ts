@@ -320,21 +320,24 @@ test("#514 Defect A: a capability wait-gate escalation surfaces the probe's last
   assert(/source="=nodeInputs\.[^"]+\.probe\.match" target="probeMatch"/.test(esc), "the escalation surfaces the resolved probe match");
 });
 
-test("#514 Defect B: a resumed wait-node escalation maps the operator-supplied value onto the node's emit source (version→detail, artifact→resolvedArtifact)", async () => {
+test("#514 Defect B + #876 review: a resumed wait-node escalation VALIDATES the operator value onto the node's emit source (version→detail, artifact→resolvedArtifact)", async () => {
   const r = await compileOk(CAP_GATE);
   // Red before the fix: the wait escalation forced emitMode="none" (hiding the value field) and carried
   // NO output mapping, so a resume published `<el>_<fact> = null`, starving the downstream consumer.
+  // (#876 review: the task VALIDATES the form's `value` on its OWN output mapping — a gateway ioMapping
+  // is not visible downstream in the pinned engine — binding the emit-source var only on a valid value.)
   const escV = escBlockForNode(r.bpmn, "n2");
-  // A `version` emit is sourced from `detail` — the operator's captured `value` must be mapped there.
+  // A `version` emit is sourced from `detail` — the operator's captured `value` must land there.
   assert(escV.includes('="typed"') && escV.includes('target="emitMode"'), "a wait node with emits PRESENTS its value field on escalation, not 'none'");
   assert(escV.includes("publishedVersion (version)") && escV.includes('target="emitLabel"'), "the emit label names the awaited fact");
-  assert(/source="=if \(is defined\(value\)\) then value else null" target="detail"/.test(escV), "the operator's value is mapped onto the version emit's source var (detail)");
+  assert(/<zeebe:output [\s\S]*?target="detail" \/>/.test(escV), "the version emit's source var (detail) is bound on the task output");
+  assert(/<zeebe:output [\s\S]*?target="resumeValid" \/>/.test(escV), "the task flags the aggregate resume validity");
 
   const escA = escBlockForNode(r.bpmn, "n3");
   // An `artifact` emit is ALSO sourced from the generic form's single `value` field (the form has no
-  // `resolvedArtifact` field), mapped onto the artifact emit's source var (resolvedArtifact) — so an
-  // artifact wait-node escalation is actually resumable via the UI.
-  assert(/source="=if \(is defined\(value\)\) then value else null" target="resolvedArtifact"/.test(escA), "the operator's value is mapped onto the artifact emit's source var (resolvedArtifact)");
+  // `resolvedArtifact` field), validated and bound onto the artifact emit's source var
+  // (resolvedArtifact) — so an artifact wait-node escalation is actually resumable via the UI.
+  assert(/<zeebe:output [\s\S]*?target="resolvedArtifact" \/>/.test(escA), "the artifact emit's source var (resolvedArtifact) is bound on the task output");
 });
 
 test("#514 Defect B: a service-node escalation (agent) stays inert — no emit field, no resume output mapping (only wait resumes)", async () => {
@@ -342,6 +345,89 @@ test("#514 Defect B: a service-node escalation (agent) stays inert — no emit f
   const esc = escBlockForNode(r.bpmn, "gv");
   assert(esc.includes('="none"') && esc.includes('target="emitMode"'), "an agent-node escalation keeps its emit field hidden");
   assert(!esc.includes("<bpmn:output") && !esc.includes("<zeebe:output"), "an agent-node escalation carries no emit-source output mapping");
+});
+
+// An agent that owes a required `pr` emit to a downstream consumer — its timeout `__esc` (and a
+// producer-contract `__contract`) is RESUMABLE with that emit (#872), so it is the natural surface
+// for the resume-validation gate (PR #876 review).
+const RESUME_GATE_GRAPH = {
+  name: "resume validation gate",
+  nodes: [
+    { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "open a PR" }, emits: [{ name: "pr", type: "pr" }] },
+    { id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "open.pr" } } },
+  ],
+  edges: [{ from: "open.pr", to: "land" }],
+};
+
+test("#876 review: a resumable escalation VALIDATES the operator value onto the emit-source var on its own output mapping", async () => {
+  // The emit-source var (`factSourceVar`) is bound from the form's `value` ONLY when it satisfies the
+  // per-emit type condition — never unconditionally — so an omitted/malformed resume can never thread
+  // null/garbage onto the emit the subProcess output mapping republishes downstream. The task also
+  // flags the aggregate `resumeValid` for the post-escalation gateway.
+  const r = await compileOk(RESUME_GATE_GRAPH);
+  for (const suffix of ["esc", "contract"] as const) {
+    const esc = escBlockForNodeSuffix(r.bpmn, "open", suffix);
+    assert(/<zeebe:output [\s\S]*?target="pr" \/>/.test(esc), `the __${suffix} task binds the emit-source var (pr) on its output`);
+    assert(/<zeebe:output [\s\S]*?target="pr" \/>/.test(esc) && esc.includes("matches("), `the __${suffix} binding is type-validated (a pr must match the PR-key shape)`);
+    assert(/<zeebe:output [\s\S]*?target="resumeValid" \/>/.test(esc), `the __${suffix} task flags resumeValid`);
+  }
+});
+
+test("#876 review: a resumable escalation is followed by a validation gate that loops back on a missing/invalid value and releases only a valid one", async () => {
+  const r = await compileOk(RESUME_GATE_GRAPH);
+  const openEl = elementForNode(r.bpmn, "open");
+  const esc = `delivery-human-task__${openEl}__esc`;
+  // The gate exists, named for its purpose, and defaults to the INVALID (loop-back) branch so a
+  // condition failure can never release a null downstream (fail closed). It is a PLAIN gateway (no
+  // ioMapping — a gateway ioMapping is not visible downstream in the pinned engine), routing on the
+  // simple `resumeValid = true` boolean the escalation task computed.
+  const gateStart = r.bpmn.indexOf(`<bpmn:exclusiveGateway id="${esc}Vg" name="resume value valid?" default="${esc}Vbad"`);
+  assert(gateStart !== -1, "the timeout escalation is followed by a resume-validation gateway defaulting to the invalid branch");
+  assert(
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${esc}Vok" name="valid" sourceRef="${esc}Vg" targetRef="${openEl}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resumeValid = true</bpmn:conditionExpression>`),
+    "the valid branch routes on resumeValid and proceeds to the node end",
+  );
+  // The INVALID branch loops back to the escalation task (re-park with an explanation), so a blank or
+  // malformed `value` never threads null downstream.
+  assert(
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${esc}Vbad" name="invalid" sourceRef="${esc}Vg" targetRef="${esc}" />`),
+    "the invalid branch loops back onto the escalation task",
+  );
+  // The gateway carries NO ioMapping (the validation ran on the task, not the gateway).
+  const gateBlock = r.bpmn.slice(gateStart, r.bpmn.indexOf("</bpmn:exclusiveGateway>", gateStart));
+  assert(!gateBlock.includes("<zeebe:ioMapping>"), "the validation gateway is a plain routing gateway (no ioMapping)");
+});
+
+test("#876 review: a NON-resumable escalation (no required emits) stays inert — no validation gate, no resume outputs", async () => {
+  const r = await compileOk(CAP_GATE);
+  // `gv` owes no required emit: its escalation is the inert acknowledgement and must NOT grow a gate.
+  const gvEl = elementForNode(r.bpmn, "gv");
+  assert(!r.bpmn.includes(`delivery-human-task__${gvEl}__escVg`), "a no-required-emit node carries no resume-validation gateway");
+  const esc = escBlockForNode(r.bpmn, "gv");
+  assert(!esc.includes('target="resumeValid"'), "an inert escalation publishes no resumeValid flag");
+});
+
+test("#876 review: the producer-contract escalation is validated by the SAME resume gate", async () => {
+  const r = await compileOk(RESUME_GATE_GRAPH);
+  const openEl = elementForNode(r.bpmn, "open");
+  const contract = `delivery-human-task__${openEl}__contract`;
+  assert(r.bpmn.includes(`<bpmn:exclusiveGateway id="${contract}Vg" name="resume value valid?" default="${contract}Vbad"`), "the contract escalation grows its own validation gateway");
+  assert(
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${contract}Vbad" name="invalid" sourceRef="${contract}Vg" targetRef="${contract}" />`),
+    "the contract invalid branch loops back onto the contract escalation task",
+  );
+});
+
+test("#876 review: a resumed WAIT-gate escalation validates against its emit type (version→detail)", async () => {
+  const r = await compileOk(CAP_GATE);
+  const n2El = elementForNode(r.bpmn, "n2");
+  const esc = escBlockForNode(r.bpmn, "n2");
+  // The version emit's source var (detail) is bound on the task output, type-validated, plus the
+  // aggregate resumeValid flag for the gateway.
+  assert(/<zeebe:output [\s\S]*?target="detail" \/>/.test(esc), "the wait escalation binds the version emit's source var (detail) on its output");
+  assert(/<zeebe:output [\s\S]*?target="resumeValid" \/>/.test(esc), "the wait escalation flags resumeValid");
+  const gateStart = r.bpmn.indexOf(`<bpmn:exclusiveGateway id="delivery-human-task__${n2El}__escVg"`);
+  assert(gateStart !== -1, "the wait timeout escalation grows a resume-validation gateway");
 });
 
 
@@ -577,6 +663,34 @@ test("a wait node with a LITERAL pr target compiles the probe unchanged (no spur
   const r = await compileOk(graph);
   assert(!/context put/.test(r.bpmn), "a literal target is not wrapped in a context put rewrite");
   assert(/source="=nodeInputs\.[^"]+\.probe" target="probe"/.test(r.bpmn), "the probe is seeded directly from nodeInputs");
+});
+
+test("#872: a fact-bound wait target whose upstream fact is NULL binds probe.target to null (fail-closed provenance), never the unresolvable fact-ref literal", async () => {
+  // The compiler — not the worker — owns the resolved/unresolved provenance (PR #876 review): when the
+  // upstream fact is as-yet-unobserved, the `context put` else-branch must write NULL (which the
+  // readiness-probe worker fails closed on) rather than leave the authored `<node>.<fact>` literal in
+  // place. A runtime syntax test on the target cannot distinguish that literal from a VALID dotted
+  // command target (e.g. `check.sh`), which must always reach the probe verbatim.
+  const graph = {
+    name: "null fact-ref provenance",
+    nodes: [
+      {
+        id: "open",
+        kind: "agent",
+        agent: { jobType: "senior:feature", prompt: "Implement and open a PR." },
+        emits: [{ name: "pr", type: "pr" }],
+      },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: "open.pr", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "open.pr", to: "merged" }],
+  };
+  const r = await compileOk(graph);
+  // The else-branch binds NULL (provenance), not the authored fact-ref literal.
+  assert(
+    /context put\([^)]*\.probe, "target", if \(is defined\([^)]*\) and [^)]* != null\) then [^)]* else null\)/.test(r.bpmn),
+    "an unresolved upstream fact binds null (provenance), not the authored fact-ref literal",
+  );
+  assert(!/else [a-zA-Z0-9_.]*\.target\)/.test(r.bpmn), "the else-branch never falls back to the authored fact-ref target literal");
 });
 
 test("a wait node whose fact-reference target is PADDED still late-binds via context put (target is trimmed before the bind match)", async () => {
@@ -925,10 +1039,13 @@ test("#731 required-emit gate: a producer's declared emit consumed as a required
   assert(g0![1].includes("(is defined(pr) and pr != null)"), "a required-emit non-null clause gates the success flow on the populated fact");
   const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
   assert(esc.includes("Required emit &apos;pr&apos;"), "the escalation NAMES the required fact that was not emitted");
-  // Resumable (#514 Defect-B mirror): a human/agent supplies the missing fact, mapped onto the agent
-  // emit source var (fact name), so the subProcess output ioMapping republishes `<el>_pr` non-null.
+  // Resumable (#514 Defect-B mirror): a human/agent supplies the missing fact, VALIDATED on the task's
+  // own output mapping (binding the agent emit source var — the fact name — only on a type-valid value)
+  // so the subProcess output ioMapping republishes `<el>_pr` non-null (PR #876 review — a gateway
+  // ioMapping is not visible downstream in the pinned engine, so the validation runs on the task).
   assert(esc.includes('="typed"') && esc.includes('target="emitMode"'), "the contract escalation PRESENTS its value field (resumable)");
-  assert(/source="=if \(is defined\(value\)\) then value else null" target="pr"/.test(esc), "the operator's value maps onto the required emit's source var");
+  assert(/<zeebe:output [\s\S]*?target="pr" \/>/.test(esc) && esc.includes("matches("), "the operator's value is type-validated onto the required emit's source var");
+  assert(/<zeebe:output [\s\S]*?target="resumeValid" \/>/.test(esc), "the contract escalation flags resumeValid for its validation gateway");
 });
 
 test("#731 routing-only emits stay optional: a fact referenced ONLY by an edge `when` guard is NOT gated as a required emit (omit ⇒ default branch)", async () => {

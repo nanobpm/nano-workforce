@@ -21,7 +21,9 @@ import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { connectorDedupeKey, deliveryConnectorDispatches, dispatchConnector } from "../app/deliveryConnector.ts";
+import type { CommandResult } from "../app/readiness.ts";
 import { readConnectorInput } from "../workers/delivery-connector/worker.ts";
+import { __setProbeExecForTest } from "../workers/readiness-probe/worker.ts";
 import { prepareDeliveryGraph, runDeliveryGraph } from "../app/deliveryRunner.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { deterministicProbeSeam } from "./support/probe-exec.ts";
@@ -39,6 +41,20 @@ function takenFlows(app: TestApp): string[] {
   return flows
     .filter((f): f is TakenFlow => typeof f === "object" && f !== null && "from" in f && "to" in f)
     .map((f) => `${f.from}->${f.to}`);
+}
+
+/** Await the re-parked `__esc` escalation user task after a resume, re-settling briefly so the
+ * resume-validation gateway's loop-back (esc → gate → esc) fully materialises the fresh task before
+ * it is searched. The gate's re-park is engine-synchronous but can straddle a `settle()` fixpoint, so
+ * a single immediate search can race it; a bounded re-settle loop makes the assertion deterministic
+ * (no wall-clock sleep). */
+async function waitForEsc(app: TestApp): Promise<{ userTaskKey: string; elementId?: string } | undefined> {
+  for (let i = 0; i < 10; i++) {
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
+    if (esc) return esc;
+    await app.settle();
+  }
+  return undefined;
 }
 
 /** Boot a fresh app per scenario (the WASM engine's taken-flow snapshot is engine-global cumulative). */
@@ -183,6 +199,53 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // hermetic seam records + fails on), and the gate would never have resolved. The graph reaching End
     // proves the wait released its ready branch off the late-bound target.
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the late-bound wait resolved and the graph reached End");
+  });
+
+  test("#876 review: a DOTTED command literal target (check.sh) is NOT misclassified as an unresolved fact-ref — the gate probes it and resolves", async () => {
+    const app = track(await boot(freshDir()));
+
+    // PR #876 review finding: the #872 fail-closed guard keyed on a fact-ref SYNTAX test
+    // (`isFactRefTarget`), which a valid dotted command target like `check.sh` also satisfies — so the
+    // gate would have parked forever without ever running the probe. The fix moves the
+    // resolved/unresolved provenance into the COMPILER (an unresolved late-bind writes null), so a
+    // dotted literal reaches the probe verbatim. The deterministic seam maps the hermetic `true`/
+    // `false` builtins; `check.sh` itself would be an escape, so the upstream agent late-binds the
+    // dotted literal — proving it flows through the late-bind machinery to the probe UNTOUCHED.
+    let probed: string[] = [];
+    const restore = __setProbeExecForTest({
+      run(command: string): Promise<CommandResult> {
+        probed.push(command);
+        // The dotted literal is the probe under test; treat it green so the gate can resolve.
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+      },
+      httpGet(): Promise<never> {
+        return Promise.reject(new Error("unexpected http probe"));
+      },
+    });
+    try {
+      await app.engine.registerWorker("senior:demo", async () => ({ cmd: "check.sh" }));
+
+      const graph: DeliveryGraph = {
+        name: "e2e dotted command literal",
+        nodes: [
+          { id: "a", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "cmd", type: "string" }] },
+          { id: "w", kind: "wait", wait: { kind: "command", target: "a.cmd", poll: { everyMs: 5, backoff: "fixed" } } },
+        ],
+        edges: [{ from: "a.cmd", to: "w" }],
+      };
+
+      const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT2S", repoless: true });
+      assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+      await app.settle();
+
+      // The dotted late-bound value reached the probe VERBATIM (not parked as an "unresolved fact-ref")
+      // and the gate resolved on it — the graph reached End.
+      assert.deepEqual(probed, ["check.sh"], "the dotted command target was probed, not misclassified as unresolved");
+      assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the dotted-target wait resolved and the graph reached End");
+    } finally {
+      __setProbeExecForTest(restore);
+      probed = [];
+    }
   });
 
   test("#731 producer contract gate: an agent that completes with status=in_progress and a null required emit escalates AT the producer, does NOT thread null downstream, and resumes", async () => {
@@ -424,6 +487,75 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     const rows = await deliveryConnectorDispatches(app.db).find({ dedupe_key: "land-872a" });
     assert.equal(rows.length, 1, "the connector fired exactly once after the resume");
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the resumed node's result reaches End");
+  });
+
+  test("#876 review: a timeout escalation resumed with a MISSING or MALFORMED value re-parks (validated), never threads null/garbage downstream", async () => {
+    const app = track(await boot(freshDir()));
+
+    // PR #876 review finding: the resumable timeout `__esc` mapped the form's optional `value`
+    // straight onto the emit-source var, so completing it with `{}` (or a malformed value) released
+    // the downstream consumer with a null/invalid fact. The fix routes the resume through a
+    // validation gateway: the task re-publishes to a scratch var, and a per-required-emit FEEL
+    // condition binds the emit-source var ONLY when the value is present and type-valid — otherwise
+    // the node loops back onto a fresh escalation task (fail closed).
+    let connectorFired = 0;
+    let connectorBoundFacts: unknown;
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => {
+        connectorFired++;
+        const vars = job.variables as Record<string, unknown>;
+        connectorBoundFacts = vars.boundFacts;
+        const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key (author-supplied or graph-derived) available");
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
+      },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+    );
+
+    const graph: DeliveryGraph = {
+      name: "e2e resume validation",
+      nodes: [
+        { id: "open", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "land", kind: "connector", connector: { target: "slack", payload: { pr: "open.pr" }, dedupeKey: "land-876v" } },
+      ],
+      edges: [{ from: "open.pr", to: "land" }],
+    };
+
+    // `senior:demo` is never registered, so the node parks and only its SLA timer fires.
+    const run = await runDeliveryGraph(app.engine, graph, { nodeTimeout: "PT2S", escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+    await app.advanceTime(2_100);
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
+    assert.ok(esc, "the timed-out agent parks on its timeout escalation task");
+
+    // (a) Resume with NO value — the missing required `pr` emit must NOT release downstream.
+    await app.engine.completeUserTask(esc.userTaskKey, { humanOutcome: "completed" });
+    await app.settle();
+    assert.equal(connectorFired, 0, "a value-less resume never fires the downstream connector");
+    assert.ok(!takenFlows(app).some((f) => f.endsWith("->End")), "a value-less resume never reaches End");
+    const reparked = await waitForEsc(app);
+    assert.ok(reparked, "the invalid resume loops back onto a fresh escalation task (fail closed)");
+
+    // (b) Resume with a MALFORMED `pr` value — same fail-closed re-park.
+    await app.engine.completeUserTask(reparked.userTaskKey, { value: "not-a-pr-key", humanOutcome: "completed" });
+    await app.settle();
+    assert.equal(connectorFired, 0, "a malformed resume value never fires the downstream connector");
+    const reparked2 = await waitForEsc(app);
+    assert.ok(reparked2, "the malformed resume loops back onto a fresh escalation task");
+
+    // (c) Resume with a VALID `pr` value — the gate binds the emit-source var and releases downstream.
+    await app.engine.completeUserTask(reparked2.userTaskKey, { value: "owner/repo#876", humanOutcome: "completed" });
+    await app.settle();
+    assert.equal(connectorFired, 1, "a valid resume value unblocks the downstream connector");
+    assert.deepEqual(connectorBoundFacts, [{ from: "open", name: "pr", value: "owner/repo#876" }], "the validated value late-binds downstream");
+    assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the validated resume reaches End");
   });
 
   test("#872 a wait gate whose target resolves to NULL fails closed: it does NOT pass through, it parks and escalates", async () => {

@@ -80,6 +80,7 @@ export type DeliveryGraphErrorCode =
   | "missing-required-field"
   | "duplicate-fact"
   | "invalid-fact-name"
+  | "reserved-fact-name"
   | "invalid-fact-type"
   | "invalid-edges"
   | "dangling-edge"
@@ -2139,6 +2140,19 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
                 "(`^[A-Za-z_][A-Za-z0-9_]*$`, no dots) of " +
                 `\u2264 ${FACT_NAME_MAX_LENGTH} chars so qualified edge \`from\` references stay unambiguous`,
               code: "invalid-fact-name",
+            });
+            return;
+          }
+          // `resumeValid` is RESERVED (PR #876 review): the escalation resume-validation gate publishes
+          // its aggregate validity flag under this name, so a user-declared emit with the same name
+          // would collide with / shadow it (and a `wait` node's emit would bind the flag as its source
+          // var). Reject it here so the reservation holds by construction.
+          if (rawFact.name === "resumeValid") {
+            errors.push({
+              path: `${path}.emits[${j}].name`,
+              message:
+                'emitted fact name "resumeValid" is reserved (the escalation resume-validation gate publishes its validity flag under this name)',
+              code: "reserved-fact-name",
             });
             return;
           }

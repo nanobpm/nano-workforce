@@ -12,7 +12,6 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import {
   defaultProbeExec,
-  isFactRefTarget,
   makeCapabilityFallback,
   type ProbeExec,
   type ProbeResult,
@@ -50,19 +49,24 @@ function errorDetail(err: unknown): string {
   return `probe error: ${err instanceof Error ? err.name : "Error"}`;
 }
 
-/** Fail-closed guard for an UNRESOLVED wait-gate target (issue #872). A `wait` node's probe `target`
- * is late-bound from an upstream emit: the compiler rewrites it to the observed value only when that
- * fact resolved to a non-null value, otherwise it leaves the authored `<node>.<fact>` reference (or a
- * blank/null) in place. A probe left with such an unresolved target MUST NOT pass through — a blank or
- * fact-ref target is not a real handle, so the gate is NOT satisfiable yet. Returning not-ready keeps
- * the gate parked so its bounded timeout escalates to a human, instead of either incident-ing inside
- * `parseProbe` (which throws on a blank/fact-ref literal) or — worse — silently treating the null
- * target as "ready". Returns `null` when the target is a usable literal (let `parseProbe` run). */
+/** Fail-closed guard for an UNRESOLVED wait-gate target (issue #872, PR #876 review). A `wait` node's
+ * probe `target` is late-bound from an upstream emit: the compiler rewrites it to the observed value
+ * when that fact resolved to a non-null value, otherwise it writes NULL (the compiler owns the
+ * resolved/unresolved provenance — it is the only component that knows whether the target was actually
+ * bound). A probe left with a null/blank target MUST NOT pass through — it is not a real handle, so the
+ * gate is NOT satisfiable yet. Returning not-ready keeps the gate parked so its bounded timeout
+ * escalates to a human, instead of either incident-ing inside `parseProbe` (which throws on a blank
+ * target) or — worse — silently treating the null target as "ready". Returns `null` when the target is
+ * a usable literal (let `parseProbe` run).
+ *
+ * Deliberately NO fact-ref SYNTAX test here: a dotted, hash-free literal (`check.sh`) is a VALID
+ * `command` target yet is indistinguishable from an unresolved `<node>.<fact>` reference by shape
+ * alone — guarding on syntax parked such a gate forever without ever running its probe (PR #876
+ * review). Only the compiler's null provenance marks an unresolved target. */
 function unresolvedTargetDetail(rawProbe: unknown): string | null {
   const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
   const target = isRecord(rawProbe) ? rawProbe.target : undefined;
   if (typeof target !== "string" || target.trim() === "") return "wait gate: unresolved target (not ready)";
-  if (isFactRefTarget(target)) return "wait gate: unresolved upstream fact (not ready)";
   return null;
 }
 
@@ -166,10 +170,11 @@ function resolveProbeExec(): ProbeExec {
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
-  // Fail closed on an unresolved late-bound target (issue #872): a null/blank/fact-ref target means the
+  // Fail closed on an unresolved late-bound target (issue #872): a null/blank target means the
   // upstream emit this gate waits on never resolved — the gate is not satisfiable, so stay parked (and
   // let the gate's bounded timeout escalate) rather than throw in parseProbe or pass a null target
-  // through as if ready.
+  // through as if ready. (The compiler writes the null provenance; a dotted LITERAL target — e.g. a
+  // `check.sh` command — is never unresolved and reaches `parseProbe` verbatim, PR #876 review.)
   const unresolved = unresolvedTargetDetail(job.variables.probe);
   if (unresolved !== null) {
     app.log.warn(`readiness gate not ready: ${unresolved}`);

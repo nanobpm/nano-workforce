@@ -480,6 +480,14 @@ test("invalid-fact-name: an emitted fact name over the openapi 128-char cap is r
   assertEquals(err.path, "nodes[0].emits[0].name");
 });
 
+test("reserved-fact-name: an emitted fact named `resumeValid` is rejected (it would collide with the resume-validation gate's flag)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "resumeValid", type: "boolean" }] }],
+  });
+  const err = hasCode(errors, "reserved-fact-name");
+  assertEquals(err.path, "nodes[0].emits[0].name");
+});
+
 test("invalid-fact-type: an emitted fact with a type outside the allowlist is rejected, path-qualified", () => {
   const errors = validateDeliveryGraph({
     nodes: [
