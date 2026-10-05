@@ -43,7 +43,6 @@ import {
   type DeliveryGraphError,
   deliveryNodeFacts,
   hasXmlInvalidChars,
-  RESERVED_FACT_NAME_MARKER,
   redactConnectorValue,
   resolveDeliveryFrom,
   stripXmlInvalidChars,
@@ -176,6 +175,15 @@ function contractEscalationTaskElement(element: string): string {
   return `${DELIVERY_HUMAN_ELEMENT}__${element}__contract`;
 }
 
+/** A distinctive infix stamped into the compiler-generated resume-validity flag variable ({@link
+ * resumeValidVar}) to visually mark it as an internal engine variable rather than a user fact. It is
+ * NOT a reserved fact-name namespace — reserving it in the public `DeliveryFact.name` space would
+ * silently reject previously valid names (e.g. `my__flag__fact`) that openapi still advertises as legal
+ * and that durable library/proposal rows may already carry (PR #876 review). Collision-freedom is
+ * instead guaranteed structurally at the single bind site (see {@link escalationTaskLines}), so this
+ * infix is only a readability aid. */
+const FLAG_VAR_INFIX = "__flag__";
+
 /** The internal FEEL variable the resume-validation gateway routes on (PR #876 review). Derived from
  * the escalation task's compiler-generated element id (sanitised to a FEEL-safe identifier) — NOT from
  * the user fact-name space — so it can never collide with a user-declared emit fact bound into the same
@@ -183,18 +191,15 @@ function contractEscalationTaskElement(element: string): string {
  * removes the need to RESERVE a user-visible fact name (`resumeValid`) and the recompilation break that
  * reserving it would impose on durable rows that already carry a fact of that name.
  *
- * The sanitised element id is still a legal FACT-NAME string (`^[A-Za-z_][A-Za-z0-9_]*$`), so without
- * a reserved marker a node could legally declare an emit NAMED EXACTLY this flag — and for a single-emit
- * `agent`/`connector` node that fact's emit-source var IS its own name ({@link factSourceVar}), so the
- * resume output would map the recovered fact value AND this boolean flag onto the ONE variable (the
- * valid resume then publishes `true` instead of the supplied value — PR #876 round-4 review). The
- * {@link RESERVED_FACT_NAME_MARKER} (`__flag__`) closes the class categorically: the validator REJECTS
- * any declared emit whose name contains the marker, so no emit-source var can ever carry it — the flag
- * can never share a variable with a declared emit no matter how the fact is named. The marker is the
- * SINGLE SOURCE OF TRUTH shared with the validator, so the stamp here and the reservation there can
- * never drift. */
+ * The sanitised element id is still a legal FACT-NAME string (`^[A-Za-z_][A-Za-z0-9_]*$`), so a node
+ * could in principle declare an emit NAMED EXACTLY this flag — and for a single-emit `agent`/`connector`
+ * node that fact's emit-source var IS its own name ({@link factSourceVar}), which would map the
+ * recovered fact value AND this boolean flag onto the ONE variable. Rather than RESERVE part of the
+ * public fact-name space to forbid that (which would break previously valid names — PR #876 review),
+ * the single bind site in {@link escalationTaskLines} makes the generated flag name collision-free
+ * against this node's actual emit-source target by construction (a deterministic unused suffix). */
 export function resumeValidVar(esc: string): string {
-  return `${esc.replace(/[^A-Za-z0-9_]/g, "_")}${RESERVED_FACT_NAME_MARKER}resumeValid`;
+  return `${esc.replace(/[^A-Za-z0-9_]/g, "_")}${FLAG_VAR_INFIX}resumeValid`;
 }
 
 /** The self-reported completion statuses an `agent` node's job may return that count as a TERMINAL
@@ -2317,7 +2322,18 @@ function escalationTaskLines(
   // always loops back (the operator re-parks) and no single value is ever threaded onto several
   // distinct emits. (Per-fact resume would need a per-fact form, which the generic form does not have.)
   const outputs: string[] = [];
-  const flagVar = resume !== undefined && emits.length > 0 ? resumeValidVar(esc) : "";
+  // The single emit's source var is the ONLY user-controlled variable that shares this escalation's
+  // flat engine scope with the validity flag (for a multi-emit node nothing is bound, and for
+  // `wait`/`human` kinds `factSourceVar` is a fixed internal name). So the flag only needs to be
+  // collision-free against THAT one target: a single-emit `agent`/`connector` node's target is the
+  // fact's own name ({@link factSourceVar}), which the user controls and could legally set equal to the
+  // generated flag. Grow the flag with a deterministic unused suffix until it differs — closing the
+  // collision class structurally WITHOUT reserving any part of the public fact-name space (PR #876
+  // review). `_` keeps it a legal FEEL identifier; the loop terminates because each step lengthens the
+  // flag past the fixed-length target.
+  const singleTarget = resume !== undefined && emits.length === 1 ? factSourceVar(resume.kind, emits[0]) : undefined;
+  let flagVar = resume !== undefined && emits.length > 0 ? resumeValidVar(esc) : "";
+  while (singleTarget !== undefined && flagVar === singleTarget) flagVar = `${flagVar}_`;
   if (resume !== undefined && emits.length === 1) {
     const fact = emits[0];
     const target = factSourceVar(resume.kind, fact);
@@ -2326,8 +2342,8 @@ function escalationTaskLines(
     );
     outputs.push(
       // The validity flag the post-escalation gateway routes on — an internal, compiler-generated
-      // variable name (`resumeValidVar`), never a reserved user-visible fact name, so it can neither
-      // collide with nor be shadowed by a declared emit.
+      // variable name ({@link resumeValidVar}), made collision-free against the emit-source var above
+      // by construction, so it can neither collide with nor be shadowed by a declared emit.
       `            <zeebe:output ${attr("source", `=if ${resumeValueCondition(fact, "value")} then true else false`)} target="${flagVar}" />`,
     );
   } else if (resume !== undefined && emits.length > 1) {

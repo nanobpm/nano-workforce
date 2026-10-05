@@ -464,14 +464,14 @@ test("#876 review: a multi-required-emit escalation FAILS CLOSED — it binds no
   }
 });
 
-test("#876 round-4 review: the resume-valid flag is namespaced so it can NEVER share a variable with a declared emit's fact-source var", async () => {
+test("#876 round-4 review: the resume-valid flag is distinct from any declared emit's fact-source var", async () => {
   // The flag is derived from the escalation element id, which is itself a legal fact-name string — so
   // a node could declare an emit NAMED `delivery_human_task__<el>__esc__resumeValid`, and for an
-  // `agent`/`connector` node that fact's emit-source var IS its own name (factSourceVar), colliding
-  // with the flag (the valid resume would publish `true` instead of the supplied value). The `__flag__`
-  // marker closes the class: no emit-source var carries it. A graph whose single emit is named to the
-  // EXACT pre-fix flag string must still compile with a DISTINCT flag var and bind the emit under its
-  // own name.
+  // `agent`/`connector` node that fact's emit-source var IS its own name (factSourceVar), which could
+  // collide with the flag (the valid resume would publish `true` instead of the supplied value). The
+  // `__flag__` infix plus the collision-free suffix in escalationTaskLines keep the two distinct WITHOUT
+  // reserving any user fact name. A graph whose single emit is named close to the flag string must still
+  // compile with a DISTINCT flag var and bind the emit under its own name.
   const collisionName = "delivery_human_task__open__esc__resumeValid";
   const r = await compileOk({
     name: "resume flag namespace",
@@ -525,31 +525,59 @@ test("#876 round-4 'Previously missed': the resume FEEL grammar ALIGNS with the 
   );
 });
 
-test("#876 round-4 review: a declared emit whose name carries the reserved `__flag__` marker is REJECTED (so no user fact can ever collide with the internal resume-valid flag)", async () => {
-  // The resume-valid flag (`resumeValidVar`) is `delivery_human_task__<el>__esc__flag__resumeValid` —
-  // itself a legal fact-name string. For a single-emit agent/connector node `factSourceVar` returns the
-  // bare fact name, so a fact declared with that exact name would map BOTH the recovered value and the
-  // boolean flag onto one variable. Reserving the `__flag__` marker in the emit-name space closes the
-  // class categorically: any emit whose name contains it is rejected with a path-qualified error.
-  const collisionName = resumeValidVar("delivery-human-task__n0__esc"); // the EXACT compiled flag var
-  assert(collisionName.includes("__flag__"), "sanity: the flag var carries the reserved marker");
-  const errors = await compileFail({
-    name: "reserved flag-marker collision",
+test("#876 round-5 review: a declared emit whose name EQUALS the generated resume-valid flag var is ACCEPTED — the flag deterministically grows a collision-free suffix instead of reserving the fact-name space", async () => {
+  // openapi's DeliveryFact.name permits `^[A-Za-z_][A-Za-z0-9_]*$`, so `my__flag__fact` and even the
+  // exact generated flag string are legal names that durable rows may already carry. Round-4 RESERVED
+  // the `__flag__` marker to forbid a collision, which silently rejected those previously valid names on
+  // recompilation (PR #876 round-5 review). Instead the single bind site makes the flag collision-free:
+  // if the single emit's fact-source var EQUALS the generated flag var, the flag grows a `_` suffix
+  // until distinct. The graph must COMPILE, bind the value under the fact's own name, and bind the flag
+  // under the distinct suffixed var.
+  //
+  // The flag is derived from `open`'s COMPILED element id (`nK`), which is not user-predictable, so
+  // probe-compile to learn it, then name the emit to the exact generated flag var (topology is
+  // unchanged by the rename, so the element id is stable).
+  const probe = await compileOk({
+    name: "flag collision probe",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "probeFact", type: "string" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.probeFact" }, dedupeKey: "coll-p" } },
+    ],
+    edges: [{ from: "open.probeFact", to: "land" }],
+  });
+  const collisionName = resumeValidVar(`delivery-human-task__${elementForNode(probe.bpmn, "open")}__esc`);
+  assert(collisionName.includes("__flag__"), "sanity: the flag var carries the internal infix");
+  const r = await compileOk({
+    name: "flag collision tolerated",
     nodes: [
       { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: collisionName, type: "string" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: `open.${collisionName}` }, dedupeKey: "coll-c" } },
     ],
+    edges: [{ from: `open.${collisionName}`, to: "land" }],
   });
-  const e = errors.find((err) => err.path === "nodes[0].emits[0].name");
-  assert(e !== undefined, `expected a nodes[0].emits[0].name error, got ${JSON.stringify(errors)}`);
-  assert(/reserved/.test(e.message) && e.message.includes("__flag__"), `the error names the reserved marker, got ${e.message}`);
+  const escBlock = escBlockForNodeSuffix(r.bpmn, "open", "esc");
+  // The declared emit still binds under its OWN name (the user's value is recovered on a valid resume).
+  assert(escBlock.includes(`target="${collisionName}"`), `the declared emit binds under its own fact name, got ${escBlock}`);
+  // The flag binds under a DISTINCT var — the collision-free `_`-suffixed name, never the fact's var.
+  const suffixedFlag = `${collisionName}_`;
+  assert(escBlock.includes(`target="${suffixedFlag}"`), `the resume-valid flag binds under the distinct suffixed var, got ${escBlock}`);
+  // … and the gateway routes on that SAME suffixed flag var, so the valid branch stays wired.
+  assert(
+    r.bpmn.includes(`<bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${suffixedFlag} = true</bpmn:conditionExpression>`),
+    `the valid branch routes on the suffixed flag var, got ${r.bpmn}`,
+  );
 
-  // The reservation is the WHOLE marker, not just the exact flag string: any `__flag__`-bearing name is
-  // rejected (a structural namespace reservation, not a single-instance block).
-  const anyMarker = await compileFail({
-    name: "reserved marker anywhere",
-    nodes: [{ id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "my__flag__fact", type: "string" }] }],
+  // A merely `__flag__`-bearing fact name (not the exact flag) is now also ACCEPTED — the public name
+  // space is no longer narrowed (PR #876 round-5 review).
+  const rOk = await compileOk({
+    name: "flag-infix name tolerated",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "my__flag__fact", type: "string" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.my__flag__fact" }, dedupeKey: "coll-d" } },
+    ],
+    edges: [{ from: "open.my__flag__fact", to: "land" }],
   });
-  assert(anyMarker.some((err) => err.path === "nodes[0].emits[0].name" && /reserved/.test(err.message)), `any __flag__-bearing emit name is reserved, got ${JSON.stringify(anyMarker)}`);
+  assert(escBlockForNodeSuffix(rOk.bpmn, "open", "esc").includes('target="my__flag__fact"'), "a __flag__-bearing fact name compiles and binds under its own name");
 });
 
 
