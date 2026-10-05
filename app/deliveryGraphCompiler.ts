@@ -1862,14 +1862,21 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // emit through so the userTask ioMapping reads that fact-named field too. Without it a valid
       // `{ approval: "yes" }` custom form for an `approval` emit renders fine but publishes NULL (the
       // ioMapping only read the fixed `value`/`resolvedArtifact` controls) — PR #863 review, thread
-      // deliveryGraphCompiler.ts:1929. SCOPE it to `source === "explicit"`: the built-in generic/publish
-      // forms capture under the FIXED `value`/`resolvedArtifact` controls, and a fact happening to be
-      // named after one of those built-in forms' OTHER fields (e.g. a single emit named `note`) must not
-      // make the mapping read that unrelated field — only a bespoke form keys its control on the fact.
+      // deliveryGraphCompiler.ts:1929. SCOPE the fact-NAMED read to `source === "explicit"`: the built-in
+      // generic/publish forms capture under the FIXED `value`/`resolvedArtifact` controls, and a fact
+      // happening to be named after one of those built-in forms' OTHER fields (e.g. a single emit named
+      // `note`) must not make the mapping read that unrelated field — only a bespoke form keys its control
+      // on the fact.
+      // TYPE COERCION is a WIDER contract than the fact-named read: the SAME class of bug (a captured
+      // TEXT value published verbatim for a typed fact) also bites the GENERIC single-value form — a lone
+      // `boolean`/`number` emit answered through the generic textfield would publish the string
+      // `"true"`/`"1"` that a downstream guarded split (`= true`/`= 1`) never matches. So coerce by the
+      // one declared emit's type for EVERY form source (explicit AND built-in), while preferring the
+      // fact-named field ONLY for an explicit bespoke form (PR #863 thread r4189815989).
       const humanForm = resolveHumanForm(node);
-      const singleEmit =
-        humanForm.source === "explicit" && humanForm.emits.length === 1 ? humanForm.emits[0] : undefined;
-      return humanBodyLines(el, displayName, humanForm.formKey ?? GENERIC_HUMAN_FORM, singleEmit);
+      const singleEmit = humanForm.emits.length === 1 ? humanForm.emits[0] : undefined;
+      const preferFactName = humanForm.source === "explicit";
+      return humanBodyLines(el, displayName, humanForm.formKey ?? GENERIC_HUMAN_FORM, singleEmit, preferFactName);
     }
     default:
       return assertNever(node, "innerBodyLines");
@@ -2314,20 +2321,39 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
  * fact (`{ approval: "yes" }` for an `approval` emit) publishes its value instead of NULL, while the
  * generic/publish/ack forms (which capture `value`/`resolvedArtifact`) are unaffected (PR #863 review,
  * thread deliveryGraphCompiler.ts:1929). Fact names are `FACT_NAME_PATTERN`-constrained
- * (`[A-Za-z_][A-Za-z0-9_]*`), so the name embeds safely as a FEEL identifier. */
-function humanBodyLines(el: string, displayName: string, formId: string, singleEmit?: DeliveryFact): string[] {
+ * (`[A-Za-z_][A-Za-z0-9_]*`), so the name embeds safely as a FEEL identifier. The selected value is then
+ * COERCED/VALIDATED to the emit's declared type via {@link coerceFactValueFeel} (the same typed-binding
+ * contract the escalation resume uses), so a bespoke `boolean`/`number` form publishes a real FEEL
+ * boolean/number — not the raw string `"true"`/`"1"` that a downstream guarded split (`= true`/`= 1`)
+ * would never match (PR #863 thread r4189815989). */
+function humanBodyLines(el: string, displayName: string, formId: string, singleEmit?: DeliveryFact, preferFactName = false): string[] {
   const task = humanTaskElement(el);
   const assignee =
     '=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != "") then escalationAssignee else null';
   // The canonical capture key for the single emit's TYPE (artifact → the publish form's
-  // `resolvedArtifact`; anything else → the generic form's `value`), plus a fact-named-field preference
-  // in front of it. `preferFact(canonical)` reads `<factName>` first, then the canonical control.
-  const preferFact = (canonical: string): string =>
-    singleEmit !== undefined
-      ? `=if (is defined(${singleEmit.name}) and ${singleEmit.name} != null) then ${singleEmit.name} else if (is defined(${canonical})) then ${canonical} else null`
-      : `=if (is defined(${canonical})) then ${canonical} else null`;
-  const valueSource = singleEmit !== undefined && singleEmit.type !== "artifact" ? preferFact("value") : "=if (is defined(value)) then value else null";
-  const artifactSource = singleEmit !== undefined && singleEmit.type === "artifact" ? preferFact("resolvedArtifact") : "=if (is defined(resolvedArtifact)) then resolvedArtifact else null";
+  // `resolvedArtifact`; anything else → the generic form's `value`). `selectExpr(canonical)` is a bare
+  // (no leading `=`) null-safe FEEL expression; when `preferFactName` (an EXPLICIT bespoke form only) it
+  // reads `<factName>` first, then the canonical control — a built-in form's fixed control otherwise.
+  const selectExpr = (canonical: string): string =>
+    singleEmit !== undefined && preferFactName
+      ? `if (is defined(${singleEmit.name}) and ${singleEmit.name} != null) then ${singleEmit.name} else if (is defined(${canonical})) then ${canonical} else null`
+      : `if (is defined(${canonical})) then ${canonical} else null`;
+  // A form captures the selected value as TEXT (a textfield, or an explicit form's fact-named control), so
+  // the non-artifact single emit must COERCE/VALIDATE it to the fact's declared type before writing
+  // `humanEmitValue` — the SAME typed-binding contract the escalation resume enforces
+  // (`coerceFactValueFeel`): a `boolean` fact publishes a real FEEL boolean, a `number` fact a real
+  // number, and an unparseable entry publishes null (the deadlock-safe failure path). Without it a lone
+  // `boolean` emit (bespoke OR generic form) publishes the STRING `"true"`, which the downstream guarded
+  // split (`= true`) never matches (PR #863 thread r4189815989). Text-valued types (`string`/`version`/
+  // `url`/`pr`) pass through unchanged; artifacts are object handles — passed through, never coerced.
+  const valueSource =
+    singleEmit !== undefined && singleEmit.type !== "artifact"
+      ? `=${coerceFactValueFeel(singleEmit, selectExpr("value"))}`
+      : "=if (is defined(value)) then value else null";
+  const artifactSource =
+    singleEmit !== undefined && singleEmit.type === "artifact"
+      ? `=${selectExpr("resolvedArtifact")}`
+      : "=if (is defined(resolvedArtifact)) then resolvedArtifact else null";
   return [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
     `      <bpmn:userTask id="${task}" name="Delivery: human step — ${escapeXml(displayName)}">`,
@@ -2377,31 +2403,44 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
  * `opts.diagnosticInputs` seeds read-only probe context (issue #514 Defect A) onto the same task so the
  * operator can see WHY the gate escalated (its last probe detail + observed candidate releases). */
 
+/** Coerce/validate a captured form value — a null-safe FEEL expression `rawExpr` yielding the operator's
+ * entry (string-valued text, or null when absent) — to a single emit's declared {@link DeliveryFact.type},
+ * so the published fact is a REAL FEEL value and not an untyped string. One source of truth shared by the
+ * escalation-resume source ({@link escalationResumeValueFeel}) and the bespoke single-emit human-form
+ * source ({@link humanBodyLines}), so the two typed-publish paths cannot drift (PR #863 threads
+ * r4182488193 / r4189815989). Returns a bare expression WITHOUT a leading `=`.
+ *   • `boolean` — accept only the literal `"true"`/`"false"` (case-insensitive, via `lower case()`);
+ *     anything else is invalid and yields null. (The pinned engine's FEEL `matches` does not support an
+ *     inline `(?i:…)` flag — verified against the WASM engine — so case-insensitivity is done by
+ *     lower-casing the input, not the pattern.) An already-boolean control value round-trips correctly:
+ *     `string(true)` → `"true"` passes the same gate.
+ *   • `number` — `number(value)` parses the numeric text; an unparseable entry yields null.
+ *   • every other type (`string`/`url`/`version`/`pr`/`artifact`) is text-valued already — pass through.
+ * The defined FAILURE PATH for invalid input is `null`, so a required-emit producer gate escalates and a
+ * guarded split takes its deadlock-safe default rather than routing on a mistyped value. `definedGuard`,
+ * when given, wraps the passthrough/branch in an outer `is defined(...)` for a raw name that may be
+ * entirely absent (the escalation `value` control); a `rawExpr` already null-safe (the human-form
+ * selection expression) passes none. */
+function coerceFactValueFeel(fact: DeliveryFact, rawExpr: string, definedGuard?: string): string {
+  const pre = definedGuard ? `${definedGuard} and ` : "";
+  switch (fact.type) {
+    case "boolean":
+      return `if (${pre}${rawExpr} != null and matches(lower case(string(${rawExpr})), "^(true|false)$")) then lower case(string(${rawExpr})) = "true" else null`;
+    case "number":
+      return `if (${pre}${rawExpr} != null) then number(${rawExpr}) else null`;
+    default:
+      return definedGuard ? `if (${definedGuard}) then ${rawExpr} else null` : rawExpr;
+  }
+}
+
 /** The FEEL output source that publishes the escalation form's captured `value` onto a single-emit
  * node's emit-source var, COERCED/VALIDATED to the emit's declared type (PR #863 Copilot High, thread
  * r4182488193). The form captures `value` from a TEXTFIELD, so it is always a string — but a
  * `boolean`/`number` fact's downstream guarded split compares against a TYPED FEEL literal
- * (`= true` / `= 1`), so publishing the raw string `"true"`/`"1"` would skip the guarded branch.
- * Coerce by {@link DeliveryFact.type}:
- *   • `boolean` — accept only the literal `"true"`/`"false"` (case-insensitive, via `lower case()`);
- *     anything else is invalid and publishes null. (The pinned engine's FEEL `matches` does not
- *     support an inline `(?i:…)` flag — verified against the WASM engine — so case-insensitivity is
- *     done by lower-casing the input, not the pattern.)
- *   • `number` — `number(value)` parses the numeric text; an unparseable entry yields null.
- *   • every other type (`string`/`url`/`version`/`pr`/`artifact`) is text-valued already — pass through.
- * The defined FAILURE PATH for invalid input is `null`: the emit source publishes null, so a
- * required-emit producer gate escalates and a guarded split takes its deadlock-safe default rather than
- * routing on a mistyped value. */
+ * (`= true` / `= 1`), so publishing the raw string `"true"`/`"1"` would skip the guarded branch. The
+ * per-type coercion is {@link coerceFactValueFeel} (shared with the bespoke human-form source). */
 function escalationResumeValueFeel(fact: DeliveryFact): string {
-  const defined = "is defined(value)";
-  switch (fact.type) {
-    case "boolean":
-      return `=if (${defined} and value != null and matches(lower case(string(value)), "^(true|false)$")) then lower case(string(value)) = "true" else null`;
-    case "number":
-      return `=if (${defined} and value != null) then number(value) else null`;
-    default:
-      return `=if (${defined}) then value else null`;
-  }
+  return `=${coerceFactValueFeel(fact, "value", "is defined(value)")}`;
 }
 
 function escalationTaskLines(

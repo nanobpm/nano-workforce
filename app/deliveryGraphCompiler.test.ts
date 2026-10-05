@@ -545,10 +545,41 @@ test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED fi
   const sSub = scalar.bpmn.slice(scalar.bpmn.indexOf(`<bpmn:subProcess id="${sEl}"`));
   const sTask = sSub.slice(sSub.indexOf("<bpmn:userTask"), sSub.indexOf("</bpmn:userTask>"));
   assert(sTask.includes('formId="bespoke-approval"'), "the explicit bespoke form is attached");
+  // The userTask value source must (a) read the fact-named `approval` field then fall back to `value`,
+  // AND (b) COERCE that selected text to the fact's declared `boolean` type before writing
+  // `humanEmitValue` — otherwise a bespoke form returning the string "true" publishes `"true"`, which the
+  // downstream guarded split (`= true`) never matches (PR #863 thread r4189815989). The coercion is the
+  // SAME typed-binding contract the escalation resume enforces.
+  const sValueOut = sTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/);
+  assert(sValueOut, "the bespoke boolean form maps a value onto humanEmitValue");
+  const sValueFeel = sValueOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
   assert(
-    /<zeebe:output source="=if \(is defined\(approval\) and approval != null\) then approval else if \(is defined\(value\)\) then value else null" target="humanEmitValue" \/>/.test(sTask),
-    "the userTask reads the fact-named `approval` field (then falls back to `value`), so a bespoke form keyed on the fact publishes its value, not null",
+    /is defined\(approval\) and approval != null\) then approval else if \(is defined\(value\)\) then value else null/.test(sValueFeel),
+    `the bespoke boolean form still reads the fact-named \`approval\` field then \`value\`, got: ${sValueFeel}`,
   );
+  assert(
+    /matches\(lower case\(string\(.*\)\), "\^\(true\|false\)\$"\)/.test(sValueFeel) && /= "true"/.test(sValueFeel),
+    `the selected bespoke boolean value is coerced/validated to a real FEEL boolean, got: ${sValueFeel}`,
+  );
+  assert(/else null/.test(sValueFeel), "an unparseable bespoke boolean entry publishes null (the defined failure path)");
+
+  // The class, not the instance: a bespoke single-NUMBER form must likewise coerce the selected text to a
+  // real FEEL number (the guarded split compares `= 1`, not `"1"`).
+  const numeric = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "count", formKey: "bespoke-count" }, emits: [{ name: "tally", type: "number" }] }],
+    edges: [],
+  });
+  const nEl = elementForNode(numeric.bpmn, "h");
+  const nSub = numeric.bpmn.slice(numeric.bpmn.indexOf(`<bpmn:subProcess id="${nEl}"`));
+  const nTask = nSub.slice(nSub.indexOf("<bpmn:userTask"), nSub.indexOf("</bpmn:userTask>"));
+  const nValueOut = nTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/);
+  assert(nValueOut, "the bespoke number form maps a value onto humanEmitValue");
+  const nValueFeel = nValueOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /is defined\(tally\) and tally != null\) then tally else if \(is defined\(value\)\) then value else null/.test(nValueFeel),
+    `the bespoke number form still reads the fact-named \`tally\` field then \`value\`, got: ${nValueFeel}`,
+  );
+  assert(/number\(/.test(nValueFeel) && /else null/.test(nValueFeel), `the selected bespoke number value is coerced via number(…) with a null failure path, got: ${nValueFeel}`);
 
   // The class, not the instance: the SAME gap exists for a single ARTIFACT emit with a bespoke form —
   // the fact-named field must be preferred ahead of the canonical `resolvedArtifact` control.
@@ -573,9 +604,30 @@ test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED fi
   const gEl = elementForNode(generic.bpmn, "h");
   const gSub = generic.bpmn.slice(generic.bpmn.indexOf(`<bpmn:subProcess id="${gEl}"`));
   const gTask = gSub.slice(gSub.indexOf("<bpmn:userTask"), gSub.indexOf("</bpmn:userTask>"));
-  // A single-value node still prefers its fact name, but the generic form captures under `value`, so the
-  // fallback carries it; the mapping must still contain the `value` fallback.
+  // A generic single-VALUE node does NOT read a fact-named field (only an explicit bespoke form does), so
+  // it keeps the canonical `value` capture; a string passes through uncoerced.
   assert(/then value else null" target="humanEmitValue"/.test(gTask), "the generic single-value node keeps the canonical `value` fallback");
+
+  // The class, not the instance: a GENERIC (no formKey) single-BOOLEAN emit must ALSO coerce its captured
+  // `value` text to a real FEEL boolean — the same bug bites the generic textfield, not just an explicit
+  // bespoke form (PR #863 thread r4189815989, class sweep). It must NOT read a fact-named field (`verdict`),
+  // only the fixed `value` control.
+  const genBool = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve?" }, emits: [{ name: "ok", type: "boolean" }] }],
+    edges: [],
+  });
+  const gbEl = elementForNode(genBool.bpmn, "h");
+  const gbSub = genBool.bpmn.slice(genBool.bpmn.indexOf(`<bpmn:subProcess id="${gbEl}"`));
+  const gbTask = gbSub.slice(gbSub.indexOf("<bpmn:userTask"), gbSub.indexOf("</bpmn:userTask>"));
+  assert(gbTask.includes('formId="delivery-human-generic"'), "a generic single-boolean node embeds the generic form");
+  const gbOut = gbTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/);
+  assert(gbOut, "the generic boolean form maps a value onto humanEmitValue");
+  const gbFeel = gbOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(!/is defined\(ok\)/.test(gbFeel), `the generic form must NOT read the fact-named field, got: ${gbFeel}`);
+  assert(
+    /matches\(lower case\(string\(.*\)\), "\^\(true\|false\)\$"\)/.test(gbFeel) && /= "true"/.test(gbFeel),
+    `the generic single-boolean value is coerced/validated to a real FEEL boolean, got: ${gbFeel}`,
+  );
 });
 
 
