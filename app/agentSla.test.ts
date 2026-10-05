@@ -5,9 +5,15 @@
 // `node --test`.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { agentSlaTimeout, DEFAULT_AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { readEnv } from "./contracts.ts";
+
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const AGENT_SLA_SOURCE = readFileSync(join(REPO_ROOT, "app", "agentSla.ts"), "utf8");
 
 test("agentSlaTimeout: blank / absent / malformed → default", () => {
   assert.equal(agentSlaTimeout(undefined), DEFAULT_AGENT_SLA_TIMEOUT);
@@ -56,5 +62,26 @@ test("the canonical constant reads NANO_PR_AGENT_SLA_TIMEOUT through the ONE typ
     agentSlaTimeout(readEnv("NANO_PR_AGENT_SLA_TIMEOUT", { NANO_PR_AGENT_SLA_TIMEOUT: "  pt90m  " })),
     "PT90M",
     "a valid operator override is trimmed, validated, and honoured",
+  );
+});
+
+test("SOURCE GUARD: AGENT_SLA_TIMEOUT is built from readEnv, never a raw process.env read", () => {
+  // Regression for review r8 (PR #864, "Previously missed"): the composition test above recomputes
+  // `agentSlaTimeout(readEnv(...))` inline, so it stays green even if the exported constant regresses
+  // to `agentSlaTimeout(process.env.NANO_PR_AGENT_SLA_TIMEOUT)` — a raw read that bypasses the typed
+  // schema's trim/blank-collapse AND the compile-time synonym/typo check. `AGENT_SLA_TIMEOUT` is
+  // frozen once at import time, so a same-process test cannot re-drive it with a controlled env; the
+  // deterministic guard is source-level. Pin both halves: (1) no raw `process.env` read of the key
+  // anywhere in the module, and (2) the constant is composed from the typed `readEnv` reader.
+  assert.equal(
+    AGENT_SLA_SOURCE.includes("process.env.NANO_PR_AGENT_SLA_TIMEOUT"),
+    false,
+    "agentSla.ts must not read process.env.NANO_PR_AGENT_SLA_TIMEOUT directly — route it through " +
+      "readEnv (the ONE typed env schema) so a synonym/typo is a compile-time error",
+  );
+  assert.match(
+    AGENT_SLA_SOURCE,
+    /AGENT_SLA_TIMEOUT\s*=\s*agentSlaTimeout\(\s*readEnv\(\s*"NANO_PR_AGENT_SLA_TIMEOUT"/,
+    "AGENT_SLA_TIMEOUT must be composed from readEnv(\"NANO_PR_AGENT_SLA_TIMEOUT\")",
   );
 });
