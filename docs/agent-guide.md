@@ -116,6 +116,15 @@ blank/absent base is rejected with a 400. Starting a
 plan is idempotent on the plan key; an already-running plan short-circuits. The
 response (202) echoes the `planKey` and engine `processKey`.
 
+**Single issue, one PR (feature run, `startFeature`)** — no planning or fan-out. Same body and
+base-branch admission, plus `converge` (enrol the PR in §1) and `autoMerge`:
+
+```bash
+curl -sS -X POST __BASE__/actions/start/feature \
+  -H 'content-type: application/json' \
+  -d '{ "issue": "owner/repo#123", "baseBranch": "main", "confirmDefaultBase": true, "converge": true, "autoMerge": true }'
+```
+
 ### Base-branch admission (ADR 0003)
 
 `startPlanFanout` admits the base through one fail-fast gate before any task fans out.
