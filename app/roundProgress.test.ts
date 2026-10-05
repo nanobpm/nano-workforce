@@ -222,7 +222,10 @@ async function makeUnderTest(
     processKey: string | null,
     stillOwns: () => Promise<boolean>,
   ) => Promise<{ healed: boolean; sha?: string; reason?: string }>,
-  readRounds?: (prKey: string) => Promise<{ roundNo: number; status: string | null | undefined; summary: string | null | undefined }[]>,
+  readRounds?: (
+    prKey: string,
+    processInstanceKey: string | null | undefined,
+  ) => Promise<{ roundNo: number; status: string | null | undefined; summary: string | null | undefined }[]>,
 ) {
   const { makeHandler } = await import("../workers/progress-check/worker.ts");
   // Default the self-heal OFF (always `{ healed: false }`) so the existing escalation tests keep
@@ -420,6 +423,73 @@ test("progress-check: a head-advancing round whose findings keep hitting the sam
   assertEquals(parked, undefined, "a churn escalation never parks the PR at waiting_review");
   // The baseline still advances so a redelivery replays rather than recomputing.
   assertEquals(updates.at(-1)!.patch.last_round_head, "sha-2");
+});
+
+test("progress-check: the churn history read is SCOPED to the current run (#870)", async () => {
+  // Regression for cross-run history mixing: `rounds` is retained across resubmissions (migration
+  // 102), so the reader must filter by the job's processInstanceKey. The worker must pass its own
+  // `processInstanceKey` through to the reader — not a bare prKey — so a prior run's rows never leak
+  // into THIS run's churn window.
+  let seenKey: string | null | undefined = "unset";
+  const handler = await makeUnderTest(
+    async () => "sha-2",
+    async () => true,
+    undefined,
+    async (_prKey, pik) => {
+      seenKey = pik;
+      return []; // this run has no churning history of its own
+    },
+  );
+  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler(
+    { processInstanceKey: "run-B", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 7, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(seenKey, "run-B", "the reader is scoped to the calling job's process instance");
+  assertEquals(out.progressed, true, "with no in-run churn history the loop parks for review");
+  assertEquals(updates.at(-1)!.patch.status, "waiting_review");
+});
+
+test("progress-check: a churn escalation STAMPS the run-scoped churn-reset watermark (#870)", async () => {
+  // When churn fires, the worker must persist `churn_escalated_round = roundNo` so the human-answer
+  // resume (which re-enters the same numeric round and writes no `blocked` row) restarts the clock.
+  const file = "hooks/post/720-pure-zod-schemas.ts";
+  const handler = await makeUnderTest(
+    async () => "sha-2",
+    async () => true,
+    undefined,
+    async () => churnHistory(4, file),
+  );
+  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler(
+    { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 22, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(out.noProgressReason, "churn");
+  assertEquals(updates.at(-1)!.patch.churn_escalated_round, 22, "the escalating round is stamped as the churn-reset watermark");
+});
+
+test("progress-check: the churn-reset watermark SUPPRESSES re-escalation on the human-answer resume (#870)", async () => {
+  // The resumed round re-enters the SAME numeric round the escalation fired on (the counter only
+  // advances at review-wait), so the history is the identical churning window. With the row's
+  // `churn_escalated_round` already set to that round, `detectChurn` drops the answered window and the
+  // loop continues instead of re-raising the identical question.
+  const file = "hooks/post/720-pure-zod-schemas.ts";
+  const handler = await makeUnderTest(
+    async () => "sha-3",
+    async () => true,
+    undefined,
+    async () => churnHistory(4, file), // rounds 1..4, same file
+  );
+  // The PR row already carries the watermark stamped when the escalation was raised at round 4.
+  const { app, updates } = fakeApp({ last_round_head: "sha-2", churn_escalated_round: 4 });
+  const out = await handler(
+    { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 4, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(out.progressed, true, "the answered churn window never re-escalates — the loop continues");
+  assertEquals(out.noProgressReason, undefined);
+  assertEquals(updates.at(-1)!.patch.status, "waiting_review");
 });
 
 test("progress-check: normal convergence (findings trending down across different files) does NOT escalate early (#870)", async () => {

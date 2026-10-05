@@ -119,12 +119,29 @@ export function churnQuestion(file: string, rounds: number): string {
  *
  * The verdict is conservative by construction: a round with NO extractable file path in its summary
  * also breaks the signal (the intersection can't include a file absent from one round), so churn is
- * only ever reported on a genuinely same-file, same-surface loop. */
-export function detectChurn(rounds: readonly ChurnRound[], window: number = CHURN_WINDOW): ChurnResult {
-  if (window < 1 || rounds.length < window) return { churning: false };
+ * only ever reported on a genuinely same-file, same-surface loop.
+ *
+ * `resetAfterRound` is the run-scoped churn-reset watermark (issue #870): the round number at which a
+ * churn escalation was last raised AND answered by a human for THIS run. A churn escalation routes
+ * through `persist-escalation-noprogress` with `recordRound=false`, so it writes NO `blocked` round —
+ * and the human-answer resume re-enters the SAME numeric round (the round counter only advances at the
+ * review-wait gateway). Without this watermark `detectChurn` would therefore see the identical trailing
+ * `addressed` window the instant the resumed round is recorded and re-raise the SAME question forever
+ * (which durable adjudication may auto-resume repeatedly). Dropping every round at or before the
+ * watermark makes the human's scope decision restart the churn clock exactly as a recorded
+ * `needs_input`/`blocked` round would: churn can only fire again after a fresh `window` of same-file
+ * rounds ACCUMULATES past the decision. */
+export function detectChurn(
+  rounds: readonly ChurnRound[],
+  window: number = CHURN_WINDOW,
+  resetAfterRound = 0,
+): ChurnResult {
+  // Drop rounds at or before the churn-reset watermark so a human scope decision restarts the clock.
+  const live = resetAfterRound > 0 ? rounds.filter((r) => r.roundNo > resetAfterRound) : rounds;
+  if (window < 1 || live.length < window) return { churning: false };
 
   // Order by round number, then walk back over the trailing CONSECUTIVE `addressed` run.
-  const sorted = [...rounds].sort((a, b) => a.roundNo - b.roundNo);
+  const sorted = [...live].sort((a, b) => a.roundNo - b.roundNo);
   const trailing: ChurnRound[] = [];
   for (let i = sorted.length - 1; i >= 0; i--) {
     const r = sorted[i];

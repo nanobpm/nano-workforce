@@ -372,6 +372,41 @@ Notes:
   poller does not solicit a spurious review against the still-running round. The
   round cap and the review-wait timeout remain the outer safety nets.
 
+- **Non-converging same-surface churn guard (issue #870).** The no-progress guard
+  above catches a round that pushed NOTHING. Churn is the opposite failure mode: a
+  loop where EVERY round pushes a commit (so the head advances and the round
+  legitimately "progresses") yet never reaches a fixed point — a contested surface
+  (e.g. a fail-closed analyzer whose bypass forms are unbounded) keeps producing new
+  findings in the SAME file round after round, and the loop runs to `maxRounds`
+  without a human ever being asked to make the scope call. So on a head-advancing
+  `addressed` round, BEFORE parking for the next review, `pr.progress-check` reads
+  the PR's durable `rounds` history (`app/roundChurn.ts` `detectChurn`, the single
+  canonical detector) and escalates when the trailing run of CONSECUTIVE `addressed`
+  rounds is at least `CHURN_WINDOW` (4) long AND some single file appears in EVERY
+  round of that window. Requiring the SAME file across the whole window keeps normal
+  convergence — findings that move between areas and trend down — from escalating
+  early. The file names are mined from each round's free-text `summary` (URL spans
+  stripped, so a cited link is never mistaken for a repo path). When it fires, the
+  round routes to the SAME human escalation path the no-advance guard uses (`gw-husk`
+  → `persist-escalation-noprogress`) carrying a `noProgressReason:"churn"` SCOPE
+  question — it never parks at `waiting_review`. Two invariants keep the signal
+  honest across runs and resumes:
+    - **Run-scoped history.** The history read is filtered by the job's
+      `process_instance_key` (the `rounds` table is run-scoped — migration 102), so a
+      prior run's retained rows never leak into this run's window. A legacy NULL-key
+      row is dropped (fail-OPEN: dropping a row only ever reduces the churn signal).
+    - **Churn-reset watermark.** A churn escalation writes no `blocked` round
+      (`recordRound=false`) and the human-answer resume re-enters the SAME numeric
+      round (the counter only advances at the review-wait gateway), so the escalating
+      round number is persisted as `pull_requests.churn_escalated_round`
+      (migration 117, cleared on re-open with the rest of the per-run state).
+      `detectChurn` drops every round at or before that watermark, so the human's
+      scope decision restarts the churn clock: churn can only fire again after a
+      fresh `CHURN_WINDOW` of same-file rounds accumulates past the decision, exactly
+      as a recorded `needs_input`/`blocked` round would restart it.
+    A head that cannot be read, and a history read that throws, both fail OPEN (no
+    churn escalation) — a transient GitHub/datasource hiccup never fabricates one.
+
 - **Stale-output reset on round entry (issue #822).** `pr.capture-head` — the
   single task every entry into `review-round` routes through first (from `Start`,
   the review-loop re-enter, the human-answer resume, the husk auto-retry, and the

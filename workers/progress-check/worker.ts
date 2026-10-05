@@ -18,7 +18,7 @@
 import type { AgentInstanceSummary, AppApi, AppJobHandler } from "@nanobpm/urban";
 import { type HeadReader, makeDefaultReadHead } from "../../app/currentHead.ts";
 import { compareCommits, fetchBranchHead, fetchPrHead, updateBranchRef } from "../../app/github.ts";
-import { type ChurnRound, detectChurn } from "../../app/roundChurn.ts";
+import { CHURN_WINDOW, type ChurnRound, detectChurn } from "../../app/roundChurn.ts";
 import { decideProgress, isAddressedStatus } from "../../app/roundProgress.ts";
 import { parsePr } from "../../app/service.ts";
 import { WorldStore } from "../../app/world/index.ts";
@@ -240,18 +240,35 @@ function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
 }
 
 /** Reads a PR's durable round history (its `rounds` rows) projected to the fields {@link detectChurn}
- * consumes. Injectable so churn tests never touch the datasource; the default binds the app's
- * `rounds` table. */
-export type RoundsReader = (prKey: string) => Promise<ChurnRound[]>;
+ * consumes, SCOPED to one convergence run. Injectable so churn tests never touch the datasource; the
+ * default binds the app's `rounds` table and filters by the calling job's `processInstanceKey`. */
+export type RoundsReader = (prKey: string, processInstanceKey: string | null | undefined) => Promise<ChurnRound[]>;
 
-/** Default round-history reader — the canonical `rounds` table over `app.data`. Returns the rows
- * projected to {@link ChurnRound}; any read failure surfaces as a rejected promise the caller
- * `.catch`es to an empty history (churn then never fires, failing OPEN exactly like the head read). */
+/** Default round-history reader — the canonical `rounds` table over `app.data`, SCOPED to the current
+ * convergence run. `rounds` history is retained across resubmissions (`submitPr` re-opens a PR at
+ * `current_round = 1` in a NEW process instance WITHOUT deleting prior-run rows — `migration 102`,
+ * `workers/persist-round/worker.ts`), so a bare `pr_key` read mixes runs: a prior run's higher-numbered
+ * `converged`/`blocked` row could permanently break the trailing run, and a prior run's trailing
+ * `addressed` streak could fabricate an early churn escalation. So when the caller's
+ * `processInstanceKey` is known, keep ONLY rows stamped with it; a legacy NULL-key row (pre-`102`
+ * history) or any other run's row is dropped — a fail-OPEN policy, since dropping a row only ever
+ * REDUCES the churn signal (it can never fabricate one). When the key is absent (a testkit/synthetic
+ * job that persisted no key), fall back to the whole history, matching `persist-round`'s own
+ * null-key fallback. Any read failure surfaces as a rejected promise the caller `.catch`es to an empty
+ * history (churn then never fires, failing OPEN exactly like the head read). */
 function defaultReadRounds(app: AppApi): RoundsReader {
-  return async (prKey) => {
-    const tbl = app.data.table<{ pr_key: string; round_no: number; status: string; summary?: string }>("rounds", "id");
+  return async (prKey, processInstanceKey) => {
+    const tbl = app.data.table<{
+      pr_key: string;
+      round_no: number;
+      status: string;
+      summary?: string;
+      process_instance_key?: string | null;
+    }>("rounds", "id");
     const rows = await tbl.find({ pr_key: prKey });
-    return rows.map((r) => ({ roundNo: r.round_no, status: r.status, summary: r.summary ?? null }));
+    const key = processInstanceKey != null ? String(processInstanceKey) : null;
+    const scoped = key === null ? rows : rows.filter((r) => r.process_instance_key === key);
+    return scoped.map((r) => ({ roundNo: r.round_no, status: r.status, summary: r.summary ?? null }));
   };
 }
 
@@ -277,6 +294,7 @@ export function makeHandler(deps: {
       last_progress_job_key: string | null;
       last_progress_result: string | null;
       last_progress_agent_watermark: string | null;
+      churn_escalated_round: number | null;
     }>("pull_requests", "pr_key");
     const row = await prs.get(prKey);
 
@@ -319,7 +337,12 @@ export function makeHandler(deps: {
     };
     const commit = async (
       out: Out,
-      opts: { head?: string | null; status?: "waiting_review" | "converging"; agentWatermark?: string | null },
+      opts: {
+        head?: string | null;
+        status?: "waiting_review" | "converging";
+        agentWatermark?: string | null;
+        churnEscalatedRound?: number;
+      },
     ): Promise<Out> => {
       const ts = new Date().toISOString();
       // Re-check ownership immediately before the write and drop it when this job no longer owns the
@@ -338,6 +361,10 @@ export function makeHandler(deps: {
         // unreadable head, a non-addressed round, or an injected bare-verdict reader), so the next
         // round still correlates against the last real attempt.
         ...(opts.agentWatermark !== undefined ? { last_progress_agent_watermark: opts.agentWatermark } : {}),
+        // Stamp the run-scoped churn-reset watermark when a churn escalation is raised (#870), so the
+        // human-answer resume — which re-enters the SAME numeric round and writes no `blocked` row —
+        // restarts the churn clock instead of re-raising the identical question on the resumed round.
+        ...(opts.churnEscalatedRound !== undefined ? { churn_escalated_round: opts.churnEscalatedRound } : {}),
         ...(jobKey ? { last_progress_job_key: jobKey, last_progress_result: JSON.stringify(out) } : {}),
         updated_at: ts,
       });
@@ -456,8 +483,10 @@ export function makeHandler(deps: {
       // Only on an addressed round with a readable head (a GitHub outage fails OPEN like everywhere
       // else — never fabricate a churn escalation); the round-history read fails open to no-churn too.
       if (currentHead && isAddressedStatus(status)) {
-        const history: ChurnRound[] = await (deps.readRounds ?? defaultReadRounds(app))(prKey).catch(() => []);
-        const churn = detectChurn(history);
+        const history: ChurnRound[] = await (deps.readRounds ?? defaultReadRounds(app))(prKey, job.processInstanceKey).catch(
+          () => [],
+        );
+        const churn = detectChurn(history, CHURN_WINDOW, row?.churn_escalated_round ?? 0);
         if (churn.churning && churn.question) {
           app.log.info("non-converging churn detected — escalating for a human scope decision (#870)", {
             prKey,
@@ -469,7 +498,8 @@ export function makeHandler(deps: {
           // persist-escalation-noprogress, which renders `noProgressQuestion`): progressed:false with
           // huskRetry:false escapes the husk auto-retry straight to the human. Leave the status unset
           // (the escalation worker owns it) and advance the baseline + watermark, exactly as the
-          // no-advance escalation `commit` below does.
+          // no-advance escalation `commit` below does. Also stamp the run-scoped churn-reset watermark
+          // at THIS round so the human-answer resume restarts the churn clock (see detectChurn).
           return commit(
             {
               progressed: false,
@@ -478,7 +508,7 @@ export function makeHandler(deps: {
               noProgressReason: "churn",
               noProgressQuestion: churn.question,
             },
-            { head: currentHead, agentWatermark },
+            { head: currentHead, agentWatermark, churnEscalatedRound: roundNo },
           );
         }
       }

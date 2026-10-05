@@ -1,0 +1,12 @@
+-- Run-scoped churn-reset watermark (issue #870). Records the round number at which the
+-- non-converging same-surface churn guard last escalated for a human scope decision on THIS
+-- convergence run. The churn escalation routes through `persist-escalation-noprogress` with
+-- `recordRound=false` (it writes no `blocked` round) and the human-answer resume re-enters the SAME
+-- numeric round (the round counter only advances at the review-wait gateway), so without this
+-- watermark `detectChurn` (app/roundChurn.ts) would re-observe the identical trailing `addressed`
+-- window the instant the resumed round is recorded and re-raise the SAME question forever. Dropping
+-- every round at or before the watermark makes the human's decision restart the churn clock exactly
+-- as a recorded `needs_input`/`blocked` round would. Nullable + no default: NULL means "no churn
+-- escalation yet" (treated as 0 by the reader). Scoped to the run by `submitPr`, which clears it in
+-- the atomic reopen reset alongside the other per-run baselines.
+ALTER TABLE pull_requests ADD COLUMN churn_escalated_round INTEGER;

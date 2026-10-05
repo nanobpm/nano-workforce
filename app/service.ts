@@ -358,6 +358,13 @@ export interface PullRequest {
   // BEFORE registering its AgentInstance is classified as a husk instead of masked by a prior round's
   // terminal instance. Cleared on re-open with the rest of the per-run state. NULL before any read.
   last_progress_agent_watermark: string | null;
+  // Run-scoped churn-reset watermark (117_pull_requests_churn_escalated_round.sql, issue #870): the
+  // round number at which the non-converging same-surface churn guard last escalated for a human
+  // scope decision on THIS run. `detectChurn` (app/roundChurn.ts) drops rounds at or before it, so a
+  // human's answer restarts the churn clock (the escalation writes no `blocked` round and the resume
+  // re-enters the same numeric round). Cleared on re-open with the rest of the per-run state; NULL
+  // before any churn escalation.
+  churn_escalated_round: number | null;
   // Merge-protocol liveness (012_merge_protocol_attempt.sql): head commit last nudged by the
   // frugal-CI fresh-head-run remedy. A rebase changes the head and therefore permits a new nudge.
   fresh_head_run_head: string | null;
@@ -847,6 +854,11 @@ async function submitPrCritical(
         // normal, freshly-computed decision) rather than replaying the prior run's outcome.
         last_progress_job_key: null,
         last_progress_result: null,
+        // Clear the run-scoped churn-reset watermark (issue #870): it names a round number in the
+        // PRIOR convergence run's numbering. A fresh run restarts at round 1, so a carried-over
+        // watermark could drop the new run's early rounds from the churn window (or, after the new
+        // run passes that number, silently expire). Reset it so the new run's churn clock starts clean.
+        churn_escalated_round: null,
         outcome: null,
         converged_at: null,
         merged_at: null,

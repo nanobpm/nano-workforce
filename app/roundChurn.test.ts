@@ -153,6 +153,39 @@ test("detectChurn: picks a deterministic (lexicographically smallest) file when 
   assertEquals(res.file, "dir/alpha.ts", "the stable choice is the smallest common path");
 });
 
+test("detectChurn: THE RESET REPRO — a run-scoped churn-reset watermark restarts the clock after a human answers (#870)", () => {
+  // A churn escalation at round N writes NO `blocked` round (persist-escalation-noprogress sets
+  // recordRound=false) and the human-answer resume re-enters the SAME numeric round N, so WITHOUT the
+  // watermark the resumed round's history is the identical same-file window — and churn would re-fire
+  // forever. Passing `resetAfterRound=N` drops every round at or before N, so the clock restarts.
+  const file = "hooks/post/720-pure-zod-schemas.ts";
+  const window = sameFileRounds(CHURN_WINDOW, file);
+  // Red without the fix: this is exactly the window that escalated at round CHURN_WINDOW.
+  assertEquals(detectChurn(window).churning, true, "baseline: the window escalates");
+  // After the human answered the escalation raised at round CHURN_WINDOW, the resumed round re-enters
+  // round CHURN_WINDOW and re-runs detection with the watermark set — no new rounds past it yet.
+  assertEquals(
+    detectChurn(window, CHURN_WINDOW, CHURN_WINDOW).churning,
+    false,
+    "the human's scope decision restarts the churn clock — the answered window never re-escalates",
+  );
+});
+
+test("detectChurn: churn can fire AGAIN only after a fresh window accumulates past the reset watermark (#870)", () => {
+  // Rounds 1-4 escalated and were answered (watermark=4). Four MORE same-file rounds (5-8) then
+  // accumulate — a genuinely still-contested surface the human's decision did not resolve — so churn
+  // re-escalates on the post-decision window, not on the already-answered one.
+  const file = "hooks/post/720.ts";
+  const rounds = sameFileRounds(CHURN_WINDOW * 2, file); // rounds 1..8
+  assertEquals(detectChurn(rounds, CHURN_WINDOW, CHURN_WINDOW).churning, true, "a fresh post-reset window re-escalates");
+  // One short of a fresh window (only rounds 5-7 past the watermark) does NOT re-escalate yet.
+  assertEquals(
+    detectChurn(rounds.slice(0, CHURN_WINDOW + CHURN_WINDOW - 1), CHURN_WINDOW, CHURN_WINDOW).churning,
+    false,
+    "below a fresh window past the watermark, the loop continues",
+  );
+});
+
 // ── churnQuestion ────────────────────────────────────────────────────────────
 
 test("churnQuestion: frames an actionable SCOPE decision naming the contested file", () => {
