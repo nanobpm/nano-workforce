@@ -11,6 +11,7 @@ import {
   gatherConformance,
   hasDeliveredImplementation,
   hasDeliveredImplementationForPlan,
+  markConformanceSynthesisSla,
   recordConformance,
   renderConformanceBrief,
 } from "./conformance.ts";
@@ -311,4 +312,75 @@ test("acknowledgeConformance: a blank note settles the row without changing the 
   await acknowledgeConformance(data, PLAN, "  ");
   assertEquals(stores["plan_conformance"][0].review_status, "reviewed");
   assertEquals(stores["plan_conformance"][0].summary, "auth cache unverified");
+});
+
+// Synthesis-SLA preserve path (PR #864 review): the synthesize-SLA arm runs AFTER record-conformance
+// already filed a verdict, so it must NOT overwrite the audit — only flip review_status + append the
+// synthesis-timeout context.
+test("markConformanceSynthesisSla: preserves a filed verdict, only marks reviewing + appends the SLA reason", async () => {
+  const { data, stores } = memData();
+  await recordConformance(data, PLAN, {
+    status: "filed",
+    commentUrl: "https://x/7#issuecomment-1",
+    slicesMet: 4,
+    slicesReduced: 1,
+    slicesNotVerified: 0,
+    deviationsRaised: 1,
+    deviationsUnraised: 0,
+    hasDeviations: true,
+    summary: "6 items, 4 met",
+    report: "full conformance report",
+  });
+  await markConformanceSynthesisSla(data, PLAN, {
+    summary: "The retrospective-synthesis agent exceeded its time budget without completing.",
+    processKey: "p9",
+  });
+  assertEquals(stores["plan_conformance"].length, 1, "must not duplicate the plan_key row");
+  const row = stores["plan_conformance"][0];
+  // The filed verdict survives untouched.
+  assertEquals(row.status, "filed");
+  assertEquals(row.comment_url, "https://x/7#issuecomment-1");
+  assertEquals(row.slices_met, 4);
+  assertEquals(row.slices_reduced, 1);
+  assertEquals(row.has_deviations, 1);
+  assertEquals(row.report, "full conformance report");
+  // Only review_status flips and the SLA reason is APPENDED to the existing summary.
+  assertEquals(row.review_status, "reviewing");
+  assertEquals(row.process_key, "p9");
+  assertEquals(
+    row.summary,
+    "6 items, 4 met\n\nThe retrospective-synthesis agent exceeded its time budget without completing.",
+  );
+});
+
+test("markConformanceSynthesisSla: appends the SLA reason even when the prior summary is null", async () => {
+  const { data, stores } = memData();
+  stores["plan_conformance"] = [
+    { plan_key: PLAN, process_key: "p1", review_status: "reviewed", status: "skipped", summary: null },
+  ];
+  await markConformanceSynthesisSla(data, PLAN, { summary: "synthesis timed out", processKey: "p2" });
+  const row = stores["plan_conformance"][0];
+  assertEquals(row.status, "skipped", "verdict preserved");
+  assertEquals(row.review_status, "reviewing");
+  assertEquals(row.summary, "synthesis timed out", "no prior text -> the reason stands alone");
+});
+
+test("markConformanceSynthesisSla: inserts a minimal reviewing placeholder when no verdict row exists", async () => {
+  const { data, stores } = memData();
+  await markConformanceSynthesisSla(data, PLAN, { summary: "synthesis timed out", processKey: "p3" });
+  assertEquals(stores["plan_conformance"].length, 1, "a placeholder row is created so the ack never wedges");
+  const row = stores["plan_conformance"][0];
+  assertEquals(row.status, "skipped");
+  assertEquals(row.review_status, "reviewing");
+  assertEquals(row.process_key, "p3");
+  assertEquals(row.summary, "synthesis timed out");
+});
+
+test("markConformanceSynthesisSla: rejects an untrackable reviewing row with a null processKey", async () => {
+  const { data } = memData();
+  await assertRejects(
+    () => markConformanceSynthesisSla(data, PLAN, { summary: "synthesis timed out", processKey: null }),
+    Error,
+    "no process_key",
+  );
 });

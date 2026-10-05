@@ -9,7 +9,7 @@
 // reads `status`/`pr`/`summary` through), and exposes the raw transcript under the
 // `io.nanobpm.agentResult` envelope's `.output`.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { recordConformance } from "../../app/conformance.ts";
+import { markConformanceSynthesisSla, recordConformance } from "../../app/conformance.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 const AGENT_RESULT_KEY = "io.nanobpm.agentResult";
@@ -90,6 +90,13 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const agentSlaElapsed = asBool(job.variables.agentSlaElapsed);
   const escalate = hasDeviations || agentSlaElapsed;
 
+  // Synthesis-SLA preserve path (PR #864 review): the `record-synthesize-sla` arm runs AFTER
+  // `record-conformance` already persisted a real verdict, so it sets `preserveConformance=true` to
+  // flip the row to `reviewing` + append the synthesis-timeout context WITHOUT overwriting the filed
+  // status/counts/report/summary. Only the synthesize arm sets this; the conformance-SLA arm
+  // (`record-conformance-sla`) interrupts BEFORE any verdict exists, so it takes the upsert below.
+  const preserveConformance = asBool(job.variables.preserveConformance);
+
   // Invariant: an escalation must be trackable. If we found deviations to escalate but have no
   // process key to key the `reviewing` row off, the `hasDeviations` return below would still route
   // retro to the `conformance-escalation` user task — yet `pollUserTasks` can never surface that ack
@@ -102,6 +109,16 @@ const handler: AppJobHandler<In> = async (job, app) => {
       `conformance-record: ${planKey} has an escalation to record but no processInstanceKey to track ` +
         "the escalation — refusing to route to an untrackable conformance-escalation ack task",
     );
+  }
+
+  if (preserveConformance) {
+    // Preserve the existing conformance verdict; only mark it reviewing + append the SLA reason.
+    await markConformanceSynthesisSla(app.data, planKey, {
+      summary: summary ?? "The retrospective-synthesis agent exceeded its time budget without completing.",
+      processKey,
+    });
+    app.log.info(`conformance-record: ${planKey} — synthesis SLA, preserved existing verdict (reviewing)`);
+    return { hasDeviations };
   }
 
   await recordConformance(app.data, planKey, {

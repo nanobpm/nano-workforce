@@ -507,4 +507,89 @@ describe("agent-task SLA boundary — rerouted recorder→escalation arms (#849 
       rmSync(dbDir, { recursive: true, force: true });
     }
   });
+
+  test("retro: a synthesize SLA does NOT overwrite the conformance verdict filed earlier in the same run", async () => {
+    const { app, dbDir } = await bootApp();
+    try {
+      // Conformance FILES a real verdict (with a report comment + per-item counts) and NO deviations,
+      // so the token routes on to `synthesize`; that agent then hangs and its SLA fires. The preserve
+      // path must leave the filed verdict intact.
+      await app.engine.registerWorker("senior:conformance", async () => ({
+        status: "filed",
+        commentUrl: "https://github.com/owner/repo/issues/1#issuecomment-9",
+        slicesMet: 3,
+        slicesReduced: 0,
+        slicesNotVerified: 0,
+        deviationsRaised: 0,
+        deviationsUnraised: 0,
+        hasDeviations: false,
+        summary: "3 items, 3 met",
+      }));
+      parkAgent(app, "senior:retro");
+      await seedPlan(app, "owner/repo#1");
+      const { processInstanceKey } = await app.engine.createInstance({
+        processDefinitionId: "retro",
+        variables: {
+          planKey: "owner/repo#1",
+          repo: "owner/repo",
+          issueUrl: "https://github.com/owner/repo/issues/1",
+          agentSlaTimeout: AGENT_SLA_TIMEOUT,
+        },
+      });
+      const processKey = String(processInstanceKey);
+      await settleFully(app);
+
+      // The filed conformance verdict is recorded before synthesize parks.
+      const filed = await app.db
+        .table<{ status: string; summary: string | null; slices_met: number; report: string | null }>(
+          "plan_conformance",
+          "plan_key",
+        )
+        .get("owner/repo#1");
+      assert.equal(filed?.status, "filed", "the conformance verdict was filed before synthesize");
+      assert.equal(filed?.slices_met, 3);
+
+      // Fire the synthesize SLA.
+      await advancePastTimer(app, PAST_AGENT_SLA_MS);
+      const flows = takenFlows(app);
+      assert.ok(
+        flows.includes("be_synthesize_sla->record-synthesize-sla"),
+        `the synthesize SLA boundary fired (flows: ${flows.join(", ")})`,
+      );
+      const task = await openTaskById(app, processKey, "conformance-escalation");
+      assert.ok(task?.userTaskKey, "the synthesize-SLA arm parked the conformance-escalation task");
+
+      // The decisive assertion: the filed conformance verdict SURVIVES the synthesize-SLA timeout —
+      // status/counts/report unchanged, review_status flipped to reviewing, and the synthesis-timeout
+      // reason APPENDED to (not replacing) the audit summary.
+      const row = await app.db
+        .table<{
+          status: string;
+          comment_url: string | null;
+          slices_met: number;
+          slices_reduced: number;
+          has_deviations: number;
+          summary: string | null;
+          report: string | null;
+          review_status: string;
+        }>("plan_conformance", "plan_key")
+        .get("owner/repo#1");
+      assert.equal(row?.status, "filed", "the filed verdict status is preserved, not reset to skipped");
+      assert.equal(row?.comment_url, "https://github.com/owner/repo/issues/1#issuecomment-9");
+      assert.equal(row?.slices_met, 3, "the verdict counts are preserved");
+      assert.equal(row?.slices_reduced, 0);
+      assert.equal(row?.review_status, "reviewing", "the escalation is tracked for the ack task");
+      assert.ok(
+        (row?.summary ?? "").startsWith("3 items, 3 met"),
+        `the audit summary is preserved and the SLA reason appended (got: ${row?.summary})`,
+      );
+      assert.ok(
+        (row?.summary ?? "").includes("retrospective-synthesis agent exceeded its time budget"),
+        "the synthesis-timeout context is appended to the summary",
+      );
+    } finally {
+      await app.stop();
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
 });

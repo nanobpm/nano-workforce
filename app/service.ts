@@ -221,8 +221,11 @@ export const MAX_MERGE_STALL_ROUNDS = clampCiFixBudget(process.env.NANO_PR_MAX_M
  * merge-cell's trial-merge, the merge-loop's rebase / fix-ci, and retro's conformance / synthesize.
  * The convergence-loop (review-round / adversarial-review / classify-scope) and plan-fanout (plan /
  * review-plan) tasks are only PRE-SEEDED here — their boundaries are intentionally deferred to #868
- * (a bpmn-auto-layout back-edge routing limitation, #867), so for them this seed is preparation,
- * not yet an armed bound. Unlike a human-decision escalation (PT24H), an agent task has no human in
+ * (a bpmn-auto-layout back-edge routing limitation, #867). Plan-fanout's inline wave `trial-merge`
+ * (`plan-fanout.bpmn:524-542`) is likewise deferred: it is a separate external agent task from the
+ * standalone `merge-cell` (which has no callActivity caller) on a rerun back-edge with no boundary
+ * yet. For all of these this seed is preparation, not yet an armed bound. Unlike a human-decision
+ * escalation (PT24H), an agent task has no human in
  * the loop — if its capability is unstaffed or the agent hangs/crashes without failing the job, the
  * token would otherwise park forever. Override with `NANO_PR_AGENT_SLA_TIMEOUT` (ISO-8601 duration).
  * The canonical validated constant lives in the leaf module `app/agentSla.ts` (re-exported here) so

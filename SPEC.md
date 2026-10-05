@@ -816,9 +816,13 @@ durable, in-process backstop — no external watchdog.
 - **Pre-seeded, not yet bounded:** the convergence-loop (`review-round` / `adversarial-review` /
   `classify-scope`) and plan-fanout (`plan` / `review-plan`) agent tasks sit on a back-edge loop
   whose boundary the auto-layouter cannot yet route (nano-ide #867), so their SLA boundaries are
-  intentionally deferred to #868. They are seeded now as preparation; the defect-class guard
+  intentionally deferred to #868. Plan-fanout's **inline** wave `trial-merge`
+  (`plan-fanout.bpmn:524-542`) — distinct from the standalone `merge-cell` process, which has no
+  callActivity caller — is likewise an external agent task with rerun back-edges and no
+  `agentSlaTimeout` boundary, and is deferred to #868 alongside them. They are seeded now as
+  preparation; the defect-class guard
   (`app/agentic/vocab/agent-sla-boundary.test.ts`) covers exactly the bounded subset so a regression
-  on a *bounded* process is caught while the deferred two stay out.
+  on a *bounded* process is caught while the deferred ones stay out.
 - **Escalation routing.** The boundary never drops the token on the floor: implement-cell routes
   `be_implement_sla` → `record-escalation-sla` (synthesises an SLA-specific question) → the shared
   `human-escalation` cell; merge-cell routes `be_trial_agent_sla` → `record-trial-merge` (persists a

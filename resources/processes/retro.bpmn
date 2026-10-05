@@ -24,6 +24,7 @@
           <nano:extend name="deviationsUnraised" type="integer" optional="true" />
           <nano:extend name="hasDeviations" type="boolean" optional="true" />
           <nano:extend name="agentSlaElapsed" type="boolean" optional="true" />
+          <nano:extend name="preserveConformance" type="boolean" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
         </nano:shape>
       </nano:shapes>
@@ -93,6 +94,7 @@
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=true" target="agentSlaElapsed" />
+          <zeebe:input source="=true" target="preserveConformance" />
           <zeebe:input source="=&#34;The retrospective-synthesis agent exceeded its time budget (SLA &#34; + agentSlaTimeout + &#34;) without completing — it is hung or looping. Acknowledge to record the timeout and continue.&#34;" target="summary" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>

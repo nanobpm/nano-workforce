@@ -10,8 +10,12 @@
 // whose `<bpmn:timeDuration>=agentSlaTimeout` evaluates the seeded variable at timer creation
 // (FEEL-expression timer durations, engine-native). The convergence-loop and plan-fanout agent
 // tasks are only PRE-SEEDED here — their boundaries are intentionally deferred to #868 (a
-// bpmn-auto-layout back-edge routing limitation, #867), so seeding them now is preparation, not a
-// claim of effective coverage.
+// bpmn-auto-layout back-edge routing limitation, #867). That deferred set is the convergence-loop's
+// review-round / adversarial-review / classify-scope and plan-fanout's plan / review-plan, PLUS
+// plan-fanout's inline wave `trial-merge` (`plan-fanout.bpmn:524-542`) — a separate external agent
+// task from the standalone `merge-cell` (which has no callActivity caller) that sits on a rerun
+// back-edge with no boundary yet. Seeding them now is preparation, not a claim of effective
+// coverage.
 //
 // This closes the agent-task liveness gap: unlike an escalation *user* task (whose SLA the
 // escalationSla policy already bounds), an AGENT service task has no human in the loop — if no
