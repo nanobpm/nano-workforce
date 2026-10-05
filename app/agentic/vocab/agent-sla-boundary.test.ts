@@ -82,8 +82,9 @@ test("externalAgentTasksMissingSlaBoundary rejects a non-timer boundary and a no
 // layouter bug #867; the bound-the-rest follow-up is #868). They are bounded once the layouter
 // fix lands; until then this list is the landed scope, and the corpus assertion below covers
 // exactly these processes so a regression on a *bounded* process is caught while the deferred
-// two stay out.
-const BOUNDED_PROCESSES = ["implement-cell.bpmn", "merge-cell.bpmn", "retro.bpmn"] as const;
+// two stay out. merge-loop.bpmn's agent tasks (`fix-ci` / `rebase`) were bounded in an earlier
+// #849 commit, so it belongs here too — every already-bounded process stays regression-guarded.
+const BOUNDED_PROCESSES = ["implement-cell.bpmn", "merge-cell.bpmn", "merge-loop.bpmn", "retro.bpmn"] as const;
 
 test("DEFECT-CLASS GUARD: every external agent task in a bounded process carries an interrupting timer SLA boundary", () => {
   let anyAgentTasks = false;
