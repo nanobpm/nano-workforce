@@ -51,7 +51,7 @@ export interface ChurnResult {
 // literal (a filename hyphen) rather than a range.
 const PATH_RUN_RE = /[\w.@~+/-]+/g;
 
-// A repository-relative file path, ANCHORED at the start of a candidate run: one or more `dir/`
+// A NESTED repository-relative file path, ANCHORED at the start of a candidate run: one or more `dir/`
 // segments followed by a `name.ext`. Requiring at least one slash AND an extension keeps bare words
 // ("addressed", "zod") and prose out, so only genuine file references are mined. Because it is matched
 // against one bounded run (not scanned across the whole text), the inner `(?:…\/)+` backtracking on a
@@ -59,7 +59,19 @@ const PATH_RUN_RE = /[\w.@~+/-]+/g;
 // single start position — linear in the run length — rather than the O(n²) a global re-scan would
 // cost, which would otherwise let an adversarial summary (a long directory listing, minified stack
 // trace, or base64/data-URI blob) stall the `pr.progress-check` worker inside the convergence loop.
-const PATH_RE = /^(?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z0-9]+/;
+const NESTED_PATH_RE = /^(?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z0-9]+/;
+
+// A ROOT-LEVEL file (no directory segment): a bare `name.ext`. Root repository files — `package.json`,
+// `README.md`, `tsconfig.json`, `nano.app.json` — are legitimate churn surfaces too, but the nested
+// form above excludes them because it REQUIRES a slash, so a loop repeatedly editing `package.json`
+// would never escalate (issue #870 follow-up). Matching a bare `name.ext` re-admits the prose that the
+// required slash kept out, so this form is deliberately STRICTER on the extension to compensate: the
+// extension must be at least two ALPHABETIC characters, which excludes version strings (`4.8`),
+// sentence-ending abbreviations (`e.g`, `i.e`), and initialisms (`U.S`) that a permissive
+// `[A-Za-z0-9]+` extension would mine as fake root files. Tried only AFTER the nested form, and like it
+// anchored at the run start (no global re-scan), so it adds no backtracking cost — it only ever ADDS
+// real root-level files, never removes a nested path the form above already mines.
+const ROOT_FILE_RE = /^[\w@~+-][\w.@~+-]*\.[A-Za-z]{2,}[A-Za-z0-9]*/;
 
 // A whole URL span (`scheme://…host/path…`). A citation link's path (e.g.
 // `github.com/o/r/blob/main/docs/guide.md`) otherwise looks exactly like a repo-relative file, so a
@@ -77,14 +89,14 @@ const MAX_SCAN = 20000;
 /** Mine the set of distinct file paths referenced in a round summary. A non-string / empty summary
  * yields an empty set. The summary is length-bounded and URL spans are stripped, then each maximal
  * path-char run is tested for the path shape anchored at its start (see MAX_SCAN / URL_RE /
- * PATH_RUN_RE / PATH_RE). Paths are normalized by stripping trailing sentence punctuation and closing
+ * PATH_RUN_RE / NESTED_PATH_RE / ROOT_FILE_RE). Paths are normalized by stripping trailing sentence punctuation and closing
  * brackets so the same file referenced with different surrounding punctuation collapses to one key. */
 export function extractFiles(summary: string | null | undefined): Set<string> {
   const files = new Set<string>();
   if (typeof summary !== "string" || summary.trim() === "") return files;
   const scanned = summary.slice(0, MAX_SCAN).replace(URL_RE, " ");
   for (const run of scanned.matchAll(PATH_RUN_RE)) {
-    const hit = run[0].match(PATH_RE);
+    const hit = run[0].match(NESTED_PATH_RE) ?? run[0].match(ROOT_FILE_RE);
     if (hit === null) continue;
     const path = hit[0].replace(/[),.;:'"`\]]+$/u, "").trim();
     if (path !== "") files.add(path);

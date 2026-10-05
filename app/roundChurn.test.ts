@@ -21,6 +21,35 @@ test("extractFiles: strips trailing punctuation and closing brackets", () => {
   }
 });
 
+test("extractFiles: mines root-level files (no directory segment) so same-root-file churn escalates (#870)", () => {
+  // Root repository files are a legitimate churn surface: a loop repeatedly editing `package.json` or
+  // `README.md` must escalate just like a nested path. The nested form requires a slash, so these were
+  // previously missed entirely.
+  for (const s of ["bumped `package.json`", "reworded README.md.", "edit tsconfig.json,", "touched nano.app.json"]) {
+    const files = extractFiles(s);
+    assertEquals(files.size, 1, `expected one root file in ${JSON.stringify(s)}, got ${[...files].join(",")}`);
+  }
+  assert(extractFiles("bumped `package.json`").has("package.json"));
+  assert(extractFiles("reworded README.md.").has("README.md"));
+  // A repeated-root-file loop escalates end to end.
+  const rounds: ChurnRound[] = Array.from({ length: CHURN_WINDOW }, (_, i) => ({
+    roundNo: i + 1,
+    status: "addressed",
+    summary: `chore: bump dependency ${i} in \`package.json\``,
+  }));
+  const res = detectChurn(rounds);
+  assertEquals(res.churning, true);
+  assertEquals(res.file, "package.json");
+});
+
+test("extractFiles: prose dots are NOT mined as root files (version strings, abbreviations)", () => {
+  // The bare-filename form must stay conservative: version numbers and sentence abbreviations whose
+  // "extension" is numeric or a single letter must not be mined as fake root files.
+  for (const s of ["bumped to 4.8 today", "e.g. the loop", "i.e. a fixed point", "the U.S. team", "ran it 3.0 times"]) {
+    assertEquals(extractFiles(s).size, 0, `prose should yield no file in ${JSON.stringify(s)}`);
+  }
+});
+
 test("extractFiles: ignores bare words and paths without a slash or extension", () => {
   const files = extractFiles("addressed the zod concern and fail-closed on undefined (no file here) README");
   assertEquals(files.size, 0);
@@ -49,16 +78,24 @@ test("extractFiles: strips URL spans so a citation link's path is not mined as a
   assertEquals(detectChurn(rounds).churning, false);
 });
 
-test("extractFiles: a long unterminated path run is bounded (no quadratic stall)", () => {
-  // `"a/".repeat(n)` with no closing `name.ext` is PATH_RE's quadratic worst case; the length bound
-  // must keep this fast and yield no match. Guard with a wall-clock budget so a regression (removing
-  // the cap) fails loudly rather than hanging the worker inside the convergence loop.
+test("extractFiles: the scan is structurally capped at MAX_SCAN (no wall-clock dependence)", () => {
+  // Structural cap check — deterministic regardless of machine speed (AGENTS.md:21-29 forbids a
+  // nondeterministic wall-clock assertion). A valid path placed JUST PAST the 20,000-char MAX_SCAN
+  // boundary must be dropped; a path within it is still mined. Removing the `slice(0, MAX_SCAN)` cap
+  // would make the beyond-cap path extractable and fail this test on EVERY run.
+  const MAX_SCAN = 20000;
+  const filler = "x ".repeat(MAX_SCAN); // 40,000 chars — safely past the cap
+  const beyond = `${filler} src/beyond-cap.ts`;
+  assert(beyond.length > MAX_SCAN, "fixture must exceed the cap");
+  assertEquals(extractFiles(beyond).has("src/beyond-cap.ts"), false, "a path past MAX_SCAN is not mined");
+  assert(extractFiles(`src/within-cap.ts ${filler}`).has("src/within-cap.ts"), "a path within the cap IS mined");
+});
+
+test("extractFiles: a long unterminated path run yields no match (bounded, no quadratic stall)", () => {
+  // `"a/".repeat(n)` with no closing `name.ext` is the nested form's quadratic worst case; the length
+  // bound keeps it linear and yields no match. Asserted structurally (no timing).
   const pathological = `${"a/".repeat(50_000)}b`;
-  const start = Date.now();
-  const files = extractFiles(pathological);
-  const elapsedMs = Date.now() - start;
-  assertEquals(files.size, 0);
-  assert(elapsedMs < 2500, `extractFiles took ${elapsedMs}ms on an unterminated path run — cap regressed`);
+  assertEquals(extractFiles(pathological).size, 0);
 });
 
 // ── detectChurn ──────────────────────────────────────────────────────────────
