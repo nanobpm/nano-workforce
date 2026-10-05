@@ -25,6 +25,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { classifyEscalation } from "../../app/escalationTaxonomy.ts";
 import { featureRuns, recordFeatureEscalation } from "../../app/feature.ts";
+import { implementEscalationQuestion, NO_RESULT_QUESTION } from "../../app/implementEscalationReason.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`RecordEscalationIn` in implement-cell.bpmn) — ADR 0040.
@@ -35,12 +36,6 @@ interface Out extends Record<string, unknown> {
 
 const str = (v: unknown): string | undefined =>
   typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
-
-// The answerable prompt synthesised when the agent left no usable question — the implement-stage
-// analogue of record-trial-merge's synthesised trial-merge question. It names the recoverable work (a
-// PR may exist on the slice's branch) and the two answers the cell's `ic_gw_answer` gateway routes on.
-const NO_RESULT_QUESTION =
-  'The implementation agent finished without a machine-readable result (no status was reported), so we cannot tell whether the slice succeeded. It may still have opened a PR (check for a branch targeting the epic base). Choose "Answer" and give guidance to re-run the slice — or choose "Abandon" to skip it and continue.';
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
   const subjectKey = job.variables.subjectKey;
@@ -65,7 +60,17 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // through without an assertion.
   const agentEscalated = classifyEscalation({ kind: "task", status: job.variables.status, question: rawQuestion }) ===
     "decision-required";
-  const question = agentEscalated && rawQuestion ? rawQuestion : NO_RESULT_QUESTION;
+  // Synthesise an ACCURATE reason when the agent left no answerable question (issue #865): distinguish a
+  // true no-result (blank status) from a claimed-completion-without-delivery (an off-vocabulary status
+  // such as `completed`), and always fold in the agent's own `summary` and the run's transcript link
+  // (#863) via the single canonical builder so the reason can never drift from the reconcile step.
+  const question = agentEscalated && rawQuestion
+    ? rawQuestion
+    : implementEscalationQuestion({
+      status: job.variables.status,
+      summary: job.variables.summary,
+      transcriptUrl: job.variables.transcriptUrl,
+    });
 
   // Append to the canonical `feature_escalations` audit log (the surviving table `pollUserTasks` reads),
   // keyed by `subjectKey` — the feature run's `feature_key`, or the epic's `plan_key` for a wave slice.
@@ -79,7 +84,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     await runs.update(subjectKey, { status: "escalated", updated_at: new Date().toISOString() });
   }
 
-  app.log.info("record-escalation", { subjectKey, synthesised: question === NO_RESULT_QUESTION });
+  app.log.info("record-escalation", { subjectKey, synthesised: !(agentEscalated && rawQuestion) });
 
   // Re-emit the resolved question so the `feature-escalation` form (and the answer loop) see it.
   return { question };

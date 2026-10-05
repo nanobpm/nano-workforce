@@ -28,7 +28,7 @@ test("adopts an open PR on the branch: emits reconciled + status=opened + pr", a
       { jobKey: "j1", variables: { subjectKey: "owner/repo#801", task: { id: "issue-801" }, status: null } } as never,
       fakeApp,
     );
-    assertEquals(out, { reconciled: true, status: "opened", pr: "owner/repo#801" });
+    assertEquals(out, { reconciled: true, status: "opened", pr: "owner/repo#801", retry: false, retryNudge: null, retried: false });
   } finally {
     globalThis.fetch = prevFetch;
     if (prevToken === undefined) delete process.env.GITHUB_TOKEN;
@@ -54,7 +54,7 @@ test("wires baseBranch through: a wrong-base open PR is NOT adopted → escalate
       { jobKey: "j3", variables: { subjectKey: "owner/repo#7", task: { id: "issue-7" }, status: null, baseBranch: "epic/feat-x" } } as never,
       fakeApp,
     );
-    assertEquals(out, { reconciled: false, status: null, pr: null });
+    assertEquals(out, { reconciled: false, status: null, pr: null, retry: false, retryNudge: null, retried: false });
   } finally {
     globalThis.fetch = prevFetch;
     if (prevToken === undefined) delete process.env.GITHUB_TOKEN;
@@ -76,7 +76,35 @@ test("no open PR on the branch: falls through to escalate (reconciled=false)", a
       { jobKey: "j2", variables: { subjectKey: "owner/repo#7", task: { id: "issue-7" }, status: null } } as never,
       fakeApp,
     );
-    assertEquals(out, { reconciled: false, status: null, pr: null });
+    assertEquals(out, { reconciled: false, status: null, pr: null, retry: false, retryNudge: null, retried: false });
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = prevToken;
+    if (prevTransport === undefined) delete process.env.NANO_PR_GITHUB_TRANSPORT;
+    else process.env.NANO_PR_GITHUB_TRANSPORT = prevTransport;
+  }
+});
+
+test("claimed-completion (off-vocabulary status) + no PR → auto-retry once with a nudge (issue #865)", async () => {
+  const prevToken = process.env.GITHUB_TOKEN;
+  const prevTransport = process.env.NANO_PR_GITHUB_TRANSPORT;
+  const prevFetch = globalThis.fetch;
+  process.env.GITHUB_TOKEN = "t";
+  process.env.NANO_PR_GITHUB_TRANSPORT = "token";
+  globalThis.fetch = (async () => new Response(JSON.stringify([]), { status: 200 })) as typeof fetch;
+  try {
+    const out = await handler(
+      {
+        jobKey: "j4",
+        variables: { subjectKey: "owner/repo#41", task: { id: "issue-41" }, status: "completed" },
+      } as never,
+      fakeApp,
+    );
+    assertEquals(out.reconciled, false);
+    assertEquals(out.retry, true);
+    assertEquals(out.retried, true);
+    assertEquals(typeof out.retryNudge === "string" && out.retryNudge.length > 0, true);
   } finally {
     globalThis.fetch = prevFetch;
     if (prevToken === undefined) delete process.env.GITHUB_TOKEN;

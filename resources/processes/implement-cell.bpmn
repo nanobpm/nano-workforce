@@ -7,6 +7,8 @@
           <nano:extend name="subjectKey" type="string" />
           <nano:extend name="status" type="string" optional="true" />
           <nano:extend name="question" type="string" optional="true" />
+          <nano:extend name="summary" type="string" optional="true" />
+          <nano:extend name="transcriptUrl" type="string" optional="true" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>
@@ -21,10 +23,11 @@
           <zeebe:linkedResource resourceId="prompts/feature.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (is defined(baseBranchBrief) and baseBranchBrief != null) then baseBranchBrief else &#34;&#34;) + (if (is defined(blackboardBrief) and blackboardBrief != null) then blackboardBrief else &#34;&#34;) + (if (is defined(resolvedDepsBrief) and resolvedDepsBrief != null) then resolvedDepsBrief else &#34;&#34;) + (if (is defined(resolvedArtifacts) = false or resolvedArtifacts = null or count(resolvedArtifacts[item != null]) = 0) then &#34;&#34; else (&#34;&#10;&#10;---&#10;&#10;**Bound upstream readiness.** Build/install/clone against EXACTLY these resolved published versions (the ones first carrying the awaited capability), and bump the consumer dependency to them — never merely the newest:&#10;&#10;&#34; + string join(resolvedArtifacts[item != null], &#34;&#10;&#34;))) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
+          <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (is defined(baseBranchBrief) and baseBranchBrief != null) then baseBranchBrief else &#34;&#34;) + (if (is defined(blackboardBrief) and blackboardBrief != null) then blackboardBrief else &#34;&#34;) + (if (is defined(resolvedDepsBrief) and resolvedDepsBrief != null) then resolvedDepsBrief else &#34;&#34;) + (if (is defined(resolvedArtifacts) = false or resolvedArtifacts = null or count(resolvedArtifacts[item != null]) = 0) then &#34;&#34; else (&#34;&#10;&#10;---&#10;&#10;**Bound upstream readiness.** Build/install/clone against EXACTLY these resolved published versions (the ones first carrying the awaited capability), and bump the consumer dependency to them — never merely the newest:&#10;&#10;&#34; + string join(resolvedArtifacts[item != null], &#34;&#10;&#34;))) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions) + (if (is defined(retryNudge) and retryNudge != null) then retryNudge else &#34;&#34;)" target="appendPrompt" />
           <zeebe:input source="=if (is defined(transcriptUrlBase)) then transcriptUrlBase else null" target="transcriptUrlBase" />
           <zeebe:output source="=status" target="status" />
           <zeebe:output source="=question" target="question" />
+          <zeebe:output source="=if (is defined(summary)) then summary else null" target="summary" />
           <zeebe:output source="=if (is defined(transcriptUrl)) then transcriptUrl else null" target="transcriptUrl" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
@@ -50,6 +53,9 @@
           <zeebe:output source="=reconciled" target="reconciled" />
           <zeebe:output source="=status" target="status" />
           <zeebe:output source="=pr" target="pr" />
+          <zeebe:output source="=retry" target="retry" />
+          <zeebe:output source="=retryNudge" target="retryNudge" />
+          <zeebe:output source="=retried" target="implementRetried" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>ic_escalate</bpmn:incoming>
@@ -58,6 +64,7 @@
     <bpmn:exclusiveGateway id="ic_reconcile_gw" name="reconciled?" default="ic_toRecordEscalation">
       <bpmn:incoming>ic_toReconcileGw</bpmn:incoming>
       <bpmn:outgoing>ic_reconciled</bpmn:outgoing>
+      <bpmn:outgoing>ic_retry</bpmn:outgoing>
       <bpmn:outgoing>ic_toRecordEscalation</bpmn:outgoing>
     </bpmn:exclusiveGateway>
     <bpmn:callActivity id="escalate" name="Human escalation">
@@ -114,6 +121,7 @@
         </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>ic_answerLoop</bpmn:incoming>
+      <bpmn:incoming>ic_retry</bpmn:incoming>
       <bpmn:outgoing>ic_reImplement</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:endEvent id="ic_end" name="Task done">
@@ -134,6 +142,9 @@
     <bpmn:sequenceFlow id="ic_toRecordEscalation" name="escalated" sourceRef="ic_reconcile_gw" targetRef="record-escalation" />
     <bpmn:sequenceFlow id="ic_sla" name="agent SLA elapsed" sourceRef="be_implement_sla" targetRef="record-escalation-sla" />
     <bpmn:sequenceFlow id="ic_slaToEscalate" sourceRef="record-escalation-sla" targetRef="escalate" />
+    <bpmn:sequenceFlow id="ic_retry" name="retry" sourceRef="ic_reconcile_gw" targetRef="record-implementing">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=retry = true</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="ic_toEscalate" sourceRef="record-escalation" targetRef="escalate" />
     <bpmn:sequenceFlow id="ic_toAnswerGw" sourceRef="escalate" targetRef="ic_gw_answer" />
     <bpmn:sequenceFlow id="ic_answerLoop" name="answer" sourceRef="ic_gw_answer" targetRef="record-implementing">
@@ -156,7 +167,7 @@
       <bpmndi:BPMNShape id="BPMNShape_ic_gw" bpmnElement="ic_gw" isMarkerVisible="true">
         <dc:Bounds x="441" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="391" y="150" width="70" height="28" />
+          <dc:Bounds x="431" y="62" width="70" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_reconcile-implement" bpmnElement="reconcile-implement">
@@ -175,7 +186,7 @@
         <dc:Bounds x="966" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record-escalation-sla" bpmnElement="record-escalation-sla">
-        <dc:Bounds x="416" y="240" width="100" height="80" />
+        <dc:Bounds x="416" y="400" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_ic_gw_answer" bpmnElement="ic_gw_answer" isMarkerVisible="true">
         <dc:Bounds x="1366" y="95" width="50" height="50" />
@@ -239,12 +250,20 @@
           <dc:Bounds x="1456" y="98" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_retry" bpmnElement="ic_retry">
+        <di:waypoint x="841" y="145" />
+        <di:waypoint x="841" y="280" />
+        <di:waypoint x="1516" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="846" y="223" width="39" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_answerLoop" bpmnElement="ic_answerLoop">
         <di:waypoint x="1391" y="145" />
         <di:waypoint x="1391" y="280" />
         <di:waypoint x="1516" y="280" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1337" y="206" width="49" height="14" />
+          <dc:Bounds x="1396" y="206" width="49" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_done" bpmnElement="ic_done">
@@ -266,27 +285,23 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_slaToEscalate" bpmnElement="ic_slaToEscalate">
-        <di:waypoint x="516" y="300" />
-        <di:waypoint x="536" y="300" />
-        <di:waypoint x="536" y="340" />
-        <di:waypoint x="1436" y="340" />
-        <di:waypoint x="1436" y="220" />
-        <di:waypoint x="1604" y="220" />
-        <di:waypoint x="1604" y="82" />
+        <di:waypoint x="516" y="440" />
+        <di:waypoint x="1636" y="440" />
+        <di:waypoint x="1636" y="82" />
         <di:waypoint x="1266" y="82" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_sla" bpmnElement="ic_sla">
         <di:waypoint x="266" y="178" />
-        <di:waypoint x="266" y="280" />
-        <di:waypoint x="416" y="280" />
+        <di:waypoint x="266" y="440" />
+        <di:waypoint x="416" y="440" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="271" y="215" width="70" height="28" />
+          <dc:Bounds x="271" y="295" width="70" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_reImplement" bpmnElement="ic_reImplement">
-        <di:waypoint x="1616" y="280" />
-        <di:waypoint x="1636" y="280" />
-        <di:waypoint x="1636" y="60" />
+        <di:waypoint x="1516" y="280" />
+        <di:waypoint x="60" y="280" />
+        <di:waypoint x="60" y="60" />
         <di:waypoint x="266" y="60" />
         <di:waypoint x="266" y="80" />
       </bpmndi:BPMNEdge>

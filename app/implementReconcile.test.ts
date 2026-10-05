@@ -20,16 +20,29 @@ const openPr = (number: number, base = "main"): HeadPr => ({
   baseRef: base,
 });
 
+// The non-adopt, non-retry tail every escalate/adopt assertion carries (issue #865 widened the result
+// shape with the auto-retry fields). Spread it into each expected object so the tests stay focused on
+// the reconcile/pr decision.
+const tail = { retry: false, retryNudge: null, retried: false } as const;
+
 test("implementCellBranch: the deterministic feat/<task.id> branch", () => {
   assertEquals(implementCellBranch("issue-796"), "feat/issue-796");
 });
 
-test("shouldReconcileImplement: only a blank/absent status reconciles", () => {
+test("shouldReconcileImplement: blank or a claimed-completion (off-vocabulary) status reconciles; a recognised status or an answerable question does not", () => {
   assertEquals(shouldReconcileImplement(null), true);
   assertEquals(shouldReconcileImplement(undefined), true);
   assertEquals(shouldReconcileImplement("  "), true);
+  // Off-vocabulary "claimed completion" (issue #865) — look for a delivered PR before escalating.
+  assertEquals(shouldReconcileImplement("completed"), true);
+  assertEquals(shouldReconcileImplement("done"), true);
+  // Recognised statuses are the agent's own clean terminal / escalation — never auto-reconciled.
   assertEquals(shouldReconcileImplement("escalated"), false);
   assertEquals(shouldReconcileImplement("opened"), false);
+  assertEquals(shouldReconcileImplement("blocked"), false);
+  assertEquals(shouldReconcileImplement("skipped"), false);
+  // An off-vocabulary status carrying an answerable question is a GENUINE escalation — honour it.
+  assertEquals(shouldReconcileImplement("completed", "Which API should I use?"), false);
 });
 
 test("pickAdoptablePr: the first OPEN PR wins; merged/closed are not adoptable", () => {
@@ -62,7 +75,7 @@ test("reconcileImplement: blank status + open PR on feat/<task.id> → adopt (st
     lookup,
     "token",
   );
-  assertEquals(res, { reconciled: true, status: "opened", pr: "nanobpm/nano-workforce#800" });
+  assertEquals(res, { reconciled: true, status: "opened", pr: "nanobpm/nano-workforce#800", ...tail });
   assertEquals(calls, [{ repo: "nanobpm/nano-workforce", branch: "feat/issue-796" }]);
 });
 
@@ -72,7 +85,7 @@ test("reconcileImplement: blank status but NO branch/PR → escalate (unchanged 
     async () => [],
     "token",
   );
-  assertEquals(res, { reconciled: false, status: null, pr: null });
+  assertEquals(res, { reconciled: false, status: null, pr: null, ...tail });
 });
 
 test("reconcileImplement: a genuine escalation status is honoured, GitHub never consulted", async () => {
@@ -85,7 +98,7 @@ test("reconcileImplement: a genuine escalation status is honoured, GitHub never 
     },
     "token",
   );
-  assertEquals(res, { reconciled: false, status: "escalated", pr: null });
+  assertEquals(res, { reconciled: false, status: "escalated", pr: null, ...tail });
   assertEquals(consulted, false);
 });
 
@@ -106,7 +119,7 @@ test("reconcileImplement: a lookup transport failure falls through to escalate (
     },
     "token",
   );
-  assertEquals(res, { reconciled: false, status: null, pr: null });
+  assertEquals(res, { reconciled: false, status: null, pr: null, ...tail });
 });
 
 test("reconcileImplement: an existing pr is carried through unchanged on fall-through (never wiped)", async () => {
@@ -116,7 +129,7 @@ test("reconcileImplement: an existing pr is carried through unchanged on fall-th
     async () => [],
     "token",
   );
-  assertEquals(escalated, { reconciled: false, status: "escalated", pr: "owner/repo#42" });
+  assertEquals(escalated, { reconciled: false, status: "escalated", pr: "owner/repo#42", ...tail });
 
   // Blank status but no adoptable PR → escalate; an existing pr still survives.
   const noAdopt = await reconcileImplement(
@@ -124,7 +137,7 @@ test("reconcileImplement: an existing pr is carried through unchanged on fall-th
     async () => [],
     "token",
   );
-  assertEquals(noAdopt, { reconciled: false, status: null, pr: "owner/repo#42" });
+  assertEquals(noAdopt, { reconciled: false, status: null, pr: "owner/repo#42", ...tail });
 });
 
 test("reconcileImplement: a successful adoption overwrites any existing pr with the adopted key", async () => {
@@ -133,7 +146,7 @@ test("reconcileImplement: a successful adoption overwrites any existing pr with 
     async () => [openPr(99)],
     "token",
   );
-  assertEquals(res, { reconciled: true, status: "opened", pr: "owner/repo#99" });
+  assertEquals(res, { reconciled: true, status: "opened", pr: "owner/repo#99", ...tail });
 });
 
 test("reconcileImplement: with a pinned baseBranch, only a PR targeting it is adopted", async () => {
@@ -143,7 +156,7 @@ test("reconcileImplement: with a pinned baseBranch, only a PR targeting it is ad
     async () => [openPr(50, "stale-base"), openPr(51, "epic/feat-x")],
     "token",
   );
-  assertEquals(adopt, { reconciled: true, status: "opened", pr: "owner/repo#51" });
+  assertEquals(adopt, { reconciled: true, status: "opened", pr: "owner/repo#51", ...tail });
 
   // Only a wrong-base PR exists → escalate rather than converge the wrong branch.
   const escalate = await reconcileImplement(
@@ -151,7 +164,7 @@ test("reconcileImplement: with a pinned baseBranch, only a PR targeting it is ad
     async () => [openPr(52, "stale-base")],
     "token",
   );
-  assertEquals(escalate, { reconciled: false, status: null, pr: "owner/repo#42" });
+  assertEquals(escalate, { reconciled: false, status: null, pr: "owner/repo#42", ...tail });
 });
 
 test("reconcileImplement: a missing taskId or unparseable subjectKey → escalate, no lookup", async () => {
@@ -163,4 +176,66 @@ test("reconcileImplement: a missing taskId or unparseable subjectKey → escalat
   assertEquals((await reconcileImplement({ status: null, subjectKey: "owner/repo#7", taskId: null }, lookup, "t")).reconciled, false);
   assertEquals((await reconcileImplement({ status: null, subjectKey: "not-a-key", taskId: "issue-7" }, lookup, "t")).reconciled, false);
   assertEquals(consulted, false);
+});
+
+// Issue #865 — a claimed-completion status (an off-vocabulary `completed`) is no longer dead-ended at a
+// false "no result" escalation: it reconciles from GitHub (adopting a delivered PR), and when none
+// exists it is auto-retried ONCE before escalating.
+test("reconcileImplement: claimed-completion status + an open PR on the branch → adopt (status=opened)", async () => {
+  const calls: Array<{ repo: string; branch: string }> = [];
+  const res = await reconcileImplement(
+    { status: "completed", subjectKey: "owner/repo#41", taskId: "issue-41" },
+    async (repo, branch) => {
+      calls.push({ repo, branch });
+      return [openPr(900)];
+    },
+    "token",
+  );
+  assertEquals(res, { reconciled: true, status: "opened", pr: "owner/repo#900", retry: false, retryNudge: null, retried: false });
+  assertEquals(calls, [{ repo: "owner/repo", branch: "feat/issue-41" }]);
+});
+
+test("reconcileImplement: claimed-completion + NO PR + not yet retried → auto-retry once with a nudge", async () => {
+  const res = await reconcileImplement(
+    { status: "completed", subjectKey: "owner/repo#41", taskId: "issue-41" },
+    async () => [],
+    "token",
+  );
+  assertEquals(res.reconciled, false);
+  assertEquals(res.retry, true);
+  assertEquals(res.retried, true);
+  assertEquals(res.status, "completed");
+  assertEquals(typeof res.retryNudge === "string" && res.retryNudge.includes("completed"), true);
+});
+
+test("reconcileImplement: claimed-completion + NO PR but ALREADY retried → escalate (retry is bounded once)", async () => {
+  const res = await reconcileImplement(
+    { status: "completed", subjectKey: "owner/repo#41", taskId: "issue-41", retried: true },
+    async () => [],
+    "token",
+  );
+  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: true });
+});
+
+test("reconcileImplement: claimed-completion carrying an answerable question → escalate, no lookup, no retry", async () => {
+  let consulted = false;
+  const res = await reconcileImplement(
+    { status: "completed", subjectKey: "owner/repo#41", taskId: "issue-41", question: "Which design?" },
+    async () => {
+      consulted = true;
+      return [];
+    },
+    "token",
+  );
+  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: false });
+  assertEquals(consulted, false);
+});
+
+test("reconcileImplement: a true no-result (blank status) with no PR escalates — it is NOT auto-retried", async () => {
+  const res = await reconcileImplement(
+    { status: null, subjectKey: "owner/repo#7", taskId: "issue-7" },
+    async () => [],
+    "token",
+  );
+  assertEquals(res.retry, false);
 });

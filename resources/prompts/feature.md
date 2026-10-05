@@ -18,6 +18,19 @@ The job payload (stdin JSON) carries:
 
 You have `gh` / git authenticated for the target repository.
 
+## Workspace confinement — work ONLY inside your run workspace
+
+Your run has a private workspace directory (the git repository you start in — the
+clone/worktree the harness checked out for you). **Do all your work there.** Never
+`cd /tmp/<repo>`, clone into a shared path, or edit files outside your workspace:
+that directory is torn down when your run ends, so edits made elsewhere are
+**silently lost** (and can collide with a sibling run sharing the path). If you
+need the repo, use the one you are already in — do not clone a second copy into
+`/tmp`. A completion that leaves no commit on `feat/<task.id>` and no PR is treated
+as a **failed, undelivered attempt** (see the reconcile/escalation behaviour the
+app applies), so your work must land in a pushed commit on your branch, nowhere
+else.
+
 ## Your branch (deterministic — the same across a resume)
 
 Always use the branch **`feat/<task.id>`**. Because a resumed run gets a fresh
@@ -192,7 +205,9 @@ Write a JSON object of **result variables** to the file named by the
 
 Rules:
 
-- `status` — one of:
+- `status` — one of EXACTLY these four tokens (any other value — e.g.
+  `completed`, `done`, `success` — is **off-vocabulary**: the app cannot route on
+  it and will treat your slice as **not delivered**, so never invent one):
   - `opened` — a PR was created (ready for review). Set `pr`.
   - `escalated` — you need a human decision; set `question`, and set `pr` to the
     **draft** PR you opened to preserve your work (if you managed to open one).

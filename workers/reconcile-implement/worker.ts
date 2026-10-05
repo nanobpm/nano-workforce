@@ -28,6 +28,8 @@ interface In extends Record<string, unknown> {
   status?: unknown;
   pr?: unknown;
   baseBranch?: unknown;
+  question?: unknown;
+  implementRetried?: unknown;
 }
 
 /** The cell's deterministic branch is `feat/<task.id>`; `task` is the implement-cell's slice object.
@@ -45,6 +47,8 @@ const handler: AppJobHandler<In, ReconcileImplementResult> = async (job, app) =>
       taskId: taskId(job.variables.task),
       pr: job.variables.pr,
       baseBranch: job.variables.baseBranch,
+      question: job.variables.question,
+      retried: job.variables.implementRetried,
     },
     listPrsForHead,
     process.env.GITHUB_TOKEN ?? "",
@@ -52,6 +56,7 @@ const handler: AppJobHandler<In, ReconcileImplementResult> = async (job, app) =>
   app.log.info("reconcile-implement", {
     subjectKey: job.variables.subjectKey ?? null,
     reconciled: res.reconciled,
+    retry: res.retry,
     pr: res.pr,
   });
   return res;
