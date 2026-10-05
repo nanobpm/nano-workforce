@@ -90,6 +90,40 @@ test("extractFiles: the allowlisted extension must be FINAL — a trailing dotte
   assert(extractFiles("regenerated lib.d.ts").has("lib.d.ts"));
 });
 
+test("extractFiles: a SLASH-qualified dotted symbol is NOT mined as a nested file (#870 review)", () => {
+  // Class: the nested matcher required only `name.<anything>` as the final segment, so a slash-qualified
+  // API chain (`src/schema.ts.parse`, `lib/config.json.parse`) was mined WHOLE as a fake repo file —
+  // the sibling of the root-path false positive above, which the root allowlist already closes. Four
+  // rounds citing the same qualified symbol while fixing different real files would intersect on it and
+  // falsely escalate. The nested final component must now also be an allowlisted, FINAL extension.
+  for (const s of [
+    "called src/schema.ts.parse on the payload",
+    "ran lib/config.json.parse then merged",
+    "invoked data/opts.yaml.load in the loader",
+    "used ui/app.css.modules helper",
+  ]) {
+    assertEquals(extractFiles(s).size, 0, `nested trailing-segment chain should yield no file in ${JSON.stringify(s)}`);
+  }
+  // But genuine nested files — including multi-dot basenames whose allowlisted extension IS final —
+  // still mine whole.
+  assert(extractFiles("fixed src/schema.ts").has("src/schema.ts"));
+  assert(extractFiles("touched dir/foo.test.ts").has("dir/foo.test.ts"));
+  assert(extractFiles("edited pkg/nano.app.json").has("pkg/nano.app.json"));
+  assert(extractFiles("regenerated types/lib.d.ts").has("types/lib.d.ts"));
+});
+
+test("extractFiles: a repeated SLASH-qualified dotted-symbol loop does NOT escalate as churn (#870 review)", () => {
+  // Acceptance counter-case for the nested class: four rounds that all cite the SAME slash-qualified
+  // API symbol (src/schema.ts.parse) while fixing DIFFERENT real files must NOT be churn — the shared
+  // token is a qualified symbol, not a contested file.
+  const rounds: ChurnRound[] = Array.from({ length: CHURN_WINDOW }, (_, i) => ({
+    roundNo: i + 1,
+    status: "addressed",
+    summary: `re-checked src/schema.ts.parse again; fixed src/f${i}.ts this round`,
+  }));
+  assertEquals(detectChurn(rounds).churning, false);
+});
+
 test("extractFiles: mines supported dotfiles and extensionless root files (#870 review)", () => {
   // Class: the allowlist/comment name `.gitignore`, `.env`, `Dockerfile`, `Makefile` as churn
   // surfaces, but the `name.ext` matcher can never match a leading-dot dotfile or an extensionless

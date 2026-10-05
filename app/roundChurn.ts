@@ -51,6 +51,23 @@ export interface ChurnResult {
 // literal (a filename hyphen) rather than a range.
 const PATH_RUN_RE = /[\w.@~+/-]+/g;
 
+// The KNOWN source/config/doc/build extensions a mined file path's FINAL dotted component must be —
+// shared by BOTH the nested and root matchers below. A permissive `[A-Za-z0-9]+`/`[A-Za-z]{2,}`
+// extension mines dotted API symbols and prose as fake files — `z.object`, `object.keys`,
+// `example.com`, `schema.ts.parse` all look like `name.ext` — so four rounds that each mention the
+// same qualified symbol while fixing DIFFERENT real files would intersect on that symbol and falsely
+// escalate (Copilot review of #870). Restricting the extension to a real-file allowlist rejects those
+// (`object`, `keys`, `com`, `parse` are not file extensions) while keeping every genuine file. It is
+// fail-open in the safe direction: an exotic-but-real extension it omits (`.svelte` is listed; a
+// brand-new one is not) only ever MISSES a churn signal, never fabricates one. The allowlist contains
+// no digits or single letters, so it also excludes version strings (`4.8`), sentence-ending
+// abbreviations (`e.g`, `i.e`), and initialisms (`U.S`).
+const ROOT_FILE_EXT =
+  "(?:ts|tsx|js|jsx|mjs|cjs|mts|cts|json|jsonc|json5|md|markdown|yml|yaml|toml|xml|html|css|scss|" +
+  "less|sql|sh|bash|zsh|py|rb|go|rs|java|kt|kts|swift|c|h|cc|hh|cpp|cxx|hpp|cs|fs|vue|svelte|php|" +
+  "pl|pm|lua|dart|ex|exs|erl|hrl|clj|cljs|scala|groovy|gradle|properties|ini|cfg|conf|config|env|" +
+  "lock|mod|sum|mk|cmake|txt|bpmn|form|dmn|proto|graphql|gql|prisma|tf|hcl)";
+
 // A NESTED repository-relative file path, ANCHORED at the start of a candidate run: one or more `dir/`
 // segments followed by a `name.ext`. Requiring at least one slash AND an extension keeps bare words
 // ("addressed", "zod") and prose out, so only genuine file references are mined. Because it is matched
@@ -59,23 +76,31 @@ const PATH_RUN_RE = /[\w.@~+/-]+/g;
 // single start position — linear in the run length — rather than the O(n²) a global re-scan would
 // cost, which would otherwise let an adversarial summary (a long directory listing, minified stack
 // trace, or base64/data-URI blob) stall the `pr.progress-check` worker inside the convergence loop.
-const NESTED_PATH_RE = /^(?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z0-9]+/;
+//
+// Like the root form below, the FINAL dotted component must be an allowlisted ROOT_FILE_EXT and the
+// trailing `(?![\w.@~+-])` negative lookahead refuses any following path char — crucially another
+// `.segment`. Without those, a SLASH-qualified API chain like `src/schema.ts.parse` /
+// `lib/config.json.parse` was mined WHOLE as a fake repo file: four summaries that cite that same
+// qualified symbol while fixing different real files intersect on it and falsely escalate, exactly the
+// class the root allowlist already closes (Copilot review of #870). The basename's first char is a
+// non-dot path char so a true `name.ext` anchors the stem; the greedy `[\w.@~+-]*` still lets a
+// multi-dot basename (`dir/foo.test.ts`, `lib/nano.app.json`) match whole by backtracking the LAST
+// allowlisted dot as the separator.
+const NESTED_PATH_RE = new RegExp(
+  `^(?:[\\w.@~+-]+\\/)+[\\w@~+-][\\w.@~+-]*\\.${ROOT_FILE_EXT}(?![\\w.@~+-])`,
+  "i",
+);
 
 // A ROOT-LEVEL file (no directory segment): a bare `name.ext`. Root repository files — `package.json`,
 // `README.md`, `tsconfig.json`, `nano.app.json` — are legitimate churn surfaces too, but the nested
 // form above excludes them because it REQUIRES a slash, so a loop repeatedly editing `package.json`
 // would never escalate (issue #870 follow-up). Matching a bare `name.ext` re-admits the prose that the
-// required slash kept out, so this form is deliberately STRICTER to compensate, on two axes:
+// required slash kept out, so this form is deliberately STRICTER to compensate, on three axes — all
+// now shared with the nested matcher above via ROOT_FILE_EXT + the trailing lookahead:
 //
-//  1. The extension must be a KNOWN source/config/doc/build extension (ROOT_FILE_EXT below), not just
-//     "any letters". A permissive `[A-Za-z]{2,}` extension mines dotted API symbols and prose as fake
-//     root files — `z.object`, `z.string`, `object.keys`, `example.com`, `Deno.land` all match it — so
-//     four rounds that each mention the same `z.object` schema while fixing DIFFERENT real files would
-//     intersect on `z.object` and falsely escalate (Copilot review of #870). Restricting the extension
-//     to a real-file allowlist rejects those (their "extension" — `object`, `string`, `keys`, `com`,
-//     `land` — is not a file extension) while keeping every genuine root file. It is fail-open in the
-//     safe direction: an exotic-but-real extension it omits (`.svelte` is listed; a brand-new one is
-//     not) only ever MISSES a churn signal, never fabricates one.
+//  1. The extension must be a KNOWN source/config/doc/build extension (ROOT_FILE_EXT above), not just
+//     "any letters" — see that constant's comment for why (`z.object`, `example.com`, `Deno.land` are
+//     rejected because `object`/`com`/`land` are not file extensions).
 //  2. The extension must still be at least two ALPHABETIC characters (the allowlist contains no digits
 //     or single letters), which keeps excluding version strings (`4.8`), sentence-ending abbreviations
 //     (`e.g`, `i.e`), and initialisms (`U.S`).
@@ -91,11 +116,6 @@ const NESTED_PATH_RE = /^(?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z0-9]+/;
 // still anchors the match. Tried only AFTER the nested form, and like it anchored at the run start (no
 // global re-scan), so it adds no backtracking cost — it only ever ADDS real root-level files, never
 // removes a nested path the form above already mines.
-const ROOT_FILE_EXT =
-  "(?:ts|tsx|js|jsx|mjs|cjs|mts|cts|json|jsonc|json5|md|markdown|yml|yaml|toml|xml|html|css|scss|" +
-  "less|sql|sh|bash|zsh|py|rb|go|rs|java|kt|kts|swift|c|h|cc|hh|cpp|cxx|hpp|cs|fs|vue|svelte|php|" +
-  "pl|pm|lua|dart|ex|exs|erl|hrl|clj|cljs|scala|groovy|gradle|properties|ini|cfg|conf|config|env|" +
-  "lock|mod|sum|mk|cmake|txt|bpmn|form|dmn|proto|graphql|gql|prisma|tf|hcl)";
 const ROOT_FILE_RE = new RegExp(`^[\\w@~+-][\\w.@~+-]*\\.${ROOT_FILE_EXT}(?![\\w.@~+-])`, "i");
 
 // A ROOT-LEVEL dotfile or extensionless basename — the churn surfaces the `name.ext` form above can
