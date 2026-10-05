@@ -2446,6 +2446,23 @@ test("#863 node scope: an agent's documented optional `delta` result is node-loc
   assert(/<zeebe:output source="=null" target="delta" \/>/.test(reset), "the retry reset clears a stale `delta` from the previous attempt");
 });
 
+test("#863 node scope: every documented review/audit result field (plan-review/conformance) is node-local and cleared on retry — the canonical result contract cannot drift", async () => {
+  // Regression guard (PR #863 Copilot "Previously missed", deliveryGraphCompiler.ts:214): the node-local
+  // result list omitted documented agent result fields, so a parallel delivery node using those contracts
+  // leaked them to the shared root (and a retry left them stale). `plan-review.md` returns
+  // `approved`/`findings`; `conformance.md` returns `commentUrl`, `hasDeviations`, and the per-slice /
+  // deviation counts. Each must be declared node-local AND cleared on retry.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  for (const v of ["approved", "findings", "commentUrl", "hasDeviations", "slicesMet", "slicesReduced", "slicesNotVerified", "deviationsRaised", "deviationsUnraised"]) {
+    assert(io.includes(`source="=null" target="${v}"`), `the documented result field '${v}' is declared node-local`);
+    assert(new RegExp(`<zeebe:output source="=null" target="${v}" />`).test(reset), `the retry reset clears a stale '${v}'`);
+  }
+});
+
 test("node scope: a connector node localises every declared emit source var so two parallel connectors with the same emit never cross-publish", async () => {
   // Regression guard (PR #863 Copilot review, thread r4179717614): a `DeliveryNodeConnector` permits
   // `emits` too, and its emit source is the fact's own name. Without localising it on the connector's

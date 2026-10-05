@@ -480,6 +480,65 @@ test("invalid-fact-name: an emitted fact name over the openapi 128-char cap is r
   assertEquals(err.path, "nodes[0].emits[0].name");
 });
 
+test("invalid-fact-name: an emit named after an escalation control (`decision`/`value`/`note`) is rejected — a Continue would overwrite the fact (r4181027093)", () => {
+  // Regression guard (PR #863 Copilot High, thread r4181027093): an agent/connector emit's source is the
+  // fact's own name, declared node-local in the SAME scope as the escalation form's `decision`/`value`/
+  // `note`. An agent emitting `decision` that reaches a contract escalation has its fact overwritten by
+  // the form completion (`decision="continue"`), so the subProcess publishes `<el>_decision="continue"`
+  // instead of the agent's routing value. The validator must reject the whole class fail-closed.
+  for (const name of ["decision", "value", "note"]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name, type: "string" }] }],
+    });
+    const err = hasCode(errors, "invalid-fact-name");
+    assertEquals(err.path, "nodes[0].emits[0].name", `emit '${name}' is rejected`);
+    assert(err.message.includes("reserved"), `emit '${name}' names the reserved collision, got: ${err.message}`);
+  }
+});
+
+test("invalid-fact-name: an emit named after a connector config variable (`target`/`payload`/`dedupeKey`/`nodeTimeout`) is rejected — a Retry would null the config (r4181027147)", () => {
+  // Regression guard (PR #863 Copilot High, thread r4181027147): the retry reset clears every declared
+  // emit source var; a connector emitting `target`/`payload`/`dedupeKey`/`nodeTimeout` (also subProcess
+  // config vars) has them NULLED without re-entering the input mappings, so the retried connector
+  // activates unconfigured. Reject the collision at authoring time.
+  for (const name of ["target", "payload", "dedupeKey", "nodeTimeout"]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#a" }, emits: [{ name, type: "string" }] }],
+    });
+    const err = hasCode(errors, "invalid-fact-name");
+    assertEquals(err.path, "nodes[0].emits[0].name", `connector emit '${name}' is rejected`);
+  }
+});
+
+test("invalid-fact-name: an emit named after shared late-binding/preflight scaffolding is rejected (boundFacts/nodeInputs/nodeInputsPresent)", () => {
+  // The reserved set also covers the shared subProcess scaffolding that lives in the emit's scope.
+  for (const name of ["boundFacts", "nodeInputs", "nodeInputsPresent"]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name, type: "string" }] }],
+    });
+    const err = hasCode(errors, "invalid-fact-name");
+    assertEquals(err.path, "nodes[0].emits[0].name", `emit '${name}' is rejected`);
+  }
+});
+
+test("a node-local RESULT field is NOT a reserved emit name — an agent may emit `pr` (the canonical converge shape)", () => {
+  // Guard against over-reserving (PR #863 design): the result sets (AGENT_RESULT_LOCAL_VARS /
+  // CONNECTOR_RESULT_LOCAL_VARS) are NOT reserved — an agent emitting `pr` writes the same node-local
+  // value the result field holds, and the retry reset correctly clears both. Reserving them would
+  // forbid the flagship `agent → connector[converge] → wait[pr]` pattern.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "open", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "pr", type: "pr" }] }],
+  });
+  assertEquals(errors.length, 0, `an agent emitting 'pr' validates, got: ${JSON.stringify(errors)}`);
+});
+
+test("a non-reserved emit name still validates (the reserved guard does not over-reject)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "verdict", type: "string" }, { name: "targetRef", type: "string" }] }],
+  });
+  assertEquals(errors.length, 0, `a non-reserved emit name passes, got: ${JSON.stringify(errors)}`);
+});
+
 test("invalid-fact-type: an emitted fact with a type outside the allowlist is rejected, path-qualified", () => {
   const errors = validateDeliveryGraph({
     nodes: [

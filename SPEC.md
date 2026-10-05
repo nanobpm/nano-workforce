@@ -1014,6 +1014,23 @@ incident re-evaluates only the leaf's inputs, so the operator must **re-run** th
 (re-enter the sub-process / "Retry this step"), not merely resolve, to re-map the
 subProcess-level config.
 
+Because an `agent`/`connector` node's emit source **is the fact's own name**, declared
+node-local in the same subProcess scope as the escalation form controls and the node's
+seeded config, a fact name is not fully unrestricted: `validateDeliveryGraph` rejects an
+emit named after a **reserved delivery variable** (`RESERVED_DELIVERY_FACT_NAMES`,
+app/deliveryGraph.ts) fail-closed at authoring time. Two reserved categories occupy that
+scope: the **escalation controls** (`decision`/`value`/`note` — an escalation Continue
+would overwrite the fact, publishing `<el>_decision="continue"` instead of the agent's
+routing value) and the **config variables** (`target`/`payload`/`dedupeKey`/`nodeTimeout`/
+`appendPrompt`/… — the retry reset's clear-the-emits pass would null the node's
+configuration, so the retried node activates unconfigured), plus the shared
+late-binding/preflight scaffolding (`boundFacts`/`nodeInputs`/`nodeInputsPresent`). The
+node-local **result** fields (`AGENT_RESULT_LOCAL_VARS`/`CONNECTOR_RESULT_LOCAL_VARS`) are
+deliberately **not** reserved: an agent emitting `pr` (the canonical
+`agent → connector[converge] → wait[pr]` shape) writes the same node-local value the
+result field holds, and the retry reset correctly clears both — reserving them would
+forbid that flagship pattern.
+
 ## 14. Open questions / future
 
 - **Provisioning the existing PR branch** — resolved: the `c8ctl` host-git

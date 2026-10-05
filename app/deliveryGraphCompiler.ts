@@ -38,10 +38,15 @@ import { TRANSCRIPT_URL_BASE_VAR, TRANSCRIPT_URL_VAR } from "./agentic/transcrip
 import { CONVERGE_MERGE_TARGET, CONVERGE_TARGET, isConvergeTarget, MERGE_MAIN_TARGET } from "./convergeTargets.ts";
 import { DELIVERY_CONNECTOR_TASK_TYPE } from "./deliveryConnector.ts";
 import {
+  AGENT_RESULT_LOCAL_VARS,
   analyzeExclusiveTopology,
+  CONNECTOR_RESULT_LOCAL_VARS,
   canonicalJson,
   type DeliveryGraphError,
   deliveryNodeFacts,
+  ESCALATION_DECISION_RETRY,
+  ESCALATION_DECISION_VAR,
+  ESCALATION_LOCAL_VARS,
   hasXmlInvalidChars,
   redactConnectorValue,
   resolveDeliveryFrom,
@@ -169,63 +174,13 @@ function contractEscalationTaskElement(element: string): string {
   return `${DELIVERY_HUMAN_ELEMENT}__${element}__contract`;
 }
 
-/** The escalation-completion variable that chooses how a parked `agent`/`connector` node resumes
- * (retry-node resolution). Completing a `__esc` / `__contract` escalation with
- * `{ decision: "retry" }` re-runs the node's job (any `note` is appended to the agent prompt as operator
- * guidance); any other value — or none — continues past the node exactly as before. */
-export const ESCALATION_DECISION_VAR = "decision";
-export const ESCALATION_DECISION_RETRY = "retry";
-
-/** Variables an escalation completion writes (the decision, the escalation form's `value` + `note`). They
- * are declared node-LOCAL on the node's subProcess so a completion never leaks into the shared root
- * scope, where a sibling node's escalation would read a stale value (the escalation form's `value` resumes
- * a required emit — a stale root `value` could resume the WRONG node). */
-const ESCALATION_LOCAL_VARS = [ESCALATION_DECISION_VAR, "value", "note"] as const;
-
-/** The flat result variables a fleet agent worker returns on job completion (the blocked-outcome
- * fallback `{status, summary, question}`, the free-form result fields agents commonly emit, the
- * optional structured `delta` an implementer reports (resources/prompts/feature.md), and the PR
- * identity fields). Nano propagates job-completion variables to the NEAREST scope that defines each
- * name, else the ROOT — so without a local declaration every parallel agent node overwrote ONE shared
- * root `status`/`summary`/`pr`: an escalation read whichever node finished last (instance 171774: three
- * escalations with no usable report), and a timed-out node's `<el>_pr` output would bind a SIBLING's
- * PR. Declaring these `null` on the node's subProcess keeps each node's report node-local; the declared
- * emits and `transcriptUrl` still publish onward through the subProcess output mappings. */
-const AGENT_RESULT_LOCAL_VARS = [
-  "status",
-  "summary",
-  "question",
-  "output",
-  "error",
-  "pr",
-  "prUrl",
-  "pullRequest",
-  "branch",
-  "commits",
-  "exitCode",
-  "next_steps",
-  "issue",
-  "completed",
-  "pushed",
-  "truncated",
-  "agentCheckpoint",
-  "transcriptUrl",
-  "delta",
-] as const;
-
-/** The fixed result metadata the delivery-connector worker returns on every job completion
- * (`connectorOutcome`/`connectorDedupeKey`/`connectorDetail` — see `dispatchConnector` in
- * app/deliveryConnector.ts). Like the agent result set, Nano propagates these to the NEAREST scope that
- * defines each name, else the ROOT — so without a node-local declaration two parallel connectors
- * overwrite ONE shared root `connectorOutcome`/`connectorDedupeKey`/`connectorDetail`, and an escalation
- * or downstream read sees whichever connector finished last. Declaring them `null` on the node's
- * subProcess (and clearing them on a retry reset) keeps each connector's result metadata node-local,
- * just as {@link AGENT_RESULT_LOCAL_VARS} does for agents. */
-const CONNECTOR_RESULT_LOCAL_VARS = [
-  "connectorOutcome",
-  "connectorDedupeKey",
-  "connectorDetail",
-] as const;
+// ESCALATION_DECISION_VAR / ESCALATION_DECISION_RETRY / ESCALATION_LOCAL_VARS / AGENT_RESULT_LOCAL_VARS /
+// CONNECTOR_RESULT_LOCAL_VARS are imported from ./deliveryGraph.ts (their canonical home — the
+// validator's RESERVED_DELIVERY_FACT_NAMES derives from them there without an import cycle).
+// ESCALATION_LOCAL_VARS is [ESCALATION_DECISION_VAR,"value","note"]; AGENT_RESULT_LOCAL_VARS is the
+// canonical node-local agent result contract (every resources/prompts/*.md output field);
+// CONNECTOR_RESULT_LOCAL_VARS the connector's fixed result metadata. All three are declared node-local
+// on the subProcess and cleared on retry so a node's report never leaks to the shared root.
 
 /** The node-local boolean the preflight input mapping binds (see {@link nodeInputsPreflightFeel}). */
 const NODE_INPUTS_PREFLIGHT_VAR = "nodeInputsPresent";

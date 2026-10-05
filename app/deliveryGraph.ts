@@ -19,6 +19,7 @@
 // Every error carries a JSON-path-qualified `path` (`nodes[2].kind`, `edges[1].from`, …) so the
 // caller can point the author straight at the offending input.
 
+import { TRANSCRIPT_URL_BASE_VAR } from "./agentic/transcript-url.ts";
 import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
@@ -258,6 +259,138 @@ function isDeliveryFactType(type: unknown): type is DeliveryFactType {
  * hold. */
 export const FACT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export const FACT_NAME_MAX_LENGTH = 128;
+
+/** The flat result variables a fleet agent worker returns on job completion — the CANONICAL node-local
+ * agent result contract. Every field a `resources/prompts/*.md` output contract tells an agent to
+ * return is listed here: the blocked-outcome fallback `{status, summary, question}`, the free-form
+ * result fields agents commonly emit, the optional structured `delta` an implementer reports
+ * (resources/prompts/feature.md), the PR identity fields, and the review/audit contract fields
+ * (`plan-review.md` returns `approved`/`findings`; `conformance.md` returns `commentUrl`,
+ * `hasDeviations`, and the per-slice/deviation counts). Nano propagates job-completion variables to the
+ * NEAREST scope that defines each name, else the ROOT — so the compiler declares each `null` on the
+ * node's subProcess (and the retry reset clears it) to keep a node's report node-local; a field omitted
+ * here leaks to the shared root, where a parallel node overwrites it and a retry leaves it stale
+ * (issue #863 "Previously missed"). Defined HERE, not in the compiler, so the validator's
+ * reserved-fact-name set can derive from it without an import cycle.
+ *
+ * NOTE: these are NOT reserved as emit names — an agent MAY legitimately emit a fact named `pr` (the
+ * canonical `agent → connector[converge] → wait[pr]` shape emits the PR it opened under `pr`). The
+ * worker's result write and the emit publish the SAME node-local value, so they agree; the retry reset
+ * clearing both is correct (the retry must re-produce the fact). Only the escalation controls and the
+ * config variables the reset would wrongly null are reserved — see {@link RESERVED_DELIVERY_FACT_NAMES}. */
+export const AGENT_RESULT_LOCAL_VARS = [
+  "status",
+  "summary",
+  "question",
+  "output",
+  "error",
+  "pr",
+  "prUrl",
+  "pullRequest",
+  "branch",
+  "commits",
+  "exitCode",
+  "next_steps",
+  "issue",
+  "completed",
+  "pushed",
+  "truncated",
+  "agentCheckpoint",
+  "transcriptUrl",
+  "delta",
+  "approved",
+  "findings",
+  "commentUrl",
+  "hasDeviations",
+  "slicesMet",
+  "slicesReduced",
+  "slicesNotVerified",
+  "deviationsRaised",
+  "deviationsUnraised",
+] as const;
+
+/** The fixed result metadata the delivery-connector worker returns on every job completion
+ * (`connectorOutcome`/`connectorDedupeKey`/`connectorDetail` — see `dispatchConnector` in
+ * app/deliveryConnector.ts). Like the agent result set, these are declared node-local and cleared on
+ * retry so two parallel connectors never overwrite one shared root result. Defined HERE so the
+ * validator's reserved set can derive from it without a cycle. */
+export const CONNECTOR_RESULT_LOCAL_VARS = [
+  "connectorOutcome",
+  "connectorDedupeKey",
+  "connectorDetail",
+] as const;
+
+/** The escalation-completion variable that chooses how a parked `agent`/`connector` node resumes
+ * (retry-node resolution): completing a `__esc` / `__contract` escalation with `{ decision: "retry" }`
+ * re-runs the node's job; any other value — or none — continues past it. Defined HERE (the validator's
+ * home) so {@link ESCALATION_LOCAL_VARS} derives from it and the compiler imports the ONE source —
+ * never a second hardcoded `"decision"` that could drift. */
+export const ESCALATION_DECISION_VAR = "decision";
+export const ESCALATION_DECISION_RETRY = "retry";
+
+/** The variables an escalation completion writes (the {@link ESCALATION_DECISION_VAR}, plus the
+ * escalation form's `value` + `note`). They are declared node-LOCAL on the node's subProcess so a
+ * completion never leaks into the shared root scope, where a sibling node's escalation would read a
+ * stale value. Defined HERE so the validator's reserved set can derive from it without a cycle. */
+export const ESCALATION_LOCAL_VARS = [ESCALATION_DECISION_VAR, "value", "note"] as const;
+
+/** The per-kind subProcess **config** variable names a node's compiled `ioMappingLines` seeds from the
+ * runner's `nodeInputs.<el>` (agent `jobType`/`appendPrompt`/`nodeTimeout`/`transcriptUrlBase`,
+ * connector `target`/`dedupeKey`/`payload`/`nodeTimeout`, wait `gateKey`/`probe`/`probeTimeout`/
+ * `probePollEvery`, human `escalationSlaTimeout`/`escalationAssignee`/`prompt`/`nodeId`/`emitMode`/
+ * `emitLabel`). These live in the SAME node-local subProcess scope an `agent`/`connector` emit's source
+ * variable occupies (a service-node fact's source is the fact's own name), so an emit named after one
+ * collides with the node's own configuration. */
+export const DELIVERY_CONFIG_VARS = [
+  "jobType",
+  "appendPrompt",
+  "nodeTimeout",
+  TRANSCRIPT_URL_BASE_VAR,
+  "target",
+  "dedupeKey",
+  "payload",
+  "gateKey",
+  "probe",
+  "probeTimeout",
+  "probePollEvery",
+  "escalationSlaTimeout",
+  "escalationAssignee",
+  "prompt",
+  "nodeId",
+  "emitMode",
+  "emitLabel",
+] as const;
+
+/** The RESERVED variable names an `agent`/`connector` node's emitted-fact name must NOT collide with
+ * (issue #863 review — threads r4181027093 / r4181027147). A service node's emit source is the fact's
+ * own name, declared node-local on the subProcess. Two reserved categories occupy that SAME scope and
+ * are genuinely broken by a colliding emit:
+ *   • **Escalation controls** ({@link ESCALATION_LOCAL_VARS} — `decision`/`value`/`note`, r4181027093):
+ *     the escalation form WRITES these on completion, so an agent emitting `decision` has its node-local
+ *     fact overwritten by a Continue (`decision="continue"`), publishing `<el>_decision="continue"`
+ *     instead of the agent's routing value.
+ *   • **Config variables** ({@link DELIVERY_CONFIG_VARS}, r4181027147): the retry reset clears every
+ *     declared emit source var, so a connector emitting `target`/`payload`/`dedupeKey`/`nodeTimeout` has
+ *     its CONFIG nulled without re-entering the subProcess input mappings — the retried node activates
+ *     unconfigured. (`appendPrompt` is doubly config AND a retry-reset target.)
+ * The shared late-binding/preflight scaffolding (`boundFacts`/`nodeInputs`/`nodeInputsPresent`) is
+ * reserved for the same in-scope-collision reason.
+ *
+ * The node-local RESULT sets ({@link AGENT_RESULT_LOCAL_VARS} / {@link CONNECTOR_RESULT_LOCAL_VARS})
+ * are deliberately NOT reserved: an agent emitting `pr` (the canonical converge shape) writes the same
+ * node-local value the result field holds, so they agree, and the retry reset correctly clears both.
+ * Reserving them would forbid the flagship `agent → connector[converge] → wait[pr]` pattern.
+ * {@link validateDeliveryGraph} rejects a reserved name (fail-closed at authoring time); this is the
+ * single canonical list, derived from the same source-of-truth sets so it can never drift from them. */
+export const RESERVED_DELIVERY_FACT_NAMES: readonly string[] = [
+  ...new Set<string>([
+    ...ESCALATION_LOCAL_VARS,
+    ...DELIVERY_CONFIG_VARS,
+    "boundFacts",
+    "nodeInputs",
+    "nodeInputsPresent",
+  ]),
+];
 
 /** A node `id` must match openapi's `DeliveryNodeCommon.id` `^[A-Za-z_][A-Za-z0-9_.-]*$` and stay
  * within its 128-char cap. Re-enforced here INDEPENDENTLY of the OpenAPI shape gate because later
@@ -2138,6 +2271,27 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
                 `emitted fact name "${rawFact.name}" must be a bare identifier ` +
                 "(`^[A-Za-z_][A-Za-z0-9_]*$`, no dots) of " +
                 `\u2264 ${FACT_NAME_MAX_LENGTH} chars so qualified edge \`from\` references stay unambiguous`,
+              code: "invalid-fact-name",
+            });
+            return;
+          }
+          if (RESERVED_DELIVERY_FACT_NAMES.includes(rawFact.name)) {
+            // Fail CLOSED on a reserved-name collision (issue #863 review — threads r4181027093 /
+            // r4181027147). A fact name is an otherwise-unrestricted identifier, but an
+            // `agent`/`connector` node's emit source IS the fact's own name, declared node-local on the
+            // subProcess — the SAME scope the escalation form controls (`decision`/`value`/`note`), the
+            // node-local result sets, and the subProcess config variables occupy. An emit named
+            // `decision` is overwritten by an escalation Continue (publishing `<el>_decision="continue"`
+            // instead of the agent's routing value); an emit named `target`/`payload`/`dedupeKey`/
+            // `nodeTimeout` is NULLED by the retry reset, so the retried node activates unconfigured.
+            // Reject the whole CLASS at authoring time rather than patch one name.
+            errors.push({
+              path: `${path}.emits[${j}].name`,
+              message:
+                `emitted fact name "${rawFact.name}" collides with a reserved delivery variable ` +
+                "(an escalation control, a node-local result field, or a subProcess config variable) — " +
+                "an escalation Continue would overwrite it or a Retry would null the node's config. " +
+                "Rename the fact (e.g. `decision` → `verdict`, `target` → `targetRef`).",
               code: "invalid-fact-name",
             });
             return;
