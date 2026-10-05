@@ -12,6 +12,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import {
   defaultProbeExec,
+  isFactRefTarget,
   makeCapabilityFallback,
   type ProbeExec,
   type ProbeResult,
@@ -47,6 +48,22 @@ export function safeBind(bind?: Record<string, string>): Record<string, string> 
 
 function errorDetail(err: unknown): string {
   return `probe error: ${err instanceof Error ? err.name : "Error"}`;
+}
+
+/** Fail-closed guard for an UNRESOLVED wait-gate target (issue #872). A `wait` node's probe `target`
+ * is late-bound from an upstream emit: the compiler rewrites it to the observed value only when that
+ * fact resolved to a non-null value, otherwise it leaves the authored `<node>.<fact>` reference (or a
+ * blank/null) in place. A probe left with such an unresolved target MUST NOT pass through — a blank or
+ * fact-ref target is not a real handle, so the gate is NOT satisfiable yet. Returning not-ready keeps
+ * the gate parked so its bounded timeout escalates to a human, instead of either incident-ing inside
+ * `parseProbe` (which throws on a blank/fact-ref literal) or — worse — silently treating the null
+ * target as "ready". Returns `null` when the target is a usable literal (let `parseProbe` run). */
+function unresolvedTargetDetail(rawProbe: unknown): string | null {
+  const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+  const target = isRecord(rawProbe) ? rawProbe.target : undefined;
+  if (typeof target !== "string" || target.trim() === "") return "wait gate: unresolved target (not ready)";
+  if (isFactRefTarget(target)) return "wait gate: unresolved upstream fact (not ready)";
+  return null;
 }
 
 /** Single activation of the readiness probe. The engine owns retry cadence and the timeout boundary;
@@ -149,6 +166,15 @@ function resolveProbeExec(): ProbeExec {
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
+  // Fail closed on an unresolved late-bound target (issue #872): a null/blank/fact-ref target means the
+  // upstream emit this gate waits on never resolved — the gate is not satisfiable, so stay parked (and
+  // let the gate's bounded timeout escalate) rather than throw in parseProbe or pass a null target
+  // through as if ready.
+  const unresolved = unresolvedTargetDetail(job.variables.probe);
+  if (unresolved !== null) {
+    app.log.warn(`readiness gate not ready: ${unresolved}`);
+    return { ready: false, detail: unresolved };
+  }
   const probe = parseProbe(job.variables.probe);
   const { gateKey } = readGateVars(job.variables);
   const exec = resolveProbeExec();

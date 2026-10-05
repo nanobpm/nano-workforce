@@ -1707,12 +1707,21 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
   const outputs: { source: string; target: string }[] = [];
   const cfg = (field: string): string => `=nodeInputs.${el}.${field}`;
   const guarded = (src: string): string => `=if (is defined(${src})) then ${src} else null`;
+  // Null-safe bounded-timeout source (issue #872): the node's boundary timer is `=nodeTimeout`, so a
+  // null `nodeInputs.<el>.timeout` seeds a null duration and the engine fires the timer IMMEDIATELY
+  // (a ~0.5s escalation that looks like an instant SLA breach). Fall back to the run-level
+  // `runNodeTimeout` (seeded by the runner), then to the `DEFAULTS.nodeTimeout` literal `PT1H` — so a
+  // node released with no per-node timeout always gets a real SLA instead of a zero-length timer.
+  const timeoutSource = (): string => {
+    const perNode = cfg("timeout").slice(1);
+    return `=if (is defined(${perNode}) and ${perNode} != null) then ${perNode} else (if (is defined(runNodeTimeout) and runNodeTimeout != null) then runNodeTimeout else "PT1H")`;
+  };
 
   switch (node.kind) {
     case "agent":
       inputs.push({ source: cfg("jobType"), target: "jobType" });
       inputs.push({ source: cfg("appendPrompt"), target: "appendPrompt" });
-      inputs.push({ source: cfg("timeout"), target: "nodeTimeout" });
+      inputs.push({ source: timeoutSource(), target: "nodeTimeout" });
       // Stage 0 transcript correlation (#543): seed the transcript URL base so the completing fleet
       // worker can append its own jobKey-scoped stream and emit `transcriptUrl` (below). `transcriptUrlBase`
       // is a top-level launch variable (deliveryRunner) — guarded so a hand-seeded instance without it
@@ -1739,7 +1748,7 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
         const varName = `${boundTarget.producerElement}_${boundTarget.fact}`;
         const probeRef = cfg("probe").slice(1);
         inputs.push({
-          source: `=context put(${probeRef}, "target", if (is defined(${varName})) then ${varName} else ${probeRef}.target)`,
+          source: `=context put(${probeRef}, "target", if (is defined(${varName}) and ${varName} != null) then ${varName} else ${probeRef}.target)`,
           target: "probe",
         });
       } else {
@@ -1767,7 +1776,7 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       inputs.push({ source: cfg("target"), target: "target" });
       inputs.push({ source: cfg("dedupeKey"), target: "dedupeKey" });
       inputs.push({ source: cfg("payload"), target: "payload" });
-      inputs.push({ source: cfg("timeout"), target: "nodeTimeout" });
+      inputs.push({ source: timeoutSource(), target: "nodeTimeout" });
       break;
     default:
       return assertNever(node, "ioMappingLines");
@@ -1820,19 +1829,27 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // as a required data dependency. A broken producer (returns `in_progress`, or omits a required
       // emit) escalates AT this node instead of threading an incomplete result onward.
       const contractGate = { requiredEmits: normaliseEmits(node).filter((f) => requiredEmits.has(f.name)) };
+      // The subProcess timeout `__esc` twin resumes with the SAME required emits the contract gate
+      // uses — the facts a downstream node binds, which a null (lost) result poisons (#872).
+      const timeoutResume = { kind: node.kind, emits: contractGate.requiredEmits };
       // The executable `<zeebe:taskDefinition type=…>` MUST carry the raw `jobType` verbatim for worker
       // routing (validateDeliveryGraph rejects a URL-shaped/credential-bearing jobType, so it can never
       // be a leak here), but the `descriptor` is embedded by `serviceBodyLines` into the operator-visible
       // timeout / producer-contract escalation FEEL `prompt` — so it takes the SAME display redaction
       // `nodeDisplay` applies, never the raw value (issue #778 review — thread deliveryGraphCompiler.ts:1606).
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName);
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, timeoutResume);
     }
-    case "connector":
+    case "connector": {
       // TRIM the target before building the escalation descriptor — `nodeDisplay` and the connector
       // worker both key on the trimmed value, so an untrimmed `" converge-merge "` would fork the
       // `semanticBpmn`/digest from the trimmed-equivalent graph that dispatches identically (issue #778
       // review — thread deliveryGraphCompiler.ts:1741).
-      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target.trim())}`, undefined, [], displayName);
+      // A connector has no producer-contract gate, but its timeout `__esc` is still made resumable with
+      // the facts a downstream node binds — so a human/agent who unsticks a timed-out connector can
+      // supply the lost emit value rather than thread a null onward (#872).
+      const connectorResume = { kind: node.kind, emits: normaliseEmits(node).filter((f) => requiredEmits.has(f.name)) };
+      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target.trim())}`, undefined, [], displayName, connectorResume);
+    }
     case "wait":
       return waitBodyLines(el, node, displayName);
     case "human":
@@ -1917,6 +1934,14 @@ function serviceBodyLines(
   contractGate?: { requiredEmits: readonly DeliveryFact[] },
   taskHeaders: readonly string[] = [],
   taskName: string = nodeId,
+  // The node's REQUIRED emits (the facts a downstream node binds as a data dependency), used to make
+  // the `__esc` TIMEOUT escalation RESUMABLE (issue #872): when a timed-out node is unstuck by a
+  // human/agent supplying `value`, that value must bind the node's declared emit exactly as the
+  // agent's own result would — otherwise the subProcess publishes `<el>_<fact> = null` and the
+  // downstream reference resolves to null (the production failure: a completed `__esc` returned
+  // `ok:true` yet `n3_pr` stayed null). Empty for a node with no required emit (the escalation stays
+  // an inert "click done" acknowledgement, `emitMode = "none"`).
+  timeoutResume?: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[] },
 ): string[] {
   const esc = escalationTaskElement(el);
   const taskExt = [
@@ -1937,7 +1962,13 @@ function serviceBodyLines(
       "nodeTimeout",
       "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
     ),
-    { displayName: taskName },
+    {
+      // Bind the operator-supplied `value` onto the node's emit-source var so a resumed timeout
+      // escalation publishes the SAME `<el>_<fact>` shape a normally-completing node does (#872). Only
+      // when the node owes a required emit — a no-emit node keeps its inert acknowledgement form.
+      ...(timeoutResume !== undefined && timeoutResume.emits.length > 0 ? { resume: timeoutResume } : {}),
+      displayName: taskName,
+    },
   );
   const head = [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,

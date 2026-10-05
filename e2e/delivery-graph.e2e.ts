@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { connectorDedupeKey, deliveryConnectorDispatches, dispatchConnector } from "../app/deliveryConnector.ts";
 import { readConnectorInput } from "../workers/delivery-connector/worker.ts";
-import { runDeliveryGraph } from "../app/deliveryRunner.ts";
+import { prepareDeliveryGraph, runDeliveryGraph } from "../app/deliveryRunner.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { deterministicProbeSeam } from "./support/probe-exec.ts";
 
@@ -354,5 +354,168 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       esc.length >= 1,
       `the parked wait escalates (bounded), never falsely resolved by the unrelated event, got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`,
     );
+  });
+
+  test("#872 timeout escalation value BINDS the node's emit: a timed-out agent, unstuck with `value`, threads that value downstream (not null)", async () => {
+    const app = track(await boot(freshDir()));
+
+    // The instance-216710 failure mode: an agent node that owes a required `pr` emit TIMES OUT (its job
+    // never completes). Its bounded `=nodeTimeout` boundary fires and parks the node on its `__esc`
+    // timeout escalation. A human/agent unsticks it by supplying the eventually-created PR as `value`.
+    // Before #872 the `__esc` had NO resume output mapping, so completing it published `open_pr = null`
+    // — the downstream connector then bound `pr = null`. The fix makes the timeout `__esc` resumable:
+    // `value` maps onto the node's emit-source var and the subProcess republishes `open_pr` non-null.
+    // We deliberately DO NOT register `senior:demo`, so the agent job parks and only the timer fires.
+    let connectorBoundFacts: unknown;
+    let connectorFired = 0;
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => {
+        connectorFired++;
+        const vars = job.variables as Record<string, unknown>;
+        connectorBoundFacts = vars.boundFacts;
+        const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key (author-supplied or graph-derived) available");
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
+      },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+    );
+
+    const graph: DeliveryGraph = {
+      name: "e2e timeout escalation binds emit",
+      nodes: [
+        { id: "open", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "land", kind: "connector", connector: { target: "slack", payload: { pr: "open.pr" }, dedupeKey: "land-872a" } },
+      ],
+      edges: [{ from: "open.pr", to: "land" }],
+    };
+
+    const run = await runDeliveryGraph(app.engine, graph, { nodeTimeout: "PT2S", escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+
+    // The job never completed (no worker) and the timer has not elapsed: no escalation yet, no End.
+    assert.ok(
+      (await app.engine.searchUserTasks({ state: "CREATED" })).every((t) => !t.elementId?.endsWith("__esc")),
+      "the timeout escalation has not fired before the SLA elapses",
+    );
+
+    // Elapse the node SLA → the `=nodeTimeout` boundary fires and parks the node on its timeout `__esc`.
+    await app.advanceTime(2_100);
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
+    assert.ok(esc, "the timed-out agent parks on its timeout escalation task");
+    assert.equal(connectorFired, 0, "the downstream connector has not fired before the escalation resolves");
+
+    // Unstick it with the missing PR as `value` — the #872 resume output must bind `open_pr` to it.
+    await app.engine.completeUserTask(esc.userTaskKey, { value: "owner/repo#872", humanOutcome: "completed" });
+    await app.settle();
+
+    assert.equal(connectorFired, 1, "resuming the timeout escalation with `value` unblocks the downstream connector");
+    assert.deepEqual(
+      connectorBoundFacts,
+      [{ from: "open", name: "pr", value: "owner/repo#872" }],
+      "the escalation `value` binds the node's `pr` emit and late-binds downstream (NOT null)",
+    );
+    const rows = await deliveryConnectorDispatches(app.db).find({ dedupe_key: "land-872a" });
+    assert.equal(rows.length, 1, "the connector fired exactly once after the resume");
+    assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the resumed node's result reaches End");
+  });
+
+  test("#872 a wait gate whose target resolves to NULL fails closed: it does NOT pass through, it parks and escalates", async () => {
+    const app = track(await boot(freshDir()));
+
+    // The instance-216710 downstream failure: a `wait` gate late-binds its probe `target` from an
+    // upstream emit (`up.cmd`). When that upstream fact resolves to NULL, the compiler leaves the
+    // authored `<node>.<fact>` reference in place rather than rewriting it to a real handle. Before
+    // #872 that null/fact-ref target threaded through as if the gate were satisfiable (it passed
+    // through / incidented). The fix makes the readiness worker fail CLOSED on an unresolved target, so
+    // the gate stays parked and escalates on its bounded timeout. The upstream here is a CONNECTOR
+    // (no producer-contract gate), so its null emit is not caught upstream and genuinely reaches the gate.
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => {
+        const vars = job.variables as Record<string, unknown>;
+        const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key (author-supplied or graph-derived) available");
+        // Return the dispatch outcome only — it NEVER sets `cmd`, so the node's `cmd` emit is null.
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
+      },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+    );
+
+    const graph: DeliveryGraph = {
+      name: "e2e null wait target fails closed",
+      nodes: [
+        { id: "up", kind: "connector", connector: { target: "noop", dedupeKey: "up-872b" }, emits: [{ name: "cmd", type: "string" }] },
+        { id: "w", kind: "wait", wait: { kind: "command", target: "up.cmd", poll: { everyMs: 5, backoff: "fixed" } } },
+      ],
+      edges: [{ from: "up.cmd", to: "w" }],
+    };
+
+    const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT2S", probePollEvery: "PT1S", escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+
+    // The upstream connector completed (no gate), threading `up_cmd = null`. The wait's target stays the
+    // unresolved `up.cmd` fact-ref → the worker fails closed → the gate NEVER resolves to ready.
+    assert.ok(!takenFlows(app).some((f) => f.endsWith("->End")), "a gate with a null target must NOT pass through to End");
+
+    // Bounded, not wedged: the gate escalates once its poll budget elapses.
+    await app.advanceTime(2_100);
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.endsWith("__esc"));
+    assert.ok(esc.length >= 1, `the unresolved-target gate escalates (bounded), got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`);
+  });
+
+  test("#872 a node released with NO per-node timeout gets the default SLA — not a zero-length timer that fires instantly", async () => {
+    const app = track(await boot(freshDir()));
+
+    // The instance-216710 third failure: nodes released with `nodeTimeout = null` fired their SLA
+    // boundary almost immediately (~0.5s) — a null `=nodeTimeout` duration. The fix makes the
+    // bounded-timeout ioMapping fall back to the run-level `runNodeTimeout` (then a `PT1H` literal). We
+    // simulate the degenerate seed by nulling the node's per-node `timeout` in the prepared inputs, then
+    // deploy + start manually. If the bug were present the `__esc` would appear during `settle()` (an
+    // instant timer); with the fallback the node waits the real `runNodeTimeout` SLA first.
+    await app.engine.registerWorker("senior:demo", async () => ({}));
+
+    const graph: DeliveryGraph = {
+      name: "e2e null nodeTimeout default SLA",
+      nodes: [{ id: "solo", kind: "agent", agent: { jobType: "never-registered-so-it-parks" } }],
+      edges: [],
+    };
+
+    // Run-level SLA PT2S → `runNodeTimeout`. Null the per-node timeout to drive the fallback path.
+    const prep = await prepareDeliveryGraph(graph, { nodeTimeout: "PT2S", repoless: true });
+    assert.ok(prep.ok, `prepare should succeed, got ${JSON.stringify(prep)}`);
+    const { processDefinitionId, bpmn, nodeInputs, runKey, runNodeTimeout } = prep.prepared;
+    const agentElement = Object.keys(nodeInputs).find((el) => "jobType" in (nodeInputs[el] as Record<string, unknown>));
+    assert.ok(agentElement, "the agent node's element input exists");
+    (nodeInputs[agentElement] as Record<string, unknown>).timeout = null;
+
+    await app.engine.deployResources([{ name: `${processDefinitionId}.bpmn`, content: bpmn, contentType: "application/xml" }]);
+    await app.engine.createInstance({ processDefinitionId, variables: { nodeInputs, runKey, runNodeTimeout } });
+    // The agent job type is never registered, so the node parks on its service task awaiting the timer.
+    await app.settle();
+
+    // A null per-node timeout must NOT fire a zero-length timer: with the fallback the SLA is PT2S, so
+    // no escalation yet. (Pre-fix, the `=nodeTimeout` null duration fires here during settle.)
+    assert.ok(
+      (await app.engine.searchUserTasks({ state: "CREATED" })).every((t) => !t.elementId?.endsWith("__esc")),
+      "a null per-node timeout must fall back to the default SLA, NOT fire the boundary instantly",
+    );
+
+    // Elapse the fallback SLA → the boundary fires exactly as a real PT2S timer would.
+    await app.advanceTime(2_100);
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.endsWith("__esc"));
+    assert.ok(esc.length >= 1, `the fallback SLA eventually escalates the parked node, got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`);
   });
 });
