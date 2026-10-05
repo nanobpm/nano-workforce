@@ -2431,7 +2431,23 @@ function escalationTaskLines(
  * (an engine-native, null-safe builtin) before matching its lower-case literals — otherwise a mixed-
  * case host/scheme the normal completion path accepts (`https://GitHub.com/...`, `HTTPS://...`) would be
  * rejected here, re-parking a legitimate resume (fail-closed on a value the canonical path takes). Only
- * the accept/reject test folds; the bound `value` stays verbatim. */
+ * the accept/reject test folds; the bound `value` stays verbatim.
+ *
+ * KNOWN FAIL-CLOSED DIVERGENCES (PR #876 round-5 escalation — ACCEPTED tradeoff, do NOT redesign the
+ * completion door): these FEEL regexes are a deliberate in-engine APPROXIMATION of the canonical
+ * `coerceFactValue`/`new URL()`/`Number()` parsers, which are host-side and not FEEL-expressible. A few
+ * exotic-but-canonically-valid inputs are therefore rejected HERE (re-parked) even though the normal
+ * completion path accepts them — safe (fail-CLOSED, never fail-open), and the escalation form's `value`
+ * is a textfield so no type is erased. The known cases, accepted as rare enough not to warrant a
+ * worker/host round-trip:
+ *   • `number`: scientific/hex/octal/binary literals (`1e3`, `0x10`, `.5`) — `Number()` parses them,
+ *     the `^-?\d+(\.\d+)?$` regex does not.
+ *   • `url`: schemes WHATWG `URL` accepts without `://` (`mailto:user@example.com`, `urn:…`) — the
+ *     `scheme://` guard requires the authority form.
+ *   • `artifact`: a multi-`@` name whose non-final `@` is NOT a scope prefix — the single last-`@`
+ *     split differs from edge cases of the canonical parser.
+ * If these ever become common, the fix is to route the resume through the canonical host-side coercer
+ * (a completion-door redesign) rather than widening these regexes toward fail-OPEN. */
 function resumeValueCondition(fact: DeliveryFact, v: string): string {
   const present = `((is defined(${v})) = true and (${v} != null))`;
   const s = `string(${v})`;
