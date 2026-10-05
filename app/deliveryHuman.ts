@@ -32,7 +32,7 @@
 //      binds and pins exactly the value the human handed forward.
 import type { DeliveryFact, DeliveryNodeHuman } from "../nano-generated/api-io.d.ts";
 import { DELIVERY_FACT_TYPES, type DeliveryFactType, FACT_NAME_MAX_LENGTH, FACT_NAME_PATTERN } from "./deliveryGraph.ts";
-import { redactFreeText } from "./deliveryGraphCompiler.ts";
+import { redactFreeText } from "./redactText.ts";
 
 /** The single BPMN `bpmn:userTask` element id every `human` delivery-graph node schedules its work
  *  as (`resources/processes/delivery-human.bpmn`). One reusable engine-native body, instantiated once

@@ -529,6 +529,55 @@ test("#863 human single artifact: a human node emitting ONE artifact embeds the 
   assert(/<zeebe:output source="=if \(is defined\(humanEmitArtifact\)\) then humanEmitArtifact else null" target="[^"]+_art" \/>/.test(io), "the artifact emit reads humanEmitArtifact");
 });
 
+test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED field, so a bespoke form keyed on the fact does not publish null (thread deliveryGraphCompiler.ts:1929)", async () => {
+  // Regression guard (PR #863 review — "Preserve fact-named outputs from custom human forms"): a
+  // single-emit human node MAY carry an explicit bespoke `formKey`; `resolveHumanForm` accepts it. The
+  // canonical binding contract `bindHumanEmits` reads the fact's OWN name first (then the generic
+  // `value`/`resolvedArtifact` keys), so a valid custom form returning `{ approval: "yes" }` for an
+  // `approval` emit is legitimate. The userTask ioMapping must therefore read that fact-named field
+  // (falling back to the canonical control) — otherwise it reads only `value`, which is undefined, and
+  // the emit publishes NULL despite a correctly-filled form.
+  const scalar = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "bespoke-approval" }, emits: [{ name: "approval", type: "boolean" }] }],
+    edges: [],
+  });
+  const sEl = elementForNode(scalar.bpmn, "h");
+  const sSub = scalar.bpmn.slice(scalar.bpmn.indexOf(`<bpmn:subProcess id="${sEl}"`));
+  const sTask = sSub.slice(sSub.indexOf("<bpmn:userTask"), sSub.indexOf("</bpmn:userTask>"));
+  assert(sTask.includes('formId="bespoke-approval"'), "the explicit bespoke form is attached");
+  assert(
+    /<zeebe:output source="=if \(is defined\(approval\) and approval != null\) then approval else if \(is defined\(value\)\) then value else null" target="humanEmitValue" \/>/.test(sTask),
+    "the userTask reads the fact-named `approval` field (then falls back to `value`), so a bespoke form keyed on the fact publishes its value, not null",
+  );
+
+  // The class, not the instance: the SAME gap exists for a single ARTIFACT emit with a bespoke form —
+  // the fact-named field must be preferred ahead of the canonical `resolvedArtifact` control.
+  const artifact = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "publish", formKey: "bespoke-publish" }, emits: [{ name: "release", type: "artifact" }] }],
+    edges: [],
+  });
+  const aEl = elementForNode(artifact.bpmn, "h");
+  const aSub = artifact.bpmn.slice(artifact.bpmn.indexOf(`<bpmn:subProcess id="${aEl}"`));
+  const aTask = aSub.slice(aSub.indexOf("<bpmn:userTask"), aSub.indexOf("</bpmn:userTask>"));
+  assert(
+    /<zeebe:output source="=if \(is defined\(release\) and release != null\) then release else if \(is defined\(resolvedArtifact\)\) then resolvedArtifact else null" target="humanEmitArtifact" \/>/.test(aTask),
+    "a bespoke single-artifact form reads the fact-named `release` field ahead of `resolvedArtifact`",
+  );
+
+  // And the generic/publish forms (no explicit formKey) are UNAFFECTED — they still read the fixed
+  // `value`/`resolvedArtifact` controls (no fact-named preference leaks in to break them).
+  const generic = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }] }],
+    edges: [],
+  });
+  const gEl = elementForNode(generic.bpmn, "h");
+  const gSub = generic.bpmn.slice(generic.bpmn.indexOf(`<bpmn:subProcess id="${gEl}"`));
+  const gTask = gSub.slice(gSub.indexOf("<bpmn:userTask"), gSub.indexOf("</bpmn:userTask>"));
+  // A single-value node still prefers its fact name, but the generic form captures under `value`, so the
+  // fallback carries it; the mapping must still contain the `value` fallback.
+  assert(/then value else null" target="humanEmitValue"/.test(gTask), "the generic single-value node keeps the canonical `value` fallback");
+});
+
 
 test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", async () => {
   const errors = await compileFail({
@@ -2786,16 +2835,17 @@ test("escalation form structure: the delivery-escalation value field states its 
   assert(/emits nothing/i.test(copy), "the copy tells a zero-emit step to leave the field blank");
 });
 
-test("human form structure: the delivery-human-generic value field states its single-VALUE boundary", async () => {
-  // Regression guard (PR #863 Copilot High, thread deliveryGraphCompiler.ts:1859): the generic form is
-  // now selected (via resolveHumanForm) ONLY for a human node that emits a SINGLE value-emitting
-  // (non-artifact) fact, plus wait-gate escalations that may carry none. A ≥2-emit no-form node is
-  // rejected at authoring time (`human-unroutable-emits`) and a single-artifact node uses the
-  // publish form — so the value field never has to carry more than one value, and the copy must say
-  // exactly that rather than the old (now false) "a scalar-plus-artifact step still applies this field"
-  // carve-out. The Tasks surface seeds no form variables, so a `conditional.hide` cannot fire (issue
-  // #772); the copy must STATE the single-value boundary. Unlike the escalation form there is no Retry
-  // select here, so the copy must NOT steer to Retry.
+test("human form structure: the delivery-human-generic value field states its single-value boundary generically (human node AND wait-gate escalation)", async () => {
+  // Regression guard (PR #863 review — "Use generic wording for wait-gate escalation forms"): the
+  // generic form is rendered for the scheduled human node (single value-emit) AND for every NON-retry
+  // escalation — notably a timed-out WAIT gate (`escalationTaskLines` with no `retryElement`). A wait
+  // gate may emit an ARTIFACT (this very `value` field is then mapped onto `resolvedArtifact` via
+  // `factSourceVar`) or declare MULTIPLE facts (multi-emit waits are allowed, not rejected). So the copy
+  // must NOT assert the scheduled-human-node-only restrictions the old wording did ("a step that
+  // publishes an artifact uses a dedicated form", "a step that must emit several facts is rejected at
+  // authoring time") — those are false for the wait-gate case that shares this form. The copy must
+  // describe the field generically and still tell a zero-emit step to leave it blank. Unlike the
+  // escalation form there is no Retry SELECT here, so the copy must NOT steer to a "Retry" control.
   const { readFileSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const formPath = fileURLToPath(new URL("../resources/forms/delivery-human-generic.form", import.meta.url));
@@ -2805,10 +2855,10 @@ test("human form structure: the delivery-human-generic value field states its si
   const value = form.components.find((c) => c.key === "value");
   assert(value, "the generic human form keeps its single `value` field");
   const copy = `${value?.label ?? ""}\n${value?.description ?? ""}`;
-  assert(/single value-emitting \(non-artifact\) fact/i.test(copy), "the value field copy states the single-VALUE (non-artifact) boundary");
-  assert(/emits no value-emitting fact/i.test(copy), "the copy tells a zero-value step to leave the field blank");
-  assert(/rejected at authoring time/i.test(copy), "the copy notes a multi-emit step is rejected, not silently discarded");
-  assert(/resolved-artifact field/i.test(copy), "the copy directs an artifact step to the dedicated resolved-artifact form");
+  assert(/single value this (task|step) hands forward/i.test(copy), "the value field copy states the single-value boundary generically");
+  assert(/wait gate/i.test(copy) && /artifact handle/i.test(copy), "the copy covers the shared wait-gate escalation case, where the value may be an artifact handle");
+  assert(/blank when the step emits nothing|leave it blank/i.test(copy), "the copy tells a zero-emit step to leave the field blank");
+  assert(!/dedicated form with a resolved-artifact field/i.test(copy), "the copy must not assert the human-node-only 'artifact uses a dedicated form' carve-out (false for a wait-gate artifact)");
   assert(!/[Rr]etry/.test(copy), "the generic form has no Retry select, so its copy must not steer to one");
 });
 

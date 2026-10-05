@@ -55,9 +55,15 @@ import {
 } from "./deliveryGraph.ts";
 import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
 import { layoutBpmnOffThread } from "./layoutOffThread.ts";
-import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactEmbeddedCredential, redactString } from "./readiness.ts";
+import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactString } from "./readiness.ts";
+// `redactFreeText` now lives in the low-level `redactText.ts` helper (both this compiler and
+// `deliveryHuman.ts` import it there) to break the former `compiler ⇄ deliveryHuman` import cycle
+// (PR #863 review). Re-exported here so existing `./deliveryGraphCompiler.ts` consumers keep resolving it.
+import { redactFreeText } from "./redactText.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
+
+export { redactFreeText };
 
 /** A display-safe rendering of a `wait` probe's target for user-visible BPMN name/documentation
  * (issue #778 review): a `command` target is an arbitrary shell snippet that can embed a secret, so it
@@ -1100,82 +1106,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * in `deliveryGraph.ts`) so the DISPLAY path here and `validateDeliveryGraph`'s reject/error path share
  * ONE redactor — no drift surface (issue #778 review). */
 
-/** Redact credential-bearing pieces of any URL embedded in FREE-FORM prose (a node's authored
- * `prompt`), IN PLACE. Unlike {@link redactString} — tuned for a single opaque target string, where it
- * truncates from the first `?`/`#` to end-of-string — this finds each URL-shaped token *within*
- * surrounding prose (`scheme://…` or a scheme-relative `//…`) and strips only that token's
- * `user:pass@` userinfo and `?query`/`#fragment` via `redactString`, leaving the prose (and ordinary
- * punctuation such as a `?` ending a sentence) intact. Applied to the DISPLAY name/documentation only —
- * a prompt is up to 20 000 chars of arbitrary text that can embed a bearer token or private URL, and
- * the deployed `<bpmn:documentation>`/name is visible to modeler/explorer readers; the RAW prompt still
- * reaches the runtime job input (`appendPrompt`/`prompt`) unmodified (issue #778 review). Deterministic
- * and total. */
-export function redactFreeText(value: string): string {
-  // Strip XML-invalid display characters BEFORE tokenizing/redacting so every scan runs on the exact
-  // string the renderer emits. Otherwise a control char embedded in a URL (`//us\x0Ber:pass@…`) breaks
-  // the `//[^\s]+` token match, escapes redaction, then reconstructs the credential once `escapeXml`/
-  // `stripXmlInvalidChars` drops the control at render time (issue #778 review — same class as the
-  // connector/probe strip-before-classify fix).
-  const cleaned = stripXmlInvalidChars(value);
-  // Embedded credential userinfo: DERIVE from the ONE canonical redactor {@link redactEmbeddedCredential}
-  // (`EMBEDDED_CREDENTIAL_SRC` = `//[^/?#]*@`) rather than a bespoke belt heuristic. Its `[^/?#]` class
-  // spans spaces/TABs/newlines up to the LAST `@` before a `/`/`?`/`#`, so EVERY `//<userinfo>@` shape
-  // collapses uniformly to `//***@` — a colon-prefix `//user:pass@`, a colon-LESS bearer separated from
-  // its `@host` by a word or space (`//token part@host`, `//token @host`), a userinfo split by a raw
-  // CR/LF/TAB, and a malformed multi-`@` authority (`//user:pass@ss@host`) — with NO second "what is a
-  // credential" implementation that can drift from the canonical redactor/validator (`hasEmbeddedCredential`)
-  // (issue #783 review — thread deliveryGraphCompiler.ts:1140; the earlier bespoke colon-less bridge
-  // stopped on the first non-whitespace char after the space and leaked `//token part@host`). A `//…@`
-  // span is UNAMBIGUOUSLY a credential wherever it sits, so redacting a prose `//word …@host` too is the
-  // SAFE direction: the RAW prompt still reaches the runtime job input unmodified — only the operator-
-  // visible display doc loses the span. The `[^/?#]` bound also keeps the userinfo from swallowing a `?`
-  // marker (`//host?token=secret@tail` has no userinfo — its `@` rides the query), leaving that tail to
-  // the query/fragment belt below.
-  const credStripped = redactEmbeddedCredential(cleaned);
-  // Query/fragment across a whitespace BREAK: the primary `//[^\s]+` token below stops at the break, so a
-  // `//host/?\nTOKEN=secret` would leave the value visible in the XML-preserved doc. The linear belt walks
-  // each SPACE-bounded `//`-run (crossing an embedded CR/LF/TAB the primary token stopped at) and
-  // CONSERVATIVELY redacts its `?query`/`#fragment` tail through the span's space boundary — a continuation
-  // past the break is indistinguishable from a split value, so we never keep the far side (issue #778
-  // review — thread deliveryGraphCompiler.ts:1115).
-  const belted = redactQueryFragmentSpans(credStripped);
-  return belted.replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
-}
-
-/** Linear (backtracking-free) newline-aware belt companion to {@link redactFreeText}'s primary
- * whitespace-bounded pass. Each `//`-run is bounded by a literal SPACE (0x20) — so a single span may
- * cross a CR/LF/TAB *inside* the URL that the primary `//[^\s]+` token stopped at. Credential userinfo is
- * already collapsed to `//***@` by the canonical {@link redactEmbeddedCredential} before this runs, so the
- * belt's SOLE remaining job is a `?query`/`#fragment` tail: it redacts CONSERVATIVELY from the first
- * `?`/`#` marker through the span's space boundary — a continuation past an embedded break is
- * indistinguishable from a split value, so the far side is never kept. A span with no `?`/`#` (ordinary
- * prose — a `//comment` reference, an already-collapsed `//***@host`) is returned untouched. The scan is a
- * single left-to-right walk using `indexOf`/`charCodeAt` over spans bounded by the next SPACE, with no
- * regex backtracking, so a 20 000-char adversarial prompt cannot trigger catastrophic backtracking (issue
- * #778 review). Deterministic and total. */
-function redactQueryFragmentSpans(text: string): string {
-  let out = "";
-  let i = 0;
-  for (;;) {
-    const start = text.indexOf("//", i);
-    if (start < 0) return out + text.slice(i);
-    out += text.slice(i, start);
-    let end = start;
-    while (end < text.length && text.charCodeAt(end) !== 0x20 /* SPACE */) end++;
-    const span = text.slice(start, end);
-    const qMark = span.indexOf("?");
-    const hMark = span.indexOf("#");
-    const qi = qMark < 0 ? hMark : hMark < 0 ? qMark : Math.min(qMark, hMark);
-    // CONSERVATIVE: keep everything up to and including the `?`/`#` marker, then collapse the whole tail
-    // (any continuation past an embedded CR/LF/TAB) to `***`. A value/prose resuming after the break is
-    // INDISTINGUISHABLE from a split-credential continuation, so we never keep the post-break side; the RAW
-    // prompt still reaches the runtime job input unmodified (issue #778 review — thread
-    // deliveryGraphCompiler.ts:1115).
-    out += qi < 0 ? span : `${span.slice(0, qi + 1)}***`;
-    i = end;
-  }
-}
-
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
  * (`convergeTargets.ts`) maps to intent-revealing phrases; any other (forward-declared) target is shown
  * through {@link redactConnectorValue} — an opaque identifier (`slack:#releases`) survives unchanged, but
@@ -1916,17 +1846,31 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
     }
     case "wait":
       return waitBodyLines(el, node, displayName);
-    case "human":
+    case "human": {
       // Select the human node's form by DERIVING it from the canonical resolver (resolveHumanForm),
       // never hardcoding the generic form: a 0-emit node uses the acknowledgement form, a single-artifact
       // node uses the manual-publish form (which carries the `resolvedArtifact` control the generic form
       // lacks, so the artifact is actually captured instead of published null), and a single-value node
       // uses the generic typed-emit form. A ≥2-emit node resolves to the agent-router (formKey null) and
-      // is REJECTED upstream by validateDeliveryGraph (`human-unroutable-emits` — an explicit formKey is
-      // no rescue, since the task ioMapping reads only the fixed controls), so the
+      // is REJECTED upstream by validateDeliveryGraph (`human-unroutable-emits` — a bespoke formKey is no
+      // rescue for ≥2 emits, since one form value cannot satisfy several typed facts), so the
       // `?? GENERIC_HUMAN_FORM` fallback here is unreachable defensive cover (PR #863 threads
       // deliveryGraphCompiler.ts:1859 / :1927).
-      return humanBodyLines(el, displayName, resolveHumanForm(node).formKey ?? GENERIC_HUMAN_FORM);
+      // For a SINGLE emit the node MAY carry an EXPLICIT bespoke form whose field is named after the
+      // emitted fact (the canonical binding contract `bindHumanEmits` reads the fact's own key first,
+      // then the generic `value`/`resolvedArtifact` capture keys — deliveryHuman.ts) — so thread the one
+      // emit through so the userTask ioMapping reads that fact-named field too. Without it a valid
+      // `{ approval: "yes" }` custom form for an `approval` emit renders fine but publishes NULL (the
+      // ioMapping only read the fixed `value`/`resolvedArtifact` controls) — PR #863 review, thread
+      // deliveryGraphCompiler.ts:1929. SCOPE it to `source === "explicit"`: the built-in generic/publish
+      // forms capture under the FIXED `value`/`resolvedArtifact` controls, and a fact happening to be
+      // named after one of those built-in forms' OTHER fields (e.g. a single emit named `note`) must not
+      // make the mapping read that unrelated field — only a bespoke form keys its control on the fact.
+      const humanForm = resolveHumanForm(node);
+      const singleEmit =
+        humanForm.source === "explicit" && humanForm.emits.length === 1 ? humanForm.emits[0] : undefined;
+      return humanBodyLines(el, displayName, humanForm.formKey ?? GENERIC_HUMAN_FORM, singleEmit);
+    }
     default:
       return assertNever(node, "innerBodyLines");
   }
@@ -2361,11 +2305,29 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
  * + SLA. On completion the form's captured typed value is output (`humanEmitValue`/`humanEmitArtifact`
  * — the subProcess ioMapping then publishes it as the node's fact); on SLA expiry the node records an
  * `escalated` outcome and settles (bounded — the graph cannot silently wedge). Mirrors the standalone
- * `delivery-human.bpmn` shape, reusing the S3 form + emit-var contract (`deliveryHuman.ts`). */
-function humanBodyLines(el: string, displayName: string, formId: string): string[] {
+ * `delivery-human.bpmn` shape, reusing the S3 form + emit-var contract (`deliveryHuman.ts`).
+ *
+ * `singleEmit` (the node's ONE declared fact, when it declares exactly one) lets a bespoke explicit
+ * form capture its value under the FACT'S OWN NAME — the same precedence `bindHumanEmits` honours
+ * (fact name first, then the canonical `value`/`resolvedArtifact` keys). The userTask output source
+ * therefore prefers `<factName>` and falls back to the canonical control, so a custom form keyed on the
+ * fact (`{ approval: "yes" }` for an `approval` emit) publishes its value instead of NULL, while the
+ * generic/publish/ack forms (which capture `value`/`resolvedArtifact`) are unaffected (PR #863 review,
+ * thread deliveryGraphCompiler.ts:1929). Fact names are `FACT_NAME_PATTERN`-constrained
+ * (`[A-Za-z_][A-Za-z0-9_]*`), so the name embeds safely as a FEEL identifier. */
+function humanBodyLines(el: string, displayName: string, formId: string, singleEmit?: DeliveryFact): string[] {
   const task = humanTaskElement(el);
   const assignee =
     '=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != "") then escalationAssignee else null';
+  // The canonical capture key for the single emit's TYPE (artifact → the publish form's
+  // `resolvedArtifact`; anything else → the generic form's `value`), plus a fact-named-field preference
+  // in front of it. `preferFact(canonical)` reads `<factName>` first, then the canonical control.
+  const preferFact = (canonical: string): string =>
+    singleEmit !== undefined
+      ? `=if (is defined(${singleEmit.name}) and ${singleEmit.name} != null) then ${singleEmit.name} else if (is defined(${canonical})) then ${canonical} else null`
+      : `=if (is defined(${canonical})) then ${canonical} else null`;
+  const valueSource = singleEmit !== undefined && singleEmit.type !== "artifact" ? preferFact("value") : "=if (is defined(value)) then value else null";
+  const artifactSource = singleEmit !== undefined && singleEmit.type === "artifact" ? preferFact("resolvedArtifact") : "=if (is defined(resolvedArtifact)) then resolvedArtifact else null";
   return [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
     `      <bpmn:userTask id="${task}" name="Delivery: human step — ${escapeXml(displayName)}">`,
@@ -2375,8 +2337,8 @@ function humanBodyLines(el: string, displayName: string, formId: string): string
     `          <zeebe:assignmentDefinition candidateGroups="operators" ${attr("assignee", assignee)} />`,
     "          <zeebe:ioMapping>",
     `            <zeebe:output ${attr("source", '="completed"')} target="humanOutcome" />`,
-    `            <zeebe:output ${attr("source", "=if (is defined(value)) then value else null")} target="humanEmitValue" />`,
-    `            <zeebe:output ${attr("source", "=if (is defined(resolvedArtifact)) then resolvedArtifact else null")} target="humanEmitArtifact" />`,
+    `            <zeebe:output ${attr("source", valueSource)} target="humanEmitValue" />`,
+    `            <zeebe:output ${attr("source", artifactSource)} target="humanEmitArtifact" />`,
     `            <zeebe:output ${attr("source", "=if (is defined(note)) then note else null")} target="humanNote" />`,
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",

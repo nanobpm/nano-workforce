@@ -11,8 +11,8 @@
     {
       "type": "textfield",
       "key": "value",
-      "label": "Emitted value (the single value-emitting (non-artifact) fact this step hands forward)",
-      "description": "The typed value this step hands forward to its downstream dependents. It captures a single value-emitting (non-artifact) fact — leave it blank for a step that emits no value-emitting fact. A step that publishes an artifact uses a dedicated form with a resolved-artifact field instead, and a step that must emit several facts is rejected at authoring time, so this field never has to carry more than one value."
+      "label": "Emitted value (the single value this step hands forward)",
+      "description": "The typed value this task hands forward to its downstream dependents. For a human step it is the one value-emitting fact; for a timed-out wait gate it is the awaited value — which may be an artifact handle (entered here and mapped onto the gate's resolved value). Leave it blank when the step emits nothing. One field carries at most one value: a human step that must emit several facts is refused at authoring time, and a wait gate with more than one emit leaves this field inert — re-run the step to produce those facts."
     },
     {
       "type": "textarea",

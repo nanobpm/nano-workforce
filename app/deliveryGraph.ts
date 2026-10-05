@@ -2364,11 +2364,13 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     // facts resolves to the agent-router (no static form holds them) — but the compiled generic form has
     // no control for the extra facts, and a human node has no Retry path, so completing the form would
     // publish NULL for every uncapturable emit and permanently schedule downstream consumers with missing
-    // required facts. An explicit `human.formKey` is NOT a workaround (thread r4184443511): the compiled
-    // task's ioMapping (`humanBodyLines`) reads only the fixed `value`/`resolvedArtifact`/`note` controls,
-    // never a bespoke form's per-fact fields, so a ≥2-emit explicit-form node would still publish null for
-    // every non-artifact emit. Reject the whole CLASS at authoring time: split the emits across
-    // single-emit human nodes.
+    // required facts. An explicit `human.formKey` is NOT a workaround for a ≥2-emit node (thread
+    // r4184443511): for a SINGLE emit the compiled task's ioMapping (`humanBodyLines`) now reads the
+    // fact-named field ahead of the canonical `value`/`resolvedArtifact` control (so a bespoke
+    // single-value/single-artifact form IS wired — thread deliveryGraphCompiler.ts:1929), but that
+    // per-fact mapping is emitted for the single-emit case only; a ≥2-emit explicit-form node still reads
+    // just the fixed `value`/`resolvedArtifact`/`note` controls and would publish null for every extra
+    // emit. Reject the whole CLASS at authoring time: split the emits across single-emit human nodes.
     if (kind === "human" && factTypes.size >= 2) {
       errors.push({
         path: `${path}.emits`,
