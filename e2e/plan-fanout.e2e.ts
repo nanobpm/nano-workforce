@@ -587,10 +587,83 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
 
         const answered = takenFlows(app);
         assert.ok(
-          answered.includes("w_gw_answer->implement-cell-call") && answered.includes("Start->implement-task"),
-          `answering the caps escalation released the barrier into the implement cell (flows: ${answered.join(", ")})`,
+          answered.includes("w_gw_answer->record-task-implementing") &&
+            answered.includes("record-task-implementing->implement-cell-call") &&
+            answered.includes("Start->implement-task"),
+          `answering the caps escalation reset the stale question and released the barrier into the implement cell (flows: ${answered.join(", ")})`,
         );
         assert.equal(featureRan, true, "the agent was dispatched once the operator answered the caps escalation");
+      },
+    );
+  });
+
+  // Regression (review: "Reset stale result fields on initial implementation entry"). The capability
+  // barrier's timeout seeds an operator `question` (`wait-caps-timeout`), and answering the
+  // `feature-escalation` loops back into the implement cell (`w_answerLoop`). The cell's
+  // `record-implementing` reset clears the result fields only on its OWN retry/answer re-entry — the
+  // INITIAL `Start -> implement-task` entry bypasses it, so the inherited caps-timeout question would
+  // still be in scope. If the agent then returns an off-vocabulary `completed` (no PR delivered), a
+  // stale question makes `shouldReconcileImplement` honour it as a genuine escalation — skipping the
+  // auto-retry and re-escalating the ALREADY-ANSWERED caps question. The fix clears `question` on the
+  // plan-fanout answer loop-back, so the cell is entered clean and the claimed completion auto-retries.
+  test("capability edge: an answered caps escalation enters the cell clean — a claimed completion auto-retries, not re-escalates the stale question", async () => {
+    const capTaskPlan: Stub = () => ({
+      tasks: [
+        {
+          id: "t1",
+          title: "T1",
+          prompt: "do t1",
+          // A bare handle names no owner/repo releases source — unresolvable, so the barrier times out.
+          needs: [{ capabilityRef: "#274", package: "@nanobpm/urban" }],
+        },
+      ],
+    });
+    let featureCalls = 0;
+    await withApp(
+      {
+        "senior:plan": capTaskPlan,
+        "senior:plan-review": approveReview,
+        // The implement agent claims completion WITHOUT opening a PR (the github stub lists none) — the
+        // #865 claimed-completion-without-delivery the reconcile step auto-retries ONCE.
+        "senior:feature": () => {
+          featureCalls += 1;
+          return { status: "completed", summary: "done, no PR" };
+        },
+      },
+      async ({ app, processKey }) => {
+        // Let the unresolvable barrier time out into the operator escalation.
+        await advancePastTimer(app, 25 * 60 * 60 * 1000);
+        const task = await openTask(app, processKey, "feature-escalation");
+        await app.engine.completeUserTask(task.userTaskKey, { resolution: "answer", answer: "shipped it manually" });
+        await settleFully(app);
+
+        // The answered barrier released the token through the answer loop-back's reset into the
+        // implement cell, and the agent ran.
+        const entered = takenFlows(app);
+        assert.ok(
+          entered.includes("w_gw_answer->record-task-implementing") &&
+            entered.includes("record-task-implementing->implement-cell-call") &&
+            entered.includes("Start->implement-task"),
+          `answering the caps escalation reset the stale question and released the barrier into the implement cell (flows: ${entered.join(", ")})`,
+        );
+
+        // With the stale caps-timeout question cleared on cell entry, the off-vocabulary `completed`
+        // (no adoptable PR) takes the reconcile AUTO-RETRY arm — re-dispatching the agent once — rather
+        // than re-escalating the ALREADY-ANSWERED caps question. `settleFully` above drove the whole
+        // loop to quiescence: the agent ran exactly TWICE (the initial dispatch + the one bounded
+        // auto-retry), and only then — the retry consumed — did the cell escalate (the bounded
+        // claimed-completion behaviour of #865). The retry is the proof the stale question was cleared:
+        // an inherited question would have routed the FIRST `completed` straight to escalation.
+        const flows = takenFlows(app);
+        assert.ok(
+          flows.includes("ic_reconcile_gw->record-implementing"),
+          `the claimed completion auto-retried through the cell's reset (flows: ${flows.join(", ")})`,
+        );
+        assert.ok(
+          flows.includes("record-implementing->implement-task"),
+          `the retry re-entered the implement task (flows: ${flows.join(", ")})`,
+        );
+        assert.equal(featureCalls, 2, "the auto-retry re-dispatched the implement agent exactly once");
       },
     );
   });

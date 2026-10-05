@@ -456,7 +456,14 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
           .table<{ user_task_key: string; element_id: string; question: string | null }>("user_tasks", "user_task_key")
           .findOne({ user_task_key: task!.userTaskKey });
         assert.ok(inboxRow, "the poller projected the escalation onto the Tasks inbox read-model");
-        assert.equal(inboxRow!.question, "Which API should I use?", "the agent's question is surfaced from the audit log");
+        // The recorder enriches the agent's own question with its summary as supporting context
+        // (issue #865 review) — the audit log carries the leading question AND the appended summary, and
+        // `pollUserTasks` surfaces that enriched text unchanged.
+        assert.equal(
+          inboxRow!.question,
+          'Which API should I use? The agent\'s own summary: "parked for a human".',
+          "the agent's question, enriched with its summary, is surfaced from the audit log",
+        );
 
         // Answer through the ONE canonical `complete-user-task` door (issue #332 retired the bespoke
         // `answer-escalation` operation) — the attributed human completer resumes the SAME implement task
