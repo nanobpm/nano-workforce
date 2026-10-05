@@ -1,3 +1,9 @@
+## [0.200.8](https://github.com/nanobpm/nano-workforce/compare/v0.200.7...v0.200.8) (2026-10-05)
+
+### Bug Fixes
+
+* **processes:** bound external agent tasks with an SLA timer boundary (implement-cell, merge-cell, retro) ([#864](https://github.com/nanobpm/nano-workforce/issues/864)) ([0ea4955](https://github.com/nanobpm/nano-workforce/commit/0ea4955cc2ec0fe61fbc81e8d7dcb9e842d29313)), closes [#849](https://github.com/nanobpm/nano-workforce/issues/849) [#849](https://github.com/nanobpm/nano-workforce/issues/849) [#849](https://github.com/nanobpm/nano-workforce/issues/849) [#867](https://github.com/nanobpm/nano-workforce/issues/867) [#868](https://github.com/nanobpm/nano-workforce/issues/868) [#849](https://github.com/nanobpm/nano-workforce/issues/849) [#867](https://github.com/nanobpm/nano-workforce/issues/867) [#868](https://github.com/nanobpm/nano-workforce/issues/868) [#868](https://github.com/nanobpm/nano-workforce/issues/868) [#227](https://github.com/nanobpm/nano-workforce/issues/227) [#868](https://github.com/nanobpm/nano-workforce/issues/868)
+
 ## [0.200.7](https://github.com/nanobpm/nano-workforce/compare/v0.200.6...v0.200.7) (2026-10-05)
 
 ### Documentation
