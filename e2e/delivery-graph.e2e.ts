@@ -43,18 +43,16 @@ function takenFlows(app: TestApp): string[] {
     .map((f) => `${f.from}->${f.to}`);
 }
 
-/** Await the re-parked `__esc` escalation user task after a resume, re-settling briefly so the
- * resume-validation gateway's loop-back (esc → gate → esc) fully materialises the fresh task before
- * it is searched. The gate's re-park is engine-synchronous but can straddle a `settle()` fixpoint, so
- * a single immediate search can race it; a bounded re-settle loop makes the assertion deterministic
- * (no wall-clock sleep). */
+/** Read the re-parked `__esc` escalation user task after a resume. The resume-validation gateway's
+ * loop-back (esc → gate → esc) is engine-synchronous: `completeUserTask` drains the engine to
+ * quiescence, so the fresh task already exists in the read model by the time the completion returns.
+ * One `settle()` is the deterministic completion signal — the drain fixpoint absorbs any follow-on
+ * scheduling turn — after which the task is read ONCE. No retry loop (AGENTS.md: a test must pass or
+ * fail deterministically on a single run), so if the re-park ever regresses this fails loudly instead
+ * of masking it behind a retry budget. */
 async function waitForEsc(app: TestApp): Promise<{ userTaskKey: string; elementId?: string } | undefined> {
-  for (let i = 0; i < 10; i++) {
-    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
-    if (esc) return esc;
-    await app.settle();
-  }
-  return undefined;
+  await app.settle();
+  return (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
 }
 
 /** Boot a fresh app per scenario (the WASM engine's taken-flow snapshot is engine-global cumulative). */
