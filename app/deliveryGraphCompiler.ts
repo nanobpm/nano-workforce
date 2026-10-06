@@ -2423,11 +2423,22 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
  * selection expression) passes none. */
 function coerceFactValueFeel(fact: DeliveryFact, rawExpr: string, definedGuard?: string): string {
   const pre = definedGuard ? `${definedGuard} and ` : "";
+  // Parenthesise rawExpr wherever it stands as a BARE infix operand (`(rawExpr) != null`): a caller may
+  // pass a COMPOUND `if … then … else null` selection expression (the bespoke/generic human-form
+  // `selectExpr`), and FEEL's `else` arm is GREEDY — an unparenthesised `if C then x else null != null
+  // and matches(…)` parses as `if C then x else (null != null and matches(…))`, so when the field is
+  // defined the whole coercion guard collapses to the raw entry and `if ("true") then … else null`
+  // (a non-boolean condition) publishes NULL, silently defeating the coercion for every bespoke/generic
+  // boolean & number human form (the escalation path passes the bare name `value`, so it was unaffected —
+  // which is why the string-shape unit tests never caught it; empirically confirmed on the WASM engine).
+  // The `string(rawExpr)`/`number(rawExpr)` sites are already bounded by their call parens, and the
+  // passthrough `then rawExpr else null` has no trailing operator, so only the `!= null` operand needs it.
+  const operand = `(${rawExpr})`;
   switch (fact.type) {
     case "boolean":
-      return `if (${pre}${rawExpr} != null and matches(lower case(string(${rawExpr})), "^(true|false)$")) then lower case(string(${rawExpr})) = "true" else null`;
+      return `if (${pre}${operand} != null and matches(lower case(string(${rawExpr})), "^(true|false)$")) then lower case(string(${rawExpr})) = "true" else null`;
     case "number":
-      return `if (${pre}${rawExpr} != null) then number(${rawExpr}) else null`;
+      return `if (${pre}${operand} != null) then number(${rawExpr}) else null`;
     default:
       return definedGuard ? `if (${definedGuard}) then ${rawExpr} else null` : rawExpr;
   }

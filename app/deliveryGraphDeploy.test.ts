@@ -538,3 +538,94 @@ test("S7 deploy+route: mutually-exclusive leaves join End on an exclusive merge 
     }
   }
 });
+
+// ── #863 deploy+route: a single-BOOLEAN human emit publishes a REAL FEEL boolean (not null) ─────────
+// The compiler tests above assert only the SHAPE of the `coerceFactValueFeel` output string; they do
+// NOT evaluate it, so they stayed green against a coercion defeated by a FEEL operator-precedence bug —
+// `selectExpr` returns a BARE `if … then … else null` and the coercion embedded it as `rawExpr != null`,
+// where FEEL's GREEDY `else` arm swallowed the `!= null and matches(…)` guard, collapsing the whole
+// condition to the operator's raw entry and publishing NULL (adversarial finding, round 15; empirically
+// `humanEmitValue`/`<el>_approval` came back null for `{approval:"true"}`). This drives it END TO END on
+// the real engine: a human node emitting a single `boolean` feeds a guarded split comparing the fact
+// `= true`; completing the task with the truthy text must publish a real `true` so the TRUE branch runs
+// (a null-publishing coercion would route the `default` branch instead). Covers the bespoke
+// (fact-named-field) AND generic (`value`-captured) forms — both go through the same coercion.
+async function driveBooleanHumanGuard(opts: { bespoke: boolean; entry: Record<string, string> }): Promise<{
+  state: string;
+  yesRan: boolean;
+  noRan: boolean;
+  task: string;
+}> {
+  const engine = await createWasmEngineClient();
+  try {
+    let yesRan = false;
+    let noRan = false;
+    await engine.registerWorker("senior:yes", async () => {
+      yesRan = true;
+      return {};
+    });
+    await engine.registerWorker("senior:no", async () => {
+      noRan = true;
+      return {};
+    });
+    const graph: DeliveryGraph = {
+      name: "boolean human guard",
+      nodes: [
+        {
+          id: "gate",
+          kind: "human",
+          human: opts.bespoke ? { prompt: "approve?", formKey: "bespoke-approval" } : { prompt: "approve?" },
+          emits: [{ name: "approval", type: "boolean" }],
+        },
+        { id: "yes", kind: "agent", agent: { jobType: "senior:yes" } },
+        { id: "no", kind: "agent", agent: { jobType: "senior:no" } },
+      ],
+      edges: [
+        { from: "gate", to: "yes", when: "gate.approval", equals: true },
+        { from: "gate", to: "no", default: true },
+      ],
+    };
+    // A long SLA so the human node's escalation boundary never fires during the drive.
+    const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+
+    let state = "?";
+    let task = "";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+      const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+      assert(open.length > 0, `instance is ${state} with no open user task — the guarded split never advanced`);
+      for (const t of open) {
+        task = t.elementId ?? "?";
+        await engine.completeUserTask(t.userTaskKey, opts.entry);
+      }
+    }
+    return { state, yesRan, noRan, task };
+  } finally {
+    await engine.close();
+  }
+}
+
+test("#863 deploy+route: a BESPOKE single-boolean human form publishes a REAL `true` (not null) so the `= true` guard routes the TRUE branch", async () => {
+  // The bespoke form captures under the FACT's own name (`approval`), so the operator's entry arrives as
+  // `{approval:"true"}`; the coercion must publish the boolean `true`, not null.
+  const r = await driveBooleanHumanGuard({ bespoke: true, entry: { approval: "true" } });
+  assert(r.task.startsWith("delivery-human-task__") && !r.task.endsWith("__esc"), `expected the human task, saw ${r.task}`);
+  assertEquals(r.state, "COMPLETED", "the graph must run to a COMPLETED instance");
+  assert(r.yesRan, "a truthy bespoke boolean entry must publish a real `true` so the `= true` guard routes the TRUE branch (a null-publishing coercion would take the default)");
+  assert(!r.noRan, "the default branch must NOT run when the boolean coerces to true");
+});
+
+test("#863 deploy+route: a GENERIC single-boolean human form ALSO publishes a real `true` (class sweep — same coercion, `value`-captured)", async () => {
+  // The generic form captures under the canonical `value` control, so the operator's entry arrives as
+  // `{value:"true"}`; the SAME coercion path must still publish a real `true`.
+  const r = await driveBooleanHumanGuard({ bespoke: false, entry: { value: "true" } });
+  assertEquals(r.state, "COMPLETED", "the graph must run to a COMPLETED instance");
+  assert(r.yesRan, "a truthy generic boolean entry must publish a real `true` so the `= true` guard routes the TRUE branch");
+  assert(!r.noRan, "the default branch must NOT run when the boolean coerces to true");
+});
