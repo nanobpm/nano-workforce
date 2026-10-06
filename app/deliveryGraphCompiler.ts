@@ -2553,11 +2553,12 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
   // downstream-REQUIRED fact must not publish an invalid (null-coerced) value onward — the edge to the
   // consumer is unconditional and a human node has no worker contract gate or Retry path, so a null here
   // activates the consumer with a null required fact. Mirror the escalation resume's fail-closed shape:
-  // the task's OWN output mapping computes a validity flag from the RAW captured field via
-  // {@link resumeValueCondition} (the SAME per-type grammar the escalation resume enforces — presence
-  // included, so a blank required entry is invalid too), and a post-task exclusive gateway routes a VALID
-  // completion to the node end while an INVALID one loops back to the human task for re-entry (the human
-  // analogue of a re-park — a human node has no separate escalation twin to re-park onto). The flag is
+  // the task's OWN output mapping computes a validity flag from the SAME `selectExpr` SELECTION the emit
+  // publishes (so an explicit bespoke form's fact-named control is validated, not a bare always-absent
+  // field) via {@link resumeValueCondition} (the SAME per-type grammar the escalation resume enforces —
+  // presence included, so a blank required entry is invalid too), and a post-task exclusive gateway routes
+  // a VALID completion to the node end while an INVALID one loops back to the human task for re-entry (the
+  // human analogue of a re-park — a human node has no separate escalation twin to re-park onto). The flag is
   // the node-unique, collision-free {@link resumeValidVar} (the emit source is the fixed `humanEmitValue`/
   // `humanEmitArtifact`, never the fact's own name, so the generated flag can never collide with it).
   // Grown ONLY when the single emit is required — a routing-only/unconsumed emit keeps the direct
@@ -2567,10 +2568,20 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
   // verified — so the validity is computed here on the task output, not on the gateway).
   const gateRequired = requiredEmit && singleEmit !== undefined;
   const flagVar = resumeValidVar(task);
-  const validitySource =
-    singleEmit !== undefined
-      ? `=if ${resumeValueCondition(singleEmit, singleEmit.type === "artifact" ? "resolvedArtifact" : "value")} then true else false`
-      : "=false";
+  // The completion-validity flag MUST validate the SAME selection the emit publishes (`selectExpr`), not
+  // the BARE canonical control: for an EXPLICIT bespoke form (`preferFactName`) the emit reads the
+  // fact-named control (`<singleEmit.name>`) FIRST, so a flag keyed on the bare `value`/`resolvedArtifact`
+  // would read an always-undefined field and reject a GENUINELY VALID explicit-form completion forever —
+  // the gateway's `_cbad` default re-parks the human every round until the SLA escalates (a correct human
+  // answer could never complete an explicit-form required-emit node). Mirror the emit's selection and feed
+  // it to `resumeValueCondition` with a FLAT `string(sel) != null` presence override — NOT the default
+  // `is defined(<compound>)` presence, which the pinned engine mis-evaluates on a compound
+  // `if…then…else` selection (the same reason `artifactSource` uses a flat `matches(trim(string(…)))`).
+  const validitySource = (() => {
+    if (singleEmit === undefined) return "=false";
+    const sel = selectExpr(singleEmit.type === "artifact" ? "resolvedArtifact" : "value");
+    return `=if ${resumeValueCondition(singleEmit, sel, `string(${sel}) != null`)} then true else false`;
+  })();
   const endEvent = `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${gateRequired ? `${el}_cok` : `${el}_i1`}</bpmn:incoming></bpmn:endEvent>`;
   const completionGate: string[] = gateRequired
     ? [
@@ -2600,8 +2611,9 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
     `            <zeebe:output ${attr("source", valueSource)} target="humanEmitValue" />`,
     `            <zeebe:output ${attr("source", artifactSource)} target="humanEmitArtifact" />`,
     `            <zeebe:output ${attr("source", "=if (is defined(note)) then note else null")} target="humanNote" />`,
-    // The completion-gate validity flag — computed from the RAW captured field, so it is independent of
-    // the (already fail-closed) coerced `humanEmitValue`/`humanEmitArtifact` above and routes the gateway.
+    // The completion-gate validity flag — computed from the SAME `selectExpr` selection the emit uses, so
+    // it is independent of the (already fail-closed) coerced `humanEmitValue`/`humanEmitArtifact` above and
+    // routes the gateway.
     ...(gateRequired ? [`            <zeebe:output ${attr("source", validitySource)} target="${flagVar}" />`] : []),
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
@@ -3005,8 +3017,15 @@ function escalationTaskLines(
  *     split differs from edge cases of the canonical parser.
  * If these ever become common, the fix is to route the resume through the canonical host-side coercer
  * (a completion-door redesign) rather than widening these regexes toward fail-OPEN. */
-function resumeValueCondition(fact: DeliveryFact, v: string): string {
-  const present = `((is defined(${v})) = true and (${v} != null))`;
+function resumeValueCondition(fact: DeliveryFact, v: string, presentOverride?: string): string {
+  // `presentOverride` lets a caller supply a FLAT null-safe presence test (`string(sel) != null`) when `v`
+  // is a COMPOUND `if…then…else` selection (e.g. the human-form completion gate's `selectExpr`): the pinned
+  // engine mis-evaluates `is defined(<compound if…then…else>)` — the same quirk `artifactSource` sidesteps
+  // with a flat `matches(trim(string(…)))` — so the default `is defined(v)`-based presence is only safe for
+  // a BARE variable name (the escalation resume `value`). Every per-type grammar arm below reads `v` only
+  // through null-safe `string()`/`matches()`/`trim()` wrappers, so a flat presence override keeps the whole
+  // condition engine-safe over a compound selection.
+  const present = presentOverride ?? `((is defined(${v})) = true and (${v} != null))`;
   const s = `string(${v})`;
   switch (fact.type) {
     case "string":

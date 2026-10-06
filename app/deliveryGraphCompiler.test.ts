@@ -896,14 +896,21 @@ test("#863 human required emit: an invalid typed completion is GATED back for re
   const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
   const task = sub.slice(sub.indexOf("<bpmn:userTask"), sub.indexOf("</bpmn:userTask>"));
   const flagVar = resumeValidVar(`delivery-human-task__${el}`);
-  // (1) The task publishes the completion-validity flag, computed from the RAW `value` field via the
-  //     number grammar (presence + `^-?\d+(\.\d+)?$`), so a blank/non-numeric entry is invalid.
+  // (1) The task publishes the completion-validity flag, computed from the SAME `selectExpr` SELECTION the
+  //     emit uses (for a generic form that is the bare `value`, wrapped null-safe) via the number grammar
+  //     (flat presence `string(sel) != null` + `^-?\d+(\.\d+)?$`), so a blank/non-numeric entry is invalid.
   const flagOut = task.match(new RegExp(`<zeebe:output source=(["'])(.*?)\\1 target="${flagVar}"`));
   assert(flagOut, `the human task publishes the completion-validity flag ${flagVar}`);
   const flagFeel = flagOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  const genericSel = "if (is defined(value)) then value else null";
+  // The generic form's emit reads bare `value`, so the flag validates that same selection — and uses the
+  // FLAT `string(sel) != null` presence guard (never a bare `is defined(<compound>)`, which the pinned
+  // engine mis-evaluates on a compound selection).
   assert(
-    /is defined\(value\).*matches\(lower case\(trim\(string\(value\)\)\)/.test(flagFeel) && /then true else false/.test(flagFeel),
-    `the validity flag is computed from the raw value via the number grammar (fail closed), got: ${flagFeel}`,
+    flagFeel.includes(`string(${genericSel}) != null`) &&
+      flagFeel.includes(`matches(lower case(trim(string(${genericSel}))),`) &&
+      /then true else false/.test(flagFeel),
+    `the validity flag validates the emit's selection via the number grammar with a flat presence guard (fail closed), got: ${flagFeel}`,
   );
   // (2) The task no longer flows straight to the node end — it routes into a completion gateway…
   assert(sub.includes(`<bpmn:sequenceFlow id="${el}_i1" sourceRef="delivery-human-task__${el}" targetRef="${el}_cg" />`), "the human task routes into the completion gate, not straight to the node end");
@@ -926,6 +933,46 @@ test("#863 human required emit: an invalid typed completion is GATED back for re
   assert(!unconsumed.bpmn.includes("_cg"), "an unconsumed (routing-only) single-emit human node grows NO completion gate");
   const noEmit = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "x" } }], edges: [] });
   assert(!noEmit.bpmn.includes("_cg"), "a no-emit human node grows NO completion gate");
+});
+
+test("#863 human required emit on an EXPLICIT bespoke form: the completion-validity flag validates the FACT-NAMED control, not a bare always-absent field (adversarial High)", async () => {
+  // Regression guard (PR #863 adversarial round-27, `deliveryGraphCompiler.ts` validity flag): for an
+  // EXPLICIT `human.formKey` form the emit's `selectExpr` reads the FACT-NAMED control (`count`) first, but
+  // the completion-validity flag used to validate the BARE `value`/`resolvedArtifact` field. An operator
+  // form keyed by the fact name captures into `<fact>`, leaving `value` undefined, so a GENUINELY VALID
+  // explicit-form completion evaluated the flag `false` → the gateway's `_cbad` default re-parked the human
+  // forever (until SLA escalation): a correct human answer could never complete the node. The flag must
+  // validate the SAME selection the emit publishes.
+  const r = await compileOk({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "enter a number", formKey: "bespoke-count" }, emits: [{ name: "count", type: "number" }] },
+      { id: "c", kind: "agent", agent: { jobType: "senior:consumer" } },
+    ],
+    edges: [{ from: "h.count", to: "c" }],
+  });
+  const el = elementForNode(r.bpmn, "h");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const task = sub.slice(sub.indexOf("<bpmn:userTask"), sub.indexOf("</bpmn:userTask>"));
+  const flagVar = resumeValidVar(`delivery-human-task__${el}`);
+  // The explicit-form selection prefers the fact-named control `count`, falling back to `value`.
+  const explicitSel = "if (is defined(count) and count != null and string(count) != null) then count else if (is defined(value)) then value else null";
+  const flagOut = task.match(new RegExp(`<zeebe:output source=(["'])(.*?)\\1 target="${flagVar}"`));
+  assert(flagOut, `the explicit-form human task publishes the completion-validity flag ${flagVar}`);
+  const flagFeel = flagOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  // The flag validates the EMIT's selection (the fact-named `count` control), with the same flat presence
+  // guard + number grammar — NOT the bare `value` the pre-fix flag read (which an explicit form leaves
+  // undefined, rejecting a valid completion forever).
+  assert(
+    flagFeel.includes(`string(${explicitSel}) != null`) &&
+      flagFeel.includes(`matches(lower case(trim(string(${explicitSel}))),`) &&
+      /then true else false/.test(flagFeel),
+    `the explicit-form validity flag must validate the fact-named control selection, got: ${flagFeel}`,
+  );
+  // Cross-check: the emit source and the validity flag read the SAME selection — they cannot diverge.
+  const valueOut = task.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/);
+  assert(valueOut, "the explicit-form human task maps a value onto humanEmitValue");
+  const valueFeel = valueOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(valueFeel.includes(explicitSel), `the emit source reads the fact-named control selection, got: ${valueFeel}`);
 });
 
 // An agent that owes a required `pr` emit to a downstream consumer — its timeout `__esc` (and a
