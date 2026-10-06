@@ -699,8 +699,8 @@ test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED fi
   assert(sValueOut, "the bespoke boolean form maps a value onto humanEmitValue");
   const sValueFeel = sValueOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
   assert(
-    /is defined\(approval\) and approval != null\) then approval else if \(is defined\(value\)\) then value else null/.test(sValueFeel),
-    `the bespoke boolean form still reads the fact-named \`approval\` field then \`value\`, got: ${sValueFeel}`,
+    /is defined\(approval\) and approval != null and string\(approval\) != null\) then approval else if \(is defined\(value\)\) then value else null/.test(sValueFeel),
+    `the bespoke boolean form still reads the fact-named \`approval\` field (builtin-shadow-guarded) then \`value\`, got: ${sValueFeel}`,
   );
   assert(
     /matches\(lower case\(trim\(string\(.*\)\)\), "\^\(true\|false\)\$"\)/.test(sValueFeel) && /= "true"/.test(sValueFeel),
@@ -721,8 +721,8 @@ test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED fi
   assert(nValueOut, "the bespoke number form maps a value onto humanEmitValue");
   const nValueFeel = nValueOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
   assert(
-    /is defined\(tally\) and tally != null\) then tally else if \(is defined\(value\)\) then value else null/.test(nValueFeel),
-    `the bespoke number form still reads the fact-named \`tally\` field then \`value\`, got: ${nValueFeel}`,
+    /is defined\(tally\) and tally != null and string\(tally\) != null\) then tally else if \(is defined\(value\)\) then value else null/.test(nValueFeel),
+    `the bespoke number form still reads the fact-named \`tally\` field (builtin-shadow-guarded) then \`value\`, got: ${nValueFeel}`,
   );
   assert(/number\(/.test(nValueFeel) && /else null/.test(nValueFeel), `the selected bespoke number value is coerced via number(…) with a null failure path, got: ${nValueFeel}`);
 
@@ -736,8 +736,8 @@ test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED fi
   const aSub = artifact.bpmn.slice(artifact.bpmn.indexOf(`<bpmn:subProcess id="${aEl}"`));
   const aTask = aSub.slice(aSub.indexOf("<bpmn:userTask"), aSub.indexOf("</bpmn:userTask>"));
   assert(
-    /<zeebe:output source="=if \(is defined\(release\) and release != null\) then release else if \(is defined\(resolvedArtifact\)\) then resolvedArtifact else null" target="humanEmitArtifact" \/>/.test(aTask),
-    "a bespoke single-artifact form reads the fact-named `release` field ahead of `resolvedArtifact`",
+    /<zeebe:output source="=if \(is defined\(release\) and release != null and string\(release\) != null\) then release else if \(is defined\(resolvedArtifact\)\) then resolvedArtifact else null" target="humanEmitArtifact" \/>/.test(aTask),
+    "a bespoke single-artifact form reads the fact-named `release` field (builtin-shadow-guarded) ahead of `resolvedArtifact`",
   );
 
   // And the generic/publish forms (no explicit formKey) are UNAFFECTED — they still read the fixed

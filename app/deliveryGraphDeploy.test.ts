@@ -747,3 +747,141 @@ test("#863 deploy+route: a BESPOKE single-boolean human form with a FEEL-builtin
   assert(!r.yesRan, "a blank boolean entry publishes null, so the `= true` guard must NOT run the TRUE branch");
   assert(r.noRan, "a blank boolean entry publishes null, so the default branch runs");
 });
+
+// ── #863 deploy+route: a TEXT (`string`) / `artifact` single emit named after a FEEL builtin ─────────
+// The number/boolean coercers reject a non-stringable selection operand, but the TEXT types
+// (`string`/`version`/`url`/`pr`) pass `selectExpr`'s result through verbatim and the artifact source is
+// NEVER coerced — so the builtin-shadow hazard (a blank explicit form whose fact name collides with a FEEL
+// builtin resolves `is defined(count) and count != null` to the builtin FUNCTION) selected the function
+// for those fact types, which incidents or publishes a function instead of falling back to the canonical
+// control / null (Copilot review #863, "Guard fact names that shadow FEEL builtins"). The fix guards the
+// fact-named candidate in `selectExpr` with `string(<factName>) != null`, which folds a builtin to null for
+// EVERY fact type at the selection step. These drive it END TO END on the real engine.
+async function driveStringHumanGuard(opts: { entry: Record<string, string>; emitName: string }): Promise<{
+  state: string;
+  yesRan: boolean;
+  noRan: boolean;
+  task: string;
+}> {
+  const engine = await createWasmEngineClient();
+  try {
+    let yesRan = false;
+    let noRan = false;
+    await engine.registerWorker("senior:yes", async () => {
+      yesRan = true;
+      return {};
+    });
+    await engine.registerWorker("senior:no", async () => {
+      noRan = true;
+      return {};
+    });
+    const graph: DeliveryGraph = {
+      name: "string human guard",
+      nodes: [
+        {
+          id: "gate",
+          kind: "human",
+          human: { prompt: "which label?", formKey: "bespoke-label" },
+          emits: [{ name: opts.emitName, type: "string" }],
+        },
+        { id: "yes", kind: "agent", agent: { jobType: "senior:yes" } },
+        { id: "no", kind: "agent", agent: { jobType: "senior:no" } },
+      ],
+      edges: [
+        { from: "gate", to: "yes", when: `gate.${opts.emitName}`, equals: "approved" },
+        { from: "gate", to: "no", default: true },
+      ],
+    };
+    const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+
+    let state = "?";
+    let task = "";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+      const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+      // A builtin-shadow selection that publishes/incidents on the FUNCTION parks the instance ACTIVE with
+      // no open user task — this assert catches that regression.
+      assert(open.length > 0, `instance is ${state} with no open user task — the string selection incidented on a builtin-shadow operand`);
+      for (const t of open) {
+        task = t.elementId ?? "?";
+        await engine.completeUserTask(t.userTaskKey, opts.entry);
+      }
+    }
+    return { state, yesRan, noRan, task };
+  } finally {
+    await engine.close();
+  }
+}
+
+test("#863 deploy+route: a BESPOKE single-STRING human form with a FEEL-builtin name (`count`) completed BLANK publishes null and COMPLETES (text types pass selection through — builtin-shadow class sweep)", async () => {
+  // `string` is a pass-through type: `coerceFactValueFeel` does NOT re-guard it, so the only defence is
+  // `selectExpr`'s `string(<factName>) != null` guard. A blank builtin-named explicit form must fold to
+  // null (not select the `count` builtin FUNCTION) and route the default rather than incident.
+  const r = await driveStringHumanGuard({ entry: {}, emitName: "count" });
+  assert(r.task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(r.task), `expected the human task, saw ${r.task}`);
+  assertEquals(r.state, "COMPLETED", "a blank builtin-named string entry must publish null and run to a COMPLETED instance (not incident on the selected builtin function)");
+  assert(!r.yesRan, "a blank string entry publishes null, so the `= \"approved\"` guard must NOT run the TRUE branch");
+  assert(r.noRan, "a blank string entry publishes null, so the default branch runs");
+});
+
+test("#863 deploy+route: a BESPOKE single-STRING human form still selects a real captured value (`approved`) so the guard routes TRUE (the stringability guard does not drop legit text)", async () => {
+  // The `string(<factName>) != null` guard must NOT reject a genuinely captured TEXT value — a real
+  // `approved` entry stringifies to itself, so the fact-named candidate is still selected and the `=
+  // "approved"` guard routes the TRUE branch.
+  const r = await driveStringHumanGuard({ entry: { count: "approved" }, emitName: "count" });
+  assertEquals(r.state, "COMPLETED", "the graph must run to a COMPLETED instance");
+  assert(r.yesRan, "a real captured `approved` entry must still be selected so the `= \"approved\"` guard routes the TRUE branch");
+  assert(!r.noRan, "the default branch must NOT run when the string selects `approved`");
+});
+
+test("#863 deploy+route: a BESPOKE single-ARTIFACT human form with a FEEL-builtin name (`count`) completed BLANK publishes null and COMPLETES (artifact source is never coerced — builtin-shadow class sweep)", async () => {
+  // The artifact source (`selectExpr(\"resolvedArtifact\")`) is passed through with NO coercion, so a blank
+  // builtin-named explicit form would publish the `count` builtin FUNCTION as `humanEmitArtifact` absent
+  // the `string(<factName>) != null` guard. With the guard the fact-named candidate folds to null and the
+  // instance completes instead of parking on an io-mapping incident.
+  const engine = await createWasmEngineClient();
+  try {
+    await engine.registerWorker("senior:sink", async () => ({}));
+    const graph: DeliveryGraph = {
+      name: "artifact human guard",
+      nodes: [
+        {
+          id: "gate",
+          kind: "human",
+          human: { prompt: "attach the artifact", formKey: "bespoke-artifact" },
+          emits: [{ name: "count", type: "artifact" }],
+        },
+        { id: "sink", kind: "agent", agent: { jobType: "senior:sink" } },
+      ],
+      edges: [{ from: "gate", to: "sink" }],
+    };
+    const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+    let state = "?";
+    let task = "";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+      const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+      assert(open.length > 0, `instance is ${state} with no open user task — the artifact selection incidented on a builtin-shadow operand`);
+      for (const t of open) {
+        task = t.elementId ?? "?";
+        await engine.completeUserTask(t.userTaskKey, {});
+      }
+    }
+    assert(task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(task), `expected the human task, saw ${task}`);
+    assertEquals(state, "COMPLETED", "a blank builtin-named artifact entry must publish null and run to a COMPLETED instance (not incident on the selected builtin function)");
+  } finally {
+    await engine.close();
+  }
+});

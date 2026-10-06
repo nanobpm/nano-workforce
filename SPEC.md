@@ -1098,14 +1098,21 @@ escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
 
 All retry/reset targets are **node-local** (declared on the subProcess by
 `ioMappingLines`), so a node's result vars never leak to the root and two parallel nodes
-declaring the same emit never cross-publish — with **two deliberate publish-onward
-exceptions**, both written under node-unique or intentionally-shared names rather than the
-raw result var: each declared emit is republished to the root as `<el>_<fact>` (node-unique,
-so siblings never collide), and an agent's `transcriptUrl` is propagated back to the root
-under the shared `transcriptUrl` name so Nano Explorer can render the run→transcript link
-(app/deliveryGraphCompiler.ts:1872-1877). That one shared name means parallel agents can
-overwrite the root `transcriptUrl` — acceptable, since it is a display-only correlation link,
-not a result a downstream node binds. A **preflight `assert`** on the inner leaf
+declaring the same emit never cross-publish — with a few deliberate publish-onward
+exceptions, all written under node-unique or intentionally-shared names rather than the
+raw result var. The **outward data** exceptions: each declared emit is republished to the
+root as `<el>_<fact>` (node-unique, so siblings never collide), and an agent's
+`transcriptUrl` is propagated back to the root under the shared `transcriptUrl` name so
+Nano Explorer can render the run→transcript link (app/deliveryGraphCompiler.ts:1872-1877).
+That one shared name means parallel agents can overwrite the root `transcriptUrl` —
+acceptable, since it is a display-only correlation link, not a result a downstream node
+binds. In addition, the per-node **control signals** `<el>_contractMet` (the agent
+contract-gate's proceed flag) and `<el>_retryRequested` (the per-escalation retry gate's
+route flag) are **also root-scoped** — their gateways live outside the node's subProcess
+and so cannot read node scope, and the `<el>_`-prefixed, node-unique names can never
+collide across parallel nodes. So the node-local rule governs a node's *result/emit scratch*;
+these node-unique control booleans are intentionally published to root so the routing
+gateways can read them on either engine's scope semantics. A **preflight `assert`** on the inner leaf
 task's input fails LOUD (raising an incident naming the missing `nodeInputs.<el>`)
 before any job exists when the runner-seeded config was lost — see the `KNOWN
 LIMITATION` in `serviceBodyLines` (fail-loud-only, nano-workforce#866). Resolving that

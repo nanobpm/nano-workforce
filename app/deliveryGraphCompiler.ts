@@ -2481,9 +2481,20 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
   // `resolvedArtifact`; anything else → the generic form's `value`). `selectExpr(canonical)` is a bare
   // (no leading `=`) null-safe FEEL expression; when `preferFactName` (an EXPLICIT bespoke form only) it
   // reads `<factName>` first, then the canonical control — a built-in form's fixed control otherwise.
+  // The fact-named read is STRINGABILITY-guarded (`string(<factName>) != null`) because `is defined(X)`
+  // is TRUE and `X != null` holds for a FEEL BUILTIN function (`count`, `sum`, …) when a blank form
+  // leaves no task variable of that name — so a bare presence guard would SELECT the builtin FUNCTION for
+  // the emit. The number/boolean coercers reject a non-stringable operand, but the text types
+  // (`string`/`version`/`url`/`pr`) pass the selection through verbatim and the artifact source is never
+  // coerced, so without this guard a blank builtin-named explicit form publishes (or incidents on) the
+  // function for those fact types. `string(<builtin>)` folds to null, so the guard falls back to the
+  // canonical control / null; a real captured TEXT value stringifies to itself and is still selected. The
+  // guard sits ONLY on the fact-named candidate — the canonical `resolvedArtifact` object in the else arm
+  // is untouched, so a genuine object handle still passes through (Copilot review #863, "Guard fact names
+  // that shadow FEEL builtins").
   const selectExpr = (canonical: string): string =>
     singleEmit !== undefined && preferFactName
-      ? `if (is defined(${singleEmit.name}) and ${singleEmit.name} != null) then ${singleEmit.name} else if (is defined(${canonical})) then ${canonical} else null`
+      ? `if (is defined(${singleEmit.name}) and ${singleEmit.name} != null and string(${singleEmit.name}) != null) then ${singleEmit.name} else if (is defined(${canonical})) then ${canonical} else null`
       : `if (is defined(${canonical})) then ${canonical} else null`;
   // A form captures the selected value as TEXT (a textfield, or an explicit form's fact-named control), so
   // the non-artifact single emit must COERCE/VALIDATE it to the fact's declared type before writing
