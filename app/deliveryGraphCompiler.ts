@@ -2058,8 +2058,14 @@ function serviceBodyLines(
   // because Nano evaluates exclusive-gateway conditions against the ROOT variables only (not the
   // gateway's scope, as Zeebe does). The node's result vars are node-local (see ioMappingLines), so a
   // gateway reading `status`/`<emit>` directly would never see them; reading `<el>_contractMet` /
-  // `<el>_retryRequested` works on either engine semantics and can never collide across nodes.
-  const contractMetVar = `${el}_contractMet`;
+  // `<el>_retryRequested` works on either engine semantics and can never collide ACROSS nodes. The
+  // source var ({@link factSourceVar}) of EVERY declared emit (required + non-required) is reserved so
+  // BOTH the resume-valid flag (PR #876) AND these control vars are grown collision-free against all of
+  // them — an emit whose source var equals the bare control name (e.g. an agent emit literally named
+  // `<el>_contractMet`) would otherwise be null-seeded node-local and SHADOW the root control the outer
+  // gateway reads, so the producer could never pass (issue #863 review, thread r4199435326).
+  const reservedFlagTargets = nodeEmits.map((f) => factSourceVar(kind, f));
+  const contractMetVar = nodeControlVar(el, "contractMet", reservedFlagTargets);
   const taskExt = [
     "        <bpmn:extensionElements>",
     `          <zeebe:taskDefinition ${taskDefAttr} />`,
@@ -2098,9 +2104,6 @@ function serviceBodyLines(
   // connector, its own — a connector declares `emits` and its emit source is the fact's own name, so
   // keying off the absent agent-only gate would drop them and map no `value` on a Continue resume).
   const allEmits = nodeEmits;
-  // The source var ({@link factSourceVar}) of EVERY declared emit (required + non-required), so the
-  // resume-valid flag on BOTH escalations is grown collision-free against all of them (PR #876 review).
-  const reservedFlagTargets = nodeEmits.map((f) => factSourceVar(kind, f));
   const contractEsc = contractEscalationTaskElement(el);
   const contractEmits = contractGate?.requiredEmits ?? [];
   const timeoutEscalation = escalationTaskLines(
@@ -2232,10 +2235,30 @@ function escalationResolutionHint(nodeEmits: readonly DeliveryFact[], resumeEmit
   return `${retry}${proceed}.`;
 }
 
+/** Grow a node-unique ROOT control var (`<el>_contractMet` / `<el>_retryRequested`) collision-free
+ * (deterministic trailing `_`) against the node-local emit SOURCE vars ({@link factSourceVar}) that
+ * share this node's flat subProcess scope. These controls are decided INSIDE the node's scope yet must
+ * be READ by the OUTER gateways (Nano evaluates exclusive-gateway conditions against the ROOT vars
+ * only), so they are published at root. But an emit whose source var equals the bare control name
+ * (e.g. an agent emit literally named `n0_contractMet` on the first node `n0`, whose source var IS its
+ * own name) is ALSO null-seeded node-local by {@link ioMappingLines} — and Nano's nearest-scope
+ * propagation then writes the gate/escalation output into that LOCAL shadow instead of the root the
+ * outer gateway reads, so the gateway never sees `true` and the producer can never pass (issue #863
+ * review, thread r4199435326). Growing the control name clear of every emit source var removes the
+ * whole class, exactly as {@link escalationResumeFlagVar} grows the resume-valid flag. */
+function nodeControlVar(el: string, suffix: string, reservedTargets: readonly string[]): string {
+  const reserved = new Set<string>(reservedTargets);
+  let name = `${el}_${suffix}`;
+  while (reserved.has(name)) name = `${name}_`;
+  return name;
+}
+
 /** The node-unique ROOT boolean an escalation completion publishes for the retry gateway (see the
- * gateway-scope note in {@link serviceBodyLines}). */
-function retryRequestedVar(el: string): string {
-  return `${el}_retryRequested`;
+ * gateway-scope note in {@link serviceBodyLines}), grown collision-free ({@link nodeControlVar})
+ * against the node's emit source vars so a same-named emit can neither shadow nor collide with it. The
+ * SAME `reservedTargets` must be passed at the write and read sites so the grown name agrees. */
+function retryRequestedVar(el: string, reservedTargets: readonly string[] = []): string {
+  return nodeControlVar(el, "retryRequested", reservedTargets);
 }
 
 /** The retry-node resolution RESET shared by a service node's escalations (`__esc`, and an agent's
@@ -2875,7 +2898,7 @@ function escalationTaskLines(
     outputs.push(
       // The node-unique `<el>_retryRequested` boolean the per-escalation retry gate routes on (#863),
       // derived from the node-local `decision` the operator chose on `ESCALATION_FORM`.
-      `            <zeebe:output ${attr("source", `=is defined(${ESCALATION_DECISION_VAR}) and ${ESCALATION_DECISION_VAR} = ${feelStr(ESCALATION_DECISION_RETRY)}`)} target="${retryRequestedVar(opts.retryElement)}" />`,
+      `            <zeebe:output ${attr("source", `=is defined(${ESCALATION_DECISION_VAR}) and ${ESCALATION_DECISION_VAR} = ${feelStr(ESCALATION_DECISION_RETRY)}`)} target="${retryRequestedVar(opts.retryElement, opts.reservedTargets ?? [])}" />`,
     );
   }
   // The escalation user task shows the node's DESCRIPTIVE display name (issue #778 review) so a
@@ -2935,7 +2958,7 @@ function escalationTaskLines(
       `        <bpmn:outgoing>${rr}</bpmn:outgoing>`,
       `        <bpmn:outgoing>${rc}</bpmn:outgoing>`,
       "      </bpmn:exclusiveGateway>",
-      `      <bpmn:sequenceFlow id="${rr}" name="retry" sourceRef="${rg}" targetRef="${retryEl}_retry"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${retryRequestedVar(retryEl)} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+      `      <bpmn:sequenceFlow id="${rr}" name="retry" sourceRef="${rg}" targetRef="${retryEl}_retry"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${retryRequestedVar(retryEl, opts?.reservedTargets ?? [])} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
       `      <bpmn:sequenceFlow id="${rc}" name="continue" sourceRef="${rg}" targetRef="${continueTarget}" />`,
     );
   }

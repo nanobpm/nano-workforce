@@ -374,6 +374,47 @@ test("#514 Defect B: a service-node escalation (agent) stays inert — no emit f
   );
 });
 
+// #863 review r4199435326: the node-unique ROOT controls the OUTER gateways route on — `<el>_contractMet`
+// (producer-contract gate) and `<el>_retryRequested` (retry gate) — are decided INSIDE the node scope
+// but must be published at root (Nano evaluates gateway conditions against root vars only). An agent
+// emit's source var IS its own name, and every emit source var is null-seeded node-local by
+// ioMappingLines; so an emit literally named `<el>_contractMet`/`<el>_retryRequested` would null-seed a
+// LOCAL shadow of the control, and nearest-scope propagation would write the gate/escalation output into
+// that shadow — the outer gateway never seeing `true`, wedging the producer forever. The control names
+// must be grown collision-free against every node-local emit source var (as the resume-valid flag is).
+// The single node here is the first-sorted element `n0`, so emits named `n0_contractMet`/`n0_retryRequested`
+// reproduce the collision exactly.
+test("#863 generated root controls grow collision-free against a same-named node-local emit (no shadow)", async () => {
+  const r = await compileOk({
+    name: "control-collision",
+    nodes: [
+      {
+        id: "open",
+        kind: "agent",
+        agent: { jobType: "senior:demo", prompt: "x" },
+        emits: [
+          { name: "n0_contractMet", type: "boolean" },
+          { name: "n0_retryRequested", type: "boolean" },
+        ],
+      },
+    ],
+    edges: [],
+  });
+  const el = elementForNode(r.bpmn, "open");
+  assertEquals(el, "n0", "the single node is the first-sorted element n0, so its emits collide with the bare control names");
+  // The colliding emit source vars ARE null-seeded node-local — this is the shadow the controls dodge.
+  assert(r.bpmn.includes('source="=null" target="n0_contractMet"'), "the colliding emit source var is null-seeded node-local");
+  assert(r.bpmn.includes('source="=null" target="n0_retryRequested"'), "the colliding retry emit source var is null-seeded node-local");
+  // Contract gate: the proceed output + gateway condition read the GROWN name, never the shadowed bare one.
+  assert(r.bpmn.includes('target="n0_contractMet_"'), "the contract proceed output targets the grown control var");
+  assert(r.bpmn.includes("=n0_contractMet_ = true"), "the producer-contract gateway reads the grown control var");
+  assert(!r.bpmn.includes("=n0_contractMet = true"), "the gateway must NOT read the shadowed bare control var");
+  // Retry gate (both escalations): the retry decision output + retry flow condition read the grown name.
+  assert(r.bpmn.includes('target="n0_retryRequested_"'), "the retry decision output targets the grown control var");
+  assert(r.bpmn.includes("=n0_retryRequested_ = true"), "the retry gateway reads the grown control var");
+  assert(!r.bpmn.includes("=n0_retryRequested = true"), "the retry gateway must NOT read the shadowed bare control var");
+});
+
 // The escalation form (`delivery-escalation.form` / generic) has a SINGLE `value` field, so it can
 // resume AT MOST ONE emit. A node declaring >1 emit must NOT map that single value onto every emit
 // source var (it would write the same value to each, corrupting both outputs and coercing one string
