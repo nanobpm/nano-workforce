@@ -903,6 +903,19 @@ test("invalid-form-key: a `human.formKey` carrying attribute whitespace (LF) is 
   hasCode(errors, "invalid-form-key");
 });
 
+test("invalid-form-key: a PRESENT-but-non-string `human.formKey` is rejected, not silently dropped to a generated form (PR #863 review — fail-open class)", () => {
+  // The class: a non-string optional config value bypasses the `typeof === "string"`-gated validators
+  // and is silently accepted, so the compiler falls back to a generated form instead of the author's
+  // declared executable `<zeebe:formDefinition formId=…>` key. Every non-string shape must fail closed.
+  for (const bad of [42, {}, [], true]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "step", kind: "human", human: { formKey: bad } }],
+      edges: [],
+    });
+    hasCode(errors, "invalid-form-key");
+  }
+});
+
 test("credential-in-form-key: a URL-/credential-shaped `human.formKey` is REJECTED — it is baked verbatim into the executable `<zeebe:formDefinition formId=…>`, so an embedded credential would leak into the compiled BPMN the preview door returns (PR #863 review)", () => {
   // whole-value URL carrying a `?token=` query (no userinfo needed to be a leak risk)
   const whole = validateDeliveryGraph({

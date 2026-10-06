@@ -1930,8 +1930,9 @@ function agentContractProceedCondition(requiredEmits: readonly DeliveryFact[]): 
 function agentContractContextFeel(nodeId: string, descriptor: string, requiredEmits: readonly DeliveryFact[]): string {
   const statuses = AGENT_TERMINAL_SUCCESS_STATUSES.join("/");
   const head = feelStr(
-    `Node ${nodeId} (${descriptor}) completed but did not satisfy its producer contract — a producer must ` +
-      `self-report a terminal-success status (${statuses}) and populate every emit a downstream node requires ` +
+    `Node ${nodeId} (${descriptor}) completed but did not satisfy its producer contract — when a producer ` +
+      `reports a status it must be a terminal-success status (${statuses}; an absent/null status is accepted), ` +
+      `and it must populate every emit a downstream node requires ` +
       "before its result routes onward. Reported status=",
   );
   let feel = `=${head} + (if (is defined(status) and status != null) then string(status) else "(none)") + "."`;

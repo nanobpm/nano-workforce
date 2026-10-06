@@ -2280,6 +2280,24 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         message: "`human` config, when present, must be an object",
         code: "missing-config",
       });
+    } else if (
+      isRecord(rawNode.human) &&
+      rawNode.human.formKey !== undefined &&
+      typeof rawNode.human.formKey !== "string"
+    ) {
+      // A PRESENT-but-non-string `human.formKey` (`42`, `{}`, `[]`, `true`) is the fail-open sibling of
+      // the string-gated checks below: text/JSON ingress can pass a non-string, the `typeof === "string"`
+      // branch is skipped, the graph is ACCEPTED, and the compiler silently falls back to a generated form
+      // instead of the author's declared executable `<zeebe:formDefinition formId=…>` key. Reject it
+      // explicitly — fail CLOSED on a malformed executable config rather than silently dropping it (PR #863
+      // review). The required-config loop above already rejects a non-string `agent.jobType`/`connector.target`
+      // (both REQUIRED, so `typeof value !== "string"` is caught there); `human` config is optional, leaving
+      // `formKey` the one baked-verbatim field that reaches here untyped.
+      errors.push({
+        path: `${path}.human.formKey`,
+        message: "`human.formKey`, when present, must be a string",
+        code: "invalid-form-key",
+      });
     } else if (isRecord(rawNode.human) && typeof rawNode.human.formKey === "string") {
       // A delivery `human` node's explicit `human.formKey` is baked VERBATIM into the executable
       // `<zeebe:formDefinition formId=…>` attribute (it resolves a deployed `.form` by value), so — exactly

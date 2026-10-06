@@ -1044,7 +1044,7 @@ node-local in the same subProcess scope as the escalation form controls and the 
 seeded config, a fact name is not fully unrestricted: `validateDeliveryGraph` rejects an
 emit named after a **reserved delivery variable** (`reservedDeliveryFactNames(kind)`,
 app/deliveryGraph.ts) fail-closed at authoring time. The reserved set is **kind-aware**
-(issue #863 review): the **escalation controls** (`decision`/`value`/`note` — an escalation
+(issue #863 review): the **escalation controls** (`decision`/`value`/`escalationNote` — an escalation
 Continue would overwrite the fact, publishing `<el>_decision="continue"` instead of the
 agent's routing value) and the shared late-binding/preflight **scaffolding**
 (`boundFacts`/`nodeInputs`/`nodeInputsPresent`) are reserved for **every** kind, while a
