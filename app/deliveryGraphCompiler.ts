@@ -1815,7 +1815,18 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
   // (HUMAN_RESULT_LOCAL_VARS) and its explicit fact-named control (the declared emit's own name, read first
   // by a bespoke single-emit form), fail-closing a value-less timeout to its OWN null instead of a
   // sibling's.
-  if (node.kind === "agent" || node.kind === "connector" || node.kind === "human") {
+  // A `wait` node likewise has no worker result, but its SLA-timeout escalation parks on the SAME generic
+  // form, whose completion writes the escalation controls (ESCALATION_LOCAL_VARS = decision/value/
+  // escalationNote). On the escalate path the interrupting boundary timer CANCELS the probeLoop before its
+  // output mapping runs, so the `_lastAttempt` probe result and any value-resume materialise the emit
+  // SOURCE (`detail`/`resolvedArtifact`/`mergedSha`/`prCount` — factSourceVar) with NOTHING declaring them
+  // in the wait subProcess. Left at the shared ROOT those cross-publish between parallel timed-out waits:
+  // a value-less completion on one wait reads a sibling's root `value`/emit and resumes from the sibling's
+  // answer (Copilot review #863, thread r4200608648). So a wait subProcess ALSO localises its escalation
+  // controls + each declared emit source. None of these is read by a wait gateway (the `ready?` splits read
+  // only `ready`, which stays un-seeded), so the null-seed cannot shadow a gateway (the multi-instance
+  // `=null`-shadow gotcha). A wait has no retry escape, so there is no retry-reset to clear them.
+  if (node.kind === "agent" || node.kind === "connector" || node.kind === "human" || node.kind === "wait") {
     const locals = new Set<string>();
     if (node.kind === "human") {
       for (const v of HUMAN_RESULT_LOCAL_VARS) locals.add(v);
@@ -1825,12 +1836,15 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       // the fixed `humanEmitValue`/`humanEmitArtifact` (already in the set), so seed the fact name directly.
       for (const fact of normaliseEmits(node)) locals.add(fact.name);
     } else {
+      // agent / connector / wait: the escalation user task completes with the generic form's controls,
+      // and each declared emit's SOURCE var (factSourceVar) must fail-close to this node's own null.
       for (const v of ESCALATION_LOCAL_VARS) locals.add(v);
       if (node.kind === "agent") {
         for (const v of AGENT_RESULT_LOCAL_VARS) locals.add(v);
-      } else {
+      } else if (node.kind === "connector") {
         for (const v of CONNECTOR_RESULT_LOCAL_VARS) locals.add(v);
       }
+      // (a `wait` has no self-reported worker result metadata — only its escalation controls + emit sources)
       for (const fact of normaliseEmits(node)) locals.add(factSourceVar(node.kind, fact));
     }
     const taken = new Set(inputs.map((i) => i.target));

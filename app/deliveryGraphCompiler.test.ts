@@ -3577,6 +3577,63 @@ test("node scope: a human node with a bespoke single-emit form localises the exp
   assert(io.includes(`source="=null" target="approval"`), "the human subProcess declares the bespoke form's fact-named 'approval' control node-local");
 });
 
+test("node scope: a wait node localises its escalation controls + each declared emit source so two parallel timed-out waits never share a stale root value", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4200608648 "Localize wait escalation completion
+  // variables to prevent cross-wait leakage"): a `wait` node's SLA-timeout escalation parks on the
+  // generic form, whose completion writes `decision`/`value`/`escalationNote`, and on the escalate path
+  // the `_lastAttempt` probe + any value-resume materialise the emit source (`detail`/`resolvedArtifact`/
+  // `mergedSha`/`prCount`) — the interrupted probeLoop never ran its output mapping, so these do NOT
+  // reach the wait subProcess scope on their own. Left at the shared ROOT they cross-publish between
+  // parallel waits: a value-less completion on one wait reads a sibling's root `value`/emit and resumes
+  // from the sibling's answer. Each wait subProcess must declare the escalation controls + each emit
+  // source node-local, exactly as agent/connector/human do.
+  const graph = {
+    name: "two-waits",
+    nodes: [
+      { id: "waitA", kind: "wait", wait: { kind: "command", target: "a.sh", match: { exitCode: 0 }, onTimeout: "escalate" }, emits: [{ name: "token", type: "string" }] },
+      { id: "waitB", kind: "wait", wait: { kind: "command", target: "b.sh", match: { exitCode: 0 }, onTimeout: "escalate" }, emits: [{ name: "token", type: "string" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  for (const nodeId of ["waitA", "waitB"]) {
+    const el = elementForNode(r.bpmn, nodeId);
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    // The escalation controls (the generic form's completion vars) are node-local...
+    for (const v of ["decision", "value", "escalationNote"]) {
+      assert(io.includes(`source="=null" target="${v}"`), `wait '${nodeId}' declares escalation control '${v}' node-local on the subProcess`);
+    }
+    // ...and the declared emit's SOURCE var (a non-mergedSha/prCount/non-artifact string emit sources
+    // from the probe's `detail`) is node-local too, so a value-less timeout fail-closes to its OWN null.
+    assert(io.includes(`source="=null" target="detail"`), `wait '${nodeId}' declares its 'token' emit source var (detail) node-local on the subProcess`);
+    // And it still publishes its own node's value onward under the flat node-unique name.
+    assert(io.includes(`target="${el}_token"`), `wait '${nodeId}' still publishes its emit as the node-unique ${el}_token`);
+  }
+});
+
+test("node scope: a wait node localises an artifact emit's `resolvedArtifact` source and a `mergedSha`/`prCount` emit's own-named source (each distinct emit source, not the fact name)", async () => {
+  // Thread r4200608648: factSourceVar maps a wait emit to a FIXED intermediate, never the fact's own
+  // name — an artifact emit sources from `resolvedArtifact`, a `mergedSha`/`prCount` emit from its own
+  // canonical probe bind. Each of those distinct source vars must be node-local, not just `detail`.
+  for (const emit of [
+    { fact: { name: "built", type: "artifact" }, source: "resolvedArtifact" },
+    { fact: { name: "mergedSha", type: "string" }, source: "mergedSha" },
+    { fact: { name: "prCount", type: "number" }, source: "prCount" },
+  ]) {
+    const graph = {
+      name: `wait-${emit.source}`,
+      nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target: "c.sh", match: { exitCode: 0 }, onTimeout: "escalate" }, emits: [emit.fact] }],
+      edges: [],
+    };
+    const r = await compileOk(graph);
+    const el = elementForNode(r.bpmn, "w");
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    assert(io.includes(`source="=null" target="${emit.source}"`), `a wait emitting '${emit.fact.name}' declares its '${emit.source}' emit source node-local`);
+  }
+});
+
 test("node scope: an agent/connector node never declares the human-only scratch (no cross-kind leakage of HUMAN_RESULT_LOCAL_VARS)", async () => {
   // Fail-closed guard: the human scratch vars are human-specific; a service node must not declare them
   // node-local, so the localisation sets stay disjoint-by-kind.
