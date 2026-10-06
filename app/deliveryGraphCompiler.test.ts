@@ -2842,6 +2842,7 @@ test("#863 node scope: a connector retry reset never clears the non-local `note`
 });
 
 test("node scope: an agent node never declares the connector-only result metadata (no cross-kind leakage of CONNECTOR_RESULT_LOCAL_VARS)", async () => {
+  // Fail-closed guard: the connector result vars are connector-specific; an agent node must not declare
   // them node-local (they are not part of an agent's completion contract), so the two localisation sets
   // stay disjoint-by-kind.
   const r = await compileOk(PRODUCER_GATE);
