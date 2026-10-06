@@ -24,7 +24,7 @@ import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient, GatewayDataSource } from "@nanobpm/urban";
 import { invalidateAdjudication, invalidateAdjudicationByCompletion } from "./adjudications.ts";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
-import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, isDeliveryEscalationTwin, isDeliveryHumanElement } from "./deliveryHuman.ts";
+import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, isDeliveryEscalationTwin, isDeliveryHumanElement, isDeliveryWaitEscalationTwin } from "./deliveryHuman.ts";
 import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, PR_MERGE_APPROVAL_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT } from "./userTasks.ts";
 
 const now = () => new Date().toISOString();
@@ -183,6 +183,13 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
  *  REST gateway addresses a deployed form by value whether that value is a deploy key or an authored
  *  form id, so this id resolves the same deployed `.form` the completer validates against. */
 export function escalationFormId(elementId: string): string | undefined {
+  // Derive the twin's COMPILED form from its id rather than inferring one form from the shared `__esc`
+  // suffix: a `wait`-gate twin (`…__esc__wait`, kind marker stamped by the compiler) renders the
+  // select-less GENERIC_HUMAN_FORM (no retry path); a service-node `__esc`/`__contract` twin renders the
+  // retry-capable ESCALATION_FORM. Mapping the wait twin to ESCALATION_FORM would denormalise a bogus
+  // "Retry this step" onto its Tasks row (the wait process silently ignores `decision`) whenever the
+  // engine omits `formKey` (PR #863 review, app/agentCompletion.ts:186).
+  if (isDeliveryWaitEscalationTwin(elementId)) return GENERIC_HUMAN_FORM;
   return ESCALATION_FORM_BY_ELEMENT[elementId] ?? (isDeliveryEscalationTwin(elementId) ? ESCALATION_FORM : undefined);
 }
 

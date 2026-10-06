@@ -23,6 +23,7 @@ import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { connectorDedupeKey, deliveryConnectorDispatches, dispatchConnector } from "../app/deliveryConnector.ts";
 import { readConnectorInput } from "../workers/delivery-connector/worker.ts";
 import { runDeliveryGraph } from "../app/deliveryRunner.ts";
+import { isDeliveryEscalationTwin } from "../app/deliveryHuman.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { deterministicProbeSeam } from "./support/probe-exec.ts";
 
@@ -134,7 +135,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
 
     // The human node scheduled its per-node user task (the isDeliveryHumanElement convention id).
     const open = await app.engine.searchUserTasks({ state: "CREATED" });
-    const human = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && !t.elementId?.endsWith("__esc"));
+    const human = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(t.elementId));
     assert.ok(human, `a human user task is open, got ${JSON.stringify(open.map((t) => t.elementId))}`);
 
     // Before the human completes, the connector has NOT fired — the fan-in edge from `h` gates it.
@@ -338,7 +339,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
 
     // Complete the UNRELATED human node — an upstream event with no edge to the wait.
     const open = await app.engine.searchUserTasks({ state: "CREATED" });
-    const side = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && !t.elementId?.endsWith("__esc"));
+    const side = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(t.elementId));
     assert.ok(side, "the unrelated human task is open");
     await app.engine.completeUserTask(side.userTaskKey, { value: "done", humanOutcome: "completed" });
     await app.settle();
@@ -349,7 +350,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // for a human rather than silently wedging or falsely resolving.
     assert.ok(!takenFlows(app).some((f) => f.endsWith("->End")), "the wait branch never falsely resolves to End");
     await app.advanceTime(2_100);
-    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.endsWith("__esc"));
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId !== undefined && isDeliveryEscalationTwin(t.elementId));
     assert.ok(
       esc.length >= 1,
       `the parked wait escalates (bounded), never falsely resolved by the unrelated event, got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`,

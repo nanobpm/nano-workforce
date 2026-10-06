@@ -15,6 +15,7 @@ import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText } from "./deliveryGraphCompiler.ts";
+import { isDeliveryEscalationTwin } from "./deliveryHuman.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
 async function compileOk(graph: unknown) {
@@ -37,7 +38,7 @@ function humanTaskSubEl(bpmn: string): string {
   const parts = bpmn.split('<bpmn:userTask id="delivery-human-task__');
   for (let k = 1; k < parts.length; k++) {
     const id = parts[k].slice(0, parts[k].indexOf('"'));
-    if (!id.endsWith("__esc") && !id.endsWith("__contract")) return id;
+    if (!isDeliveryEscalationTwin(`delivery-human-task__${id}`)) return id;
   }
   return "";
 }
@@ -303,17 +304,23 @@ function elementForNode(bpmn: string, nodeId: string): string {
   return m![1];
 }
 
-/** Slice a compiled BPMN to a node's escalation user task body. */
+/** Slice a compiled BPMN to a node's escalation user task body. A `wait` gate's twin carries the
+ * `__esc__wait` kind marker (no retry path → generic form); a service node's carries the bare `__esc`.
+ * Try the wait-twin id first, then the service-twin id. */
 function escBlockForNode(bpmn: string, nodeId: string): string {
-  const esc = `delivery-human-task__${elementForNode(bpmn, nodeId)}__esc`;
-  const start = bpmn.indexOf(`<bpmn:userTask id="${esc}"`);
-  assert(start !== -1, `escalation task ${esc} for node ${nodeId} exists`);
-  return bpmn.slice(start, bpmn.indexOf("</bpmn:userTask>", start));
+  const el = elementForNode(bpmn, nodeId);
+  for (const suffix of ["esc__wait", "esc"]) {
+    const esc = `delivery-human-task__${el}__${suffix}`;
+    const start = bpmn.indexOf(`<bpmn:userTask id="${esc}"`);
+    if (start !== -1) return bpmn.slice(start, bpmn.indexOf("</bpmn:userTask>", start));
+  }
+  assert(false, `escalation task for node ${nodeId} exists`);
+  return "";
 }
 
 /** Slice a compiled BPMN to a node's escalation user task body by twin suffix (`esc` timeout or
  * `contract` producer-gate, issue #731). */
-function escBlockForNodeSuffix(bpmn: string, nodeId: string, suffix: "esc" | "contract"): string {
+function escBlockForNodeSuffix(bpmn: string, nodeId: string, suffix: "esc" | "contract" | "esc__wait"): string {
   const esc = `delivery-human-task__${elementForNode(bpmn, nodeId)}__${suffix}`;
   const start = bpmn.indexOf(`<bpmn:userTask id="${esc}"`);
   assert(start !== -1, `escalation task ${esc} for node ${nodeId} exists`);
@@ -1142,9 +1149,9 @@ test("a wait node's onTimeout: continue proceeds past the gate with NO escalatio
     "continue routes the not-ready boundary branch to the node end",
   );
   // escalate: `hard` keeps its escalation twin and routes not-ready to it.
-  assert(r.bpmn.includes(`delivery-human-task__${hardEl}__esc`), "escalate keeps the escalation user task");
+  assert(r.bpmn.includes(`delivery-human-task__${hardEl}__esc__wait`), "escalate keeps the escalation user task");
   assert(
-    r.bpmn.includes(`<bpmn:sequenceFlow id="${hardEl}_i4" name="not ready" sourceRef="${hardEl}_lastGw" targetRef="delivery-human-task__${hardEl}__esc" />`),
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${hardEl}_i4" name="not ready" sourceRef="${hardEl}_lastGw" targetRef="delivery-human-task__${hardEl}__esc__wait" />`),
     "escalate routes the not-ready boundary branch to the escalation task",
   );
 });
@@ -2952,7 +2959,7 @@ test("escalation forms: service-node escalations attach delivery-escalation (ret
     ],
     edges: [{ from: "open.pr", to: "merged" }],
   });
-  const waitEsc = escBlockForNodeSuffix(waitGraph.bpmn, "merged", "esc");
+  const waitEsc = escBlockForNodeSuffix(waitGraph.bpmn, "merged", "esc__wait");
   assert(waitEsc.includes('formId="delivery-human-generic"'), "the wait-gate escalation keeps the generic form (no retry semantics)");
   assert(!waitEsc.includes('formId="delivery-escalation"'), "no retry select on a wait-gate escalation");
   const humanGraph = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "approve" } }], edges: [] });

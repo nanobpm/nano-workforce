@@ -62,6 +62,22 @@ export const DELIVERY_ESCALATION_TWIN_SUFFIX = "__esc";
 /** The id suffix for an `agent` node's producer-contract escalation TWIN (`…__contract`). */
 export const DELIVERY_CONTRACT_TWIN_SUFFIX = "__contract";
 
+/** The KIND marker the S4 compiler appends to a `wait` gate's bounded-timeout escalation twin
+ *  (`delivery-human-task__<el>__esc__wait`). A wait-gate escalation has NO retry semantics — its
+ *  resolution is "supply the awaited value and continue", never "re-run the probe loop" — so the
+ *  compiler renders the select-less {@link GENERIC_HUMAN_FORM} for it, NOT the retry-capable
+ *  {@link ESCALATION_FORM} a service-node `__esc`/`__contract` twin renders. The bare `__esc` suffix is
+ *  shared by both kinds, so a form inferred from the suffix ALONE misclassifies the wait gate as
+ *  retryable (the #461 Tasks-inbox `form_key` fallback then renders a bogus "Retry this step" that the
+ *  wait process silently ignores). Stamping the kind into the id lets {@link escalationFormId} DERIVE
+ *  the compiled form from the id — no separate node-kind registry to drift (PR #863 review,
+ *  app/agentCompletion.ts:186). */
+export const DELIVERY_WAIT_ESCALATION_KIND_MARKER = "__wait";
+
+/** The full id suffix of a `wait` gate's bounded-timeout escalation twin (`__esc` + the `__wait` kind
+ *  marker). */
+export const DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX = `${DELIVERY_ESCALATION_TWIN_SUFFIX}${DELIVERY_WAIT_ESCALATION_KIND_MARKER}`;
+
 /** True for a delivery-graph SERVICE-node escalation TWIN user task — the bounded-timeout `__esc` twin
  *  or an agent's producer-contract `__contract` twin — as opposed to a plain per-node human task
  *  (`delivery-human-task__<el>`). Unlike that per-node human task, which renders a DIFFERENT form per
@@ -81,10 +97,32 @@ export const DELIVERY_CONTRACT_TWIN_SUFFIX = "__contract";
 export function isDeliveryEscalationTwin(elementId: string): boolean {
   const prefix = `${DELIVERY_HUMAN_ELEMENT}__`;
   if (!elementId.startsWith(prefix)) return false;
-  for (const suffix of [DELIVERY_ESCALATION_TWIN_SUFFIX, DELIVERY_CONTRACT_TWIN_SUFFIX]) {
+  for (const suffix of [DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX, DELIVERY_ESCALATION_TWIN_SUFFIX, DELIVERY_CONTRACT_TWIN_SUFFIX]) {
     if (elementId.endsWith(suffix) && elementId.length > prefix.length + suffix.length) return true;
   }
   return false;
+}
+
+/** True for a `wait` gate's bounded-timeout escalation twin specifically (`…__esc__wait`) — the twin
+ *  kind that renders the select-less {@link GENERIC_HUMAN_FORM} (no retry path), as opposed to a
+ *  service-node `__esc`/`__contract` twin, which renders the retry-capable {@link ESCALATION_FORM}.
+ *  This is the discriminator {@link escalationFormId} uses to DERIVE the compiled form from the id. */
+export function isDeliveryWaitEscalationTwin(elementId: string): boolean {
+  const prefix = `${DELIVERY_HUMAN_ELEMENT}__`;
+  return (
+    elementId.startsWith(prefix) &&
+    elementId.endsWith(DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX) &&
+    elementId.length > prefix.length + DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX.length
+  );
+}
+
+/** Strip the trailing escalation-twin suffix (`__esc`, the wait-gate `__esc__wait`, or `__contract`)
+ *  to recover the base per-node element id (`delivery-human-task__<el>`). The `__esc__wait` kind marker
+ *  MUST be stripped before the bare `__esc` (it ends in `__esc`, so stripping `__esc` first would leave
+ *  a dangling `__wait`). A non-twin id is returned unchanged. Single source of truth for the strip so
+ *  every "resolve the twin to its base node" lookup agrees on the suffix set. */
+export function stripDeliveryEscalationTwinSuffix(elementId: string): string {
+  return elementId.replace(/__(esc__wait|esc|contract)$/, "");
 }
 
 /** The read-model "Decision context" for a parked delivery-graph `human` node (issue #772). The Tasks
@@ -112,7 +150,7 @@ export function deliveryHumanContextQuestion(
   livePrompt?: string | null,
 ): string {
   const labels = humanLabels ?? {};
-  const base = elementId.replace(/__esc$/, "");
+  const base = stripDeliveryEscalationTwinSuffix(elementId);
   const label = (labels[elementId] ?? labels[base] ?? "").trim();
   return label || (livePrompt ?? "").trim() || "A scheduled delivery-graph step is waiting to be completed.";
 }
@@ -124,9 +162,9 @@ export function deliveryHumanContextQuestion(
  *  static fallback — the "no actionable information" escalations of instance 171774. A real human
  *  node (or its `__esc` twin) keeps its authored instruction label. */
 export function needsLiveDeliveryPrompt(humanLabels: Record<string, string> | undefined, elementId: string): boolean {
-  if (!/__(esc|contract)$/.test(elementId)) return false;
+  if (!/__(esc__wait|esc|contract)$/.test(elementId)) return false;
   const labels = humanLabels ?? {};
-  const base = elementId.replace(/__esc$/, "");
+  const base = stripDeliveryEscalationTwinSuffix(elementId);
   return !(labels[elementId] ?? labels[base] ?? "").trim();
 }
 
@@ -163,7 +201,7 @@ export function deliveryHumanContextUrl(
   elementId: string,
 ): string | null {
   const labels = humanLabels ?? {};
-  const base = elementId.replace(/__esc$/, "");
+  const base = stripDeliveryEscalationTwinSuffix(elementId);
   const instruction = labels[elementId] ?? labels[base] ?? "";
   const url = firstHttpUrl(instruction);
   // The stored `human_labels` are display-REDACTED (`redactFreeText` in `buildHumanLabels`): a URL that

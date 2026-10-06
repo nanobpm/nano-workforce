@@ -30,6 +30,7 @@ import {
   transcriptUrlForJob,
 } from "./agentic/transcript-url.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
+import { isDeliveryEscalationTwin } from "./deliveryHuman.ts";
 
 /** A graph exercising the full node-kind matrix: `agent` (a named `senior:*` job), `wait` (the
  *  `pr.readiness-probe` poll gate), `human` (a user task), and `connector` (the delivery-connector
@@ -96,7 +97,7 @@ test("deploy+advance: a well-formed graph deploys through the real engine and ev
     // human node's user task deployed and is completable, not just that the instance ended.
     assertEquals(humanTasks.length, 1, `expected exactly one human user task, saw ${JSON.stringify(humanTasks)}`);
     assert(
-      humanTasks[0].startsWith("delivery-human-task__") && !humanTasks[0].endsWith("__esc"),
+      humanTasks[0].startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(humanTasks[0]),
       `expected a human node task, saw ${humanTasks[0]}`,
     );
   } finally {
@@ -159,7 +160,7 @@ test("deploy+advance: a stalled service node escalates on its node-timeout bound
       `the escalation task must have been driven, saw ${JSON.stringify(completed)}`,
     );
     assert(
-      completed.some((id) => id.startsWith("delivery-human-task__") && !id.endsWith("__esc")),
+      completed.some((id) => id.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(id)),
       `the downstream human task must have been driven, saw ${JSON.stringify(completed)}`,
     );
   } finally {
@@ -529,7 +530,7 @@ test("S7 deploy+route: mutually-exclusive leaves join End on an exclusive merge 
         }
       }
       assert(
-        parked.startsWith("delivery-human-task__") && !parked.endsWith("__esc"),
+        parked.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(parked),
         `the missing outcome must park on the escalate human leaf, saw ${JSON.stringify(parked)}`,
       );
       assert(!doneRan, "the guarded (missing) path must NOT run the `done` leaf");
@@ -615,7 +616,7 @@ test("#863 deploy+route: a BESPOKE single-boolean human form publishes a REAL `t
   // The bespoke form captures under the FACT's own name (`approval`), so the operator's entry arrives as
   // `{approval:"true"}`; the coercion must publish the boolean `true`, not null.
   const r = await driveBooleanHumanGuard({ bespoke: true, entry: { approval: "true" } });
-  assert(r.task.startsWith("delivery-human-task__") && !r.task.endsWith("__esc"), `expected the human task, saw ${r.task}`);
+  assert(r.task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(r.task), `expected the human task, saw ${r.task}`);
   assertEquals(r.state, "COMPLETED", "the graph must run to a COMPLETED instance");
   assert(r.yesRan, "a truthy bespoke boolean entry must publish a real `true` so the `= true` guard routes the TRUE branch (a null-publishing coercion would take the default)");
   assert(!r.noRan, "the default branch must NOT run when the boolean coerces to true");

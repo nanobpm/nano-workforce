@@ -53,7 +53,7 @@ import {
   stripXmlInvalidChars,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
-import { DELIVERY_CONTRACT_TWIN_SUFFIX, DELIVERY_ESCALATION_TWIN_SUFFIX, DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
+import { DELIVERY_CONTRACT_TWIN_SUFFIX, DELIVERY_ESCALATION_TWIN_SUFFIX, DELIVERY_HUMAN_ELEMENT, DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX, ESCALATION_FORM, GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
 import { layoutBpmnOffThread } from "./layoutOffThread.ts";
 import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactString } from "./readiness.ts";
 // `redactFreeText` now lives in the low-level `redactText.ts` helper (both this compiler and
@@ -166,8 +166,12 @@ function humanTaskElement(element: string): string {
 /** The BPMN element id a service node's bounded-timeout escalation user task carries — same
  * human-completable convention as a human node, so a stalled `agent`/`wait`/`connector` escalates onto
  * the Tasks inbox and is answerable by a human OR an agent (ADR 0046). */
-function escalationTaskElement(element: string): string {
-  return `${DELIVERY_HUMAN_ELEMENT}__${element}${DELIVERY_ESCALATION_TWIN_SUFFIX}`;
+function escalationTaskElement(element: string, kind?: DeliveryNode["kind"]): string {
+  // A `wait` gate's escalation has no retry semantics, so it renders the select-less generic form and
+  // stamps the `__wait` kind marker into its id — letting `escalationFormId` DERIVE that form from the
+  // id rather than inferring the retry-capable form from the shared `__esc` suffix (PR #863 review).
+  const suffix = kind === "wait" ? DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX : DELIVERY_ESCALATION_TWIN_SUFFIX;
+  return `${DELIVERY_HUMAN_ELEMENT}__${element}${suffix}`;
 }
 
 /** The BPMN element id an `agent` node's PRODUCER-CONTRACT escalation user task carries (issue #731) —
@@ -2192,7 +2196,7 @@ function retryResolutionLines(el: string, incoming: readonly string[], emits: re
 function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>, displayName: string): string[] {
   const nodeId = node.id;
   const name = escapeXml(displayName);
-  const esc = escalationTaskElement(el);
+  const esc = escalationTaskElement(el, "wait");
   const emits = normaliseEmits(node);
   // `onTimeout` routing (#462): `escalate` (default) parks the not-ready-at-boundary token on a
   // human-completable escalation task; `continue` proceeds past the gate as not-ready WITHOUT a human

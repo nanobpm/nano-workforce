@@ -18,6 +18,7 @@ import {
   completeEscalationAsAgent,
   completeEscalationAsHuman,
   completeUserTaskAttributed,
+  escalationFormId,
   latestCompletion,
   revertAgentCompletion,
   type TaskCompletion,
@@ -905,6 +906,34 @@ test("validateEscalationVariables enforces the `decision` select on a delivery-g
   assertEquals(validateEscalationVariables("delivery-human-task__n1", { decision: "retrry" }), null);
   // a node literally named `esc` has base id `delivery-human-task__esc` — NOT misread as a twin.
   assertEquals(validateEscalationVariables("delivery-human-task__esc", { decision: "retrry" }), null);
+});
+
+test("escalationFormId derives the COMPILED form per twin kind — wait-gate twins get the generic form, not the retry form (PR #863 review)", () => {
+  // Regression guard (Copilot thread app/agentCompletion.ts:186): the bare `__esc` suffix is shared by a
+  // service-node timeout twin (retry-capable → `delivery-escalation`) AND a `wait`-gate twin (no retry
+  // path → `delivery-human-generic`). Inferring one form from the suffix misclassified the wait gate, so
+  // the #461 Tasks-inbox `form_key` fallback rendered a bogus "Retry this step" the wait process silently
+  // ignores. The compiler now stamps a `__wait` kind marker into the wait twin's id so the form is
+  // DERIVED from the id.
+  // service-node twins → retry-capable escalation form
+  assertEquals(escalationFormId("delivery-human-task__n1__esc"), "delivery-escalation");
+  assertEquals(escalationFormId("delivery-human-task__n2__contract"), "delivery-escalation");
+  // wait-gate twin (kind marker) → select-less generic form
+  assertEquals(escalationFormId("delivery-human-task__gate__esc__wait"), "delivery-human-generic");
+  // a bare per-node human task (variable form per node) has no static contract
+  assertEquals(escalationFormId("delivery-human-task__n1"), undefined);
+  // a node literally named `esc`/`esc__wait` is NOT misread as a twin (needs a non-empty base before the suffix)
+  assertEquals(escalationFormId("delivery-human-task__esc"), undefined);
+  assertEquals(escalationFormId("delivery-human-task__esc__wait"), undefined);
+});
+
+test("validateEscalationVariables: a wait-gate twin is validated against the generic form (no `decision` select to enforce)", () => {
+  // The wait-gate twin renders the select-less generic form, so a `decision` value is out of contract
+  // there — but the generic form declares no `decision` allowed-set, so the completer does not enforce
+  // one (the wait process ignores `decision` entirely; there is no retry path to guard).
+  const waitTwin = "delivery-human-task__gate__esc__wait";
+  assertEquals(validateEscalationVariables(waitTwin, { value: "pkg@1.2.3" }), null, "a value-only wait-gate resume is valid");
+  assertEquals(validateEscalationVariables(waitTwin, {}), null, "the generic form has no required fields");
 });
 
 test("feature-escalation demands non-blank answer on the answer path, but not on the hidden abandon path", async () => {

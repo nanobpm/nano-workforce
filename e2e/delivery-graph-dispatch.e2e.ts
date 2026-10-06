@@ -21,6 +21,7 @@ import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { deliveryGraphProposals } from "../app/deliveryGraphProposals.ts";
 import { deliveryGraphRuns } from "../app/deliveryGraphRun.ts";
 import { pollDeliveryGraphPhase } from "../app/service.ts";
+import { isDeliveryEscalationTwin } from "../app/deliveryHuman.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
@@ -129,7 +130,7 @@ describe("delivery-graph dispatch — agent compiles→stages, operator dispatch
 
     // ── Completion: complete the human stop → the instance ends → the poller reconciles to done ───
     const open = await app.engine.searchUserTasks({ state: "CREATED" });
-    const human = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && !t.elementId?.endsWith("__esc"));
+    const human = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(t.elementId));
     assert.ok(human, `a human user task is open, got ${JSON.stringify(open.map((t) => t.elementId))}`);
     await app.engine.completeUserTask(human.userTaskKey, { humanOutcome: "completed" });
     await app.settle();
