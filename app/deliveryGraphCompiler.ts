@@ -1836,13 +1836,22 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       // the fixed `humanEmitValue`/`humanEmitArtifact` (already in the set), so seed the fact name directly.
       for (const fact of normaliseEmits(node)) locals.add(fact.name);
     } else {
-      // agent / connector / wait: the escalation user task completes with the generic form's controls,
-      // and each declared emit's SOURCE var (factSourceVar) must fail-close to this node's own null.
+      // agent / connector / wait: the escalation user task completes with a form's controls, and each
+      // declared emit's SOURCE var (factSourceVar) must fail-close to this node's own null.
       for (const v of ESCALATION_LOCAL_VARS) locals.add(v);
       if (node.kind === "agent") {
         for (const v of AGENT_RESULT_LOCAL_VARS) locals.add(v);
       } else if (node.kind === "connector") {
         for (const v of CONNECTOR_RESULT_LOCAL_VARS) locals.add(v);
+      } else {
+        // `wait`: its SLA-timeout escalation renders the GENERIC human form (`delivery-human-generic`),
+        // whose controls are `value` + `note` — NOT the retry-capable `ESCALATION_FORM`'s
+        // `decision`/`value`/`escalationNote` (a wait has no retryElement, so `escalationTaskLines` picks
+        // the generic form). `value` is already in ESCALATION_LOCAL_VARS, but the generic form's `note`
+        // control is NOT — so completing a timed-out wait with an operator note would propagate `note` to
+        // the shared ROOT, letting parallel waits overwrite one another's note and exposing a
+        // wait-specific note to later jobs (Copilot review #863, thread r4200916073). Seed it node-local.
+        locals.add("note");
       }
       // (a `wait` has no self-reported worker result metadata — only its escalation controls + emit sources)
       for (const fact of normaliseEmits(node)) locals.add(factSourceVar(node.kind, fact));

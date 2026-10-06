@@ -779,12 +779,17 @@ async function driveStringHumanGuard(opts: { entry: Record<string, string>; emit
   try {
     let yesRan = false;
     let noRan = false;
-    // The selected value is published as `humanEmitValue` into process scope, so a downstream worker sees
-    // it. Capture it from whichever branch runs and assert the PUBLISHED contract, not merely completion.
+    // The selected value is published as the node's flat `<el>_<fact>` emit (`n0_<emitName>` — `gate`
+    // sorts first, so its element is `n0`) into PROCESS scope, which is what a downstream worker (and the
+    // guarded split's `n0_<fact> = …` condition) actually observes. Capture THAT, not the node-local
+    // `humanEmitValue` scratch — since #863 (thread r4199949849) the scratch is localised to the human
+    // subProcess to stop cross-node leakage, so it never reaches a downstream worker. Asserting the
+    // published emit is the real PUBLISHED-value contract, not merely completion.
+    const emitVar = `n0_${opts.emitName}`;
     let published: unknown = "<<never published>>";
     const capture = (job: { variables?: Record<string, unknown> }): void => {
       const v = (job.variables as Record<string, unknown> | undefined) ?? {};
-      published = v.humanEmitValue ?? null;
+      published = v[emitVar] ?? null;
     };
     await engine.registerWorker("senior:yes", async (job) => {
       yesRan = true;
@@ -874,7 +879,10 @@ test("#863 deploy+route: a BESPOKE single-ARTIFACT human form with a FEEL-builti
     let publishedArtifact: unknown = "<<never published>>";
     await engine.registerWorker("senior:sink", async (job) => {
       const v = (job.variables as Record<string, unknown> | undefined) ?? {};
-      publishedArtifact = v.humanEmitArtifact ?? null;
+      // Read the published `<el>_<fact>` artifact emit (`n0_count`), not the node-local `humanEmitArtifact`
+      // scratch — the scratch is localised to the human subProcess (#863, thread r4199949849) and never
+      // reaches a downstream worker; the flat emit is the observable published-value contract.
+      publishedArtifact = v.n0_count ?? null;
       return {};
     });
     const graph: DeliveryGraph = {
@@ -934,7 +942,11 @@ async function driveTypedHumanGuard(opts: { emitName: string; emitType: "version
     let published: unknown = "<<never published>>";
     await engine.registerWorker("senior:sink", async (job) => {
       const v = (job.variables as Record<string, unknown> | undefined) ?? {};
-      published = v.humanEmitValue ?? v.humanEmitArtifact ?? null;
+      // Read the published `<el>_<fact>` emit (`n0_<emitName>`), not the node-local
+      // `humanEmitValue`/`humanEmitArtifact` scratch — the scratch is localised to the human subProcess
+      // (#863, thread r4199949849) and never reaches a downstream worker; the flat emit is the observable
+      // published-value contract this validation gate protects.
+      published = v[`n0_${opts.emitName}`] ?? null;
       return {};
     });
     const graph: DeliveryGraph = {

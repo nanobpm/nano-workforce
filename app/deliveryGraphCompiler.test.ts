@@ -3612,6 +3612,34 @@ test("node scope: a wait node localises its escalation controls + each declared 
   }
 });
 
+test("node scope: a wait node localises the generic escalation form's `note` control so a timed-out wait's operator note never leaks to root", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4200916073 "Declare wait form note as a local
+  // variable"): a `wait` node's SLA-timeout escalation renders the GENERIC human form
+  // (`delivery-human-generic` — a wait has no retryElement, so `escalationTaskLines` picks it over the
+  // retry-capable `ESCALATION_FORM`). That form's controls are `value` + `note`, NOT the retry form's
+  // `decision`/`value`/`escalationNote`. `value` is already in ESCALATION_LOCAL_VARS, but the generic
+  // form's `note` control was NOT seeded node-local — so completing a timed-out wait with an operator
+  // note propagated `note` to the shared ROOT, letting parallel waits overwrite one another's note and
+  // exposing a wait-specific note to later jobs. Each wait subProcess must declare `note` node-local.
+  const graph = {
+    name: "two-waits-note",
+    nodes: [
+      { id: "waitA", kind: "wait", wait: { kind: "command", target: "a.sh", match: { exitCode: 0 }, onTimeout: "escalate" }, emits: [{ name: "token", type: "string" }] },
+      { id: "waitB", kind: "wait", wait: { kind: "command", target: "b.sh", match: { exitCode: 0 }, onTimeout: "escalate" }, emits: [{ name: "token", type: "string" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  for (const nodeId of ["waitA", "waitB"]) {
+    const el = elementForNode(r.bpmn, nodeId);
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    // The generic escalation form's `note` control is node-local (alongside `value`).
+    assert(io.includes(`source="=null" target="note"`), `wait '${nodeId}' declares the generic escalation form's 'note' control node-local on the subProcess`);
+    assert(io.includes(`source="=null" target="value"`), `wait '${nodeId}' declares the generic escalation form's 'value' control node-local on the subProcess`);
+  }
+});
+
 test("node scope: a wait node localises an artifact emit's `resolvedArtifact` source and a `mergedSha`/`prCount` emit's own-named source (each distinct emit source, not the fact name)", async () => {
   // Thread r4200608648: factSourceVar maps a wait emit to a FIXED intermediate, never the fact's own
   // name — an artifact emit sources from `resolvedArtifact`, a `mergedSha`/`prCount` emit from its own
