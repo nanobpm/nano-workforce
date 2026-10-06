@@ -20,7 +20,7 @@ import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generate
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { isPlausibleBranchName } from "./baseBranch.ts";
-import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, redactFreeText } from "./deliveryGraphCompiler.ts";
+import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -97,7 +97,7 @@ export interface DeliveryRunOptions extends DeliveryRunTimeouts {
 }
 
 const DEFAULTS: Required<Omit<DeliveryRunTimeouts, "escalationAssignee">> = {
-  nodeTimeout: "PT1H",
+  nodeTimeout: DELIVERY_NODE_DEFAULT_TIMEOUT,
   probeTimeout: "PT30M",
   probePollEvery: msToIsoDuration(DEFAULT_EVERY_MS),
   escalationSlaTimeout: "P1D",
@@ -127,6 +127,11 @@ export interface PreparedDeliveryGraph {
    *  `runDeliveryGraph` seeds the SAME value as a run-root process variable — the reconciliation
    *  handle a stale-claim relaunch matches a still-running original instance on (issue #852). */
   runKey: string;
+  /** The resolved run-level node SLA (`isoDuration(options.nodeTimeout)`), surfaced so `runDeliveryGraph`
+   *  seeds it as the run-root `runNodeTimeout` variable — the fallback a node's bounded-timeout
+   *  ioMapping reads when its per-node `nodeInputs.<el>.timeout` is null, so a node released with no
+   *  per-node timeout gets a real SLA instead of a zero-length timer that fires instantly (issue #872). */
+  runNodeTimeout: string;
 }
 
 export type PrepareDeliveryResult =
@@ -198,7 +203,7 @@ export async function prepareDeliveryGraph(
     if (element === undefined) continue; // unreachable — resolved covers every node — but keep total.
     nodeInputs[element] = buildNodeInput(node, { runKey, element, ...timeouts, requiredEmits: requiredEmitsByNodeId.get(node.id) ?? EMPTY_REQUIRED_EMITS });
   }
-  return { ok: true, prepared: { processDefinitionId, bpmn, nodeInputs, runKey } };
+  return { ok: true, prepared: { processDefinitionId, bpmn, nodeInputs, runKey, runNodeTimeout: timeouts.nodeTimeout } };
 }
 
 /** Deploy + start a compiled graph as a running engine-native instance. Idempotent at the DEFINITION
@@ -212,7 +217,7 @@ export async function runDeliveryGraph(
 ): Promise<RunDeliveryResult> {
   const prep = await prepareDeliveryGraph(graph, options);
   if (!prep.ok) return prep;
-  const { processDefinitionId, bpmn, nodeInputs, runKey } = prep.prepared;
+  const { processDefinitionId, bpmn, nodeInputs, runKey, runNodeTimeout } = prep.prepared;
 
   await engine.deployResources([{ name: `${processDefinitionId}.bpmn`, content: bpmn, contentType: "application/xml" }]);
   // Per-node repository isolation (#739): the `io.nanobpm.agentTask.repository` envelope is now seeded
@@ -235,6 +240,10 @@ export async function runDeliveryGraph(
     variables: {
       nodeInputs,
       runKey,
+      // Run-level node SLA fallback (issue #872): the bounded-timeout ioMapping reads this when a node's
+      // per-node `nodeInputs.<el>.timeout` is null, so a node released without a per-node timeout gets a
+      // real SLA instead of a null `=nodeTimeout` that fires the boundary timer instantly.
+      runNodeTimeout,
       // Stage 0 transcript correlation (#543): the transcript-endpoint base every agent node's
       // completing worker appends its jobKey-scoped stream to, to emit `transcriptUrl` (see the agent
       // node ioMapping in deliveryGraphCompiler). Seeded once at the run root — the same value for
@@ -250,7 +259,7 @@ export async function runDeliveryGraph(
   // downstream consumers expect a string — coerce (codebase-wide `String(...)` pattern, e.g. app/plan.ts).
   return {
     ok: true,
-    handle: { processDefinitionId, bpmn, nodeInputs, runKey, processInstanceKey: String(processInstanceKey) },
+    handle: { processDefinitionId, bpmn, nodeInputs, runKey, runNodeTimeout, processInstanceKey: String(processInstanceKey) },
   };
 }
 

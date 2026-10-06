@@ -14,7 +14,7 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
-import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText } from "./deliveryGraphCompiler.ts";
+import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText, resumeValidVar } from "./deliveryGraphCompiler.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
 async function compileOk(graph: unknown) {
@@ -320,21 +320,24 @@ test("#514 Defect A: a capability wait-gate escalation surfaces the probe's last
   assert(/source="=nodeInputs\.[^"]+\.probe\.match" target="probeMatch"/.test(esc), "the escalation surfaces the resolved probe match");
 });
 
-test("#514 Defect B: a resumed wait-node escalation maps the operator-supplied value onto the node's emit source (version→detail, artifact→resolvedArtifact)", async () => {
+test("#514 Defect B + #876 review: a resumed wait-node escalation VALIDATES the operator value onto the node's emit source (version→detail, artifact→resolvedArtifact)", async () => {
   const r = await compileOk(CAP_GATE);
   // Red before the fix: the wait escalation forced emitMode="none" (hiding the value field) and carried
   // NO output mapping, so a resume published `<el>_<fact> = null`, starving the downstream consumer.
+  // (#876 review: the task VALIDATES the form's `value` on its OWN output mapping — a gateway ioMapping
+  // is not visible downstream in the pinned engine — binding the emit-source var only on a valid value.)
   const escV = escBlockForNode(r.bpmn, "n2");
-  // A `version` emit is sourced from `detail` — the operator's captured `value` must be mapped there.
+  // A `version` emit is sourced from `detail` — the operator's captured `value` must land there.
   assert(escV.includes('="typed"') && escV.includes('target="emitMode"'), "a wait node with emits PRESENTS its value field on escalation, not 'none'");
   assert(escV.includes("publishedVersion (version)") && escV.includes('target="emitLabel"'), "the emit label names the awaited fact");
-  assert(/source="=if \(is defined\(value\)\) then value else null" target="detail"/.test(escV), "the operator's value is mapped onto the version emit's source var (detail)");
+  assert(/<zeebe:output [\s\S]*?target="detail" \/>/.test(escV), "the version emit's source var (detail) is bound on the task output");
+  assert(/<zeebe:output [\s\S]*?target="[^"]*__resumeValid" \/>/.test(escV), "the task flags the resume validity");
 
   const escA = escBlockForNode(r.bpmn, "n3");
   // An `artifact` emit is ALSO sourced from the generic form's single `value` field (the form has no
-  // `resolvedArtifact` field), mapped onto the artifact emit's source var (resolvedArtifact) — so an
-  // artifact wait-node escalation is actually resumable via the UI.
-  assert(/source="=if \(is defined\(value\)\) then value else null" target="resolvedArtifact"/.test(escA), "the operator's value is mapped onto the artifact emit's source var (resolvedArtifact)");
+  // `resolvedArtifact` field), validated and bound onto the artifact emit's source var
+  // (resolvedArtifact) — so an artifact wait-node escalation is actually resumable via the UI.
+  assert(/<zeebe:output [\s\S]*?target="resolvedArtifact" \/>/.test(escA), "the artifact emit's source var (resolvedArtifact) is bound on the task output");
 });
 
 test("#514 Defect B: a service-node escalation (agent) stays inert — no emit field, no resume output mapping (only wait resumes)", async () => {
@@ -344,6 +347,316 @@ test("#514 Defect B: a service-node escalation (agent) stays inert — no emit f
   assert(!esc.includes("<bpmn:output") && !esc.includes("<zeebe:output"), "an agent-node escalation carries no emit-source output mapping");
 });
 
+// An agent that owes a required `pr` emit to a downstream consumer — its timeout `__esc` (and a
+// producer-contract `__contract`) is RESUMABLE with that emit (#872), so it is the natural surface
+// for the resume-validation gate (PR #876 review).
+const RESUME_GATE_GRAPH = {
+  name: "resume validation gate",
+  nodes: [
+    { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "open a PR" }, emits: [{ name: "pr", type: "pr" }] },
+    { id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "open.pr" } } },
+  ],
+  edges: [{ from: "open.pr", to: "land" }],
+};
+
+test("#876 review: a resumable escalation VALIDATES the operator value onto the emit-source var on its own output mapping", async () => {
+  // The emit-source var (`factSourceVar`) is bound from the form's `value` ONLY when it satisfies the
+  // per-emit type condition — never unconditionally — so an omitted/malformed resume can never thread
+  // null/garbage onto the emit the subProcess output mapping republishes downstream. The task also
+  // flags the resume-valid boolean for the post-escalation gateway.
+  const r = await compileOk(RESUME_GATE_GRAPH);
+  for (const suffix of ["esc", "contract"] as const) {
+    const esc = escBlockForNodeSuffix(r.bpmn, "open", suffix);
+    assert(/<zeebe:output [\s\S]*?target="pr" \/>/.test(esc), `the __${suffix} task binds the emit-source var (pr) on its output`);
+    assert(/<zeebe:output [\s\S]*?target="pr" \/>/.test(esc) && esc.includes("matches("), `the __${suffix} binding is type-validated (a pr must match the PR-key shape)`);
+    assert(/<zeebe:output [\s\S]*?target="[^"]*__resumeValid" \/>/.test(esc), `the __${suffix} task flags its resume-valid flag`);
+  }
+});
+
+test("#876 review: a resumable escalation is followed by a validation gate that loops back on a missing/invalid value and releases only a valid one", async () => {
+  const r = await compileOk(RESUME_GATE_GRAPH);
+  const openEl = elementForNode(r.bpmn, "open");
+  const esc = `delivery-human-task__${openEl}__esc`;
+  // The gate exists, named for its purpose, and defaults to the INVALID (loop-back) branch so a
+  // condition failure can never release a null downstream (fail closed). It is a PLAIN gateway (no
+  // ioMapping — a gateway ioMapping is not visible downstream in the pinned engine), routing on the
+  // simple `<resumeValidVar> = true` boolean the escalation task computed.
+  const gateStart = r.bpmn.indexOf(`<bpmn:exclusiveGateway id="${esc}Vg" name="resume value valid?" default="${esc}Vbad"`);
+  assert(gateStart !== -1, "the timeout escalation is followed by a resume-validation gateway defaulting to the invalid branch");
+  assert(
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${esc}Vok" name="valid" sourceRef="${esc}Vg" targetRef="${openEl}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${resumeValidVar(esc)} = true</bpmn:conditionExpression>`),
+    "the valid branch routes on the resume-valid flag and proceeds to the node end",
+  );
+  // The INVALID branch loops back to the escalation task (re-park with an explanation), so a blank or
+  // malformed `value` never threads null downstream.
+  assert(
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${esc}Vbad" name="invalid" sourceRef="${esc}Vg" targetRef="${esc}" />`),
+    "the invalid branch loops back onto the escalation task",
+  );
+  // The gateway carries NO ioMapping (the validation ran on the task, not the gateway).
+  const gateBlock = r.bpmn.slice(gateStart, r.bpmn.indexOf("</bpmn:exclusiveGateway>", gateStart));
+  assert(!gateBlock.includes("<zeebe:ioMapping>"), "the validation gateway is a plain routing gateway (no ioMapping)");
+});
+
+test("#876 review: a NON-resumable escalation (no required emits) stays inert — no validation gate, no resume outputs", async () => {
+  const r = await compileOk(CAP_GATE);
+  // `gv` owes no required emit: its escalation is the inert acknowledgement and must NOT grow a gate.
+  const gvEl = elementForNode(r.bpmn, "gv");
+  assert(!r.bpmn.includes(`delivery-human-task__${gvEl}__escVg`), "a no-required-emit node carries no resume-validation gateway");
+  const esc = escBlockForNode(r.bpmn, "gv");
+  assert(!/target="[^"]*__resumeValid"/.test(esc), "an inert escalation publishes no resume-valid flag");
+});
+
+test("#876 review: the producer-contract escalation is validated by the SAME resume gate", async () => {
+  const r = await compileOk(RESUME_GATE_GRAPH);
+  const openEl = elementForNode(r.bpmn, "open");
+  const contract = `delivery-human-task__${openEl}__contract`;
+  assert(r.bpmn.includes(`<bpmn:exclusiveGateway id="${contract}Vg" name="resume value valid?" default="${contract}Vbad"`), "the contract escalation grows its own validation gateway");
+  assert(
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${contract}Vbad" name="invalid" sourceRef="${contract}Vg" targetRef="${contract}" />`),
+    "the contract invalid branch loops back onto the contract escalation task",
+  );
+});
+
+test("#876 review: a resumed WAIT-gate escalation validates against its emit type (version→detail)", async () => {
+  const r = await compileOk(CAP_GATE);
+  const n2El = elementForNode(r.bpmn, "n2");
+  const esc = escBlockForNode(r.bpmn, "n2");
+  // The version emit's source var (detail) is bound on the task output, type-validated, plus the
+  // resume-valid flag for the gateway.
+  assert(/<zeebe:output [\s\S]*?target="detail" \/>/.test(esc), "the wait escalation binds the version emit's source var (detail) on its output");
+  assert(/<zeebe:output [\s\S]*?target="[^"]*__resumeValid" \/>/.test(esc), "the wait escalation flags its resume-valid flag");
+  const gateStart = r.bpmn.indexOf(`<bpmn:exclusiveGateway id="delivery-human-task__${n2El}__escVg"`);
+  assert(gateStart !== -1, "the wait timeout escalation grows a resume-validation gateway");
+});
+
+// A producer owing MORE THAN ONE required emit to downstream consumers. The generic escalation form
+// captures a single `value`, so such a node CANNOT be resumed from the UI (one value can't supply two
+// distinct facts) — the escalation must FAIL CLOSED (PR #876 review).
+const MULTI_EMIT_GRAPH = {
+  name: "multi-emit fail-closed",
+  nodes: [
+    { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "open a PR" }, emits: [{ name: "pr", type: "pr" }, { name: "version", type: "version" }] },
+    { id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "open.pr", version: "open.version" } } },
+  ],
+  edges: [
+    { from: "open.pr", to: "land" },
+    { from: "open.version", to: "land" },
+  ],
+};
+
+test("#876 review: a multi-required-emit escalation FAILS CLOSED — it binds no fact value and hard-sets its resume-valid flag to false (the single-value form can't supply two distinct emits)", async () => {
+  const r = await compileOk(MULTI_EMIT_GRAPH);
+  const openEl = elementForNode(r.bpmn, "open");
+  for (const suffix of ["esc", "contract"] as const) {
+    const esc = escBlockForNodeSuffix(r.bpmn, "open", suffix);
+    const flagVar = resumeValidVar(`delivery-human-task__${openEl}__${suffix}`);
+    // No per-fact value binding — copying one `value` onto two distinct emits would release garbage.
+    assert(!/<zeebe:output [\s\S]*?target="pr" \/>/.test(esc), `the __${suffix} multi-emit escalation binds NO pr value`);
+    assert(!/<zeebe:output [\s\S]*?target="detail" \/>/.test(esc), `the __${suffix} multi-emit escalation binds NO version value`);
+    // The flag is a hard `false` — so the downstream gate always takes its default (invalid) branch.
+    assert(esc.includes(`<zeebe:output source="=false" target="${flagVar}" />`), `the __${suffix} multi-emit escalation hard-sets its resume-valid flag to false`);
+    // The gate still exists and routes on the (always-false) flag, so a resume always re-parks.
+    assert(
+      r.bpmn.includes(`<bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${flagVar} = true</bpmn:conditionExpression>`),
+      `the __${suffix} valid branch routes on the (always-false) resume-valid flag`,
+    );
+  }
+});
+
+test("#876 round-4 review: the resume-valid flag is distinct from any declared emit's fact-source var", async () => {
+  // The flag is derived from the escalation element id, which is itself a legal fact-name string — so
+  // a node could declare an emit NAMED `delivery_human_task__<el>__esc__resumeValid`, and for an
+  // `agent`/`connector` node that fact's emit-source var IS its own name (factSourceVar), which could
+  // collide with the flag (the valid resume would publish `true` instead of the supplied value). The
+  // `__flag__` infix plus the collision-free suffix in escalationTaskLines keep the two distinct WITHOUT
+  // reserving any user fact name. A graph whose single emit is named close to the flag string must still
+  // compile with a DISTINCT flag var and bind the emit under its own name.
+  const collisionName = "delivery_human_task__open__esc__resumeValid";
+  const r = await compileOk({
+    name: "resume flag namespace",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: collisionName, type: "string" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: `open.${collisionName}` }, dedupeKey: "ns-c" } },
+    ],
+    edges: [{ from: `open.${collisionName}`, to: "land" }],
+  });
+  const openEl = elementForNode(r.bpmn, "open");
+  const esc = `delivery-human-task__${openEl}__esc`;
+  const flagVar = resumeValidVar(esc);
+  // The flag carries the internal `__flag__` marker …
+  assert(flagVar.includes("__flag__"), `the resume-valid flag is namespaced with __flag__, got ${flagVar}`);
+  // … and is DISTINCT from the declared emit's fact-source var (its own name for an agent node), so the
+  // two outputs can never share one variable.
+  const escBlock = escBlockForNodeSuffix(r.bpmn, "open", "esc");
+  assert(escBlock.includes(`target="${collisionName}"`), "the declared emit binds under its own fact name");
+  assert(escBlock.includes(`target="${flagVar}"`), "the resume-valid flag binds under its distinct namespaced var");
+  assert(flagVar !== collisionName, "the flag var differs from the declared emit's source var");
+});
+
+test("#876 round-4 'Previously missed': the resume FEEL grammar ALIGNS with the canonical artifact + PR contracts", async () => {
+  // A timed-out node must be resumable with a value that works on its normal completion path. The
+  // `artifact` branch must accept a SCOPED package (`@nanobpm/urban@0.54.0` — coerceFactValue splits on
+  // the LAST `@`), and the `pr` branch must accept a canonical GitHub PR URL (parsePr) in addition to
+  // the `owner/repo#N` shorthand — otherwise the escalation rejects a value the canonical path accepts.
+  const r = await compileOk({
+    name: "resume grammar alignment",
+    nodes: [
+      { id: "pub", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "artifactRef", type: "artifact" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { a: "pub.artifactRef" }, dedupeKey: "gram-a" } },
+    ],
+    edges: [{ from: "pub.artifactRef", to: "land" }],
+  });
+  const escA = escBlockForNodeSuffix(r.bpmn, "pub", "esc");
+  // The artifact grammar permits an optional leading scope `@` before the name segment.
+  assert(escA.includes('"^@?[^@\\\\s]+@v?\\\\d[\\\\w.+-]*$"'), `the artifact resume grammar accepts a scoped package, got ${escA}`);
+
+  const rP = await compileOk(RESUME_GATE_GRAPH);
+  const escP = escBlockForNodeSuffix(rP.bpmn, "open", "esc");
+  // The pr grammar is the disjunction of the `owner/repo#N` shorthand AND a canonical GitHub PR URL.
+  assert(escP.includes("github\\\\.com/[^/]+/[^/]+/pull/"), `the pr resume grammar accepts a canonical GitHub PR URL, got ${escP}`);
+  assert(escP.includes("[^/#]+/[^/#]+)#"), "the pr resume grammar still accepts the owner/repo#N shorthand");
+  // Case-INSENSITIVE like parsePr's `/i`: the tested value is folded through `lower case(...)` so a
+  // mixed-case host/scheme (`https://GitHub.com/...`) the normal completion path accepts is not
+  // rejected here. The match folds; the bound `value` stays verbatim (see the verbatim-bind test).
+  assert(
+    escP.includes("matches(lower case(trim(string(value)))"),
+    `the pr resume grammar folds the tested value to lower case for case-insensitive alignment, got ${escP}`,
+  );
+});
+
+test("#876 round-5 review: a declared emit whose name EQUALS the generated resume-valid flag var is ACCEPTED — the flag deterministically grows a collision-free suffix instead of reserving the fact-name space", async () => {
+  // openapi's DeliveryFact.name permits `^[A-Za-z_][A-Za-z0-9_]*$`, so `my__flag__fact` and even the
+  // exact generated flag string are legal names that durable rows may already carry. Round-4 RESERVED
+  // the `__flag__` marker to forbid a collision, which silently rejected those previously valid names on
+  // recompilation (PR #876 round-5 review). Instead the single bind site makes the flag collision-free:
+  // if the single emit's fact-source var EQUALS the generated flag var, the flag grows a `_` suffix
+  // until distinct. The graph must COMPILE, bind the value under the fact's own name, and bind the flag
+  // under the distinct suffixed var.
+  //
+  // The flag is derived from `open`'s COMPILED element id (`nK`), which is not user-predictable, so
+  // probe-compile to learn it, then name the emit to the exact generated flag var (topology is
+  // unchanged by the rename, so the element id is stable).
+  const probe = await compileOk({
+    name: "flag collision probe",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "probeFact", type: "string" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.probeFact" }, dedupeKey: "coll-p" } },
+    ],
+    edges: [{ from: "open.probeFact", to: "land" }],
+  });
+  const collisionName = resumeValidVar(`delivery-human-task__${elementForNode(probe.bpmn, "open")}__esc`);
+  assert(collisionName.includes("__flag__"), "sanity: the flag var carries the internal infix");
+  const r = await compileOk({
+    name: "flag collision tolerated",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: collisionName, type: "string" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: `open.${collisionName}` }, dedupeKey: "coll-c" } },
+    ],
+    edges: [{ from: `open.${collisionName}`, to: "land" }],
+  });
+  const escBlock = escBlockForNodeSuffix(r.bpmn, "open", "esc");
+  // The declared emit still binds under its OWN name (the user's value is recovered on a valid resume).
+  assert(escBlock.includes(`target="${collisionName}"`), `the declared emit binds under its own fact name, got ${escBlock}`);
+  // The flag binds under a DISTINCT var — the collision-free `_`-suffixed name, never the fact's var.
+  const suffixedFlag = `${collisionName}_`;
+  assert(escBlock.includes(`target="${suffixedFlag}"`), `the resume-valid flag binds under the distinct suffixed var, got ${escBlock}`);
+  // … and the gateway routes on that SAME suffixed flag var, so the valid branch stays wired.
+  assert(
+    r.bpmn.includes(`<bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${suffixedFlag} = true</bpmn:conditionExpression>`),
+    `the valid branch routes on the suffixed flag var, got ${r.bpmn}`,
+  );
+
+  // A merely `__flag__`-bearing fact name (not the exact flag) is now also ACCEPTED — the public name
+  // space is no longer narrowed (PR #876 round-5 review).
+  const rOk = await compileOk({
+    name: "flag-infix name tolerated",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "my__flag__fact", type: "string" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.my__flag__fact" }, dedupeKey: "coll-d" } },
+    ],
+    edges: [{ from: "open.my__flag__fact", to: "land" }],
+  });
+  assert(escBlockForNodeSuffix(rOk.bpmn, "open", "esc").includes('target="my__flag__fact"'), "a __flag__-bearing fact name compiles and binds under its own name");
+});
+
+test("#876 round-6 review: the resume-valid flag dodges a NON-REQUIRED declared emit named exactly the flag, not only the resumed required emit", async () => {
+  // The round-5 fix grew the flag past only the SINGLE resumed required emit's source var. But every
+  // declared emit — including a NON-required one absent from `resume.emits` (a routing-only `when`-guard
+  // emit, or a declared-but-unconsumed emit) — is still republished by the node's subProcess output
+  // mapping from its own source var (for an agent that var IS the fact's own name). A node that declares
+  // a REQUIRED emit (so the escalation is resumable and a flag exists) PLUS a non-required emit named
+  // EXACTLY the generated flag would, under the old code, have the escalation write its boolean validity
+  // flag into that emit's var — and the subProcess then publishes `true`/`false` for that emit downstream
+  // (potentially selecting a guarded branch — PR #876 round-6 review). The flag must grow collision-free
+  // against ALL declared emits, so bind the extra emit to the exact flag var and assert the flag dodges.
+  //
+  // The flag is derived from `open`'s COMPILED element id; renaming/adding the extra (unconsumed) emit
+  // does not change topology, so probe-compile with the final shape to learn the element id, then name
+  // the extra emit the exact generated flag var.
+  const probe = await compileOk({
+    name: "flag non-required collision probe",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "pr", type: "pr" }, { name: "routeProbe", type: "boolean" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.pr" }, dedupeKey: "nr-p" } },
+    ],
+    edges: [{ from: "open.pr", to: "land" }],
+  });
+  const flagVar = resumeValidVar(`delivery-human-task__${elementForNode(probe.bpmn, "open")}__esc`);
+  const r = await compileOk({
+    name: "flag non-required collision tolerated",
+    nodes: [
+      // `pr` is REQUIRED (consumed by `land` below), so the timeout escalation is resumable and owns a
+      // flag; `flagVar` is a declared-but-unconsumed emit named exactly that flag — absent from the
+      // required set, so the old single-target collision check never saw it.
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "pr", type: "pr" }, { name: flagVar, type: "boolean" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.pr" }, dedupeKey: "nr-c" } },
+    ],
+    edges: [{ from: "open.pr", to: "land" }],
+  });
+  const escBlock = escBlockForNodeSuffix(r.bpmn, "open", "esc");
+  // The flag binds under the DISTINCT suffixed var, never the declared emit's own var.
+  const suffixedFlag = `${flagVar}_`;
+  assert(escBlock.includes(`target="${suffixedFlag}" />`), `the flag grows a collision-free suffix past the non-required emit, got ${escBlock}`);
+  assert(!escBlock.includes(`target="${flagVar}" />`), "the flag never binds under the non-required emit's own var");
+  // The gateway routes on that SAME suffixed flag var, so the valid branch stays wired.
+  assert(
+    r.bpmn.includes(`<bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${suffixedFlag} = true</bpmn:conditionExpression>`),
+    `the valid branch routes on the suffixed flag var, got ${r.bpmn}`,
+  );
+  // The non-required emit is still republished from its OWN (now flag-free) var by the subProcess output.
+  const el = elementForNode(r.bpmn, "open");
+  assert(
+    r.bpmn.includes(`<zeebe:output source="=if (is defined(${flagVar})) then ${flagVar} else null" target="${el}_${flagVar}" />`),
+    "the non-required emit still republishes from its own source var, uncontaminated by the flag",
+  );
+});
+
+test("#876 round-6 review: the PRODUCER-CONTRACT (`__contract`) escalation flag ALSO dodges a non-required declared emit named the flag", async () => {
+  // The same subProcess scope hosts both the timeout `__esc` and the producer-contract `__contract`
+  // escalations, so the contract flag must dodge the full declared-emit set too (PR #876 round-6 review).
+  const probe = await compileOk({
+    name: "contract flag collision probe",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "pr", type: "pr" }, { name: "cProbe", type: "boolean" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.pr" }, dedupeKey: "cr-p" } },
+    ],
+    edges: [{ from: "open.pr", to: "land" }],
+  });
+  const flagVar = resumeValidVar(`delivery-human-task__${elementForNode(probe.bpmn, "open")}__contract`);
+  const r = await compileOk({
+    name: "contract flag collision tolerated",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "pr", type: "pr" }, { name: flagVar, type: "boolean" }] },
+      { id: "land", kind: "connector", connector: { target: "slack", payload: { v: "open.pr" }, dedupeKey: "cr-c" } },
+    ],
+    edges: [{ from: "open.pr", to: "land" }],
+  });
+  const escBlock = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  const suffixedFlag = `${flagVar}_`;
+  assert(escBlock.includes(`target="${suffixedFlag}" />`), `the contract flag grows a collision-free suffix past the non-required emit, got ${escBlock}`);
+  assert(!escBlock.includes(`target="${flagVar}" />`), "the contract flag never binds under the non-required emit's own var");
+});
 
 test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", async () => {
   const errors = await compileFail({
@@ -577,6 +890,34 @@ test("a wait node with a LITERAL pr target compiles the probe unchanged (no spur
   const r = await compileOk(graph);
   assert(!/context put/.test(r.bpmn), "a literal target is not wrapped in a context put rewrite");
   assert(/source="=nodeInputs\.[^"]+\.probe" target="probe"/.test(r.bpmn), "the probe is seeded directly from nodeInputs");
+});
+
+test("#872: a fact-bound wait target whose upstream fact is NULL binds probe.target to null (fail-closed provenance), never the unresolvable fact-ref literal", async () => {
+  // The compiler — not the worker — owns the resolved/unresolved provenance (PR #876 review): when the
+  // upstream fact is as-yet-unobserved, the `context put` else-branch must write NULL (which the
+  // readiness-probe worker fails closed on) rather than leave the authored `<node>.<fact>` literal in
+  // place. A runtime syntax test on the target cannot distinguish that literal from a VALID dotted
+  // command target (e.g. `check.sh`), which must always reach the probe verbatim.
+  const graph = {
+    name: "null fact-ref provenance",
+    nodes: [
+      {
+        id: "open",
+        kind: "agent",
+        agent: { jobType: "senior:feature", prompt: "Implement and open a PR." },
+        emits: [{ name: "pr", type: "pr" }],
+      },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: "open.pr", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "open.pr", to: "merged" }],
+  };
+  const r = await compileOk(graph);
+  // The else-branch binds NULL (provenance), not the authored fact-ref literal.
+  assert(
+    /context put\([^)]*\.probe, "target", if \(is defined\([^)]*\) and [^)]* != null\) then [^)]* else null\)/.test(r.bpmn),
+    "an unresolved upstream fact binds null (provenance), not the authored fact-ref literal",
+  );
+  assert(!/else [a-zA-Z0-9_.]*\.target\)/.test(r.bpmn), "the else-branch never falls back to the authored fact-ref target literal");
 });
 
 test("a wait node whose fact-reference target is PADDED still late-binds via context put (target is trimmed before the bind match)", async () => {
@@ -925,10 +1266,13 @@ test("#731 required-emit gate: a producer's declared emit consumed as a required
   assert(g0![1].includes("(is defined(pr) and pr != null)"), "a required-emit non-null clause gates the success flow on the populated fact");
   const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
   assert(esc.includes("Required emit &apos;pr&apos;"), "the escalation NAMES the required fact that was not emitted");
-  // Resumable (#514 Defect-B mirror): a human/agent supplies the missing fact, mapped onto the agent
-  // emit source var (fact name), so the subProcess output ioMapping republishes `<el>_pr` non-null.
+  // Resumable (#514 Defect-B mirror): a human/agent supplies the missing fact, VALIDATED on the task's
+  // own output mapping (binding the agent emit source var — the fact name — only on a type-valid value)
+  // so the subProcess output ioMapping republishes `<el>_pr` non-null (PR #876 review — a gateway
+  // ioMapping is not visible downstream in the pinned engine, so the validation runs on the task).
   assert(esc.includes('="typed"') && esc.includes('target="emitMode"'), "the contract escalation PRESENTS its value field (resumable)");
-  assert(/source="=if \(is defined\(value\)\) then value else null" target="pr"/.test(esc), "the operator's value maps onto the required emit's source var");
+  assert(/<zeebe:output [\s\S]*?target="pr" \/>/.test(esc) && esc.includes("matches("), "the operator's value is type-validated onto the required emit's source var");
+  assert(/<zeebe:output [\s\S]*?target="[^"]*__resumeValid" \/>/.test(esc), "the contract escalation flags its resume-valid flag for its validation gateway");
 });
 
 test("#731 routing-only emits stay optional: a fact referenced ONLY by an edge `when` guard is NOT gated as a required emit (omit ⇒ default branch)", async () => {
