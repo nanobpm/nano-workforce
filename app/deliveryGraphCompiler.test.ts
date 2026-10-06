@@ -3529,6 +3529,66 @@ test("node scope: a connector node localises every declared emit source var so t
   }
 });
 
+test("node scope: a human node localises its emit scratch + form controls so two parallel human nodes never cross-publish a sibling's answer", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4199949849 "Isolate human subprocess scratch state
+  // to prevent cross-run leakage"): a human user task captures the operator's answer into FIXED,
+  // non-node-unique scratch (`humanEmitValue`/`humanEmitArtifact`) by SELECTING from fixed form controls
+  // (`value`/`resolvedArtifact`/`note`). Left at the shared ROOT, if human A completes while human B times
+  // out WITHOUT producing a value, B's subProcess output reads A's root `humanEmitValue` and publishes it
+  // as B's own `<el>_<fact>` (the complete-one/timeout-the-other leak). Each human subProcess must declare
+  // this scratch + its form controls node-local so a value-less timeout fail-closes to its OWN null.
+  const graph = {
+    name: "two-humans",
+    nodes: [
+      { id: "approveA", kind: "human", human: { prompt: "approve A" }, emits: [{ name: "verdict", type: "string" }] },
+      { id: "approveB", kind: "human", human: { prompt: "approve B" }, emits: [{ name: "verdict", type: "string" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  for (const nodeId of ["approveA", "approveB"]) {
+    const el = elementForNode(r.bpmn, nodeId);
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    for (const v of ["humanEmitValue", "humanEmitArtifact", "humanOutcome", "humanNote", "value", "resolvedArtifact", "note"]) {
+      assert(io.includes(`source="=null" target="${v}"`), `human '${nodeId}' declares '${v}' node-local on the subProcess`);
+    }
+    // And it still publishes its own node's value onward under the flat node-unique name.
+    assert(io.includes(`target="${el}_verdict"`), `human '${nodeId}' still publishes its emit as the node-unique ${el}_verdict`);
+  }
+});
+
+test("node scope: a human node with a bespoke single-emit form localises the explicit FACT-NAMED control too", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4199949849): a bespoke single-emit human form
+  // captures the value under the FACT'S OWN NAME (`selectExpr` reads `<factName>` before the canonical
+  // control), so that control must ALSO be node-local — otherwise a blank completion reads a sibling's
+  // root value for that fact name.
+  const graph = {
+    name: "bespoke-human",
+    nodes: [
+      { id: "approve", kind: "human", human: { prompt: "approve", formKey: "bespoke-approval" }, emits: [{ name: "approval", type: "boolean" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "approve");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  assert(io.includes(`source="=null" target="approval"`), "the human subProcess declares the bespoke form's fact-named 'approval' control node-local");
+});
+
+test("node scope: an agent/connector node never declares the human-only scratch (no cross-kind leakage of HUMAN_RESULT_LOCAL_VARS)", async () => {
+  // Fail-closed guard: the human scratch vars are human-specific; a service node must not declare them
+  // node-local, so the localisation sets stay disjoint-by-kind.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  for (const v of ["humanEmitValue", "humanEmitArtifact", "humanOutcome", "humanNote"]) {
+    assert(!io.includes(`target="${v}"`), `the agent node does not declare human-only '${v}'`);
+  }
+});
+
 test("connector timeout escalation is resumable with the connector's declared emits (Continue maps `value`; Retry clears them)", async () => {
   // Regression guard (PR #863 Copilot review, "Previously missed" — connector emits lost during timeout
   // escalation recovery): a connector has NO producer-contract gate (`contractGate === undefined`), so

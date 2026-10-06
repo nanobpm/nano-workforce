@@ -346,6 +346,30 @@ export const CONNECTOR_RESULT_LOCAL_VARS = [
   "connectorDetail",
 ] as const;
 
+/** The human-node scratch a `human` subProcess writes/reads while the operator completes (or times out
+ * of) its user task — the emit scratch the task output mapping captures (`humanEmitValue`/
+ * `humanEmitArtifact`), the task's fixed outcome/note (`humanOutcome`/`humanNote`), and the form
+ * controls the output mapping SELECTS from (`value`/`resolvedArtifact`/`note`). None of these is
+ * node-unique, so left at the shared ROOT they cross-publish between parallel human nodes exactly as an
+ * un-localised agent/connector result once did (PR #863 review, thread r4199949849 "Isolate human
+ * subprocess scratch state"): if human A completes while human B times out WITHOUT producing a value,
+ * B's subProcess output reads A's root `humanEmitValue`/`humanEmitArtifact` and publishes it as B's own
+ * `<el>_<fact>`; likewise a B that completes on a blank form reads A's root `value`/`resolvedArtifact`.
+ * Declared node-local on each human subProcess (seeded `=null`, like the agent/connector result sets)
+ * so Nano's nearest-scope propagation lands each human's capture inside its OWN subProcess. The
+ * node's explicit fact-named control (`<factName>`, read first by a bespoke single-emit form) is
+ * localised ALONGSIDE this set from the node's declared emits, since it is dynamic per node. Defined
+ * HERE (the validator's home) so the reserved set stays derivable without a cycle. */
+export const HUMAN_RESULT_LOCAL_VARS = [
+  "humanEmitValue",
+  "humanEmitArtifact",
+  "humanOutcome",
+  "humanNote",
+  "value",
+  "resolvedArtifact",
+  "note",
+] as const;
+
 /** The escalation-completion variable that chooses how a parked `agent`/`connector` node resumes
  * (retry-node resolution): completing a `__esc` / `__contract` escalation with `{ decision: "retry" }`
  * re-runs the node's job; any other value — or none — continues past it. Defined HERE (the validator's

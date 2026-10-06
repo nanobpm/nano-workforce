@@ -48,6 +48,7 @@ import {
   ESCALATION_DECISION_VAR,
   ESCALATION_LOCAL_VARS,
   ESCALATION_NOTE_VAR,
+  HUMAN_RESULT_LOCAL_VARS,
   hasXmlInvalidChars,
   redactConnectorValue,
   resolveDeliveryFrom,
@@ -1804,14 +1805,34 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
   // A `DeliveryNodeConnector` permits `emits` too, so WITHOUT this a timed-out connector could publish a
   // parallel sibling connector's root-scoped result through its own output mapping (Copilot review #863,
   // thread r4179717614).
-  if (node.kind === "agent" || node.kind === "connector") {
-    const locals = new Set<string>(ESCALATION_LOCAL_VARS);
-    if (node.kind === "agent") {
-      for (const v of AGENT_RESULT_LOCAL_VARS) locals.add(v);
+  // A `human` node has no worker result, but its user task captures the operator's answer into fixed,
+  // non-node-unique scratch (`humanEmitValue`/`humanEmitArtifact`/`humanOutcome`/`humanNote`) by SELECTING
+  // from fixed form controls (`value`/`resolvedArtifact`/`note`, plus a bespoke form's fact-named control).
+  // Left at the shared ROOT these cross-publish between parallel human nodes: a human that completes while
+  // a sibling times out WITHOUT producing a value would have the sibling read its root `humanEmitValue`
+  // and publish it as the sibling's own `<el>_<fact>` — the complete-one/timeout-the-other leak (Copilot
+  // review #863, thread r4199949849). So a human subProcess ALSO localises its scratch + form controls
+  // (HUMAN_RESULT_LOCAL_VARS) and its explicit fact-named control (the declared emit's own name, read first
+  // by a bespoke single-emit form), fail-closing a value-less timeout to its OWN null instead of a
+  // sibling's.
+  if (node.kind === "agent" || node.kind === "connector" || node.kind === "human") {
+    const locals = new Set<string>();
+    if (node.kind === "human") {
+      for (const v of HUMAN_RESULT_LOCAL_VARS) locals.add(v);
+      // A bespoke single-emit human form captures the value under the FACT'S OWN NAME (humanBodyLines'
+      // `selectExpr` reads `<factName>` before the canonical control), so that control must be node-local
+      // too — otherwise a blank completion reads a sibling's root value. factSourceVar maps a human emit to
+      // the fixed `humanEmitValue`/`humanEmitArtifact` (already in the set), so seed the fact name directly.
+      for (const fact of normaliseEmits(node)) locals.add(fact.name);
     } else {
-      for (const v of CONNECTOR_RESULT_LOCAL_VARS) locals.add(v);
+      for (const v of ESCALATION_LOCAL_VARS) locals.add(v);
+      if (node.kind === "agent") {
+        for (const v of AGENT_RESULT_LOCAL_VARS) locals.add(v);
+      } else {
+        for (const v of CONNECTOR_RESULT_LOCAL_VARS) locals.add(v);
+      }
+      for (const fact of normaliseEmits(node)) locals.add(factSourceVar(node.kind, fact));
     }
-    for (const fact of normaliseEmits(node)) locals.add(factSourceVar(node.kind, fact));
     const taken = new Set(inputs.map((i) => i.target));
     for (const v of locals) {
       if (!taken.has(v)) inputs.push({ source: "=null", target: v });
