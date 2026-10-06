@@ -1076,7 +1076,10 @@ escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
   there, on Continue it **fails closed and loops
   back to the escalation** (it does NOT write nulls and does NOT advance to a fallback branch)
   — **Retry this step** is the only way to actually produce the facts, except that a node
-  owing exactly **one** required emit may instead satisfy it by entering the coerced `value`.
+  declaring exactly **one** emit — that single declared emit being its only required resume
+  target — may instead satisfy it by entering the coerced `value` (the value field stays inert
+  for a node declaring two or more emits even when only one is required, matching
+  `declaredEmits.length === 1 && emits.length === 1` in the compiler).
   (A **wait** gate owing **two or more**
   emits is a special case: it has no Retry exit and its single value field can resume
   none of them, so its escalation grows **no** validation gate at all and Continue simply
