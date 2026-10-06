@@ -2608,13 +2608,25 @@ function coerceFactValueFeel(fact: DeliveryFact, rawExpr: string, definedGuard?:
       // gate ({@link resumeValueCondition}) accepts coerces to the SAME boolean here — `" true "`/`"TRUE"`
       // can never be accepted-then-mis-published (#863 review r4194186383).
       const norm = normalizedBoolNumberFeel(rawExpr);
-      return `if (${pre}${operand} != null and matches(${norm}, "^(true|false)$")) then ${norm} = "true" else null`;
+      // NULL-SAFE the normalization exactly like the number arm below: `operand != null` does NOT prove the
+      // operand is STRINGABLE, so a fact name colliding with a FEEL builtin (`count`, …) left blank resolves
+      // the selection operand to the builtin FUNCTION and `lower case(trim(string(<function>)))` throws a
+      // runtime INCIDENT. Guard with `string(rawExpr) != null` (null-safe, short-circuits the normalization).
+      return `if (${pre}${operand} != null and string(${rawExpr}) != null and matches(${norm}, "^(true|false)$")) then ${norm} = "true" else null`;
     }
     case "number":
       // TRIM/stringify to match the gate's `trim(string(...))` (#863 review r4194186383): the gate accepts
       // `" 42 "`, so the bind must parse the same trimmed text — a bare `number(" 42 ")` yields null,
       // breaking the "gate accepts ⇒ bind is non-null" invariant.
-      return `if (${pre}${operand} != null) then number(trim(string(${rawExpr}))) else null`;
+      // NULL-SAFE the trim: `string(rawExpr) != null` must guard it, because `operand != null` does NOT
+      // prove the operand is STRINGABLE. When the fact name collides with a FEEL builtin (`count`, `sum`,
+      // …), a blank human form leaves the variable unset, so the `is defined(count) and count != null`
+      // selection operand resolves to the builtin FUNCTION (is-defined ⇒ true, function ≠ null), and
+      // `trim(string(<function>))` throws `trim: expected a string, got null` — a runtime INCIDENT rather
+      // than the intended null (the pre-round `number(rawExpr)` folded it to null; this restores that
+      // null-safety while keeping the trim). `string(…)` itself is null-safe (yields null, no incident),
+      // so the guard evaluates cleanly and short-circuits the trim away for any non-stringable operand.
+      return `if (${pre}${operand} != null and string(${rawExpr}) != null) then number(trim(string(${rawExpr}))) else null`;
     default:
       return definedGuard ? `if (${definedGuard}) then ${rawExpr} else null` : rawExpr;
   }

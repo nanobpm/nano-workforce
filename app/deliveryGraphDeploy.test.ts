@@ -551,7 +551,7 @@ test("S7 deploy+route: mutually-exclusive leaves join End on an exclusive merge 
 // `= true`; completing the task with the truthy text must publish a real `true` so the TRUE branch runs
 // (a null-publishing coercion would route the `default` branch instead). Covers the bespoke
 // (fact-named-field) AND generic (`value`-captured) forms — both go through the same coercion.
-async function driveBooleanHumanGuard(opts: { bespoke: boolean; entry: Record<string, string> }): Promise<{
+async function driveBooleanHumanGuard(opts: { bespoke: boolean; entry: Record<string, string>; emitName?: string }): Promise<{
   state: string;
   yesRan: boolean;
   noRan: boolean;
@@ -569,6 +569,7 @@ async function driveBooleanHumanGuard(opts: { bespoke: boolean; entry: Record<st
       noRan = true;
       return {};
     });
+    const emitName = opts.emitName ?? "approval";
     const graph: DeliveryGraph = {
       name: "boolean human guard",
       nodes: [
@@ -576,13 +577,13 @@ async function driveBooleanHumanGuard(opts: { bespoke: boolean; entry: Record<st
           id: "gate",
           kind: "human",
           human: opts.bespoke ? { prompt: "approve?", formKey: "bespoke-approval" } : { prompt: "approve?" },
-          emits: [{ name: "approval", type: "boolean" }],
+          emits: [{ name: emitName, type: "boolean" }],
         },
         { id: "yes", kind: "agent", agent: { jobType: "senior:yes" } },
         { id: "no", kind: "agent", agent: { jobType: "senior:no" } },
       ],
       edges: [
-        { from: "gate", to: "yes", when: "gate.approval", equals: true },
+        { from: "gate", to: "yes", when: `gate.${emitName}`, equals: true },
         { from: "gate", to: "no", default: true },
       ],
     };
@@ -629,4 +630,120 @@ test("#863 deploy+route: a GENERIC single-boolean human form ALSO publishes a re
   assertEquals(r.state, "COMPLETED", "the graph must run to a COMPLETED instance");
   assert(r.yesRan, "a truthy generic boolean entry must publish a real `true` so the `= true` guard routes the TRUE branch");
   assert(!r.noRan, "the default branch must NOT run when the boolean coerces to true");
+});
+
+// ── #863 deploy+route: a single-NUMBER human emit coerces END TO END without incidenting on a blank ──
+// The compiler tests assert only the SHAPE of `coerceFactValueFeel`'s number arm
+// (`number(trim(string(value)))`); they never EVALUATE it, so they stayed green against a FEEL hazard.
+// Round 23 aligned the number bind with the gate's `trim(string(...))` normalization. But `trim` is NOT
+// null-safe, and `operand != null` does NOT prove the operand is STRINGABLE: when the emit's name collides
+// with a FEEL BUILTIN (`count`, `sum`, `min`, …), a BLANK human form leaves that variable unset, so the
+// `if (is defined(count) and count != null) then count else …` selection operand resolves to the builtin
+// FUNCTION (`is defined(count)` is true for the builtin, and the function ≠ null). `trim(string(<function>))`
+// then THROWS (`trim: expected a string, got null`), raising an io-mapping INCIDENT that parks the instance
+// ACTIVE instead of publishing null and completing (adversarial finding, round 23; the pre-regression
+// `number(rawExpr)` folded the same builtin operand to null cleanly). The fix NULL-SAFES the bind with a
+// `string(rawExpr) != null` guard that short-circuits the trim for any non-stringable operand. This drives
+// the number coercion END TO END on the real engine for a reserved-name (`count`) blank entry (must publish
+// null → the `= 42` guard takes the default) and a padded `" 42 "` entry (must coerce the trimmed text to
+// the real number → the TRUE branch). Covers the bespoke (fact-named-field) AND generic (`value`-captured)
+// forms — both go through the same coercion.
+async function driveNumberHumanGuard(opts: { bespoke: boolean; entry: Record<string, string> }): Promise<{
+  state: string;
+  yesRan: boolean;
+  noRan: boolean;
+  task: string;
+}> {
+  const engine = await createWasmEngineClient();
+  try {
+    let yesRan = false;
+    let noRan = false;
+    await engine.registerWorker("senior:yes", async () => {
+      yesRan = true;
+      return {};
+    });
+    await engine.registerWorker("senior:no", async () => {
+      noRan = true;
+      return {};
+    });
+    const graph: DeliveryGraph = {
+      name: "number human guard",
+      nodes: [
+        {
+          id: "gate",
+          kind: "human",
+          human: opts.bespoke ? { prompt: "how many?", formKey: "bespoke-count" } : { prompt: "how many?" },
+          emits: [{ name: "count", type: "number" }],
+        },
+        { id: "yes", kind: "agent", agent: { jobType: "senior:yes" } },
+        { id: "no", kind: "agent", agent: { jobType: "senior:no" } },
+      ],
+      edges: [
+        { from: "gate", to: "yes", when: "gate.count", equals: 42 },
+        { from: "gate", to: "no", default: true },
+      ],
+    };
+    const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+
+    let state = "?";
+    let task = "";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+      const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+      // A blank-number io-mapping INCIDENT parks the instance ACTIVE with NO open user task — this is the
+      // exact failure the null-unsafe `number(trim(string(null)))` produced, and this assert catches it.
+      assert(open.length > 0, `instance is ${state} with no open user task — the number coercion incidented instead of publishing a value`);
+      for (const t of open) {
+        task = t.elementId ?? "?";
+        await engine.completeUserTask(t.userTaskKey, opts.entry);
+      }
+    }
+    return { state, yesRan, noRan, task };
+  } finally {
+    await engine.close();
+  }
+}
+
+test("#863 deploy+route: a BESPOKE single-number human form with a FEEL-builtin name (`count`) completed BLANK publishes null and COMPLETES (no io-mapping incident)", async () => {
+  // Value absent + a builtin name → the selection operand resolves to the `count` builtin FUNCTION, so the
+  // coercion's then-arm must NOT evaluate `trim(string(<function>))` (which throws); the `string(rawExpr)
+  // != null` guard short-circuits it, the instance publishes null and routes the default.
+  const r = await driveNumberHumanGuard({ bespoke: true, entry: {} });
+  assert(r.task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(r.task), `expected the human task, saw ${r.task}`);
+  assertEquals(r.state, "COMPLETED", "a blank bespoke number entry must publish null and run to a COMPLETED instance (not park on an io-mapping incident)");
+  assert(!r.yesRan, "a blank number entry publishes null, so the `= 42` guard must NOT run the TRUE branch");
+  assert(r.noRan, "a blank number entry publishes null, so the default branch runs");
+});
+
+test("#863 deploy+route: a GENERIC single-number human form completed BLANK ALSO publishes null and COMPLETES (class sweep)", async () => {
+  const r = await driveNumberHumanGuard({ bespoke: false, entry: {} });
+  assertEquals(r.state, "COMPLETED", "a blank generic number entry must publish null and run to a COMPLETED instance");
+  assert(!r.yesRan, "a blank number entry publishes null, so the `= 42` guard must NOT run the TRUE branch");
+  assert(r.noRan, "a blank number entry publishes null, so the default branch runs");
+});
+
+test("#863 deploy+route: a BESPOKE single-number human form coerces a PADDED `\" 42 \"` to the real number so the `= 42` guard routes TRUE", async () => {
+  // The gate accepts `" 42 "` (it trims), so the coercion must parse the SAME trimmed text to 42 — a
+  // bare `number(" 42 ")` would yield null and wrongly take the default, breaking "gate accepts ⇒ bind".
+  const r = await driveNumberHumanGuard({ bespoke: true, entry: { count: " 42 " } });
+  assertEquals(r.state, "COMPLETED", "the graph must run to a COMPLETED instance");
+  assert(r.yesRan, "a padded `\" 42 \"` entry must coerce to the real number 42 so the `= 42` guard routes the TRUE branch");
+  assert(!r.noRan, "the default branch must NOT run when the number coerces to 42");
+});
+
+test("#863 deploy+route: a BESPOKE single-boolean human form with a FEEL-builtin name (`count`) completed BLANK publishes null and COMPLETES (class sweep — same null-unsafe-normalization hazard as the number arm)", async () => {
+  // The boolean arm shares the hazard: `lower case(trim(string(<count builtin>)))` throws on a blank
+  // builtin-named emit. The `string(rawExpr) != null` guard short-circuits it, so the instance publishes
+  // null (a blank is not `true`) and routes the default rather than parking on an io-mapping incident.
+  const r = await driveBooleanHumanGuard({ bespoke: true, entry: {}, emitName: "count" });
+  assert(r.task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(r.task), `expected the human task, saw ${r.task}`);
+  assertEquals(r.state, "COMPLETED", "a blank builtin-named boolean entry must publish null and run to a COMPLETED instance (not park on an io-mapping incident)");
+  assert(!r.yesRan, "a blank boolean entry publishes null, so the `= true` guard must NOT run the TRUE branch");
+  assert(r.noRan, "a blank boolean entry publishes null, so the default branch runs");
 });
