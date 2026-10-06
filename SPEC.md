@@ -1063,16 +1063,21 @@ escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
   form captures ONE value, so a node declaring **zero** emits has nothing to resume (the
   field stays blank) and a node declaring **two or more** emits is **not** value-resumable
   — one value cannot satisfy multiple distinct typed facts without corrupting them.
-  **The value is also inert for a node whose sole emit is routing-only or unconsumed** —
-  the resume keys off the **required** (downstream-consumed) emit set, not the raw declared
-  set, so an exactly-one-emit node whose fact nothing downstream reads has no required
-  resume target and its `value` is discarded (there is nothing to publish it to). For
-  such a node the resume-valid flag is **hard-set to `false`**, so the post-escalation
-  validation gate behaves as follows: if the node still owes a **required** emit, **Continue
-  fails closed and loops back to the escalation** (it does NOT write nulls and does NOT
-  advance to a fallback branch) — **Retry this step** is the only way to actually produce
-  the facts; only a multi-emit node with **no required resume target** lets Continue proceed
-  past the node to its default (fallback) branch. (A **wait** gate owing **two or more**
+  **The value is also inert for a node with no *required* (downstream-consumed) resume
+  target** — the resume keys off the **required** emit set, not the raw declared set, so a
+  node whose facts nothing downstream reads has no required resume target and its `value` is
+  discarded (there is nothing to publish it to). This covers a node that declares **zero**
+  emits, exactly **one** routing-only/unconsumed emit, or **several** routing-only/unconsumed
+  emits alike: because the required resume set (`resumeEmits`) is empty, **no post-escalation
+  validation gate is compiled at all**, so **Continue simply proceeds past the node to its
+  default (fallback) branch** — there is nothing to re-park (`serviceBodyLines` /
+  `escalationTaskLines` add the `validTarget` gate only when `resumeEmits` is non-empty). The
+  fail-closed validation gate exists **only** for a node that still owes a **required** emit:
+  there, on Continue it **fails closed and loops
+  back to the escalation** (it does NOT write nulls and does NOT advance to a fallback branch)
+  — **Retry this step** is the only way to actually produce the facts, except that a node
+  owing exactly **one** required emit may instead satisfy it by entering the coerced `value`.
+  (A **wait** gate owing **two or more**
   emits is a special case: it has no Retry exit and its single value field can resume
   none of them, so its escalation grows **no** validation gate at all and Continue simply
   acknowledges and proceeds to the node end — see issue #863 — rather than looping forever.)
