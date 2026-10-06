@@ -735,9 +735,16 @@ test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED fi
   const aEl = elementForNode(artifact.bpmn, "h");
   const aSub = artifact.bpmn.slice(artifact.bpmn.indexOf(`<bpmn:subProcess id="${aEl}"`));
   const aTask = aSub.slice(aSub.indexOf("<bpmn:userTask"), aSub.indexOf("</bpmn:userTask>"));
+  const aOut = aTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitArtifact"/);
+  assert(aOut, "a bespoke single-artifact form maps a value onto humanEmitArtifact");
+  const aFeel = aOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
   assert(
-    /<zeebe:output source="=if \(is defined\(release\) and release != null and string\(release\) != null\) then release else if \(is defined\(resolvedArtifact\)\) then resolvedArtifact else null" target="humanEmitArtifact" \/>/.test(aTask),
-    "a bespoke single-artifact form reads the fact-named `release` field (builtin-shadow-guarded) ahead of `resolvedArtifact`",
+    /is defined\(release\) and release != null and string\(release\) != null\) then release else if \(is defined\(resolvedArtifact\)\)/.test(aFeel),
+    `a bespoke single-artifact form still reads the fact-named \`release\` field (builtin-shadow-guarded) ahead of \`resolvedArtifact\`, got: ${aFeel}`,
+  );
+  assert(
+    /matches\(trim\(string\(/.test(aFeel) && /else null/.test(aFeel),
+    `a bespoke single-artifact form is now wrapped in the artifact-grammar validity gate (fail closed to null), got: ${aFeel}`,
   );
 
   // And the generic/publish forms (no explicit formKey) are UNAFFECTED — they still read the fixed
@@ -750,8 +757,12 @@ test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED fi
   const gSub = generic.bpmn.slice(generic.bpmn.indexOf(`<bpmn:subProcess id="${gEl}"`));
   const gTask = gSub.slice(gSub.indexOf("<bpmn:userTask"), gSub.indexOf("</bpmn:userTask>"));
   // A generic single-VALUE node does NOT read a fact-named field (only an explicit bespoke form does), so
-  // it keeps the canonical `value` capture; a string passes through uncoerced.
-  assert(/then value else null" target="humanEmitValue"/.test(gTask), "the generic single-value node keeps the canonical `value` fallback");
+  // it keeps the canonical `value` capture — now VALIDATED non-blank (the string rule) before publish.
+  assert(!/is defined\(verdict\)/.test(gTask), "the generic single-value node must NOT read the fact-named field");
+  assert(
+    /trim\(string\(if \(is defined\(value\)\) then value else null\)\) != ""/.test(gTask.replaceAll("&quot;", '"')) && /then if \(is defined\(value\)\) then value else null else null/.test(gTask.replaceAll("&quot;", '"')),
+    "the generic single-value node keeps the canonical `value` capture, now validated non-blank (fail closed to null)",
+  );
 
   // The class, not the instance: a GENERIC (no formKey) single-BOOLEAN emit must ALSO coerce its captured
   // `value` text to a real FEEL boolean — the same bug bites the generic textfield, not just an explicit
@@ -772,6 +783,96 @@ test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED fi
   assert(
     /matches\(lower case\(trim\(string\(.*\)\)\), "\^\(true\|false\)\$"\)/.test(gbFeel) && /= "true"/.test(gbFeel),
     `the generic single-boolean value is coerced/validated to a real FEEL boolean, got: ${gbFeel}`,
+  );
+});
+
+test("#863 human single-emit: a non-boolean/number fact (version/url/pr/string) is VALIDATED — not just coerced — before publish (review 5430718031 'Previously missed')", async () => {
+  // Regression guard (PR #863 review 5430718031, "Validate human-task fact values before publishing"):
+  // the human-task path called `coerceFactValueFeel` WITHOUT the type-aware validity gate the escalation
+  // resume uses (`resumeValueCondition`). That helper only validates boolean/number; its default arm
+  // passes `string`/`version`/`url`/`pr` through unchanged, so a generic/custom form could publish a
+  // malformed `version`/`url`/`pr` (or a blank `string`) directly downstream despite the declared type.
+  // The fix wraps the binding in `resumeValueCondition` — fail closed to null on an invalid entry, the
+  // SAME contract the escalation resume enforces. These compiler-level regex asserts are the
+  // red-before/green-after gate (they go red the moment the validity wrap is dropped).
+  const version = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "which version?" }, emits: [{ name: "ver", type: "version" }] }],
+    edges: [],
+  });
+  const vEl = elementForNode(version.bpmn, "h");
+  const vSub = version.bpmn.slice(version.bpmn.indexOf(`<bpmn:subProcess id="${vEl}"`));
+  const vTask = vSub.slice(vSub.indexOf("<bpmn:userTask"), vSub.indexOf("</bpmn:userTask>"));
+  const vOut = vTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/);
+  assert(vOut, "a single-version human node maps a value onto humanEmitValue");
+  const vFeel = vOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  // The version grammar (`^v?\d[\w.+-]*$`, matching resumeValueCondition) must gate the bind, fail-closed.
+  assert(
+    /matches\(trim\(string\(.*\)\), "\^v\?\\\\d\[\\\\w\.\+-\]\*\$"\)/.test(vFeel) && /else null/.test(vFeel),
+    `a single-version human emit is VALIDATED against the version grammar (fail closed to null), got: ${vFeel}`,
+  );
+
+  // The class, not the instance: a `url` emit must carry the scheme guard, and a `pr` emit the
+  // owner/repo#N-or-URL grammar — every text type is validated, not only the cited `version`.
+  const url = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "which url?" }, emits: [{ name: "link", type: "url" }] }],
+    edges: [],
+  });
+  const uEl = elementForNode(url.bpmn, "h");
+  const uSub = url.bpmn.slice(url.bpmn.indexOf(`<bpmn:subProcess id="${uEl}"`));
+  const uTask = uSub.slice(uSub.indexOf("<bpmn:userTask"), uSub.indexOf("</bpmn:userTask>"));
+  const uFeel = (uTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/)?.[2] ?? "").replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /matches\(trim\(string\(.*\)\), "\^\[A-Za-z\]\[A-Za-z0-9\+\.-\]\*:\/\/"\)/.test(uFeel) && /else null/.test(uFeel),
+    `a single-url human emit is VALIDATED for a scheme (fail closed to null), got: ${uFeel}`,
+  );
+
+  const pr = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "which pr?" }, emits: [{ name: "change", type: "pr" }] }],
+    edges: [],
+  });
+  const pEl = elementForNode(pr.bpmn, "h");
+  const pSub = pr.bpmn.slice(pr.bpmn.indexOf(`<bpmn:subProcess id="${pEl}"`));
+  const pTask = pSub.slice(pSub.indexOf("<bpmn:userTask"), pSub.indexOf("</bpmn:userTask>"));
+  const pFeel = (pTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/)?.[2] ?? "").replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /github\\\\\.com/.test(pFeel) && /else null/.test(pFeel),
+    `a single-pr human emit is VALIDATED against the owner/repo#N-or-URL grammar (fail closed to null), got: ${pFeel}`,
+  );
+
+  // A `string` emit must be non-blank (the resume gate's only string rule) — fail closed on whitespace.
+  const str = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "say" }, emits: [{ name: "note", type: "string" }] }],
+    edges: [],
+  });
+  const sEl = elementForNode(str.bpmn, "h");
+  const sSub = str.bpmn.slice(str.bpmn.indexOf(`<bpmn:subProcess id="${sEl}"`));
+  const sTask = sSub.slice(sSub.indexOf("<bpmn:userTask"), sSub.indexOf("</bpmn:userTask>"));
+  const sFeel = (sTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/)?.[2] ?? "").replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /trim\(string\(.*\)\) != ""/.test(sFeel) && /else null/.test(sFeel),
+    `a single-string human emit is VALIDATED non-blank (fail closed to null), got: ${sFeel}`,
+  );
+});
+
+test("#863 human single-artifact: the artifact handle is VALIDATED against the pkg@version grammar before publish (review 5430718031 'Previously missed')", async () => {
+  // Regression guard (PR #863 review 5430718031, "Validate human artifact handles before publishing"): a
+  // single-artifact human node published `resolvedArtifact` VERBATIM — the form's `required` rule checks
+  // only presence, so `not-an-artifact` was accepted and propagated downstream despite the canonical
+  // `pkg@version` contract. The fix wraps the artifact source in the SAME `resumeValueCondition` artifact
+  // grammar (`^@?[^@\s]+@v?\d[\w.+-]*$`, scoped-package aware) the escalation resume enforces, fail closed.
+  const r = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "publish it" }, emits: [{ name: "art", type: "artifact" }] }],
+    edges: [],
+  });
+  const el = elementForNode(r.bpmn, "h");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const task = sub.slice(sub.indexOf("<bpmn:userTask"), sub.indexOf("</bpmn:userTask>"));
+  const aOut = task.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitArtifact"/);
+  assert(aOut, "a single-artifact human node maps a value onto humanEmitArtifact");
+  const aFeel = aOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /matches\(trim\(string\(if \(is defined\(resolvedArtifact\)\) then resolvedArtifact else null\)\), "\^@\?\[\^@\\\\s\]\+@v\?\\\\d\[\\\\w\.\+-\]\*\$"\)/.test(aFeel) && /else null/.test(aFeel),
+    `a single-artifact human emit is VALIDATED against the pkg@version grammar (fail closed to null), got: ${aFeel}`,
   );
 });
 

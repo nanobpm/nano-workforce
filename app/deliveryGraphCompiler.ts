@@ -2502,20 +2502,38 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
       ? `if (is defined(${singleEmit.name}) and ${singleEmit.name} != null and string(${singleEmit.name}) != null) then ${singleEmit.name} else if (is defined(${canonical})) then ${canonical} else null`
       : `if (is defined(${canonical})) then ${canonical} else null`;
   // A form captures the selected value as TEXT (a textfield, or an explicit form's fact-named control), so
-  // the non-artifact single emit must COERCE/VALIDATE it to the fact's declared type before writing
-  // `humanEmitValue` — the SAME typed-binding contract the escalation resume enforces
-  // (`coerceFactValueFeel`): a `boolean` fact publishes a real FEEL boolean, a `number` fact a real
-  // number, and an unparseable entry publishes null (the deadlock-safe failure path). Without it a lone
-  // `boolean` emit (bespoke OR generic form) publishes the STRING `"true"`, which the downstream guarded
-  // split (`= true`) never matches (PR #863 thread r4189815989). Text-valued types (`string`/`version`/
-  // `url`/`pr`) pass through unchanged; artifacts are object handles — passed through, never coerced.
+  // the non-artifact single emit must be VALIDATED against the fact's declared type AND COERCED to it
+  // before writing `humanEmitValue` — the SAME type-aware, fail-closed contract the escalation resume
+  // enforces. That contract is absorbed into {@link coerceFactValueFeel}, whose per-type arm now VALIDATES
+  // (not merely coerces) the selection: `boolean`/`number` already failed closed on an unparseable entry,
+  // and `string`/`version`/`url`/`pr` now fail closed on a value that does not match the declared type's
+  // grammar — so a generic/custom form can no longer publish a blank string, a malformed version/URL, or an
+  // invalid PR ref directly downstream (PR #863 review 5430718031, "Validate human-task fact values before
+  // publishing"). (The validity test is folded INTO the coercion's single `if` rather than wrapped in an
+  // outer `if (resumeValueCondition(…)) then …` because the pinned engine mis-evaluates a nested
+  // `if…then…else` selection inside that outer guard — verified engine-native: valid entries routed to the
+  // default branch. Folding the check into the one `if` keeps the working single-level shape.)
   const valueSource =
     singleEmit !== undefined && singleEmit.type !== "artifact"
       ? `=${coerceFactValueFeel(singleEmit, selectExpr("value"))}`
       : "=if (is defined(value)) then value else null";
+  // The artifact source is likewise VALIDATED before publish: the publish form's `required` rule checks
+  // only PRESENCE, so a value like `not-an-artifact` was accepted and propagated downstream despite the
+  // canonical `pkg@version` handle contract (PR #863 review 5430718031, "Validate human artifact handles
+  // before publishing"). Gate it on the SAME artifact grammar the escalation resume enforces
+  // (`resumeValueCondition`'s artifact arm — scoped-package aware), fail closed to null. An artifact handle
+  // is a text reference, so the valid arm publishes the selection verbatim (no coercion). The guard is a
+  // FLAT `matches(trim(string(…)))` on the selection — NOT `resumeValueCondition`'s full form, whose
+  // `is defined(<nested if…else>)` presence conjunct the pinned engine mis-evaluates when the selection is
+  // a compound `if…then…else` (verified engine-native: a valid handle routed to null). `string(…) != null`
+  // is the null-safe presence/stringability test; `matches()` is null-safe (a non-match yields false).
   const artifactSource =
     singleEmit !== undefined && singleEmit.type === "artifact"
-      ? `=${selectExpr("resolvedArtifact")}`
+      ? (() => {
+          const sel = selectExpr("resolvedArtifact");
+          const s = `string(${sel})`;
+          return `=if (${s} != null and matches(trim(${s}), "^@?[^@\\\\s]+@v?\\\\d[\\\\w.+-]*$") = true) then ${sel} else null`;
+        })()
       : "=if (is defined(resolvedArtifact)) then resolvedArtifact else null";
   return [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
@@ -2643,6 +2661,30 @@ function coerceFactValueFeel(fact: DeliveryFact, rawExpr: string, definedGuard?:
       // null-safety while keeping the trim). `string(…)` itself is null-safe (yields null, no incident),
       // so the guard evaluates cleanly and short-circuits the trim away for any non-stringable operand.
       return `if (${pre}${operand} != null and string(${rawExpr}) != null) then number(trim(string(${rawExpr}))) else null`;
+    case "string":
+    case "version":
+    case "url":
+    case "pr": {
+      // TEXT-VALUED types were previously passed through UNCHANGED — so a human form could publish a blank
+      // string, a malformed version/URL, or an invalid PR ref directly downstream despite the declared
+      // fact type (PR #863 review 5430718031, "Validate human-task fact values before publishing"). Fold
+      // the SAME type-aware validity grammar the escalation resume gate ({@link resumeValueCondition})
+      // enforces into this single `if`, failing CLOSED to null on a non-conforming entry. The grammar is
+      // applied as a FLAT `matches(...)`/`trim(...)` on `string(rawExpr)` (null-safe, no
+      // `is defined(<nested if…else>)` — the pinned engine mis-evaluates that compound inside an outer
+      // guard, verified engine-native). The valid arm publishes the selection VERBATIM (these types need
+      // no coercion), so a real captured value round-trips unchanged.
+      const s = `string(${rawExpr})`;
+      const grammar =
+        fact.type === "string"
+          ? `trim(${s}) != ""`
+          : fact.type === "version"
+            ? `matches(trim(${s}), "^v?\\\\d[\\\\w.+-]*$") = true`
+            : fact.type === "url"
+              ? `matches(trim(${s}), "^[A-Za-z][A-Za-z0-9+.-]*://") = true`
+              : `matches(lower case(trim(${s})), "^(([^/#]+/[^/#]+)#(\\\\d+)|((https?://)?(www\\\\.)?github\\\\.com/[^/]+/[^/]+/pull/\\\\d+([/?#].*)?))$") = true`;
+      return `if (${pre}${operand} != null and ${s} != null and ${grammar}) then ${rawExpr} else null`;
+    }
     default:
       return definedGuard ? `if (${definedGuard}) then ${rawExpr} else null` : rawExpr;
   }

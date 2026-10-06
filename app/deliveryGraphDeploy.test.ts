@@ -916,3 +916,82 @@ test("#863 deploy+route: a BESPOKE single-ARTIFACT human form with a FEEL-builti
     await engine.close();
   }
 });
+
+// ── #863 review 5430718031 deploy+route: human single-emit VALIDATION (fail closed) end to end ────────
+// The compiler tests above assert only the SHAPE of the validity gate (`matches(…)` in the generated
+// FEEL); they never EVALUATE it. These drive the typed validation END TO END on the real engine: an
+// INVALID entry (a malformed version, a non-`pkg@version` artifact) must publish null and route the
+// DEFAULT branch (fail closed — the guarded split's `equals` never matches null), while a VALID entry
+// publishes through and routes the guarded branch. This is the observable contract the "Previously
+// missed" findings asked for: human-task fact/artifact values are validated before downstream
+// publication, exactly like the escalation resume path.
+async function driveTypedHumanGuard(opts: { emitName: string; emitType: "version" | "artifact"; entry: Record<string, string> }): Promise<{
+  state: string;
+  published: unknown;
+}> {
+  const engine = await createWasmEngineClient();
+  try {
+    let published: unknown = "<<never published>>";
+    await engine.registerWorker("senior:sink", async (job) => {
+      const v = (job.variables as Record<string, unknown> | undefined) ?? {};
+      published = v.humanEmitValue ?? v.humanEmitArtifact ?? null;
+      return {};
+    });
+    const graph: DeliveryGraph = {
+      name: "typed human guard",
+      nodes: [
+        {
+          id: "gate",
+          kind: "human",
+          human: { prompt: "enter", formKey: "bespoke-typed" },
+          emits: [{ name: opts.emitName, type: opts.emitType }],
+        },
+        { id: "sink", kind: "agent", agent: { jobType: "senior:sink" } },
+      ],
+      edges: [{ from: "gate", to: "sink" }],
+    };
+    const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+    let state = "?";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+      const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+      assert(open.length > 0, `instance is ${state} with no open user task — the typed-validation guard incidented`);
+      for (const t of open) {
+        await engine.completeUserTask(t.userTaskKey, opts.entry);
+      }
+    }
+    return { state, published };
+  } finally {
+    await engine.close();
+  }
+}
+
+test("#863 review 5430718031 deploy+route: a single-VERSION human emit rejects a malformed version (publishes null) and accepts a valid one", async () => {
+  // Invalid: `not-a-version` fails the `^v?\d[\w.+-]*$` grammar → publishes null (fail closed), COMPLETES.
+  const bad = await driveTypedHumanGuard({ emitName: "ver", emitType: "version", entry: { ver: "not-a-version" } });
+  assertEquals(bad.state, "COMPLETED", "an invalid version entry must still COMPLETE (fail closed to null, not incident)");
+  assertEquals(bad.published, null, "an invalid version must publish null (validated fail-closed), not the malformed text");
+
+  // Valid: `1.2.3` passes the grammar → publishes through verbatim.
+  const good = await driveTypedHumanGuard({ emitName: "ver", emitType: "version", entry: { ver: "1.2.3" } });
+  assertEquals(good.state, "COMPLETED", "a valid version entry must COMPLETE");
+  assertEquals(good.published, "1.2.3", "a valid version must publish through verbatim");
+});
+
+test("#863 review 5430718031 deploy+route: a single-ARTIFACT human emit rejects a non-pkg@version handle (publishes null) and accepts a valid one", async () => {
+  // Invalid: `not-an-artifact` fails the `^@?[^@\s]+@v?\d[\w.+-]*$` grammar → publishes null (fail closed).
+  const bad = await driveTypedHumanGuard({ emitName: "release", emitType: "artifact", entry: { release: "not-an-artifact" } });
+  assertEquals(bad.state, "COMPLETED", "an invalid artifact entry must still COMPLETE (fail closed to null, not incident)");
+  assertEquals(bad.published, null, "an invalid artifact handle must publish null (validated fail-closed), not the malformed text");
+
+  // Valid (scoped pkg@version): `@nanobpm/demo@1.0.0` passes the grammar → publishes through verbatim.
+  const good = await driveTypedHumanGuard({ emitName: "release", emitType: "artifact", entry: { release: "@nanobpm/demo@1.0.0" } });
+  assertEquals(good.state, "COMPLETED", "a valid artifact entry must COMPLETE");
+  assertEquals(good.published, "@nanobpm/demo@1.0.0", "a valid (scoped) artifact handle must publish through verbatim");
+});
