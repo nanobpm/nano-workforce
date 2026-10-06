@@ -876,6 +876,58 @@ test("#863 human single-artifact: the artifact handle is VALIDATED against the p
   );
 });
 
+test("#863 human required emit: an invalid typed completion is GATED back for re-entry, never published null downstream (thread r4198662345)", async () => {
+  // Regression guard (PR #863 Copilot High, thread r4198662345): a human node whose single emit is a
+  // downstream-REQUIRED fact coerced invalid typed input to null and then flowed DIRECTLY to the
+  // subProcess end — the unconditional edge activated the consumer with a null required fact, and a
+  // human node has no worker contract gate or Retry path to stop it. The fix grows a FAIL-CLOSED
+  // completion gate: the task's OWN output mapping computes a validity flag from the RAW captured field
+  // (the SAME per-type `resumeValueCondition` grammar the escalation resume enforces, presence included),
+  // and a post-task exclusive gateway routes a VALID completion to the node end while an INVALID one
+  // loops back to the human task for re-entry.
+  const r = await compileOk({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "enter a number" }, emits: [{ name: "count", type: "number" }] },
+      { id: "c", kind: "agent", agent: { jobType: "senior:consumer" } },
+    ],
+    edges: [{ from: "h.count", to: "c" }],
+  });
+  const el = elementForNode(r.bpmn, "h");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const task = sub.slice(sub.indexOf("<bpmn:userTask"), sub.indexOf("</bpmn:userTask>"));
+  const flagVar = resumeValidVar(`delivery-human-task__${el}`);
+  // (1) The task publishes the completion-validity flag, computed from the RAW `value` field via the
+  //     number grammar (presence + `^-?\d+(\.\d+)?$`), so a blank/non-numeric entry is invalid.
+  const flagOut = task.match(new RegExp(`<zeebe:output source=(["'])(.*?)\\1 target="${flagVar}"`));
+  assert(flagOut, `the human task publishes the completion-validity flag ${flagVar}`);
+  const flagFeel = flagOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /is defined\(value\).*matches\(lower case\(trim\(string\(value\)\)\)/.test(flagFeel) && /then true else false/.test(flagFeel),
+    `the validity flag is computed from the raw value via the number grammar (fail closed), got: ${flagFeel}`,
+  );
+  // (2) The task no longer flows straight to the node end — it routes into a completion gateway…
+  assert(sub.includes(`<bpmn:sequenceFlow id="${el}_i1" sourceRef="delivery-human-task__${el}" targetRef="${el}_cg" />`), "the human task routes into the completion gate, not straight to the node end");
+  assert(sub.includes(`<bpmn:exclusiveGateway id="${el}_cg"`), "a required-emit human node grows a completion gateway");
+  // (3) …whose VALID branch reaches the node end and whose DEFAULT (invalid) branch loops back to the task.
+  assert(
+    sub.includes(`<bpmn:sequenceFlow id="${el}_cok" name="valid" sourceRef="${el}_cg" targetRef="${el}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${flagVar} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`),
+    "the valid branch reaches the node end on `<flag> = true`",
+  );
+  assert(
+    sub.includes(`<bpmn:sequenceFlow id="${el}_cbad" name="invalid — re-enter" sourceRef="${el}_cg" targetRef="delivery-human-task__${el}" />`),
+    "the invalid (default) branch loops back to the human task for re-entry",
+  );
+  assert(sub.includes(`<bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_cok</bpmn:incoming></bpmn:endEvent>`), "the node end is reached only via the valid branch");
+
+  // The class, not the instance: the SAME gate guards a single-emit human node of EVERY type — a
+  // routing-only/unconsumed emit (no downstream data binding) must NOT grow it (its null just takes a
+  // guarded split's default, like the escalation resume's no-required-target case).
+  const unconsumed = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "x" }, emits: [{ name: "count", type: "number" }] }], edges: [] });
+  assert(!unconsumed.bpmn.includes("_cg"), "an unconsumed (routing-only) single-emit human node grows NO completion gate");
+  const noEmit = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "x" } }], edges: [] });
+  assert(!noEmit.bpmn.includes("_cg"), "a no-emit human node grows NO completion gate");
+});
+
 // An agent that owes a required `pr` emit to a downstream consumer — its timeout `__esc` (and a
 // producer-contract `__contract`) is RESUMABLE with that emit (#872), so it is the natural surface
 // for the resume-validation gate (PR #876 review).

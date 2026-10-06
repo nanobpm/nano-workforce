@@ -1166,6 +1166,24 @@ other routing value (`approved`, …) always escalates, and `status="done"` can 
 for an **`agent`** (a connector has no producer status gate, so a connector `status` emit
 stays allowed); the rest of the result set remains unreserved.
 
+A **`human` node's required emit is gated fail-closed on completion** (PR #863 review,
+thread r4198662345). A human node has no worker self-report to producer-gate on, but its
+single emit can be a downstream-**required** fact — and the captured value is coerced and
+validated to the emit's declared type (`coerceFactValueFeel`), so an invalid entry becomes
+`null`. Without a completion gate the node ended and the unconditional edge activated the
+consumer with a `null` required fact. The compiler therefore grows a **completion gate**
+when the node's single emit is downstream-required: the user task's own output mapping
+computes a node-unique validity flag (`resumeValidVar`) from the *raw* captured field via
+the **same** per-type `resumeValueCondition` grammar the escalation resume enforces
+(presence included, so a blank required entry is invalid), and a post-task exclusive
+gateway routes a **valid** completion to the node end while an **invalid** one loops back
+to the human task for re-entry — the human analogue of the escalation resume's fail-closed
+re-park (a human node has no separate escalation twin to re-park onto). The gate is grown
+**only** when the single emit is required: a routing-only/unconsumed emit keeps the direct
+`task → end` flow (its `null` simply takes a guarded split's deadlock-safe default, exactly
+like the escalation resume's no-required-target case), and a no-emit acknowledgement node
+has nothing to validate.
+
 ## 14. Open questions / future
 
 - **Provisioning the existing PR branch** — resolved: the `c8ctl` host-git

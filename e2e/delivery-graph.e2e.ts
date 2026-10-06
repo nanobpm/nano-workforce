@@ -155,8 +155,11 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // Before the human completes, the connector has NOT fired — the fan-in edge from `h` gates it.
     assert.equal((await deliveryConnectorDispatches(app.db).find({})).length, 0, "connector waits on the human edge");
 
-    // Complete the human with a resolved artifact — its typed emit late-binds downstream.
-    await app.engine.completeUserTask(human.userTaskKey, { resolvedArtifact: "ARTIFACT-1", humanOutcome: "completed" });
+    // Complete the human with a resolved artifact — its typed emit late-binds downstream. The value is a
+    // canonical `pkg@version` handle: the human node's required-artifact completion gate (thread
+    // r4198662345) validates the captured handle against the SAME `pkg@version` grammar the canonical
+    // `coerceFactValue` enforces, so a non-conforming handle would re-park the task instead of binding.
+    await app.engine.completeUserTask(human.userTaskKey, { resolvedArtifact: "pkg@1.0.0", humanOutcome: "completed" });
     await app.settle();
 
     // The connector fired exactly once (fan-in of the wait AND the human both satisfied), and it
@@ -164,7 +167,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     const rows = await deliveryConnectorDispatches(app.db).find({ dedupe_key: "c-e2e-1" });
     assert.equal(rows.length, 1, "the connector fired exactly once");
     assert.equal(rows[0].outcome, "delivered");
-    assert.deepEqual(connectorBoundFacts, [{ from: "h", name: "art", value: "ARTIFACT-1" }], "the human fact late-binds into the connector");
+    assert.deepEqual(connectorBoundFacts, [{ from: "h", name: "art", value: "pkg@1.0.0" }], "the human fact late-binds into the connector");
 
     // The graph reached End — the fan-in join released only after BOTH upstream branches completed.
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the graph reached its End event");

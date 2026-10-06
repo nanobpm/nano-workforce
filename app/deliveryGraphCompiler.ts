@@ -1936,7 +1936,14 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       const humanForm = resolveHumanForm(node);
       const singleEmit = humanForm.emits.length === 1 ? humanForm.emits[0] : undefined;
       const preferFactName = humanForm.source === "explicit";
-      return humanBodyLines(el, displayName, humanForm.formKey ?? GENERIC_HUMAN_FORM, singleEmit, preferFactName);
+      // A human node has no worker self-report to gate on, but its single emit CAN be a downstream-REQUIRED
+      // fact — and invalid typed input coerces to null (fail-closed on the value, coerceFactValueFeel), so
+      // WITHOUT a completion gate the node ends and the unconditional edge activates the consumer with a
+      // null required fact (PR #863 review, thread r4198662345). Thread whether that single emit is
+      // required so humanBodyLines grows a fail-closed completion gate over it (re-enter on an invalid
+      // value) instead of publishing null onward.
+      const requiredEmit = singleEmit !== undefined && requiredEmits.has(singleEmit.name);
+      return humanBodyLines(el, displayName, humanForm.formKey ?? GENERIC_HUMAN_FORM, singleEmit, preferFactName, requiredEmit);
     }
     default:
       return assertNever(node, "innerBodyLines");
@@ -2480,7 +2487,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
  * contract the escalation resume uses), so a bespoke `boolean`/`number` form publishes a real FEEL
  * boolean/number — not the raw string `"true"`/`"1"` that a downstream guarded split (`= true`/`= 1`)
  * would never match (PR #863 thread r4189815989). */
-function humanBodyLines(el: string, displayName: string, formId: string, singleEmit?: DeliveryFact, preferFactName = false): string[] {
+function humanBodyLines(el: string, displayName: string, formId: string, singleEmit?: DeliveryFact, preferFactName = false, requiredEmit = false): string[] {
   const task = humanTaskElement(el);
   const assignee =
     '=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != "") then escalationAssignee else null';
@@ -2542,6 +2549,40 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
           return `=if (${s} != null and matches(trim(${s}), "^@?[^@\\\\s]+@v?\\\\d[\\\\w.+-]*$") = true) then ${sel} else null`;
         })()
       : "=if (is defined(resolvedArtifact)) then resolvedArtifact else null";
+  // FAIL-CLOSED COMPLETION GATE (PR #863 review, thread r4198662345): a human node whose single emit is a
+  // downstream-REQUIRED fact must not publish an invalid (null-coerced) value onward — the edge to the
+  // consumer is unconditional and a human node has no worker contract gate or Retry path, so a null here
+  // activates the consumer with a null required fact. Mirror the escalation resume's fail-closed shape:
+  // the task's OWN output mapping computes a validity flag from the RAW captured field via
+  // {@link resumeValueCondition} (the SAME per-type grammar the escalation resume enforces — presence
+  // included, so a blank required entry is invalid too), and a post-task exclusive gateway routes a VALID
+  // completion to the node end while an INVALID one loops back to the human task for re-entry (the human
+  // analogue of a re-park — a human node has no separate escalation twin to re-park onto). The flag is
+  // the node-unique, collision-free {@link resumeValidVar} (the emit source is the fixed `humanEmitValue`/
+  // `humanEmitArtifact`, never the fact's own name, so the generated flag can never collide with it).
+  // Grown ONLY when the single emit is required — a routing-only/unconsumed emit keeps the direct
+  // `task → end` flow (a routing-only null just takes a guarded split's deadlock-safe default, exactly
+  // like the escalation resume's no-required-target case). The gateway routes on the SIMPLE
+  // `<flag> = true` boolean (a gateway ioMapping is not visible downstream in the pinned engine —
+  // verified — so the validity is computed here on the task output, not on the gateway).
+  const gateRequired = requiredEmit && singleEmit !== undefined;
+  const flagVar = resumeValidVar(task);
+  const validitySource =
+    singleEmit !== undefined
+      ? `=if ${resumeValueCondition(singleEmit, singleEmit.type === "artifact" ? "resolvedArtifact" : "value")} then true else false`
+      : "=false";
+  const endEvent = `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${gateRequired ? `${el}_cok` : `${el}_i1`}</bpmn:incoming></bpmn:endEvent>`;
+  const completionGate: string[] = gateRequired
+    ? [
+        `      <bpmn:exclusiveGateway id="${el}_cg" name="required fact valid?" default="${el}_cbad">`,
+        `        <bpmn:incoming>${el}_i1</bpmn:incoming>`,
+        `        <bpmn:outgoing>${el}_cok</bpmn:outgoing>`,
+        `        <bpmn:outgoing>${el}_cbad</bpmn:outgoing>`,
+        "      </bpmn:exclusiveGateway>",
+        `      <bpmn:sequenceFlow id="${el}_cok" name="valid" sourceRef="${el}_cg" targetRef="${el}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${flagVar} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+        `      <bpmn:sequenceFlow id="${el}_cbad" name="invalid — re-enter" sourceRef="${el}_cg" targetRef="${task}" />`,
+      ]
+    : [];
   return [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
     `      <bpmn:userTask id="${task}" name="Delivery: human step — ${escapeXml(displayName)}">`,
@@ -2559,16 +2600,21 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
     `            <zeebe:output ${attr("source", valueSource)} target="humanEmitValue" />`,
     `            <zeebe:output ${attr("source", artifactSource)} target="humanEmitArtifact" />`,
     `            <zeebe:output ${attr("source", "=if (is defined(note)) then note else null")} target="humanNote" />`,
+    // The completion-gate validity flag — computed from the RAW captured field, so it is independent of
+    // the (already fail-closed) coerced `humanEmitValue`/`humanEmitArtifact` above and routes the gateway.
+    ...(gateRequired ? [`            <zeebe:output ${attr("source", validitySource)} target="${flagVar}" />`] : []),
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
     `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
+    // The invalid completion loops back to re-enter this task (re-park for a value correction).
+    ...(gateRequired ? [`        <bpmn:incoming>${el}_cbad</bpmn:incoming>`] : []),
     `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
     "      </bpmn:userTask>",
     `      <bpmn:boundaryEvent id="${el}_sla" name="SLA elapsed" attachedToRef="${task}">`,
     `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
     `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=escalationSlaTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
     "      </bpmn:boundaryEvent>",
-    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming></bpmn:endEvent>`,
+    endEvent,
     `      <bpmn:endEvent id="${el}_escEnd" name="Escalated">`,
     "        <bpmn:extensionElements>",
     `          <zeebe:ioMapping><zeebe:input ${attr("source", '="escalated"')} target="humanOutcome" /></zeebe:ioMapping>`,
@@ -2576,8 +2622,10 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
     `        <bpmn:incoming>${el}_i2</bpmn:incoming>`,
     "      </bpmn:endEvent>",
     flow(`${el}_i0`, `${el}_start`, task),
-    flow(`${el}_i1`, task, `${el}_end`),
+    // Valid completion routes task → gate → end; the gate's default (invalid) loops back to the task.
+    flow(`${el}_i1`, task, gateRequired ? `${el}_cg` : `${el}_end`),
     flow(`${el}_i2`, `${el}_sla`, `${el}_escEnd`),
+    ...completionGate,
   ];
 }
 
