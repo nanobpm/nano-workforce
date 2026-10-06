@@ -993,6 +993,63 @@ test("#876 review: a multi-required-emit escalation FAILS CLOSED — it binds no
   }
 });
 
+// A MULTI-emit WAIT node: a wait gate owing >1 fact. Unlike an agent/connector, a wait escalation has
+// NO Retry gate (its resolution is "supply the awaited value and continue"), and the single escalation-
+// form `value` field cannot supply two distinct facts — so a resume-validation gate here would re-park
+// EVERY Continue with no escape, wedging the timed-out token forever (issue #863 review r4198123619,
+// "Prevent unresolvable loops for multi-emit wait nodes"). The compiler must therefore grow NO gate and
+// let the escalation continue straight to the node end.
+const MULTI_EMIT_WAIT_GRAPH = {
+  name: "multi-emit wait unresolvable loop",
+  nodes: [
+    { id: "gv", kind: "agent", agent: { jobType: "senior:feature", prompt: "ship the rollup" } },
+    {
+      id: "w",
+      kind: "wait",
+      wait: {
+        kind: "capability",
+        target: "github-releases:nanobpm/nano-ide",
+        match: { package: "@nanobpm/urban", capabilityRef: "#500" },
+        onTimeout: "escalate",
+      },
+      emits: [
+        { name: "publishedVersion", type: "version" },
+        { name: "artifactRef", type: "artifact" },
+      ],
+    },
+    { id: "sink", kind: "connector", connector: { target: "npm:install", dedupeKey: "c1" } },
+  ],
+  edges: [
+    { from: "gv", to: "w" },
+    { from: "w.publishedVersion", to: "sink" },
+    { from: "w.artifactRef", to: "sink" },
+  ],
+};
+
+test("#863 review r4198123619: a MULTI-emit wait escalation grows NO resume-validation gate (would be an unresolvable loop: no retry, Continue always invalid) and continues straight to the node end", async () => {
+  const r = await compileOk(MULTI_EMIT_WAIT_GRAPH);
+  const wEl = elementForNode(r.bpmn, "w");
+  const esc = `delivery-human-task__${wEl}__esc__wait`;
+  // The escalation task itself still exists (operator is stopped so a timed-out multi-emit gate is
+  // legible), but it is NOT value-resumable.
+  assert(r.bpmn.includes(`<bpmn:userTask id="${esc}"`), "the multi-emit wait still parks on a human escalation task");
+  // NO resume-validation gateway: it would route every Continue to its invalid (default) branch and
+  // loop back onto the escalation task, which — with no Retry escape — can never advance.
+  assert(!r.bpmn.includes(`<bpmn:exclusiveGateway id="${esc}Vg"`), "a multi-emit wait escalation grows NO resume-validation gateway");
+  assert(!r.bpmn.includes(`${esc}Vbad`), "a multi-emit wait escalation has NO invalid-resume re-park flow (no unresolvable loop)");
+  assert(!r.bpmn.includes(`${esc}Vok`), "a multi-emit wait escalation has NO valid-resume branch");
+  // Instead the escalation's return flow `_i5` flows straight to the node end — an acknowledged,
+  // value-less continue (the same path a no-emit wait escalation takes).
+  assert(
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${wEl}_i5" sourceRef="${esc}" targetRef="${wEl}_end" />`),
+    "the multi-emit wait escalation continues straight to the node end",
+  );
+  // And it binds NO fact value (the single value field can't supply two distinct facts).
+  const escBlock = escBlockForNodeSuffix(r.bpmn, "w", "esc__wait");
+  assert(escBlock.includes('="none"') && escBlock.includes('target="emitMode"'), "a multi-emit wait escalation hides its value field (emitMode none)");
+  assert(!/then value else null/.test(escBlock), "a multi-emit wait escalation writes NO value→emit mapping");
+});
+
 test("#876 round-4 review: the resume-valid flag is distinct from any declared emit's fact-source var", async () => {
   // The flag is derived from the escalation element id, which is itself a legal fact-name string — so
   // a node could declare an emit NAMED `delivery_human_task__<el>__esc__resumeValid`, and for an

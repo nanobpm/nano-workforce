@@ -29,7 +29,7 @@
       "type": "textfield",
       "key": "value",
       "label": "Emitted value (only when this step emits exactly one fact)",
-      "description": "The typed value this step hands forward to its downstream dependents, applied on Continue. It is applied ONLY when the step emits exactly one fact: leave it blank for a click-done step that emits nothing, and for a step emitting more than one fact any entry here is discarded (a single value cannot satisfy several distinct facts) — choose \"Retry this step\" to actually produce those facts."
+      "description": "The typed value this step hands forward to its downstream dependents, applied on Continue. It is applied ONLY when the step emits exactly one fact AND that fact is actually consumed downstream: leave it blank for a click-done step that emits nothing (or whose sole emit is routing-only/unconsumed, where any entry is discarded — nothing reads it), and for a step emitting more than one fact any entry here is discarded (a single value cannot satisfy several distinct facts) — choose \"Retry this step\" to actually produce those facts."
     },
     {
       "type": "textarea",

@@ -1051,7 +1051,8 @@ escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
 `decision` select):
 
 - **Continue** (`decision="continue"`, the default) completes the node as resolved. If
-  the node declares **exactly one** emit, the form presents a typed-value field and maps
+  the node declares **exactly one** emit **and that emit is a downstream-required fact**,
+  the form presents a typed-value field and maps
   the operator-supplied `value` onto the node's emit-source var (`factSourceVar`), so the
   subProcess output publishes the same `<el>_<fact>` a normal completion would —
   letting work finished out of band (a draft PR the stalled agent already opened) be
@@ -1061,13 +1062,21 @@ escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
   agent-only gate metadata. The single-emit boundary is a hard cardinality rule: the
   form captures ONE value, so a node declaring **zero** emits has nothing to resume (the
   field stays blank) and a node declaring **two or more** emits is **not** value-resumable
-  — one value cannot satisfy multiple distinct typed facts without corrupting them. For
+  — one value cannot satisfy multiple distinct typed facts without corrupting them.
+  **The value is also inert for a node whose sole emit is routing-only or unconsumed** —
+  the resume keys off the **required** (downstream-consumed) emit set, not the raw declared
+  set, so an exactly-one-emit node whose fact nothing downstream reads has no required
+  resume target and its `value` is discarded (there is nothing to publish it to). For
   such a node the resume-valid flag is **hard-set to `false`**, so the post-escalation
   validation gate behaves as follows: if the node still owes a **required** emit, **Continue
   fails closed and loops back to the escalation** (it does NOT write nulls and does NOT
   advance to a fallback branch) — **Retry this step** is the only way to actually produce
   the facts; only a multi-emit node with **no required resume target** lets Continue proceed
-  past the node to its default (fallback) branch. Because the form
+  past the node to its default (fallback) branch. (A **wait** gate owing **two or more**
+  emits is a special case: it has no Retry exit and its single value field can resume
+  none of them, so its escalation grows **no** validation gate at all and Continue simply
+  acknowledges and proceeds to the node end — see issue #863 — rather than looping forever.)
+  Because the form
   captures `value` as textfield **text**, the single-emit resume **coerces/validates it to
   the emit's declared type** before publishing (`escalationResumeValueFeel`): a `boolean`
   emit accepts `"true"`/`"false"` **case-insensitively and surrounding-whitespace-trimmed**

@@ -2349,7 +2349,12 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
   const continueOnTimeout = trimmedOrEmpty(node.wait?.onTimeout) === "continue";
   // When the escalation is RESUMABLE (it grew a validation gate), its return flow `_i5` routes to the
   // GATE (not straight to the end) and the gate's valid branch flows to the end (PR #876 review).
-  const waitResumed = !continueOnTimeout && emits.length > 0;
+  // Only a SINGLE-emit wait is genuinely value-resumable: the single escalation-form `value` field
+  // cannot supply >1 distinct fact, and a wait gate has no Retry escape, so a MULTI-emit wait grows NO
+  // validation gate (building one would wedge the token in an unresolvable loop — issue #863 review
+  // r4198123619). A multi-emit (or no-emit) wait escalation therefore flows `_i5` straight to the node
+  // end — an acknowledged, value-less continue — the same path as a no-emit wait.
+  const waitResumed = !continueOnTimeout && emits.length === 1;
   // Defect A: read-only probe diagnostics seeded onto the escalation task so the operator/agent can
   // tell a genuine "not published yet" from a transient false-negative — the probe's last detail, the
   // resolved target/match, and a compact summary of the candidate releases the probe observed.
@@ -2437,8 +2442,10 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
           waitEscalationContextFeel(nodeId),
           // A resumed wait-gate escalation is VALIDATED by the post-escalation gate (`validTarget`) so
           // an omitted/malformed operator value re-parks instead of threading null onto the emit the
-          // downstream consumer binds (PR #876 review).
-          { resume: { kind: node.kind, emits }, diagnosticInputs, displayName, reservedTargets: emits.map((f) => factSourceVar(node.kind, f)), ...(emits.length > 0 ? { validTarget: `${el}_end` } : {}) },
+          // downstream consumer binds (PR #876 review). Only a SINGLE-emit wait is value-resumable, so
+          // `validTarget` (and the gate it drives) is provided ONLY then — a multi-emit wait has no
+          // escapable resume and so grows no gate (issue #863 review r4198123619).
+          { resume: { kind: node.kind, emits }, diagnosticInputs, displayName, reservedTargets: emits.map((f) => factSourceVar(node.kind, f)), ...(emits.length === 1 ? { validTarget: `${el}_end` } : {}) },
         )),
     // On `continue`, the not-ready-at-boundary branch (`_i4`) proceeds straight to the node end (no
     // human stop, no `_i5` escalation-return flow); on `escalate` it parks on the escalation task,
@@ -2836,9 +2843,19 @@ function escalationTaskLines(
     "      </bpmn:userTask>",
   ];
   const retryEl = opts?.retryElement;
-  const resumable = resume !== undefined && emits.length > 0;
-  // A wait-gate escalation with no emits (no `retryElement`, not resumable) has no tail — the caller
-  // flows `outgoing` straight to the node end.
+  // The resume-validation gate re-parks an invalid Continue back onto THIS escalation task (fail
+  // closed). That loop is only escapable when the operator has a way out of it — EITHER a genuinely
+  // value-resumable single emit (supply the value → flag true → proceed to the node end) OR a Retry
+  // gate (service nodes). A multi-emit WAIT escalation has NEITHER: the single `value` field cannot
+  // supply >1 distinct fact so the flag is hard-`false` and Continue ALWAYS re-parks, and a wait gate
+  // carries no `retryElement`, so there is no Retry escape. Building the gate there wedges the timed-out
+  // token in an unresolvable loop (issue #863 review, thread r4198123619 — "Prevent unresolvable loops
+  // for multi-emit wait nodes"). So the gate is grown ONLY when there is an escape; otherwise the
+  // escalation flows straight to the node end, exactly like a no-emit wait escalation (an acknowledged,
+  // value-less continue). Service nodes KEEP the fail-closed re-park — their Retry gate is the escape.
+  const resumable = resume !== undefined && emits.length > 0 && (resumableEmit !== undefined || retryEl !== undefined);
+  // A wait-gate escalation with no escapable resume (no `retryElement`, not resumable) has no tail — the
+  // caller flows `outgoing` straight to the node end.
   if (retryEl === undefined && !resumable) return task;
 
   const tail: string[] = [];
