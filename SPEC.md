@@ -1061,13 +1061,20 @@ escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
   agent-only gate metadata. The single-emit boundary is a hard cardinality rule: the
   form captures ONE value, so a node declaring **zero** emits has nothing to resume (the
   field stays blank) and a node declaring **two or more** emits is **not** value-resumable
-  — one value cannot satisfy multiple distinct typed facts without corrupting them, so
-  Continue writes no facts and the downstream guarded split takes its deadlock-safe
-  default; **Retry this step** is the way to actually produce the facts. Because the form
+  — one value cannot satisfy multiple distinct typed facts without corrupting them. For
+  such a node the resume-valid flag is **hard-set to `false`**, so the post-escalation
+  validation gate behaves as follows: if the node still owes a **required** emit, **Continue
+  fails closed and loops back to the escalation** (it does NOT write nulls and does NOT
+  advance to a fallback branch) — **Retry this step** is the only way to actually produce
+  the facts; only a multi-emit node with **no required resume target** lets Continue proceed
+  past the node to its default (fallback) branch. Because the form
   captures `value` as textfield **text**, the single-emit resume **coerces/validates it to
   the emit's declared type** before publishing (`escalationResumeValueFeel`): a `boolean`
-  emit accepts only `"true"`/`"false"` and publishes a real boolean, a `number` emit parses
-  via `number(value)`, and any other (text-valued) type passes through. An **invalid** entry
+  emit accepts `"true"`/`"false"` **case-insensitively and surrounding-whitespace-trimmed**
+  (the validity gate and the coercion share one `lower case(trim(string(value)))`
+  normalization, so a value one accepts the other can never convert differently) and
+  publishes a real boolean, a `number` emit parses via `number(trim(string(value)))`, and
+  any other (text-valued) type passes through. An **invalid** entry
   publishes `null` — the defined failure path — so a required-emit producer gate escalates
   and a guarded split takes its default rather than routing on a mistyped value (a raw
   `"true"` string would silently skip a `= true` guard).

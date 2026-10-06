@@ -414,8 +414,14 @@ test("#863 multi-emit escalation is inert: a node declaring >1 emit cannot resum
   const escContract = escBlockForNodeSuffix(r.bpmn, "open", "contract");
   assert(escContract.includes('="none"') && escContract.includes('target="emitMode"'), "a multi-emit contract escalation hides its value field");
   assert(!/then value else null/.test(escContract), "a multi-emit contract escalation writes NO value→emit mapping");
-  // The resolution hint tells the operator Continue takes the default branch and Retry produces the facts.
-  assert(escContract.includes("default (fallback) branch") && escContract.includes("Retry this step"), "the hint steers a multi-emit resolution to Retry, not a single-value Continue");
+  // The resolution hint must tell the operator Continue CANNOT resume (it re-parks, does not advance)
+  // and Retry produces the facts — never promise a fallback exit the hard-false flag makes unreachable
+  // (#863 review r4194186490).
+  assert(
+    escContract.includes("re-parks HERE") && escContract.includes("does NOT advance") && escContract.includes("Retry this step"),
+    "the hint steers a required multi-emit resolution to Retry and says Continue re-parks (does not advance)",
+  );
+  assert(!escContract.includes("fallback) branch"), "the hint must NOT promise a fallback exit for a required multi-emit escalation (Continue re-parks)");
 });
 
 // A node DECLARING two facts but where only ONE is a downstream data dependency (the sibling is
@@ -448,10 +454,15 @@ test("#863 review r4193902690: a node declaring >1 emit is inert even when only 
     assert(!/target="emitLabel"/.test(esc), `the __${suffix} escalation emits no single emitLabel`);
     assert(esc.includes(`<zeebe:output source="=false" target="${flagVar}" />`), `the __${suffix} escalation hard-sets its resume-valid flag to false (fail closed, always re-parks)`);
   }
-  // The resolution hint must steer to Retry + the default (fallback) branch, naming BOTH declared facts,
-  // never promise a value field the inert escalation does not render.
+  // The resolution hint must say Continue RE-PARKS (does not advance to a fallback branch), naming BOTH
+  // declared facts, never promise a value field OR a fallback exit the inert, hard-false escalation
+  // cannot take (#863 review r4194186490).
   const contract = escBlockForNodeSuffix(r.bpmn, "open", "contract");
-  assert(contract.includes("default (fallback) branch") && contract.includes("Retry this step"), "the hint steers a multi-declared resolution to Retry, not a single-value Continue");
+  assert(
+    contract.includes("re-parks HERE") && contract.includes("does NOT advance") && contract.includes("Retry this step"),
+    "the hint steers a multi-declared resolution to Retry and says Continue re-parks (does not advance)",
+  );
+  assert(!contract.includes("fallback) branch"), "the hint must NOT promise a fallback exit for a multi-declared escalation owing a required emit");
   assert(contract.includes("&apos;pr&apos;/&apos;version&apos;"), "the hint names BOTH declared facts the single value field cannot supply");
 });
 
@@ -492,8 +503,8 @@ test("#863 typed Continue: a single-emit escalation coerces/validates the textfi
   const boolOut = boolEsc.match(/<zeebe:output source='([^']*)' target="ok"/);
   assert(boolOut, "the boolean emit's escalation resume maps value onto its source var");
   const boolFeel = boolOut[1].replaceAll("&quot;", '"');
-  assert(/lower case\(string\(value\)\)\s*=\s*"true"/.test(boolFeel), `a boolean emit coerces the text to a real boolean (… = "true"), got: ${boolFeel}`);
-  assert(/matches\(lower case\(string\(value\)\)/.test(boolFeel), "a boolean emit validates the text is true/false before coercing");
+  assert(/lower case\(trim\(string\(value\)\)\)\s*=\s*"true"/.test(boolFeel), `a boolean emit coerces the trimmed/lower-cased text to a real boolean (… = "true"), got: ${boolFeel}`);
+  assert(/matches\(lower case\(trim\(string\(value\)\)\)/.test(boolFeel), "a boolean emit validates the normalized text is true/false before coercing");
   assert(/else null/.test(boolFeel), "an unparseable boolean entry publishes null (the defined failure path), not the raw string");
 
   const numGraph = await compileOk({
@@ -507,7 +518,7 @@ test("#863 typed Continue: a single-emit escalation coerces/validates the textfi
   const numOut = numEsc.match(/<zeebe:output source=(["'])([\s\S]*?)\1 target="count"/);
   assert(numOut, "the number emit's escalation resume maps value onto its source var");
   const numFeel = numOut[2].replaceAll("&quot;", '"');
-  assert(/number\(value\)/.test(numFeel), `a number emit coerces the text via number(value), got: ${numFeel}`);
+  assert(/number\(trim\(string\(value\)\)\)/.test(numFeel), `a number emit coerces the trimmed text via number(trim(string(value))), got: ${numFeel}`);
   assert(/else null/.test(numFeel), "an unparseable number entry publishes null");
 
   // A string-typed emit passes the text through unchanged (no coercion needed) — but the composed
@@ -526,6 +537,68 @@ test("#863 typed Continue: a single-emit escalation coerces/validates the textfi
   const strFeel = strOut[2].replaceAll("&quot;", '"');
   assert(/then value else null/.test(strFeel), `a string emit passes the text value through unchanged (then value else null), got: ${strFeel}`);
   assert(/is defined\(value\)/.test(strFeel), "a string emit still guards on a present, non-blank value (fail closed)");
+});
+
+test("#863 review r4194186383: the boolean/number resume VALIDITY gate and the typed COERCION share ONE normalization — a value accepted can never be mis-published", async () => {
+  // RED before the fix: the validity gate trimmed (`trim(string(value))`) but the coercion did not
+  // (`lower case(string(value))`), so `\" true \"` passed the gate (validity=true) yet the coercion
+  // published the WRONG boolean, and `\"TRUE\"` the coercion accepted but the gate rejected. Both sides
+  // must now fold the SAME `lower case(trim(string(value)))`, so "gate accepts ⇒ bind is the same value".
+  const boolGraph = await compileOk({
+    nodes: [
+      { id: "gate", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "ok", type: "boolean" }] },
+      { id: "use", kind: "agent", agent: { jobType: "j2" } },
+    ],
+    edges: [{ from: "gate.ok", to: "use" }],
+  });
+  const boolEsc = escBlockForNodeSuffix(boolGraph.bpmn, "gate", "esc");
+  const boolOut = boolEsc.match(/<zeebe:output source='([^']*)' target="ok"/);
+  assert(boolOut, "the boolean emit resume binds value onto its source var");
+  const boolFeel = boolOut![1].replaceAll("&quot;", '"');
+  // The bind is `=if <gate> then <coerce> else null`: BOTH the gate (the matches/equality) and the
+  // coerce (the `= \"true\"`) read the trimmed+lower-cased text, and NO occurrence reads the old
+  // un-trimmed `lower case(string(value))` form.
+  assert(
+    (boolFeel.match(/lower case\(trim\(string\(value\)\)\)/g) ?? []).length >= 2,
+    `both the boolean gate and coercion fold lower case(trim(string(value))), got: ${boolFeel}`,
+  );
+  assert(!/lower case\(string\(value\)\)/.test(boolFeel), `no boolean side may read the un-trimmed lower case(string(value)), got: ${boolFeel}`);
+
+  const numGraph = await compileOk({
+    nodes: [
+      { id: "n", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "count", type: "number" }] },
+      { id: "use", kind: "agent", agent: { jobType: "j2" } },
+    ],
+    edges: [{ from: "n.count", to: "use" }],
+  });
+  const numEsc = escBlockForNodeSuffix(numGraph.bpmn, "n", "esc");
+  const numOut = numEsc.match(/<zeebe:output source=(["'])([\s\S]*?)\1 target="count"/);
+  assert(numOut, "the number emit resume binds value onto its source var");
+  const numFeel = numOut![2].replaceAll("&quot;", '"');
+  // The number gate matches the NORMALIZED text and the coercion parses the SAME trimmed text, so the
+  // gate can never accept `\" 42 \"` while `number(\" 42 \")` yields null.
+  assert(/matches\(lower case\(trim\(string\(value\)\)\)/.test(numFeel), `the number gate matches the normalized text, got: ${numFeel}`);
+  assert(/number\(trim\(string\(value\)\)\)/.test(numFeel), `the number coercion parses the SAME trimmed text, got: ${numFeel}`);
+  assert(!/number\(value\)/.test(numFeel), `the number coercion must not parse the un-trimmed raw value, got: ${numFeel}`);
+});
+
+test("#863 review r4194186490: a multi-declared node with NO required resume target keeps the fallback-branch hint (Continue genuinely advances)", async () => {
+  // The hint promises a fallback exit ONLY when Continue can actually take it — i.e. the node has NO
+  // required resume target, so no validation gate re-parks it. A node declaring two emits that NO
+  // downstream node consumes is such a case: the escalation is not validation-gated, so Continue
+  // proceeds past the node. (Contrast the required-emit cases above, which must RE-PARK, not advance.)
+  const r = await compileOk({
+    name: "two-declared-none-required",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "pr", type: "pr" }, { name: "version", type: "version" }] },
+      { id: "sink", kind: "agent", agent: { jobType: "j2", prompt: "y" } },
+    ],
+    // `open` is sequenced before `sink` but neither of its facts is bound downstream (control-flow edge).
+    edges: [{ from: "open", to: "sink" }],
+  });
+  const esc = escBlockForNodeSuffix(r.bpmn, "open", "esc");
+  assert(esc.includes("default (fallback) branch") && esc.includes("no downstream node requires"), "a multi-declared node with no required emit keeps the fallback-branch Continue hint");
+  assert(!esc.includes("re-parks HERE"), "a node with no required resume target does not re-park on Continue");
 });
 
 test("#863 human multi-emit: a human node emitting several facts with no form is REJECTED (no static form can capture them → would publish null) (r4182488264 / thread deliveryGraphCompiler.ts:1859)", async () => {
@@ -630,7 +703,7 @@ test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED fi
     `the bespoke boolean form still reads the fact-named \`approval\` field then \`value\`, got: ${sValueFeel}`,
   );
   assert(
-    /matches\(lower case\(string\(.*\)\), "\^\(true\|false\)\$"\)/.test(sValueFeel) && /= "true"/.test(sValueFeel),
+    /matches\(lower case\(trim\(string\(.*\)\)\), "\^\(true\|false\)\$"\)/.test(sValueFeel) && /= "true"/.test(sValueFeel),
     `the selected bespoke boolean value is coerced/validated to a real FEEL boolean, got: ${sValueFeel}`,
   );
   assert(/else null/.test(sValueFeel), "an unparseable bespoke boolean entry publishes null (the defined failure path)");
@@ -697,7 +770,7 @@ test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED fi
   const gbFeel = gbOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
   assert(!/is defined\(ok\)/.test(gbFeel), `the generic form must NOT read the fact-named field, got: ${gbFeel}`);
   assert(
-    /matches\(lower case\(string\(.*\)\), "\^\(true\|false\)\$"\)/.test(gbFeel) && /= "true"/.test(gbFeel),
+    /matches\(lower case\(trim\(string\(.*\)\)\), "\^\(true\|false\)\$"\)/.test(gbFeel) && /= "true"/.test(gbFeel),
     `the generic single-boolean value is coerced/validated to a real FEEL boolean, got: ${gbFeel}`,
   );
 });

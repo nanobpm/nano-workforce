@@ -2205,14 +2205,23 @@ function escalationResolutionHint(nodeEmits: readonly DeliveryFact[], resumeEmit
   // the node declares EXACTLY ONE emit AND that emit is the required resume target. Gating on the
   // required count alone would promise a value field a node declaring two facts (one required) never
   // renders (issue #863 review, thread r4193902690).
-  const proceed =
-    nodeEmits.length === 1 && resumeEmits.length === 1
-      ? `; or choose "Continue" and put the '${resumeEmits[0].name}' value in the value field (e.g. work finished out of band)`
-      : nodeEmits.length > 1
-        ? `; or choose "Continue" to proceed past this node to its default (fallback) branch — the single value field cannot supply its ${nodeEmits
-            .map((e) => `'${e.name}'`)
-            .join("/")} facts, so "Retry this step" to actually produce them`
-        : '; or choose "Continue" to proceed past this node';
+  const names = (fs: readonly DeliveryFact[]): string => fs.map((e) => `'${e.name}'`).join("/");
+  let proceed: string;
+  if (nodeEmits.length === 1 && resumeEmits.length === 1) {
+    proceed = `; or choose "Continue" and put the '${resumeEmits[0].name}' value in the value field (e.g. work finished out of band)`;
+  } else if (nodeEmits.length > 1 && resumeEmits.length >= 1) {
+    // A multi-declared node that still owes ≥1 REQUIRED emit: the resume-valid flag is hard-`false`, so
+    // the post-escalation validation gate ALWAYS re-parks — Continue loops back HERE, it does NOT write
+    // nulls or advance to a fallback branch (deliveryGraphCompiler.ts fail-closed loop; #863 review
+    // r4194186490/r4194186441). Only "Retry this step" can produce the facts.
+    proceed = `; "Continue" CANNOT resume this node and does NOT advance — the single value field cannot supply its ${names(nodeEmits)} facts, so it re-parks HERE until you choose "Retry this step" to actually produce them`;
+  } else if (nodeEmits.length > 1) {
+    // Multi-declared but NO required resume target downstream: the escalation is not validation-gated, so
+    // Continue genuinely proceeds past the node to its default (fallback) branch.
+    proceed = `; or choose "Continue" to proceed past this node to its default (fallback) branch — no downstream node requires its ${names(nodeEmits)} facts, and the single value field cannot supply them anyway`;
+  } else {
+    proceed = '; or choose "Continue" to proceed past this node';
+  }
   return `${retry}${proceed}.`;
 }
 
@@ -2546,6 +2555,17 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
  * `opts.diagnosticInputs` seeds read-only probe context (issue #514 Defect A) onto the same task so the
  * operator can see WHY the gate escalated (its last probe detail + observed candidate releases). */
 
+/** The ONE canonical runtime normalization a captured escalation/human-form text value is folded
+ * through before a `boolean`/`number` gate or coercion reads it: `lower case(trim(string(...)))`. The
+ * validity gate ({@link resumeValueCondition}) and the typed bind ({@link coerceFactValueFeel}) MUST
+ * share it, or a value one accepts the other converts differently — e.g. `" true "` passes a trimming
+ * gate but a non-trimming coercion publishes the wrong boolean, and `"TRUE"` a case-folding coercion
+ * accepts but a non-folding gate rejects (#863 review r4194186383). Deriving both from this single
+ * expression makes "gate accepts ⇒ coercion binds the same value" structurally true, not coincidental. */
+function normalizedBoolNumberFeel(rawExpr: string): string {
+  return `lower case(trim(string(${rawExpr})))`;
+}
+
 /** Coerce/validate a captured form value — a null-safe FEEL expression `rawExpr` yielding the operator's
  * entry (string-valued text, or null when absent) — to a single emit's declared {@link DeliveryFact.type},
  * so the published fact is a REAL FEEL value and not an untyped string. One source of truth shared by the
@@ -2553,12 +2573,16 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
  * resumed `value` when `resumeValueCondition` accepts it) and the bespoke single-emit human-form
  * source ({@link humanBodyLines}), so the two typed-publish paths cannot drift (PR #863 threads
  * r4182488193 / r4189815989). Returns a bare expression WITHOUT a leading `=`.
- *   • `boolean` — accept only the literal `"true"`/`"false"` (case-insensitive, via `lower case()`);
- *     anything else is invalid and yields null. (The pinned engine's FEEL `matches` does not support an
- *     inline `(?i:…)` flag — verified against the WASM engine — so case-insensitivity is done by
- *     lower-casing the input, not the pattern.) An already-boolean control value round-trips correctly:
- *     `string(true)` → `"true"` passes the same gate.
- *   • `number` — `number(value)` parses the numeric text; an unparseable entry yields null.
+ *   • `boolean` — accept the literal `"true"`/`"false"`, case-insensitively AND
+ *     surrounding-whitespace-trimmed via the shared {@link normalizedBoolNumberFeel}
+ *     (`lower case(trim(string(…)))`); anything else is invalid and yields null. (The pinned engine's
+ *     FEEL `matches` does not support an inline `(?i:…)` flag — verified against the WASM engine — so
+ *     case-insensitivity is done by lower-casing the input, not the pattern.) The validity gate
+ *     ({@link resumeValueCondition}) folds the SAME normalization, so a value it accepts coerces to the
+ *     SAME boolean here (#863 review r4194186383). An already-boolean control value round-trips
+ *     correctly: `string(true)` → `"true"` passes the same gate.
+ *   • `number` — `number(trim(string(value)))` parses the trimmed numeric text (matching the gate's
+ *     `trim(string(…))`); an unparseable entry yields null.
  *   • every other type (`string`/`url`/`version`/`pr`/`artifact`) is text-valued already — pass through.
  * The defined FAILURE PATH for invalid input is `null`, so a required-emit producer gate escalates and a
  * guarded split takes its deadlock-safe default rather than routing on a mistyped value. `definedGuard`,
@@ -2579,10 +2603,18 @@ function coerceFactValueFeel(fact: DeliveryFact, rawExpr: string, definedGuard?:
   // passthrough `then rawExpr else null` has no trailing operator, so only the `!= null` operand needs it.
   const operand = `(${rawExpr})`;
   switch (fact.type) {
-    case "boolean":
-      return `if (${pre}${operand} != null and matches(lower case(string(${rawExpr})), "^(true|false)$")) then lower case(string(${rawExpr})) = "true" else null`;
+    case "boolean": {
+      // Share the gate's EXACT normalization ({@link normalizedBoolNumberFeel}) so a value the validity
+      // gate ({@link resumeValueCondition}) accepts coerces to the SAME boolean here — `" true "`/`"TRUE"`
+      // can never be accepted-then-mis-published (#863 review r4194186383).
+      const norm = normalizedBoolNumberFeel(rawExpr);
+      return `if (${pre}${operand} != null and matches(${norm}, "^(true|false)$")) then ${norm} = "true" else null`;
+    }
     case "number":
-      return `if (${pre}${operand} != null) then number(${rawExpr}) else null`;
+      // TRIM/stringify to match the gate's `trim(string(...))` (#863 review r4194186383): the gate accepts
+      // `" 42 "`, so the bind must parse the same trimmed text — a bare `number(" 42 ")` yields null,
+      // breaking the "gate accepts ⇒ bind is non-null" invariant.
+      return `if (${pre}${operand} != null) then number(trim(string(${rawExpr}))) else null`;
     default:
       return definedGuard ? `if (${definedGuard}) then ${rawExpr} else null` : rawExpr;
   }
@@ -2845,9 +2877,14 @@ function resumeValueCondition(fact: DeliveryFact, v: string): string {
     case "string":
       return `${present} and trim(${s}) != ""`;
     case "number":
-      return `${present} and (matches(trim(${s}), "^-?\\\\d+(\\\\.\\\\d+)?$") = true)`;
+      // Share the coercion's `number(trim(string(...)))` input ({@link normalizedBoolNumberFeel} folds an
+      // extra harmless lower-case over the digits): gate and bind normalize identically (#863 r4194186383).
+      return `${present} and (matches(${normalizedBoolNumberFeel(v)}, "^-?\\\\d+(\\\\.\\\\d+)?$") = true)`;
     case "boolean":
-      return `${present} and (trim(${s}) = "true" or trim(${s}) = "false")`;
+      // SAME normalization as the typed bind ({@link coerceFactValueFeel} → {@link normalizedBoolNumberFeel}),
+      // so this gate accepts exactly the texts the coercion publishes correctly — `" true "`/`"TRUE"` are
+      // accepted here AND bound as a real boolean, never accepted-then-mis-published (#863 r4194186383).
+      return `${present} and (${normalizedBoolNumberFeel(v)} = "true" or ${normalizedBoolNumberFeel(v)} = "false")`;
     case "version":
       return `${present} and (matches(trim(${s}), "^v?\\\\d[\\\\w.+-]*$") = true)`;
     case "artifact":
