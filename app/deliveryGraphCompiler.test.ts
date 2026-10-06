@@ -737,20 +737,41 @@ test("humanNodes: extracts prompt/formKey/emits; a click-done node emits nothing
   assertEquals(ack?.prompt, undefined);
 });
 
-test("#778 humanNodes: a credential-bearing formKey is redacted in the preview projection (raw only reaches runtime form resolution)", async () => {
-  // `humanNodes[]` is persisted into the staged proposal `preview` and rendered verbatim on the Delivery
-  // Graphs page, so a credential in a human `formKey` (`//user:pass@…`) must be stripped here with the
-  // SAME helper the BPMN `Form:` doc uses — else it leaks unredacted through the preview. The RAW formKey
-  // still drives runtime form resolution (`deliveryHuman` reads `node.human.formKey` directly).
-  const r = await compileOk({
-    nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "//user:pass@forms.example.com/approve?token=abc" } }],
+test("#863 human.formKey: a credential-bearing formKey is REJECTED before compilation (HIGH finding), while a plain opaque form id compiles verbatim", async () => {
+  // PR #863 review (HIGH): an explicit `human.formKey` is baked into the executable
+  // `<zeebe:formDefinition formId=…>`, so a credential-bearing URL formKey (`//user:pass@…`) must be
+  // REJECTED at the semantic boundary — not merely redacted in the preview projection — so it can never
+  // reach the compiled/deployed BPMN at all. (The preview redactor on `humanNodes[].formKey` remains as
+  // residual defence-in-depth for an opaque query-bearing form id the URL/credential gate does not catch.)
+  const errors = await compileFail({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "https://forms.example.com/approve?token=abc" } }],
     edges: [],
   });
-  const h = r.humanNodes.find((n) => n.nodeId === "h");
-  assert(h?.formKey !== undefined && !h.formKey.includes("user:pass") && !h.formKey.includes("token=abc"), `credential stripped from preview formKey: ${h?.formKey}`);
-  // An ordinary opaque form id is preserved verbatim.
+  const e = errors.find((err) => err.path === "nodes[0].human.formKey");
+  assert(e !== undefined, `expected a formKey rejection, got ${JSON.stringify(errors)}`);
+  assert(!e.message.includes("token=abc"), `the formKey rejection message must redact the query token, got: ${e.message}`);
+  // An ordinary opaque form id is accepted and preserved verbatim in the preview projection.
   const plain = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "deploy-approval" } }], edges: [] });
   assertEquals(plain.humanNodes.find((n) => n.nodeId === "h")?.formKey, "deploy-approval");
+});
+
+test("#863 human.formKey: a quote-bearing formKey can never break out of the `<zeebe:formDefinition formId=…>` attribute (rendered via `attr()`)", async () => {
+  // A formKey is XML-attribute-safe but need not be injection-safe on its own: the compiler renders it
+  // through `attr()`, which switches the attribute delimiter to a single quote when the value contains a
+  // `"`, so a crafted `"/><bpmn:…` payload stays INSIDE the attribute instead of closing it. (A
+  // `"`-bearing formKey is not URL/credential/control-char shaped, so the validator admits it — defence
+  // in depth: even an admitted hostile key cannot inject.)
+  const r = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: 'a"/><bpmn:userTask id="pwn' } }],
+    edges: [],
+  });
+  // No raw `<bpmn:userTask id="pwn` element was injected — its `<`/`>` are entity-escaped INSIDE a
+  // single-quote-delimited attribute, so the payload stays contained as attribute text.
+  assert(!r.bpmn.includes('<bpmn:userTask id="pwn'), "a quote-bearing formKey must not inject a sibling element");
+  assert(
+    r.bpmn.includes(`formId='a"/&gt;&lt;bpmn:userTask id="pwn'`),
+    `formKey must be single-quote delimited with < > escaped, BPMN: ${r.bpmn.slice(r.bpmn.indexOf("formDefinition") - 10, r.bpmn.indexOf("formDefinition") + 90)}`,
+  );
 });
 
 test("#778 humanNodes: a credential-bearing emit `description` is redacted in the preview projection (raw only reaches runtime)", async () => {

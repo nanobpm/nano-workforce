@@ -55,6 +55,38 @@ export function isDeliveryHumanElement(elementId: string): boolean {
   return elementId === DELIVERY_HUMAN_ELEMENT || elementId.startsWith(`${DELIVERY_HUMAN_ELEMENT}__`);
 }
 
+/** The id suffix the S4 compiler appends for a service node's bounded-timeout escalation TWIN user task
+ *  (`delivery-human-task__<el>__esc`). */
+export const DELIVERY_ESCALATION_TWIN_SUFFIX = "__esc";
+
+/** The id suffix for an `agent` node's producer-contract escalation TWIN (`…__contract`). */
+export const DELIVERY_CONTRACT_TWIN_SUFFIX = "__contract";
+
+/** True for a delivery-graph SERVICE-node escalation TWIN user task — the bounded-timeout `__esc` twin
+ *  or an agent's producer-contract `__contract` twin — as opposed to a plain per-node human task
+ *  (`delivery-human-task__<el>`). Unlike that per-node human task, which renders a DIFFERENT form per
+ *  node (and so has no single static completion contract — left unvalidated, `ESCALATION_FORM_BY_ELEMENT`
+ *  deliberately omits it), a twin ALWAYS renders a FIXED escalation form — the retry-capable
+ *  {@link ESCALATION_FORM} (a strict superset of {@link GENERIC_HUMAN_FORM}: same `value`/`note`, PLUS
+ *  the `decision` select) or the select-less generic form — so its completion variables CAN be validated
+ *  against `ESCALATION_FORM`'s contract (no required fields, so the generic-form twins never false-reject;
+ *  only a present-but-invalid `decision` is rejected). Matched on the convention suffix — single source of
+ *  truth with the compiler's `escalationTaskElement`/`contractEscalationTaskElement` builders — requiring
+ *  a NON-EMPTY `<el>` between prefix and suffix so the bare per-node base of a node literally named
+ *  `esc`/`contract` (`delivery-human-task__esc`) is not misread as a twin. (A node id MAY itself end in
+ *  `__esc` — `NODE_ID_PATTERN` allows it — so the twin of node `foo` and the base of a node named
+ *  `foo__esc` collide on one id; validating that rare base against the superset escalation form is
+ *  harmless, since the form has no required fields and only constrains a `decision` such a base never
+ *  sets to an out-of-range value through its own select-less form.) */
+export function isDeliveryEscalationTwin(elementId: string): boolean {
+  const prefix = `${DELIVERY_HUMAN_ELEMENT}__`;
+  if (!elementId.startsWith(prefix)) return false;
+  for (const suffix of [DELIVERY_ESCALATION_TWIN_SUFFIX, DELIVERY_CONTRACT_TWIN_SUFFIX]) {
+    if (elementId.endsWith(suffix) && elementId.length > prefix.length + suffix.length) return true;
+  }
+  return false;
+}
+
 /** The read-model "Decision context" for a parked delivery-graph `human` node (issue #772). The Tasks
  *  surface renders the deployed `.form` against EMPTY data (it seeds no task-local variables), so the
  *  node's instruction cannot reach the operator through the form's readonly `prompt` field — it must

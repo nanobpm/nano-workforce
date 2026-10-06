@@ -53,7 +53,7 @@ import {
   stripXmlInvalidChars,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
-import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
+import { DELIVERY_CONTRACT_TWIN_SUFFIX, DELIVERY_ESCALATION_TWIN_SUFFIX, DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
 import { layoutBpmnOffThread } from "./layoutOffThread.ts";
 import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactString } from "./readiness.ts";
 // `redactFreeText` now lives in the low-level `redactText.ts` helper (both this compiler and
@@ -167,7 +167,7 @@ function humanTaskElement(element: string): string {
  * human-completable convention as a human node, so a stalled `agent`/`wait`/`connector` escalates onto
  * the Tasks inbox and is answerable by a human OR an agent (ADR 0046). */
 function escalationTaskElement(element: string): string {
-  return `${DELIVERY_HUMAN_ELEMENT}__${element}__esc`;
+  return `${DELIVERY_HUMAN_ELEMENT}__${element}${DELIVERY_ESCALATION_TWIN_SUFFIX}`;
 }
 
 /** The BPMN element id an `agent` node's PRODUCER-CONTRACT escalation user task carries (issue #731) —
@@ -177,7 +177,7 @@ function escalationTaskElement(element: string): string {
  * a producer that finishes without doing its job escalates AT that node and is answerable by a human
  * OR an agent. */
 function contractEscalationTaskElement(element: string): string {
-  return `${DELIVERY_HUMAN_ELEMENT}__${element}__contract`;
+  return `${DELIVERY_HUMAN_ELEMENT}__${element}${DELIVERY_CONTRACT_TWIN_SUFFIX}`;
 }
 
 // ESCALATION_DECISION_VAR / ESCALATION_DECISION_RETRY / ESCALATION_LOCAL_VARS / AGENT_RESULT_LOCAL_VARS /
@@ -2358,7 +2358,12 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
     `      <bpmn:userTask id="${task}" name="Delivery: human step — ${escapeXml(displayName)}">`,
     "        <bpmn:extensionElements>",
-    `          <zeebe:formDefinition formId="${formId}" />`,
+    // `formId` is the node's RESOLVED form key, which for an explicit `human.formKey` is OPERATOR-SUPPLIED
+    // text — render it through `attr()` (which switches to a single-quote delimiter when the value contains
+    // a `"`) so a quote-bearing key can never break out of the attribute and inject BPMN. Authoring-time
+    // validation (`deliveryGraph.ts`) additionally rejects a URL-/credential-/control-char-bearing formKey
+    // before it ever reaches here, so this is defence in depth, not the only gate.
+    `          <zeebe:formDefinition ${attr("formId", formId)} />`,
     "          <zeebe:userTask />",
     `          <zeebe:assignmentDefinition candidateGroups="operators" ${attr("assignee", assignee)} />`,
     "          <zeebe:ioMapping>",

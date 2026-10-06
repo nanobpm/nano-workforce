@@ -882,6 +882,72 @@ test("invalid-job-type: an `agent.jobType` carrying attribute whitespace (LF) is
   hasCode(errors, "invalid-job-type");
 });
 
+test("invalid-form-key: a `human.formKey` carrying an XML-1.0-invalid character is rejected, not silently rewritten into a different executable form id (PR #863 review)", () => {
+  // `human.formKey` is emitted VERBATIM as the executable `<zeebe:formDefinition formId=…>` (it resolves
+  // a deployed `.form` by value). An XML-1.0-forbidden control char would be STRIPPED by the attribute
+  // sanitiser — resolving a DIFFERENT (wrong) form — so it must be rejected, exactly like `agent.jobType`.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "step", kind: "human", human: { formKey: "my-form\u0001x" } }],
+    edges: [],
+  });
+  hasCode(errors, "invalid-form-key");
+});
+
+test("invalid-form-key: a `human.formKey` carrying attribute whitespace (LF) is rejected — XML attribute-value normalization would fold it to a space, resolving a different form (PR #863 review)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "step", kind: "human", human: { formKey: "my\nform" } }],
+    edges: [],
+  });
+  hasCode(errors, "invalid-form-key");
+});
+
+test("credential-in-form-key: a URL-/credential-shaped `human.formKey` is REJECTED — it is baked verbatim into the executable `<zeebe:formDefinition formId=…>`, so an embedded credential would leak into the compiled BPMN the preview door returns (PR #863 review)", () => {
+  // whole-value URL carrying a `?token=` query (no userinfo needed to be a leak risk)
+  const whole = validateDeliveryGraph({
+    nodes: [{ id: "step", kind: "human", human: { formKey: "https://evil.example/f.form?token=secret" } }],
+    edges: [],
+  });
+  const err = hasCode(whole, "credential-in-form-key");
+  assert(!err.message.includes("token=secret"), `the credential-in-form-key message must redact the query token, got: ${err.message}`);
+  // embedded `//user:pass@host` past an otherwise plausible token
+  hasCode(
+    validateDeliveryGraph({
+      nodes: [{ id: "step", kind: "human", human: { formKey: "my-form //user:pass@evil.example/f" } }],
+      edges: [],
+    }),
+    "credential-in-form-key",
+  );
+  // explicit-scheme embedded URL with a `?token=` query
+  hasCode(
+    validateDeliveryGraph({
+      nodes: [{ id: "step", kind: "human", human: { formKey: "my-form https://evil.example/f?token=secret" } }],
+      edges: [],
+    }),
+    "credential-in-form-key",
+  );
+  // scheme-relative `//host?token=` authority
+  hasCode(
+    validateDeliveryGraph({
+      nodes: [{ id: "step", kind: "human", human: { formKey: "my-form //evil.example/f?token=secret" } }],
+      edges: [],
+    }),
+    "credential-in-form-key",
+  );
+});
+
+test("human.formKey: a clean form id (and a blank/absent one) passes the formKey gates", () => {
+  for (const formKey of ["my-custom-form", "  ", undefined]) {
+    assertEquals(
+      validateDeliveryGraph({
+        nodes: [{ id: "step", kind: "human", human: formKey === undefined ? {} : { formKey } }],
+        edges: [],
+      }).filter((e) => e.code === "invalid-form-key" || e.code === "credential-in-form-key"),
+      [],
+      `formKey ${JSON.stringify(formKey)} must pass the formKey gates`,
+    );
+  }
+});
+
 test("invalid-job-type: a clean `agent.jobType` (no XML-invalid characters, no attribute whitespace) passes validation", () => {
   assertEquals(
     validateDeliveryGraph({

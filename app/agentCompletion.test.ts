@@ -884,6 +884,29 @@ test("validateEscalationVariables derives its contract from the canonical .form 
   assertEquals(validateEscalationVariables("some-other-task", { whatever: 1 }), null);
 });
 
+test("validateEscalationVariables enforces the `decision` select on a delivery-graph service-escalation twin (retry-node)", async () => {
+  // A delivery-graph service-node escalation twin (`…__esc`/`…__contract`) ALWAYS renders the fixed
+  // `delivery-escalation` form, whose `decision` select is {continue, retry}. The canonical completers
+  // must therefore reject a present-but-invalid `decision` (e.g. an agent/direct-API typo `retrry`),
+  // instead of silently computing `retryRequested=false` and taking the deadlock-safe Continue default
+  // — which would skip the node (PR #863 review — MEDIUM "Validate decision values" advisory).
+  const escTwin = "delivery-human-task__n1__esc";
+  const contractTwin = "delivery-human-task__n2__contract";
+  // present-but-invalid decision → rejected on BOTH twin kinds
+  assert(validateEscalationVariables(escTwin, { decision: "retrry" }) !== null, "invalid decision rejected on __esc twin");
+  assert(validateEscalationVariables(contractTwin, { decision: "nope" }) !== null, "invalid decision rejected on __contract twin");
+  // valid decisions pass
+  assertEquals(validateEscalationVariables(escTwin, { decision: "retry" }), null);
+  assertEquals(validateEscalationVariables(escTwin, { decision: "continue" }), null);
+  // decision OMITTED → still valid (defaults to Continue); the generic-form wait-escalation twins, which
+  // never submit `decision`, must not be false-rejected (the form has no required fields).
+  assertEquals(validateEscalationVariables(escTwin, { value: "something", note: "n" }), null);
+  // the bare per-node human task (NOT a twin) stays unenforced — it renders a different form per node.
+  assertEquals(validateEscalationVariables("delivery-human-task__n1", { decision: "retrry" }), null);
+  // a node literally named `esc` has base id `delivery-human-task__esc` — NOT misread as a twin.
+  assertEquals(validateEscalationVariables("delivery-human-task__esc", { decision: "retrry" }), null);
+});
+
 test("feature-escalation demands non-blank answer on the answer path, but not on the hidden abandon path", async () => {
   // resolution=answer shows the conditional `answer` field, which is required → blank/missing rejected.
   assert(

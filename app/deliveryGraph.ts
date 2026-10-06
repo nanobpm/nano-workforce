@@ -108,6 +108,8 @@ export type DeliveryGraphErrorCode =
   | "credential-in-job-type"
   | "embedded-url-in-job-type"
   | "scheme-relative-url-in-job-type"
+  | "invalid-form-key"
+  | "credential-in-form-key"
   | "invalid-credential-env"
   | "invalid-backoff"
   | "unbound-pr"
@@ -2258,6 +2260,53 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         message: "`human` config, when present, must be an object",
         code: "missing-config",
       });
+    } else if (isRecord(rawNode.human) && typeof rawNode.human.formKey === "string") {
+      // A delivery `human` node's explicit `human.formKey` is baked VERBATIM into the executable
+      // `<zeebe:formDefinition formId=…>` attribute (it resolves a deployed `.form` by value), so — exactly
+      // like `agent.jobType` above — it must be REJECTED, not silently rewritten/redacted, when it carries a
+      // character the attribute sanitiser would strip/fold or a credential-bearing URL that would leak into
+      // the compiled BPMN. The compiler renders it through `attr()` (so a quote can no longer break out of
+      // the attribute), but that neither undoes a silent XML-rewrite nor keeps a credential URL out of the
+      // deployed model — this authoring-time gate does (PR #863 review — HIGH formKey finding at
+      // deliveryGraphCompiler.ts:2361). The runtime TRIMS the key before use (`resolveHumanForm`), so
+      // validate the trimmed value and skip blank (blank → generic form, carries nothing to leak).
+      const formKey = rawNode.human.formKey.trim();
+      if (formKey.length > 0) {
+        if (hasXmlInvalidChars(formKey) || hasAttrNormalizedWhitespace(formKey)) {
+          errors.push({
+            path: `${path}.human.formKey`,
+            message:
+              `\`human.formKey\` ${JSON.stringify(redactString(stripXmlInvalidChars(formKey)))} contains a character that would be ` +
+              "silently rewritten when emitted as the executable `<zeebe:formDefinition formId=…>` attribute — an XML-1.0-invalid " +
+              "character (control characters, U+FFFE/U+FFFF, or an unpaired surrogate) that the sanitiser strips, or attribute " +
+              "whitespace (tab, LF, CR) that XML attribute-value normalization folds to a space — so it would resolve a DIFFERENT " +
+              "(wrong) deployed form and must be rejected rather than silently rewritten into a different form key",
+            code: "invalid-form-key",
+          });
+        } else if (
+          isUrlShaped(formKey) ||
+          hasEmbeddedCredential(formKey) ||
+          hasEmbeddedUrl(formKey) ||
+          hasSchemeRelativeAuthority(formKey)
+        ) {
+          // One code (not jobType's five per-shape codes) covers every URL/credential shape: a form key
+          // names a deployed `.form`, so the distinction between a whole-value URL, an embedded
+          // `//user:pass@host`, an explicit-scheme `scheme://…`, and a scheme-relative `//host` is
+          // immaterial — none is a legal form id, and the operator fix is the same. Gated behind the
+          // XML/whitespace check above so a single value is reported once. Message redacted so the 400
+          // never echoes a credential.
+          errors.push({
+            path: `${path}.human.formKey`,
+            message:
+              `\`human.formKey\` ${JSON.stringify(redactString(stripXmlInvalidChars(formKey)))} is URL-/credential-shaped — a form ` +
+              "key names a deployed `.form` resource, never a URL, and since the executable `<zeebe:formDefinition formId=…>` " +
+              "carries it verbatim, a credential embedded in it (`//user:pass@host`, `scheme://…?token=…`, or a scheme-relative " +
+              "`//host?token=…`) would leak into the compiled BPMN even though the preview path redacts it. Use a plain deployed " +
+              "form id and carry any endpoint/credential elsewhere",
+            code: "credential-in-form-key",
+          });
+        }
+      }
     }
 
     // Collect + validate this node's typed emitted facts (uniqueness within the node). Registered
