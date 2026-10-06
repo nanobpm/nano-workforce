@@ -418,6 +418,43 @@ test("#863 multi-emit escalation is inert: a node declaring >1 emit cannot resum
   assert(escContract.includes("default (fallback) branch") && escContract.includes("Retry this step"), "the hint steers a multi-emit resolution to Retry, not a single-value Continue");
 });
 
+// A node DECLARING two facts but where only ONE is a downstream data dependency (the sibling is
+// declared-but-unconsumed). The resume boundary must gate on the DECLARED-emit count, not the required
+// subset: SPEC 13.3 says "any node with multiple declared emits leaves the field inert". Gating on the
+// required count alone (the #863 review r4193902690 gap) wrongly offered a value-resumable Continue
+// that would publish the one required fact while silently dropping its declared sibling.
+const TWO_DECLARED_ONE_REQUIRED = {
+  name: "two-declared-one-required",
+  nodes: [
+    { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "open a PR" }, emits: [{ name: "pr", type: "pr" }, { name: "version", type: "version" }] },
+    // Only `open.pr` is consumed downstream, so `version` is declared-but-not-required.
+    { id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "open.pr" }, dedupeKey: "land-1" } },
+  ],
+  edges: [{ from: "open.pr", to: "land" }],
+};
+
+test("#863 review r4193902690: a node declaring >1 emit is inert even when only ONE is required — resumability gates on DECLARED cardinality, not the required subset", async () => {
+  const r = await compileOk(TWO_DECLARED_ONE_REQUIRED);
+  // RED before the fix: `resumeEmits` (required) had length 1, so both escalations offered a typed
+  // value-resumable Continue that published `open.pr` from the single `value` field while dropping the
+  // declared-but-unrequired `version` — exactly the "multiple declared emits must leave the field inert"
+  // violation. GREEN: both twins are inert (emitMode="none", no value→emit mapping, flag hard-false).
+  for (const suffix of ["esc", "contract"] as const) {
+    const esc = escBlockForNodeSuffix(r.bpmn, "open", suffix);
+    const flagVar = resumeValidVar(`delivery-human-task__${elementForNode(r.bpmn, "open")}__${suffix}`);
+    assert(esc.includes('="none"') && esc.includes('target="emitMode"'), `the __${suffix} escalation hides its value field (multiple declared emits)`);
+    assert(!/then value else null/.test(esc), `the __${suffix} escalation writes NO value→emit mapping`);
+    assert(!/target="pr" \/>/.test(esc), `the __${suffix} escalation binds NO pr value from the single form field`);
+    assert(!/target="emitLabel"/.test(esc), `the __${suffix} escalation emits no single emitLabel`);
+    assert(esc.includes(`<zeebe:output source="=false" target="${flagVar}" />`), `the __${suffix} escalation hard-sets its resume-valid flag to false (fail closed, always re-parks)`);
+  }
+  // The resolution hint must steer to Retry + the default (fallback) branch, naming BOTH declared facts,
+  // never promise a value field the inert escalation does not render.
+  const contract = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  assert(contract.includes("default (fallback) branch") && contract.includes("Retry this step"), "the hint steers a multi-declared resolution to Retry, not a single-value Continue");
+  assert(contract.includes("&apos;pr&apos;/&apos;version&apos;"), "the hint names BOTH declared facts the single value field cannot supply");
+});
+
 test("#863 single-emit escalation still resumes: exactly one emit maps the operator value onto its source var", async () => {
   // Guard the boundary: the multi-emit fix must NOT regress the single-emit resume path.
   const r = await compileOk(PRODUCER_GATE);

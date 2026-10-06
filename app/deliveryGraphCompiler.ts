@@ -1982,7 +1982,7 @@ function agentContractProceedCondition(requiredEmits: readonly DeliveryFact[]): 
  * so the human/agent unsticking it sees WHY it parked — the node, its job type, the actual reported
  * status, and, per required emit, whether it arrived. Turns the instance-10746 failure (a silent null
  * thread + two mis-attributed CONSUMER incidents) into one correctly-attributed PRODUCER escalation. */
-function agentContractContextFeel(nodeId: string, descriptor: string, requiredEmits: readonly DeliveryFact[]): string {
+function agentContractContextFeel(nodeId: string, descriptor: string, requiredEmits: readonly DeliveryFact[], nodeEmits: readonly DeliveryFact[]): string {
   const statuses = AGENT_TERMINAL_SUCCESS_STATUSES.join("/");
   const head = feelStr(
     `Node ${nodeId} (${descriptor}) completed but did not satisfy its producer contract — when a producer ` +
@@ -2006,7 +2006,7 @@ function agentContractContextFeel(nodeId: string, descriptor: string, requiredEm
   feel += ` + (if ${text("question")} and (not(${text("summary")}) or string(question) != string(summary)) then " Agent question: " + ${sentence("question")} else "")`;
   feel += ` + (if ${text("error")} then " Error: " + ${sentence("error")} else "")`;
   feel += ` + (if ${text("transcriptUrl")} then " Transcript: " + string(transcriptUrl) else "")`;
-  feel += ` + ${feelStr(escalationResolutionHint(requiredEmits, true))}`;
+  feel += ` + ${feelStr(escalationResolutionHint(nodeEmits, requiredEmits, true))}`;
   return feel;
 }
 
@@ -2106,12 +2106,12 @@ function serviceBodyLines(
       descriptor,
       "nodeTimeout",
       "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
-    )} + ${feelStr(escalationResolutionHint(resumeEmits, isAgent))}`,
+    )} + ${feelStr(escalationResolutionHint(nodeEmits, resumeEmits, isAgent))}`,
     {
       // #863 Retry + #876 Continue/validate, nested: the timeout escalation routes through a retry gate
       // (`retryElement`) and, on Continue with a required emit, a fail-closed validation gate
       // (`validTarget`) that re-parks a null/invalid value instead of threading it downstream.
-      ...(resumeEmits.length > 0 ? { resume: { kind, emits: resumeEmits }, validTarget: `${el}_end` } : {}),
+      ...(resumeEmits.length > 0 ? { resume: { kind, emits: resumeEmits, declaredEmits: nodeEmits }, validTarget: `${el}_end` } : {}),
       displayName: taskName,
       retryElement: el,
       reservedTargets: reservedFlagTargets,
@@ -2165,14 +2165,14 @@ function serviceBodyLines(
     nodeId,
     [`${el}_g1`],
     `${el}_g2`,
-    agentContractContextFeel(nodeId, descriptor, emits),
+    agentContractContextFeel(nodeId, descriptor, emits, nodeEmits),
     // Resumable when the producer owes a required emit: a human/agent supplies the missing fact, which
     // the subProcess output ioMapping then publishes as `<el>_<fact>` (agent emit source = fact name),
     // so the downstream consumer late-binds a real value instead of the null that poisoned it (#731) —
     // VALIDATED by the post-escalation gate (`validTarget`) so an omitted/malformed value re-parks
     // instead of threading null downstream (PR #876 review), and routed through the retry gate
     // (`retryElement`) so Retry resets+reruns the node (#863).
-    { ...(contractResumable ? { resume: { kind: "agent" as const, emits }, validTarget: `${el}_end` } : {}), displayName: taskName, retryElement: el, reservedTargets: reservedFlagTargets },
+    { ...(contractResumable ? { resume: { kind: "agent" as const, emits, declaredEmits: nodeEmits }, validTarget: `${el}_end` } : {}), displayName: taskName, retryElement: el, reservedTargets: reservedFlagTargets },
   );
   return [
     ...head,
@@ -2197,15 +2197,19 @@ function serviceBodyLines(
 /** The operator-facing "how do I resolve this" sentence appended to a service node's escalation
  * prompt (retry-node resolution): every escalation names its two exits so the task is actionable on
  * its own, without reading the BPMN. */
-function escalationResolutionHint(resumeEmits: readonly DeliveryFact[], isAgent: boolean): string {
+function escalationResolutionHint(nodeEmits: readonly DeliveryFact[], resumeEmits: readonly DeliveryFact[], isAgent: boolean): string {
   const retry =
     ` To resolve: choose Resolution "Retry this step" (${ESCALATION_DECISION_VAR}="${ESCALATION_DECISION_RETRY}") to re-run this node` +
     (isAgent ? " — the note is passed to the agent as guidance for the retry" : "");
+  // Mirror the compiled topology (escalationTaskLines): a value-resumable Continue is offered ONLY when
+  // the node declares EXACTLY ONE emit AND that emit is the required resume target. Gating on the
+  // required count alone would promise a value field a node declaring two facts (one required) never
+  // renders (issue #863 review, thread r4193902690).
   const proceed =
-    resumeEmits.length === 1
+    nodeEmits.length === 1 && resumeEmits.length === 1
       ? `; or choose "Continue" and put the '${resumeEmits[0].name}' value in the value field (e.g. work finished out of band)`
-      : resumeEmits.length > 1
-        ? `; or choose "Continue" to proceed past this node to its default (fallback) branch — the single value field cannot supply its ${resumeEmits
+      : nodeEmits.length > 1
+        ? `; or choose "Continue" to proceed past this node to its default (fallback) branch — the single value field cannot supply its ${nodeEmits
             .map((e) => `'${e.name}'`)
             .join("/")} facts, so "Retry this step" to actually produce them`
         : '; or choose "Continue" to proceed past this node';
@@ -2591,7 +2595,13 @@ function escalationTaskLines(
   outgoing: string,
   contextFeel: string,
   opts?: {
-    resume?: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[] };
+    /** `emits` are the escalation's RESUME targets (the facts a Continue value may publish); for a
+     * `wait` node this is the node's full declared-emit set, but for an `agent`/`connector` it is only
+     * the REQUIRED subset a downstream node binds. `declaredEmits` is the node's FULL declared-emit set
+     * — it drives SPEC 13.3's hard cardinality rule (value-resume ONLY when exactly one emit is
+     * declared), which the required-count alone cannot see (issue #863 review, thread r4193902690).
+     * Defaults to `emits` for the `wait` case where the two sets coincide. */
+    resume?: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[]; declaredEmits?: readonly DeliveryFact[] };
     diagnosticInputs?: readonly { source: string; target: string }[];
     displayName?: string;
     /** The node element whose retry gate this escalation feeds (#863): the completion publishes the
@@ -2612,6 +2622,11 @@ function escalationTaskLines(
 ): string[] {
   const resume = opts?.resume;
   const emits = resume?.emits ?? [];
+  // The node's FULL declared-emit set drives SPEC 13.3's hard cardinality rule. For a `wait` node
+  // `resume.emits` already IS the declared set, so it defaults here; for an `agent`/`connector`
+  // `resume.emits` is only the REQUIRED subset, so the declared set is threaded explicitly (issue #863
+  // review, thread r4193902690).
+  const declaredEmits = resume?.declaredEmits ?? emits;
   // The escalation form (`ESCALATION_FORM` / `GENERIC_HUMAN_FORM`) captures the operator's answer in a
   // SINGLE `value` field, so it can resume AT MOST ONE emit. With >1 required emit, one value cannot
   // satisfy multiple distinct typed facts — mapping it onto every emit-source var writes the SAME value
@@ -2620,7 +2635,13 @@ function escalationTaskLines(
   // field is inert ("none"), the resume-valid flag is hard-`false` (#876 fail closed), and the
   // validation gate always re-parks — re-running the node ("Retry this step") stays the way to produce
   // the facts.
-  const resumableEmit = emits.length === 1 ? emits[0] : undefined;
+  //
+  // The cardinality that gates this is the DECLARED-emit count, NOT the required-emit count: a node
+  // declaring two facts where only one is required must STILL leave the value field inert (SPEC 13.3 —
+  // "any node with multiple declared emits leaves the field inert"). Gating on `emits.length === 1`
+  // (required) alone let such a node offer a value-resumable Continue that would publish the lone
+  // required fact while silently dropping the sibling (issue #863 review, thread r4193902690).
+  const resumableEmit = declaredEmits.length === 1 && emits.length === 1 ? emits[0] : undefined;
   const emitMode = resumableEmit !== undefined ? "typed" : "none";
   const inputs: string[] = [
     `            <zeebe:input ${attr("source", contextFeel)} target="prompt" />`,
@@ -2673,10 +2694,11 @@ function escalationTaskLines(
       // by construction, so it can neither collide with nor be shadowed by a declared emit.
       `            <zeebe:output ${attr("source", `=if ${valid} then true else false`)} target="${flagVar}" />`,
     );
-  } else if (resume !== undefined && emits.length > 1) {
+  } else if (resume !== undefined && emits.length > 0) {
     outputs.push(
-      // Fail closed: more than one required emit cannot be resumed from the form's single `value`, so
-      // the resume is never valid and the validation gate always re-parks (see the comment above).
+      // Fail closed: the escalation is not value-resumable (more than one required emit, OR more than
+      // one DECLARED emit so the single value field is inert per SPEC 13.3) yet a required emit is owed,
+      // so the resume is never valid and the validation gate always re-parks (see the comment above).
       `            <zeebe:output ${attr("source", "=false")} target="${flagVar}" />`,
     );
   }
