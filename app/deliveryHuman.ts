@@ -83,7 +83,8 @@ export const DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX = `${DELIVERY_ESCALATION_TWIN_
  *  (`delivery-human-task__<el>`). Unlike that per-node human task, which renders a DIFFERENT form per
  *  node (and so has no single static completion contract — left unvalidated, `ESCALATION_FORM_BY_ELEMENT`
  *  deliberately omits it), a twin ALWAYS renders a FIXED escalation form — the retry-capable
- *  {@link ESCALATION_FORM} (a strict superset of {@link GENERIC_HUMAN_FORM}: same `value`/`note`, PLUS
+ *  {@link ESCALATION_FORM} (a strict superset of {@link GENERIC_HUMAN_FORM}: same `value`, an optional
+ *  note field (`escalationNote` on the escalation form, `note` on the generic human form), PLUS
  *  the `decision` select) or the select-less generic form — so its completion variables CAN be validated
  *  against `ESCALATION_FORM`'s contract (no required fields, so the generic-form twins never false-reject;
  *  only a present-but-invalid `decision` is rejected). Matched on the convention suffix — single source of

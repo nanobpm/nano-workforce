@@ -2669,9 +2669,13 @@ test("node scope: an agent node declares its result vars node-local so parallel 
   const el = elementForNode(r.bpmn, "open");
   const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
   const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
-  for (const v of ["status", "summary", "question", "error", "pr", "transcriptUrl", "delta", "decision", "value", "note"]) {
+  for (const v of ["status", "summary", "question", "error", "pr", "transcriptUrl", "delta", "decision", "value", "escalationNote"]) {
     assert(io.includes(`source="=null" target="${v}"`), `'${v}' is declared node-local on the subProcess`);
   }
+  // The plain `note` is declared node-local too — as a plan.md WORKER RESULT field via
+  // AGENT_RESULT_LOCAL_VARS, NOT as an escalation control (the retry-guidance control is the distinct
+  // `escalationNote`, PR #863 "Previously missed", deliveryGraphCompiler.ts:2156).
+  assert(io.includes(`source="=null" target="note"`), "the worker-result `note` is declared node-local (AGENT_RESULT_LOCAL_VARS)");
 });
 
 test("#863 node scope: an agent's documented optional `delta` result is node-local, so parallel senior:feature nodes never overwrite one another's delta at root", async () => {
@@ -2837,10 +2841,16 @@ test("retry-node: both escalations route decision=retry through a reset back to 
     assert(esc.includes(`target="${el}_retryRequested"`), `the __${suffix} escalation publishes the retry decision`);
   }
   const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
-  for (const v of ["status", "summary", "question", "pr", "decision", "note", "value"]) {
+  for (const v of ["status", "summary", "question", "pr", "decision", "note", "value", "escalationNote"]) {
     assert(new RegExp(`target="${v}"`).test(reset), `the reset clears '${v}' from the previous attempt`);
   }
   assert(reset.includes(`target="appendPrompt"`), "the reset passes the operator note to the agent");
+  // The guidance paragraph reads the escalation-specific `escalationNote` control — NEVER the plain
+  // `note`, which is a plan.md worker RESULT field propagated into the same subProcess scope (PR #863
+  // "Previously missed", deliveryGraphCompiler.ts:2156).
+  const appendLine = reset.split("\n").find((l) => l.includes(`target="appendPrompt"`));
+  assert(appendLine?.includes("escalationNote"), "the guidance reads the escalationNote control");
+  assert(!/[( ]note[ )]/.test(appendLine.replaceAll("escalationNote", "")), "the guidance never reads the worker-result `note`");
 });
 
 test("retry-node: the reset clears the FULL declared agent result set, not only the five status fields", async () => {

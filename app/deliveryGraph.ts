@@ -328,6 +328,11 @@ export const AGENT_RESULT_LOCAL_VARS = [
   "result",
   "conflicts",
   "failing",
+  // `note` — plan.md's free-text operator note (returned alongside `{ tasks: [] }`). It MUST be
+  // node-local: left at the shared root, a parallel node's `note` overwrites it. The escalation
+  // retry-guidance control is the DISTINCT `escalationNote` (ESCALATION_LOCAL_VARS) precisely so this
+  // worker result can never be read back as operator input (PR #863 "Previously missed").
+  "note",
 ] as const;
 
 /** The fixed result metadata the delivery-connector worker returns on every job completion
@@ -349,11 +354,26 @@ export const CONNECTOR_RESULT_LOCAL_VARS = [
 export const ESCALATION_DECISION_VAR = "decision";
 export const ESCALATION_DECISION_RETRY = "retry";
 
+/** The escalation-completion variable that carries the operator's optional retry-guidance note
+ * (retry-node resolution): on `decision: "retry"` the retry reset appends it to the agent's prompt as
+ * "Operator guidance for this retry: …". Named `escalationNote` — NOT the plain `note` — because the
+ * escalation form's controls live in the SAME node-local subProcess scope a worker's job-completion
+ * result propagates into, and `note` is a documented WORKER RESULT field (`resources/prompts/plan.md`
+ * returns one): an operator who retries WITHOUT a note (the form permits omitting it) would otherwise
+ * have the previous attempt's worker-produced `note` fed back to the agent as if it were operator
+ * guidance (PR #863 Copilot "Previously missed", deliveryGraphCompiler.ts:2156). The plain `note`
+ * name is instead a node-local WORKER RESULT field ({@link AGENT_RESULT_LOCAL_VARS}), so no emit or
+ * escalation control can alias it. Defined HERE (the validator's home) so {@link ESCALATION_LOCAL_VARS}
+ * derives from it and the compiler imports the ONE source — never a second hardcoded `"escalationNote"`
+ * that could drift. */
+export const ESCALATION_NOTE_VAR = "escalationNote";
+
 /** The variables an escalation completion writes (the {@link ESCALATION_DECISION_VAR}, plus the
- * escalation form's `value` + `note`). They are declared node-LOCAL on the node's subProcess so a
- * completion never leaks into the shared root scope, where a sibling node's escalation would read a
- * stale value. Defined HERE so the validator's reserved set can derive from it without a cycle. */
-export const ESCALATION_LOCAL_VARS = [ESCALATION_DECISION_VAR, "value", "note"] as const;
+ * escalation form's `value` + {@link ESCALATION_NOTE_VAR}). They are declared node-LOCAL on the node's
+ * subProcess so a completion never leaks into the shared root scope, where a sibling node's escalation
+ * would read a stale value. Defined HERE so the validator's reserved set can derive from it without a
+ * cycle. */
+export const ESCALATION_LOCAL_VARS = [ESCALATION_DECISION_VAR, "value", ESCALATION_NOTE_VAR] as const;
 
 /** The subProcess **config** variable names an `agent` node's compiled `ioMappingLines` seeds from the
  * runner's `nodeInputs.<el>`. These live in the SAME node-local subProcess scope the emit's source

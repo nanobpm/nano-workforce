@@ -148,7 +148,7 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
     const esc = await openTask(app, "__contract");
     assert.ok(esc, "b parked on its contract escalation");
 
-    await app.engine.completeUserTask(esc.userTaskKey, { decision: "retry", note: "clone acme/repo" });
+    await app.engine.completeUserTask(esc.userTaskKey, { decision: "retry", escalationNote: "clone acme/repo" });
     await app.settle();
 
     assert.equal(bPrompts.length, 2, "the retry re-ran b's job");
@@ -183,13 +183,13 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
 
     const first = await openTask(app, "__contract");
     assert.ok(first, "b parked on its contract escalation");
-    await app.engine.completeUserTask(first.userTaskKey, { decision: "retry", note: "first note" });
+    await app.engine.completeUserTask(first.userTaskKey, { decision: "retry", escalationNote: "first note" });
     await app.settle();
     assert.equal(bPrompts.length, 2, "retry 1 re-ran b's job");
 
     const second = await openTask(app, "__contract");
     assert.ok(second, "b parked again after retry 1 reported blocked");
-    await app.engine.completeUserTask(second.userTaskKey, { decision: "retry", note: "second note" });
+    await app.engine.completeUserTask(second.userTaskKey, { decision: "retry", escalationNote: "second note" });
     await app.settle();
     assert.equal(bPrompts.length, 3, "retry 2 re-ran b's job");
 
@@ -198,6 +198,55 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
     assert.doesNotMatch(String(bPrompts[2]), /first note/, "retry 2's prompt does NOT accumulate retry 1's note");
     assert.equal((String(bPrompts[2]).match(/Operator guidance for this retry:/g) ?? []).length, 1, "exactly one guidance paragraph");
     assert.equal(await openTask(app, "__contract"), undefined, "the third attempt passed the contract gate");
+  });
+
+  test("retry-node: a retry with an omitted operator note never reuses the previous attempt's worker `note` result", async () => {
+    // Regression (PR #863 Copilot "Previously missed", deliveryGraphCompiler.ts:2156): the escalation
+    // note control shared the plain name `note` with a WORKER RESULT field the built-in plan prompt
+    // returns (resources/prompts/plan.md). Declared node-local via ESCALATION_LOCAL_VARS, a worker's
+    // `note` landed in the same subProcess scope the retry reset reads for "Operator guidance…" — so
+    // completing the escalation with `{ decision: "retry" }` and NO note (the form contract permits
+    // it) fed the worker's own stale note back to the agent as if the operator had written it. The
+    // control is renamed `escalationNote` (a name no worker result contract may use), so an omitted
+    // operator note appends NOTHING.
+    const app = await boot();
+    await observeConnectors(app);
+    await app.engine.registerWorker("senior:a", async () => ({ status: "done", pr: PR_A }));
+    const bPrompts: unknown[] = [];
+    await app.engine.registerWorker(
+      "senior:b",
+      async (job) => {
+        bPrompts.push((job.variables as Record<string, unknown>).appendPrompt);
+        // 1st attempt: blocked AND returns a worker `note` (the plan.md contract). 2nd: succeeds.
+        return bPrompts.length === 1
+          ? { status: "blocked", summary: "no repo", note: "worker-produced note" }
+          : { pr: PR_B };
+      },
+      { fetchVariables: ["appendPrompt"] },
+    );
+
+    const run = await runDeliveryGraph(app.engine, TWO_CHAINS, { repoless: true });
+    assert.ok(run.ok, JSON.stringify(run));
+    await app.settle();
+    const esc = await openTask(app, "__contract");
+    assert.ok(esc, "b parked on its contract escalation");
+
+    // Retry WITHOUT an operator note — the escalation form permits omitting it.
+    await app.engine.completeUserTask(esc.userTaskKey, { decision: "retry" });
+    await app.settle();
+
+    assert.equal(bPrompts.length, 2, "the retry re-ran b's job");
+    assert.doesNotMatch(
+      String(bPrompts[1]),
+      /Operator guidance for this retry:/,
+      "an omitted operator note appends NO guidance paragraph",
+    );
+    assert.doesNotMatch(
+      String(bPrompts[1]),
+      /worker-produced note/,
+      "the previous attempt's worker `note` result is never fed back as operator guidance",
+    );
+    assert.equal(await openTask(app, "__contract"), undefined, "the retried run passed the contract gate");
   });
 
   test("a continue resolution (no decision) supplies the missing emit and does not loop", async () => {

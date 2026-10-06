@@ -901,7 +901,7 @@ test("validateEscalationVariables enforces the `decision` select on a delivery-g
   assertEquals(validateEscalationVariables(escTwin, { decision: "continue" }), null);
   // decision OMITTED → still valid (defaults to Continue); the generic-form wait-escalation twins, which
   // never submit `decision`, must not be false-rejected (the form has no required fields).
-  assertEquals(validateEscalationVariables(escTwin, { value: "something", note: "n" }), null);
+  assertEquals(validateEscalationVariables(escTwin, { value: "something", escalationNote: "n" }), null);
   // the bare per-node human task (NOT a twin) stays unenforced — it renders a different form per node.
   assertEquals(validateEscalationVariables("delivery-human-task__n1", { decision: "retrry" }), null);
   // a node literally named `esc` has base id `delivery-human-task__esc` — NOT misread as a twin.

@@ -480,13 +480,15 @@ test("invalid-fact-name: an emitted fact name over the openapi 128-char cap is r
   assertEquals(err.path, "nodes[0].emits[0].name");
 });
 
-test("invalid-fact-name: an emit named after an escalation control (`decision`/`value`/`note`) is rejected — a Continue would overwrite the fact (r4181027093)", () => {
+test("invalid-fact-name: an emit named after an escalation control (`decision`/`value`/`escalationNote`) is rejected — a Continue would overwrite the fact (r4181027093)", () => {
   // Regression guard (PR #863 Copilot High, thread r4181027093): an agent/connector emit's source is the
   // fact's own name, declared node-local in the SAME scope as the escalation form's `decision`/`value`/
-  // `note`. An agent emitting `decision` that reaches a contract escalation has its fact overwritten by
+  // `escalationNote`. An agent emitting `decision` that reaches a contract escalation has its fact overwritten by
   // the form completion (`decision="continue"`), so the subProcess publishes `<el>_decision="continue"`
   // instead of the agent's routing value. The validator must reject the whole class fail-closed.
-  for (const name of ["decision", "value", "note"]) {
+  // (`note` is NOT an escalation control — it is a plan.md worker RESULT field; the retry-guidance
+  // control is the worker-unwritable `escalationNote`, PR #863 "Previously missed" deliveryGraphCompiler.ts:2156.)
+  for (const name of ["decision", "value", "escalationNote"]) {
     const errors = validateDeliveryGraph({
       nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name, type: "string" }] }],
     });

@@ -47,6 +47,7 @@ import {
   ESCALATION_DECISION_RETRY,
   ESCALATION_DECISION_VAR,
   ESCALATION_LOCAL_VARS,
+  ESCALATION_NOTE_VAR,
   hasXmlInvalidChars,
   redactConnectorValue,
   resolveDeliveryFrom,
@@ -187,7 +188,7 @@ function contractEscalationTaskElement(element: string): string {
 // ESCALATION_DECISION_VAR / ESCALATION_DECISION_RETRY / ESCALATION_LOCAL_VARS / AGENT_RESULT_LOCAL_VARS /
 // CONNECTOR_RESULT_LOCAL_VARS are imported from ./deliveryGraph.ts (their canonical home — the
 // validator's reservedDeliveryFactNames derives from them there without an import cycle).
-// ESCALATION_LOCAL_VARS is [ESCALATION_DECISION_VAR,"value","note"]; AGENT_RESULT_LOCAL_VARS is the
+// ESCALATION_LOCAL_VARS is [ESCALATION_DECISION_VAR,"value",ESCALATION_NOTE_VAR]; AGENT_RESULT_LOCAL_VARS is the
 // canonical node-local agent result contract (every resources/prompts/*.md output field);
 // CONNECTOR_RESULT_LOCAL_VARS the connector's fixed result metadata. All three are declared node-local
 // on the subProcess and cleared on retry so a node's report never leaks to the shared root.
@@ -2136,7 +2137,7 @@ function retryRequestedVar(el: string): string {
  * FULL declared result set (every {@link AGENT_RESULT_LOCAL_VARS} field, so a stale `blocked` status
  * can't fail the contract gate again and a stale `transcriptUrl`/PR alias/other optional field can't
  * republish downstream) — and appends the
- * operator's `note` to the agent prompt as retry guidance. All targets are node-local (declared on the
+ * operator's {@link ESCALATION_NOTE_VAR} to the agent prompt as retry guidance. All targets are node-local (declared on the
  * subProcess by `ioMappingLines`), so nothing leaks to the root. */
 function retryResolutionLines(el: string, incoming: readonly string[], emits: readonly DeliveryFact[], kind: "agent" | "connector"): string[] {
   const isAgent = kind === "agent";
@@ -2153,7 +2154,12 @@ function retryResolutionLines(el: string, incoming: readonly string[], emits: re
   for (const f of emits) cleared.add(factSourceVar(kind, f));
   for (const v of cleared) outputs.push({ source: "=null", target: v });
   if (isAgent) {
-    const hasNote = `(is defined(note) and note != null and string(note) != "")`;
+    // Read the OPERATOR's note from the escalation-specific `escalationNote` control — NEVER the plain
+    // `note`: `note` is a documented WORKER RESULT field (resources/prompts/plan.md returns one) that
+    // nearest-scope propagation lands in this same subProcess scope, so reading it here would feed a
+    // worker-produced note back to the agent as "Operator guidance" whenever the operator retries
+    // WITHOUT a note (the form permits omitting it) — PR #863 Copilot "Previously missed".
+    const hasNote = `(is defined(${ESCALATION_NOTE_VAR}) and ${ESCALATION_NOTE_VAR} != null and string(${ESCALATION_NOTE_VAR}) != "")`;
     // Re-derive from the RUNNER-SEEDED BASELINE (`nodeInputs.<el>.appendPrompt`), never the live
     // `appendPrompt`: the subProcess input seeds `appendPrompt` from `nodeInputs` only at subProcess
     // ENTRY, so on a retry re-entry the task still reads this var as the last reset left it — building
@@ -2162,10 +2168,15 @@ function retryResolutionLines(el: string, incoming: readonly string[], emits: re
     const seeded = `nodeInputs.${el}.appendPrompt`;
     const base = `(if (is defined(${seeded}) and ${seeded} != null) then ${seeded} + "\n\n" else "")`;
     outputs.push({
-      source: `=if ${hasNote} then ${base} + "Operator guidance for this retry: " + string(note) else (if (is defined(${seeded})) then ${seeded} else null)`,
+      source: `=if ${hasNote} then ${base} + "Operator guidance for this retry: " + string(${ESCALATION_NOTE_VAR}) else (if (is defined(${seeded})) then ${seeded} else null)`,
       target: "appendPrompt",
     });
   }
+  // Clear the escalation controls (ESCALATION_LOCAL_VARS) AND the plain `note`: a worker's `note`
+  // result is declared node-local by ioMappingLines (it is a plan.md contract output) and would
+  // otherwise survive into the retried attempt's scope, where the NEXT escalation's context would
+  // surface it as if the worker had just written it.
+  outputs.push({ source: "=null", target: ESCALATION_NOTE_VAR });
   outputs.push({ source: "=null", target: "note" });
   outputs.push({ source: "=null", target: "value" });
   outputs.push({ source: "=null", target: ESCALATION_DECISION_VAR });

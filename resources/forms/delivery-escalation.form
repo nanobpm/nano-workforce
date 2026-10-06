@@ -33,7 +33,7 @@
     },
     {
       "type": "textarea",
-      "key": "note",
+      "key": "escalationNote",
       "label": "Note (optional)",
       "description": "Optional. On Retry of an AGENT step, passed to the agent as guidance for the next attempt. A connector-step retry ignores this note."
     }
