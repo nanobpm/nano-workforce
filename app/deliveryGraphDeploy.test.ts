@@ -751,28 +751,49 @@ test("#863 deploy+route: a BESPOKE single-boolean human form with a FEEL-builtin
 // ── #863 deploy+route: a TEXT (`string`) / `artifact` single emit named after a FEEL builtin ─────────
 // The number/boolean coercers reject a non-stringable selection operand, but the TEXT types
 // (`string`/`version`/`url`/`pr`) pass `selectExpr`'s result through verbatim and the artifact source is
-// NEVER coerced — so the builtin-shadow hazard (a blank explicit form whose fact name collides with a FEEL
-// builtin resolves `is defined(count) and count != null` to the builtin FUNCTION) selected the function
-// for those fact types, which incidents or publishes a function instead of falling back to the canonical
-// control / null (Copilot review #863, "Guard fact names that shadow FEEL builtins"). The fix guards the
-// fact-named candidate in `selectExpr` with `string(<factName>) != null`, which folds a builtin to null for
-// EVERY fact type at the selection step. These drive it END TO END on the real engine.
+// NEVER coerced. The builtin-shadow hazard is a blank explicit form whose fact name collides with a FEEL
+// builtin: `is defined(count) and count != null` is TRUE for the `count` builtin FUNCTION, so the
+// fact-named candidate `then count` selects a FUNCTION for those fact types. The fix guards that candidate
+// in `selectExpr` with `string(<factName>) != null`, which folds a builtin to null at the selection step
+// for EVERY fact type (Copilot review #863, "Guard fact names that shadow FEEL builtins").
+//
+// IMPORTANT — what gates a GUARD REGRESSION vs what these engine tests prove. On the pinned WASM engine a
+// function-valued selection ALREADY folds to null before it is published (a FEEL variable binding cannot
+// hold a function), so the engine-observable outcome — COMPLETED, default routing, AND the published
+// `humanEmitValue`/`humanEmitArtifact` (null for a blank form) — is IDENTICAL with or without the guard.
+// The red-before/green-after gate against removing the guard is therefore the COMPILER-level assertion in
+// `deliveryGraphCompiler.test.ts` (it regex-matches `… and string(<fact>) != null …` in the generated
+// FEEL and goes red the moment the guard is dropped). These end-to-end engine tests instead pin the
+// observable PUBLISHED-value contract — a blank builtin-named emit publishes null (not a function, which
+// would incident or corrupt the fact on an engine that did NOT fold), and the guard does NOT drop a real
+// captured text value (`approved` still selects and routes TRUE). Both layers are needed: the compiler
+// test locks the guard in, the engine test proves the guarded expression yields the intended value.
 async function driveStringHumanGuard(opts: { entry: Record<string, string>; emitName: string }): Promise<{
   state: string;
   yesRan: boolean;
   noRan: boolean;
   task: string;
+  published: unknown;
 }> {
   const engine = await createWasmEngineClient();
   try {
     let yesRan = false;
     let noRan = false;
-    await engine.registerWorker("senior:yes", async () => {
+    // The selected value is published as `humanEmitValue` into process scope, so a downstream worker sees
+    // it. Capture it from whichever branch runs and assert the PUBLISHED contract, not merely completion.
+    let published: unknown = "<<never published>>";
+    const capture = (job: { variables?: Record<string, unknown> }): void => {
+      const v = (job.variables as Record<string, unknown> | undefined) ?? {};
+      published = v.humanEmitValue ?? null;
+    };
+    await engine.registerWorker("senior:yes", async (job) => {
       yesRan = true;
+      capture(job);
       return {};
     });
-    await engine.registerWorker("senior:no", async () => {
+    await engine.registerWorker("senior:no", async (job) => {
       noRan = true;
+      capture(job);
       return {};
     });
     const graph: DeliveryGraph = {
@@ -813,7 +834,7 @@ async function driveStringHumanGuard(opts: { entry: Record<string, string>; emit
         await engine.completeUserTask(t.userTaskKey, opts.entry);
       }
     }
-    return { state, yesRan, noRan, task };
+    return { state, yesRan, noRan, task, published };
   } finally {
     await engine.close();
   }
@@ -826,6 +847,8 @@ test("#863 deploy+route: a BESPOKE single-STRING human form with a FEEL-builtin 
   const r = await driveStringHumanGuard({ entry: {}, emitName: "count" });
   assert(r.task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(r.task), `expected the human task, saw ${r.task}`);
   assertEquals(r.state, "COMPLETED", "a blank builtin-named string entry must publish null and run to a COMPLETED instance (not incident on the selected builtin function)");
+  assertEquals(r.published, null, "a blank builtin-named string emit must PUBLISH null — never the selected `count` builtin function");
+  assert(typeof r.published !== "function", "the published emit must never be a FEEL builtin function value");
   assert(!r.yesRan, "a blank string entry publishes null, so the `= \"approved\"` guard must NOT run the TRUE branch");
   assert(r.noRan, "a blank string entry publishes null, so the default branch runs");
 });
@@ -836,6 +859,7 @@ test("#863 deploy+route: a BESPOKE single-STRING human form still selects a real
   // "approved"` guard routes the TRUE branch.
   const r = await driveStringHumanGuard({ entry: { count: "approved" }, emitName: "count" });
   assertEquals(r.state, "COMPLETED", "the graph must run to a COMPLETED instance");
+  assertEquals(r.published, "approved", "the guard must still PUBLISH the real captured `approved` text — `string(approved) != null` holds, so it is not dropped");
   assert(r.yesRan, "a real captured `approved` entry must still be selected so the `= \"approved\"` guard routes the TRUE branch");
   assert(!r.noRan, "the default branch must NOT run when the string selects `approved`");
 });
@@ -847,7 +871,12 @@ test("#863 deploy+route: a BESPOKE single-ARTIFACT human form with a FEEL-builti
   // instance completes instead of parking on an io-mapping incident.
   const engine = await createWasmEngineClient();
   try {
-    await engine.registerWorker("senior:sink", async () => ({}));
+    let publishedArtifact: unknown = "<<never published>>";
+    await engine.registerWorker("senior:sink", async (job) => {
+      const v = (job.variables as Record<string, unknown> | undefined) ?? {};
+      publishedArtifact = v.humanEmitArtifact ?? null;
+      return {};
+    });
     const graph: DeliveryGraph = {
       name: "artifact human guard",
       nodes: [
@@ -881,6 +910,8 @@ test("#863 deploy+route: a BESPOKE single-ARTIFACT human form with a FEEL-builti
     }
     assert(task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(task), `expected the human task, saw ${task}`);
     assertEquals(state, "COMPLETED", "a blank builtin-named artifact entry must publish null and run to a COMPLETED instance (not incident on the selected builtin function)");
+    assertEquals(publishedArtifact, null, "a blank builtin-named artifact emit must PUBLISH null — never the selected `count` builtin function");
+    assert(typeof publishedArtifact !== "function", "the published artifact must never be a FEEL builtin function value");
   } finally {
     await engine.close();
   }

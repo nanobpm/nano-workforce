@@ -2483,15 +2483,20 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
   // reads `<factName>` first, then the canonical control — a built-in form's fixed control otherwise.
   // The fact-named read is STRINGABILITY-guarded (`string(<factName>) != null`) because `is defined(X)`
   // is TRUE and `X != null` holds for a FEEL BUILTIN function (`count`, `sum`, …) when a blank form
-  // leaves no task variable of that name — so a bare presence guard would SELECT the builtin FUNCTION for
-  // the emit. The number/boolean coercers reject a non-stringable operand, but the text types
-  // (`string`/`version`/`url`/`pr`) pass the selection through verbatim and the artifact source is never
-  // coerced, so without this guard a blank builtin-named explicit form publishes (or incidents on) the
-  // function for those fact types. `string(<builtin>)` folds to null, so the guard falls back to the
-  // canonical control / null; a real captured TEXT value stringifies to itself and is still selected. The
-  // guard sits ONLY on the fact-named candidate — the canonical `resolvedArtifact` object in the else arm
-  // is untouched, so a genuine object handle still passes through (Copilot review #863, "Guard fact names
-  // that shadow FEEL builtins").
+  // leaves no task variable of that name — so a bare presence guard would SELECT the builtin FUNCTION as
+  // the `then` arm for the emit. The number/boolean coercers reject a non-stringable operand, but the text
+  // types (`string`/`version`/`url`/`pr`) pass the selection through verbatim and the artifact source is
+  // never coerced, so without this guard those fact types would select the builtin function rather than
+  // fall back to the canonical control / null. On the pinned WASM engine a function-valued selection is
+  // itself folded to null before it can be published (a FEEL variable binding cannot hold a function), so
+  // the guard is defence-in-depth THERE — but it is NOT a no-op: it makes the null-fold explicit and
+  // engine-independent (an engine that published the function instead would corrupt the fact or incident
+  // on the downstream io-mapping), and it is what the compiler-level FEEL assertion in
+  // `deliveryGraphCompiler.test.ts` pins red-before/green-after. `string(<builtin>)` folds to null, so the
+  // guard falls back to the canonical control / null; a real captured TEXT value stringifies to itself and
+  // is still selected. The guard sits ONLY on the fact-named candidate — the canonical `resolvedArtifact`
+  // object in the else arm is untouched, so a genuine object handle still passes through (Copilot review
+  // #863, "Guard fact names that shadow FEEL builtins").
   const selectExpr = (canonical: string): string =>
     singleEmit !== undefined && preferFactName
       ? `if (is defined(${singleEmit.name}) and ${singleEmit.name} != null and string(${singleEmit.name}) != null) then ${singleEmit.name} else if (is defined(${canonical})) then ${canonical} else null`
