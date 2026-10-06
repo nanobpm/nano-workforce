@@ -1,3 +1,13 @@
+## [0.201.0](https://github.com/nanobpm/nano-workforce/compare/v0.200.9...v0.201.0) (2026-10-06)
+
+### Features
+
+* **convergence:** escalate non-converging same-surface review churn ([#870](https://github.com/nanobpm/nano-workforce/issues/870)) ([#875](https://github.com/nanobpm/nano-workforce/issues/875)) ([307505b](https://github.com/nanobpm/nano-workforce/commit/307505b3e9603129c3ad101b29dc1f10992f038e))
+
+### Bug Fixes
+
+* **delivery-graph:** bind escalation value to emit, fail closed on null gate target, default node SLA ([#876](https://github.com/nanobpm/nano-workforce/issues/876)) ([ff6f3d0](https://github.com/nanobpm/nano-workforce/commit/ff6f3d0f191b641c13e460ac03c8ecfa075026f4)), closes [#872](https://github.com/nanobpm/nano-workforce/issues/872) [#872](https://github.com/nanobpm/nano-workforce/issues/872) [#872](https://github.com/nanobpm/nano-workforce/issues/872) [owner/repo#N](https://github.com/owner/repo/issues/N) [#872](https://github.com/nanobpm/nano-workforce/issues/872) [#872](https://github.com/nanobpm/nano-workforce/issues/872)
+
 ## [0.200.9](https://github.com/nanobpm/nano-workforce/compare/v0.200.8...v0.200.9) (2026-10-05)
 
 ### Bug Fixes
