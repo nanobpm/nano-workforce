@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { CommandResult, HttpResponse, ProbeExec, ReadinessProbe } from "../../app/readiness.ts";
 import { parseProbe } from "../../app/readiness.ts";
-import handler, { probeSingleShot, READINESS_READY_MESSAGE, readGateVars, safeBind } from "./worker.ts";
+import handler, { __setProbeExecForTest, probeSingleShot, READINESS_READY_MESSAGE, readGateVars, safeBind } from "./worker.ts";
 
 function execReturning(seq: Array<HttpResponse>, counts: { http: number } = { http: 0 }): ProbeExec {
   let i = 0;
@@ -237,6 +237,77 @@ test("handler: a blank gateKey fails fast (an empty correlationKey would never r
     Error,
     "gateKey",
   );
+});
+
+test("#876 review: a DOTTED command target (e.g. check.sh) is NOT an unresolved fact-ref — the worker probes it, never parks the gate", async () => {
+  // The #872 fail-closed guard must key on the compiler's NULL provenance only — a runtime fact-ref
+  // SYNTAX test cannot distinguish an unresolved `<node>.<fact>` literal from a valid dotted command
+  // target, and misclassifying `check.sh` would park the gate forever without ever running the probe.
+  const ran: string[] = [];
+  const exec: ProbeExec = {
+    async run(command: string): Promise<CommandResult> {
+      ran.push(command);
+      return { code: 0, stdout: "", stderr: "" };
+    },
+    async httpGet(): Promise<HttpResponse> {
+      throw new Error("not an http probe");
+    },
+  };
+  const restore = __setProbeExecForTest(exec);
+  const published: string[] = [];
+  try {
+    const job = { variables: { probe: { kind: "command", target: "check.sh" }, gateKey: "g1", probeTimeout: "PT30M" } };
+    const app = {
+      log: { info() {}, warn() {} },
+      engine: {
+        async publishMessage(msg: { name: string }) {
+          published.push(msg.name);
+        },
+      },
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal job/app stub over the real handler.
+    const out = await handler(job as any, app as any);
+    assertEquals(out.ready, true, "a dotted command target probes normally and reports ready");
+  } finally {
+    __setProbeExecForTest(restore);
+  }
+  assertEquals(ran, ["check.sh"], "the probe RAN the dotted command target (it was not misclassified as an unresolved fact-ref)");
+  assertEquals(published, [READINESS_READY_MESSAGE], "a green dotted-target probe publishes readiness");
+});
+
+test("#872: a NULL/blank late-bound target still fails closed (the gate parks and escalates, never probes a null handle)", async () => {
+  for (const target of [null, undefined, "  "]) {
+    // Intermediate poll activation (no lastAttempt): fails closed, logs at INFO, never WARNs — the
+    // boundary-only WARN policy (PR #876 review) keeps a 30-minute gate from emitting ~120 WARN lines.
+    const job = { variables: { probe: { kind: "command", target }, gateKey: "g1", probeTimeout: "PT30M" } };
+    const infos: string[] = [];
+    const warnings: string[] = [];
+    const app = {
+      log: { info(msg: string) { infos.push(msg); }, warn(msg: string) { warnings.push(msg); } },
+      engine: { async publishMessage() { throw new Error("must never publish"); } },
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal job/app stub over the real handler.
+    const out = await handler(job as any, app as any);
+    assertEquals(out.ready, false, `a ${JSON.stringify(target)} target is not ready`);
+    assert(String(out.detail).includes("unresolved target"), "the detail names the unresolved target");
+    assertEquals(warnings.length, 0, `an intermediate ${JSON.stringify(target)} activation must NOT WARN`);
+    assertEquals(infos.length, 1, "the fail-closed park is logged at info on intermediate attempts");
+
+    // Final (boundary) activation: the SAME fail-closed park, but now it IS the escalation trigger, so
+    // it WARNs exactly once (and does not duplicate at info).
+    const lastJob = { variables: { ...job.variables, lastAttempt: true } };
+    const lastInfos: string[] = [];
+    const lastWarnings: string[] = [];
+    const lastApp = {
+      log: { info(msg: string) { lastInfos.push(msg); }, warn(msg: string) { lastWarnings.push(msg); } },
+      engine: { async publishMessage() { throw new Error("must never publish"); } },
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal job/app stub over the real handler.
+    const lastOut = await handler(lastJob as any, lastApp as any);
+    assertEquals(lastOut.ready, false, `a ${JSON.stringify(target)} target is not ready on the last attempt`);
+    assertEquals(lastWarnings.length, 1, "the boundary (lastAttempt) fail-closed park WARNs exactly once");
+    assertEquals(lastInfos.length, 0, "the boundary park does not also log at info");
+  }
 });
 
 test("READINESS_READY_MESSAGE is the name the gate correlates", () => {

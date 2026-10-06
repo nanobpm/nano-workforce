@@ -25,6 +25,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { classifyEscalation } from "../../app/escalationTaxonomy.ts";
 import { featureRuns, recordFeatureEscalation } from "../../app/feature.ts";
+import { implementEscalationQuestion, NO_RESULT_QUESTION } from "../../app/implementEscalationReason.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`RecordEscalationIn` in implement-cell.bpmn) — ADR 0040.
@@ -35,12 +36,6 @@ interface Out extends Record<string, unknown> {
 
 const str = (v: unknown): string | undefined =>
   typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
-
-// The answerable prompt synthesised when the agent left no usable question — the implement-stage
-// analogue of record-trial-merge's synthesised trial-merge question. It names the recoverable work (a
-// PR may exist on the slice's branch) and the two answers the cell's `ic_gw_answer` gateway routes on.
-const NO_RESULT_QUESTION =
-  'The implementation agent finished without a machine-readable result (no status was reported), so we cannot tell whether the slice succeeded. It may still have opened a PR (check for a branch targeting the epic base). Choose "Answer" and give guidance to re-run the slice — or choose "Abandon" to skip it and continue.';
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
   const subjectKey = job.variables.subjectKey;
@@ -61,11 +56,30 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // so the parked task is never a dead end. Route through the single canonical taxonomy so this net can
   // never drift from the tier logic every other raise site uses. A "task"-kind escalation is
   // `decision-required` only when the agent left an answerable question, so this already covers the
-  // blank-question case; the extra `&& rawQuestion` is the type narrowing that lets us hand the string
-  // through without an assertion.
+  // blank-question case.
   const agentEscalated = classifyEscalation({ kind: "task", status: job.variables.status, question: rawQuestion }) ===
     "decision-required";
-  const question = agentEscalated && rawQuestion ? rawQuestion : NO_RESULT_QUESTION;
+  // Build the escalation question through the single canonical builder (issue #865), ALWAYS — including
+  // when the agent raised its own answerable question. Passing the agent's `question` lets the builder
+  // lead with it AND fold in the agent's `summary` + transcript as supporting context (#865 review —
+  // otherwise an `escalated` result's summary/transcript were dropped and only the bare question
+  // survived). With no answerable question it synthesises an accurate reason — distinguishing a true
+  // no-result (blank status) from a claimed-completion-without-delivery (an affirmative-completion alias
+  // such as `completed`) and from a reported non-completion status — never the false "no status was
+  // reported" diagnosis for a reported `escalated`/`failed` (#865 review). The reason can never drift
+  // from the reconcile step because both read the same canonical builder.
+  const question = implementEscalationQuestion({
+    status: job.variables.status,
+    question: rawQuestion,
+    summary: job.variables.summary,
+    transcriptUrl: job.variables.transcriptUrl,
+    // Delivery EVIDENCE (#865 review): the preserved PR (an `escalated`/`failed` with a blank question
+    // retains it — never claim "opened no pull request") and whether the reconcile step's GitHub lookup
+    // actually CONFIRMED the delivery state (only then may the reason say "none was found"). Both are
+    // process variables the upstream `reconcile-implement` step emits into scope.
+    pr: job.variables.pr,
+    deliveryVerified: job.variables.deliveryVerified,
+  });
 
   // Append to the canonical `feature_escalations` audit log (the surviving table `pollUserTasks` reads),
   // keyed by `subjectKey` — the feature run's `feature_key`, or the epic's `plan_key` for a wave slice.
@@ -79,7 +93,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     await runs.update(subjectKey, { status: "escalated", updated_at: new Date().toISOString() });
   }
 
-  app.log.info("record-escalation", { subjectKey, synthesised: question === NO_RESULT_QUESTION });
+  app.log.info("record-escalation", { subjectKey, synthesised: !(agentEscalated && rawQuestion) });
 
   // Re-emit the resolved question so the `feature-escalation` form (and the answer loop) see it.
   return { question };

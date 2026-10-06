@@ -298,6 +298,78 @@ export async function recordConformance(
   }
 }
 
+/** Mark a conformance row whose *synthesis* (retro) agent blew its SLA — WITHOUT touching the filed
+ * verdict. The synthesize-SLA arm (`record-synthesize-sla` in retro.bpmn) runs AFTER
+ * `record-conformance` has already persisted a real audit (the token must pass through it to reach
+ * `synthesize`), so routing it through the upsert above would rewrite `status`/counts/`report` with
+ * blanks/zeros and clobber `summary` (incl. any operator acknowledgement) with the timeout text —
+ * destroying the verdict the escalation is supposed to surface (PR #864 review). Instead this only
+ * flips `review_status` to `reviewing` (so the shared `conformance-escalation` ack task is tracked)
+ * and APPENDS the synthesis-timeout context to the existing `summary`, leaving the audit intact.
+ *
+ * Edge: if no row exists yet (a bypassed/gather-only path where `record-conformance` never ran),
+ * insert a minimal placeholder so the ack's `acknowledgeConformance` — which throws on a missing row
+ * — still settles, and the escalation is never untrackable. */
+export async function markConformanceSynthesisSla(
+  data: DataLayer,
+  planKey: string,
+  input: { summary: string; processKey: string | null },
+): Promise<void> {
+  const ts = now();
+  const processKey = input.processKey ?? null;
+  // Same trackability invariant as recordConformance: a `reviewing` row with no process_key can
+  // never be surfaced by `pollUserTasks` nor cleared by `onTerminated` — it wedges forever.
+  if (processKey == null) {
+    throw new Error(
+      `markConformanceSynthesisSla: ${planKey} would persist review_status='reviewing' with no process_key — ` +
+        "refusing to record an untrackable synthesis-SLA escalation that no poller or onTerminated binding can clear",
+    );
+  }
+  const existing = await conformanceTbl(data).get(planKey);
+  if (!existing) {
+    // No conformance verdict was recorded (record-conformance never ran). Persist a minimal
+    // `reviewing` placeholder carrying only the synthesis-timeout reason so the ack settles it.
+    await conformanceTbl(data).insert({
+      plan_key: planKey,
+      created_at: ts,
+      status: "skipped",
+      comment_url: null,
+      slices_met: 0,
+      slices_reduced: 0,
+      slices_not_verified: 0,
+      deviations_raised: 0,
+      deviations_unraised: 0,
+      has_deviations: 0,
+      summary: input.summary,
+      report: null,
+      process_key: processKey,
+      review_status: CONFORMANCE_REVIEWING_STATUS,
+      updated_at: ts,
+    });
+    return;
+  }
+  // Preserve the filed verdict: only flip review_status and append the synthesis-timeout context to
+  // the existing summary (never replace it — it may carry the audit's own text + an operator ack).
+  // At-least-once worker semantics can retry `record-synthesize-sla` after it already updated the
+  // row but before the job completes; the append below is NOT idempotent, so a retry would duplicate
+  // the identical timeout paragraph. If the row is already parked at `reviewing` and its summary
+  // already ends with this exact reason, the update already landed — short-circuit so the retry is a
+  // no-op (mirrors acknowledgeConformance's idempotency guard). A genuinely later timeout only
+  // recurs after the operator ack flips status back to `reviewed`, so that path still appends afresh.
+  const existingSummary = typeof existing.summary === "string" ? existing.summary : "";
+  if (existing.review_status === CONFORMANCE_REVIEWING_STATUS && existingSummary.endsWith(input.summary)) {
+    return;
+  }
+  const prior = typeof existing.summary === "string" && existing.summary.trim() ? existing.summary : null;
+  const summary = prior ? `${prior}\n\n${input.summary}` : input.summary;
+  await conformanceTbl(data).update(planKey, {
+    process_key: processKey,
+    review_status: CONFORMANCE_REVIEWING_STATUS,
+    summary,
+    updated_at: ts,
+  });
+}
+
 /** Settle a conformance run's escalation once the operator acknowledges it: flip `review_status` to
  * `reviewed` so `pollUserTasks` stops scanning it (its inbox row is already gone once the ack task
  * closes) and stamp the disposition note into `summary` for the audit trail. Needed because the

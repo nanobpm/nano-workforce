@@ -116,6 +116,15 @@ blank/absent base is rejected with a 400. Starting a
 plan is idempotent on the plan key; an already-running plan short-circuits. The
 response (202) echoes the `planKey` and engine `processKey`.
 
+**Single issue, one PR (feature run, `startFeature`)** — no planning or fan-out. Same body and
+base-branch admission, plus `converge` (enrol the PR in §1) and `autoMerge`:
+
+```bash
+curl -sS -X POST __BASE__/actions/start/feature \
+  -H 'content-type: application/json' \
+  -d '{ "issue": "owner/repo#123", "baseBranch": "main", "confirmDefaultBase": true, "converge": true, "autoMerge": true }'
+```
+
 ### Base-branch admission (ADR 0003)
 
 `startPlanFanout` admits the base through one fail-fast gate before any task fans out.
@@ -721,12 +730,15 @@ declared facts, which downstream edges bind.
 > it — extend the gate's `poll.timeoutMs` and re-dispatch, or abandon the run. (Same for
 > `onTimeout: "continue"`, which proceeds past the gate as not-ready with **no** human stop
 > at all.)
+>
+> **Exception (#872):** a `wait` that declares `emits` **validates** its resume value — an
+> omitted/invalid value **re-parks** the task rather than releasing not-ready.
 
 > **Why the split?** Making the compile door the end of the agent surface closes a
-> self-approval hole: the old flow handed the same caller a content-addressed approval token
-> to re-submit with, so any holder of the API credential approved its own graph. Removing the
-> dispatch affordance from the agent surface entirely (capability by absence) means there is
-> nothing to replay — the human in the cockpit is the only actor who can launch side effects.
+> self-approval hole: the old flow handed the same caller an approval token to re-submit with,
+> so any holder of the API credential approved its own graph. With no dispatch affordance on the
+> agent surface (capability by absence), the human in the cockpit is the only actor who can
+> launch side effects.
 
 ### 9.3 Worked example — the cross-repo human-in-the-loop release
 
@@ -912,9 +924,9 @@ Semantics:
 - **Set `poll.timeoutMs` to a realistic budget.** An epic reaching "fully merged" is a
   multi-day, human-paced event, so the example gives it `poll: { everyMs: 300000, timeoutMs:
   259200000 }` (re-probe every 5 minutes, budget 3 days). **Omitting `poll` inherits the
-  30-minute default** (§9.1) — the gate would escalate long before the epic lands, and (per
-  §9.2) completing that escalation would release `start-b` **as not-ready**, launching feature
-  B before its dependency merged. Size `timeoutMs` to how long the epic realistically takes.
+  30-minute default** (§9.1) — the gate would escalate long before the epic lands. Because this
+  gate binds `prCount`, that escalation is **validated** (§9.2): it **re-parks** unless the
+  operator supplies a valid `prCount`, rather than silently releasing `start-b` as not-ready.
 - On a fully-merged match it binds **`prCount`** (how many slice PRs the epic landed) as an
   output fact, so a downstream node can consume it (parity with the `pr` kind's `mergedSha`).
 - **It also gates a single-PR *feature run*, not just a plan-fanout epic.** The gate resolves the

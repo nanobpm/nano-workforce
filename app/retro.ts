@@ -14,6 +14,7 @@
 // Data access goes through the record gateway (`data.table`), never hand-written SQL — matching
 // app/plan.ts, app/blackboard.ts, and app/taskDelta.ts.
 import type { DataLayer, EngineClient, Logger } from "@nanobpm/urban";
+import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { type BlackboardEntry, isUniqueViolation, readBlackboard } from "./blackboard.ts";
 import { hasDeliveredImplementationForPlan } from "./conformance.ts";
 import { TERMINAL_STATUSES } from "./delivery.ts";
@@ -355,6 +356,9 @@ export async function maybeStartRetro(
           planKey,
           repo: digest.repo,
           issueUrl: digest.issueUrl,
+          // Agent-task liveness SLA (issue #849): bounds the retro's two external agent tasks
+          // (`conformance`, `synthesize`) — a hung agent escalates to a human instead of parking.
+          agentSlaTimeout: AGENT_SLA_TIMEOUT,
         },
       }));
     } catch (err) {

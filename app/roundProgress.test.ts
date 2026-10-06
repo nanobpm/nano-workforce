@@ -222,13 +222,21 @@ async function makeUnderTest(
     processKey: string | null,
     stillOwns: () => Promise<boolean>,
   ) => Promise<{ healed: boolean; sha?: string; reason?: string }>,
+  readRounds?: (
+    prKey: string,
+    processInstanceKey: string | null | undefined,
+  ) => Promise<{ roundNo: number; status: string | null | undefined; summary: string | null | undefined }[]>,
 ) {
   const { makeHandler } = await import("../workers/progress-check/worker.ts");
   // Default the self-heal OFF (always `{ healed: false }`) so the existing escalation tests keep
   // escalating without touching the real WorldStore/GitHub deps; the #818 tests inject a healing stub.
   const heal = selfHeal ?? (async () => ({ healed: false }));
+  // Default the round-history reader to an EMPTY history so the existing tests never trip the churn
+  // guard (#870); the churn tests inject a stub history. An injected reader also avoids the fakeApp
+  // table double (which implements only get/update, not find).
+  const rounds = readRounds ?? (async () => []);
   // biome-ignore lint/suspicious/noExplicitAny: test double for the injectable worker deps.
-  return makeHandler({ readHead, ...(readAgentWork ? { readAgentWork } : {}), selfHeal: heal as any });
+  return makeHandler({ readHead, ...(readAgentWork ? { readAgentWork } : {}), selfHeal: heal as any, readRounds: rounds as any });
 }
 
 test("progress-check: a non-addressed round records the baseline and consumes the attempt watermark but never escalates", async () => {
@@ -376,6 +384,221 @@ test("progress-check: self-heal is NOT attempted on a progressed round (only bef
   );
   assertEquals(out.progressed, true);
   assertEquals(healCalls, 0, "a genuinely-progressing round never consults the self-heal");
+});
+
+// ── Non-converging churn guard (#870) ────────────────────────────────────────
+
+/** A trailing run of `count` `addressed` rounds whose summaries all name `file`. */
+function churnHistory(count: number, file: string) {
+  return Array.from({ length: count }, (_, i) => ({
+    roundNo: i + 1,
+    status: "addressed" as const,
+    summary: `chore: fail closed on bypass form ${i} in \`${file}\``,
+  }));
+}
+
+test("progress-check: a head-advancing round whose findings keep hitting the same file ESCALATES for a scope decision (#870 repro)", async () => {
+  // The repro: the head ADVANCED (sha-1 → sha-2), so the no-progress guard continues — but the
+  // durable round history shows the findings keep landing in the same analyzer file round after
+  // round. Instead of parking for yet another review, the worker escalates with a scope question.
+  const file = "hooks/post/720-pure-zod-schemas.ts";
+  const handler = await makeUnderTest(
+    async () => "sha-2", // head advanced → decideProgress says "progressed"
+    async () => true,
+    undefined,
+    async () => churnHistory(4, file),
+  );
+  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler(
+    { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 22, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(out.progressed, false, "a churning loop is routed to escalation, not another review");
+  assertEquals(out.huskRetry, false, "churn escapes the husk auto-retry straight to the human");
+  assertEquals(out.noProgressReason, "churn");
+  assertStringIncludes(String(out.noProgressQuestion), file);
+  assertStringIncludes(String(out.noProgressQuestion), "SCOPE");
+  // It does NOT park at waiting_review — the escalation worker owns the status (like no-advance).
+  const parked = updates.find((u) => u.patch.status === "waiting_review");
+  assertEquals(parked, undefined, "a churn escalation never parks the PR at waiting_review");
+  // The baseline still advances so a redelivery replays rather than recomputing.
+  assertEquals(updates.at(-1)!.patch.last_round_head, "sha-2");
+});
+
+test("progress-check: the churn history read is SCOPED to the current run (#870)", async () => {
+  // Regression for cross-run history mixing: `rounds` is retained across resubmissions (migration
+  // 102), so the reader must filter by the job's processInstanceKey. The worker must pass its own
+  // `processInstanceKey` through to the reader — not a bare prKey — so a prior run's rows never leak
+  // into THIS run's churn window.
+  let seenKey: string | null | undefined = "unset";
+  const handler = await makeUnderTest(
+    async () => "sha-2",
+    async () => true,
+    undefined,
+    async (_prKey, pik) => {
+      seenKey = pik;
+      return []; // this run has no churning history of its own
+    },
+  );
+  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler(
+    { processInstanceKey: "run-B", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 7, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(seenKey, "run-B", "the reader is scoped to the calling job's process instance");
+  assertEquals(out.progressed, true, "with no in-run churn history the loop parks for review");
+  assertEquals(updates.at(-1)!.patch.status, "waiting_review");
+});
+
+test("projectRunScopedRounds: only CURRENT-run rows can contribute to churn (#870 review)", async () => {
+  // The SCOPED-reader test above injects a reader returning [], so it exercises only the key forwarding
+  // — the actual row-filtering would still pass if removed or inverted. This covers the pure projection
+  // directly: `rounds` is retained across resubmissions (migration 102), so the default reader MUST
+  // drop any row not stamped with the calling job's processInstanceKey, including a legacy NULL-key row.
+  const { projectRunScopedRounds } = await import("../workers/progress-check/worker.ts");
+  const rows = [
+    { round_no: 1, status: "addressed", summary: "run B edit `src/a.ts`", process_instance_key: "run-B" },
+    { round_no: 2, status: "addressed", summary: "run B edit `src/b.ts`", process_instance_key: "run-B" },
+    { round_no: 9, status: "converged", summary: "prior run finished `src/z.ts`", process_instance_key: "run-A" },
+    { round_no: 3, status: "addressed", summary: "legacy row `src/c.ts`", process_instance_key: null },
+  ];
+  // Known key: ONLY the two run-B rows survive — the prior run's terminal `converged` row (which would
+  // break the trailing addressed run) and the legacy NULL-key row are both dropped.
+  const scoped = projectRunScopedRounds(rows, "run-B");
+  assertEquals(
+    scoped.map((r) => r.roundNo).sort((a, b) => a - b),
+    [1, 2],
+    "a prior run's rows and a legacy NULL-key row never leak into this run's window",
+  );
+  assertEquals(scoped.every((r) => r.status === "addressed"), true);
+  // Absent key (testkit/synthetic job that persisted no key): fall back to the WHOLE history, matching
+  // persist-round's own null-key fallback.
+  assertEquals(projectRunScopedRounds(rows, null).length, rows.length, "absent key falls back to full history");
+  assertEquals(projectRunScopedRounds(rows, undefined).length, rows.length, "undefined key falls back to full history");
+  // A numeric processInstanceKey is coerced to string before comparison.
+  const numeric = [{ round_no: 1, status: "addressed", summary: "x", process_instance_key: "42" }];
+  assertEquals(projectRunScopedRounds(numeric, 42 as unknown as string).length, 1, "numeric key is coerced to string");
+});
+
+test("progress-check: a churn escalation STAMPS the run-scoped churn-reset watermark (#870)", async () => {
+  // When churn fires, the worker must persist `churn_escalated_round = roundNo` so the human-answer
+  // resume (which re-enters the same numeric round and writes no `blocked` row) restarts the clock.
+  const file = "hooks/post/720-pure-zod-schemas.ts";
+  const handler = await makeUnderTest(
+    async () => "sha-2",
+    async () => true,
+    undefined,
+    async () => churnHistory(4, file),
+  );
+  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler(
+    { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 22, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(out.noProgressReason, "churn");
+  assertEquals(updates.at(-1)!.patch.churn_escalated_round, 22, "the escalating round is stamped as the churn-reset watermark");
+});
+
+test("progress-check: the churn-reset watermark SUPPRESSES re-escalation on the human-answer resume (#870)", async () => {
+  // The resumed round re-enters the SAME numeric round the escalation fired on (the counter only
+  // advances at review-wait), so the history is the identical churning window. With the row's
+  // `churn_escalated_round` already set to that round, `detectChurn` drops the answered window and the
+  // loop continues instead of re-raising the identical question.
+  const file = "hooks/post/720-pure-zod-schemas.ts";
+  const handler = await makeUnderTest(
+    async () => "sha-3",
+    async () => true,
+    undefined,
+    async () => churnHistory(4, file), // rounds 1..4, same file
+  );
+  // The PR row already carries the watermark stamped when the escalation was raised at round 4.
+  const { app, updates } = fakeApp({ last_round_head: "sha-2", churn_escalated_round: 4 });
+  const out = await handler(
+    { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 4, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(out.progressed, true, "the answered churn window never re-escalates — the loop continues");
+  assertEquals(out.noProgressReason, undefined);
+  assertEquals(updates.at(-1)!.patch.status, "waiting_review");
+});
+
+test("progress-check: normal convergence (findings trending down across different files) does NOT escalate early (#870)", async () => {
+  // The counter-case the acceptance calls out: head advances AND the findings move between areas, so
+  // no single file spans the window → the loop continues to the next review as before.
+  const handler = await makeUnderTest(
+    async () => "sha-2",
+    async () => true,
+    undefined,
+    async () => [
+      { roundNo: 1, status: "addressed", summary: "fix src/a.ts" },
+      { roundNo: 2, status: "addressed", summary: "fix src/b.ts" },
+      { roundNo: 3, status: "addressed", summary: "fix src/c.ts" },
+      { roundNo: 4, status: "addressed", summary: "fix src/d.ts" },
+    ],
+  );
+  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler(
+    { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 5, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(out.progressed, true, "a converging loop continues to the next review");
+  assertEquals(out.noProgressReason, undefined);
+  assertEquals(updates.at(-1)!.patch.status, "waiting_review", "it parks for the next review as normal");
+});
+
+test("progress-check: a NO-ADVANCE round is still caught by the no-progress guard even without churn history (#870 is additive)", async () => {
+  // Churn is additive to — never a replacement for — the no-advance guard: an unchanged head with a
+  // terminal agent-instance still escalates as no-advance, regardless of the (empty) churn history.
+  const handler = await makeUnderTest(async () => "sha-1", async () => true, undefined, async () => []);
+  const { app } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler(
+    { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(out.progressed, false);
+  assertEquals(out.noProgressReason, "no-advance", "the no-advance path is unchanged by the churn guard");
+});
+
+test("progress-check: the churn guard fails OPEN when the round-history read throws", async () => {
+  // A datasource hiccup must never fabricate a churn escalation — the read rejects, the worker
+  // `.catch`es to an empty history, and the progressing round parks for review as normal.
+  const handler = await makeUnderTest(
+    async () => "sha-2",
+    async () => true,
+    undefined,
+    async () => {
+      throw new Error("db down");
+    },
+  );
+  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler(
+    { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 10, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(out.progressed, true, "an unreadable round history fails open to continue");
+  assertEquals(updates.at(-1)!.patch.status, "waiting_review");
+});
+
+test("progress-check: a non-addressed `waiting` round never consults the churn guard", async () => {
+  // A `waiting` round short-circuits before the progressed branch, so even a churning history is
+  // irrelevant — it parks for review.
+  let readRoundsCalled = false;
+  const handler = await makeUnderTest(
+    async () => "sha-2",
+    async () => ({ work: true, consumedKey: "9" }),
+    undefined,
+    async () => {
+      readRoundsCalled = true;
+      return churnHistory(4, "dir/file.ts");
+    },
+  );
+  const { app } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler(
+    { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "waiting", repo: "o/r", prNumber: 1, round: 8 } } as any,
+    app as any,
+  );
+  assertEquals(out.progressed, true);
+  assertEquals(readRoundsCalled, false, "a non-addressed round never reaches the churn check");
 });
 
 test("progress-check: a no-advance round with no recoverable checkpoint still escalates (#818)", async () => {

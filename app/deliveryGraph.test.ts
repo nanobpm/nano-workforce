@@ -652,6 +652,16 @@ test("a non-reserved emit name still validates (the reserved guard does not over
   assertEquals(errors.length, 0, `a non-reserved emit name passes, got: ${JSON.stringify(errors)}`);
 });
 
+test("fact-name `resumeValid` is NOT reserved — a user emit may use it (PR #876 review: the resume-validation gate's flag is an internal compiler-generated var, not a user fact name, so reserving `resumeValid` would needlessly break recompilation of durable rows that already carry a fact of that name)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "resumeValid", type: "boolean" }] }],
+  });
+  assert(
+    !errors.some((e) => e.path === "nodes[0].emits[0].name"),
+    `expected no fact-name error for \`resumeValid\`, got ${JSON.stringify(errors)}`,
+  );
+});
+
 test("invalid-fact-type: an emitted fact with a type outside the allowlist is rejected, path-qualified", () => {
   const errors = validateDeliveryGraph({
     nodes: [

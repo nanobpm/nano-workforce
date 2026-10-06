@@ -4,6 +4,7 @@ import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { memBlackboardSource } from "../test/blackboardDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
+import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { appendEntry } from "./blackboard.ts";
 import { recordTaskDelta } from "./taskDelta.ts";
 import {
@@ -308,6 +309,10 @@ test("maybeStartRetro: starts the retro exactly once when the last PR lands with
   assertEquals(started.length, 1);
   assertEquals(started[0].processDefinitionId, "retro");
   assertEquals(started[0].variables.planKey, PLAN);
+  // The retro seed must carry the canonical agent-SLA bound through its PRODUCTION start path
+  // (not just the e2e, which supplies agentSlaTimeout manually) — else the two external agent
+  // tasks (`conformance` / `synthesize`) would run unbounded (Previously-missed advisory, PR #864).
+  assertEquals(started[0].variables.agentSlaTimeout, AGENT_SLA_TIMEOUT);
   assert(stores["plans"][0].retro_started_at, "retro_started_at must be stamped");
   assertEquals(stores["plan_retro_starts"].length, 1);
 

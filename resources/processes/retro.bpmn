@@ -23,6 +23,8 @@
           <nano:extend name="deviationsRaised" type="integer" optional="true" />
           <nano:extend name="deviationsUnraised" type="integer" optional="true" />
           <nano:extend name="hasDeviations" type="boolean" optional="true" />
+          <nano:extend name="agentSlaElapsed" type="boolean" optional="true" />
+          <nano:extend name="preserveConformance" type="boolean" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
         </nano:shape>
       </nano:shapes>
@@ -54,15 +56,55 @@
       <bpmn:incoming>f_toConformance</bpmn:incoming>
       <bpmn:outgoing>f_toRecordConformance</bpmn:outgoing>
     </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_conformance_sla" name="Agent SLA elapsed" attachedToRef="conformance">
+      <bpmn:outgoing>f_conformanceSla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_conformance_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
     <bpmn:serviceTask id="record-conformance" name="Record conformance">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.conformance-record" />
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ConformanceRecordIn" />
         </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:input source="=false" target="agentSlaElapsed" />
+          <zeebe:input source="=false" target="preserveConformance" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toRecordConformance</bpmn:incoming>
       <bpmn:outgoing>f_toDeviationsGw</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="record-conformance-sla" name="Record conformance (agent SLA)">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.conformance-record" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ConformanceRecordIn" />
+        </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:input source="=true" target="agentSlaElapsed" />
+          <zeebe:input source="=false" target="preserveConformance" />
+          <zeebe:input source="=&#34;The spec-conformance agent exceeded its time budget (SLA &#34; + agentSlaTimeout + &#34;) without returning a verdict — it is hung or looping. Acknowledge to record the timeout and continue to the retrospective synthesis.&#34;" target="summary" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_conformanceSla</bpmn:incoming>
+      <bpmn:outgoing>f_conformanceSlaToEsc</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="record-synthesize-sla" name="Record synthesize (agent SLA)">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.conformance-record" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ConformanceRecordIn" />
+        </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:input source="=true" target="agentSlaElapsed" />
+          <zeebe:input source="=true" target="preserveConformance" />
+          <zeebe:input source="=&#34;The retrospective-synthesis agent exceeded its time budget (SLA &#34; + agentSlaTimeout + &#34;) without completing — it is hung or looping. Acknowledge to record the timeout and continue.&#34;" target="summary" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_synthesizeSla</bpmn:incoming>
+      <bpmn:outgoing>f_synthesizeSlaToEsc</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:exclusiveGateway id="gw-deviations" name="deviations?" default="f_noDeviations">
       <bpmn:incoming>f_toDeviationsGw</bpmn:incoming>
@@ -104,6 +146,12 @@
       <bpmn:incoming>f_ackToSynthesize</bpmn:incoming>
       <bpmn:outgoing>f_toRecord</bpmn:outgoing>
     </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_synthesize_sla" name="Agent SLA elapsed" attachedToRef="synthesize">
+      <bpmn:outgoing>f_synthesizeSla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_synthesize_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
     <bpmn:serviceTask id="record" name="Record retro">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.retro-record" />
@@ -119,6 +167,10 @@
     </bpmn:endEvent>
     <bpmn:sequenceFlow id="f_start" sourceRef="Start" targetRef="gather" />
     <bpmn:sequenceFlow id="f_toConformance" sourceRef="gather" targetRef="conformance" />
+    <bpmn:sequenceFlow id="f_conformanceSla" name="conformance agent SLA elapsed" sourceRef="be_conformance_sla" targetRef="record-conformance-sla" />
+    <bpmn:sequenceFlow id="f_synthesizeSla" name="synthesize agent SLA elapsed" sourceRef="be_synthesize_sla" targetRef="record-synthesize-sla" />
+    <bpmn:sequenceFlow id="f_conformanceSlaToEsc" sourceRef="record-conformance-sla" targetRef="conformance-escalation" />
+    <bpmn:sequenceFlow id="f_synthesizeSlaToEsc" sourceRef="record-synthesize-sla" targetRef="conformance-escalation" />
     <bpmn:sequenceFlow id="f_toRecordConformance" sourceRef="conformance" targetRef="record-conformance" />
     <bpmn:sequenceFlow id="f_toDeviationsGw" sourceRef="record-conformance" targetRef="gw-deviations" />
     <bpmn:sequenceFlow id="f_deviations" name="deviations" sourceRef="gw-deviations" targetRef="conformance-escalation">
@@ -147,6 +199,12 @@
       <bpmndi:BPMNShape id="BPMNShape_record-conformance" bpmnElement="record-conformance">
         <dc:Bounds x="616" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_record-conformance-sla" bpmnElement="record-conformance-sla">
+        <dc:Bounds x="616" y="400" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_record-synthesize-sla" bpmnElement="record-synthesize-sla">
+        <dc:Bounds x="1566" y="400" width="100" height="80" />
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-deviations" bpmnElement="gw-deviations" isMarkerVisible="true">
         <dc:Bounds x="816" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
@@ -169,6 +227,18 @@
         <dc:Bounds x="1766" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="1744" y="143" width="80" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_conformance_sla" bpmnElement="be_conformance_sla">
+        <dc:Bounds x="448" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="370" y="183" width="72" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_synthesize_sla" bpmnElement="be_synthesize_sla">
+        <dc:Bounds x="1398" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1320" y="183" width="72" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_f_start" bpmnElement="f_start">
@@ -207,14 +277,41 @@
           <dc:Bounds x="846" y="206" width="74" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_conformanceSlaToEsc" bpmnElement="f_conformanceSlaToEsc">
+        <di:waypoint x="716" y="440" />
+        <di:waypoint x="1016" y="440" />
+        <di:waypoint x="1016" y="320" />
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toConformanceAck" bpmnElement="f_toConformanceAck">
         <di:waypoint x="1066" y="280" />
         <di:waypoint x="1166" y="280" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_ackToSynthesize" bpmnElement="f_ackToSynthesize">
-        <di:waypoint x="1266" y="280" />
-        <di:waypoint x="1416" y="280" />
-        <di:waypoint x="1416" y="160" />
+        <di:waypoint x="1216" y="240" />
+        <di:waypoint x="1216" y="120" />
+        <di:waypoint x="1366" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_conformanceSla" bpmnElement="f_conformanceSla">
+        <di:waypoint x="466" y="178" />
+        <di:waypoint x="466" y="440" />
+        <di:waypoint x="616" y="440" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="471" y="288" width="84" height="42" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_synthesizeSla" bpmnElement="f_synthesizeSla">
+        <di:waypoint x="1416" y="178" />
+        <di:waypoint x="1416" y="440" />
+        <di:waypoint x="1566" y="440" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1421" y="288" width="74" height="42" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_synthesizeSlaToEsc" bpmnElement="f_synthesizeSlaToEsc">
+        <di:waypoint x="1616" y="480" />
+        <di:waypoint x="1616" y="500" />
+        <di:waypoint x="1016" y="500" />
+        <di:waypoint x="1016" y="320" />
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>

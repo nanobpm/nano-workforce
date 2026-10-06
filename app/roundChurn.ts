@@ -1,0 +1,265 @@
+// Non-converging churn guard — the canonical, testable detector the `pr.progress-check` worker uses
+// to escalate a review loop that is making head-advancing "progress" every round yet never reaches a
+// fixed point (issue #870).
+//
+// The no-progress guard in app/roundProgress.ts catches the OTHER failure mode: an `addressed` round
+// whose PR head did NOT advance (no commit pushed). Churn is the opposite shape — EVERY round pushes
+// a commit, so the head advances and `routeProgress` legitimately returns `continue`, round after
+// round. The trap is that the findings never end: a contested surface (e.g. a fail-closed static
+// analyzer whose bypass forms are unbounded) keeps producing 1–3 new findings in the SAME file,
+// the review agent patches them, the patch adds more surface for the next review, and the loop runs
+// to `maxRounds` (or forever) without a human ever being asked to make the scope call.
+//
+// This detector reads the durable `rounds` history and reports churn when the trailing run of
+// consecutive `addressed` rounds keeps landing findings in the SAME file(s) over a window of rounds.
+// It is deliberately conservative — it requires the SAME file to appear in EVERY round of the window
+// — so normal multi-round convergence (findings in different areas, trending down) is never escalated
+// early. When it fires, the worker routes the round to the SAME human escalation path the no-advance
+// guard uses (gw-husk → persist-escalation-noprogress), carrying an actionable scope question.
+import { isAddressedStatus } from "./roundProgress.ts";
+
+/** How many CONSECUTIVE `addressed` rounds must all land findings in the same file before the loop is
+ * declared non-converging and escalated for a human scope decision. Four matches the issue's
+ * suggested threshold (#870) — long enough that a legitimately-converging loop whose findings move
+ * between areas never reaches it, short enough to catch a stuck surface well below a high `maxRounds`
+ * cap. */
+export const CHURN_WINDOW = 4;
+
+/** One recorded round, projected to just the fields churn detection reads: its number (for ordering),
+ * its `status` (to find the trailing consecutive `addressed` run), and its `summary` (the agent's
+ * round summary, the durable free-text the contested file names are mined from). */
+export interface ChurnRound {
+  readonly roundNo: number;
+  readonly status: string | null | undefined;
+  readonly summary: string | null | undefined;
+}
+
+/** The churn verdict. `churning:false` is the common case (continue the loop). When `churning:true`,
+ * `file` is the contested surface, `rounds` is how many consecutive rounds hit it, and `question` is
+ * the human-facing scope decision to carry into the escalation. */
+export interface ChurnResult {
+  readonly churning: boolean;
+  readonly file?: string;
+  readonly rounds?: number;
+  readonly question?: string;
+}
+
+// A maximal run of path characters (`\w`, plus `.@~+/-`). Splitting the summary into these runs
+// first — a single linear scan — isolates each candidate token (a non-path char like a space, comma,
+// backtick, or `:` ends a run), so the path shape below is only ever tested ANCHORED at a run's start
+// and never re-tried at every offset of the whole summary. The trailing `-` keeps that metacharacter
+// literal (a filename hyphen) rather than a range.
+const PATH_RUN_RE = /[\w.@~+/-]+/g;
+
+// The KNOWN source/config/doc/build extensions a mined file path's FINAL dotted component must be —
+// shared by BOTH the nested and root matchers below. A permissive `[A-Za-z0-9]+`/`[A-Za-z]{2,}`
+// extension mines dotted API symbols and prose as fake files — `z.object`, `object.keys`,
+// `example.com`, `schema.ts.parse` all look like `name.ext` — so four rounds that each mention the
+// same qualified symbol while fixing DIFFERENT real files would intersect on that symbol and falsely
+// escalate (Copilot review of #870). Restricting the extension to a real-file allowlist rejects those
+// (`object`, `keys`, `com`, `parse` are not file extensions) while keeping every genuine file. It is
+// fail-open in the safe direction: an exotic-but-real extension it omits (`.svelte` is listed; a
+// brand-new one is not) only ever MISSES a churn signal, never fabricates one. The allowlist contains
+// no digits or single letters, so it also excludes version strings (`4.8`), sentence-ending
+// abbreviations (`e.g`, `i.e`), and initialisms (`U.S`).
+const ROOT_FILE_EXT =
+  "(?:ts|tsx|js|jsx|mjs|cjs|mts|cts|json|jsonc|json5|md|markdown|yml|yaml|toml|xml|html|css|scss|" +
+  "less|sql|sh|bash|zsh|py|rb|go|rs|java|kt|kts|swift|c|h|cc|hh|cpp|cxx|hpp|cs|fs|vue|svelte|php|" +
+  "pl|pm|lua|dart|ex|exs|erl|hrl|clj|cljs|scala|groovy|gradle|properties|ini|cfg|conf|config|env|" +
+  "lock|mod|sum|mk|cmake|txt|bpmn|form|dmn|proto|graphql|gql|prisma|tf|hcl)";
+
+// A NESTED repository-relative file path, ANCHORED at the start of a candidate run: one or more `dir/`
+// segments followed by a `name.ext`. Requiring at least one slash AND an extension keeps bare words
+// ("addressed", "zod") and prose out, so only genuine file references are mined. Because it is matched
+// against one bounded run (not scanned across the whole text), the inner `(?:…\/)+` backtracking on a
+// long UNTERMINATED `dir/` run (e.g. `"a/".repeat(n)` with no closing `name.ext`) is paid ONCE at a
+// single start position — linear in the run length — rather than the O(n²) a global re-scan would
+// cost, which would otherwise let an adversarial summary (a long directory listing, minified stack
+// trace, or base64/data-URI blob) stall the `pr.progress-check` worker inside the convergence loop.
+//
+// Like the root form below, the FINAL dotted component must be an allowlisted ROOT_FILE_EXT and the
+// trailing `(?![\w.@~+-])` negative lookahead refuses any following path char — crucially another
+// `.segment`. Without those, a SLASH-qualified API chain like `src/schema.ts.parse` /
+// `lib/config.json.parse` was mined WHOLE as a fake repo file: four summaries that cite that same
+// qualified symbol while fixing different real files intersect on it and falsely escalate, exactly the
+// class the root allowlist already closes (Copilot review of #870). The basename's first char is a
+// non-dot path char so a true `name.ext` anchors the stem; the greedy `[\w.@~+-]*` still lets a
+// multi-dot basename (`dir/foo.test.ts`, `lib/nano.app.json`) match whole by backtracking the LAST
+// allowlisted dot as the separator.
+const NESTED_PATH_RE = new RegExp(
+  `^(?:[\\w.@~+-]+\\/)+[\\w@~+-][\\w.@~+-]*\\.${ROOT_FILE_EXT}(?![\\w.@~+-])`,
+  "i",
+);
+
+// A ROOT-LEVEL file (no directory segment): a bare `name.ext`. Root repository files — `package.json`,
+// `README.md`, `tsconfig.json`, `nano.app.json` — are legitimate churn surfaces too, but the nested
+// form above excludes them because it REQUIRES a slash, so a loop repeatedly editing `package.json`
+// would never escalate (issue #870 follow-up). Matching a bare `name.ext` re-admits the prose that the
+// required slash kept out, so this form is deliberately STRICTER to compensate, on three axes — all
+// now shared with the nested matcher above via ROOT_FILE_EXT + the trailing lookahead:
+//
+//  1. The extension must be a KNOWN source/config/doc/build extension (ROOT_FILE_EXT above), not just
+//     "any letters" — see that constant's comment for why (`z.object`, `example.com`, `Deno.land` are
+//     rejected because `object`/`com`/`land` are not file extensions).
+//  2. The extension must still be at least two ALPHABETIC characters (the allowlist contains no digits
+//     or single letters), which keeps excluding version strings (`4.8`), sentence-ending abbreviations
+//     (`e.g`, `i.e`), and initialisms (`U.S`).
+//  3. The allowlisted extension must be the FINAL dotted component of the token. The trailing
+//     `(?![\w.@~+-])` negative lookahead refuses any following path character — crucially another
+//     `.segment` — so an API chain like `schema.ts.parse` / `config.json.parse` is NOT truncated to a
+//     fake `schema.ts` / `config.json` root file (a `\b`-only anchor succeeds before that next dot and
+//     mined the truncation, Copilot review of #870). Trailing SENTENCE punctuation is stripped from the
+//     candidate token in {@link extractFiles} BEFORE matching, so `README.md.` still mines `README.md`.
+//
+// The stem is greedy and MAY contain dots (`foo.test.ts`, `nano.app.json`): backtracking lets the LAST
+// dot be the separator so a multi-dot root file matches whole, while the allowlisted final extension
+// still anchors the match. Tried only AFTER the nested form, and like it anchored at the run start (no
+// global re-scan), so it adds no backtracking cost — it only ever ADDS real root-level files, never
+// removes a nested path the form above already mines.
+const ROOT_FILE_RE = new RegExp(`^[\\w@~+-][\\w.@~+-]*\\.${ROOT_FILE_EXT}(?![\\w.@~+-])`, "i");
+
+// A ROOT-LEVEL dotfile or extensionless basename — the churn surfaces the `name.ext` form above can
+// NEVER match because they have a leading dot and no basename (`.gitignore`, `.env`, `.editorconfig`,
+// `.gitattributes`) or no extension at all (`Dockerfile`, `Makefile`). The allowlist/comment above
+// name these as legitimate surfaces, so a loop repeatedly editing `.gitignore` must escalate too
+// (Copilot review of #870). A CLOSED allowlist of well-known basenames — not "any dotfile" — keeps the
+// match conservative (prose like "the environment" or "docker build" is never mined), and the trailing
+// `(?![\w.@~+-])` requires an EXACT whole-token match so a dotted variant (`.env.local`,
+// `Dockerfile.prod`) is left un-mined (fail-open) rather than collapsed to the base name.
+const ROOT_BASENAME_RE =
+  /^(?:\.(?:gitignore|gitattributes|editorconfig|env|dockerignore|npmrc|nvmrc|prettierrc|eslintrc|babelrc)|Dockerfile|Makefile|Rakefile|Gemfile|Procfile|Caddyfile|CODEOWNERS)(?![\w.@~+-])/i;
+
+// A whole URL span (`scheme://…host/path…`). A citation link's path (e.g.
+// `github.com/o/r/blob/main/docs/guide.md`) otherwise looks exactly like a repo-relative file, so a
+// summary that cites the SAME link every round while fixing DIFFERENT real files would false-escalate
+// as churn naming the URL as the contested file. Strip URL spans before mining so only genuine repo
+// paths remain. `\S+` is linear (no backtracking).
+const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/\S+/giu;
+
+// A SCHEME-LESS citation URL's host+path (`github.com/o/r/blob/main/docs/guide.md`), ANCHORED at a
+// candidate run's start. URL_RE only strips spans with an explicit `scheme://`; a bare `host.tld/path`
+// citation survives it and then satisfies NESTED_PATH_RE (dir segments + an allowlisted `guide.md`), so
+// four summaries that cite the SAME link while fixing DIFFERENT real files would intersect on the URL
+// and falsely escalate as churn (Copilot review of #870). A repo-relative path's FIRST segment is a
+// plain directory name — a dotfile dir (`.github/…`) has a LEADING dot (no label before it, so this
+// `(?:label\.)+` prefix can't match) and an ordinary dir (`src/…`) has no dot at all — whereas a URL
+// host is `label(.label)*.tld/`, so a leading dot-containing host segment followed by `/` reliably
+// marks a citation URL, not a file. Tested ONCE per bounded run (like NESTED_PATH_RE), the
+// `(?:[\w-]+\.)+` prefix is linear: the `\.` delimiter makes label boundaries unambiguous, so there is
+// no catastrophic backtracking even on an adversarial dotted run. REJECTING (not truncating) the whole
+// token is fail-open: the rare real path whose first directory literally contains a dot only MISSES a
+// churn signal, never fabricates one — the same safe direction the extension allowlist already favours.
+const SCHEMELESS_URL_RE = /^(?:[\w-]+\.)+[a-z]{2,}\/[\w.@~+-]/i;
+
+// Defensive cap on the free text scanned. The matcher above is linear, so this is belt-and-suspenders
+// (bounding Set growth and any unforeseen pathological input), not the primary perf guard; real round
+// summaries are far shorter, and truncating one only ever drops a churn SIGNAL (fail-open), never
+// fabricates one.
+const MAX_SCAN = 20000;
+
+/** Mine the set of distinct file paths referenced in a round summary. A non-string / empty summary
+ * yields an empty set. The summary is length-bounded and URL spans are stripped, then each maximal
+ * path-char run is tested for the path shape anchored at its start (see MAX_SCAN / URL_RE /
+ * PATH_RUN_RE / NESTED_PATH_RE / ROOT_FILE_RE / ROOT_BASENAME_RE). Each run's trailing sentence
+ * punctuation and closing brackets are stripped BEFORE matching so the same file referenced with
+ * different surrounding punctuation collapses to one key and the allowlisted extension anchors to the
+ * token end. */
+export function extractFiles(summary: string | null | undefined): Set<string> {
+  const files = new Set<string>();
+  if (typeof summary !== "string" || summary.trim() === "") return files;
+  const scanned = summary.slice(0, MAX_SCAN).replace(URL_RE, " ");
+  for (const run of scanned.matchAll(PATH_RUN_RE)) {
+    // Strip trailing sentence punctuation / closing brackets BEFORE matching: `.` is itself a path
+    // char, so a sentence-ending `README.md.` arrives in the run with its period attached. Removing it
+    // first lets the allowlisted extension anchor cleanly to the END of the token (ROOT_FILE_RE's
+    // `(?![\w.@~+-])` lookahead), instead of a `\b` that also fired before that trailing dot.
+    const token = run[0].replace(/[),.;:'"`\]]+$/u, "").trim();
+    if (token === "") continue;
+    // Reject a scheme-less citation URL (`github.com/o/r/blob/main/docs/guide.md`) before mining: its
+    // host+path otherwise looks exactly like a nested repo file (see SCHEMELESS_URL_RE). URL_RE already
+    // removed any `scheme://` span, so this closes the remaining citation-URL hole.
+    if (SCHEMELESS_URL_RE.test(token)) continue;
+    const hit = token.match(NESTED_PATH_RE) ?? token.match(ROOT_FILE_RE) ?? token.match(ROOT_BASENAME_RE);
+    if (hit === null) continue;
+    const path = hit[0].trim();
+    if (path !== "") files.add(path);
+  }
+  return files;
+}
+
+/** Build the human-facing escalation question for a churning loop, framed — per the issue — as a
+ * SCOPE decision, not a request to keep looping. The answer the human gives is threaded into the next
+ * round's context (the `answer` variable), so it must offer concrete, actionable choices. */
+export function churnQuestion(file: string, rounds: number): string {
+  return (
+    `Convergence is not converging: the last ${rounds} review rounds all reported the comments were ` +
+    `addressed, yet the findings keep landing in the same file (\`${file}\`) with no fixed point in ` +
+    `sight — a contested surface whose findings never end (e.g. a fail-closed analyzer whose bypass ` +
+    `forms are unbounded). Rather than burn more rounds, this needs a human SCOPE decision: ` +
+    `(a) narrow or simplify the contested surface in \`${file}\`; (b) defer the remaining findings ` +
+    `to a follow-up issue and accept the current state as non-blocking; or (c) accept the residual ` +
+    `findings as non-blocking and let the loop converge. Reply with the decision to resume the loop.`
+  );
+}
+
+/** Detect non-converging churn over a PR's recorded rounds.
+ *
+ * Churn = the trailing run of CONSECUTIVE `addressed` rounds is at least `window` long AND some single
+ * file appears in the summary of EVERY round of the most recent `window`. Requiring the same file in
+ * all `window` rounds is what keeps normal convergence (findings that move between areas and trend
+ * down) from escalating: a loop whose findings are in different files each round has no file common to
+ * the whole window, so it continues. A non-`addressed` round (a `waiting` round, or a prior human
+ * escalation recorded as `needs_input`/`blocked`) BREAKS the consecutive run — a human already made a
+ * call, so the churn clock restarts after it.
+ *
+ * The verdict is conservative by construction: a round with NO extractable file path in its summary
+ * also breaks the signal (the intersection can't include a file absent from one round), so churn is
+ * only ever reported on a genuinely same-file, same-surface loop.
+ *
+ * `resetAfterRound` is the run-scoped churn-reset watermark (issue #870): the round number at which a
+ * churn escalation was last raised AND answered by a human for THIS run. A churn escalation routes
+ * through `persist-escalation-noprogress` with `recordRound=false`, so it writes NO `blocked` round —
+ * and the human-answer resume re-enters the SAME numeric round (the round counter only advances at the
+ * review-wait gateway). Without this watermark `detectChurn` would therefore see the identical trailing
+ * `addressed` window the instant the resumed round is recorded and re-raise the SAME question forever
+ * (which durable adjudication may auto-resume repeatedly). Dropping every round at or before the
+ * watermark makes the human's scope decision restart the churn clock exactly as a recorded
+ * `needs_input`/`blocked` round would: churn can only fire again after a fresh `window` of same-file
+ * rounds ACCUMULATES past the decision. */
+export function detectChurn(
+  rounds: readonly ChurnRound[],
+  window: number = CHURN_WINDOW,
+  resetAfterRound = 0,
+): ChurnResult {
+  // Drop rounds at or before the churn-reset watermark so a human scope decision restarts the clock.
+  const live = resetAfterRound > 0 ? rounds.filter((r) => r.roundNo > resetAfterRound) : rounds;
+  if (window < 1 || live.length < window) return { churning: false };
+
+  // Order by round number, then walk back over the trailing CONSECUTIVE `addressed` run.
+  const sorted = [...live].sort((a, b) => a.roundNo - b.roundNo);
+  const trailing: ChurnRound[] = [];
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const r = sorted[i];
+    if (r === undefined || !isAddressedStatus(r.status)) break;
+    trailing.unshift(r);
+  }
+  if (trailing.length < window) return { churning: false };
+
+  // Intersect the file sets of the most-recent `window` addressed rounds. A single empty set means no
+  // same-file signal — bail immediately.
+  const recent = trailing.slice(-window);
+  const fileSets = recent.map((r) => extractFiles(r.summary));
+  if (fileSets.some((s) => s.size === 0)) return { churning: false };
+  let common = fileSets[0] ?? new Set<string>();
+  for (let i = 1; i < fileSets.length && common.size > 0; i++) {
+    const next = fileSets[i] ?? new Set<string>();
+    common = new Set([...common].filter((f) => next.has(f)));
+  }
+  if (common.size === 0) return { churning: false };
+
+  // Deterministic choice when several files are common to the whole window: the lexicographically
+  // smallest, so the escalation question is stable across redeliveries of the same round.
+  const [file] = [...common].sort();
+  if (file === undefined) return { churning: false };
+  return { churning: true, file, rounds: recent.length, question: churnQuestion(file, recent.length) };
+}

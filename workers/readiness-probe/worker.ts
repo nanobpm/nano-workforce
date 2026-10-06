@@ -49,6 +49,27 @@ function errorDetail(err: unknown): string {
   return `probe error: ${err instanceof Error ? err.name : "Error"}`;
 }
 
+/** Fail-closed guard for an UNRESOLVED wait-gate target (issue #872, PR #876 review). A `wait` node's
+ * probe `target` is late-bound from an upstream emit: the compiler rewrites it to the observed value
+ * when that fact resolved to a non-null value, otherwise it writes NULL (the compiler owns the
+ * resolved/unresolved provenance — it is the only component that knows whether the target was actually
+ * bound). A probe left with a null/blank target MUST NOT pass through — it is not a real handle, so the
+ * gate is NOT satisfiable yet. Returning not-ready keeps the gate parked so its bounded timeout
+ * escalates to a human, instead of either incident-ing inside `parseProbe` (which throws on a blank
+ * target) or — worse — silently treating the null target as "ready". Returns `null` when the target is
+ * a usable literal (let `parseProbe` run).
+ *
+ * Deliberately NO fact-ref SYNTAX test here: a dotted, hash-free literal (`check.sh`) is a VALID
+ * `command` target yet is indistinguishable from an unresolved `<node>.<fact>` reference by shape
+ * alone — guarding on syntax parked such a gate forever without ever running its probe (PR #876
+ * review). Only the compiler's null provenance marks an unresolved target. */
+function unresolvedTargetDetail(rawProbe: unknown): string | null {
+  const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+  const target = isRecord(rawProbe) ? rawProbe.target : undefined;
+  if (typeof target !== "string" || target.trim() === "") return "wait gate: unresolved target (not ready)";
+  return null;
+}
+
 /** Single activation of the readiness probe. The engine owns retry cadence and the timeout boundary;
  * this function performs one `probeOnce`, publishes only when ready, and optionally performs exactly
  * one empirical fallback on a model-marked last attempt. */
@@ -149,6 +170,24 @@ function resolveProbeExec(): ProbeExec {
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
+  // Fail closed on an unresolved late-bound target (issue #872): a null/blank target means the
+  // upstream emit this gate waits on never resolved — the gate is not satisfiable, so stay parked (and
+  // let the gate's bounded timeout escalate) rather than throw in parseProbe or pass a null target
+  // through as if ready. (The compiler writes the null provenance; a dotted LITERAL target — e.g. a
+  // `check.sh` command — is never unresolved and reaches `parseProbe` verbatim, PR #876 review.)
+  const unresolved = unresolvedTargetDetail(job.variables.probe);
+  if (unresolved !== null) {
+    // Boundary-only WARN policy (mirrors probeSingleShot, PR #876 review): an unresolved late-bound
+    // target stays unresolved for the WHOLE bounded wait, so the engine re-activates this job on every
+    // poll tick. Warning on each activation would emit ~120 WARN lines over a 30-minute gate at the
+    // 15s default cadence and drown the one that matters. Reserve WARN for the final attempt (the
+    // escalation trigger) and log intermediate activations at info — the same boundary-only policy
+    // probeSingleShot applies to a not-ready probe.
+    const msg = `readiness gate not ready: ${unresolved}`;
+    if (job.variables.lastAttempt === true) app.log.warn(msg);
+    else app.log.info(msg);
+    return { ready: false, detail: unresolved };
+  }
   const probe = parseProbe(job.variables.probe);
   const { gateKey } = readGateVars(job.variables);
   const exec = resolveProbeExec();

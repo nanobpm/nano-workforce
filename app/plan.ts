@@ -10,6 +10,7 @@
 // the process. Data access goes through the record gateway (`data.table`), never
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import {
   InvalidBaseBranchError,
   isPlausibleBranchName,
@@ -1021,6 +1022,17 @@ export async function startPlan(
       // `operators` candidate group); an operator/agent can claim/reassign via the task inbox.
       escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
       escalationAssignee: null,
+      // Agent-task liveness SLA (issue #849): PRE-SEED the canonical bound for the fan-out's
+      // external agent tasks. Each slice's implementation agent (via the implement-cell
+      // callActivity's explicit `agentSlaTimeout` input mapping) is bounded today; the wave's own
+      // inline `trial-merge` agent (`plan-fanout.bpmn:524-542`) is NOT — it is a separate external
+      // task from the standalone `merge-cell` process (which has no callActivity caller), sits on a
+      // rerun back-edge, and its SLA boundary is deferred to #868 alongside the planner (`plan`) and
+      // plan reviewer (`review-plan`), whose back-edge loop the layouter cannot yet route (layouter
+      // bug #867). For those three this seed is preparation, not yet an armed bound. Each bounded
+      // task's interrupting timer boundary evaluates `=agentSlaTimeout` at timer creation, so a hung
+      // or looping agent escalates to a human instead of parking forever.
+      agentSlaTimeout: AGENT_SLA_TIMEOUT,
       // Capability-barrier bound (#289): the validated ISO-8601 duration read by the
       // `wait-caps-timeout` timer arm of the `wait-caps-resolved` event-based gateway. A task whose
       // declared cross-repo capabilities never resolve (most acutely an unresolvable capabilityRef the

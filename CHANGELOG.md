@@ -1,3 +1,31 @@
+## [0.201.0](https://github.com/nanobpm/nano-workforce/compare/v0.200.9...v0.201.0) (2026-10-06)
+
+### Features
+
+* **convergence:** escalate non-converging same-surface review churn ([#870](https://github.com/nanobpm/nano-workforce/issues/870)) ([#875](https://github.com/nanobpm/nano-workforce/issues/875)) ([307505b](https://github.com/nanobpm/nano-workforce/commit/307505b3e9603129c3ad101b29dc1f10992f038e))
+
+### Bug Fixes
+
+* **delivery-graph:** bind escalation value to emit, fail closed on null gate target, default node SLA ([#876](https://github.com/nanobpm/nano-workforce/issues/876)) ([ff6f3d0](https://github.com/nanobpm/nano-workforce/commit/ff6f3d0f191b641c13e460ac03c8ecfa075026f4)), closes [#872](https://github.com/nanobpm/nano-workforce/issues/872) [#872](https://github.com/nanobpm/nano-workforce/issues/872) [#872](https://github.com/nanobpm/nano-workforce/issues/872) [owner/repo#N](https://github.com/owner/repo/issues/N) [#872](https://github.com/nanobpm/nano-workforce/issues/872) [#872](https://github.com/nanobpm/nano-workforce/issues/872)
+
+## [0.200.9](https://github.com/nanobpm/nano-workforce/compare/v0.200.8...v0.200.9) (2026-10-05)
+
+### Bug Fixes
+
+* **implement-cell:** accurate escalation reason, adopt/retry a claimed completion without delivery ([#869](https://github.com/nanobpm/nano-workforce/issues/869)) ([9d7b3a8](https://github.com/nanobpm/nano-workforce/commit/9d7b3a83a4728ca831c519ffc3ad4eade00cc45e)), closes [#865](https://github.com/nanobpm/nano-workforce/issues/865) [#863](https://github.com/nanobpm/nano-workforce/issues/863) [#865](https://github.com/nanobpm/nano-workforce/issues/865) [#865](https://github.com/nanobpm/nano-workforce/issues/865)
+
+## [0.200.8](https://github.com/nanobpm/nano-workforce/compare/v0.200.7...v0.200.8) (2026-10-05)
+
+### Bug Fixes
+
+* **processes:** bound external agent tasks with an SLA timer boundary (implement-cell, merge-cell, retro) ([#864](https://github.com/nanobpm/nano-workforce/issues/864)) ([0ea4955](https://github.com/nanobpm/nano-workforce/commit/0ea4955cc2ec0fe61fbc81e8d7dcb9e842d29313)), closes [#849](https://github.com/nanobpm/nano-workforce/issues/849) [#849](https://github.com/nanobpm/nano-workforce/issues/849) [#849](https://github.com/nanobpm/nano-workforce/issues/849) [#867](https://github.com/nanobpm/nano-workforce/issues/867) [#868](https://github.com/nanobpm/nano-workforce/issues/868) [#849](https://github.com/nanobpm/nano-workforce/issues/849) [#867](https://github.com/nanobpm/nano-workforce/issues/867) [#868](https://github.com/nanobpm/nano-workforce/issues/868) [#868](https://github.com/nanobpm/nano-workforce/issues/868) [#227](https://github.com/nanobpm/nano-workforce/issues/227) [#868](https://github.com/nanobpm/nano-workforce/issues/868)
+
+## [0.200.7](https://github.com/nanobpm/nano-workforce/compare/v0.200.6...v0.200.7) (2026-10-05)
+
+### Documentation
+
+* **agent-guide:** document the feature-run start endpoint ([#874](https://github.com/nanobpm/nano-workforce/issues/874)) ([faa01f2](https://github.com/nanobpm/nano-workforce/commit/faa01f28da943dcd5fd8695cb18bd8054d08c3f1))
+
 ## [0.200.6](https://github.com/nanobpm/nano-workforce/compare/v0.200.5...v0.200.6) (2026-10-04)
 
 ### Bug Fixes

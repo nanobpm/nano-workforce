@@ -9,7 +9,7 @@
 // reads `status`/`pr`/`summary` through), and exposes the raw transcript under the
 // `io.nanobpm.agentResult` envelope's `.output`.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { recordConformance } from "../../app/conformance.ts";
+import { markConformanceSynthesisSla, recordConformance } from "../../app/conformance.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 const AGENT_RESULT_KEY = "io.nanobpm.agentResult";
@@ -81,6 +81,22 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // the same `String(...)` coercion app/service.ts applies when it stamps `process_key`.
   const processKey = job.processInstanceKey != null ? String(job.processInstanceKey) : null;
 
+  // Agent-SLA path (issue #849 review): the conformance/synthesize agent's interrupting timer
+  // boundary fired (retro.bpmn routes the SLA arm here with `agentSlaElapsed=true` + an SLA summary).
+  // The agent produced no verdict, so there is nothing to score — but the shared conformance-escalation
+  // ack task ALWAYS runs `pr.conformance-ack`, whose `acknowledgeConformance` throws when no
+  // `plan_conformance` row exists. Persist a `reviewing` row so the ack settles it and the Tasks inbox
+  // shows the SLA-timeout reason. This escalates exactly like a deviations finding.
+  const agentSlaElapsed = asBool(job.variables.agentSlaElapsed);
+  const escalate = hasDeviations || agentSlaElapsed;
+
+  // Synthesis-SLA preserve path (PR #864 review): the `record-synthesize-sla` arm runs AFTER
+  // `record-conformance` already persisted a real verdict, so it sets `preserveConformance=true` to
+  // flip the row to `reviewing` + append the synthesis-timeout context WITHOUT overwriting the filed
+  // status/counts/report/summary. Only the synthesize arm sets this; the conformance-SLA arm
+  // (`record-conformance-sla`) interrupts BEFORE any verdict exists, so it takes the upsert below.
+  const preserveConformance = asBool(job.variables.preserveConformance);
+
   // Invariant: an escalation must be trackable. If we found deviations to escalate but have no
   // process key to key the `reviewing` row off, the `hasDeviations` return below would still route
   // retro to the `conformance-escalation` user task — yet `pollUserTasks` can never surface that ack
@@ -88,11 +104,21 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // escalation wedges forever, invisible to any human. Rather than record that silent, unreachable
   // state, fail loudly so the run retries/alerts. `job.processInstanceKey` is always present for an
   // activated job, so this only fires on a genuine engine-contract violation.
-  if (hasDeviations && processKey == null) {
+  if (escalate && processKey == null) {
     throw new Error(
-      `conformance-record: ${planKey} has deviations to escalate but no processInstanceKey to track ` +
+      `conformance-record: ${planKey} has an escalation to record but no processInstanceKey to track ` +
         "the escalation — refusing to route to an untrackable conformance-escalation ack task",
     );
+  }
+
+  if (preserveConformance) {
+    // Preserve the existing conformance verdict; only mark it reviewing + append the SLA reason.
+    await markConformanceSynthesisSla(app.data, planKey, {
+      summary: summary ?? "The retrospective-synthesis agent exceeded its time budget without completing.",
+      processKey,
+    });
+    app.log.info(`conformance-record: ${planKey} — synthesis SLA, preserved existing verdict (reviewing)`);
+    return { hasDeviations };
   }
 
   await recordConformance(app.data, planKey, {
@@ -110,17 +136,18 @@ const handler: AppJobHandler<In> = async (job, app) => {
     // Only enter the `reviewing` inbox scan when we actually have a `processKey` to key off — a
     // null key can never be found by `pollUserTasks` (it skips rows without `process_key`) nor
     // cleared by the `instanceTracking` `onTerminated` binding, so a `reviewing` row with no key
-    // would wedge forever. The invariant guard above already rejected `hasDeviations` with a null
+    // would wedge forever. The invariant guard above already rejected any escalation with a null
     // key, so `reviewing` here always carries a non-null `processKey`.
-    reviewStatus: hasDeviations ? "reviewing" : "reviewed",
+    reviewStatus: escalate ? "reviewing" : "reviewed",
   });
 
   app.log.info(
-    `conformance-record: ${planKey} — status=${status} deviations=${hasDeviations ? "yes" : "no"}`,
+    `conformance-record: ${planKey} — status=${status} deviations=${hasDeviations ? "yes" : "no"} agentSla=${agentSlaElapsed ? "yes" : "no"}`,
   );
   // Return the ground-truth `hasDeviations` as a process variable so the `gw-deviations` gateway
   // routes to the human ack task (retro.bpmn) — overriding the agent's hoisted flag with the value
-  // reconciled against the recorded counts above.
+  // reconciled against the recorded counts above. (The SLA arm routes to the escalation task
+  // directly, not through gw-deviations, so this flag is only read on the normal path.)
   return { hasDeviations };
 };
 

@@ -372,6 +372,41 @@ Notes:
   poller does not solicit a spurious review against the still-running round. The
   round cap and the review-wait timeout remain the outer safety nets.
 
+- **Non-converging same-surface churn guard (issue #870).** The no-progress guard
+  above catches a round that pushed NOTHING. Churn is the opposite failure mode: a
+  loop where EVERY round pushes a commit (so the head advances and the round
+  legitimately "progresses") yet never reaches a fixed point — a contested surface
+  (e.g. a fail-closed analyzer whose bypass forms are unbounded) keeps producing new
+  findings in the SAME file round after round, and the loop runs to `maxRounds`
+  without a human ever being asked to make the scope call. So on a head-advancing
+  `addressed` round, BEFORE parking for the next review, `pr.progress-check` reads
+  the PR's durable `rounds` history (`app/roundChurn.ts` `detectChurn`, the single
+  canonical detector) and escalates when the trailing run of CONSECUTIVE `addressed`
+  rounds is at least `CHURN_WINDOW` (4) long AND some single file appears in EVERY
+  round of that window. Requiring the SAME file across the whole window keeps normal
+  convergence — findings that move between areas and trend down — from escalating
+  early. The file names are mined from each round's free-text `summary` (URL spans
+  stripped, so a cited link is never mistaken for a repo path). When it fires, the
+  round routes to the SAME human escalation path the no-advance guard uses (`gw-husk`
+  → `persist-escalation-noprogress`) carrying a `noProgressReason:"churn"` SCOPE
+  question — it never parks at `waiting_review`. Two invariants keep the signal
+  honest across runs and resumes:
+    - **Run-scoped history.** The history read is filtered by the job's
+      `process_instance_key` (the `rounds` table is run-scoped — migration 102), so a
+      prior run's retained rows never leak into this run's window. A legacy NULL-key
+      row is dropped (fail-OPEN: dropping a row only ever reduces the churn signal).
+    - **Churn-reset watermark.** A churn escalation writes no `blocked` round
+      (`recordRound=false`) and the human-answer resume re-enters the SAME numeric
+      round (the counter only advances at the review-wait gateway), so the escalating
+      round number is persisted as `pull_requests.churn_escalated_round`
+      (migration 117, cleared on re-open with the rest of the per-run state).
+      `detectChurn` drops every round at or before that watermark, so the human's
+      scope decision restarts the churn clock: churn can only fire again after a
+      fresh `CHURN_WINDOW` of same-file rounds accumulates past the decision, exactly
+      as a recorded `needs_input`/`blocked` round would restart it.
+    A head that cannot be read, and a history read that throws, both fail OPEN (no
+    churn escalation) — a transient GitHub/datasource hiccup never fabricates one.
+
 - **Stale-output reset on round entry (issue #822).** `pr.capture-head` — the
   single task every entry into `review-round` routes through first (from `Start`,
   the review-loop re-enter, the human-answer resume, the husk auto-retry, and the
@@ -790,6 +825,47 @@ queries skip (`merging`), so a slow pass can't double-signal.
 | `NANO_PR_MERGE_ADMIN` | 0 | pass `--admin` on merge |
 | `NANO_PR_REVIEW_WAIT_TIMEOUT` | PT30M | ISO-8601 wait before a stalled review escalates (timer arm of the `wait-review` event-based gateway); malformed → default |
 | `NANO_PR_REVIEW_NUDGE_MINUTES` | 5 | cooldown between poller Copilot re-request nudges per PR (clamped 1–1440) |
+| `NANO_PR_AGENT_SLA_TIMEOUT` | PT2H | ISO-8601 liveness bound on an external **agent** service task (see §12.1); seeded as `agentSlaTimeout` at every process start that hosts one. Malformed → default |
+
+### 12.1 Agent-task liveness SLA (issue #849)
+
+An external **agent** service task (`<zeebe:agentDefinition agentType="external"/>`) is a durable
+wait on an external actor with **no human in the loop**: the worker renews the job's deadline for as
+long as the agent process is alive, so an unstaffed capability or a hung/looping agent that never
+fails its job would otherwise park the token forever (no incident, no escalation — the
+`classify-scope` 7h27m incident, nanobpm/nano-bpm#1308). The agent-task SLA closes that gap with a
+durable, in-process backstop — no external watchdog.
+
+- **Mechanism.** Every process start that hosts an external agent task seeds the validated
+  `agentSlaTimeout` process variable (`app/agentSla.ts` `AGENT_SLA_TIMEOUT`, env
+  `NANO_PR_AGENT_SLA_TIMEOUT`, default `PT2H`). Each *bounded* agent task carries an **interrupting
+  timer boundary** whose `<bpmn:timeDuration>=agentSlaTimeout` is evaluated at timer creation
+  (FEEL-expression duration). When the SLA elapses the boundary fires, cancels the stuck job, and
+  routes the token to the process's escalation path so a human is pulled in. It is deliberately much
+  shorter than the human-decision escalation SLA (`NANO_ESCALATION_SLA_TIMEOUT`, PT24H) so a stuck
+  agent surfaces quickly without interrupting a legitimately long task.
+- **Bounded today:** the implement-cell (`implement-task`), the merge-cell's trial-merge
+  (`trial-merge`), the merge-loop's `rebase` / `fix-ci`, and retro's `conformance` / `synthesize`.
+  The implement-cell is reached by **both** parents — a standalone `feature` run and a plan-fanout
+  wave slice — and each parent's callActivity maps `agentSlaTimeout` into the child explicitly.
+- **Pre-seeded, not yet bounded:** the convergence-loop (`review-round` / `adversarial-review` /
+  `classify-scope`) and plan-fanout (`plan` / `review-plan`) agent tasks sit on a back-edge loop
+  whose boundary the auto-layouter cannot yet route (#867), so their SLA boundaries are
+  intentionally deferred to #868. Plan-fanout's **inline** wave `trial-merge`
+  (`plan-fanout.bpmn:524-542`) — distinct from the standalone `merge-cell` process, which has no
+  callActivity caller — is likewise an external agent task with rerun back-edges and no
+  `agentSlaTimeout` boundary, and is deferred to #868 alongside them. They are seeded now as
+  preparation; the defect-class guard
+  (`app/agentic/vocab/agent-sla-boundary.test.ts`) covers exactly the bounded subset so a regression
+  on a *bounded* process is caught while the deferred ones stay out.
+- **Escalation routing.** The boundary never drops the token on the floor: implement-cell routes
+  `be_implement_sla` → `record-escalation-sla` (synthesises an SLA-specific question) → the shared
+  `human-escalation` cell; merge-cell routes `be_trial_agent_sla` → `record-trial-merge-sla` (its dedicated SLA recorder,
+  distinct from the normal-path `record-trial-merge`; persists a trial-merge audit row + answerable
+  question for the timed-out attempt) → `gw-trial` → `trial-merge-decision`;
+  retro routes each agent boundary → a `record-*-sla` task (persists a `plan_conformance` row at
+  `review_status='reviewing'` so the always-following `conformance-ack` settles it) →
+  `conformance-escalation`. Runtime coverage: `e2e/agent-sla-boundary.e2e.ts`.
 
 ## 13. Planning fan-out (`plan-fanout.bpmn`) — issue #14
 
