@@ -2173,14 +2173,19 @@ function retryResolutionLines(el: string, incoming: readonly string[], emits: re
       target: "appendPrompt",
     });
   }
-  // Clear the escalation controls (ESCALATION_LOCAL_VARS) AND the plain `note`: a worker's `note`
-  // result is declared node-local by ioMappingLines (it is a plan.md contract output) and would
-  // otherwise survive into the retried attempt's scope, where the NEXT escalation's context would
-  // surface it as if the worker had just written it.
-  outputs.push({ source: "=null", target: ESCALATION_NOTE_VAR });
-  outputs.push({ source: "=null", target: "note" });
-  outputs.push({ source: "=null", target: "value" });
-  outputs.push({ source: "=null", target: ESCALATION_DECISION_VAR });
+  // Clear the escalation controls (ESCALATION_LOCAL_VARS = decision/value/escalationNote), derived from
+  // the ONE source so a renamed control can't drift a second hardcoded list. These are declared
+  // node-local by ioMappingLines for BOTH kinds (agent and connector), so each clear lands in this
+  // subProcess scope, never the shared root.
+  //
+  // Do NOT clear the plain `note` here. `note` is a WORKER RESULT field that is node-local ONLY for an
+  // agent (it is in AGENT_RESULT_LOCAL_VARS, so the `cleared` result-set loop above already resets it on
+  // an agent retry). A connector does NOT declare `note` node-local (CONNECTOR_RESULT_LOCAL_VARS omits
+  // it, and it is neither an escalation control nor a connector emit), so an unconditional `note = null`
+  // here would land at the SHARED ROOT — leaking null across the node-isolation boundary and clobbering a
+  // parallel node's `note` — while for an agent it merely duplicates the `cleared` loop's reset
+  // (deliveryGraphCompiler.ts:2181, PR #863 Copilot "Previously missed").
+  for (const v of ESCALATION_LOCAL_VARS) outputs.push({ source: "=null", target: v });
   return [
     `      <bpmn:exclusiveGateway id="${el}_rg" name="retry node?" default="${el}_r2">`,
     ...incoming.map((id) => `        <bpmn:incoming>${id}</bpmn:incoming>`),

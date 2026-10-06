@@ -2806,8 +2806,42 @@ test("#863 node scope: a connector's fixed result metadata (connectorOutcome/con
   }
 });
 
+test("#863 node scope: a connector retry reset never clears the non-local `note` (no null leak to shared root); an agent still clears it via its node-local result set", async () => {
+  // Regression guard (PR #863 Copilot Medium "Previously missed", deliveryGraphCompiler.ts:2181):
+  // `note` is a WORKER RESULT field declared node-local ONLY for an agent (it is in
+  // AGENT_RESULT_LOCAL_VARS). A connector does NOT declare it node-local (CONNECTOR_RESULT_LOCAL_VARS
+  // omits it; it is neither an escalation control nor a connector emit). An unconditional
+  // `note = null` in the retry reset therefore lands at the SHARED ROOT for a connector — leaking null
+  // across the node-isolation boundary and clobbering a parallel node's `note`. The reset must clear
+  // `note` ONLY where it is actually node-local.
+  const graph = {
+    name: "connector-note-leak",
+    nodes: [
+      { id: "notify", kind: "connector", connector: { target: "slack:#a", payload: { pr: null } } },
+    ],
+    edges: [],
+  };
+  const rc = await compileOk(graph);
+  const cel = elementForNode(rc.bpmn, "notify");
+  const csub = rc.bpmn.slice(rc.bpmn.indexOf(`<bpmn:subProcess id="${cel}"`));
+  const cio = csub.slice(0, csub.indexOf("</zeebe:ioMapping>"));
+  assert(!cio.includes(`target="note"`), "the connector does not declare `note` node-local (so clearing it would write to root)");
+  const creset = rc.bpmn.slice(rc.bpmn.indexOf(`id="${cel}_retry"`), rc.bpmn.indexOf("</bpmn:intermediateThrowEvent>", rc.bpmn.indexOf(`id="${cel}_retry"`)));
+  assert(!creset.includes(`target="note"`), "the connector retry reset never clears `note` (would leak null to the shared root)");
+  // The escalation controls ARE node-local for a connector, so the reset still clears them.
+  for (const v of ["decision", "value", "escalationNote"]) {
+    assert(new RegExp(`<zeebe:output source="=null" target="${v}" />`).test(creset), `the connector reset still clears the node-local escalation control '${v}'`);
+  }
+  // An agent, by contrast, DOES clear `note` on retry — it is node-local (AGENT_RESULT_LOCAL_VARS) —
+  // and does so exactly once (the reset must not duplicate it).
+  const ra = await compileOk(PRODUCER_GATE);
+  const ael = elementForNode(ra.bpmn, "open");
+  const areset = ra.bpmn.slice(ra.bpmn.indexOf(`id="${ael}_retry"`), ra.bpmn.indexOf("</bpmn:intermediateThrowEvent>", ra.bpmn.indexOf(`id="${ael}_retry"`)));
+  const noteClears = areset.match(/<zeebe:output source="=null" target="note" \/>/g) ?? [];
+  assertEquals(noteClears.length, 1, "the agent reset clears `note` exactly once (node-local, not duplicated)");
+});
+
 test("node scope: an agent node never declares the connector-only result metadata (no cross-kind leakage of CONNECTOR_RESULT_LOCAL_VARS)", async () => {
-  // Fail-closed guard: the connector result vars are connector-specific; an agent node must not declare
   // them node-local (they are not part of an agent's completion contract), so the two localisation sets
   // stay disjoint-by-kind.
   const r = await compileOk(PRODUCER_GATE);
