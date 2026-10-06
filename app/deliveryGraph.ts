@@ -410,7 +410,7 @@ export const DELIVERY_SCAFFOLDING_VARS = ["boundFacts", "nodeInputs", "nodeInput
  * review — threads r4181027093 / r4181027147 / r4181322008). A reserved name is one a colliding emit
  * would genuinely break, and what breaks depends on the node kind:
  *
- *   • **Escalation controls** ({@link ESCALATION_LOCAL_VARS} — `decision`/`value`/`note`) and the shared
+ *   • **Escalation controls** ({@link ESCALATION_LOCAL_VARS} — `decision`/`value`/`escalationNote`) and the shared
  *     **scaffolding** ({@link DELIVERY_SCAFFOLDING_VARS}) are reserved for EVERY kind: they occupy the
  *     node's subProcess scope and an escalation Continue / the late-binding wiring writes them no matter
  *     how the emit's source is mapped.
@@ -426,7 +426,7 @@ export const DELIVERY_SCAFFOLDING_VARS = ["boundFacts", "nodeInputs", "nodeInput
  *   • A `wait`/`human` emit's source is a FIXED intermediate (`detail`/`mergedSha`/`prCount`/
  *     `resolvedArtifact`, `humanEmitValue`/`humanEmitArtifact`), never the fact's own name, so its config
  *     vars cannot collide with an emit source — a `wait` emitting `target` or a `human` emitting `prompt`
- *     is fine. (`decision`/`value`/`note` stay reserved for these kinds via the escalation controls.)
+ *     is fine. (`decision`/`value`/`escalationNote` stay reserved for these kinds via the escalation controls.)
  *
  * The node-local RESULT sets ({@link AGENT_RESULT_LOCAL_VARS} / {@link CONNECTOR_RESULT_LOCAL_VARS})
  * are deliberately NOT reserved — with ONE exception. An agent emitting `pr` (the canonical converge
@@ -2383,7 +2383,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
             // Fail CLOSED on a reserved-name collision (issue #863 review — threads r4181027093 /
             // r4181027147 / r4181322008). A fact name is an otherwise-unrestricted identifier, but an
             // `agent`/`connector` node's emit source IS the fact's own name, declared node-local on the
-            // subProcess — the SAME scope the escalation form controls (`decision`/`value`/`note`) and
+            // subProcess — the SAME scope the escalation form controls (`decision`/`value`/`escalationNote`) and
             // the node's OWN seeded config variables occupy. An emit named `decision` is overwritten by
             // an escalation Continue (publishing `<el>_decision="continue"` instead of the agent's
             // routing value); an emit named after the node's OWN config (`target`/`payload`/`dedupeKey`/
