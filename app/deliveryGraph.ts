@@ -19,6 +19,7 @@
 // Every error carries a JSON-path-qualified `path` (`nodes[2].kind`, `edges[1].from`, …) so the
 // caller can point the author straight at the offending input.
 
+import { TRANSCRIPT_URL_BASE_VAR } from "./agentic/transcript-url.ts";
 import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
@@ -107,10 +108,13 @@ export type DeliveryGraphErrorCode =
   | "credential-in-job-type"
   | "embedded-url-in-job-type"
   | "scheme-relative-url-in-job-type"
+  | "invalid-form-key"
+  | "credential-in-form-key"
   | "invalid-credential-env"
   | "invalid-backoff"
   | "unbound-pr"
-  | "partial-scope-close";
+  | "partial-scope-close"
+  | "human-unroutable-emits";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
  * input (`nodes[2].kind`, `edges[1].from`, `nodes[0].emits[1].name`), `message` is human-actionable,
@@ -258,6 +262,216 @@ function isDeliveryFactType(type: unknown): type is DeliveryFactType {
  * hold. */
 export const FACT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export const FACT_NAME_MAX_LENGTH = 128;
+
+/** The flat result variables a fleet agent worker returns on job completion — the CANONICAL node-local
+ * agent result contract. Every field a `resources/prompts/*.md` output contract tells an agent to
+ * return is listed here: the blocked-outcome fallback `{status, summary, question}`, the free-form
+ * result fields agents commonly emit, the optional structured `delta` an implementer reports
+ * (resources/prompts/feature.md), the PR identity fields, and the review/audit contract fields
+ * (`plan-review.md` returns `approved`/`findings`; `conformance.md` returns `commentUrl`,
+ * `hasDeviations`, and the per-slice/deviation counts). Nano propagates job-completion variables to the
+ * NEAREST scope that defines each name, else the ROOT — so the compiler declares each `null` on the
+ * node's subProcess (and the retry reset clears it) to keep a node's report node-local; a field omitted
+ * here leaks to the shared root, where a parallel node overwrites it and a retry leaves it stale
+ * (issue #863 "Previously missed"). Defined HERE, not in the compiler, so the validator's
+ * reserved-fact-name set can derive from it without an import cycle.
+ *
+ * NOTE: these are NOT reserved as emit names — an agent MAY legitimately emit a fact named `pr` (the
+ * canonical `agent → connector[converge] → wait[pr]` shape emits the PR it opened under `pr`). The
+ * worker's result write and the emit publish the SAME node-local value, so they agree; the retry reset
+ * clearing both is correct (the retry must re-produce the fact). Only the escalation controls and the
+ * config variables the reset would wrongly null are reserved — see {@link reservedDeliveryFactNames}. */
+export const AGENT_RESULT_LOCAL_VARS = [
+  "status",
+  "summary",
+  "question",
+  "output",
+  "error",
+  "pr",
+  "prUrl",
+  "pullRequest",
+  "branch",
+  "commits",
+  "exitCode",
+  "next_steps",
+  "issue",
+  "completed",
+  "pushed",
+  "truncated",
+  "agentCheckpoint",
+  "transcriptUrl",
+  "delta",
+  "approved",
+  "findings",
+  "commentUrl",
+  "hasDeviations",
+  "slicesMet",
+  "slicesReduced",
+  "slicesNotVerified",
+  "deviationsRaised",
+  "deviationsUnraised",
+  // The remaining built-in prompt result contracts (issue #863 review — thread r4181321969). Each is a
+  // documented output of a `resources/prompts/*.md` agent that a delivery node may run; omitted here it
+  // would write at the shared ROOT, where a parallel node overwrites it and a retry retains a stale
+  // value:
+  //   • `dependsOn` — fix-ci.md / rebase.md: the PR(s) that must merge first (`waiting-on-pr`).
+  //   • `adversarialFindings` / `adversarialSummary` — adversarial-review.md.
+  //   • `scopeBlocked` / `scopeBlockReason` — scope-classify.md.
+  //   • `tasks` — plan.md (the decomposed task list).
+  //   • `result` / `conflicts` / `failing` — trial-merge.md.
+  "dependsOn",
+  "adversarialFindings",
+  "adversarialSummary",
+  "scopeBlocked",
+  "scopeBlockReason",
+  "tasks",
+  "result",
+  "conflicts",
+  "failing",
+  // `note` — plan.md's free-text operator note (returned alongside `{ tasks: [] }`). It MUST be
+  // node-local: left at the shared root, a parallel node's `note` overwrites it. The escalation
+  // retry-guidance control is the DISTINCT `escalationNote` (ESCALATION_LOCAL_VARS) precisely so this
+  // worker result can never be read back as operator input (PR #863 "Previously missed").
+  "note",
+] as const;
+
+/** The fixed result metadata the delivery-connector worker returns on every job completion
+ * (`connectorOutcome`/`connectorDedupeKey`/`connectorDetail` — see `dispatchConnector` in
+ * app/deliveryConnector.ts). Like the agent result set, these are declared node-local and cleared on
+ * retry so two parallel connectors never overwrite one shared root result. Defined HERE so the
+ * validator's reserved set can derive from it without a cycle. */
+export const CONNECTOR_RESULT_LOCAL_VARS = [
+  "connectorOutcome",
+  "connectorDedupeKey",
+  "connectorDetail",
+] as const;
+
+/** The human-node scratch a `human` subProcess writes/reads while the operator completes (or times out
+ * of) its user task — the emit scratch the task output mapping captures (`humanEmitValue`/
+ * `humanEmitArtifact`), the task's fixed outcome/note (`humanOutcome`/`humanNote`), and the form
+ * controls the output mapping SELECTS from (`value`/`resolvedArtifact`/`note`). None of these is
+ * node-unique, so left at the shared ROOT they cross-publish between parallel human nodes exactly as an
+ * un-localised agent/connector result once did (PR #863 review, thread r4199949849 "Isolate human
+ * subprocess scratch state"): if human A completes while human B times out WITHOUT producing a value,
+ * B's subProcess output reads A's root `humanEmitValue`/`humanEmitArtifact` and publishes it as B's own
+ * `<el>_<fact>`; likewise a B that completes on a blank form reads A's root `value`/`resolvedArtifact`.
+ * Declared node-local on each human subProcess (seeded `=null`, like the agent/connector result sets)
+ * so Nano's nearest-scope propagation lands each human's capture inside its OWN subProcess. The
+ * node's explicit fact-named control (`<factName>`, read first by a bespoke single-emit form) is
+ * localised ALONGSIDE this set from the node's declared emits, since it is dynamic per node. Defined
+ * HERE (the validator's home) so the reserved set stays derivable without a cycle. */
+export const HUMAN_RESULT_LOCAL_VARS = [
+  "humanEmitValue",
+  "humanEmitArtifact",
+  "humanOutcome",
+  "humanNote",
+  "value",
+  "resolvedArtifact",
+  "note",
+] as const;
+
+/** The escalation-completion variable that chooses how a parked `agent`/`connector` node resumes
+ * (retry-node resolution): completing a `__esc` / `__contract` escalation with `{ decision: "retry" }`
+ * re-runs the node's job; any other value — or none — continues past it. Defined HERE (the validator's
+ * home) so {@link ESCALATION_LOCAL_VARS} derives from it and the compiler imports the ONE source —
+ * never a second hardcoded `"decision"` that could drift. */
+export const ESCALATION_DECISION_VAR = "decision";
+export const ESCALATION_DECISION_RETRY = "retry";
+
+/** The escalation-completion variable that carries the operator's optional retry-guidance note
+ * (retry-node resolution): on `decision: "retry"` the retry reset appends it to the agent's prompt as
+ * "Operator guidance for this retry: …". Named `escalationNote` — NOT the plain `note` — because the
+ * escalation form's controls live in the SAME node-local subProcess scope a worker's job-completion
+ * result propagates into, and `note` is a documented WORKER RESULT field (`resources/prompts/plan.md`
+ * returns one): an operator who retries WITHOUT a note (the form permits omitting it) would otherwise
+ * have the previous attempt's worker-produced `note` fed back to the agent as if it were operator
+ * guidance (PR #863 Copilot "Previously missed", deliveryGraphCompiler.ts:2156). The plain `note`
+ * name is instead a node-local WORKER RESULT field ({@link AGENT_RESULT_LOCAL_VARS}), so no emit or
+ * escalation control can alias it. Defined HERE (the validator's home) so {@link ESCALATION_LOCAL_VARS}
+ * derives from it and the compiler imports the ONE source — never a second hardcoded `"escalationNote"`
+ * that could drift. */
+export const ESCALATION_NOTE_VAR = "escalationNote";
+
+/** The variables an escalation completion writes (the {@link ESCALATION_DECISION_VAR}, plus the
+ * escalation form's `value` + {@link ESCALATION_NOTE_VAR}). They are declared node-LOCAL on the node's
+ * subProcess so a completion never leaks into the shared root scope, where a sibling node's escalation
+ * would read a stale value. Defined HERE so the validator's reserved set can derive from it without a
+ * cycle. */
+export const ESCALATION_LOCAL_VARS = [ESCALATION_DECISION_VAR, "value", ESCALATION_NOTE_VAR] as const;
+
+/** The subProcess **config** variable names an `agent` node's compiled `ioMappingLines` seeds from the
+ * runner's `nodeInputs.<el>`. These live in the SAME node-local subProcess scope the emit's source
+ * variable occupies (a service-node fact's source is the fact's own name), so an emit named after one
+ * collides with the node's own configuration. */
+export const AGENT_CONFIG_VARS = ["jobType", "appendPrompt", "nodeTimeout", TRANSCRIPT_URL_BASE_VAR] as const;
+
+/** The subProcess **config** variables a `connector` node seeds (see {@link AGENT_CONFIG_VARS}). */
+export const CONNECTOR_CONFIG_VARS = ["target", "dedupeKey", "payload", "nodeTimeout"] as const;
+
+/** The subProcess **config** variables a `wait` node seeds. A `wait` emit's source is NOT the fact's own
+ * name ({@link factSourceVar} maps it to `mergedSha`/`prCount`/`resolvedArtifact`/`detail`), so these do
+ * NOT collide with a wait emit — listed for completeness/derivation, not reserved against a wait emit. */
+export const WAIT_CONFIG_VARS = ["gateKey", "probe", "probeTimeout", "probePollEvery"] as const;
+
+/** The subProcess **config** variables a `human` node seeds. A `human` emit's source is NOT the fact's
+ * own name ({@link factSourceVar} maps it to `humanEmitValue`/`humanEmitArtifact`), so these do NOT
+ * collide with a human emit — listed for completeness/derivation, not reserved against a human emit. */
+export const HUMAN_CONFIG_VARS = [
+  "escalationSlaTimeout",
+  "escalationAssignee",
+  "prompt",
+  "nodeId",
+  "emitMode",
+  "emitLabel",
+] as const;
+
+/** The shared late-binding/preflight scaffolding variables every node's subProcess occupies. An emit
+ * named after one collides with the node's own wiring regardless of kind, so it is reserved for ALL
+ * kinds. */
+export const DELIVERY_SCAFFOLDING_VARS = ["boundFacts", "nodeInputs", "nodeInputsPresent"] as const;
+
+/** The RESERVED variable names an emitted-fact name must not collide with, **kind-aware** (issue #863
+ * review — threads r4181027093 / r4181027147 / r4181322008). A reserved name is one a colliding emit
+ * would genuinely break, and what breaks depends on the node kind:
+ *
+ *   • **Escalation controls** ({@link ESCALATION_LOCAL_VARS} — `decision`/`value`/`escalationNote`) and the shared
+ *     **scaffolding** ({@link DELIVERY_SCAFFOLDING_VARS}) are reserved for EVERY kind: they occupy the
+ *     node's subProcess scope and an escalation Continue / the late-binding wiring writes them no matter
+ *     how the emit's source is mapped.
+ *
+ *   • **Config variables** are reserved ONLY for the kind whose own config they are — and only for
+ *     `agent`/`connector`, the kinds whose emit source IS the fact's own name ({@link factSourceVar}).
+ *     The retry reset clears every declared emit source var, so an `agent` emitting `appendPrompt`/
+ *     `jobType`/`nodeTimeout`/`transcriptUrlBase`, or a `connector` emitting `target`/`payload`/
+ *     `dedupeKey`/`nodeTimeout`, has its CONFIG nulled without re-entering the input mappings — the
+ *     retried node activates unconfigured. An `agent` emitting `target` (a connector-only config var) is
+ *     NOT a collision: an agent seeds no `target`. A cross-kind name is therefore allowed.
+ *
+ *   • A `wait`/`human` emit's source is a FIXED intermediate (`detail`/`mergedSha`/`prCount`/
+ *     `resolvedArtifact`, `humanEmitValue`/`humanEmitArtifact`), never the fact's own name, so its config
+ *     vars cannot collide with an emit source — a `wait` emitting `target` or a `human` emitting `prompt`
+ *     is fine. (`decision`/`value`/`escalationNote` stay reserved for these kinds via the escalation controls.)
+ *
+ * The node-local RESULT sets ({@link AGENT_RESULT_LOCAL_VARS} / {@link CONNECTOR_RESULT_LOCAL_VARS})
+ * are deliberately NOT reserved — with ONE exception. An agent emitting `pr` (the canonical converge
+ * shape) writes the same node-local value the result field holds, so they agree, and the retry reset
+ * correctly clears both. Reserving the whole set would forbid the flagship
+ * `agent → connector[converge] → wait[pr]` pattern. The exception is the agent completion-control
+ * `status`: the producer status gate reads that SAME node-local field as the node's completion status
+ * and accepts only `done`/`opened`/`skipped`, so an agent emit named `status` whose routing value is
+ * anything else (`approved`, …) ALWAYS escalates, and `status="done"` can never take an `approved`
+ * branch — the emit contract and the gate conflict. `status` is therefore reserved for an `agent`
+ * (a connector has no producer status gate, so its `status` emit collides with nothing and stays
+ * allowed); the rest of the result set (`pr`, `summary`, …) remains unreserved.
+ * {@link validateDeliveryGraph} rejects a reserved name (fail-closed at authoring time); derived from
+ * the same source-of-truth sets so it can never drift from them. */
+export function reservedDeliveryFactNames(kind: DeliveryNodeKind): readonly string[] {
+  const config =
+    kind === "agent" ? AGENT_CONFIG_VARS : kind === "connector" ? CONNECTOR_CONFIG_VARS : [];
+  // `status` is reserved ONLY for an agent (the producer-gate completion control — see the doc above).
+  const completionControl = kind === "agent" ? ["status"] : [];
+  return [...new Set<string>([...ESCALATION_LOCAL_VARS, ...DELIVERY_SCAFFOLDING_VARS, ...config, ...completionControl])];
+}
 
 /** A node `id` must match openapi's `DeliveryNodeCommon.id` `^[A-Za-z_][A-Za-z0-9_.-]*$` and stay
  * within its 128-char cap. Re-enforced here INDEPENDENTLY of the OpenAPI shape gate because later
@@ -2090,6 +2304,71 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         message: "`human` config, when present, must be an object",
         code: "missing-config",
       });
+    } else if (
+      isRecord(rawNode.human) &&
+      rawNode.human.formKey !== undefined &&
+      typeof rawNode.human.formKey !== "string"
+    ) {
+      // A PRESENT-but-non-string `human.formKey` (`42`, `{}`, `[]`, `true`) is the fail-open sibling of
+      // the string-gated checks below: text/JSON ingress can pass a non-string, the `typeof === "string"`
+      // branch is skipped, the graph is ACCEPTED, and the compiler silently falls back to a generated form
+      // instead of the author's declared executable `<zeebe:formDefinition formId=…>` key. Reject it
+      // explicitly — fail CLOSED on a malformed executable config rather than silently dropping it (PR #863
+      // review). The required-config loop above already rejects a non-string `agent.jobType`/`connector.target`
+      // (both REQUIRED, so `typeof value !== "string"` is caught there); `human` config is optional, leaving
+      // `formKey` the one baked-verbatim field that reaches here untyped.
+      errors.push({
+        path: `${path}.human.formKey`,
+        message: "`human.formKey`, when present, must be a string",
+        code: "invalid-form-key",
+      });
+    } else if (isRecord(rawNode.human) && typeof rawNode.human.formKey === "string") {
+      // A delivery `human` node's explicit `human.formKey` is baked VERBATIM into the executable
+      // `<zeebe:formDefinition formId=…>` attribute (it resolves a deployed `.form` by value), so — exactly
+      // like `agent.jobType` above — it must be REJECTED, not silently rewritten/redacted, when it carries a
+      // character the attribute sanitiser would strip/fold or a credential-bearing URL that would leak into
+      // the compiled BPMN. The compiler renders it through `attr()` (so a quote can no longer break out of
+      // the attribute), but that neither undoes a silent XML-rewrite nor keeps a credential URL out of the
+      // deployed model — this authoring-time gate does (PR #863 review — HIGH formKey finding at
+      // deliveryGraphCompiler.ts:2361). The runtime TRIMS the key before use (`resolveHumanForm`), so
+      // validate the trimmed value and skip blank (blank → generic form, carries nothing to leak).
+      const formKey = rawNode.human.formKey.trim();
+      if (formKey.length > 0) {
+        if (hasXmlInvalidChars(formKey) || hasAttrNormalizedWhitespace(formKey)) {
+          errors.push({
+            path: `${path}.human.formKey`,
+            message:
+              `\`human.formKey\` ${JSON.stringify(redactString(stripXmlInvalidChars(formKey)))} contains a character that would be ` +
+              "silently rewritten when emitted as the executable `<zeebe:formDefinition formId=…>` attribute — an XML-1.0-invalid " +
+              "character (control characters, U+FFFE/U+FFFF, or an unpaired surrogate) that the sanitiser strips, or attribute " +
+              "whitespace (tab, LF, CR) that XML attribute-value normalization folds to a space — so it would resolve a DIFFERENT " +
+              "(wrong) deployed form and must be rejected rather than silently rewritten into a different form key",
+            code: "invalid-form-key",
+          });
+        } else if (
+          isUrlShaped(formKey) ||
+          hasEmbeddedCredential(formKey) ||
+          hasEmbeddedUrl(formKey) ||
+          hasSchemeRelativeAuthority(formKey)
+        ) {
+          // One code (not jobType's five per-shape codes) covers every URL/credential shape: a form key
+          // names a deployed `.form`, so the distinction between a whole-value URL, an embedded
+          // `//user:pass@host`, an explicit-scheme `scheme://…`, and a scheme-relative `//host` is
+          // immaterial — none is a legal form id, and the operator fix is the same. Gated behind the
+          // XML/whitespace check above so a single value is reported once. Message redacted so the 400
+          // never echoes a credential.
+          errors.push({
+            path: `${path}.human.formKey`,
+            message:
+              `\`human.formKey\` ${JSON.stringify(redactString(stripXmlInvalidChars(formKey)))} is URL-/credential-shaped — a form ` +
+              "key names a deployed `.form` resource, never a URL, and since the executable `<zeebe:formDefinition formId=…>` " +
+              "carries it verbatim, a credential embedded in it (`//user:pass@host`, `scheme://…?token=…`, or a scheme-relative " +
+              "`//host?token=…`) would leak into the compiled BPMN even though the preview path redacts it. Use a plain deployed " +
+              "form id and carry any endpoint/credential elsewhere",
+            code: "credential-in-form-key",
+          });
+        }
+      }
     }
 
     // Collect + validate this node's typed emitted facts (uniqueness within the node). Registered
@@ -2142,6 +2421,32 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
             });
             return;
           }
+          if (isDeliveryNodeKind(kind) && reservedDeliveryFactNames(kind).includes(rawFact.name)) {
+            // Fail CLOSED on a reserved-name collision (issue #863 review — threads r4181027093 /
+            // r4181027147 / r4181322008). A fact name is an otherwise-unrestricted identifier, but an
+            // `agent`/`connector` node's emit source IS the fact's own name, declared node-local on the
+            // subProcess — the SAME scope the escalation form controls (`decision`/`value`/`escalationNote`) and
+            // the node's OWN seeded config variables occupy. An emit named `decision` is overwritten by
+            // an escalation Continue (publishing `<el>_decision="continue"` instead of the agent's
+            // routing value); an emit named after the node's OWN config (`target`/`payload`/`dedupeKey`/
+            // `nodeTimeout` on a connector, `appendPrompt`/`jobType`/… on an agent) is NULLED by the
+            // retry reset, so the retried node activates unconfigured. The set is KIND-AWARE
+            // (`reservedDeliveryFactNames`): only the kinds whose emit source is the fact's own name
+            // reserve their own config, so a `wait` emitting `target` or a `human` emitting `prompt`
+            // (whose sources are fixed intermediates) is NOT rejected. Reject the whole CLASS at
+            // authoring time rather than patch one name.
+            errors.push({
+              path: `${path}.emits[${j}].name`,
+              message:
+                `emitted fact name "${rawFact.name}" collides with a reserved delivery variable ` +
+                `(an escalation control, the shared scaffolding, or a ${kind} node's own subProcess ` +
+                "config variable) — an escalation Continue would overwrite it or a Retry would null " +
+                "the node's config. " +
+                "Rename the fact (e.g. `decision` → `verdict`, `target` → `targetRef`).",
+              code: "invalid-fact-name",
+            });
+            return;
+          }
           if (!isDeliveryFactType(rawFact.type)) {
             // emits are TYPED (Decision 3/4). An invalid/missing `type` must be rejected even when the
             // OpenAPI shape validator is bypassed, or a later step reading the type allowlist breaks.
@@ -2162,6 +2467,34 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     if (typeof id === "string" && id.length > 0 && !nodeFacts.has(id)) {
       nodeFacts.set(id, facts);
       nodeFactTypes.set(id, factTypes);
+    }
+
+    // Reject a `human` node whose emits no static form can capture (PR #863 review — threads
+    // deliveryGraphCompiler.ts:1859 / :2451 / :1927). A human form captures ONE value: the generic form a
+    // single non-artifact `value`, the publish form a single `resolvedArtifact`. A node emitting ≥2 typed
+    // facts resolves to the agent-router (no static form holds them) — but the compiled generic form has
+    // no control for the extra facts, and a human node has no Retry path, so completing the form would
+    // publish NULL for every uncapturable emit and permanently schedule downstream consumers with missing
+    // required facts. An explicit `human.formKey` is NOT a workaround for a ≥2-emit node (thread
+    // r4184443511): for a SINGLE emit the compiled task's ioMapping (`humanBodyLines`) now reads the
+    // fact-named field ahead of the canonical `value`/`resolvedArtifact` control (so a bespoke
+    // single-value/single-artifact form IS wired — thread deliveryGraphCompiler.ts:1929), but that
+    // per-fact mapping is emitted for the single-emit case only; a ≥2-emit explicit-form node still reads
+    // just the fixed `value`/`resolvedArtifact`/`note` controls and would publish null for every extra
+    // emit. Reject the whole CLASS at authoring time: split the emits across single-emit human nodes.
+    if (kind === "human" && factTypes.size >= 2) {
+      errors.push({
+        path: `${path}.emits`,
+        message:
+          `human node "${String(id)}" emits ${factTypes.size} typed facts but no static form can ` +
+          "capture more than one value (the generic form captures a single non-artifact `value`, the " +
+          "publish form a single `resolvedArtifact`) — completing its form would publish null for the " +
+          "uncapturable emits, and a human node has no Retry path to recover. An explicit `human.formKey` " +
+          "does not help: the compiled task's ioMapping reads only the fixed value/resolvedArtifact/note " +
+          "controls, never a bespoke form's per-fact fields. Split the emits across separate single-emit " +
+          "human nodes.",
+        code: "human-unroutable-emits",
+      });
     }
   });
 

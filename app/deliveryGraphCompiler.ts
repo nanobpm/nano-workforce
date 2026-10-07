@@ -38,21 +38,34 @@ import { TRANSCRIPT_URL_BASE_VAR, TRANSCRIPT_URL_VAR } from "./agentic/transcrip
 import { CONVERGE_MERGE_TARGET, CONVERGE_TARGET, isConvergeTarget, MERGE_MAIN_TARGET } from "./convergeTargets.ts";
 import { DELIVERY_CONNECTOR_TASK_TYPE } from "./deliveryConnector.ts";
 import {
+  AGENT_RESULT_LOCAL_VARS,
   analyzeExclusiveTopology,
+  CONNECTOR_RESULT_LOCAL_VARS,
   canonicalJson,
   type DeliveryGraphError,
   deliveryNodeFacts,
+  ESCALATION_DECISION_RETRY,
+  ESCALATION_DECISION_VAR,
+  ESCALATION_LOCAL_VARS,
+  ESCALATION_NOTE_VAR,
+  HUMAN_RESULT_LOCAL_VARS,
   hasXmlInvalidChars,
   redactConnectorValue,
   resolveDeliveryFrom,
   stripXmlInvalidChars,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
-import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
+import { DELIVERY_CONTRACT_TWIN_SUFFIX, DELIVERY_ESCALATION_TWIN_SUFFIX, DELIVERY_HUMAN_ELEMENT, DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX, ESCALATION_FORM, GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
 import { layoutBpmnOffThread } from "./layoutOffThread.ts";
-import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactEmbeddedCredential, redactString } from "./readiness.ts";
+import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactString } from "./readiness.ts";
+// `redactFreeText` now lives in the low-level `redactText.ts` helper (both this compiler and
+// `deliveryHuman.ts` import it there) to break the former `compiler ⇄ deliveryHuman` import cycle
+// (PR #863 review). Re-exported here so existing `./deliveryGraphCompiler.ts` consumers keep resolving it.
+import { redactFreeText } from "./redactText.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
+
+export { redactFreeText };
 
 /** A display-safe rendering of a `wait` probe's target for user-visible BPMN name/documentation
  * (issue #778 review): a `command` target is an arbitrary shell snippet that can embed a secret, so it
@@ -161,8 +174,12 @@ function humanTaskElement(element: string): string {
 /** The BPMN element id a service node's bounded-timeout escalation user task carries — same
  * human-completable convention as a human node, so a stalled `agent`/`wait`/`connector` escalates onto
  * the Tasks inbox and is answerable by a human OR an agent (ADR 0046). */
-function escalationTaskElement(element: string): string {
-  return `${DELIVERY_HUMAN_ELEMENT}__${element}__esc`;
+function escalationTaskElement(element: string, kind?: DeliveryNode["kind"]): string {
+  // A `wait` gate's escalation has no retry semantics, so it renders the select-less generic form and
+  // stamps the `__wait` kind marker into its id — letting `escalationFormId` DERIVE that form from the
+  // id rather than inferring the retry-capable form from the shared `__esc` suffix (PR #863 review).
+  const suffix = kind === "wait" ? DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX : DELIVERY_ESCALATION_TWIN_SUFFIX;
+  return `${DELIVERY_HUMAN_ELEMENT}__${element}${suffix}`;
 }
 
 /** The BPMN element id an `agent` node's PRODUCER-CONTRACT escalation user task carries (issue #731) —
@@ -172,7 +189,35 @@ function escalationTaskElement(element: string): string {
  * a producer that finishes without doing its job escalates AT that node and is answerable by a human
  * OR an agent. */
 function contractEscalationTaskElement(element: string): string {
-  return `${DELIVERY_HUMAN_ELEMENT}__${element}__contract`;
+  return `${DELIVERY_HUMAN_ELEMENT}__${element}${DELIVERY_CONTRACT_TWIN_SUFFIX}`;
+}
+
+// ESCALATION_DECISION_VAR / ESCALATION_DECISION_RETRY / ESCALATION_LOCAL_VARS / AGENT_RESULT_LOCAL_VARS /
+// CONNECTOR_RESULT_LOCAL_VARS are imported from ./deliveryGraph.ts (their canonical home — the
+// validator's reservedDeliveryFactNames derives from them there without an import cycle).
+// ESCALATION_LOCAL_VARS is [ESCALATION_DECISION_VAR,"value",ESCALATION_NOTE_VAR]; AGENT_RESULT_LOCAL_VARS is the
+// canonical node-local agent result contract (every resources/prompts/*.md output field);
+// CONNECTOR_RESULT_LOCAL_VARS the connector's fixed result metadata. All three are declared node-local
+// on the subProcess and cleared on retry so a node's report never leaks to the shared root.
+
+/** The node-local boolean the preflight input mapping binds (see {@link nodeInputsPreflightFeel}). */
+const NODE_INPUTS_PREFLIGHT_VAR = "nodeInputsPresent";
+
+/** FEEL for the per-node preflight guard: `true` when the runner-seeded `nodeInputs.<el>` config is
+ * present, else a FEEL `assert` failure — an input-mapping incident on the node whose message names the
+ * cause and the fix, instead of a node that runs with null config and escalates with no explanation. */
+export function nodeInputsPreflightFeel(el: string): string {
+  const present = `is defined(nodeInputs) and nodeInputs != null and is defined(nodeInputs.${el}) and nodeInputs.${el} != null`;
+  const cause =
+    `delivery-graph node ${el}: its runner-seeded config nodeInputs.${el} is missing from the process ` +
+    "instance (lost root variables?). Restore the instance's root variables (nodeInputs), then RE-ENTER " +
+    "the node's sub-process from OUTSIDE (relaunch/re-enter the node) so its subProcess input mappings " +
+    "re-evaluate against the restored config. Do NOT only resolve this incident, and do NOT use this " +
+    "node's in-subprocess \"Retry this step\" loop: resolving re-evaluates just this leaf's inputs, and " +
+    "the retry loop goes straight back to the inner service task — neither re-runs the subProcess entry " +
+    "mappings, so the subProcess-seeded config (prompt/appendPrompt/nodeTimeout, connector " +
+    "target/payload/dedupeKey) stays null and the job would run unconfigured.";
+  return `=assert(true, ${present}, ${feelStr(cause)})`;
 }
 
 /** A distinctive infix stamped into the compiler-generated resume-validity flag variable ({@link
@@ -1100,82 +1145,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * in `deliveryGraph.ts`) so the DISPLAY path here and `validateDeliveryGraph`'s reject/error path share
  * ONE redactor — no drift surface (issue #778 review). */
 
-/** Redact credential-bearing pieces of any URL embedded in FREE-FORM prose (a node's authored
- * `prompt`), IN PLACE. Unlike {@link redactString} — tuned for a single opaque target string, where it
- * truncates from the first `?`/`#` to end-of-string — this finds each URL-shaped token *within*
- * surrounding prose (`scheme://…` or a scheme-relative `//…`) and strips only that token's
- * `user:pass@` userinfo and `?query`/`#fragment` via `redactString`, leaving the prose (and ordinary
- * punctuation such as a `?` ending a sentence) intact. Applied to the DISPLAY name/documentation only —
- * a prompt is up to 20 000 chars of arbitrary text that can embed a bearer token or private URL, and
- * the deployed `<bpmn:documentation>`/name is visible to modeler/explorer readers; the RAW prompt still
- * reaches the runtime job input (`appendPrompt`/`prompt`) unmodified (issue #778 review). Deterministic
- * and total. */
-export function redactFreeText(value: string): string {
-  // Strip XML-invalid display characters BEFORE tokenizing/redacting so every scan runs on the exact
-  // string the renderer emits. Otherwise a control char embedded in a URL (`//us\x0Ber:pass@…`) breaks
-  // the `//[^\s]+` token match, escapes redaction, then reconstructs the credential once `escapeXml`/
-  // `stripXmlInvalidChars` drops the control at render time (issue #778 review — same class as the
-  // connector/probe strip-before-classify fix).
-  const cleaned = stripXmlInvalidChars(value);
-  // Embedded credential userinfo: DERIVE from the ONE canonical redactor {@link redactEmbeddedCredential}
-  // (`EMBEDDED_CREDENTIAL_SRC` = `//[^/?#]*@`) rather than a bespoke belt heuristic. Its `[^/?#]` class
-  // spans spaces/TABs/newlines up to the LAST `@` before a `/`/`?`/`#`, so EVERY `//<userinfo>@` shape
-  // collapses uniformly to `//***@` — a colon-prefix `//user:pass@`, a colon-LESS bearer separated from
-  // its `@host` by a word or space (`//token part@host`, `//token @host`), a userinfo split by a raw
-  // CR/LF/TAB, and a malformed multi-`@` authority (`//user:pass@ss@host`) — with NO second "what is a
-  // credential" implementation that can drift from the canonical redactor/validator (`hasEmbeddedCredential`)
-  // (issue #783 review — thread deliveryGraphCompiler.ts:1140; the earlier bespoke colon-less bridge
-  // stopped on the first non-whitespace char after the space and leaked `//token part@host`). A `//…@`
-  // span is UNAMBIGUOUSLY a credential wherever it sits, so redacting a prose `//word …@host` too is the
-  // SAFE direction: the RAW prompt still reaches the runtime job input unmodified — only the operator-
-  // visible display doc loses the span. The `[^/?#]` bound also keeps the userinfo from swallowing a `?`
-  // marker (`//host?token=secret@tail` has no userinfo — its `@` rides the query), leaving that tail to
-  // the query/fragment belt below.
-  const credStripped = redactEmbeddedCredential(cleaned);
-  // Query/fragment across a whitespace BREAK: the primary `//[^\s]+` token below stops at the break, so a
-  // `//host/?\nTOKEN=secret` would leave the value visible in the XML-preserved doc. The linear belt walks
-  // each SPACE-bounded `//`-run (crossing an embedded CR/LF/TAB the primary token stopped at) and
-  // CONSERVATIVELY redacts its `?query`/`#fragment` tail through the span's space boundary — a continuation
-  // past the break is indistinguishable from a split value, so we never keep the far side (issue #778
-  // review — thread deliveryGraphCompiler.ts:1115).
-  const belted = redactQueryFragmentSpans(credStripped);
-  return belted.replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
-}
-
-/** Linear (backtracking-free) newline-aware belt companion to {@link redactFreeText}'s primary
- * whitespace-bounded pass. Each `//`-run is bounded by a literal SPACE (0x20) — so a single span may
- * cross a CR/LF/TAB *inside* the URL that the primary `//[^\s]+` token stopped at. Credential userinfo is
- * already collapsed to `//***@` by the canonical {@link redactEmbeddedCredential} before this runs, so the
- * belt's SOLE remaining job is a `?query`/`#fragment` tail: it redacts CONSERVATIVELY from the first
- * `?`/`#` marker through the span's space boundary — a continuation past an embedded break is
- * indistinguishable from a split value, so the far side is never kept. A span with no `?`/`#` (ordinary
- * prose — a `//comment` reference, an already-collapsed `//***@host`) is returned untouched. The scan is a
- * single left-to-right walk using `indexOf`/`charCodeAt` over spans bounded by the next SPACE, with no
- * regex backtracking, so a 20 000-char adversarial prompt cannot trigger catastrophic backtracking (issue
- * #778 review). Deterministic and total. */
-function redactQueryFragmentSpans(text: string): string {
-  let out = "";
-  let i = 0;
-  for (;;) {
-    const start = text.indexOf("//", i);
-    if (start < 0) return out + text.slice(i);
-    out += text.slice(i, start);
-    let end = start;
-    while (end < text.length && text.charCodeAt(end) !== 0x20 /* SPACE */) end++;
-    const span = text.slice(start, end);
-    const qMark = span.indexOf("?");
-    const hMark = span.indexOf("#");
-    const qi = qMark < 0 ? hMark : hMark < 0 ? qMark : Math.min(qMark, hMark);
-    // CONSERVATIVE: keep everything up to and including the `?`/`#` marker, then collapse the whole tail
-    // (any continuation past an embedded CR/LF/TAB) to `***`. A value/prose resuming after the break is
-    // INDISTINGUISHABLE from a split-credential continuation, so we never keep the post-break side; the RAW
-    // prompt still reaches the runtime job input unmodified (issue #778 review — thread
-    // deliveryGraphCompiler.ts:1115).
-    out += qi < 0 ? span : `${span.slice(0, qi + 1)}***`;
-    i = end;
-  }
-}
-
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
  * (`convergeTargets.ts`) maps to intent-revealing phrases; any other (forward-declared) target is shown
  * through {@link redactConnectorValue} — an opaque identifier (`slack:#releases`) survives unchanged, but
@@ -1824,6 +1793,75 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       return assertNever(node, "ioMappingLines");
   }
 
+  // Node-local result scope (see AGENT_RESULT_LOCAL_VARS / ESCALATION_LOCAL_VARS): declare the variables a
+  // job completion / escalation completion writes as `null` on THIS subProcess, so Nano's nearest-scope
+  // propagation lands them here instead of the shared root. BOTH service-node kinds (agent AND connector)
+  // also localise each declared emit's source variable (an agent/connector fact's source is the fact's
+  // own name — see factSourceVar), so a sibling's same-named emit can never satisfy this node's contract
+  // gate or publish through this node's `<el>_<fact>` output. A connector ALSO returns fixed result
+  // metadata (`connectorOutcome`/`connectorDedupeKey`/`connectorDetail`); without localising those too,
+  // parallel connectors overwrite each other's root-scoped result (Copilot review #863, thread
+  // r4180856788) exactly as parallel agents once overwrote one shared root status/pr.
+  // A `DeliveryNodeConnector` permits `emits` too, so WITHOUT this a timed-out connector could publish a
+  // parallel sibling connector's root-scoped result through its own output mapping (Copilot review #863,
+  // thread r4179717614).
+  // A `human` node has no worker result, but its user task captures the operator's answer into fixed,
+  // non-node-unique scratch (`humanEmitValue`/`humanEmitArtifact`/`humanOutcome`/`humanNote`) by SELECTING
+  // from fixed form controls (`value`/`resolvedArtifact`/`note`, plus a bespoke form's fact-named control).
+  // Left at the shared ROOT these cross-publish between parallel human nodes: a human that completes while
+  // a sibling times out WITHOUT producing a value would have the sibling read its root `humanEmitValue`
+  // and publish it as the sibling's own `<el>_<fact>` — the complete-one/timeout-the-other leak (Copilot
+  // review #863, thread r4199949849). So a human subProcess ALSO localises its scratch + form controls
+  // (HUMAN_RESULT_LOCAL_VARS) and its explicit fact-named control (the declared emit's own name, read first
+  // by a bespoke single-emit form), fail-closing a value-less timeout to its OWN null instead of a
+  // sibling's.
+  // A `wait` node likewise has no worker result, but its SLA-timeout escalation parks on the SAME generic
+  // form, whose completion writes the escalation controls (ESCALATION_LOCAL_VARS = decision/value/
+  // escalationNote). On the escalate path the interrupting boundary timer CANCELS the probeLoop before its
+  // output mapping runs, so the `_lastAttempt` probe result and any value-resume materialise the emit
+  // SOURCE (`detail`/`resolvedArtifact`/`mergedSha`/`prCount` — factSourceVar) with NOTHING declaring them
+  // in the wait subProcess. Left at the shared ROOT those cross-publish between parallel timed-out waits:
+  // a value-less completion on one wait reads a sibling's root `value`/emit and resumes from the sibling's
+  // answer (Copilot review #863, thread r4200608648). So a wait subProcess ALSO localises its escalation
+  // controls + each declared emit source. None of these is read by a wait gateway (the `ready?` splits read
+  // only `ready`, which stays un-seeded), so the null-seed cannot shadow a gateway (the multi-instance
+  // `=null`-shadow gotcha). A wait has no retry escape, so there is no retry-reset to clear them.
+  if (node.kind === "agent" || node.kind === "connector" || node.kind === "human" || node.kind === "wait") {
+    const locals = new Set<string>();
+    if (node.kind === "human") {
+      for (const v of HUMAN_RESULT_LOCAL_VARS) locals.add(v);
+      // A bespoke single-emit human form captures the value under the FACT'S OWN NAME (humanBodyLines'
+      // `selectExpr` reads `<factName>` before the canonical control), so that control must be node-local
+      // too — otherwise a blank completion reads a sibling's root value. factSourceVar maps a human emit to
+      // the fixed `humanEmitValue`/`humanEmitArtifact` (already in the set), so seed the fact name directly.
+      for (const fact of normaliseEmits(node)) locals.add(fact.name);
+    } else {
+      // agent / connector / wait: the escalation user task completes with a form's controls, and each
+      // declared emit's SOURCE var (factSourceVar) must fail-close to this node's own null.
+      for (const v of ESCALATION_LOCAL_VARS) locals.add(v);
+      if (node.kind === "agent") {
+        for (const v of AGENT_RESULT_LOCAL_VARS) locals.add(v);
+      } else if (node.kind === "connector") {
+        for (const v of CONNECTOR_RESULT_LOCAL_VARS) locals.add(v);
+      } else {
+        // `wait`: its SLA-timeout escalation renders the GENERIC human form (`delivery-human-generic`),
+        // whose controls are `value` + `note` — NOT the retry-capable `ESCALATION_FORM`'s
+        // `decision`/`value`/`escalationNote` (a wait has no retryElement, so `escalationTaskLines` picks
+        // the generic form). `value` is already in ESCALATION_LOCAL_VARS, but the generic form's `note`
+        // control is NOT — so completing a timed-out wait with an operator note would propagate `note` to
+        // the shared ROOT, letting parallel waits overwrite one another's note and exposing a
+        // wait-specific note to later jobs (Copilot review #863, thread r4200916073). Seed it node-local.
+        locals.add("note");
+      }
+      // (a `wait` has no self-reported worker result metadata — only its escalation controls + emit sources)
+      for (const fact of normaliseEmits(node)) locals.add(factSourceVar(node.kind, fact));
+    }
+    const taken = new Set(inputs.map((i) => i.target));
+    for (const v of locals) {
+      if (!taken.has(v)) inputs.push({ source: "=null", target: v });
+    }
+  }
+
   // Late-binding: a deterministic FEEL list literal of the upstream producers' emitted facts, keyed
   // exactly as the edge references them (`<producerNode>.<fact>`), read from the flat parent variable
   // each producer publishes. Guarded so an as-yet-unobserved fact threads as null, not a FEEL error.
@@ -1836,8 +1874,24 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
   }
 
   // Outputs: publish each declared emit into `<element>_<fact>` for a downstream consumer to bind.
+  // A `human` node's non-artifact emits ALL share the one captured `humanEmitValue` (the generic/publish
+  // forms have a single value field — see humanBodyLines). Publishing that one value into SEVERAL
+  // distinct facts would corrupt them (PR #863 Copilot Low, thread r4182488264). validateDeliveryGraph
+  // now REJECTS every ≥2-emit human node (`human-unroutable-emits`, threads
+  // deliveryGraphCompiler.ts:1859 / :1927) — no static form can capture several emits (an explicit
+  // `human.formKey` is no exception: this ioMapping reads only the fixed value/resolvedArtifact/note
+  // controls, never a bespoke form's per-fact fields), so that whole class is refused at authoring time
+  // rather than silently publishing null. This discard stays as residual defence for a ≥2-emit node that
+  // somehow reaches compile despite the validator: only a SINGLE non-artifact human emit is sourced from
+  // `humanEmitValue`; with two or more, every non-artifact emit publishes null. Artifact emits are
+  // unaffected (they read the distinct `humanEmitArtifact`).
+  const humanNonArtifactEmits =
+    node.kind === "human" ? normaliseEmits(node).filter((f) => f.type !== "artifact") : [];
+  const humanValueEmit = humanNonArtifactEmits.length === 1 ? humanNonArtifactEmits[0] : undefined;
   for (const fact of normaliseEmits(node)) {
-    outputs.push({ source: guarded(factSourceVar(node.kind, fact)), target: `${el}_${fact.name}` });
+    const discardHumanValue =
+      node.kind === "human" && fact.type !== "artifact" && humanValueEmit === undefined;
+    outputs.push({ source: discardHumanValue ? "=null" : guarded(factSourceVar(node.kind, fact)), target: `${el}_${fact.name}` });
   }
 
   // Stage 0 transcript correlation (#543): propagate the completing worker's `transcriptUrl` (built
@@ -1870,38 +1924,71 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // self-reported `status` AND a non-null value for every declared emit a downstream consumer binds
       // as a required data dependency. A broken producer (returns `in_progress`, or omits a required
       // emit) escalates AT this node instead of threading an incomplete result onward.
-      const contractGate = { requiredEmits: normaliseEmits(node).filter((f) => requiredEmits.has(f.name)) };
-      // The subProcess timeout `__esc` twin resumes with the SAME required emits the contract gate
-      // uses — the facts a downstream node binds, which a null (lost) result poisons (#872).
-      const timeoutResume = { kind: node.kind, emits: contractGate.requiredEmits };
-      // The source var of EVERY declared emit (required + non-required), so the resume-valid flag on
-      // this node's escalations dodges all of them — not only the resumed required emit (PR #876 review).
-      const allEmitTargets = normaliseEmits(node).map((f) => factSourceVar(node.kind, f));
+      const nodeEmits = normaliseEmits(node);
+      const contractGate = { requiredEmits: nodeEmits.filter((f) => requiredEmits.has(f.name)), emits: nodeEmits };
       // The executable `<zeebe:taskDefinition type=…>` MUST carry the raw `jobType` verbatim for worker
       // routing (validateDeliveryGraph rejects a URL-shaped/credential-bearing jobType, so it can never
       // be a leak here), but the `descriptor` is embedded by `serviceBodyLines` into the operator-visible
       // timeout / producer-contract escalation FEEL `prompt` — so it takes the SAME display redaction
       // `nodeDisplay` applies, never the raw value (issue #778 review — thread deliveryGraphCompiler.ts:1606).
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, timeoutResume, allEmitTargets);
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, "agent", nodeEmits);
     }
     case "connector": {
       // TRIM the target before building the escalation descriptor — `nodeDisplay` and the connector
       // worker both key on the trimmed value, so an untrimmed `" converge-merge "` would fork the
       // `semanticBpmn`/digest from the trimmed-equivalent graph that dispatches identically (issue #778
       // review — thread deliveryGraphCompiler.ts:1741).
-      // A connector has no producer-contract gate, but its timeout `__esc` is still made resumable with
-      // the facts a downstream node binds — so a human/agent who unsticks a timed-out connector can
-      // supply the lost emit value rather than thread a null onward (#872).
-      const connectorResume = { kind: node.kind, emits: normaliseEmits(node).filter((f) => requiredEmits.has(f.name)) };
-      // Every declared emit's source var, so the flag dodges a non-required (routing/unconsumed) emit
-      // named exactly the flag, not only the resumed required one (PR #876 review).
-      const allEmitTargets = normaliseEmits(node).map((f) => factSourceVar(node.kind, f));
-      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target.trim())}`, undefined, [], displayName, connectorResume, allEmitTargets);
+      // A connector declares `emits` (its emit source is the fact's own name) but has NO
+      // producer-contract gate, so pass them explicitly as `nodeEmits` — otherwise the timeout
+      // escalation could not resume a connector's emit on Continue, nor clear it on Retry (#863).
+      // The resume/validation path (Continue) uses only the REQUIRED emits a downstream node binds —
+      // the facts a null (lost) result poisons (#872/#876) — while `nodeEmits` (all declared emits)
+      // drive the Retry clear and the resume-valid flag's collision-avoidance targets.
+      const connectorEmits = normaliseEmits(node);
+      const connectorRequired = connectorEmits.filter((f) => requiredEmits.has(f.name));
+      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target.trim())}`, undefined, [], displayName, "connector", connectorEmits, connectorRequired);
     }
     case "wait":
       return waitBodyLines(el, node, displayName);
-    case "human":
-      return humanBodyLines(el, displayName);
+    case "human": {
+      // Select the human node's form by DERIVING it from the canonical resolver (resolveHumanForm),
+      // never hardcoding the generic form: a 0-emit node uses the acknowledgement form, a single-artifact
+      // node uses the manual-publish form (which carries the `resolvedArtifact` control the generic form
+      // lacks, so the artifact is actually captured instead of published null), and a single-value node
+      // uses the generic typed-emit form. A ≥2-emit node resolves to the agent-router (formKey null) and
+      // is REJECTED upstream by validateDeliveryGraph (`human-unroutable-emits` — a bespoke formKey is no
+      // rescue for ≥2 emits, since one form value cannot satisfy several typed facts), so the
+      // `?? GENERIC_HUMAN_FORM` fallback here is unreachable defensive cover (PR #863 threads
+      // deliveryGraphCompiler.ts:1859 / :1927).
+      // For a SINGLE emit the node MAY carry an EXPLICIT bespoke form whose field is named after the
+      // emitted fact (the canonical binding contract `bindHumanEmits` reads the fact's own key first,
+      // then the generic `value`/`resolvedArtifact` capture keys — deliveryHuman.ts) — so thread the one
+      // emit through so the userTask ioMapping reads that fact-named field too. Without it a valid
+      // `{ approval: "yes" }` custom form for an `approval` emit renders fine but publishes NULL (the
+      // ioMapping only read the fixed `value`/`resolvedArtifact` controls) — PR #863 review, thread
+      // deliveryGraphCompiler.ts:1929. SCOPE the fact-NAMED read to `source === "explicit"`: the built-in
+      // generic/publish forms capture under the FIXED `value`/`resolvedArtifact` controls, and a fact
+      // happening to be named after one of those built-in forms' OTHER fields (e.g. a single emit named
+      // `note`) must not make the mapping read that unrelated field — only a bespoke form keys its control
+      // on the fact.
+      // TYPE COERCION is a WIDER contract than the fact-named read: the SAME class of bug (a captured
+      // TEXT value published verbatim for a typed fact) also bites the GENERIC single-value form — a lone
+      // `boolean`/`number` emit answered through the generic textfield would publish the string
+      // `"true"`/`"1"` that a downstream guarded split (`= true`/`= 1`) never matches. So coerce by the
+      // one declared emit's type for EVERY form source (explicit AND built-in), while preferring the
+      // fact-named field ONLY for an explicit bespoke form (PR #863 thread r4189815989).
+      const humanForm = resolveHumanForm(node);
+      const singleEmit = humanForm.emits.length === 1 ? humanForm.emits[0] : undefined;
+      const preferFactName = humanForm.source === "explicit";
+      // A human node has no worker self-report to gate on, but its single emit CAN be a downstream-REQUIRED
+      // fact — and invalid typed input coerces to null (fail-closed on the value, coerceFactValueFeel), so
+      // WITHOUT a completion gate the node ends and the unconditional edge activates the consumer with a
+      // null required fact (PR #863 review, thread r4198662345). Thread whether that single emit is
+      // required so humanBodyLines grows a fail-closed completion gate over it (re-enter on an invalid
+      // value) instead of publishing null onward.
+      const requiredEmit = singleEmit !== undefined && requiredEmits.has(singleEmit.name);
+      return humanBodyLines(el, displayName, humanForm.formKey ?? GENERIC_HUMAN_FORM, singleEmit, preferFactName, requiredEmit);
+    }
     default:
       return assertNever(node, "innerBodyLines");
   }
@@ -1946,11 +2033,12 @@ function agentContractProceedCondition(requiredEmits: readonly DeliveryFact[]): 
  * so the human/agent unsticking it sees WHY it parked — the node, its job type, the actual reported
  * status, and, per required emit, whether it arrived. Turns the instance-10746 failure (a silent null
  * thread + two mis-attributed CONSUMER incidents) into one correctly-attributed PRODUCER escalation. */
-function agentContractContextFeel(nodeId: string, descriptor: string, requiredEmits: readonly DeliveryFact[]): string {
+function agentContractContextFeel(nodeId: string, descriptor: string, requiredEmits: readonly DeliveryFact[], nodeEmits: readonly DeliveryFact[]): string {
   const statuses = AGENT_TERMINAL_SUCCESS_STATUSES.join("/");
   const head = feelStr(
-    `Node ${nodeId} (${descriptor}) completed but did not satisfy its producer contract — a producer must ` +
-      `self-report a terminal-success status (${statuses}) and populate every emit a downstream node requires ` +
+    `Node ${nodeId} (${descriptor}) completed but did not satisfy its producer contract — when a producer ` +
+      `reports a status it must be a terminal-success status (${statuses}; an absent/null status is accepted), ` +
+      `and it must populate every emit a downstream node requires ` +
       "before its result routes onward. Reported status=",
   );
   let feel = `=${head} + (if (is defined(status) and status != null) then string(status) else "(none)") + "."`;
@@ -1958,6 +2046,18 @@ function agentContractContextFeel(nodeId: string, descriptor: string, requiredEm
     const present = `(is defined(${f.name}) and ${f.name} != null)`;
     feel += ` + " Required emit '${f.name}': " + (if ${present} then "present" else "MISSING (null)") + "."`;
   }
+  // The node's OWN agent report (node-local since the result vars are declared on the subProcess): what
+  // the agent said it did / why it stopped, its question for the operator, and the transcript link — the
+  // actionable content the bare status line above never carried (171774's three report-less escalations).
+  const text = (v: string): string => `(is defined(${v}) and ${v} != null and string(${v}) != "")`;
+  // Each fragment reads as its own sentence on the plain-text "Decision context" (terminal period added
+  // unless the agent's text already ends in punctuation).
+  const sentence = (v: string): string => `string(${v}) + (if matches(string(${v}), "[.!?]\\s*$") then "" else ".")`;
+  feel += ` + (if ${text("summary")} then " Agent report: " + ${sentence("summary")} else " Agent report: (the agent returned no summary).")`;
+  feel += ` + (if ${text("question")} and (not(${text("summary")}) or string(question) != string(summary)) then " Agent question: " + ${sentence("question")} else "")`;
+  feel += ` + (if ${text("error")} then " Error: " + ${sentence("error")} else "")`;
+  feel += ` + (if ${text("transcriptUrl")} then " Transcript: " + string(transcriptUrl) else "")`;
+  feel += ` + ${feelStr(escalationResolutionHint(nodeEmits, requiredEmits, true))}`;
   return feel;
 }
 
@@ -1979,51 +2079,95 @@ function serviceBodyLines(
   taskDefAttr: string,
   taskProps: readonly string[],
   descriptor: string,
-  contractGate?: { requiredEmits: readonly DeliveryFact[] },
+  contractGate?: { requiredEmits: readonly DeliveryFact[]; emits: readonly DeliveryFact[] },
   taskHeaders: readonly string[] = [],
   taskName: string = nodeId,
-  // The node's REQUIRED emits (the facts a downstream node binds as a data dependency), used to make
-  // the `__esc` TIMEOUT escalation RESUMABLE (issue #872): when a timed-out node is unstuck by a
-  // human/agent supplying `value`, that value must bind the node's declared emit exactly as the
-  // agent's own result would — otherwise the subProcess publishes `<el>_<fact> = null` and the
-  // downstream reference resolves to null (the production failure: a completed `__esc` returned
-  // `ok:true` yet `n3_pr` stayed null). Empty for a node with no required emit (the escalation stays
-  // an inert "click done" acknowledgement, `emitMode = "none"`).
-  timeoutResume?: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[] },
-  // The source var ({@link factSourceVar}) of EVERY declared emit of this node — required AND
-  // non-required — so the resume-valid flag on BOTH the timeout `__esc` and the producer-contract
-  // `__contract` escalations is grown collision-free against all of them, not only the resumed required
-  // emit (PR #876 review). Both escalations live in this node's subProcess scope, which republishes
-  // every declared emit, so both must dodge the same full target set.
-  reservedFlagTargets: readonly string[] = [],
+  // The node's kind (`agent`/`connector`) and its OWN declared emits. A connector passes
+  // `contractGate = undefined` (no self-reported status contract) yet still declares `emits`, so the
+  // escalation resume / retry-clear below key off the node's OWN emits, not the agent-only gate — and
+  // map them through `factSourceVar(kind, …)` (issue #863 review — thread "Connector emits are lost
+  // during timeout escalation recovery").
+  kind: "agent" | "connector" = "agent",
+  nodeEmits: readonly DeliveryFact[] = contractGate?.emits ?? [],
+  // The node's REQUIRED emits (the facts a downstream node binds as a data dependency). The #863 Retry
+  // path clears ALL `nodeEmits`; the #876 Continue/resume path is gated through fail-closed validation
+  // on exactly these REQUIRED emits — a null/invalid operator value re-parks instead of threading null
+  // onto a consumed fact (issue #872). Defaults to the contract gate's required emits (an agent); a
+  // connector passes its own required subset explicitly (it has no gate to derive from).
+  resumeEmits: readonly DeliveryFact[] = contractGate?.requiredEmits ?? [],
 ): string[] {
   const esc = escalationTaskElement(el);
+  const isAgent = contractGate !== undefined;
+  // Gateway decisions are computed INSIDE the node's scope and published as a node-UNIQUE root boolean,
+  // because Nano evaluates exclusive-gateway conditions against the ROOT variables only (not the
+  // gateway's scope, as Zeebe does). The node's result vars are node-local (see ioMappingLines), so a
+  // gateway reading `status`/`<emit>` directly would never see them; reading `<el>_contractMet` /
+  // `<el>_retryRequested` works on either engine semantics and can never collide ACROSS nodes. The
+  // source var ({@link factSourceVar}) of EVERY declared emit (required + non-required) is reserved so
+  // BOTH the resume-valid flag (PR #876) AND these control vars are grown collision-free against all of
+  // them — an emit whose source var equals the bare control name (e.g. an agent emit literally named
+  // `<el>_contractMet`) would otherwise be null-seeded node-local and SHADOW the root control the outer
+  // gateway reads, so the producer could never pass (issue #863 review, thread r4199435326).
+  const reservedFlagTargets = nodeEmits.map((f) => factSourceVar(kind, f));
+  const contractMetVar = nodeControlVar(el, "contractMet", reservedFlagTargets);
   const taskExt = [
     "        <bpmn:extensionElements>",
     `          <zeebe:taskDefinition ${taskDefAttr} />`,
     ...(taskProps.length > 0 ? ["          <zeebe:properties>", ...taskProps, "          </zeebe:properties>"] : []),
     ...taskHeaders,
+    "          <zeebe:ioMapping>",
+    // Preflight guard: the node body is configured from the runner-seeded root `nodeInputs.<el>`. If that
+    // seed is missing (lost root variables — nano-bpm#1331 wiped them on 171774/171309), every `cfg(...)`
+    // on the subProcess silently evaluated to null and the agent ran BLIND (no prompt/timeout), reporting
+    // `blocked` into an unexplained producer-contract escalation. Fail LOUD instead: a FEEL `assert` makes
+    // this input raise an incident naming the cause, BEFORE a job exists; once the root variables are
+    // restored, resolving the incident re-applies the inputs and the job is created. It sits on the inner
+    // LEAF task, not the subProcess: a leaf input incident parks the token on every engine (#946), whereas
+    // a subProcess input incident was completed past its body by the drain sweep (nano-bpm#1334).
+    // KNOWN LIMITATION (fail-loud-only, nano-workforce#866): resolving this incident re-evaluates ONLY
+    // this leaf's inputs — the subProcess-level config mappings (prompt/appendPrompt/nodeTimeout,
+    // connector target/payload/dedupeKey) ran ONCE at subProcess entry and are NOT re-mapped on resolve.
+    // The in-subprocess "Retry this step" loop does NOT help either: it loops directly back to the inner
+    // service task (to reset the node-local scratch), bypassing the subProcess entry mappings, so it too
+    // leaves the config null. Recovery therefore requires re-entering the sub-process from OUTSIDE —
+    // relaunch/re-enter the node so its subProcess input mappings re-evaluate against the restored
+    // `nodeInputs` — not merely resolving the incident or using "Retry this step". The incident message
+    // says so. The correct fix is to run this check at sub-process ENTRY — Camunda parity, where a failed
+    // sub-process input mapping parks in `activating` and resolving re-evaluates ALL inputs — which
+    // nano-bpm#1336 restores; until then we fail loud here rather than risk the #1334 drain-past.
+    `            <zeebe:input ${attr("source", nodeInputsPreflightFeel(el))} target="${NODE_INPUTS_PREFLIGHT_VAR}" />`,
+    ...(contractGate !== undefined
+      ? [`            <zeebe:output ${attr("source", agentContractProceedCondition(contractGate.requiredEmits))} target="${contractMetVar}" />`]
+      : []),
+    "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
   ];
+  // The timeout escalation is resumable with the node's declared emits too: work finished out of band
+  // (or a draft PR the stalled agent already opened) can be handed onward instead of threading null.
+  // `nodeEmits` is the node's OWN declared emits (for an agent, the contract gate's emits; for a
+  // connector, its own — a connector declares `emits` and its emit source is the fact's own name, so
+  // keying off the absent agent-only gate would drop them and map no `value` on a Continue resume).
+  const allEmits = nodeEmits;
+  const contractEsc = contractEscalationTaskElement(el);
+  const contractEmits = contractGate?.requiredEmits ?? [];
   const timeoutEscalation = escalationTaskLines(
     esc,
     nodeId,
     [`${el}_i2`],
     `${el}_i3`,
-    escalationContextFeel(
+    `${escalationContextFeel(
       nodeId,
       descriptor,
       "nodeTimeout",
       "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
-    ),
+    )} + ${feelStr(escalationResolutionHint(nodeEmits, resumeEmits, isAgent))}`,
     {
-      // Bind the operator-supplied `value` onto the node's emit-source var so a resumed timeout
-      // escalation publishes the SAME `<el>_<fact>` shape a normally-completing node does (#872) —
-      // VALIDATED by the post-escalation gate (`validTarget`), so an omitted/malformed value re-parks
-      // instead of threading null downstream (PR #876 review). Only when the node owes a required emit
-      // — a no-emit node keeps its inert acknowledgement form.
-      ...(timeoutResume !== undefined && timeoutResume.emits.length > 0 ? { resume: timeoutResume, validTarget: `${el}_end` } : {}),
+      // #863 Retry + #876 Continue/validate, nested: the timeout escalation routes through a retry gate
+      // (`retryElement`) and, on Continue with a required emit, a fail-closed validation gate
+      // (`validTarget`) that re-parks a null/invalid value instead of threading it downstream.
+      ...(resumeEmits.length > 0 ? { resume: { kind, emits: resumeEmits, declaredEmits: nodeEmits }, validTarget: `${el}_end` } : {}),
       displayName: taskName,
+      retryElement: el,
       reservedTargets: reservedFlagTargets,
     },
   );
@@ -2032,6 +2176,7 @@ function serviceBodyLines(
     `      <bpmn:serviceTask id="${el}_task" name="${escapeXml(taskName)}">`,
     ...taskExt,
     `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
+    `        <bpmn:incoming>${el}_r1</bpmn:incoming>`,
     `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
     "      </bpmn:serviceTask>",
     `      <bpmn:boundaryEvent id="${el}_be" name="Node timed out" attachedToRef="${el}_task">`,
@@ -2040,44 +2185,48 @@ function serviceBodyLines(
     "      </bpmn:boundaryEvent>",
     ...timeoutEscalation,
   ];
-
-  // When the timeout escalation is RESUMABLE (it grew a validation gate), its return flow `${el}_i3`
-  // routes to the GATE (not straight to the end), and the gate's valid branch flows to the end — so a
-  // value-less/invalid resume can never bypass the gate (PR #876 review).
-  const timeoutResumed = timeoutResume !== undefined && timeoutResume.emits.length > 0;
-  const timeoutReturnTarget = timeoutResumed ? `${esc}Vg` : `${el}_end`;
+  const timeoutResumable = resumeEmits.length > 0;
+  const contractResumable = isAgent && contractEmits.length > 0;
+  // #863 shared reset: both escalations' retry branches (`${esc}Rr` / `${contractEsc}Rr`) loop into ONE
+  // reset-throw that clears the node-local scratch (including each escalation's resume-valid flag) then
+  // re-enters the task. Per-escalation retry gates (built in `escalationTaskLines`) feed it, so a Continue
+  // re-park knows WHICH escalation to return to while Retry is funnelled through this single reset.
+  const resetFlagVars: string[] = [];
+  if (timeoutResumable) resetFlagVars.push(escalationResumeFlagVar(esc, { kind, emits: resumeEmits }, reservedFlagTargets));
+  if (contractResumable) resetFlagVars.push(escalationResumeFlagVar(contractEsc, { kind: "agent", emits: contractEmits }, reservedFlagTargets));
+  const retryIncoming = [`${esc}Rr`, ...(isAgent ? [`${contractEsc}Rr`] : [])];
+  const reset = retryResetLines(el, kind, allEmits, resetFlagVars, retryIncoming);
 
   if (contractGate === undefined) {
     return [
       ...head,
-      `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming>${timeoutResumed ? `<bpmn:incoming>${esc}Vok</bpmn:incoming>` : `<bpmn:incoming>${el}_i3</bpmn:incoming>`}</bpmn:endEvent>`,
+      ...reset,
+      `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming><bpmn:incoming>${timeoutResumable ? `${esc}Vok` : `${esc}Rc`}</bpmn:incoming></bpmn:endEvent>`,
       flow(`${el}_i0`, `${el}_start`, `${el}_task`),
       flow(`${el}_i1`, `${el}_task`, `${el}_end`),
       flow(`${el}_i2`, `${el}_be`, esc),
-      flow(`${el}_i3`, esc, timeoutReturnTarget),
+      flow(`${el}_i3`, esc, `${esc}Rg`),
     ];
   }
 
   // Producer-contract gate (issue #731): task → gate → (proceed | contract-escalation) → end. When the
   // contract escalation is RESUMABLE (it grew a validation gate), its return flow `${el}_g2` routes to
   // the GATE (not straight to the end), and the gate's valid branch flows to the end (PR #876 review).
-  const contractEsc = contractEscalationTaskElement(el);
-  const emits = contractGate.requiredEmits;
-  const contractResumed = emits.length > 0;
-  const contractReturnTarget = contractResumed ? `${contractEsc}Vg` : `${el}_end`;
-  const proceedCondition = agentContractProceedCondition(emits);
+  const emits = contractEmits;
+  const proceedCondition = `=${contractMetVar} = true`;
   const contractEscalation = escalationTaskLines(
     contractEsc,
     nodeId,
     [`${el}_g1`],
     `${el}_g2`,
-    agentContractContextFeel(nodeId, descriptor, emits),
+    agentContractContextFeel(nodeId, descriptor, emits, nodeEmits),
     // Resumable when the producer owes a required emit: a human/agent supplies the missing fact, which
     // the subProcess output ioMapping then publishes as `<el>_<fact>` (agent emit source = fact name),
     // so the downstream consumer late-binds a real value instead of the null that poisoned it (#731) —
     // VALIDATED by the post-escalation gate (`validTarget`) so an omitted/malformed value re-parks
-    // instead of threading null downstream (PR #876 review).
-    { ...(contractResumed ? { resume: { kind: "agent" as const, emits }, validTarget: `${el}_end` } : {}), displayName: taskName, reservedTargets: reservedFlagTargets },
+    // instead of threading null downstream (PR #876 review), and routed through the retry gate
+    // (`retryElement`) so Retry resets+reruns the node (#863).
+    { ...(contractResumable ? { resume: { kind: "agent" as const, emits, declaredEmits: nodeEmits }, validTarget: `${el}_end` } : {}), displayName: taskName, retryElement: el, reservedTargets: reservedFlagTargets },
   );
   return [
     ...head,
@@ -2087,15 +2236,180 @@ function serviceBodyLines(
     `        <bpmn:outgoing>${el}_g1</bpmn:outgoing>`,
     "      </bpmn:exclusiveGateway>",
     ...contractEscalation,
-    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_g0</bpmn:incoming>${timeoutResumed ? `<bpmn:incoming>${esc}Vok</bpmn:incoming>` : `<bpmn:incoming>${el}_i3</bpmn:incoming>`}${contractResumed ? `<bpmn:incoming>${contractEsc}Vok</bpmn:incoming>` : `<bpmn:incoming>${el}_g2</bpmn:incoming>`}</bpmn:endEvent>`,
+    ...reset,
+    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_g0</bpmn:incoming><bpmn:incoming>${timeoutResumable ? `${esc}Vok` : `${esc}Rc`}</bpmn:incoming><bpmn:incoming>${contractResumable ? `${contractEsc}Vok` : `${contractEsc}Rc`}</bpmn:incoming></bpmn:endEvent>`,
     flow(`${el}_i0`, `${el}_start`, `${el}_task`),
     flow(`${el}_i1`, `${el}_task`, `${el}_gate`),
     `      <bpmn:sequenceFlow id="${el}_g0" name="contract met" sourceRef="${el}_gate" targetRef="${el}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${proceedCondition}</bpmn:conditionExpression></bpmn:sequenceFlow>`,
     `      <bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="${contractEsc}" />`,
-    flow(`${el}_g2`, contractEsc, contractReturnTarget),
+    flow(`${el}_g2`, contractEsc, `${contractEsc}Rg`),
     flow(`${el}_i2`, `${el}_be`, esc),
-    flow(`${el}_i3`, esc, timeoutReturnTarget),
+    flow(`${el}_i3`, esc, `${esc}Rg`),
   ];
+}
+
+/** The operator-facing "how do I resolve this" sentence appended to a service node's escalation
+ * prompt (retry-node resolution): every escalation names its two exits so the task is actionable on
+ * its own, without reading the BPMN. */
+function escalationResolutionHint(nodeEmits: readonly DeliveryFact[], resumeEmits: readonly DeliveryFact[], isAgent: boolean): string {
+  const retry =
+    ` To resolve: choose Resolution "Retry this step" (${ESCALATION_DECISION_VAR}="${ESCALATION_DECISION_RETRY}") to re-run this node` +
+    (isAgent ? " — the note is passed to the agent as guidance for the retry" : "");
+  // Mirror the compiled topology (escalationTaskLines): a value-resumable Continue is offered ONLY when
+  // the node declares EXACTLY ONE emit AND that emit is the required resume target. Gating on the
+  // required count alone would promise a value field a node declaring two facts (one required) never
+  // renders (issue #863 review, thread r4193902690).
+  const names = (fs: readonly DeliveryFact[]): string => fs.map((e) => `'${e.name}'`).join("/");
+  let proceed: string;
+  if (nodeEmits.length === 1 && resumeEmits.length === 1) {
+    proceed = `; or choose "Continue" and put the '${resumeEmits[0].name}' value in the value field (e.g. work finished out of band)`;
+  } else if (nodeEmits.length > 1 && resumeEmits.length >= 1) {
+    // A multi-declared node that still owes ≥1 REQUIRED emit: the resume-valid flag is hard-`false`, so
+    // the post-escalation validation gate ALWAYS re-parks — Continue loops back HERE, it does NOT write
+    // nulls or advance to a fallback branch (deliveryGraphCompiler.ts fail-closed loop; #863 review
+    // r4194186490/r4194186441). Only "Retry this step" can produce the facts.
+    proceed = `; "Continue" CANNOT resume this node and does NOT advance — the single value field cannot supply its ${names(nodeEmits)} facts, so it re-parks HERE until you choose "Retry this step" to actually produce them`;
+  } else if (nodeEmits.length > 1) {
+    // Multi-declared but NO required resume target downstream: the escalation is not validation-gated, so
+    // Continue genuinely proceeds past the node to its default (fallback) branch.
+    proceed = `; or choose "Continue" to proceed past this node to its default (fallback) branch — no downstream node requires its ${names(nodeEmits)} facts, and the single value field cannot supply them anyway`;
+  } else {
+    proceed = '; or choose "Continue" to proceed past this node';
+  }
+  return `${retry}${proceed}.`;
+}
+
+/** Grow a node-unique ROOT control var (`<el>_contractMet` / `<el>_retryRequested`) collision-free
+ * (deterministic trailing `_`) against the node-local emit SOURCE vars ({@link factSourceVar}) that
+ * share this node's flat subProcess scope. These controls are decided INSIDE the node's scope yet must
+ * be READ by the OUTER gateways (Nano evaluates exclusive-gateway conditions against the ROOT vars
+ * only), so they are published at root. But an emit whose source var equals the bare control name
+ * (e.g. an agent emit literally named `n0_contractMet` on the first node `n0`, whose source var IS its
+ * own name) is ALSO null-seeded node-local by {@link ioMappingLines} — and Nano's nearest-scope
+ * propagation then writes the gate/escalation output into that LOCAL shadow instead of the root the
+ * outer gateway reads, so the gateway never sees `true` and the producer can never pass (issue #863
+ * review, thread r4199435326). Growing the control name clear of every emit source var removes the
+ * whole class, exactly as {@link escalationResumeFlagVar} grows the resume-valid flag. */
+function nodeControlVar(el: string, suffix: string, reservedTargets: readonly string[]): string {
+  const reserved = new Set<string>(reservedTargets);
+  let name = `${el}_${suffix}`;
+  while (reserved.has(name)) name = `${name}_`;
+  return name;
+}
+
+/** The node-unique ROOT boolean an escalation completion publishes for the retry gateway (see the
+ * gateway-scope note in {@link serviceBodyLines}), grown collision-free ({@link nodeControlVar})
+ * against the node's emit source vars so a same-named emit can neither shadow nor collide with it. The
+ * SAME `reservedTargets` must be passed at the write and read sites so the grown name agrees. */
+function retryRequestedVar(el: string, reservedTargets: readonly string[] = []): string {
+  return nodeControlVar(el, "retryRequested", reservedTargets);
+}
+
+/** The retry-node resolution RESET shared by a service node's escalations (`__esc`, and an agent's
+ * `__contract`): their per-escalation retry gates (built in {@link escalationTaskLines}) each loop
+ * `─retry→` this single reset, which clears the node-local scratch then re-enters the task (`_r1`). The
+ * reset (a none intermediate throw event carrying output mappings only — the compiler never emits a
+ * scriptTask) clears the node-local decision and the previous attempt's emits (a rerun that succeeds
+ * may report no status at all; a stale emit would otherwise be republished downstream) — plus, for an
+ * agent, its FULL declared result set (every {@link AGENT_RESULT_LOCAL_VARS} field, so a stale
+ * `blocked` status can't fail the contract gate again and a stale `transcriptUrl`/PR alias/other
+ * optional field can't republish downstream) — plus each escalation's resume-valid flag
+ * (`resumeFlagVars`, so a Retry can never leave a stale `true` that the next Continue's validation gate
+ * would read) — and appends the operator's {@link ESCALATION_NOTE_VAR} to the agent prompt as retry
+ * guidance. All targets are node-local (declared on the subProcess by `ioMappingLines`), so nothing
+ * leaks to the root. `incoming` is each feeding escalation's retry branch (`${esc}Rr`). */
+function retryResetLines(el: string, kind: "agent" | "connector", emits: readonly DeliveryFact[], resumeFlagVars: readonly string[], incoming: readonly string[]): string[] {
+  const isAgent = kind === "agent";
+  const outputs: { source: string; target: string }[] = [];
+  // Clear the node's declared emits for ANY emitting kind (agent or connector) so a retry never
+  // republishes a stale value; for an agent, also clear the FULL declared result set
+  // (AGENT_RESULT_LOCAL_VARS — every field declared node-local, not just the five self-reported status
+  // fields) so a retried worker that omits an optional field (transcriptUrl, agentCheckpoint, a PR
+  // alias, exitCode, …) cannot let the previous attempt's value republish downstream or surface in the
+  // next escalation. For a connector, clear its fixed result metadata (CONNECTOR_RESULT_LOCAL_VARS) for
+  // the same reason. The status/summary fields and prompt-guidance are agent-specific (a connector has
+  // no self-reported status contract or prompt).
+  const cleared = new Set<string>(isAgent ? AGENT_RESULT_LOCAL_VARS : CONNECTOR_RESULT_LOCAL_VARS);
+  for (const f of emits) cleared.add(factSourceVar(kind, f));
+  // Clear each escalation's resume-valid flag too (PR #876 flag × #863 retry): a Retry resets the
+  // node-local scratch, so a stale `true` can never survive into the next Continue's validation gate.
+  for (const v of resumeFlagVars) cleared.add(v);
+  for (const v of cleared) outputs.push({ source: "=null", target: v });
+  if (isAgent) {
+    // Read the OPERATOR's note from the escalation-specific `escalationNote` control — NEVER the plain
+    // `note`: `note` is a documented WORKER RESULT field (resources/prompts/plan.md returns one) that
+    // nearest-scope propagation lands in this same subProcess scope, so reading it here would feed a
+    // worker-produced note back to the agent as "Operator guidance" whenever the operator retries
+    // WITHOUT a note (the form permits omitting it) — PR #863 Copilot "Previously missed".
+    const hasNote = `(is defined(${ESCALATION_NOTE_VAR}) and ${ESCALATION_NOTE_VAR} != null and string(${ESCALATION_NOTE_VAR}) != "")`;
+    // Re-derive from the RUNNER-SEEDED BASELINE (`nodeInputs.<el>.appendPrompt`), never the live
+    // `appendPrompt`: the subProcess input seeds `appendPrompt` from `nodeInputs` only at subProcess
+    // ENTRY, so on a retry re-entry the task still reads this var as the last reset left it — building
+    // on the live value would carry the previous retry's note forward and ACCUMULATE one stale
+    // "Operator guidance…" paragraph per consecutive retry.
+    const seeded = `nodeInputs.${el}.appendPrompt`;
+    const base = `(if (is defined(${seeded}) and ${seeded} != null) then ${seeded} + "\n\n" else "")`;
+    outputs.push({
+      source: `=if ${hasNote} then ${base} + "Operator guidance for this retry: " + string(${ESCALATION_NOTE_VAR}) else (if (is defined(${seeded})) then ${seeded} else null)`,
+      target: "appendPrompt",
+    });
+  }
+  // Clear the escalation controls (ESCALATION_LOCAL_VARS = decision/value/escalationNote), derived from
+  // the ONE source so a renamed control can't drift a second hardcoded list. These are declared
+  // node-local by ioMappingLines for BOTH kinds (agent and connector), so each clear lands in this
+  // subProcess scope, never the shared root.
+  //
+  // Do NOT clear the plain `note` here. `note` is a WORKER RESULT field that is node-local ONLY for an
+  // agent (it is in AGENT_RESULT_LOCAL_VARS, so the `cleared` result-set loop above already resets it on
+  // an agent retry). A connector does NOT declare `note` node-local (CONNECTOR_RESULT_LOCAL_VARS omits
+  // it, and it is neither an escalation control nor a connector emit), so an unconditional `note = null`
+  // here would land at the SHARED ROOT — leaking null across the node-isolation boundary and clobbering a
+  // parallel node's `note` — while for an agent it merely duplicates the `cleared` loop's reset
+  // (deliveryGraphCompiler.ts:2181, PR #863 Copilot "Previously missed").
+  for (const v of ESCALATION_LOCAL_VARS) outputs.push({ source: "=null", target: v });
+  return [
+    `      <bpmn:intermediateThrowEvent id="${el}_retry" name="Reset for retry">`,
+    "        <bpmn:extensionElements>",
+    "          <zeebe:ioMapping>",
+    ...outputs.map((o) => `            <zeebe:output ${attr("source", o.source)} target="${o.target}" />`),
+    "          </zeebe:ioMapping>",
+    "        </bpmn:extensionElements>",
+    ...incoming.map((id) => `        <bpmn:incoming>${id}</bpmn:incoming>`),
+    `        <bpmn:outgoing>${el}_r1</bpmn:outgoing>`,
+    "      </bpmn:intermediateThrowEvent>",
+    flow(`${el}_r1`, `${el}_retry`, `${el}_task`),
+  ];
+}
+
+/** The node-unique internal resume-valid flag ({@link resumeValidVar}) an escalation publishes for its
+ * post-escalation validation gate, GROWN collision-free (deterministic trailing `_`) against every
+ * declared emit's source var (`reservedTargets`) plus the resumed required emits (PR #876 review). The
+ * SAME computation must run in both {@link escalationTaskLines} (writer + gate condition) and the
+ * {@link retryResetLines} reset (clear), so it lives in one shared helper. Returns `""` for a
+ * non-resumable escalation (no flag). */
+function escalationResumeFlagVar(
+  esc: string,
+  resume: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[] } | undefined,
+  reservedTargets: readonly string[],
+): string {
+  if (resume === undefined || resume.emits.length === 0) return "";
+  const reserved = new Set<string>(reservedTargets);
+  for (const f of resume.emits) reserved.add(factSourceVar(resume.kind, f));
+  return growFlagClear(resumeValidVar(esc), reserved);
+}
+
+/** Grow a base internal-flag var ({@link resumeValidVar}) clear of a reserved set with a deterministic
+ * trailing `_`, so a user-declared fact/control whose name happens to EQUAL the generated flag can never
+ * shadow it. Shared by {@link escalationResumeFlagVar} (service-node emit-source vars) and the `human`
+ * node's completion gate (whose declared emit fact NAME is null-seeded node-local by {@link
+ * ioMappingLines} — a bare {@link resumeValidVar} would otherwise land in that null-seeded var and the
+ * immediately-following completion gateway would read the stale `null`, re-parking a valid answer
+ * forever; Copilot review #863, thread r4201222762). Returns the base unchanged when no collision, so
+ * the common case emits byte-identical output. */
+function growFlagClear(base: string, reserved: ReadonlySet<string>): string {
+  let flag = base;
+  while (reserved.has(flag)) flag = `${flag}_`;
+  return flag;
 }
 
 /** `wait` body: `start → pr.readiness-probe (poll) → ready? → end`, escalating on not-ready or on the
@@ -2104,7 +2418,7 @@ function serviceBodyLines(
 function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>, displayName: string): string[] {
   const nodeId = node.id;
   const name = escapeXml(displayName);
-  const esc = escalationTaskElement(el);
+  const esc = escalationTaskElement(el, "wait");
   const emits = normaliseEmits(node);
   // `onTimeout` routing (#462): `escalate` (default) parks the not-ready-at-boundary token on a
   // human-completable escalation task; `continue` proceeds past the gate as not-ready WITHOUT a human
@@ -2121,7 +2435,12 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
   const continueOnTimeout = trimmedOrEmpty(node.wait?.onTimeout) === "continue";
   // When the escalation is RESUMABLE (it grew a validation gate), its return flow `_i5` routes to the
   // GATE (not straight to the end) and the gate's valid branch flows to the end (PR #876 review).
-  const waitResumed = !continueOnTimeout && emits.length > 0;
+  // Only a SINGLE-emit wait is genuinely value-resumable: the single escalation-form `value` field
+  // cannot supply >1 distinct fact, and a wait gate has no Retry escape, so a MULTI-emit wait grows NO
+  // validation gate (building one would wedge the token in an unresolvable loop — issue #863 review
+  // r4198123619). A multi-emit (or no-emit) wait escalation therefore flows `_i5` straight to the node
+  // end — an acknowledged, value-less continue — the same path as a no-emit wait.
+  const waitResumed = !continueOnTimeout && emits.length === 1;
   // Defect A: read-only probe diagnostics seeded onto the escalation task so the operator/agent can
   // tell a genuine "not published yet" from a transient false-negative — the probe's last detail, the
   // resolved target/match, and a compact summary of the candidate releases the probe observed.
@@ -2209,8 +2528,10 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
           waitEscalationContextFeel(nodeId),
           // A resumed wait-gate escalation is VALIDATED by the post-escalation gate (`validTarget`) so
           // an omitted/malformed operator value re-parks instead of threading null onto the emit the
-          // downstream consumer binds (PR #876 review).
-          { resume: { kind: node.kind, emits }, diagnosticInputs, displayName, reservedTargets: emits.map((f) => factSourceVar(node.kind, f)), ...(emits.length > 0 ? { validTarget: `${el}_end` } : {}) },
+          // downstream consumer binds (PR #876 review). Only a SINGLE-emit wait is value-resumable, so
+          // `validTarget` (and the gate it drives) is provided ONLY then — a multi-emit wait has no
+          // escapable resume and so grows no gate (issue #863 review r4198123619).
+          { resume: { kind: node.kind, emits }, diagnosticInputs, displayName, reservedTargets: emits.map((f) => factSourceVar(node.kind, f)), ...(emits.length === 1 ? { validTarget: `${el}_end` } : {}) },
         )),
     // On `continue`, the not-ready-at-boundary branch (`_i4`) proceeds straight to the node end (no
     // human stop, no `_i5` escalation-return flow); on `escalate` it parks on the escalation task,
@@ -2231,33 +2552,168 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
  * + SLA. On completion the form's captured typed value is output (`humanEmitValue`/`humanEmitArtifact`
  * — the subProcess ioMapping then publishes it as the node's fact); on SLA expiry the node records an
  * `escalated` outcome and settles (bounded — the graph cannot silently wedge). Mirrors the standalone
- * `delivery-human.bpmn` shape, reusing the S3 form + emit-var contract (`deliveryHuman.ts`). */
-function humanBodyLines(el: string, displayName: string): string[] {
+ * `delivery-human.bpmn` shape, reusing the S3 form + emit-var contract (`deliveryHuman.ts`).
+ *
+ * `singleEmit` (the node's ONE declared fact, when it declares exactly one) lets a bespoke explicit
+ * form capture its value under the FACT'S OWN NAME — the same precedence `bindHumanEmits` honours
+ * (fact name first, then the canonical `value`/`resolvedArtifact` keys). The userTask output source
+ * therefore prefers `<factName>` and falls back to the canonical control, so a custom form keyed on the
+ * fact (`{ approval: "yes" }` for an `approval` emit) publishes its value instead of NULL, while the
+ * generic/publish/ack forms (which capture `value`/`resolvedArtifact`) are unaffected (PR #863 review,
+ * thread deliveryGraphCompiler.ts:1929). Fact names are `FACT_NAME_PATTERN`-constrained
+ * (`[A-Za-z_][A-Za-z0-9_]*`), so the name embeds safely as a FEEL identifier. The selected value is then
+ * COERCED/VALIDATED to the emit's declared type via {@link coerceFactValueFeel} (the same typed-binding
+ * contract the escalation resume uses), so a bespoke `boolean`/`number` form publishes a real FEEL
+ * boolean/number — not the raw string `"true"`/`"1"` that a downstream guarded split (`= true`/`= 1`)
+ * would never match (PR #863 thread r4189815989). */
+function humanBodyLines(el: string, displayName: string, formId: string, singleEmit?: DeliveryFact, preferFactName = false, requiredEmit = false): string[] {
   const task = humanTaskElement(el);
   const assignee =
     '=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != "") then escalationAssignee else null';
+  // The canonical capture key for the single emit's TYPE (artifact → the publish form's
+  // `resolvedArtifact`; anything else → the generic form's `value`). `selectExpr(canonical)` is a bare
+  // (no leading `=`) null-safe FEEL expression; when `preferFactName` (an EXPLICIT bespoke form only) it
+  // reads `<factName>` first, then the canonical control — a built-in form's fixed control otherwise.
+  // The fact-named read is STRINGABILITY-guarded (`string(<factName>) != null`) because `is defined(X)`
+  // is TRUE and `X != null` holds for a FEEL BUILTIN function (`count`, `sum`, …) when a blank form
+  // leaves no task variable of that name — so a bare presence guard would SELECT the builtin FUNCTION as
+  // the `then` arm for the emit. The number/boolean coercers reject a non-stringable operand, but the text
+  // types (`string`/`version`/`url`/`pr`) pass the selection through verbatim and the artifact source is
+  // never coerced, so without this guard those fact types would select the builtin function rather than
+  // fall back to the canonical control / null. On the pinned WASM engine a function-valued selection is
+  // itself folded to null before it can be published (a FEEL variable binding cannot hold a function), so
+  // the guard is defence-in-depth THERE — but it is NOT a no-op: it makes the null-fold explicit and
+  // engine-independent (an engine that published the function instead would corrupt the fact or incident
+  // on the downstream io-mapping), and it is what the compiler-level FEEL assertion in
+  // `deliveryGraphCompiler.test.ts` pins red-before/green-after. `string(<builtin>)` folds to null, so the
+  // guard falls back to the canonical control / null; a real captured TEXT value stringifies to itself and
+  // is still selected. The guard sits ONLY on the fact-named candidate — the canonical `resolvedArtifact`
+  // object in the else arm is untouched, so a genuine object handle still passes through (Copilot review
+  // #863, "Guard fact names that shadow FEEL builtins").
+  const selectExpr = (canonical: string): string =>
+    singleEmit !== undefined && preferFactName
+      ? `if (is defined(${singleEmit.name}) and ${singleEmit.name} != null and string(${singleEmit.name}) != null) then ${singleEmit.name} else if (is defined(${canonical})) then ${canonical} else null`
+      : `if (is defined(${canonical})) then ${canonical} else null`;
+  // A form captures the selected value as TEXT (a textfield, or an explicit form's fact-named control), so
+  // the non-artifact single emit must be VALIDATED against the fact's declared type AND COERCED to it
+  // before writing `humanEmitValue` — the SAME type-aware, fail-closed contract the escalation resume
+  // enforces. That contract is absorbed into {@link coerceFactValueFeel}, whose per-type arm now VALIDATES
+  // (not merely coerces) the selection: `boolean`/`number` already failed closed on an unparseable entry,
+  // and `string`/`version`/`url`/`pr` now fail closed on a value that does not match the declared type's
+  // grammar — so a generic/custom form can no longer publish a blank string, a malformed version/URL, or an
+  // invalid PR ref directly downstream (PR #863 review 5430718031, "Validate human-task fact values before
+  // publishing"). (The validity test is folded INTO the coercion's single `if` rather than wrapped in an
+  // outer `if (resumeValueCondition(…)) then …` because the pinned engine mis-evaluates a nested
+  // `if…then…else` selection inside that outer guard — verified engine-native: valid entries routed to the
+  // default branch. Folding the check into the one `if` keeps the working single-level shape.)
+  const valueSource =
+    singleEmit !== undefined && singleEmit.type !== "artifact"
+      ? `=${coerceFactValueFeel(singleEmit, selectExpr("value"))}`
+      : "=if (is defined(value)) then value else null";
+  // The artifact source is likewise VALIDATED before publish: the publish form's `required` rule checks
+  // only PRESENCE, so a value like `not-an-artifact` was accepted and propagated downstream despite the
+  // canonical `pkg@version` handle contract (PR #863 review 5430718031, "Validate human artifact handles
+  // before publishing"). Gate it on the SAME artifact grammar the escalation resume enforces
+  // (`resumeValueCondition`'s artifact arm — scoped-package aware), fail closed to null. An artifact handle
+  // is a text reference, so the valid arm publishes the selection verbatim (no coercion). The guard is a
+  // FLAT `matches(trim(string(…)))` on the selection — NOT `resumeValueCondition`'s full form, whose
+  // `is defined(<nested if…else>)` presence conjunct the pinned engine mis-evaluates when the selection is
+  // a compound `if…then…else` (verified engine-native: a valid handle routed to null). `string(…) != null`
+  // is the null-safe presence/stringability test; `matches()` is null-safe (a non-match yields false).
+  const artifactSource =
+    singleEmit !== undefined && singleEmit.type === "artifact"
+      ? (() => {
+          const sel = selectExpr("resolvedArtifact");
+          const s = `string(${sel})`;
+          return `=if (${s} != null and matches(trim(${s}), "^@?[^@\\\\s]+@v?\\\\d[\\\\w.+-]*$") = true) then ${sel} else null`;
+        })()
+      : "=if (is defined(resolvedArtifact)) then resolvedArtifact else null";
+  // FAIL-CLOSED COMPLETION GATE (PR #863 review, thread r4198662345): a human node whose single emit is a
+  // downstream-REQUIRED fact must not publish an invalid (null-coerced) value onward — the edge to the
+  // consumer is unconditional and a human node has no worker contract gate or Retry path, so a null here
+  // activates the consumer with a null required fact. Mirror the escalation resume's fail-closed shape:
+  // the task's OWN output mapping computes a validity flag from the SAME `selectExpr` SELECTION the emit
+  // publishes (so an explicit bespoke form's fact-named control is validated, not a bare always-absent
+  // field) via {@link resumeValueCondition} (the SAME per-type grammar the escalation resume enforces —
+  // presence included, so a blank required entry is invalid too), and a post-task exclusive gateway routes
+  // a VALID completion to the node end while an INVALID one loops back to the human task for re-entry (the
+  // human analogue of a re-park — a human node has no separate escalation twin to re-park onto). The flag is
+  // the node-unique {@link resumeValidVar} (the emit source is the fixed `humanEmitValue`/
+  // `humanEmitArtifact`, never the fact's own name) — GROWN collision-free (via {@link growFlagClear})
+  // against this node's node-local null-seeded vars (HUMAN_RESULT_LOCAL_VARS + the declared emit's fact
+  // NAME, which `ioMappingLines` null-seeds node-local). A required single emit named EXACTLY this flag
+  // would otherwise land the flag in that node-local null-seed and the completion gateway would read the
+  // stale `null`, re-parking a valid answer forever (Copilot review #863, thread r4201222762 — the same
+  // shadow class `escalationResumeFlagVar` already dodges for service-node emits).
+  // Grown ONLY when the single emit is required — a routing-only/unconsumed emit keeps the direct
+  // `task → end` flow (a routing-only null just takes a guarded split's deadlock-safe default, exactly
+  // like the escalation resume's no-required-target case). The gateway routes on the SIMPLE
+  // `<flag> = true` boolean (a gateway ioMapping is not visible downstream in the pinned engine —
+  // verified — so the validity is computed here on the task output, not on the gateway).
+  const gateRequired = requiredEmit && singleEmit !== undefined;
+  const flagVar = growFlagClear(
+    resumeValidVar(task),
+    new Set<string>([...HUMAN_RESULT_LOCAL_VARS, ...(singleEmit !== undefined ? [singleEmit.name] : [])]),
+  );
+  // The completion-validity flag MUST validate the SAME selection the emit publishes (`selectExpr`), not
+  // the BARE canonical control: for an EXPLICIT bespoke form (`preferFactName`) the emit reads the
+  // fact-named control (`<singleEmit.name>`) FIRST, so a flag keyed on the bare `value`/`resolvedArtifact`
+  // would read an always-undefined field and reject a GENUINELY VALID explicit-form completion forever —
+  // the gateway's `_cbad` default re-parks the human every round until the SLA escalates (a correct human
+  // answer could never complete an explicit-form required-emit node). Mirror the emit's selection and feed
+  // it to `resumeValueCondition` with a FLAT `string(sel) != null` presence override — NOT the default
+  // `is defined(<compound>)` presence, which the pinned engine mis-evaluates on a compound
+  // `if…then…else` selection (the same reason `artifactSource` uses a flat `matches(trim(string(…)))`).
+  const validitySource = (() => {
+    if (singleEmit === undefined) return "=false";
+    const sel = selectExpr(singleEmit.type === "artifact" ? "resolvedArtifact" : "value");
+    return `=if ${resumeValueCondition(singleEmit, sel, `string(${sel}) != null`)} then true else false`;
+  })();
+  const endEvent = `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${gateRequired ? `${el}_cok` : `${el}_i1`}</bpmn:incoming></bpmn:endEvent>`;
+  const completionGate: string[] = gateRequired
+    ? [
+        `      <bpmn:exclusiveGateway id="${el}_cg" name="required fact valid?" default="${el}_cbad">`,
+        `        <bpmn:incoming>${el}_i1</bpmn:incoming>`,
+        `        <bpmn:outgoing>${el}_cok</bpmn:outgoing>`,
+        `        <bpmn:outgoing>${el}_cbad</bpmn:outgoing>`,
+        "      </bpmn:exclusiveGateway>",
+        `      <bpmn:sequenceFlow id="${el}_cok" name="valid" sourceRef="${el}_cg" targetRef="${el}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${flagVar} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+        `      <bpmn:sequenceFlow id="${el}_cbad" name="invalid — re-enter" sourceRef="${el}_cg" targetRef="${task}" />`,
+      ]
+    : [];
   return [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
     `      <bpmn:userTask id="${task}" name="Delivery: human step — ${escapeXml(displayName)}">`,
     "        <bpmn:extensionElements>",
-    `          <zeebe:formDefinition formId="${GENERIC_HUMAN_FORM}" />`,
+    // `formId` is the node's RESOLVED form key, which for an explicit `human.formKey` is OPERATOR-SUPPLIED
+    // text — render it through `attr()` (which switches to a single-quote delimiter when the value contains
+    // a `"`) so a quote-bearing key can never break out of the attribute and inject BPMN. Authoring-time
+    // validation (`deliveryGraph.ts`) additionally rejects a URL-/credential-/control-char-bearing formKey
+    // before it ever reaches here, so this is defence in depth, not the only gate.
+    `          <zeebe:formDefinition ${attr("formId", formId)} />`,
     "          <zeebe:userTask />",
     `          <zeebe:assignmentDefinition candidateGroups="operators" ${attr("assignee", assignee)} />`,
     "          <zeebe:ioMapping>",
     `            <zeebe:output ${attr("source", '="completed"')} target="humanOutcome" />`,
-    `            <zeebe:output ${attr("source", "=if (is defined(value)) then value else null")} target="humanEmitValue" />`,
-    `            <zeebe:output ${attr("source", "=if (is defined(resolvedArtifact)) then resolvedArtifact else null")} target="humanEmitArtifact" />`,
+    `            <zeebe:output ${attr("source", valueSource)} target="humanEmitValue" />`,
+    `            <zeebe:output ${attr("source", artifactSource)} target="humanEmitArtifact" />`,
     `            <zeebe:output ${attr("source", "=if (is defined(note)) then note else null")} target="humanNote" />`,
+    // The completion-gate validity flag — computed from the SAME `selectExpr` selection the emit uses, so
+    // it is independent of the (already fail-closed) coerced `humanEmitValue`/`humanEmitArtifact` above and
+    // routes the gateway.
+    ...(gateRequired ? [`            <zeebe:output ${attr("source", validitySource)} target="${flagVar}" />`] : []),
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
     `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
+    // The invalid completion loops back to re-enter this task (re-park for a value correction).
+    ...(gateRequired ? [`        <bpmn:incoming>${el}_cbad</bpmn:incoming>`] : []),
     `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
     "      </bpmn:userTask>",
     `      <bpmn:boundaryEvent id="${el}_sla" name="SLA elapsed" attachedToRef="${task}">`,
     `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
     `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=escalationSlaTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
     "      </bpmn:boundaryEvent>",
-    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming></bpmn:endEvent>`,
+    endEvent,
     `      <bpmn:endEvent id="${el}_escEnd" name="Escalated">`,
     "        <bpmn:extensionElements>",
     `          <zeebe:ioMapping><zeebe:input ${attr("source", '="escalated"')} target="humanOutcome" /></zeebe:ioMapping>`,
@@ -2265,8 +2721,10 @@ function humanBodyLines(el: string, displayName: string): string[] {
     `        <bpmn:incoming>${el}_i2</bpmn:incoming>`,
     "      </bpmn:endEvent>",
     flow(`${el}_i0`, `${el}_start`, task),
-    flow(`${el}_i1`, task, `${el}_end`),
+    // Valid completion routes task → gate → end; the gate's default (invalid) loops back to the task.
+    flow(`${el}_i1`, task, gateRequired ? `${el}_cg` : `${el}_end`),
     flow(`${el}_i2`, `${el}_sla`, `${el}_escEnd`),
+    ...completionGate,
   ];
 }
 
@@ -2284,6 +2742,108 @@ function humanBodyLines(el: string, displayName: string): string[] {
  * mapping a naive resume publishes `<el>_<fact> = null`, silently starving the downstream consumer.
  * `opts.diagnosticInputs` seeds read-only probe context (issue #514 Defect A) onto the same task so the
  * operator can see WHY the gate escalated (its last probe detail + observed candidate releases). */
+
+/** The ONE canonical runtime normalization a captured escalation/human-form text value is folded
+ * through before a `boolean`/`number` gate or coercion reads it: `lower case(trim(string(...)))`. The
+ * validity gate ({@link resumeValueCondition}) and the typed bind ({@link coerceFactValueFeel}) MUST
+ * share it, or a value one accepts the other converts differently — e.g. `" true "` passes a trimming
+ * gate but a non-trimming coercion publishes the wrong boolean, and `"TRUE"` a case-folding coercion
+ * accepts but a non-folding gate rejects (#863 review r4194186383). Deriving both from this single
+ * expression makes "gate accepts ⇒ coercion binds the same value" structurally true, not coincidental. */
+function normalizedBoolNumberFeel(rawExpr: string): string {
+  return `lower case(trim(string(${rawExpr})))`;
+}
+
+/** Coerce/validate a captured form value — a null-safe FEEL expression `rawExpr` yielding the operator's
+ * entry (string-valued text, or null when absent) — to a single emit's declared {@link DeliveryFact.type},
+ * so the published fact is a REAL FEEL value and not an untyped string. One source of truth shared by the
+ * escalation-resume validation gate (the {@link escalationTaskLines} output mapping, which coerces the
+ * resumed `value` when `resumeValueCondition` accepts it) and the bespoke single-emit human-form
+ * source ({@link humanBodyLines}), so the two typed-publish paths cannot drift (PR #863 threads
+ * r4182488193 / r4189815989). Returns a bare expression WITHOUT a leading `=`.
+ *   • `boolean` — accept the literal `"true"`/`"false"`, case-insensitively AND
+ *     surrounding-whitespace-trimmed via the shared {@link normalizedBoolNumberFeel}
+ *     (`lower case(trim(string(…)))`); anything else is invalid and yields null. (The pinned engine's
+ *     FEEL `matches` does not support an inline `(?i:…)` flag — verified against the WASM engine — so
+ *     case-insensitivity is done by lower-casing the input, not the pattern.) The validity gate
+ *     ({@link resumeValueCondition}) folds the SAME normalization, so a value it accepts coerces to the
+ *     SAME boolean here (#863 review r4194186383). An already-boolean control value round-trips
+ *     correctly: `string(true)` → `"true"` passes the same gate.
+ *   • `number` — `number(trim(string(value)))` parses the trimmed numeric text (matching the gate's
+ *     `trim(string(…))`); an unparseable entry yields null.
+ *   • every other type (`string`/`url`/`version`/`pr`/`artifact`) is text-valued already — pass through.
+ * The defined FAILURE PATH for invalid input is `null`, so a required-emit producer gate escalates and a
+ * guarded split takes its deadlock-safe default rather than routing on a mistyped value. `definedGuard`,
+ * when given, wraps the passthrough/branch in an outer `is defined(...)` for a raw name that may be
+ * entirely absent (the escalation `value` control); a `rawExpr` already null-safe (the human-form
+ * selection expression) passes none. */
+function coerceFactValueFeel(fact: DeliveryFact, rawExpr: string, definedGuard?: string): string {
+  const pre = definedGuard ? `${definedGuard} and ` : "";
+  // Parenthesise rawExpr wherever it stands as a BARE infix operand (`(rawExpr) != null`): a caller may
+  // pass a COMPOUND `if … then … else null` selection expression (the bespoke/generic human-form
+  // `selectExpr`), and FEEL's `else` arm is GREEDY — an unparenthesised `if C then x else null != null
+  // and matches(…)` parses as `if C then x else (null != null and matches(…))`, so when the field is
+  // defined the whole coercion guard collapses to the raw entry and `if ("true") then … else null`
+  // (a non-boolean condition) publishes NULL, silently defeating the coercion for every bespoke/generic
+  // boolean & number human form (the escalation path passes the bare name `value`, so it was unaffected —
+  // which is why the string-shape unit tests never caught it; empirically confirmed on the WASM engine).
+  // The `string(rawExpr)`/`number(rawExpr)` sites are already bounded by their call parens, and the
+  // passthrough `then rawExpr else null` has no trailing operator, so only the `!= null` operand needs it.
+  const operand = `(${rawExpr})`;
+  switch (fact.type) {
+    case "boolean": {
+      // Share the gate's EXACT normalization ({@link normalizedBoolNumberFeel}) so a value the validity
+      // gate ({@link resumeValueCondition}) accepts coerces to the SAME boolean here — `" true "`/`"TRUE"`
+      // can never be accepted-then-mis-published (#863 review r4194186383).
+      const norm = normalizedBoolNumberFeel(rawExpr);
+      // NULL-SAFE the normalization exactly like the number arm below: `operand != null` does NOT prove the
+      // operand is STRINGABLE, so a fact name colliding with a FEEL builtin (`count`, …) left blank resolves
+      // the selection operand to the builtin FUNCTION and `lower case(trim(string(<function>)))` throws a
+      // runtime INCIDENT. Guard with `string(rawExpr) != null` (null-safe, short-circuits the normalization).
+      return `if (${pre}${operand} != null and string(${rawExpr}) != null and matches(${norm}, "^(true|false)$")) then ${norm} = "true" else null`;
+    }
+    case "number":
+      // TRIM/stringify to match the gate's `trim(string(...))` (#863 review r4194186383): the gate accepts
+      // `" 42 "`, so the bind must parse the same trimmed text — a bare `number(" 42 ")` yields null,
+      // breaking the "gate accepts ⇒ bind is non-null" invariant.
+      // NULL-SAFE the trim: `string(rawExpr) != null` must guard it, because `operand != null` does NOT
+      // prove the operand is STRINGABLE. When the fact name collides with a FEEL builtin (`count`, `sum`,
+      // …), a blank human form leaves the variable unset, so the `is defined(count) and count != null`
+      // selection operand resolves to the builtin FUNCTION (is-defined ⇒ true, function ≠ null), and
+      // `trim(string(<function>))` throws `trim: expected a string, got null` — a runtime INCIDENT rather
+      // than the intended null (the pre-round `number(rawExpr)` folded it to null; this restores that
+      // null-safety while keeping the trim). `string(…)` itself is null-safe (yields null, no incident),
+      // so the guard evaluates cleanly and short-circuits the trim away for any non-stringable operand.
+      return `if (${pre}${operand} != null and string(${rawExpr}) != null) then number(trim(string(${rawExpr}))) else null`;
+    case "string":
+    case "version":
+    case "url":
+    case "pr": {
+      // TEXT-VALUED types were previously passed through UNCHANGED — so a human form could publish a blank
+      // string, a malformed version/URL, or an invalid PR ref directly downstream despite the declared
+      // fact type (PR #863 review 5430718031, "Validate human-task fact values before publishing"). Fold
+      // the SAME type-aware validity grammar the escalation resume gate ({@link resumeValueCondition})
+      // enforces into this single `if`, failing CLOSED to null on a non-conforming entry. The grammar is
+      // applied as a FLAT `matches(...)`/`trim(...)` on `string(rawExpr)` (null-safe, no
+      // `is defined(<nested if…else>)` — the pinned engine mis-evaluates that compound inside an outer
+      // guard, verified engine-native). The valid arm publishes the selection VERBATIM (these types need
+      // no coercion), so a real captured value round-trips unchanged.
+      const s = `string(${rawExpr})`;
+      const grammar =
+        fact.type === "string"
+          ? `trim(${s}) != ""`
+          : fact.type === "version"
+            ? `matches(trim(${s}), "^v?\\\\d[\\\\w.+-]*$") = true`
+            : fact.type === "url"
+              ? `matches(trim(${s}), "^[A-Za-z][A-Za-z0-9+.-]*://") = true`
+              : `matches(lower case(trim(${s})), "^(([^/#]+/[^/#]+)#(\\\\d+)|((https?://)?(www\\\\.)?github\\\\.com/[^/]+/[^/]+/pull/\\\\d+([/?#].*)?))$") = true`;
+      return `if (${pre}${operand} != null and ${s} != null and ${grammar}) then ${rawExpr} else null`;
+    }
+    default:
+      return definedGuard ? `if (${definedGuard}) then ${rawExpr} else null` : rawExpr;
+  }
+}
+
 function escalationTaskLines(
   esc: string,
   nodeId: string,
@@ -2291,11 +2851,22 @@ function escalationTaskLines(
   outgoing: string,
   contextFeel: string,
   opts?: {
-    resume?: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[] };
+    /** `emits` are the escalation's RESUME targets (the facts a Continue value may publish); for a
+     * `wait` node this is the node's full declared-emit set, but for an `agent`/`connector` it is only
+     * the REQUIRED subset a downstream node binds. `declaredEmits` is the node's FULL declared-emit set
+     * — it drives SPEC 13.3's hard cardinality rule (value-resume ONLY when exactly one emit is
+     * declared), which the required-count alone cannot see (issue #863 review, thread r4193902690).
+     * Defaults to `emits` for the `wait` case where the two sets coincide. */
+    resume?: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[]; declaredEmits?: readonly DeliveryFact[] };
     diagnosticInputs?: readonly { source: string; target: string }[];
     displayName?: string;
+    /** The node element whose retry gate this escalation feeds (#863): the completion publishes the
+     * node-unique `<el>_retryRequested` boolean from the node-local `decision`, and the tail grows a
+     * retry gate (`${esc}Rg`) routing Retry to the shared reset `${retryElement}_retry`. Absent for a
+     * `wait`-gate escalation (resolution is "supply the awaited value", never "re-run the probe loop"). */
+    retryElement?: string;
     /** The element the resume-validation gate's VALID branch flows to (the node end). Required iff
-     * `resume` carries emits — a resumable escalation never routes straight to its end. */
+     * `resume` carries emits — a resumable escalation's Continue never routes straight to its end. */
     validTarget?: string;
     /** The emit-source var ({@link factSourceVar}) of EVERY declared emit of this node — required AND
      * non-required (a routing-only `when`-guard emit, or a declared-but-unconsumed one) — that shares
@@ -2307,86 +2878,106 @@ function escalationTaskLines(
 ): string[] {
   const resume = opts?.resume;
   const emits = resume?.emits ?? [];
-  const emitMode = emits.length > 0 ? "typed" : "none";
-  const emitLabel = emits.map((e) => `${e.name} (${e.type})`).join(", ");
+  // The node's FULL declared-emit set drives SPEC 13.3's hard cardinality rule. For a `wait` node
+  // `resume.emits` already IS the declared set, so it defaults here; for an `agent`/`connector`
+  // `resume.emits` is only the REQUIRED subset, so the declared set is threaded explicitly (issue #863
+  // review, thread r4193902690).
+  const declaredEmits = resume?.declaredEmits ?? emits;
+  // The escalation form (`ESCALATION_FORM` / `GENERIC_HUMAN_FORM`) captures the operator's answer in a
+  // SINGLE `value` field, so it can resume AT MOST ONE emit. With >1 required emit, one value cannot
+  // satisfy multiple distinct typed facts — mapping it onto every emit-source var writes the SAME value
+  // to each, corrupting all of them (and coercing one string into differently-typed facts; #863 review
+  // r4180629319). So Continue-with-value is offered ONLY for a single emit; with multiple, the value
+  // field is inert ("none"), the resume-valid flag is hard-`false` (#876 fail closed), and the
+  // validation gate always re-parks — re-running the node ("Retry this step") stays the way to produce
+  // the facts.
+  //
+  // The cardinality that gates this is the DECLARED-emit count, NOT the required-emit count: a node
+  // declaring two facts where only one is required must STILL leave the value field inert (SPEC 13.3 —
+  // "any node with multiple declared emits leaves the field inert"). Gating on `emits.length === 1`
+  // (required) alone let such a node offer a value-resumable Continue that would publish the lone
+  // required fact while silently dropping the sibling (issue #863 review, thread r4193902690).
+  const resumableEmit = declaredEmits.length === 1 && emits.length === 1 ? emits[0] : undefined;
+  const emitMode = resumableEmit !== undefined ? "typed" : "none";
   const inputs: string[] = [
     `            <zeebe:input ${attr("source", contextFeel)} target="prompt" />`,
     `            <zeebe:input ${attr("source", `=${feelStr(nodeId)}`)} target="nodeId" />`,
     `            <zeebe:input ${attr("source", `=${feelStr(emitMode)}`)} target="emitMode" />`,
   ];
-  if (emits.length > 0) {
-    inputs.push(`            <zeebe:input ${attr("source", `=${feelStr(emitLabel)}`)} target="emitLabel" />`);
+  if (resumableEmit !== undefined) {
+    inputs.push(
+      `            <zeebe:input ${attr("source", `=${feelStr(`${resumableEmit.name} (${resumableEmit.type})`)}`)} target="emitLabel" />`,
+    );
   }
   for (const di of opts?.diagnosticInputs ?? []) {
     inputs.push(`            <zeebe:input ${attr("source", di.source)} target="${di.target}" />`);
   }
-  // Defect B + PR #876 review: the operator's captured typed value is VALIDATED on this task's OWN
-  // output mapping (reading the form's `value` field), which the pinned engine evaluates reliably —
-  // unlike a downstream gateway's ioMapping, whose inputs/outputs are NOT visible downstream (verified
-  // engine-native). The required emit's emit-source var is bound from `value` ONLY when it is present
-  // and type-valid (`resumeValueCondition`), else null; a validity boolean flags the resume.
-  // The post-escalation gateway then routes on the SIMPLE `<resumeValidVar> = true` (a complex FEEL
-  // condition on the gateway mis-evaluates — verified), looping an invalid resume back onto a fresh
-  // escalation task (fail closed) so it can never thread null/garbage onto the emit the subProcess
-  // output ioMapping republishes downstream. The generic escalation form (`GENERIC_HUMAN_FORM`)
-  // captures the operator's answer in a single `value` field — it has NO `resolvedArtifact` field — so
-  // a single emit resumes from `value`, validated per its fact type (artifact→resolvedArtifact,
-  // version→detail, …). Sourcing an artifact from a `resolvedArtifact` form field the form never sets
-  // would publish null and make an artifact wait-node escalation non-resumable via the UI.
+  // Defect B + PR #876 review + #863 retry: the operator's captured typed value is VALIDATED on this
+  // task's OWN output mapping (reading the form's `value` field), which the pinned engine evaluates
+  // reliably — unlike a downstream gateway's ioMapping, whose inputs/outputs are NOT visible downstream
+  // (verified engine-native). The required emit's emit-source var is bound from `value` — COERCED to
+  // the fact's declared type ({@link coerceFactValueFeel}, #863) — ONLY when it is present and type-valid
+  // ({@link resumeValueCondition}, #876), else null; a validity boolean flags the resume. The
+  // post-escalation validation gateway routes on the SIMPLE `<resumeValidVar> = true` (a complex FEEL
+  // condition on the gateway mis-evaluates — verified), re-parking an invalid resume (fail closed) so it
+  // can never thread null/garbage onto the emit the subProcess output ioMapping republishes downstream.
+  // On Continue (`decision != retry`) this validation gate runs; on Retry the per-escalation retry gate
+  // funnels to the shared reset instead. The generic/service escalation form captures the answer in a
+  // single `value` field — no `resolvedArtifact` field — so a single emit resumes from `value`,
+  // validated per its fact type (artifact→resolvedArtifact, version→detail, …).
   //
-  // MULTI-EMIT (PR #876 review): the generic form's SINGLE `value` cannot supply a distinct value per
-  // fact, so a node owing more than one required emit CANNOT be resumed from it. Copying the one
-  // `value` into every emit-source var would release duplicate/garbage facts downstream; instead we
-  // FAIL CLOSED — bind nothing and hard-set the validity flag to `false`, so the post-escalation gate
-  // always loops back (the operator re-parks) and no single value is ever threaded onto several
-  // distinct emits. (Per-fact resume would need a per-fact form, which the generic form does not have.)
+  // MULTI-EMIT (PR #876 review): the form's SINGLE `value` cannot supply a distinct value per fact, so a
+  // node owing more than one required emit CANNOT be resumed from it. Copying the one `value` into every
+  // emit-source var would release duplicate/garbage facts downstream; instead we FAIL CLOSED — bind
+  // nothing and hard-set the validity flag to `false`, so the validation gate always re-parks.
   const outputs: string[] = [];
-  // The resume-valid flag shares this escalation's flat engine scope with EVERY declared emit's
-  // source var — not only the single resumed required emit. For a multi-emit node nothing is bound by
-  // the gate, and for `wait`/`human` kinds `factSourceVar` is a fixed internal name; but for an
-  // `agent`/`connector` a declared emit's source var IS its own fact name, which the user controls.
-  // That emit need NOT be the resumed required one: a routing-only `when`-guard emit, or a declared-
-  // but-unconsumed emit, is absent from `resume.emits` yet is STILL republished by the subProcess
-  // output mapping from its own source var (see the `normaliseEmits(node)` output loop). So a node can
-  // legally declare such an emit named EXACTLY the generated flag; left colliding, the escalation would
-  // write its boolean validity flag into that emit's var and the subProcess would publish `true`/`false`
-  // for it downstream (potentially selecting a guarded branch — PR #876 review). Reserve the source var
-  // of every declared emit (callers thread them via `reservedTargets`) AND the resumed required emits,
-  // then grow the flag with a deterministic unused `_` suffix until it differs from ALL of them —
-  // closing the whole collision class structurally WITHOUT reserving any part of the public fact-name
-  // space. `_` keeps it a legal FEEL identifier; the loop terminates because each step lengthens the
-  // flag past every fixed-length reserved target.
-  const reservedTargets = new Set<string>(opts?.reservedTargets ?? []);
-  if (resume !== undefined) for (const f of emits) reservedTargets.add(factSourceVar(resume.kind, f));
-  let flagVar = resume !== undefined && emits.length > 0 ? resumeValidVar(esc) : "";
-  while (flagVar !== "" && reservedTargets.has(flagVar)) flagVar = `${flagVar}_`;
-  if (resume !== undefined && emits.length === 1) {
-    const fact = emits[0];
+  // The resume-valid flag shares this escalation's flat engine scope with EVERY declared emit's source
+  // var — not only the single resumed required emit — so it is grown collision-free against ALL of them
+  // (shared with the reset via {@link escalationResumeFlagVar}). See that helper for the collision class.
+  const flagVar = escalationResumeFlagVar(esc, resume, opts?.reservedTargets ?? []);
+  if (resume !== undefined && resumableEmit !== undefined) {
+    const fact = resumableEmit;
     const target = factSourceVar(resume.kind, fact);
+    const valid = resumeValueCondition(fact, "value");
     outputs.push(
-      `            <zeebe:output ${attr("source", `=if ${resumeValueCondition(fact, "value")} then value else null`)} target="${target}" />`,
+      // Bind the coerced typed value only when it passes the fail-closed validity test (so flag=true
+      // always implies a non-null, correctly-typed bind — the two can never disagree).
+      `            <zeebe:output ${attr("source", `=if ${valid} then ${coerceFactValueFeel(fact, "value")} else null`)} target="${target}" />`,
     );
     outputs.push(
       // The validity flag the post-escalation gateway routes on — an internal, compiler-generated
       // variable name ({@link resumeValidVar}), made collision-free against the emit-source var above
       // by construction, so it can neither collide with nor be shadowed by a declared emit.
-      `            <zeebe:output ${attr("source", `=if ${resumeValueCondition(fact, "value")} then true else false`)} target="${flagVar}" />`,
+      `            <zeebe:output ${attr("source", `=if ${valid} then true else false`)} target="${flagVar}" />`,
     );
-  } else if (resume !== undefined && emits.length > 1) {
+  } else if (resume !== undefined && emits.length > 0) {
     outputs.push(
-      // Fail closed: more than one required emit cannot be resumed from the generic form's single
-      // `value`, so the resume is never valid and the gate always re-parks (see the comment above).
+      // Fail closed: the escalation is not value-resumable (more than one required emit, OR more than
+      // one DECLARED emit so the single value field is inert per SPEC 13.3) yet a required emit is owed,
+      // so the resume is never valid and the validation gate always re-parks (see the comment above).
       `            <zeebe:output ${attr("source", "=false")} target="${flagVar}" />`,
+    );
+  }
+  if (opts?.retryElement !== undefined) {
+    outputs.push(
+      // The node-unique `<el>_retryRequested` boolean the per-escalation retry gate routes on (#863),
+      // derived from the node-local `decision` the operator chose on `ESCALATION_FORM`.
+      `            <zeebe:output ${attr("source", `=is defined(${ESCALATION_DECISION_VAR}) and ${ESCALATION_DECISION_VAR} = ${feelStr(ESCALATION_DECISION_RETRY)}`)} target="${retryRequestedVar(opts.retryElement, opts.reservedTargets ?? [])}" />`,
     );
   }
   // The escalation user task shows the node's DESCRIPTIVE display name (issue #778 review) so a
   // timed-out / contract-broken node is legible in the explorer/inbox instead of an opaque bare id;
   // `nodeId` is still threaded as the `nodeId` input above for runtime correlation.
   const escLabel = trimmedOrEmpty(opts?.displayName) || nodeId;
+  // The retry-capable `decision` select lives ONLY on the service-escalation form (`ESCALATION_FORM`).
+  // A wait-gate escalation carries no `retryElement` — its resolution is "supply the awaited value and
+  // continue", never "re-run the probe loop" — so it keeps the select-less generic form rather than
+  // render a "Retry this step" option that would be silently ignored.
+  const form = opts?.retryElement !== undefined ? ESCALATION_FORM : GENERIC_HUMAN_FORM;
   const task = [
     `      <bpmn:userTask id="${esc}" name="Escalate: ${escapeXml(escLabel)}">`,
     "        <bpmn:extensionElements>",
-    `          <zeebe:formDefinition formId="${GENERIC_HUMAN_FORM}" />`,
+    `          <zeebe:formDefinition formId="${form}" />`,
     "          <zeebe:userTask />",
     '          <zeebe:assignmentDefinition candidateGroups="operators" />',
     "          <zeebe:ioMapping>",
@@ -2398,35 +2989,74 @@ function escalationTaskLines(
     `        <bpmn:outgoing>${outgoing}</bpmn:outgoing>`,
     "      </bpmn:userTask>",
   ];
-  if (resume === undefined || emits.length === 0) return task;
+  const retryEl = opts?.retryElement;
+  // The resume-validation gate re-parks an invalid Continue back onto THIS escalation task (fail
+  // closed). That loop is only escapable when the operator has a way out of it — EITHER a genuinely
+  // value-resumable single emit (supply the value → flag true → proceed to the node end) OR a Retry
+  // gate (service nodes). A multi-emit WAIT escalation has NEITHER: the single `value` field cannot
+  // supply >1 distinct fact so the flag is hard-`false` and Continue ALWAYS re-parks, and a wait gate
+  // carries no `retryElement`, so there is no Retry escape. Building the gate there wedges the timed-out
+  // token in an unresolvable loop (issue #863 review, thread r4198123619 — "Prevent unresolvable loops
+  // for multi-emit wait nodes"). So the gate is grown ONLY when there is an escape; otherwise the
+  // escalation flows straight to the node end, exactly like a no-emit wait escalation (an acknowledged,
+  // value-less continue). Service nodes KEEP the fail-closed re-park — their Retry gate is the escape.
+  const resumable = resume !== undefined && emits.length > 0 && (resumableEmit !== undefined || retryEl !== undefined);
+  // A wait-gate escalation with no escapable resume (no `retryElement`, not resumable) has no tail — the
+  // caller flows `outgoing` straight to the node end.
+  if (retryEl === undefined && !resumable) return task;
 
-  // Resume-validation gate (PR #876 review): a resumable escalation no longer routes straight to the
-  // node end. It flows into an exclusive gateway whose VALID branch proceeds to the node end and whose
-  // DEFAULT (invalid) branch loops back onto the escalation task — so a blank/malformed `value`
-  // re-parks with an explanation instead of releasing a null/invalid fact downstream (fail closed on
-  // the default). The gateway is a PLAIN exclusive gateway (NO ioMapping — a gateway's ioMapping is not
-  // visible downstream in the pinned engine, verified): the per-emit validation already ran on the
-  // escalation task's OWN output mapping (binding the emit-source var + the validity flag), so
-  // the gateway only routes on the simple `<resumeValidVar> = true` boolean. For a multi-emit node the
-  // flag is hard-`false` (unresumable via the single-value form — see the outputs comment above), so
-  // the gate always takes its default (invalid) branch and re-parks.
-  const validTarget = opts?.validTarget;
-  if (validTarget === undefined) {
-    throw new Error(`escalationTaskLines(${esc}): a resumable escalation requires opts.validTarget (the node end its valid resume flows to)`);
+  const tail: string[] = [];
+  // #863 retry gate (service escalations only): the esc task's `outgoing` flows into this gate (built by
+  // the caller). Retry (`decision == retry`) → the SHARED reset `${retryEl}_retry`; Continue (default) →
+  // the validation gate (if resumable) else the node end. Checking Retry FIRST is essential: a Retry
+  // supplies no `value`, so its resume-valid flag is false — a validation-first topology would wrongly
+  // re-park a legitimate Retry.
+  if (retryEl !== undefined) {
+    const rg = `${esc}Rg`;
+    const rr = `${esc}Rr`;
+    const rc = `${esc}Rc`;
+    const continueTarget = resumable ? `${esc}Vg` : `${retryEl}_end`;
+    tail.push(
+      `      <bpmn:exclusiveGateway id="${rg}" name="retry node?" default="${rc}">`,
+      `        <bpmn:incoming>${outgoing}</bpmn:incoming>`,
+      `        <bpmn:outgoing>${rr}</bpmn:outgoing>`,
+      `        <bpmn:outgoing>${rc}</bpmn:outgoing>`,
+      "      </bpmn:exclusiveGateway>",
+      `      <bpmn:sequenceFlow id="${rr}" name="retry" sourceRef="${rg}" targetRef="${retryEl}_retry"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${retryRequestedVar(retryEl, opts?.reservedTargets ?? [])} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+      `      <bpmn:sequenceFlow id="${rc}" name="continue" sourceRef="${rg}" targetRef="${continueTarget}" />`,
+    );
   }
-  const vg = `${esc}Vg`;
-  const vok = `${esc}Vok`;
-  const vbad = `${esc}Vbad`;
-  return [
-    ...task,
-    `      <bpmn:exclusiveGateway id="${vg}" name="resume value valid?" default="${vbad}">`,
-    `        <bpmn:incoming>${outgoing}</bpmn:incoming>`,
-    `        <bpmn:outgoing>${vok}</bpmn:outgoing>`,
-    `        <bpmn:outgoing>${vbad}</bpmn:outgoing>`,
-    "      </bpmn:exclusiveGateway>",
-    `      <bpmn:sequenceFlow id="${vok}" name="valid" sourceRef="${vg}" targetRef="${validTarget}"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${flagVar} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
-    `      <bpmn:sequenceFlow id="${vbad}" name="invalid" sourceRef="${vg}" targetRef="${esc}" />`,
-  ];
+
+  // Resume-validation gate (PR #876 review): a resumable Continue no longer routes straight to the node
+  // end. It flows into an exclusive gateway whose VALID branch proceeds to the node end and whose
+  // DEFAULT (invalid) branch loops back onto the escalation task — so a blank/malformed `value` re-parks
+  // instead of releasing a null/invalid fact downstream (fail closed on the default). The gateway is a
+  // PLAIN exclusive gateway (NO ioMapping — a gateway's ioMapping is not visible downstream in the
+  // pinned engine, verified): the per-emit validation already ran on the escalation task's OWN output
+  // mapping (binding the emit-source var + the validity flag), so the gateway only routes on the simple
+  // `<resumeValidVar> = true` boolean. For a multi-emit node the flag is hard-`false` (unresumable via
+  // the single-value form), so the gate always re-parks. The gate's incoming is the retry gate's
+  // `continue` flow (service escalation) or the esc task's `outgoing` (wait escalation).
+  if (resumable) {
+    const validTarget = opts?.validTarget;
+    if (validTarget === undefined) {
+      throw new Error(`escalationTaskLines(${esc}): a resumable escalation requires opts.validTarget (the node end its valid resume flows to)`);
+    }
+    const vg = `${esc}Vg`;
+    const vok = `${esc}Vok`;
+    const vbad = `${esc}Vbad`;
+    const vgIncoming = retryEl !== undefined ? `${esc}Rc` : outgoing;
+    tail.push(
+      `      <bpmn:exclusiveGateway id="${vg}" name="resume value valid?" default="${vbad}">`,
+      `        <bpmn:incoming>${vgIncoming}</bpmn:incoming>`,
+      `        <bpmn:outgoing>${vok}</bpmn:outgoing>`,
+      `        <bpmn:outgoing>${vbad}</bpmn:outgoing>`,
+      "      </bpmn:exclusiveGateway>",
+      `      <bpmn:sequenceFlow id="${vok}" name="valid" sourceRef="${vg}" targetRef="${validTarget}"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${flagVar} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+      `      <bpmn:sequenceFlow id="${vbad}" name="invalid" sourceRef="${vg}" targetRef="${esc}" />`,
+    );
+  }
+  return [...task, ...tail];
 }
 
 /** The per-required-emit FEEL condition an escalation resume value must satisfy to bind its
@@ -2474,16 +3104,28 @@ function escalationTaskLines(
  *     split differs from edge cases of the canonical parser.
  * If these ever become common, the fix is to route the resume through the canonical host-side coercer
  * (a completion-door redesign) rather than widening these regexes toward fail-OPEN. */
-function resumeValueCondition(fact: DeliveryFact, v: string): string {
-  const present = `((is defined(${v})) = true and (${v} != null))`;
+function resumeValueCondition(fact: DeliveryFact, v: string, presentOverride?: string): string {
+  // `presentOverride` lets a caller supply a FLAT null-safe presence test (`string(sel) != null`) when `v`
+  // is a COMPOUND `if…then…else` selection (e.g. the human-form completion gate's `selectExpr`): the pinned
+  // engine mis-evaluates `is defined(<compound if…then…else>)` — the same quirk `artifactSource` sidesteps
+  // with a flat `matches(trim(string(…)))` — so the default `is defined(v)`-based presence is only safe for
+  // a BARE variable name (the escalation resume `value`). Every per-type grammar arm below reads `v` only
+  // through null-safe `string()`/`matches()`/`trim()` wrappers, so a flat presence override keeps the whole
+  // condition engine-safe over a compound selection.
+  const present = presentOverride ?? `((is defined(${v})) = true and (${v} != null))`;
   const s = `string(${v})`;
   switch (fact.type) {
     case "string":
       return `${present} and trim(${s}) != ""`;
     case "number":
-      return `${present} and (matches(trim(${s}), "^-?\\\\d+(\\\\.\\\\d+)?$") = true)`;
+      // Share the coercion's `number(trim(string(...)))` input ({@link normalizedBoolNumberFeel} folds an
+      // extra harmless lower-case over the digits): gate and bind normalize identically (#863 r4194186383).
+      return `${present} and (matches(${normalizedBoolNumberFeel(v)}, "^-?\\\\d+(\\\\.\\\\d+)?$") = true)`;
     case "boolean":
-      return `${present} and (trim(${s}) = "true" or trim(${s}) = "false")`;
+      // SAME normalization as the typed bind ({@link coerceFactValueFeel} → {@link normalizedBoolNumberFeel}),
+      // so this gate accepts exactly the texts the coercion publishes correctly — `" true "`/`"TRUE"` are
+      // accepted here AND bound as a real boolean, never accepted-then-mis-published (#863 r4194186383).
+      return `${present} and (${normalizedBoolNumberFeel(v)} = "true" or ${normalizedBoolNumberFeel(v)} = "false")`;
     case "version":
       return `${present} and (matches(trim(${s}), "^v?\\\\d[\\\\w.+-]*$") = true)`;
     case "artifact":

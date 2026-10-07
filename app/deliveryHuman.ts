@@ -32,6 +32,7 @@
 //      binds and pins exactly the value the human handed forward.
 import type { DeliveryFact, DeliveryNodeHuman } from "../nano-generated/api-io.d.ts";
 import { DELIVERY_FACT_TYPES, type DeliveryFactType, FACT_NAME_MAX_LENGTH, FACT_NAME_PATTERN } from "./deliveryGraph.ts";
+import { redactFreeText } from "./redactText.ts";
 
 /** The single BPMN `bpmn:userTask` element id every `human` delivery-graph node schedules its work
  *  as (`resources/processes/delivery-human.bpmn`). One reusable engine-native body, instantiated once
@@ -52,6 +53,77 @@ export const DELIVERY_HUMAN_ELEMENT = "delivery-human-task";
  *  for the id convention, so the compiler's id form and the routers can never drift apart. */
 export function isDeliveryHumanElement(elementId: string): boolean {
   return elementId === DELIVERY_HUMAN_ELEMENT || elementId.startsWith(`${DELIVERY_HUMAN_ELEMENT}__`);
+}
+
+/** The id suffix the S4 compiler appends for a service node's bounded-timeout escalation TWIN user task
+ *  (`delivery-human-task__<el>__esc`). */
+export const DELIVERY_ESCALATION_TWIN_SUFFIX = "__esc";
+
+/** The id suffix for an `agent` node's producer-contract escalation TWIN (`…__contract`). */
+export const DELIVERY_CONTRACT_TWIN_SUFFIX = "__contract";
+
+/** The KIND marker the S4 compiler appends to a `wait` gate's bounded-timeout escalation twin
+ *  (`delivery-human-task__<el>__esc__wait`). A wait-gate escalation has NO retry semantics — its
+ *  resolution is "supply the awaited value and continue", never "re-run the probe loop" — so the
+ *  compiler renders the select-less {@link GENERIC_HUMAN_FORM} for it, NOT the retry-capable
+ *  {@link ESCALATION_FORM} a service-node `__esc`/`__contract` twin renders. The bare `__esc` suffix is
+ *  shared by both kinds, so a form inferred from the suffix ALONE misclassifies the wait gate as
+ *  retryable (the #461 Tasks-inbox `form_key` fallback then renders a bogus "Retry this step" that the
+ *  wait process silently ignores). Stamping the kind into the id lets {@link escalationFormId} DERIVE
+ *  the compiled form from the id — no separate node-kind registry to drift (PR #863 review,
+ *  app/agentCompletion.ts:186). */
+export const DELIVERY_WAIT_ESCALATION_KIND_MARKER = "__wait";
+
+/** The full id suffix of a `wait` gate's bounded-timeout escalation twin (`__esc` + the `__wait` kind
+ *  marker). */
+export const DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX = `${DELIVERY_ESCALATION_TWIN_SUFFIX}${DELIVERY_WAIT_ESCALATION_KIND_MARKER}`;
+
+/** True for a delivery-graph SERVICE-node escalation TWIN user task — the bounded-timeout `__esc` twin
+ *  or an agent's producer-contract `__contract` twin — as opposed to a plain per-node human task
+ *  (`delivery-human-task__<el>`). Unlike that per-node human task, which renders a DIFFERENT form per
+ *  node (and so has no single static completion contract — left unvalidated, `ESCALATION_FORM_BY_ELEMENT`
+ *  deliberately omits it), a twin ALWAYS renders a FIXED escalation form — the retry-capable
+ *  {@link ESCALATION_FORM} (a strict superset of {@link GENERIC_HUMAN_FORM}: same `value`, an optional
+ *  note field (`escalationNote` on the escalation form, `note` on the generic human form), PLUS
+ *  the `decision` select) or the select-less generic form — so its completion variables CAN be validated
+ *  against `ESCALATION_FORM`'s contract (no required fields, so the generic-form twins never false-reject;
+ *  only a present-but-invalid `decision` is rejected). Matched on the convention suffix — single source of
+ *  truth with the compiler's `escalationTaskElement`/`contractEscalationTaskElement` builders — requiring
+ *  a NON-EMPTY `<el>` between prefix and suffix so the bare per-node base of a node literally named
+ *  `esc`/`contract` (`delivery-human-task__esc`) is not misread as a twin. (A node id MAY itself end in
+ *  `__esc` — `NODE_ID_PATTERN` allows it — so the twin of node `foo` and the base of a node named
+ *  `foo__esc` collide on one id; validating that rare base against the superset escalation form is
+ *  harmless, since the form has no required fields and only constrains a `decision` such a base never
+ *  sets to an out-of-range value through its own select-less form.) */
+export function isDeliveryEscalationTwin(elementId: string): boolean {
+  const prefix = `${DELIVERY_HUMAN_ELEMENT}__`;
+  if (!elementId.startsWith(prefix)) return false;
+  for (const suffix of [DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX, DELIVERY_ESCALATION_TWIN_SUFFIX, DELIVERY_CONTRACT_TWIN_SUFFIX]) {
+    if (elementId.endsWith(suffix) && elementId.length > prefix.length + suffix.length) return true;
+  }
+  return false;
+}
+
+/** True for a `wait` gate's bounded-timeout escalation twin specifically (`…__esc__wait`) — the twin
+ *  kind that renders the select-less {@link GENERIC_HUMAN_FORM} (no retry path), as opposed to a
+ *  service-node `__esc`/`__contract` twin, which renders the retry-capable {@link ESCALATION_FORM}.
+ *  This is the discriminator {@link escalationFormId} uses to DERIVE the compiled form from the id. */
+export function isDeliveryWaitEscalationTwin(elementId: string): boolean {
+  const prefix = `${DELIVERY_HUMAN_ELEMENT}__`;
+  return (
+    elementId.startsWith(prefix) &&
+    elementId.endsWith(DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX) &&
+    elementId.length > prefix.length + DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX.length
+  );
+}
+
+/** Strip the trailing escalation-twin suffix (`__esc`, the wait-gate `__esc__wait`, or `__contract`)
+ *  to recover the base per-node element id (`delivery-human-task__<el>`). The `__esc__wait` kind marker
+ *  MUST be stripped before the bare `__esc` (it ends in `__esc`, so stripping `__esc` first would leave
+ *  a dangling `__wait`). A non-twin id is returned unchanged. Single source of truth for the strip so
+ *  every "resolve the twin to its base node" lookup agrees on the suffix set. */
+export function stripDeliveryEscalationTwinSuffix(elementId: string): string {
+  return elementId.replace(/__(esc__wait|esc|contract)$/, "");
 }
 
 /** The read-model "Decision context" for a parked delivery-graph `human` node (issue #772). The Tasks
@@ -76,11 +148,45 @@ export function isDeliveryHumanElement(elementId: string): boolean {
 export function deliveryHumanContextQuestion(
   humanLabels: Record<string, string> | undefined,
   elementId: string,
+  livePrompt?: string | null,
 ): string {
   const labels = humanLabels ?? {};
-  const base = elementId.replace(/__esc$/, "");
+  const base = stripDeliveryEscalationTwinSuffix(elementId);
   const label = (labels[elementId] ?? labels[base] ?? "").trim();
-  return label || "A scheduled delivery-graph step is waiting to be completed.";
+  return label || (livePrompt ?? "").trim() || "A scheduled delivery-graph step is waiting to be completed.";
+}
+
+/** Whether a parked delivery task needs its LIVE engine prompt for the "Decision context": an
+ *  `__esc`/`__contract` escalation twin of a bounded agent/wait/connector node has no stamped
+ *  `human_labels` entry, so without the compiler's per-task `prompt` (node, reported status, missing
+ *  emits, the agent's own report/question/transcript, and how to resolve) the operator saw only the
+ *  static fallback — the "no actionable information" escalations of instance 171774. A real human
+ *  node (or its `__esc` twin) keeps its authored instruction label. */
+export function needsLiveDeliveryPrompt(humanLabels: Record<string, string> | undefined, elementId: string): boolean {
+  if (!/__(esc__wait|esc|contract)$/.test(elementId)) return false;
+  const labels = humanLabels ?? {};
+  const base = stripDeliveryEscalationTwinSuffix(elementId);
+  return !(labels[elementId] ?? labels[base] ?? "").trim();
+}
+
+/** Decode a `prompt` variable as the engine's variable search reports it (a JSON-encoded value) into
+ *  plain text; `null` for an absent, non-string, or truncated preview (never show a clipped prompt as
+ *  if it were whole — the caller falls back).
+ *
+ *  The decoded text is REDACTED ({@link redactFreeText}) before it is returned: the escalation prompt
+ *  embeds agent-controlled `summary`/`question`/`error`/`transcriptUrl` (the compiler's report
+ *  sentence), and the caller persists the result as the operator-facing `user_tasks.question`. An
+ *  agent report can carry a token-bearing URL or a credential copied into its report, so this path
+ *  redacts exactly like the static `human_labels` instruction (which `buildHumanLabels` runs through
+ *  `redactFreeText`, issue #778) — never store a live prompt raw (issue #863 review). */
+export function decodeLivePrompt(row: { value: string; isTruncated?: boolean } | undefined): string | null {
+  if (!row || row.isTruncated) return null;
+  try {
+    const v: unknown = JSON.parse(row.value);
+    return typeof v === "string" && v.trim() ? redactFreeText(v.trim()) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The clickable link for a parked delivery-graph `human` node's Tasks-inbox row (issue #813): the
@@ -96,7 +202,7 @@ export function deliveryHumanContextUrl(
   elementId: string,
 ): string | null {
   const labels = humanLabels ?? {};
-  const base = elementId.replace(/__esc$/, "");
+  const base = stripDeliveryEscalationTwinSuffix(elementId);
   const instruction = labels[elementId] ?? labels[base] ?? "";
   const url = firstHttpUrl(instruction);
   // The stored `human_labels` are display-REDACTED (`redactFreeText` in `buildHumanLabels`): a URL that
@@ -178,6 +284,12 @@ export function firstHttpUrl(text: string | undefined | null): string | null {
 /** The GENERIC fallback form (Decision 4, step 3): captures ONE typed value into the node's single
  *  declared emitted fact, so a human node with no explicit/category form can STILL emit downstream. */
 export const GENERIC_HUMAN_FORM = "delivery-human-generic";
+
+/** The bounded service-node ESCALATION form (retry-node resolution): like the generic form plus the
+ *  `decision` Resolution select (Continue / Retry this step). Kept SEPARATE from {@link GENERIC_HUMAN_FORM}
+ *  — that form is shared with plain scheduled human steps and wait-gate escalations, which have no
+ *  retry semantics and never read `decision`, so the select must not render there. */
+export const ESCALATION_FORM = "delivery-escalation";
 
 /** The "click done" category form: a degenerate no-emit acknowledgement ("now do X" → done). */
 export const HUMAN_ACK_FORM = "delivery-human-ack";

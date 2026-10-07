@@ -27,7 +27,7 @@ import type { DataLayer, EngineClient, ProcessInstanceState } from "@nanobpm/urb
 import type { CompileDeliveryGraphResult } from "../nano-generated/api-io.d.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { redactFreeText } from "./deliveryGraphCompiler.ts";
-import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
+import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement, stripDeliveryEscalationTwinSuffix } from "./deliveryHuman.ts";
 
 const now = () => new Date().toISOString();
 
@@ -469,7 +469,7 @@ export function deriveDeliveryPhase(
     // one-liner). Use the SAME exact-then-`__esc`-stripped lookup as `deliveryHumanContext*` so a
     // parked bounded-timeout twin (`…__esc`, whose exact id is never stamped) resolves to its base
     // node's label instead of showing the raw element id. A missing label falls back to the raw id.
-    const stored = humanLabels[parkedOn] ?? humanLabels[parkedOn.replace(/__esc$/, "")];
+    const stored = humanLabels[parkedOn] ?? humanLabels[stripDeliveryEscalationTwinSuffix(parkedOn)];
     const label = firstLine(stored) || parkedOn;
     return { status: "running", phase: `Parked on human node: ${label}`, phase_node_id: parkedOn };
   }

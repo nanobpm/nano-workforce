@@ -25,6 +25,7 @@ import type { CommandResult } from "../app/readiness.ts";
 import { readConnectorInput } from "../workers/delivery-connector/worker.ts";
 import { __setProbeExecForTest } from "../workers/readiness-probe/worker.ts";
 import { prepareDeliveryGraph, runDeliveryGraph } from "../app/deliveryRunner.ts";
+import { isDeliveryEscalationTwin } from "../app/deliveryHuman.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { deterministicProbeSeam } from "./support/probe-exec.ts";
 
@@ -148,14 +149,17 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
 
     // The human node scheduled its per-node user task (the isDeliveryHumanElement convention id).
     const open = await app.engine.searchUserTasks({ state: "CREATED" });
-    const human = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && !t.elementId?.endsWith("__esc"));
+    const human = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(t.elementId));
     assert.ok(human, `a human user task is open, got ${JSON.stringify(open.map((t) => t.elementId))}`);
 
     // Before the human completes, the connector has NOT fired — the fan-in edge from `h` gates it.
     assert.equal((await deliveryConnectorDispatches(app.db).find({})).length, 0, "connector waits on the human edge");
 
-    // Complete the human with a resolved artifact — its typed emit late-binds downstream.
-    await app.engine.completeUserTask(human.userTaskKey, { resolvedArtifact: "ARTIFACT-1", humanOutcome: "completed" });
+    // Complete the human with a resolved artifact — its typed emit late-binds downstream. The value is a
+    // canonical `pkg@version` handle: the human node's required-artifact completion gate (thread
+    // r4198662345) validates the captured handle against the SAME `pkg@version` grammar the canonical
+    // `coerceFactValue` enforces, so a non-conforming handle would re-park the task instead of binding.
+    await app.engine.completeUserTask(human.userTaskKey, { resolvedArtifact: "pkg@1.0.0", humanOutcome: "completed" });
     await app.settle();
 
     // The connector fired exactly once (fan-in of the wait AND the human both satisfied), and it
@@ -163,7 +167,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     const rows = await deliveryConnectorDispatches(app.db).find({ dedupe_key: "c-e2e-1" });
     assert.equal(rows.length, 1, "the connector fired exactly once");
     assert.equal(rows[0].outcome, "delivered");
-    assert.deepEqual(connectorBoundFacts, [{ from: "h", name: "art", value: "ARTIFACT-1" }], "the human fact late-binds into the connector");
+    assert.deepEqual(connectorBoundFacts, [{ from: "h", name: "art", value: "pkg@1.0.0" }], "the human fact late-binds into the connector");
 
     // The graph reached End — the fan-in join released only after BOTH upstream branches completed.
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the graph reached its End event");
@@ -399,7 +403,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
 
     // Complete the UNRELATED human node — an upstream event with no edge to the wait.
     const open = await app.engine.searchUserTasks({ state: "CREATED" });
-    const side = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && !t.elementId?.endsWith("__esc"));
+    const side = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(t.elementId));
     assert.ok(side, "the unrelated human task is open");
     await app.engine.completeUserTask(side.userTaskKey, { value: "done", humanOutcome: "completed" });
     await app.settle();
@@ -410,7 +414,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // for a human rather than silently wedging or falsely resolving.
     assert.ok(!takenFlows(app).some((f) => f.endsWith("->End")), "the wait branch never falsely resolves to End");
     await app.advanceTime(2_100);
-    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.endsWith("__esc"));
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId !== undefined && isDeliveryEscalationTwin(t.elementId));
     assert.ok(
       esc.length >= 1,
       `the parked wait escalates (bounded), never falsely resolved by the unrelated event, got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`,
@@ -828,7 +832,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
 
     // Bounded, not wedged: the gate escalates once its poll budget elapses.
     await app.advanceTime(2_100);
-    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.endsWith("__esc"));
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.includes("__esc"));
     assert.ok(esc.length >= 1, `the unresolved-target gate escalates (bounded), got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`);
   });
 

@@ -24,7 +24,7 @@ import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient, GatewayDataSource } from "@nanobpm/urban";
 import { invalidateAdjudication, invalidateAdjudicationByCompletion } from "./adjudications.ts";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
-import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
+import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, isDeliveryEscalationTwin, isDeliveryHumanElement, isDeliveryWaitEscalationTwin } from "./deliveryHuman.ts";
 import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, PR_MERGE_APPROVAL_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT } from "./userTasks.ts";
 
 const now = () => new Date().toISOString();
@@ -165,17 +165,32 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   // contract is enforced instead by `bindHumanEmits` against the node's declared `emits[]` (binds are
   // validated, not stringly — Decision 3/4), so `validateEscalationVariables` leaves it unenforced
   // (returns `null`) and the completer accepts the captured form variables for the emit binder to type.
+  // (Its SERVICE-node escalation TWINS — `…__esc`/`…__contract` — are different: they render a FIXED
+  // form, so `escalationFormId` maps them to `ESCALATION_FORM` via `isDeliveryEscalationTwin` rather
+  // than listing each per-node id here.)
 };
 
 /** The fixed `.form` linkage (a `zeebe:formDefinition formId`) that governs a fixed-form escalation
- *  kind's completion, or `undefined` for a kind with no static form (the delivery-graph `human` node,
- *  which renders DIFFERENT forms per node — its `formKey` only ever comes from the engine at runtime).
+ *  kind's completion, or `undefined` for a kind with no static form (the per-node delivery-graph `human`
+ *  task, which renders DIFFERENT forms per node — its `formKey` only ever comes from the engine at
+ *  runtime). A delivery-graph SERVICE-node escalation TWIN (`…__esc`/`…__contract`), by contrast, ALWAYS
+ *  renders the fixed {@link ESCALATION_FORM} — a strict superset of the generic form — so it DOES carry a
+ *  static contract here (via {@link isDeliveryEscalationTwin}): this is what lets the canonical completers
+ *  reject a present-but-invalid `decision` (continue/retry) on a retry-node escalation, while leaving the
+ *  select-less generic-form twins unaffected (the form has no required fields, so they never false-reject).
  *  Exposed so the Tasks-inbox poller can denormalise a row's `form_key` from this SAME single source of
  *  truth when the raw `/v2/user-tasks/search` result omits the engine-resolved key (issue #461) — the
  *  REST gateway addresses a deployed form by value whether that value is a deploy key or an authored
  *  form id, so this id resolves the same deployed `.form` the completer validates against. */
 export function escalationFormId(elementId: string): string | undefined {
-  return ESCALATION_FORM_BY_ELEMENT[elementId];
+  // Derive the twin's COMPILED form from its id rather than inferring one form from the shared `__esc`
+  // suffix: a `wait`-gate twin (`…__esc__wait`, kind marker stamped by the compiler) renders the
+  // select-less GENERIC_HUMAN_FORM (no retry path); a service-node `__esc`/`__contract` twin renders the
+  // retry-capable ESCALATION_FORM. Mapping the wait twin to ESCALATION_FORM would denormalise a bogus
+  // "Retry this step" onto its Tasks row (the wait process silently ignores `decision`) whenever the
+  // engine omits `formKey` (PR #863 review, app/agentCompletion.ts:186).
+  if (isDeliveryWaitEscalationTwin(elementId)) return GENERIC_HUMAN_FORM;
+  return ESCALATION_FORM_BY_ELEMENT[elementId] ?? (isDeliveryEscalationTwin(elementId) ? ESCALATION_FORM : undefined);
 }
 
 /** A field's `conditional.hide` rule, parsed from the FEEL subset the `.form` files use
@@ -261,7 +276,7 @@ export function validateEscalationVariables(
   elementId: string,
   variables: Record<string, unknown>,
 ): string | null {
-  const formId = ESCALATION_FORM_BY_ELEMENT[elementId];
+  const formId = escalationFormId(elementId);
   if (!formId) return null;
   const { required, allowed, hideWhen } = formContract(formId);
   for (const key of required) {

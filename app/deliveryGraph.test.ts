@@ -480,6 +480,178 @@ test("invalid-fact-name: an emitted fact name over the openapi 128-char cap is r
   assertEquals(err.path, "nodes[0].emits[0].name");
 });
 
+test("invalid-fact-name: an emit named after an escalation control (`decision`/`value`/`escalationNote`) is rejected — a Continue would overwrite the fact (r4181027093)", () => {
+  // Regression guard (PR #863 Copilot High, thread r4181027093): an agent/connector emit's source is the
+  // fact's own name, declared node-local in the SAME scope as the escalation form's `decision`/`value`/
+  // `escalationNote`. An agent emitting `decision` that reaches a contract escalation has its fact overwritten by
+  // the form completion (`decision="continue"`), so the subProcess publishes `<el>_decision="continue"`
+  // instead of the agent's routing value. The validator must reject the whole class fail-closed.
+  // (`note` is NOT an escalation control — it is a plan.md worker RESULT field; the retry-guidance
+  // control is the worker-unwritable `escalationNote`, PR #863 "Previously missed" deliveryGraphCompiler.ts:2156.)
+  for (const name of ["decision", "value", "escalationNote"]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name, type: "string" }] }],
+    });
+    const err = hasCode(errors, "invalid-fact-name");
+    assertEquals(err.path, "nodes[0].emits[0].name", `emit '${name}' is rejected`);
+    assert(err.message.includes("reserved"), `emit '${name}' names the reserved collision, got: ${err.message}`);
+  }
+});
+
+test("invalid-fact-name: an emit named after a connector config variable (`target`/`payload`/`dedupeKey`/`nodeTimeout`) is rejected — a Retry would null the config (r4181027147)", () => {
+  // Regression guard (PR #863 Copilot High, thread r4181027147): the retry reset clears every declared
+  // emit source var; a connector emitting `target`/`payload`/`dedupeKey`/`nodeTimeout` (also subProcess
+  // config vars) has them NULLED without re-entering the input mappings, so the retried connector
+  // activates unconfigured. Reject the collision at authoring time.
+  for (const name of ["target", "payload", "dedupeKey", "nodeTimeout"]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#a" }, emits: [{ name, type: "string" }] }],
+    });
+    const err = hasCode(errors, "invalid-fact-name");
+    assertEquals(err.path, "nodes[0].emits[0].name", `connector emit '${name}' is rejected`);
+  }
+});
+
+test("invalid-fact-name: an emit named after shared late-binding/preflight scaffolding is rejected (boundFacts/nodeInputs/nodeInputsPresent)", () => {
+  // The reserved set also covers the shared subProcess scaffolding that lives in the emit's scope.
+  for (const name of ["boundFacts", "nodeInputs", "nodeInputsPresent"]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name, type: "string" }] }],
+    });
+    const err = hasCode(errors, "invalid-fact-name");
+    assertEquals(err.path, "nodes[0].emits[0].name", `emit '${name}' is rejected`);
+  }
+});
+
+test("a node-local RESULT field is NOT a reserved emit name — an agent may emit `pr` (the canonical converge shape)", () => {
+  // Guard against over-reserving (PR #863 design): the result sets (AGENT_RESULT_LOCAL_VARS /
+  // CONNECTOR_RESULT_LOCAL_VARS) are NOT reserved — an agent emitting `pr` writes the same node-local
+  // value the result field holds, and the retry reset correctly clears both. Reserving them would
+  // forbid the flagship `agent → connector[converge] → wait[pr]` pattern.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "open", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "pr", type: "pr" }] }],
+  });
+  assertEquals(errors.length, 0, `an agent emitting 'pr' validates, got: ${JSON.stringify(errors)}`);
+});
+
+test("invalid-fact-name: an AGENT emit named `status` is reserved — the producer gate reads that node-local field as its completion status", () => {
+  // Regression guard (PR #863 Copilot Medium "Previously missed", deliveryGraph.ts:418): the result-set
+  // exemption was too broad for an agent emit named `status`. The producer status gate
+  // (`agentContractProceedCondition`) interprets that same node-local field as the completion status and
+  // accepts only `done`/`opened`/`skipped`, while the emit contract may require a different routing
+  // value — `status="approved"` always escalates, and `status="done"` can never take an `approved`
+  // branch. Unlike an aligned result fact such as `pr` (whose emit value and result field agree),
+  // `status` is CONSTRAINED by the gate, so the two uses conflict. Reserve the agent completion-control
+  // `status` while continuing to allow aligned result facts such as `pr`.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "status", type: "string" }] }],
+  });
+  const err = hasCode(errors, "invalid-fact-name");
+  assertEquals(err.path, "nodes[0].emits[0].name", "an agent emitting 'status' is rejected");
+  assert(err.message.includes("reserved"), `emit 'status' names the reserved collision, got: ${err.message}`);
+  // A CONNECTOR has no producer status gate, so its `status` emit collides with nothing — allowed.
+  const connector = validateDeliveryGraph({
+    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#a" }, emits: [{ name: "status", type: "string" }] }],
+  });
+  assertEquals(connector.length, 0, `a connector emitting 'status' validates (no producer gate), got: ${JSON.stringify(connector)}`);
+});
+
+test("invalid-fact-name is KIND-AWARE: an agent may emit a connector-only config name (`target`), and vice versa (r4181322008)", () => {
+  // Regression guard (PR #863 Copilot Medium, thread r4181322008): the reserved set reserves only the
+  // node's OWN kind's config. An agent seeds no `target`/`payload`/`dedupeKey` (connector-only), so an
+  // agent emitting `target` collides with nothing; symmetrically a connector seeds no `jobType`/
+  // `appendPrompt` (agent-only). Only the shared `nodeTimeout` is reserved for both.
+  const agentTarget = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "target", type: "string" }] }],
+  });
+  assertEquals(agentTarget.length, 0, `an agent emitting 'target' validates, got: ${JSON.stringify(agentTarget)}`);
+  const connectorJobType = validateDeliveryGraph({
+    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#a" }, emits: [{ name: "jobType", type: "string" }] }],
+  });
+  assertEquals(connectorJobType.length, 0, `a connector emitting 'jobType' validates, got: ${JSON.stringify(connectorJobType)}`);
+  // …but each kind's OWN config is still reserved (the collision is real there).
+  const agentAppend = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "appendPrompt", type: "string" }] }],
+  });
+  assertEquals(hasCode(agentAppend, "invalid-fact-name").path, "nodes[0].emits[0].name", "an agent emitting its OWN config 'appendPrompt' is rejected");
+  const connectorTarget = validateDeliveryGraph({
+    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#a" }, emits: [{ name: "target", type: "string" }] }],
+  });
+  assertEquals(hasCode(connectorTarget, "invalid-fact-name").path, "nodes[0].emits[0].name", "a connector emitting its OWN config 'target' is rejected");
+});
+
+test("invalid-fact-name does NOT apply a config restriction to wait/human emits, whose source is a fixed intermediate (r4181322008)", () => {
+  // A wait/human emit's source is NOT the fact's own name (factSourceVar maps it to `detail`/
+  // `humanEmitValue`/…), so its config vars can't collide with an emit source — a wait emitting
+  // `target`/`probe` or a human emitting `prompt`/`emitMode` is fine. Only the escalation
+  // controls + shared scaffolding stay reserved for these kinds.
+  const waitTarget = validateDeliveryGraph({
+    nodes: [{ id: "w", kind: "wait", wait: { kind: "github-check", target: "o/r@main" }, emits: [{ name: "target", type: "string" }, { name: "probe", type: "string" }] }],
+  });
+  assertEquals(waitTarget.length, 0, `a wait emitting 'target'/'probe' validates, got: ${JSON.stringify(waitTarget)}`);
+  // `prompt`/`emitMode` are not reserved for a human node. Assert each as its OWN single-emit human node
+  // — a two-emit human node with no form is separately rejected (`human-unroutable-emits`, thread
+  // deliveryGraphCompiler.ts:1859), which would otherwise mask the reserved-name intent under test here.
+  const humanPrompt = validateDeliveryGraph({
+    nodes: [
+      { id: "h1", kind: "human", human: { prompt: "do it" }, emits: [{ name: "prompt", type: "string" }] },
+      { id: "h2", kind: "human", human: { prompt: "do it" }, emits: [{ name: "emitMode", type: "string" }] },
+    ],
+  });
+  assertEquals(humanPrompt.length, 0, `a human emitting 'prompt'/'emitMode' validates, got: ${JSON.stringify(humanPrompt)}`);
+  // …but the escalation controls + scaffolding are STILL reserved for wait/human.
+  const humanDecision = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "decision", type: "string" }] }],
+  });
+  assertEquals(hasCode(humanDecision, "invalid-fact-name").path, "nodes[0].emits[0].name", "a human emitting 'decision' (escalation control) is still rejected");
+  const waitScaffold = validateDeliveryGraph({
+    nodes: [{ id: "w", kind: "wait", wait: { kind: "github-check", target: "o/r@main" }, emits: [{ name: "nodeInputs", type: "string" }] }],
+  });
+  assertEquals(hasCode(waitScaffold, "invalid-fact-name").path, "nodes[0].emits[0].name", "a wait emitting 'nodeInputs' (scaffolding) is still rejected");
+});
+
+test("human-unroutable-emits: a human node emitting ≥2 facts with no form is rejected — no static form captures them (thread deliveryGraphCompiler.ts:1859)", () => {
+  // Class guard (PR #863 Copilot High): a human form captures ONE value and a human node has no Retry
+  // path, so a node emitting two or more facts with no explicit `human.formKey` resolves to the
+  // agent-router — no static form holds them — and completing its form would publish null for the
+  // uncapturable emits. Reject the class at authoring time rather than silently starve consumers.
+  const twoScalars = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "a", type: "string" }, { name: "b", type: "string" }] }],
+  });
+  assertEquals(hasCode(twoScalars, "human-unroutable-emits").path, "nodes[0].emits", "two non-artifact emits with no form are rejected");
+  // The carve-out the finding cites: one scalar + one artifact — the generic form has no resolvedArtifact
+  // control and the publish form no value control, so NO static form captures both. Also rejected.
+  const scalarPlusArtifact = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }, { name: "report", type: "artifact" }] }],
+  });
+  assertEquals(hasCode(scalarPlusArtifact, "human-unroutable-emits").path, "nodes[0].emits", "one scalar + one artifact with no form is rejected");
+  // An explicit `human.formKey` is NOT a workaround: the compiled human task's ioMapping reads only the
+  // fixed `value`/`resolvedArtifact`/`note` controls (humanBodyLines), never a bespoke form's per-fact
+  // fields, so a ≥2-emit explicit-form node would STILL publish null for every non-artifact emit.
+  // Reject it too (PR #863 Copilot High, thread r4184443511) — the only correct shape is single-emit
+  // human nodes.
+  const explicitForm = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it", formKey: "bespoke-multi" }, emits: [{ name: "a", type: "string" }, { name: "b", type: "string" }] }],
+  });
+  assertEquals(hasCode(explicitForm, "human-unroutable-emits").path, "nodes[0].emits", "an explicit human.formKey does NOT make a ≥2-emit node capturable — the ioMapping cannot read its bespoke fields");
+  // Single-emit human nodes are capturable → NOT rejected (the guard must not over-reject).
+  const singleScalar = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }] }],
+  });
+  assertEquals(singleScalar.filter((e) => e.code === "human-unroutable-emits").length, 0, "a single non-artifact emit is capturable (generic form)");
+  const singleArtifact = validateDeliveryGraph({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "art", type: "artifact" }] }],
+  });
+  assertEquals(singleArtifact.filter((e) => e.code === "human-unroutable-emits").length, 0, "a single artifact emit is capturable (publish form)");
+});
+
+test("a non-reserved emit name still validates (the reserved guard does not over-reject)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "verdict", type: "string" }, { name: "targetRef", type: "string" }] }],
+  });
+  assertEquals(errors.length, 0, `a non-reserved emit name passes, got: ${JSON.stringify(errors)}`);
+});
+
 test("fact-name `resumeValid` is NOT reserved — a user emit may use it (PR #876 review: the resume-validation gate's flag is an internal compiler-generated var, not a user fact name, so reserving `resumeValid` would needlessly break recompilation of durable rows that already carry a fact of that name)", () => {
   const errors = validateDeliveryGraph({
     nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "resumeValid", type: "boolean" }] }],
@@ -720,6 +892,85 @@ test("invalid-job-type: an `agent.jobType` carrying attribute whitespace (LF) is
     edges: [],
   });
   hasCode(errors, "invalid-job-type");
+});
+
+test("invalid-form-key: a `human.formKey` carrying an XML-1.0-invalid character is rejected, not silently rewritten into a different executable form id (PR #863 review)", () => {
+  // `human.formKey` is emitted VERBATIM as the executable `<zeebe:formDefinition formId=…>` (it resolves
+  // a deployed `.form` by value). An XML-1.0-forbidden control char would be STRIPPED by the attribute
+  // sanitiser — resolving a DIFFERENT (wrong) form — so it must be rejected, exactly like `agent.jobType`.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "step", kind: "human", human: { formKey: "my-form\u0001x" } }],
+    edges: [],
+  });
+  hasCode(errors, "invalid-form-key");
+});
+
+test("invalid-form-key: a `human.formKey` carrying attribute whitespace (LF) is rejected — XML attribute-value normalization would fold it to a space, resolving a different form (PR #863 review)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "step", kind: "human", human: { formKey: "my\nform" } }],
+    edges: [],
+  });
+  hasCode(errors, "invalid-form-key");
+});
+
+test("invalid-form-key: a PRESENT-but-non-string `human.formKey` is rejected, not silently dropped to a generated form (PR #863 review — fail-open class)", () => {
+  // The class: a non-string optional config value bypasses the `typeof === "string"`-gated validators
+  // and is silently accepted, so the compiler falls back to a generated form instead of the author's
+  // declared executable `<zeebe:formDefinition formId=…>` key. Every non-string shape must fail closed.
+  for (const bad of [42, {}, [], true]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "step", kind: "human", human: { formKey: bad } }],
+      edges: [],
+    });
+    hasCode(errors, "invalid-form-key");
+  }
+});
+
+test("credential-in-form-key: a URL-/credential-shaped `human.formKey` is REJECTED — it is baked verbatim into the executable `<zeebe:formDefinition formId=…>`, so an embedded credential would leak into the compiled BPMN the preview door returns (PR #863 review)", () => {
+  // whole-value URL carrying a `?token=` query (no userinfo needed to be a leak risk)
+  const whole = validateDeliveryGraph({
+    nodes: [{ id: "step", kind: "human", human: { formKey: "https://evil.example/f.form?token=secret" } }],
+    edges: [],
+  });
+  const err = hasCode(whole, "credential-in-form-key");
+  assert(!err.message.includes("token=secret"), `the credential-in-form-key message must redact the query token, got: ${err.message}`);
+  // embedded `//user:pass@host` past an otherwise plausible token
+  hasCode(
+    validateDeliveryGraph({
+      nodes: [{ id: "step", kind: "human", human: { formKey: "my-form //user:pass@evil.example/f" } }],
+      edges: [],
+    }),
+    "credential-in-form-key",
+  );
+  // explicit-scheme embedded URL with a `?token=` query
+  hasCode(
+    validateDeliveryGraph({
+      nodes: [{ id: "step", kind: "human", human: { formKey: "my-form https://evil.example/f?token=secret" } }],
+      edges: [],
+    }),
+    "credential-in-form-key",
+  );
+  // scheme-relative `//host?token=` authority
+  hasCode(
+    validateDeliveryGraph({
+      nodes: [{ id: "step", kind: "human", human: { formKey: "my-form //evil.example/f?token=secret" } }],
+      edges: [],
+    }),
+    "credential-in-form-key",
+  );
+});
+
+test("human.formKey: a clean form id (and a blank/absent one) passes the formKey gates", () => {
+  for (const formKey of ["my-custom-form", "  ", undefined]) {
+    assertEquals(
+      validateDeliveryGraph({
+        nodes: [{ id: "step", kind: "human", human: formKey === undefined ? {} : { formKey } }],
+        edges: [],
+      }).filter((e) => e.code === "invalid-form-key" || e.code === "credential-in-form-key"),
+      [],
+      `formKey ${JSON.stringify(formKey)} must pass the formKey gates`,
+    );
+  }
 });
 
 test("invalid-job-type: a clean `agent.jobType` (no XML-invalid characters, no attribute whitespace) passes validation", () => {

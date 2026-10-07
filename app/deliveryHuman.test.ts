@@ -8,6 +8,8 @@ import { readFileSync } from "node:fs";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import type { DeliveryFact } from "../nano-generated/api-io.d.ts";
 import {
+  decodeLivePrompt,
+  needsLiveDeliveryPrompt,
   bindHumanEmits,
   DELIVERY_HUMAN_ELEMENT,
   deliveryHumanContextQuestion,
@@ -451,13 +453,25 @@ test("deliveryHumanContextQuestion: a human node whose id itself ends in __esc r
 const genericForm = readFileSync("resources/forms/delivery-human-generic.form", "utf8");
 
 test("form-structure guard: delivery-human-generic.form uses node-neutral wording", () => {
-  // This shared form is also attached to the `__esc`/`__contract` escalation tasks that bounded
-  // agent/wait/connector nodes create (`app/deliveryGraphCompiler.ts`), not only scheduled `human`
-  // nodes. Copy that calls the task a "scheduled human step" is inaccurate for the escalation family
-  // and can obscure that the task is an escalation, so the static text must stay node-neutral.
+  // This shared form serves scheduled `human` nodes (the standalone `delivery-human.bpmn` and the
+  // compiler's `human` body). The bounded service-node escalation tasks (`__esc`/`__contract`) moved to
+  // their own `delivery-escalation.form` when the retry-node Resolution select landed — the select has
+  // no meaning on a plain human step, so it must not leak back onto this shared form.
   assert(
     !/scheduled human step/i.test(genericForm),
-    "the shared generic form must use node-neutral wording (it also serves escalation tasks)",
+    "the shared generic form must use node-neutral wording",
+  );
+});
+
+test("form-structure guard: delivery-human-generic.form carries NO retry `decision` select (that lives on delivery-escalation.form)", () => {
+  // Regression guard (PR #863 adversarial review): the retry-node Resolution select was first added to
+  // THIS shared form, where it also rendered on plain scheduled human steps and wait-gate escalations —
+  // neither has retry semantics nor reads `decision`, so an operator could pick "Retry this step" and
+  // have it silently ignored. The select lives only on the service-escalation form now.
+  const parsed = JSON.parse(genericForm) as { components: { key?: string }[] };
+  assert(
+    !parsed.components.some((c) => c.key === "decision"),
+    "the retry `decision` select belongs on delivery-escalation.form, not the shared human form",
   );
 });
 
@@ -503,4 +517,44 @@ test("form-structure guard: delivery-human-generic.form has no task-variable-dep
     !parsed.components.some((c) => c.key === "prompt"),
     "the never-seeded readonly `prompt` control must not reappear on the Tasks surface",
   );
+});
+
+// ── 171774: agent/connector escalation twins surface their LIVE compiler prompt ─────────────────────
+
+test("needsLiveDeliveryPrompt: an unlabeled __esc/__contract twin reads its live prompt; human nodes keep their label", () => {
+  assert(needsLiveDeliveryPrompt({}, "delivery-human-task__n1__contract"), "agent contract twin");
+  assert(needsLiveDeliveryPrompt(undefined, "delivery-human-task__n12__esc"), "agent timeout twin");
+  assert(!needsLiveDeliveryPrompt({ "delivery-human-task__n3": "Approve" }, "delivery-human-task__n3__esc"), "human node __esc twin keeps its label");
+  assert(!needsLiveDeliveryPrompt({}, "delivery-human-task__n3"), "a human node itself is never a twin");
+});
+
+test("decodeLivePrompt: decodes the engine's JSON-encoded string; null for missing, non-string, or truncated", () => {
+  assertEquals(decodeLivePrompt({ value: JSON.stringify("Node i10 blocked. Agent report: no repo."), isTruncated: false }), "Node i10 blocked. Agent report: no repo.");
+  assertEquals(decodeLivePrompt(undefined), null);
+  assertEquals(decodeLivePrompt({ value: "42" }), null);
+  assertEquals(decodeLivePrompt({ value: JSON.stringify("partial…"), isTruncated: true }), null, "never show a clipped prompt as whole");
+  assertEquals(decodeLivePrompt({ value: "{not json" }), null);
+});
+
+test("decodeLivePrompt: redacts an embedded credential before the prompt is persisted as user_tasks.question (issue #863 review)", () => {
+  // The compiler embeds agent-controlled summary/question/error/transcriptUrl into the escalation
+  // prompt; an agent report can carry a token-bearing URL or credential. The static human_labels path
+  // is redacted via redactFreeText (issue #778) — the live-prompt path must redact the same way.
+  const withUserinfo = decodeLivePrompt({ value: JSON.stringify("Agent report: failed pushing to https://user:secret-token@github.com/org/repo.git — see log.") });
+  assert(withUserinfo !== null);
+  assert(!withUserinfo.includes("secret-token"), `credential must not survive: ${withUserinfo}`);
+  assertStringIncludes(withUserinfo, "//***@");
+
+  const withQueryToken = decodeLivePrompt({ value: JSON.stringify("Transcript: https://logs.example.com/t?sig=secret123") });
+  assert(withQueryToken !== null);
+  assert(!withQueryToken.includes("secret123"), `query credential must not survive: ${withQueryToken}`);
+
+  // A credential-free prompt is untouched (redaction is a no-op on ordinary prose).
+  assertEquals(decodeLivePrompt({ value: JSON.stringify("Node i10 blocked. Agent report: no repo.") }), "Node i10 blocked. Agent report: no repo.");
+});
+
+test("deliveryHumanContextQuestion: a live prompt replaces the static fallback but never a human label", () => {
+  assertEquals(deliveryHumanContextQuestion({}, "delivery-human-task__n1__contract", "Node a blocked."), "Node a blocked.");
+  assertEquals(deliveryHumanContextQuestion({ "delivery-human-task__n3": "Approve" }, "delivery-human-task__n3__esc", "nag"), "Approve");
+  assertStringIncludes(deliveryHumanContextQuestion({}, "delivery-human-task__n1__contract", null), "waiting to be completed");
 });

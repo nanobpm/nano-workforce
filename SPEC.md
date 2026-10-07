@@ -1039,6 +1039,159 @@ decision. The target behaviour is an **autonomy ladder**:
 A human escalation is then reserved for its one true case: **two slices that each pass
 but encode incompatible decisions about a shared contract** — a genuine design call.
 
+## 13.3 Delivery-graph node escalation — Continue / Retry / reset (PR #863)
+
+The delivery-graph compiler (`app/deliveryGraphCompiler.ts`, ADR 0005) compiles each
+`agent`/`connector` node to a `start → serviceTask → end` subProcess guarded by a
+**bounded `=nodeTimeout` boundary**. On timeout (or, for an `agent`, on a broken
+producer contract — issue #731) the stalled node parks on a **human-completable
+escalation user task** (`delivery-human-task__<el>__esc`, and the agent-only
+`__contract` twin), surfaced in the Tasks inbox and answerable by a human or an agent
+(ADR 0046). Every such escalation names **two exits** (the `delivery-escalation` form's
+`decision` select):
+
+- **Continue** (`decision="continue"`, the default) completes the node as resolved. If
+  the node declares **exactly one** emit **and that emit is a downstream-required fact**,
+  the form presents a typed-value field and maps
+  the operator-supplied `value` onto the node's emit-source var (`factSourceVar`), so the
+  subProcess output publishes the same `<el>_<fact>` a normal completion would —
+  letting work finished out of band (a draft PR the stalled agent already opened) be
+  handed onward instead of threading a null downstream. This applies to **both** `agent`
+  and `connector` emits: a connector has no producer-contract gate, so its resume keys
+  off the node's **own** declared `emits` (emit source = the fact's own name), never the
+  agent-only gate metadata. The single-emit boundary is a hard cardinality rule: the
+  form captures ONE value, so a node declaring **zero** emits has nothing to resume (the
+  field stays blank) and a node declaring **two or more** emits is **not** value-resumable
+  — one value cannot satisfy multiple distinct typed facts without corrupting them.
+  **The value is also inert for a node with no *required* (downstream-consumed) resume
+  target** — the resume keys off the **required** emit set, not the raw declared set, so a
+  node whose facts nothing downstream reads has no required resume target and its `value` is
+  discarded (there is nothing to publish it to). This covers a node that declares **zero**
+  emits, exactly **one** routing-only/unconsumed emit, or **several** routing-only/unconsumed
+  emits alike: because the required resume set (`resumeEmits`) is empty, **no post-escalation
+  validation gate is compiled at all**, so **Continue simply proceeds past the node to its
+  default (fallback) branch** — there is nothing to re-park (`serviceBodyLines` /
+  `escalationTaskLines` add the `validTarget` gate only when `resumeEmits` is non-empty). The
+  fail-closed validation gate exists **only** for a node that still owes a **required** emit:
+  there, on Continue it **fails closed and loops
+  back to the escalation** (it does NOT write nulls and does NOT advance to a fallback branch)
+  — **Retry this step** is the only way to actually produce the facts, except that a node
+  declaring exactly **one** emit — that single declared emit being its only required resume
+  target — may instead satisfy it by entering the coerced `value` (the value field stays inert
+  for a node declaring two or more emits even when only one is required, matching
+  `declaredEmits.length === 1 && emits.length === 1` in the compiler).
+  (A **wait** gate owing **two or more**
+  emits is a special case: it has no Retry exit and its single value field can resume
+  none of them, so its escalation grows **no** validation gate at all and Continue simply
+  acknowledges and proceeds to the node end — see issue #863 — rather than looping forever.)
+  Because the form
+  captures `value` as textfield **text**, the single-emit resume **coerces/validates it to
+  the emit's declared type** before publishing (`escalationResumeValueFeel`): a `boolean`
+  emit accepts `"true"`/`"false"` **case-insensitively and surrounding-whitespace-trimmed**
+  (the validity gate and the coercion share one `lower case(trim(string(value)))`
+  normalization, so a value one accepts the other can never convert differently) and
+  publishes a real boolean, a `number` emit parses via `number(trim(string(value)))`, and
+  any other (text-valued) type passes through. An **invalid** entry
+  publishes `null` — the defined failure path — so a required-emit producer gate escalates
+  and a guarded split takes its default rather than routing on a mistyped value (a raw
+  `"true"` string would silently skip a `= true` guard).
+- **Retry this step** (`decision="retry"`) re-runs the node. A none intermediate throw
+  event (never a scriptTask) resets the node-local scratch — the decision, the captured
+  `value`/`escalationNote`, and (for an agent) the **full declared result set**
+  (`AGENT_RESULT_LOCAL_VARS` — the self-reported `status`/`summary`/… **and** every other
+  node-local result field such as `transcriptUrl`, `agentCheckpoint`, and the PR aliases)
+  — or, **for a connector**, its fixed result metadata (`CONNECTOR_RESULT_LOCAL_VARS` —
+  `connectorOutcome`/`connectorDedupeKey`/`connectorDetail`) — plus the previous attempt's
+  emits — and appends the operator's `escalationNote` to the agent
+  prompt as guidance for the next attempt (re-derived from the runner-seeded
+  `nodeInputs.<el>.appendPrompt` baseline, so consecutive retries never accumulate stale
+  guidance). The guidance control is the escalation-specific `escalationNote`, never the
+  plain `note`: `note` is a worker **result** field (`plan.md` returns one) that
+  nearest-scope propagation lands in the same subProcess scope, so reading it would feed a
+  worker-produced note back as "operator guidance" on a retry submitted without one. Clearing
+  the whole declared set (not just the status fields) stops a retried
+  worker that omits an optional field from republishing the previous attempt's value
+  downstream or surfacing it in the next escalation.
+
+All retry/reset targets are **node-local** (declared on the subProcess by
+`ioMappingLines`), so a node's result vars never leak to the root and two parallel nodes
+declaring the same emit never cross-publish — with a few deliberate publish-onward
+exceptions, all written under node-unique or intentionally-shared names rather than the
+raw result var. The **outward data** exceptions: each declared emit is republished to the
+root as `<el>_<fact>` (node-unique, so siblings never collide), and an agent's
+`transcriptUrl` is propagated back to the root under the shared `transcriptUrl` name so
+Nano Explorer can render the run→transcript link (app/deliveryGraphCompiler.ts:1872-1877).
+That one shared name means parallel agents can overwrite the root `transcriptUrl` —
+acceptable, since it is a display-only correlation link, not a result a downstream node
+binds. In addition, the per-node **control signals** `<el>_contractMet` (the agent
+contract-gate's proceed flag) and `<el>_retryRequested` (the per-escalation retry gate's
+route flag) are **also root-scoped** — their gateways live outside the node's subProcess
+and so cannot read node scope, and the `<el>_`-prefixed, node-unique names can never
+collide across parallel nodes. So the node-local rule governs a node's *result/emit scratch*;
+these node-unique control booleans are intentionally published to root so the routing
+gateways can read them on either engine's scope semantics. A **preflight `assert`** on the inner leaf
+task's input fails LOUD (raising an incident naming the missing `nodeInputs.<el>`)
+before any job exists when the runner-seeded config was lost — see the `KNOWN
+LIMITATION` in `serviceBodyLines` (fail-loud-only, nano-workforce#866). Resolving that
+incident re-evaluates **only the leaf's inputs** — the subProcess-level config mappings
+(`prompt`/`appendPrompt`/`nodeTimeout`, connector `target`/`payload`/`dedupeKey`) ran once
+at subProcess entry and are **not** re-mapped on a leaf resolve, so the node would
+activate **unconfigured**. The in-subprocess **"Retry this step"** loop does **not**
+help here either: it loops directly back to the inner service task (to reset the
+node-local scratch), bypassing the subProcess entry mappings, so it too leaves the
+config null. **Recovery therefore requires re-entering the sub-process from OUTSIDE —
+relaunch/re-enter the node so its subProcess input mappings re-evaluate against the
+restored `nodeInputs`** — not merely resolving the incident or using "Retry this step".
+The correct in-model fix is to run this check at sub-process *entry* (Camunda parity,
+nano-bpm#1336); until then the preflight fails loud so the node never runs blind
+*without* an incident, and the operator re-enters the sub-process to recover.
+
+Because an `agent`/`connector` node's emit source **is the fact's own name**, declared
+node-local in the same subProcess scope as the escalation form controls and the node's
+seeded config, a fact name is not fully unrestricted: `validateDeliveryGraph` rejects an
+emit named after a **reserved delivery variable** (`reservedDeliveryFactNames(kind)`,
+app/deliveryGraph.ts) fail-closed at authoring time. The reserved set is **kind-aware**
+(issue #863 review): the **escalation controls** (`decision`/`value`/`escalationNote` — an escalation
+Continue would overwrite the fact, publishing `<el>_decision="continue"` instead of the
+agent's routing value) and the shared late-binding/preflight **scaffolding**
+(`boundFacts`/`nodeInputs`/`nodeInputsPresent`) are reserved for **every** kind, while a
+**config variable** is reserved only for the kind whose own config it is — and only for
+`agent`/`connector`, the kinds whose emit source is the fact's own name (the retry reset's
+clear-the-emits pass would null the node's own configuration, so the retried node activates
+unconfigured). A `wait`/`human` emit's source is a fixed intermediate (`detail`/
+`humanEmitValue`/…), never the fact's own name, so those kinds reserve only the escalation
+controls + scaffolding — a `wait` emitting `target` or a `human` emitting `prompt` is
+allowed. The node-local **result** fields
+(`AGENT_RESULT_LOCAL_VARS`/`CONNECTOR_RESULT_LOCAL_VARS`) are deliberately **not**
+reserved — with **one exception**: an agent emitting `pr` (the canonical
+`agent → connector[converge] → wait[pr]` shape) writes the same node-local value the
+result field holds, and the retry reset correctly clears both — reserving them would
+forbid that flagship pattern. The exception is the agent completion-control **`status`**:
+the producer status gate reads that same node-local field as the node's completion status
+and accepts only `done`/`opened`/`skipped`, so an agent emit named `status` carrying any
+other routing value (`approved`, …) always escalates, and `status="done"` can never take an
+`approved` branch — the emit contract and the gate conflict. `status` is therefore reserved
+for an **`agent`** (a connector has no producer status gate, so a connector `status` emit
+stays allowed); the rest of the result set remains unreserved.
+
+A **`human` node's required emit is gated fail-closed on completion** (PR #863 review,
+thread r4198662345). A human node has no worker self-report to producer-gate on, but its
+single emit can be a downstream-**required** fact — and the captured value is coerced and
+validated to the emit's declared type (`coerceFactValueFeel`), so an invalid entry becomes
+`null`. Without a completion gate the node ended and the unconditional edge activated the
+consumer with a `null` required fact. The compiler therefore grows a **completion gate**
+when the node's single emit is downstream-required: the user task's own output mapping
+computes a node-unique validity flag (`resumeValidVar`) from the *raw* captured field via
+the **same** per-type `resumeValueCondition` grammar the escalation resume enforces
+(presence included, so a blank required entry is invalid), and a post-task exclusive
+gateway routes a **valid** completion to the node end while an **invalid** one loops back
+to the human task for re-entry — the human analogue of the escalation resume's fail-closed
+re-park (a human node has no separate escalation twin to re-park onto). The gate is grown
+**only** when the single emit is required: a routing-only/unconsumed emit keeps the direct
+`task → end` flow (its `null` simply takes a guarded split's deadlock-safe default, exactly
+like the escalation resume's no-required-target case), and a no-emit acknowledgement node
+has nothing to validate.
+
 ## 14. Open questions / future
 
 - **Provisioning the existing PR branch** — resolved: the `c8ctl` host-git

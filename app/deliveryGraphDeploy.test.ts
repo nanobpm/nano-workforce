@@ -30,6 +30,7 @@ import {
   transcriptUrlForJob,
 } from "./agentic/transcript-url.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
+import { isDeliveryEscalationTwin } from "./deliveryHuman.ts";
 
 /** A graph exercising the full node-kind matrix: `agent` (a named `senior:*` job), `wait` (the
  *  `pr.readiness-probe` poll gate), `human` (a user task), and `connector` (the delivery-connector
@@ -96,7 +97,7 @@ test("deploy+advance: a well-formed graph deploys through the real engine and ev
     // human node's user task deployed and is completable, not just that the instance ended.
     assertEquals(humanTasks.length, 1, `expected exactly one human user task, saw ${JSON.stringify(humanTasks)}`);
     assert(
-      humanTasks[0].startsWith("delivery-human-task__") && !humanTasks[0].endsWith("__esc"),
+      humanTasks[0].startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(humanTasks[0]),
       `expected a human node task, saw ${humanTasks[0]}`,
     );
   } finally {
@@ -159,7 +160,7 @@ test("deploy+advance: a stalled service node escalates on its node-timeout bound
       `the escalation task must have been driven, saw ${JSON.stringify(completed)}`,
     );
     assert(
-      completed.some((id) => id.startsWith("delivery-human-task__") && !id.endsWith("__esc")),
+      completed.some((id) => id.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(id)),
       `the downstream human task must have been driven, saw ${JSON.stringify(completed)}`,
     );
   } finally {
@@ -529,7 +530,7 @@ test("S7 deploy+route: mutually-exclusive leaves join End on an exclusive merge 
         }
       }
       assert(
-        parked.startsWith("delivery-human-task__") && !parked.endsWith("__esc"),
+        parked.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(parked),
         `the missing outcome must park on the escalate human leaf, saw ${JSON.stringify(parked)}`,
       );
       assert(!doneRan, "the guarded (missing) path must NOT run the `done` leaf");
@@ -537,4 +538,472 @@ test("S7 deploy+route: mutually-exclusive leaves join End on an exclusive merge 
       await engine.close();
     }
   }
+});
+
+// ── #863 deploy+route: a single-BOOLEAN human emit publishes a REAL FEEL boolean (not null) ─────────
+// The compiler tests above assert only the SHAPE of the `coerceFactValueFeel` output string; they do
+// NOT evaluate it, so they stayed green against a coercion defeated by a FEEL operator-precedence bug —
+// `selectExpr` returns a BARE `if … then … else null` and the coercion embedded it as `rawExpr != null`,
+// where FEEL's GREEDY `else` arm swallowed the `!= null and matches(…)` guard, collapsing the whole
+// condition to the operator's raw entry and publishing NULL (adversarial finding, round 15; empirically
+// `humanEmitValue`/`<el>_approval` came back null for `{approval:"true"}`). This drives it END TO END on
+// the real engine: a human node emitting a single `boolean` feeds a guarded split comparing the fact
+// `= true`; completing the task with the truthy text must publish a real `true` so the TRUE branch runs
+// (a null-publishing coercion would route the `default` branch instead). Covers the bespoke
+// (fact-named-field) AND generic (`value`-captured) forms — both go through the same coercion.
+async function driveBooleanHumanGuard(opts: { bespoke: boolean; entry: Record<string, string>; emitName?: string }): Promise<{
+  state: string;
+  yesRan: boolean;
+  noRan: boolean;
+  task: string;
+}> {
+  const engine = await createWasmEngineClient();
+  try {
+    let yesRan = false;
+    let noRan = false;
+    await engine.registerWorker("senior:yes", async () => {
+      yesRan = true;
+      return {};
+    });
+    await engine.registerWorker("senior:no", async () => {
+      noRan = true;
+      return {};
+    });
+    const emitName = opts.emitName ?? "approval";
+    const graph: DeliveryGraph = {
+      name: "boolean human guard",
+      nodes: [
+        {
+          id: "gate",
+          kind: "human",
+          human: opts.bespoke ? { prompt: "approve?", formKey: "bespoke-approval" } : { prompt: "approve?" },
+          emits: [{ name: emitName, type: "boolean" }],
+        },
+        { id: "yes", kind: "agent", agent: { jobType: "senior:yes" } },
+        { id: "no", kind: "agent", agent: { jobType: "senior:no" } },
+      ],
+      edges: [
+        { from: "gate", to: "yes", when: `gate.${emitName}`, equals: true },
+        { from: "gate", to: "no", default: true },
+      ],
+    };
+    // A long SLA so the human node's escalation boundary never fires during the drive.
+    const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+
+    let state = "?";
+    let task = "";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+      const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+      assert(open.length > 0, `instance is ${state} with no open user task — the guarded split never advanced`);
+      for (const t of open) {
+        task = t.elementId ?? "?";
+        await engine.completeUserTask(t.userTaskKey, opts.entry);
+      }
+    }
+    return { state, yesRan, noRan, task };
+  } finally {
+    await engine.close();
+  }
+}
+
+test("#863 deploy+route: a BESPOKE single-boolean human form publishes a REAL `true` (not null) so the `= true` guard routes the TRUE branch", async () => {
+  // The bespoke form captures under the FACT's own name (`approval`), so the operator's entry arrives as
+  // `{approval:"true"}`; the coercion must publish the boolean `true`, not null.
+  const r = await driveBooleanHumanGuard({ bespoke: true, entry: { approval: "true" } });
+  assert(r.task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(r.task), `expected the human task, saw ${r.task}`);
+  assertEquals(r.state, "COMPLETED", "the graph must run to a COMPLETED instance");
+  assert(r.yesRan, "a truthy bespoke boolean entry must publish a real `true` so the `= true` guard routes the TRUE branch (a null-publishing coercion would take the default)");
+  assert(!r.noRan, "the default branch must NOT run when the boolean coerces to true");
+});
+
+test("#863 deploy+route: a GENERIC single-boolean human form ALSO publishes a real `true` (class sweep — same coercion, `value`-captured)", async () => {
+  // The generic form captures under the canonical `value` control, so the operator's entry arrives as
+  // `{value:"true"}`; the SAME coercion path must still publish a real `true`.
+  const r = await driveBooleanHumanGuard({ bespoke: false, entry: { value: "true" } });
+  assertEquals(r.state, "COMPLETED", "the graph must run to a COMPLETED instance");
+  assert(r.yesRan, "a truthy generic boolean entry must publish a real `true` so the `= true` guard routes the TRUE branch");
+  assert(!r.noRan, "the default branch must NOT run when the boolean coerces to true");
+});
+
+// ── #863 deploy+route: a single-NUMBER human emit coerces END TO END without incidenting on a blank ──
+// The compiler tests assert only the SHAPE of `coerceFactValueFeel`'s number arm
+// (`number(trim(string(value)))`); they never EVALUATE it, so they stayed green against a FEEL hazard.
+// Round 23 aligned the number bind with the gate's `trim(string(...))` normalization. But `trim` is NOT
+// null-safe, and `operand != null` does NOT prove the operand is STRINGABLE: when the emit's name collides
+// with a FEEL BUILTIN (`count`, `sum`, `min`, …), a BLANK human form leaves that variable unset, so the
+// `if (is defined(count) and count != null) then count else …` selection operand resolves to the builtin
+// FUNCTION (`is defined(count)` is true for the builtin, and the function ≠ null). `trim(string(<function>))`
+// then THROWS (`trim: expected a string, got null`), raising an io-mapping INCIDENT that parks the instance
+// ACTIVE instead of publishing null and completing (adversarial finding, round 23; the pre-regression
+// `number(rawExpr)` folded the same builtin operand to null cleanly). The fix NULL-SAFES the bind with a
+// `string(rawExpr) != null` guard that short-circuits the trim for any non-stringable operand. This drives
+// the number coercion END TO END on the real engine for a reserved-name (`count`) blank entry (must publish
+// null → the `= 42` guard takes the default) and a padded `" 42 "` entry (must coerce the trimmed text to
+// the real number → the TRUE branch). Covers the bespoke (fact-named-field) AND generic (`value`-captured)
+// forms — both go through the same coercion.
+async function driveNumberHumanGuard(opts: { bespoke: boolean; entry: Record<string, string> }): Promise<{
+  state: string;
+  yesRan: boolean;
+  noRan: boolean;
+  task: string;
+}> {
+  const engine = await createWasmEngineClient();
+  try {
+    let yesRan = false;
+    let noRan = false;
+    await engine.registerWorker("senior:yes", async () => {
+      yesRan = true;
+      return {};
+    });
+    await engine.registerWorker("senior:no", async () => {
+      noRan = true;
+      return {};
+    });
+    const graph: DeliveryGraph = {
+      name: "number human guard",
+      nodes: [
+        {
+          id: "gate",
+          kind: "human",
+          human: opts.bespoke ? { prompt: "how many?", formKey: "bespoke-count" } : { prompt: "how many?" },
+          emits: [{ name: "count", type: "number" }],
+        },
+        { id: "yes", kind: "agent", agent: { jobType: "senior:yes" } },
+        { id: "no", kind: "agent", agent: { jobType: "senior:no" } },
+      ],
+      edges: [
+        { from: "gate", to: "yes", when: "gate.count", equals: 42 },
+        { from: "gate", to: "no", default: true },
+      ],
+    };
+    const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+
+    let state = "?";
+    let task = "";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+      const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+      // A blank-number io-mapping INCIDENT parks the instance ACTIVE with NO open user task — this is the
+      // exact failure the null-unsafe `number(trim(string(null)))` produced, and this assert catches it.
+      assert(open.length > 0, `instance is ${state} with no open user task — the number coercion incidented instead of publishing a value`);
+      for (const t of open) {
+        task = t.elementId ?? "?";
+        await engine.completeUserTask(t.userTaskKey, opts.entry);
+      }
+    }
+    return { state, yesRan, noRan, task };
+  } finally {
+    await engine.close();
+  }
+}
+
+test("#863 deploy+route: a BESPOKE single-number human form with a FEEL-builtin name (`count`) completed BLANK publishes null and COMPLETES (no io-mapping incident)", async () => {
+  // Value absent + a builtin name → the selection operand resolves to the `count` builtin FUNCTION, so the
+  // coercion's then-arm must NOT evaluate `trim(string(<function>))` (which throws); the `string(rawExpr)
+  // != null` guard short-circuits it, the instance publishes null and routes the default.
+  const r = await driveNumberHumanGuard({ bespoke: true, entry: {} });
+  assert(r.task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(r.task), `expected the human task, saw ${r.task}`);
+  assertEquals(r.state, "COMPLETED", "a blank bespoke number entry must publish null and run to a COMPLETED instance (not park on an io-mapping incident)");
+  assert(!r.yesRan, "a blank number entry publishes null, so the `= 42` guard must NOT run the TRUE branch");
+  assert(r.noRan, "a blank number entry publishes null, so the default branch runs");
+});
+
+test("#863 deploy+route: a GENERIC single-number human form completed BLANK ALSO publishes null and COMPLETES (class sweep)", async () => {
+  const r = await driveNumberHumanGuard({ bespoke: false, entry: {} });
+  assertEquals(r.state, "COMPLETED", "a blank generic number entry must publish null and run to a COMPLETED instance");
+  assert(!r.yesRan, "a blank number entry publishes null, so the `= 42` guard must NOT run the TRUE branch");
+  assert(r.noRan, "a blank number entry publishes null, so the default branch runs");
+});
+
+test("#863 deploy+route: a BESPOKE single-number human form coerces a PADDED `\" 42 \"` to the real number so the `= 42` guard routes TRUE", async () => {
+  // The gate accepts `" 42 "` (it trims), so the coercion must parse the SAME trimmed text to 42 — a
+  // bare `number(" 42 ")` would yield null and wrongly take the default, breaking "gate accepts ⇒ bind".
+  const r = await driveNumberHumanGuard({ bespoke: true, entry: { count: " 42 " } });
+  assertEquals(r.state, "COMPLETED", "the graph must run to a COMPLETED instance");
+  assert(r.yesRan, "a padded `\" 42 \"` entry must coerce to the real number 42 so the `= 42` guard routes the TRUE branch");
+  assert(!r.noRan, "the default branch must NOT run when the number coerces to 42");
+});
+
+test("#863 deploy+route: a BESPOKE single-boolean human form with a FEEL-builtin name (`count`) completed BLANK publishes null and COMPLETES (class sweep — same null-unsafe-normalization hazard as the number arm)", async () => {
+  // The boolean arm shares the hazard: `lower case(trim(string(<count builtin>)))` throws on a blank
+  // builtin-named emit. The `string(rawExpr) != null` guard short-circuits it, so the instance publishes
+  // null (a blank is not `true`) and routes the default rather than parking on an io-mapping incident.
+  const r = await driveBooleanHumanGuard({ bespoke: true, entry: {}, emitName: "count" });
+  assert(r.task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(r.task), `expected the human task, saw ${r.task}`);
+  assertEquals(r.state, "COMPLETED", "a blank builtin-named boolean entry must publish null and run to a COMPLETED instance (not park on an io-mapping incident)");
+  assert(!r.yesRan, "a blank boolean entry publishes null, so the `= true` guard must NOT run the TRUE branch");
+  assert(r.noRan, "a blank boolean entry publishes null, so the default branch runs");
+});
+
+// ── #863 deploy+route: a TEXT (`string`) / `artifact` single emit named after a FEEL builtin ─────────
+// The number/boolean coercers reject a non-stringable selection operand, but the TEXT types
+// (`string`/`version`/`url`/`pr`) pass `selectExpr`'s result through verbatim and the artifact source is
+// NEVER coerced. The builtin-shadow hazard is a blank explicit form whose fact name collides with a FEEL
+// builtin: `is defined(count) and count != null` is TRUE for the `count` builtin FUNCTION, so the
+// fact-named candidate `then count` selects a FUNCTION for those fact types. The fix guards that candidate
+// in `selectExpr` with `string(<factName>) != null`, which folds a builtin to null at the selection step
+// for EVERY fact type (Copilot review #863, "Guard fact names that shadow FEEL builtins").
+//
+// IMPORTANT — what gates a GUARD REGRESSION vs what these engine tests prove. On the pinned WASM engine a
+// function-valued selection ALREADY folds to null before it is published (a FEEL variable binding cannot
+// hold a function), so the engine-observable outcome — COMPLETED, default routing, AND the published
+// `humanEmitValue`/`humanEmitArtifact` (null for a blank form) — is IDENTICAL with or without the guard.
+// The red-before/green-after gate against removing the guard is therefore the COMPILER-level assertion in
+// `deliveryGraphCompiler.test.ts` (it regex-matches `… and string(<fact>) != null …` in the generated
+// FEEL and goes red the moment the guard is dropped). These end-to-end engine tests instead pin the
+// observable PUBLISHED-value contract — a blank builtin-named emit publishes null (not a function, which
+// would incident or corrupt the fact on an engine that did NOT fold), and the guard does NOT drop a real
+// captured text value (`approved` still selects and routes TRUE). Both layers are needed: the compiler
+// test locks the guard in, the engine test proves the guarded expression yields the intended value.
+async function driveStringHumanGuard(opts: { entry: Record<string, string>; emitName: string }): Promise<{
+  state: string;
+  yesRan: boolean;
+  noRan: boolean;
+  task: string;
+  published: unknown;
+}> {
+  const engine = await createWasmEngineClient();
+  try {
+    let yesRan = false;
+    let noRan = false;
+    // The selected value is published as the node's flat `<el>_<fact>` emit (`n0_<emitName>` — `gate`
+    // sorts first, so its element is `n0`) into PROCESS scope, which is what a downstream worker (and the
+    // guarded split's `n0_<fact> = …` condition) actually observes. Capture THAT, not the node-local
+    // `humanEmitValue` scratch — since #863 (thread r4199949849) the scratch is localised to the human
+    // subProcess to stop cross-node leakage, so it never reaches a downstream worker. Asserting the
+    // published emit is the real PUBLISHED-value contract, not merely completion.
+    const emitVar = `n0_${opts.emitName}`;
+    let published: unknown = "<<never published>>";
+    const capture = (job: { variables?: Record<string, unknown> }): void => {
+      const v = (job.variables as Record<string, unknown> | undefined) ?? {};
+      published = v[emitVar] ?? null;
+    };
+    await engine.registerWorker("senior:yes", async (job) => {
+      yesRan = true;
+      capture(job);
+      return {};
+    });
+    await engine.registerWorker("senior:no", async (job) => {
+      noRan = true;
+      capture(job);
+      return {};
+    });
+    const graph: DeliveryGraph = {
+      name: "string human guard",
+      nodes: [
+        {
+          id: "gate",
+          kind: "human",
+          human: { prompt: "which label?", formKey: "bespoke-label" },
+          emits: [{ name: opts.emitName, type: "string" }],
+        },
+        { id: "yes", kind: "agent", agent: { jobType: "senior:yes" } },
+        { id: "no", kind: "agent", agent: { jobType: "senior:no" } },
+      ],
+      edges: [
+        { from: "gate", to: "yes", when: `gate.${opts.emitName}`, equals: "approved" },
+        { from: "gate", to: "no", default: true },
+      ],
+    };
+    const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+
+    let state = "?";
+    let task = "";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+      const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+      // A builtin-shadow selection that publishes/incidents on the FUNCTION parks the instance ACTIVE with
+      // no open user task — this assert catches that regression.
+      assert(open.length > 0, `instance is ${state} with no open user task — the string selection incidented on a builtin-shadow operand`);
+      for (const t of open) {
+        task = t.elementId ?? "?";
+        await engine.completeUserTask(t.userTaskKey, opts.entry);
+      }
+    }
+    return { state, yesRan, noRan, task, published };
+  } finally {
+    await engine.close();
+  }
+}
+
+test("#863 deploy+route: a BESPOKE single-STRING human form with a FEEL-builtin name (`count`) completed BLANK publishes null and COMPLETES (text types pass selection through — builtin-shadow class sweep)", async () => {
+  // `string` is a pass-through type: `coerceFactValueFeel` does NOT re-guard it, so the only defence is
+  // `selectExpr`'s `string(<factName>) != null` guard. A blank builtin-named explicit form must fold to
+  // null (not select the `count` builtin FUNCTION) and route the default rather than incident.
+  const r = await driveStringHumanGuard({ entry: {}, emitName: "count" });
+  assert(r.task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(r.task), `expected the human task, saw ${r.task}`);
+  assertEquals(r.state, "COMPLETED", "a blank builtin-named string entry must publish null and run to a COMPLETED instance (not incident on the selected builtin function)");
+  assertEquals(r.published, null, "a blank builtin-named string emit must PUBLISH null — never the selected `count` builtin function");
+  assert(typeof r.published !== "function", "the published emit must never be a FEEL builtin function value");
+  assert(!r.yesRan, "a blank string entry publishes null, so the `= \"approved\"` guard must NOT run the TRUE branch");
+  assert(r.noRan, "a blank string entry publishes null, so the default branch runs");
+});
+
+test("#863 deploy+route: a BESPOKE single-STRING human form still selects a real captured value (`approved`) so the guard routes TRUE (the stringability guard does not drop legit text)", async () => {
+  // The `string(<factName>) != null` guard must NOT reject a genuinely captured TEXT value — a real
+  // `approved` entry stringifies to itself, so the fact-named candidate is still selected and the `=
+  // "approved"` guard routes the TRUE branch.
+  const r = await driveStringHumanGuard({ entry: { count: "approved" }, emitName: "count" });
+  assertEquals(r.state, "COMPLETED", "the graph must run to a COMPLETED instance");
+  assertEquals(r.published, "approved", "the guard must still PUBLISH the real captured `approved` text — `string(approved) != null` holds, so it is not dropped");
+  assert(r.yesRan, "a real captured `approved` entry must still be selected so the `= \"approved\"` guard routes the TRUE branch");
+  assert(!r.noRan, "the default branch must NOT run when the string selects `approved`");
+});
+
+test("#863 deploy+route: a BESPOKE single-ARTIFACT human form with a FEEL-builtin name (`count`) completed BLANK publishes null and COMPLETES (artifact source is never coerced — builtin-shadow class sweep)", async () => {
+  // The artifact source (`selectExpr(\"resolvedArtifact\")`) is passed through with NO coercion, so a blank
+  // builtin-named explicit form would publish the `count` builtin FUNCTION as `humanEmitArtifact` absent
+  // the `string(<factName>) != null` guard. With the guard the fact-named candidate folds to null and the
+  // instance completes instead of parking on an io-mapping incident.
+  const engine = await createWasmEngineClient();
+  try {
+    let publishedArtifact: unknown = "<<never published>>";
+    await engine.registerWorker("senior:sink", async (job) => {
+      const v = (job.variables as Record<string, unknown> | undefined) ?? {};
+      // Read the published `<el>_<fact>` artifact emit (`n0_count`), not the node-local `humanEmitArtifact`
+      // scratch — the scratch is localised to the human subProcess (#863, thread r4199949849) and never
+      // reaches a downstream worker; the flat emit is the observable published-value contract.
+      publishedArtifact = v.n0_count ?? null;
+      return {};
+    });
+    const graph: DeliveryGraph = {
+      name: "artifact human guard",
+      nodes: [
+        {
+          id: "gate",
+          kind: "human",
+          human: { prompt: "attach the artifact", formKey: "bespoke-artifact" },
+          emits: [{ name: "count", type: "artifact" }],
+        },
+        { id: "sink", kind: "agent", agent: { jobType: "senior:sink" } },
+      ],
+      edges: [{ from: "gate", to: "sink" }],
+    };
+    const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+    let state = "?";
+    let task = "";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+      const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+      assert(open.length > 0, `instance is ${state} with no open user task — the artifact selection incidented on a builtin-shadow operand`);
+      for (const t of open) {
+        task = t.elementId ?? "?";
+        await engine.completeUserTask(t.userTaskKey, {});
+      }
+    }
+    assert(task.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(task), `expected the human task, saw ${task}`);
+    assertEquals(state, "COMPLETED", "a blank builtin-named artifact entry must publish null and run to a COMPLETED instance (not incident on the selected builtin function)");
+    assertEquals(publishedArtifact, null, "a blank builtin-named artifact emit must PUBLISH null — never the selected `count` builtin function");
+    assert(typeof publishedArtifact !== "function", "the published artifact must never be a FEEL builtin function value");
+  } finally {
+    await engine.close();
+  }
+});
+
+// ── #863 review 5430718031 deploy+route: human single-emit VALIDATION (fail closed) end to end ────────
+// The compiler tests above assert only the SHAPE of the validity gate (`matches(…)` in the generated
+// FEEL); they never EVALUATE it. These drive the typed validation END TO END on the real engine: an
+// INVALID entry (a malformed version, a non-`pkg@version` artifact) must publish null and route the
+// DEFAULT branch (fail closed — the guarded split's `equals` never matches null), while a VALID entry
+// publishes through and routes the guarded branch. This is the observable contract the "Previously
+// missed" findings asked for: human-task fact/artifact values are validated before downstream
+// publication, exactly like the escalation resume path.
+async function driveTypedHumanGuard(opts: { emitName: string; emitType: "version" | "artifact"; entry: Record<string, string> }): Promise<{
+  state: string;
+  published: unknown;
+}> {
+  const engine = await createWasmEngineClient();
+  try {
+    let published: unknown = "<<never published>>";
+    await engine.registerWorker("senior:sink", async (job) => {
+      const v = (job.variables as Record<string, unknown> | undefined) ?? {};
+      // Read the published `<el>_<fact>` emit (`n0_<emitName>`), not the node-local
+      // `humanEmitValue`/`humanEmitArtifact` scratch — the scratch is localised to the human subProcess
+      // (#863, thread r4199949849) and never reaches a downstream worker; the flat emit is the observable
+      // published-value contract this validation gate protects.
+      published = v[`n0_${opts.emitName}`] ?? null;
+      return {};
+    });
+    const graph: DeliveryGraph = {
+      name: "typed human guard",
+      nodes: [
+        {
+          id: "gate",
+          kind: "human",
+          human: { prompt: "enter", formKey: "bespoke-typed" },
+          emits: [{ name: opts.emitName, type: opts.emitType }],
+        },
+        { id: "sink", kind: "agent", agent: { jobType: "senior:sink" } },
+      ],
+      edges: [{ from: "gate", to: "sink" }],
+    };
+    const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+    let state = "?";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+      const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+      assert(open.length > 0, `instance is ${state} with no open user task — the typed-validation guard incidented`);
+      for (const t of open) {
+        await engine.completeUserTask(t.userTaskKey, opts.entry);
+      }
+    }
+    return { state, published };
+  } finally {
+    await engine.close();
+  }
+}
+
+test("#863 review 5430718031 deploy+route: a single-VERSION human emit rejects a malformed version (publishes null) and accepts a valid one", async () => {
+  // Invalid: `not-a-version` fails the `^v?\d[\w.+-]*$` grammar → publishes null (fail closed), COMPLETES.
+  const bad = await driveTypedHumanGuard({ emitName: "ver", emitType: "version", entry: { ver: "not-a-version" } });
+  assertEquals(bad.state, "COMPLETED", "an invalid version entry must still COMPLETE (fail closed to null, not incident)");
+  assertEquals(bad.published, null, "an invalid version must publish null (validated fail-closed), not the malformed text");
+
+  // Valid: `1.2.3` passes the grammar → publishes through verbatim.
+  const good = await driveTypedHumanGuard({ emitName: "ver", emitType: "version", entry: { ver: "1.2.3" } });
+  assertEquals(good.state, "COMPLETED", "a valid version entry must COMPLETE");
+  assertEquals(good.published, "1.2.3", "a valid version must publish through verbatim");
+});
+
+test("#863 review 5430718031 deploy+route: a single-ARTIFACT human emit rejects a non-pkg@version handle (publishes null) and accepts a valid one", async () => {
+  // Invalid: `not-an-artifact` fails the `^@?[^@\s]+@v?\d[\w.+-]*$` grammar → publishes null (fail closed).
+  const bad = await driveTypedHumanGuard({ emitName: "release", emitType: "artifact", entry: { release: "not-an-artifact" } });
+  assertEquals(bad.state, "COMPLETED", "an invalid artifact entry must still COMPLETE (fail closed to null, not incident)");
+  assertEquals(bad.published, null, "an invalid artifact handle must publish null (validated fail-closed), not the malformed text");
+
+  // Valid (scoped pkg@version): `@nanobpm/demo@1.0.0` passes the grammar → publishes through verbatim.
+  const good = await driveTypedHumanGuard({ emitName: "release", emitType: "artifact", entry: { release: "@nanobpm/demo@1.0.0" } });
+  assertEquals(good.state, "COMPLETED", "a valid artifact entry must COMPLETE");
+  assertEquals(good.published, "@nanobpm/demo@1.0.0", "a valid (scoped) artifact handle must publish through verbatim");
 });

@@ -238,12 +238,12 @@ test("producer contract required-emit subset (#761): a routing-only emit is NOT 
   const graph: DeliveryGraph = {
     name: "routing-only producer",
     nodes: [
-      { id: "classify", kind: "agent", agent: { jobType: "senior:feature", prompt: "classify it" }, emits: [{ name: "decision", type: "string" }] },
+      { id: "classify", kind: "agent", agent: { jobType: "senior:feature", prompt: "classify it" }, emits: [{ name: "verdict", type: "string" }] },
       { id: "migrate", kind: "connector", connector: { target: "npm:install", dedupeKey: "m-1" } },
       { id: "release", kind: "connector", connector: { target: "npm:publish", dedupeKey: "r-1" } },
     ],
     edges: [
-      { from: "classify", to: "migrate", when: "classify.decision", equals: "breaking" },
+      { from: "classify", to: "migrate", when: "classify.verdict", equals: "breaking" },
       { from: "classify", to: "release", default: true },
     ],
   };
@@ -257,7 +257,7 @@ test("producer contract required-emit subset (#761): a routing-only emit is NOT 
   assert(!prompt.includes("populate each of these top-level fields"), "no required-emit sentence is rendered when every emit is routing-only");
   // The classifier-emit contract STILL tells the agent to return the routing fact (and omit if undecidable).
   assert(prompt.includes("Classifier emit contract"), "the classifier-emit contract is present");
-  assert(prompt.includes("`decision`"), "the routing fact is still named by the classifier-emit contract");
+  assert(prompt.includes("`verdict`"), "the routing fact is still named by the classifier-emit contract");
 });
 
 

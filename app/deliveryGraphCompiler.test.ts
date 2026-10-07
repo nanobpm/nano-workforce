@@ -15,6 +15,7 @@ import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText, resumeValidVar } from "./deliveryGraphCompiler.ts";
+import { isDeliveryEscalationTwin } from "./deliveryHuman.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
 async function compileOk(graph: unknown) {
@@ -37,7 +38,7 @@ function humanTaskSubEl(bpmn: string): string {
   const parts = bpmn.split('<bpmn:userTask id="delivery-human-task__');
   for (let k = 1; k < parts.length; k++) {
     const id = parts[k].slice(0, parts[k].indexOf('"'));
-    if (!id.endsWith("__esc") && !id.endsWith("__contract")) return id;
+    if (!isDeliveryEscalationTwin(`delivery-human-task__${id}`)) return id;
   }
   return "";
 }
@@ -58,7 +59,7 @@ const RELEASE_RUNBOOK = {
     {
       id: "publish",
       kind: "human",
-      human: { prompt: "run the manual OTP publish", formKey: "publish-form" },
+      human: { prompt: "run the manual OTP publish" },
       emits: [{ name: "resolvedArtifact", type: "artifact" }],
     },
     { id: "consume", kind: "connector", connector: { target: "npm:install", dedupeKey: "consume-1" } },
@@ -98,10 +99,24 @@ test("#543 transcript correlation: only an agent node seeds transcriptUrlBase an
     "an agent node propagates the worker-emitted transcriptUrl up to the instance scope",
   );
   // RELEASE_RUNBOOK has exactly ONE agent node — wait/human/connector must NOT carry the mapping.
+  // The agent node carries exactly TWO transcriptUrl outputs, BOTH agent-local: the propagate-out
+  // ioMapping (the `=if` source above) and the retry reset's `=null` clear (transcriptUrl is in
+  // AGENT_RESULT_LOCAL_VARS, so the retry reset wipes the previous attempt's value — PR #863). A
+  // non-agent kind carries neither, so splitting the count by source keeps that guarantee sharp.
   assertEquals(
-    (r.bpmn.match(/target="transcriptUrl"/g) ?? []).length,
+    (r.bpmn.match(/<zeebe:output source="=if \(is defined\(transcriptUrl\)\)[^>]*target="transcriptUrl"/g) ?? []).length,
     1,
-    "only the agent node emits transcriptUrl (non-agent kinds do not)",
+    "only the agent node propagates transcriptUrl out (non-agent kinds do not)",
+  );
+  assertEquals(
+    (r.bpmn.match(/<zeebe:output source="=null" target="transcriptUrl"/g) ?? []).length,
+    1,
+    "only the agent node's retry reset clears transcriptUrl (non-agent kinds have no reset for it)",
+  );
+  assertEquals(
+    (r.bpmn.match(/<zeebe:output [^>]*target="transcriptUrl"/g) ?? []).length,
+    2,
+    "transcriptUrl outputs are exactly the agent node's propagate-out + retry-reset clear",
   );
   assertEquals(
     (r.bpmn.match(/target="transcriptUrlBase"/g) ?? []).length,
@@ -289,17 +304,23 @@ function elementForNode(bpmn: string, nodeId: string): string {
   return m![1];
 }
 
-/** Slice a compiled BPMN to a node's escalation user task body. */
+/** Slice a compiled BPMN to a node's escalation user task body. A `wait` gate's twin carries the
+ * `__esc__wait` kind marker (no retry path → generic form); a service node's carries the bare `__esc`.
+ * Try the wait-twin id first, then the service-twin id. */
 function escBlockForNode(bpmn: string, nodeId: string): string {
-  const esc = `delivery-human-task__${elementForNode(bpmn, nodeId)}__esc`;
-  const start = bpmn.indexOf(`<bpmn:userTask id="${esc}"`);
-  assert(start !== -1, `escalation task ${esc} for node ${nodeId} exists`);
-  return bpmn.slice(start, bpmn.indexOf("</bpmn:userTask>", start));
+  const el = elementForNode(bpmn, nodeId);
+  for (const suffix of ["esc__wait", "esc"]) {
+    const esc = `delivery-human-task__${el}__${suffix}`;
+    const start = bpmn.indexOf(`<bpmn:userTask id="${esc}"`);
+    if (start !== -1) return bpmn.slice(start, bpmn.indexOf("</bpmn:userTask>", start));
+  }
+  assert(false, `escalation task for node ${nodeId} exists`);
+  return "";
 }
 
 /** Slice a compiled BPMN to a node's escalation user task body by twin suffix (`esc` timeout or
  * `contract` producer-gate, issue #731). */
-function escBlockForNodeSuffix(bpmn: string, nodeId: string, suffix: "esc" | "contract"): string {
+function escBlockForNodeSuffix(bpmn: string, nodeId: string, suffix: "esc" | "contract" | "esc__wait"): string {
   const esc = `delivery-human-task__${elementForNode(bpmn, nodeId)}__${suffix}`;
   const start = bpmn.indexOf(`<bpmn:userTask id="${esc}"`);
   assert(start !== -1, `escalation task ${esc} for node ${nodeId} exists`);
@@ -344,7 +365,700 @@ test("#514 Defect B: a service-node escalation (agent) stays inert — no emit f
   const r = await compileOk(CAP_GATE);
   const esc = escBlockForNode(r.bpmn, "gv");
   assert(esc.includes('="none"') && esc.includes('target="emitMode"'), "an agent-node escalation keeps its emit field hidden");
-  assert(!esc.includes("<bpmn:output") && !esc.includes("<zeebe:output"), "an agent-node escalation carries no emit-source output mapping");
+  assert(!/then value else null/.test(esc), "an emit-less agent-node escalation carries no emit-source output mapping");
+  // Its only output is the retry-node decision, published as the node-unique root boolean.
+  const el = elementForNode(r.bpmn, "gv");
+  assert(
+    esc.includes(`source='=is defined(decision) and decision = "retry"' target="${el}_retryRequested"`),
+    "the escalation publishes the retry decision for the node's retry gateway",
+  );
+});
+
+// #863 review r4199435326: the node-unique ROOT controls the OUTER gateways route on — `<el>_contractMet`
+// (producer-contract gate) and `<el>_retryRequested` (retry gate) — are decided INSIDE the node scope
+// but must be published at root (Nano evaluates gateway conditions against root vars only). An agent
+// emit's source var IS its own name, and every emit source var is null-seeded node-local by
+// ioMappingLines; so an emit literally named `<el>_contractMet`/`<el>_retryRequested` would null-seed a
+// LOCAL shadow of the control, and nearest-scope propagation would write the gate/escalation output into
+// that shadow — the outer gateway never seeing `true`, wedging the producer forever. The control names
+// must be grown collision-free against every node-local emit source var (as the resume-valid flag is).
+// The single node here is the first-sorted element `n0`, so emits named `n0_contractMet`/`n0_retryRequested`
+// reproduce the collision exactly.
+test("#863 generated root controls grow collision-free against a same-named node-local emit (no shadow)", async () => {
+  const r = await compileOk({
+    name: "control-collision",
+    nodes: [
+      {
+        id: "open",
+        kind: "agent",
+        agent: { jobType: "senior:demo", prompt: "x" },
+        emits: [
+          { name: "n0_contractMet", type: "boolean" },
+          { name: "n0_retryRequested", type: "boolean" },
+        ],
+      },
+    ],
+    edges: [],
+  });
+  const el = elementForNode(r.bpmn, "open");
+  assertEquals(el, "n0", "the single node is the first-sorted element n0, so its emits collide with the bare control names");
+  // The colliding emit source vars ARE null-seeded node-local — this is the shadow the controls dodge.
+  assert(r.bpmn.includes('source="=null" target="n0_contractMet"'), "the colliding emit source var is null-seeded node-local");
+  assert(r.bpmn.includes('source="=null" target="n0_retryRequested"'), "the colliding retry emit source var is null-seeded node-local");
+  // Contract gate: the proceed output + gateway condition read the GROWN name, never the shadowed bare one.
+  assert(r.bpmn.includes('target="n0_contractMet_"'), "the contract proceed output targets the grown control var");
+  assert(r.bpmn.includes("=n0_contractMet_ = true"), "the producer-contract gateway reads the grown control var");
+  assert(!r.bpmn.includes("=n0_contractMet = true"), "the gateway must NOT read the shadowed bare control var");
+  // Retry gate (both escalations): the retry decision output + retry flow condition read the grown name.
+  assert(r.bpmn.includes('target="n0_retryRequested_"'), "the retry decision output targets the grown control var");
+  assert(r.bpmn.includes("=n0_retryRequested_ = true"), "the retry gateway reads the grown control var");
+  assert(!r.bpmn.includes("=n0_retryRequested = true"), "the retry gateway must NOT read the shadowed bare control var");
+});
+
+// The escalation form (`delivery-escalation.form` / generic) has a SINGLE `value` field, so it can
+// resume AT MOST ONE emit. A node declaring >1 emit must NOT map that single value onto every emit
+// source var (it would write the same value to each, corrupting both outputs and coercing one string
+// into differently-typed facts — #863 review r4180629319). Continue is inert for multi-emit; Retry
+// produces the facts.
+const MULTI_EMIT = {
+  name: "multi-emit-required",
+  nodes: [
+    {
+      id: "open",
+      kind: "agent",
+      agent: { jobType: "senior:feature" },
+      emits: [
+        { name: "pr", type: "pr" },
+        { name: "mergedSha", type: "string" },
+      ],
+    },
+    { id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "open.pr", sha: "open.mergedSha" }, dedupeKey: "land-1" } },
+  ],
+  edges: [
+    { from: "open.pr", to: "land" },
+    { from: "open.mergedSha", to: "land" },
+  ],
+};
+
+test("#863 multi-emit escalation is inert: a node declaring >1 emit cannot resume through the single value field (no cross-emit corruption)", async () => {
+  const r = await compileOk(MULTI_EMIT);
+  // The timeout escalation (`__esc`) carries the node's OWN declared emits — both would otherwise map
+  // from the one `value` field. With >1 emit the field is hidden ("none") and NO value→emit output is
+  // written, so Continue falls through to the downstream default (deadlock-safe) instead of corrupting
+  // both `pr` and `mergedSha` with the same operator string.
+  const escTimeout = escBlockForNodeSuffix(r.bpmn, "open", "esc");
+  assert(escTimeout.includes('="none"') && escTimeout.includes('target="emitMode"'), "a multi-emit timeout escalation hides its value field");
+  assert(!/then value else null/.test(escTimeout), "a multi-emit timeout escalation writes NO value→emit mapping (would corrupt both)");
+  assert(!/target="emitLabel"/.test(escTimeout), "a multi-emit timeout escalation emits no single emitLabel");
+  // The producer-contract escalation requires BOTH emits — it too must stay inert rather than resume
+  // both from one value.
+  const escContract = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  assert(escContract.includes('="none"') && escContract.includes('target="emitMode"'), "a multi-emit contract escalation hides its value field");
+  assert(!/then value else null/.test(escContract), "a multi-emit contract escalation writes NO value→emit mapping");
+  // The resolution hint must tell the operator Continue CANNOT resume (it re-parks, does not advance)
+  // and Retry produces the facts — never promise a fallback exit the hard-false flag makes unreachable
+  // (#863 review r4194186490).
+  assert(
+    escContract.includes("re-parks HERE") && escContract.includes("does NOT advance") && escContract.includes("Retry this step"),
+    "the hint steers a required multi-emit resolution to Retry and says Continue re-parks (does not advance)",
+  );
+  assert(!escContract.includes("fallback) branch"), "the hint must NOT promise a fallback exit for a required multi-emit escalation (Continue re-parks)");
+});
+
+// A node DECLARING two facts but where only ONE is a downstream data dependency (the sibling is
+// declared-but-unconsumed). The resume boundary must gate on the DECLARED-emit count, not the required
+// subset: SPEC 13.3 says "any node with multiple declared emits leaves the field inert". Gating on the
+// required count alone (the #863 review r4193902690 gap) wrongly offered a value-resumable Continue
+// that would publish the one required fact while silently dropping its declared sibling.
+const TWO_DECLARED_ONE_REQUIRED = {
+  name: "two-declared-one-required",
+  nodes: [
+    { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "open a PR" }, emits: [{ name: "pr", type: "pr" }, { name: "version", type: "version" }] },
+    // Only `open.pr` is consumed downstream, so `version` is declared-but-not-required.
+    { id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "open.pr" }, dedupeKey: "land-1" } },
+  ],
+  edges: [{ from: "open.pr", to: "land" }],
+};
+
+test("#863 review r4193902690: a node declaring >1 emit is inert even when only ONE is required — resumability gates on DECLARED cardinality, not the required subset", async () => {
+  const r = await compileOk(TWO_DECLARED_ONE_REQUIRED);
+  // RED before the fix: `resumeEmits` (required) had length 1, so both escalations offered a typed
+  // value-resumable Continue that published `open.pr` from the single `value` field while dropping the
+  // declared-but-unrequired `version` — exactly the "multiple declared emits must leave the field inert"
+  // violation. GREEN: both twins are inert (emitMode="none", no value→emit mapping, flag hard-false).
+  for (const suffix of ["esc", "contract"] as const) {
+    const esc = escBlockForNodeSuffix(r.bpmn, "open", suffix);
+    const flagVar = resumeValidVar(`delivery-human-task__${elementForNode(r.bpmn, "open")}__${suffix}`);
+    assert(esc.includes('="none"') && esc.includes('target="emitMode"'), `the __${suffix} escalation hides its value field (multiple declared emits)`);
+    assert(!/then value else null/.test(esc), `the __${suffix} escalation writes NO value→emit mapping`);
+    assert(!/target="pr" \/>/.test(esc), `the __${suffix} escalation binds NO pr value from the single form field`);
+    assert(!/target="emitLabel"/.test(esc), `the __${suffix} escalation emits no single emitLabel`);
+    assert(esc.includes(`<zeebe:output source="=false" target="${flagVar}" />`), `the __${suffix} escalation hard-sets its resume-valid flag to false (fail closed, always re-parks)`);
+  }
+  // The resolution hint must say Continue RE-PARKS (does not advance to a fallback branch), naming BOTH
+  // declared facts, never promise a value field OR a fallback exit the inert, hard-false escalation
+  // cannot take (#863 review r4194186490).
+  const contract = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  assert(
+    contract.includes("re-parks HERE") && contract.includes("does NOT advance") && contract.includes("Retry this step"),
+    "the hint steers a multi-declared resolution to Retry and says Continue re-parks (does not advance)",
+  );
+  assert(!contract.includes("fallback) branch"), "the hint must NOT promise a fallback exit for a multi-declared escalation owing a required emit");
+  assert(contract.includes("&apos;pr&apos;/&apos;version&apos;"), "the hint names BOTH declared facts the single value field cannot supply");
+});
+
+test("#863 single-emit escalation still resumes: exactly one emit maps the operator value onto its source var", async () => {
+  // Guard the boundary: the multi-emit fix must NOT regress the single-emit resume path.
+  const r = await compileOk(PRODUCER_GATE);
+  const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  assert(esc.includes('="typed"') && esc.includes('target="emitMode"'), "a single-emit contract escalation PRESENTS its value field");
+  // The composed resume path (PR #876 validation nested on #863 retry) binds the single emit from the
+  // form's `value` onto its source var — guarded by the fail-closed validity test — so a valid Continue
+  // publishes it and a blank/invalid one re-parks.
+  const contractOut = esc.match(/<zeebe:output source=(["'])(.*?)\1 target="pr"/);
+  assert(contractOut, "the single emit resumes from the value field onto its source var (pr)");
+  const contractFeel = contractOut[2].replaceAll("&quot;", '"');
+  assert(/then value else null/.test(contractFeel), `the resume binds the operator value onto the emit source, got: ${contractFeel}`);
+  assert(/is defined\(value\)/.test(contractFeel), "the resume guards on a present value (fail closed)");
+});
+
+test("#863 typed Continue: a single-emit escalation coerces/validates the textfield `value` to the emit's declared type before publishing (r4182488193)", async () => {
+  // Regression guard (PR #863 Copilot High, thread r4182488193): the escalation form captures `value`
+  // from a TEXTFIELD (always a string), but the single-emit resume published it unchanged for every
+  // declared fact type. A Continue on a `boolean`/`number` emit therefore wrote the STRINGS
+  // `"true"`/`"1"`, while a downstream guarded split compares against typed FEEL literals
+  // (`= true`/`= 1`), so the guarded branch was skipped. The resume must coerce/validate using
+  // `resumableEmit.type` before writing the emit source, with a defined failure path (an unparseable
+  // entry publishes null → the required-emit gate / deadlock-safe default) for invalid input.
+  // The emit must be REQUIRED (consumed by a downstream node) for the timeout escalation to present a
+  // resumable value field (PR #872 / #876): a `use` consumer binds each producer's fact so its `__esc`
+  // escalation offers the typed Continue path whose coercion this test guards.
+  const boolGraph = await compileOk({
+    nodes: [
+      { id: "gate", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "ok", type: "boolean" }] },
+      { id: "use", kind: "agent", agent: { jobType: "j2" } },
+    ],
+    edges: [{ from: "gate.ok", to: "use" }],
+  });
+  const boolEsc = escBlockForNodeSuffix(boolGraph.bpmn, "gate", "esc");
+  const boolOut = boolEsc.match(/<zeebe:output source='([^']*)' target="ok"/);
+  assert(boolOut, "the boolean emit's escalation resume maps value onto its source var");
+  const boolFeel = boolOut[1].replaceAll("&quot;", '"');
+  assert(/lower case\(trim\(string\(value\)\)\)\s*=\s*"true"/.test(boolFeel), `a boolean emit coerces the trimmed/lower-cased text to a real boolean (… = "true"), got: ${boolFeel}`);
+  assert(/matches\(lower case\(trim\(string\(value\)\)\)/.test(boolFeel), "a boolean emit validates the normalized text is true/false before coercing");
+  assert(/else null/.test(boolFeel), "an unparseable boolean entry publishes null (the defined failure path), not the raw string");
+
+  const numGraph = await compileOk({
+    nodes: [
+      { id: "n", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "count", type: "number" }] },
+      { id: "use", kind: "agent", agent: { jobType: "j2" } },
+    ],
+    edges: [{ from: "n.count", to: "use" }],
+  });
+  const numEsc = escBlockForNodeSuffix(numGraph.bpmn, "n", "esc");
+  const numOut = numEsc.match(/<zeebe:output source=(["'])([\s\S]*?)\1 target="count"/);
+  assert(numOut, "the number emit's escalation resume maps value onto its source var");
+  const numFeel = numOut[2].replaceAll("&quot;", '"');
+  assert(/number\(trim\(string\(value\)\)\)/.test(numFeel), `a number emit coerces the trimmed text via number(trim(string(value))), got: ${numFeel}`);
+  assert(/else null/.test(numFeel), "an unparseable number entry publishes null");
+
+  // A string-typed emit passes the text through unchanged (no coercion needed) — but the composed
+  // resume path still guards it with the fail-closed validity test (PR #876), so the bind is
+  // `=if (<non-blank>) then value else null`, not an unconditional `value`.
+  const strGraph = await compileOk({
+    nodes: [
+      { id: "s", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "verdict", type: "string" }] },
+      { id: "use", kind: "agent", agent: { jobType: "j2" } },
+    ],
+    edges: [{ from: "s.verdict", to: "use" }],
+  });
+  const strEsc = escBlockForNodeSuffix(strGraph.bpmn, "s", "esc");
+  const strOut = strEsc.match(/<zeebe:output source=(["'])(.*?)\1 target="verdict"/);
+  assert(strOut, "a string emit maps the value onto its source var");
+  const strFeel = strOut[2].replaceAll("&quot;", '"');
+  assert(/then value else null/.test(strFeel), `a string emit passes the text value through unchanged (then value else null), got: ${strFeel}`);
+  assert(/is defined\(value\)/.test(strFeel), "a string emit still guards on a present, non-blank value (fail closed)");
+});
+
+test("#863 review r4194186383: the boolean/number resume VALIDITY gate and the typed COERCION share ONE normalization — a value accepted can never be mis-published", async () => {
+  // RED before the fix: the validity gate trimmed (`trim(string(value))`) but the coercion did not
+  // (`lower case(string(value))`), so `\" true \"` passed the gate (validity=true) yet the coercion
+  // published the WRONG boolean, and `\"TRUE\"` the coercion accepted but the gate rejected. Both sides
+  // must now fold the SAME `lower case(trim(string(value)))`, so "gate accepts ⇒ bind is the same value".
+  const boolGraph = await compileOk({
+    nodes: [
+      { id: "gate", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "ok", type: "boolean" }] },
+      { id: "use", kind: "agent", agent: { jobType: "j2" } },
+    ],
+    edges: [{ from: "gate.ok", to: "use" }],
+  });
+  const boolEsc = escBlockForNodeSuffix(boolGraph.bpmn, "gate", "esc");
+  const boolOut = boolEsc.match(/<zeebe:output source='([^']*)' target="ok"/);
+  assert(boolOut, "the boolean emit resume binds value onto its source var");
+  const boolFeel = boolOut![1].replaceAll("&quot;", '"');
+  // The bind is `=if <gate> then <coerce> else null`: BOTH the gate (the matches/equality) and the
+  // coerce (the `= \"true\"`) read the trimmed+lower-cased text, and NO occurrence reads the old
+  // un-trimmed `lower case(string(value))` form.
+  assert(
+    (boolFeel.match(/lower case\(trim\(string\(value\)\)\)/g) ?? []).length >= 2,
+    `both the boolean gate and coercion fold lower case(trim(string(value))), got: ${boolFeel}`,
+  );
+  assert(!/lower case\(string\(value\)\)/.test(boolFeel), `no boolean side may read the un-trimmed lower case(string(value)), got: ${boolFeel}`);
+
+  const numGraph = await compileOk({
+    nodes: [
+      { id: "n", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "count", type: "number" }] },
+      { id: "use", kind: "agent", agent: { jobType: "j2" } },
+    ],
+    edges: [{ from: "n.count", to: "use" }],
+  });
+  const numEsc = escBlockForNodeSuffix(numGraph.bpmn, "n", "esc");
+  const numOut = numEsc.match(/<zeebe:output source=(["'])([\s\S]*?)\1 target="count"/);
+  assert(numOut, "the number emit resume binds value onto its source var");
+  const numFeel = numOut![2].replaceAll("&quot;", '"');
+  // The number gate matches the NORMALIZED text and the coercion parses the SAME trimmed text, so the
+  // gate can never accept `\" 42 \"` while `number(\" 42 \")` yields null.
+  assert(/matches\(lower case\(trim\(string\(value\)\)\)/.test(numFeel), `the number gate matches the normalized text, got: ${numFeel}`);
+  assert(/number\(trim\(string\(value\)\)\)/.test(numFeel), `the number coercion parses the SAME trimmed text, got: ${numFeel}`);
+  assert(!/number\(value\)/.test(numFeel), `the number coercion must not parse the un-trimmed raw value, got: ${numFeel}`);
+});
+
+test("#863 review r4194186490: a multi-declared node with NO required resume target keeps the fallback-branch hint (Continue genuinely advances)", async () => {
+  // The hint promises a fallback exit ONLY when Continue can actually take it — i.e. the node has NO
+  // required resume target, so no validation gate re-parks it. A node declaring two emits that NO
+  // downstream node consumes is such a case: the escalation is not validation-gated, so Continue
+  // proceeds past the node. (Contrast the required-emit cases above, which must RE-PARK, not advance.)
+  const r = await compileOk({
+    name: "two-declared-none-required",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" }, emits: [{ name: "pr", type: "pr" }, { name: "version", type: "version" }] },
+      { id: "sink", kind: "agent", agent: { jobType: "j2", prompt: "y" } },
+    ],
+    // `open` is sequenced before `sink` but neither of its facts is bound downstream (control-flow edge).
+    edges: [{ from: "open", to: "sink" }],
+  });
+  const esc = escBlockForNodeSuffix(r.bpmn, "open", "esc");
+  assert(esc.includes("default (fallback) branch") && esc.includes("no downstream node requires"), "a multi-declared node with no required emit keeps the fallback-branch Continue hint");
+  assert(!esc.includes("re-parks HERE"), "a node with no required resume target does not re-park on Continue");
+});
+
+test("#863 human multi-emit: a human node emitting several facts with no form is REJECTED (no static form can capture them → would publish null) (r4182488264 / thread deliveryGraphCompiler.ts:1859)", async () => {
+  // Regression guard (PR #863 Copilot High, thread deliveryGraphCompiler.ts:1859): a human form captures
+  // ONE value, and a human node has no Retry path — so a node emitting ≥2 facts with no explicit form
+  // can never capture the extra emits and would permanently schedule downstream consumers with null
+  // required facts. Reject the whole CLASS at authoring time (`human-unroutable-emits`) rather than
+  // silently discard emits.
+  const errors = await compileFail({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "a", type: "string" }, { name: "b", type: "string" }] },
+    ],
+    edges: [],
+  });
+  const e = errors.find((err) => err.path === "nodes[0].emits" && /no static form can/.test(err.message));
+  assert(e !== undefined, `expected a human-unroutable-emits error, got ${JSON.stringify(errors)}`);
+
+  // An explicit `human.formKey` does NOT rescue a ≥2-emit node (PR #863 Copilot High, thread
+  // r4184443511): the compiled task ioMapping reads only the fixed value/resolvedArtifact/note controls,
+  // never a bespoke form's per-fact fields, so the extra emits would still publish null. Rejected too.
+  const explicitForm = await compileFail({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "do it", formKey: "bespoke-multi" }, emits: [{ name: "a", type: "string" }, { name: "b", type: "string" }] },
+    ],
+    edges: [],
+  });
+  const ef = explicitForm.find((err) => err.path === "nodes[0].emits" && /no static form can/.test(err.message));
+  assert(ef !== undefined, `expected a human-unroutable-emits error for an explicit-formKey multi-emit node, got ${JSON.stringify(explicitForm)}`);
+
+  // …but a SINGLE non-artifact human emit still compiles and resumes from humanEmitValue (the rejection
+  // must not regress the single-emit path).
+  const single = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }] }],
+    edges: [],
+  });
+  const sEl = elementForNode(single.bpmn, "h");
+  const sSub = single.bpmn.slice(single.bpmn.indexOf(`<bpmn:subProcess id="${sEl}"`));
+  assert(/<zeebe:output source="=if \(is defined\(humanEmitValue\)\) then humanEmitValue else null" target="[^"]+_verdict" \/>/.test(sSub), "a single-emit human node still publishes its one fact from humanEmitValue");
+  // The single value-emit node embeds the generic typed-emit form.
+  const sTask = sSub.slice(sSub.indexOf("<bpmn:userTask"), sSub.indexOf("</bpmn:userTask>"));
+  assert(sTask.includes('formId="delivery-human-generic"'), "a single value-emit human node embeds the generic form");
+});
+
+test("#863 human mixed emits: one scalar + one artifact (no form) is REJECTED — no static form captures both (thread deliveryGraphCompiler.ts:1859)", async () => {
+  // Regression guard (PR #863 Copilot High): the generic form has no `resolvedArtifact` control and the
+  // publish form no `value` control, so a 1-scalar+1-artifact human node (two emits) has no static form
+  // that captures BOTH — it resolves to the agent-router and must be rejected, not compiled with a
+  // half-captured result. (A SINGLE artifact resolves to the publish form; see the artifact test below.)
+  const errors = await compileFail({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }, { name: "report", type: "artifact" }] },
+    ],
+    edges: [],
+  });
+  const e = errors.find((err) => err.path === "nodes[0].emits" && /no static form can/.test(err.message));
+  assert(e !== undefined, `expected a human-unroutable-emits error, got ${JSON.stringify(errors)}`);
+});
+
+test("#863 human single artifact: a human node emitting ONE artifact embeds the manual-publish form (which captures resolvedArtifact) — thread deliveryGraphCompiler.ts:1859", async () => {
+  // Regression guard (PR #863 Copilot High): a single-artifact human node must embed the publish form so
+  // an operator actually has a `resolvedArtifact` control — the generic form has none, so it would
+  // publish null. The compiler now DERIVES the form from resolveHumanForm instead of hardcoding generic.
+  const r = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "publish it" }, emits: [{ name: "art", type: "artifact" }] }],
+    edges: [],
+  });
+  const el = elementForNode(r.bpmn, "h");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const task = sub.slice(sub.indexOf("<bpmn:userTask"), sub.indexOf("</bpmn:userTask>"));
+  assert(task.includes('formId="delivery-human-publish"'), "a single-artifact human node embeds the manual-publish form (captures resolvedArtifact)");
+  // …and its artifact emit reads the distinct artifact capture.
+  const io = sub.slice(0, sub.indexOf("</bpmn:subProcess>"));
+  assert(/<zeebe:output source="=if \(is defined\(humanEmitArtifact\)\) then humanEmitArtifact else null" target="[^"]+_art" \/>/.test(io), "the artifact emit reads humanEmitArtifact");
+});
+
+test("#863 human single-emit explicit form: the userTask reads the FACT-NAMED field, so a bespoke form keyed on the fact does not publish null (thread deliveryGraphCompiler.ts:1929)", async () => {
+  // Regression guard (PR #863 review — "Preserve fact-named outputs from custom human forms"): a
+  // single-emit human node MAY carry an explicit bespoke `formKey`; `resolveHumanForm` accepts it. The
+  // canonical binding contract `bindHumanEmits` reads the fact's OWN name first (then the generic
+  // `value`/`resolvedArtifact` keys), so a valid custom form returning `{ approval: "yes" }` for an
+  // `approval` emit is legitimate. The userTask ioMapping must therefore read that fact-named field
+  // (falling back to the canonical control) — otherwise it reads only `value`, which is undefined, and
+  // the emit publishes NULL despite a correctly-filled form.
+  const scalar = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "bespoke-approval" }, emits: [{ name: "approval", type: "boolean" }] }],
+    edges: [],
+  });
+  const sEl = elementForNode(scalar.bpmn, "h");
+  const sSub = scalar.bpmn.slice(scalar.bpmn.indexOf(`<bpmn:subProcess id="${sEl}"`));
+  const sTask = sSub.slice(sSub.indexOf("<bpmn:userTask"), sSub.indexOf("</bpmn:userTask>"));
+  assert(sTask.includes('formId="bespoke-approval"'), "the explicit bespoke form is attached");
+  // The userTask value source must (a) read the fact-named `approval` field then fall back to `value`,
+  // AND (b) COERCE that selected text to the fact's declared `boolean` type before writing
+  // `humanEmitValue` — otherwise a bespoke form returning the string "true" publishes `"true"`, which the
+  // downstream guarded split (`= true`) never matches (PR #863 thread r4189815989). The coercion is the
+  // SAME typed-binding contract the escalation resume enforces.
+  const sValueOut = sTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/);
+  assert(sValueOut, "the bespoke boolean form maps a value onto humanEmitValue");
+  const sValueFeel = sValueOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /is defined\(approval\) and approval != null and string\(approval\) != null\) then approval else if \(is defined\(value\)\) then value else null/.test(sValueFeel),
+    `the bespoke boolean form still reads the fact-named \`approval\` field (builtin-shadow-guarded) then \`value\`, got: ${sValueFeel}`,
+  );
+  assert(
+    /matches\(lower case\(trim\(string\(.*\)\)\), "\^\(true\|false\)\$"\)/.test(sValueFeel) && /= "true"/.test(sValueFeel),
+    `the selected bespoke boolean value is coerced/validated to a real FEEL boolean, got: ${sValueFeel}`,
+  );
+  assert(/else null/.test(sValueFeel), "an unparseable bespoke boolean entry publishes null (the defined failure path)");
+
+  // The class, not the instance: a bespoke single-NUMBER form must likewise coerce the selected text to a
+  // real FEEL number (the guarded split compares `= 1`, not `"1"`).
+  const numeric = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "count", formKey: "bespoke-count" }, emits: [{ name: "tally", type: "number" }] }],
+    edges: [],
+  });
+  const nEl = elementForNode(numeric.bpmn, "h");
+  const nSub = numeric.bpmn.slice(numeric.bpmn.indexOf(`<bpmn:subProcess id="${nEl}"`));
+  const nTask = nSub.slice(nSub.indexOf("<bpmn:userTask"), nSub.indexOf("</bpmn:userTask>"));
+  const nValueOut = nTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/);
+  assert(nValueOut, "the bespoke number form maps a value onto humanEmitValue");
+  const nValueFeel = nValueOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /is defined\(tally\) and tally != null and string\(tally\) != null\) then tally else if \(is defined\(value\)\) then value else null/.test(nValueFeel),
+    `the bespoke number form still reads the fact-named \`tally\` field (builtin-shadow-guarded) then \`value\`, got: ${nValueFeel}`,
+  );
+  assert(/number\(/.test(nValueFeel) && /else null/.test(nValueFeel), `the selected bespoke number value is coerced via number(…) with a null failure path, got: ${nValueFeel}`);
+
+  // The class, not the instance: the SAME gap exists for a single ARTIFACT emit with a bespoke form —
+  // the fact-named field must be preferred ahead of the canonical `resolvedArtifact` control.
+  const artifact = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "publish", formKey: "bespoke-publish" }, emits: [{ name: "release", type: "artifact" }] }],
+    edges: [],
+  });
+  const aEl = elementForNode(artifact.bpmn, "h");
+  const aSub = artifact.bpmn.slice(artifact.bpmn.indexOf(`<bpmn:subProcess id="${aEl}"`));
+  const aTask = aSub.slice(aSub.indexOf("<bpmn:userTask"), aSub.indexOf("</bpmn:userTask>"));
+  const aOut = aTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitArtifact"/);
+  assert(aOut, "a bespoke single-artifact form maps a value onto humanEmitArtifact");
+  const aFeel = aOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /is defined\(release\) and release != null and string\(release\) != null\) then release else if \(is defined\(resolvedArtifact\)\)/.test(aFeel),
+    `a bespoke single-artifact form still reads the fact-named \`release\` field (builtin-shadow-guarded) ahead of \`resolvedArtifact\`, got: ${aFeel}`,
+  );
+  assert(
+    /matches\(trim\(string\(/.test(aFeel) && /else null/.test(aFeel),
+    `a bespoke single-artifact form is now wrapped in the artifact-grammar validity gate (fail closed to null), got: ${aFeel}`,
+  );
+
+  // And the generic/publish forms (no explicit formKey) are UNAFFECTED — they still read the fixed
+  // `value`/`resolvedArtifact` controls (no fact-named preference leaks in to break them).
+  const generic = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "do it" }, emits: [{ name: "verdict", type: "string" }] }],
+    edges: [],
+  });
+  const gEl = elementForNode(generic.bpmn, "h");
+  const gSub = generic.bpmn.slice(generic.bpmn.indexOf(`<bpmn:subProcess id="${gEl}"`));
+  const gTask = gSub.slice(gSub.indexOf("<bpmn:userTask"), gSub.indexOf("</bpmn:userTask>"));
+  // A generic single-VALUE node does NOT read a fact-named field (only an explicit bespoke form does), so
+  // it keeps the canonical `value` capture — now VALIDATED non-blank (the string rule) before publish.
+  assert(!/is defined\(verdict\)/.test(gTask), "the generic single-value node must NOT read the fact-named field");
+  assert(
+    /trim\(string\(if \(is defined\(value\)\) then value else null\)\) != ""/.test(gTask.replaceAll("&quot;", '"')) && /then if \(is defined\(value\)\) then value else null else null/.test(gTask.replaceAll("&quot;", '"')),
+    "the generic single-value node keeps the canonical `value` capture, now validated non-blank (fail closed to null)",
+  );
+
+  // The class, not the instance: a GENERIC (no formKey) single-BOOLEAN emit must ALSO coerce its captured
+  // `value` text to a real FEEL boolean — the same bug bites the generic textfield, not just an explicit
+  // bespoke form (PR #863 thread r4189815989, class sweep). It must NOT read a fact-named field (`verdict`),
+  // only the fixed `value` control.
+  const genBool = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve?" }, emits: [{ name: "ok", type: "boolean" }] }],
+    edges: [],
+  });
+  const gbEl = elementForNode(genBool.bpmn, "h");
+  const gbSub = genBool.bpmn.slice(genBool.bpmn.indexOf(`<bpmn:subProcess id="${gbEl}"`));
+  const gbTask = gbSub.slice(gbSub.indexOf("<bpmn:userTask"), gbSub.indexOf("</bpmn:userTask>"));
+  assert(gbTask.includes('formId="delivery-human-generic"'), "a generic single-boolean node embeds the generic form");
+  const gbOut = gbTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/);
+  assert(gbOut, "the generic boolean form maps a value onto humanEmitValue");
+  const gbFeel = gbOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(!/is defined\(ok\)/.test(gbFeel), `the generic form must NOT read the fact-named field, got: ${gbFeel}`);
+  assert(
+    /matches\(lower case\(trim\(string\(.*\)\)\), "\^\(true\|false\)\$"\)/.test(gbFeel) && /= "true"/.test(gbFeel),
+    `the generic single-boolean value is coerced/validated to a real FEEL boolean, got: ${gbFeel}`,
+  );
+});
+
+test("#863 human single-emit: a non-boolean/number fact (version/url/pr/string) is VALIDATED — not just coerced — before publish (review 5430718031 'Previously missed')", async () => {
+  // Regression guard (PR #863 review 5430718031, "Validate human-task fact values before publishing"):
+  // the human-task path called `coerceFactValueFeel` WITHOUT the type-aware validity gate the escalation
+  // resume uses (`resumeValueCondition`). That helper only validates boolean/number; its default arm
+  // passes `string`/`version`/`url`/`pr` through unchanged, so a generic/custom form could publish a
+  // malformed `version`/`url`/`pr` (or a blank `string`) directly downstream despite the declared type.
+  // The fix wraps the binding in `resumeValueCondition` — fail closed to null on an invalid entry, the
+  // SAME contract the escalation resume enforces. These compiler-level regex asserts are the
+  // red-before/green-after gate (they go red the moment the validity wrap is dropped).
+  const version = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "which version?" }, emits: [{ name: "ver", type: "version" }] }],
+    edges: [],
+  });
+  const vEl = elementForNode(version.bpmn, "h");
+  const vSub = version.bpmn.slice(version.bpmn.indexOf(`<bpmn:subProcess id="${vEl}"`));
+  const vTask = vSub.slice(vSub.indexOf("<bpmn:userTask"), vSub.indexOf("</bpmn:userTask>"));
+  const vOut = vTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/);
+  assert(vOut, "a single-version human node maps a value onto humanEmitValue");
+  const vFeel = vOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  // The version grammar (`^v?\d[\w.+-]*$`, matching resumeValueCondition) must gate the bind, fail-closed.
+  assert(
+    /matches\(trim\(string\(.*\)\), "\^v\?\\\\d\[\\\\w\.\+-\]\*\$"\)/.test(vFeel) && /else null/.test(vFeel),
+    `a single-version human emit is VALIDATED against the version grammar (fail closed to null), got: ${vFeel}`,
+  );
+
+  // The class, not the instance: a `url` emit must carry the scheme guard, and a `pr` emit the
+  // owner/repo#N-or-URL grammar — every text type is validated, not only the cited `version`.
+  const url = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "which url?" }, emits: [{ name: "link", type: "url" }] }],
+    edges: [],
+  });
+  const uEl = elementForNode(url.bpmn, "h");
+  const uSub = url.bpmn.slice(url.bpmn.indexOf(`<bpmn:subProcess id="${uEl}"`));
+  const uTask = uSub.slice(uSub.indexOf("<bpmn:userTask"), uSub.indexOf("</bpmn:userTask>"));
+  const uFeel = (uTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/)?.[2] ?? "").replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /matches\(trim\(string\(.*\)\), "\^\[A-Za-z\]\[A-Za-z0-9\+\.-\]\*:\/\/"\)/.test(uFeel) && /else null/.test(uFeel),
+    `a single-url human emit is VALIDATED for a scheme (fail closed to null), got: ${uFeel}`,
+  );
+
+  const pr = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "which pr?" }, emits: [{ name: "change", type: "pr" }] }],
+    edges: [],
+  });
+  const pEl = elementForNode(pr.bpmn, "h");
+  const pSub = pr.bpmn.slice(pr.bpmn.indexOf(`<bpmn:subProcess id="${pEl}"`));
+  const pTask = pSub.slice(pSub.indexOf("<bpmn:userTask"), pSub.indexOf("</bpmn:userTask>"));
+  const pFeel = (pTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/)?.[2] ?? "").replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /github\\\\\.com/.test(pFeel) && /else null/.test(pFeel),
+    `a single-pr human emit is VALIDATED against the owner/repo#N-or-URL grammar (fail closed to null), got: ${pFeel}`,
+  );
+
+  // A `string` emit must be non-blank (the resume gate's only string rule) — fail closed on whitespace.
+  const str = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "say" }, emits: [{ name: "note", type: "string" }] }],
+    edges: [],
+  });
+  const sEl = elementForNode(str.bpmn, "h");
+  const sSub = str.bpmn.slice(str.bpmn.indexOf(`<bpmn:subProcess id="${sEl}"`));
+  const sTask = sSub.slice(sSub.indexOf("<bpmn:userTask"), sSub.indexOf("</bpmn:userTask>"));
+  const sFeel = (sTask.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/)?.[2] ?? "").replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /trim\(string\(.*\)\) != ""/.test(sFeel) && /else null/.test(sFeel),
+    `a single-string human emit is VALIDATED non-blank (fail closed to null), got: ${sFeel}`,
+  );
+});
+
+test("#863 human single-artifact: the artifact handle is VALIDATED against the pkg@version grammar before publish (review 5430718031 'Previously missed')", async () => {
+  // Regression guard (PR #863 review 5430718031, "Validate human artifact handles before publishing"): a
+  // single-artifact human node published `resolvedArtifact` VERBATIM — the form's `required` rule checks
+  // only presence, so `not-an-artifact` was accepted and propagated downstream despite the canonical
+  // `pkg@version` contract. The fix wraps the artifact source in the SAME `resumeValueCondition` artifact
+  // grammar (`^@?[^@\s]+@v?\d[\w.+-]*$`, scoped-package aware) the escalation resume enforces, fail closed.
+  const r = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "publish it" }, emits: [{ name: "art", type: "artifact" }] }],
+    edges: [],
+  });
+  const el = elementForNode(r.bpmn, "h");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const task = sub.slice(sub.indexOf("<bpmn:userTask"), sub.indexOf("</bpmn:userTask>"));
+  const aOut = task.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitArtifact"/);
+  assert(aOut, "a single-artifact human node maps a value onto humanEmitArtifact");
+  const aFeel = aOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(
+    /matches\(trim\(string\(if \(is defined\(resolvedArtifact\)\) then resolvedArtifact else null\)\), "\^@\?\[\^@\\\\s\]\+@v\?\\\\d\[\\\\w\.\+-\]\*\$"\)/.test(aFeel) && /else null/.test(aFeel),
+    `a single-artifact human emit is VALIDATED against the pkg@version grammar (fail closed to null), got: ${aFeel}`,
+  );
+});
+
+test("#863 human required emit: an invalid typed completion is GATED back for re-entry, never published null downstream (thread r4198662345)", async () => {
+  // Regression guard (PR #863 Copilot High, thread r4198662345): a human node whose single emit is a
+  // downstream-REQUIRED fact coerced invalid typed input to null and then flowed DIRECTLY to the
+  // subProcess end — the unconditional edge activated the consumer with a null required fact, and a
+  // human node has no worker contract gate or Retry path to stop it. The fix grows a FAIL-CLOSED
+  // completion gate: the task's OWN output mapping computes a validity flag from the RAW captured field
+  // (the SAME per-type `resumeValueCondition` grammar the escalation resume enforces, presence included),
+  // and a post-task exclusive gateway routes a VALID completion to the node end while an INVALID one
+  // loops back to the human task for re-entry.
+  const r = await compileOk({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "enter a number" }, emits: [{ name: "count", type: "number" }] },
+      { id: "c", kind: "agent", agent: { jobType: "senior:consumer" } },
+    ],
+    edges: [{ from: "h.count", to: "c" }],
+  });
+  const el = elementForNode(r.bpmn, "h");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const task = sub.slice(sub.indexOf("<bpmn:userTask"), sub.indexOf("</bpmn:userTask>"));
+  const flagVar = resumeValidVar(`delivery-human-task__${el}`);
+  // (1) The task publishes the completion-validity flag, computed from the SAME `selectExpr` SELECTION the
+  //     emit uses (for a generic form that is the bare `value`, wrapped null-safe) via the number grammar
+  //     (flat presence `string(sel) != null` + `^-?\d+(\.\d+)?$`), so a blank/non-numeric entry is invalid.
+  const flagOut = task.match(new RegExp(`<zeebe:output source=(["'])(.*?)\\1 target="${flagVar}"`));
+  assert(flagOut, `the human task publishes the completion-validity flag ${flagVar}`);
+  const flagFeel = flagOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  const genericSel = "if (is defined(value)) then value else null";
+  // The generic form's emit reads bare `value`, so the flag validates that same selection — and uses the
+  // FLAT `string(sel) != null` presence guard (never a bare `is defined(<compound>)`, which the pinned
+  // engine mis-evaluates on a compound selection).
+  assert(
+    flagFeel.includes(`string(${genericSel}) != null`) &&
+      flagFeel.includes(`matches(lower case(trim(string(${genericSel}))),`) &&
+      /then true else false/.test(flagFeel),
+    `the validity flag validates the emit's selection via the number grammar with a flat presence guard (fail closed), got: ${flagFeel}`,
+  );
+  // (2) The task no longer flows straight to the node end — it routes into a completion gateway…
+  assert(sub.includes(`<bpmn:sequenceFlow id="${el}_i1" sourceRef="delivery-human-task__${el}" targetRef="${el}_cg" />`), "the human task routes into the completion gate, not straight to the node end");
+  assert(sub.includes(`<bpmn:exclusiveGateway id="${el}_cg"`), "a required-emit human node grows a completion gateway");
+  // (3) …whose VALID branch reaches the node end and whose DEFAULT (invalid) branch loops back to the task.
+  assert(
+    sub.includes(`<bpmn:sequenceFlow id="${el}_cok" name="valid" sourceRef="${el}_cg" targetRef="${el}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${flagVar} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`),
+    "the valid branch reaches the node end on `<flag> = true`",
+  );
+  assert(
+    sub.includes(`<bpmn:sequenceFlow id="${el}_cbad" name="invalid — re-enter" sourceRef="${el}_cg" targetRef="delivery-human-task__${el}" />`),
+    "the invalid (default) branch loops back to the human task for re-entry",
+  );
+  assert(sub.includes(`<bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_cok</bpmn:incoming></bpmn:endEvent>`), "the node end is reached only via the valid branch");
+
+  // The class, not the instance: the SAME gate guards a single-emit human node of EVERY type — a
+  // routing-only/unconsumed emit (no downstream data binding) must NOT grow it (its null just takes a
+  // guarded split's default, like the escalation resume's no-required-target case).
+  const unconsumed = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "x" }, emits: [{ name: "count", type: "number" }] }], edges: [] });
+  assert(!unconsumed.bpmn.includes("_cg"), "an unconsumed (routing-only) single-emit human node grows NO completion gate");
+  const noEmit = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "x" } }], edges: [] });
+  assert(!noEmit.bpmn.includes("_cg"), "a no-emit human node grows NO completion gate");
+});
+
+test("#863 human required emit on an EXPLICIT bespoke form: the completion-validity flag validates the FACT-NAMED control, not a bare always-absent field (adversarial High)", async () => {
+  // Regression guard (PR #863 adversarial round-27, `deliveryGraphCompiler.ts` validity flag): for an
+  // EXPLICIT `human.formKey` form the emit's `selectExpr` reads the FACT-NAMED control (`count`) first, but
+  // the completion-validity flag used to validate the BARE `value`/`resolvedArtifact` field. An operator
+  // form keyed by the fact name captures into `<fact>`, leaving `value` undefined, so a GENUINELY VALID
+  // explicit-form completion evaluated the flag `false` → the gateway's `_cbad` default re-parked the human
+  // forever (until SLA escalation): a correct human answer could never complete the node. The flag must
+  // validate the SAME selection the emit publishes.
+  const r = await compileOk({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "enter a number", formKey: "bespoke-count" }, emits: [{ name: "count", type: "number" }] },
+      { id: "c", kind: "agent", agent: { jobType: "senior:consumer" } },
+    ],
+    edges: [{ from: "h.count", to: "c" }],
+  });
+  const el = elementForNode(r.bpmn, "h");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const task = sub.slice(sub.indexOf("<bpmn:userTask"), sub.indexOf("</bpmn:userTask>"));
+  const flagVar = resumeValidVar(`delivery-human-task__${el}`);
+  // The explicit-form selection prefers the fact-named control `count`, falling back to `value`.
+  const explicitSel = "if (is defined(count) and count != null and string(count) != null) then count else if (is defined(value)) then value else null";
+  const flagOut = task.match(new RegExp(`<zeebe:output source=(["'])(.*?)\\1 target="${flagVar}"`));
+  assert(flagOut, `the explicit-form human task publishes the completion-validity flag ${flagVar}`);
+  const flagFeel = flagOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  // The flag validates the EMIT's selection (the fact-named `count` control), with the same flat presence
+  // guard + number grammar — NOT the bare `value` the pre-fix flag read (which an explicit form leaves
+  // undefined, rejecting a valid completion forever).
+  assert(
+    flagFeel.includes(`string(${explicitSel}) != null`) &&
+      flagFeel.includes(`matches(lower case(trim(string(${explicitSel}))),`) &&
+      /then true else false/.test(flagFeel),
+    `the explicit-form validity flag must validate the fact-named control selection, got: ${flagFeel}`,
+  );
+  // Cross-check: the emit source and the validity flag read the SAME selection — they cannot diverge.
+  const valueOut = task.match(/<zeebe:output source=(["'])(.*?)\1 target="humanEmitValue"/);
+  assert(valueOut, "the explicit-form human task maps a value onto humanEmitValue");
+  const valueFeel = valueOut[2].replaceAll("&quot;", '"').replaceAll("&apos;", "'");
+  assert(valueFeel.includes(explicitSel), `the emit source reads the fact-named control selection, got: ${valueFeel}`);
+});
+
+test("#863 review r4201222762: a human node's completion-gate flag dodges a declared emit named EXACTLY the generated flag — never shadowed by its node-local null-seed", async () => {
+  // The completion-validity flag (`resumeValidVar(delivery-human-task__<el>)`) is itself a legal
+  // fact-name string, and a human node null-seeds each declared emit's fact NAME node-local
+  // (`ioMappingLines`) so a parallel sibling's value can't leak in. If a required single emit is named
+  // EXACTLY the generated flag, the flag lands in that node-local null-seeded var — and the
+  // immediately-following completion gateway reads the stale `null` (the multi-instance `=null`-shadow
+  // gotcha), routing the default `_cbad` branch so even a VALID answer re-parks the human forever. The
+  // flag must grow collision-free (deterministic `_` suffix), exactly as `escalationResumeFlagVar` does
+  // for service-node emits. Probe-compile to learn the (topology-stable) element id, then name the emit
+  // the exact flag var.
+  const probe = await compileOk({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "answer" }, emits: [{ name: "probeFact", type: "string" }] },
+      { id: "c", kind: "agent", agent: { jobType: "senior:consumer" } },
+    ],
+    edges: [{ from: "h.probeFact", to: "c" }],
+  });
+  const collisionName = resumeValidVar(`delivery-human-task__${elementForNode(probe.bpmn, "h")}`);
+  assert(collisionName.includes("__flag__"), "sanity: the human flag var carries the internal infix");
+  const r = await compileOk({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "answer" }, emits: [{ name: collisionName, type: "string" }] },
+      { id: "c", kind: "agent", agent: { jobType: "senior:consumer" } },
+    ],
+    edges: [{ from: `h.${collisionName}`, to: "c" }],
+  });
+  const el = elementForNode(r.bpmn, "h");
+  assertEquals(el, elementForNode(probe.bpmn, "h"), "sanity: renaming the emit leaves topology (and the element id) unchanged");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const task = sub.slice(sub.indexOf("<bpmn:userTask"), sub.indexOf("</bpmn:userTask>"));
+  // The declared emit's fact name is STILL null-seeded node-local (its anti-leak isolation is untouched);
+  // the seed lives in the subProcess ioMapping, outside the userTask.
+  assert(r.bpmn.includes(`<zeebe:input source="=null" target="${collisionName}" />`), "the declared emit's fact name stays null-seeded node-local");
+  // The flag binds under a DISTINCT var — the collision-free `_`-suffixed name, never the emit's var.
+  const suffixedFlag = `${collisionName}_`;
+  assert(task.includes(`target="${suffixedFlag}"`), `the completion-validity flag binds under the distinct suffixed var, got: ${task}`);
+  // … and the gateway routes on that SAME suffixed flag var (never the colliding emit var), so a valid
+  // completion can actually reach the node end instead of re-parking forever.
+  assert(
+    sub.includes(`<bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${suffixedFlag} = true</bpmn:conditionExpression>`),
+    `the valid branch routes on the suffixed flag var, got: ${sub}`,
+  );
+  assert(!sub.includes(`=${collisionName} = true`), "the valid branch must NOT route on the colliding emit var (which is node-local null-seeded)");
 });
 
 // An agent that owes a required `pr` emit to a downstream consumer — its timeout `__esc` (and a
@@ -426,7 +1140,7 @@ test("#876 review: a resumed WAIT-gate escalation validates against its emit typ
   // resume-valid flag for the gateway.
   assert(/<zeebe:output [\s\S]*?target="detail" \/>/.test(esc), "the wait escalation binds the version emit's source var (detail) on its output");
   assert(/<zeebe:output [\s\S]*?target="[^"]*__resumeValid" \/>/.test(esc), "the wait escalation flags its resume-valid flag");
-  const gateStart = r.bpmn.indexOf(`<bpmn:exclusiveGateway id="delivery-human-task__${n2El}__escVg"`);
+  const gateStart = r.bpmn.indexOf(`<bpmn:exclusiveGateway id="delivery-human-task__${n2El}__esc__waitVg"`);
   assert(gateStart !== -1, "the wait timeout escalation grows a resume-validation gateway");
 });
 
@@ -462,6 +1176,63 @@ test("#876 review: a multi-required-emit escalation FAILS CLOSED — it binds no
       `the __${suffix} valid branch routes on the (always-false) resume-valid flag`,
     );
   }
+});
+
+// A MULTI-emit WAIT node: a wait gate owing >1 fact. Unlike an agent/connector, a wait escalation has
+// NO Retry gate (its resolution is "supply the awaited value and continue"), and the single escalation-
+// form `value` field cannot supply two distinct facts — so a resume-validation gate here would re-park
+// EVERY Continue with no escape, wedging the timed-out token forever (issue #863 review r4198123619,
+// "Prevent unresolvable loops for multi-emit wait nodes"). The compiler must therefore grow NO gate and
+// let the escalation continue straight to the node end.
+const MULTI_EMIT_WAIT_GRAPH = {
+  name: "multi-emit wait unresolvable loop",
+  nodes: [
+    { id: "gv", kind: "agent", agent: { jobType: "senior:feature", prompt: "ship the rollup" } },
+    {
+      id: "w",
+      kind: "wait",
+      wait: {
+        kind: "capability",
+        target: "github-releases:nanobpm/nano-ide",
+        match: { package: "@nanobpm/urban", capabilityRef: "#500" },
+        onTimeout: "escalate",
+      },
+      emits: [
+        { name: "publishedVersion", type: "version" },
+        { name: "artifactRef", type: "artifact" },
+      ],
+    },
+    { id: "sink", kind: "connector", connector: { target: "npm:install", dedupeKey: "c1" } },
+  ],
+  edges: [
+    { from: "gv", to: "w" },
+    { from: "w.publishedVersion", to: "sink" },
+    { from: "w.artifactRef", to: "sink" },
+  ],
+};
+
+test("#863 review r4198123619: a MULTI-emit wait escalation grows NO resume-validation gate (would be an unresolvable loop: no retry, Continue always invalid) and continues straight to the node end", async () => {
+  const r = await compileOk(MULTI_EMIT_WAIT_GRAPH);
+  const wEl = elementForNode(r.bpmn, "w");
+  const esc = `delivery-human-task__${wEl}__esc__wait`;
+  // The escalation task itself still exists (operator is stopped so a timed-out multi-emit gate is
+  // legible), but it is NOT value-resumable.
+  assert(r.bpmn.includes(`<bpmn:userTask id="${esc}"`), "the multi-emit wait still parks on a human escalation task");
+  // NO resume-validation gateway: it would route every Continue to its invalid (default) branch and
+  // loop back onto the escalation task, which — with no Retry escape — can never advance.
+  assert(!r.bpmn.includes(`<bpmn:exclusiveGateway id="${esc}Vg"`), "a multi-emit wait escalation grows NO resume-validation gateway");
+  assert(!r.bpmn.includes(`${esc}Vbad`), "a multi-emit wait escalation has NO invalid-resume re-park flow (no unresolvable loop)");
+  assert(!r.bpmn.includes(`${esc}Vok`), "a multi-emit wait escalation has NO valid-resume branch");
+  // Instead the escalation's return flow `_i5` flows straight to the node end — an acknowledged,
+  // value-less continue (the same path a no-emit wait escalation takes).
+  assert(
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${wEl}_i5" sourceRef="${esc}" targetRef="${wEl}_end" />`),
+    "the multi-emit wait escalation continues straight to the node end",
+  );
+  // And it binds NO fact value (the single value field can't supply two distinct facts).
+  const escBlock = escBlockForNodeSuffix(r.bpmn, "w", "esc__wait");
+  assert(escBlock.includes('="none"') && escBlock.includes('target="emitMode"'), "a multi-emit wait escalation hides its value field (emitMode none)");
+  assert(!/then value else null/.test(escBlock), "a multi-emit wait escalation writes NO value→emit mapping");
 });
 
 test("#876 round-4 review: the resume-valid flag is distinct from any declared emit's fact-source var", async () => {
@@ -764,20 +1535,41 @@ test("humanNodes: extracts prompt/formKey/emits; a click-done node emits nothing
   assertEquals(ack?.prompt, undefined);
 });
 
-test("#778 humanNodes: a credential-bearing formKey is redacted in the preview projection (raw only reaches runtime form resolution)", async () => {
-  // `humanNodes[]` is persisted into the staged proposal `preview` and rendered verbatim on the Delivery
-  // Graphs page, so a credential in a human `formKey` (`//user:pass@…`) must be stripped here with the
-  // SAME helper the BPMN `Form:` doc uses — else it leaks unredacted through the preview. The RAW formKey
-  // still drives runtime form resolution (`deliveryHuman` reads `node.human.formKey` directly).
-  const r = await compileOk({
-    nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "//user:pass@forms.example.com/approve?token=abc" } }],
+test("#863 human.formKey: a credential-bearing formKey is REJECTED before compilation (HIGH finding), while a plain opaque form id compiles verbatim", async () => {
+  // PR #863 review (HIGH): an explicit `human.formKey` is baked into the executable
+  // `<zeebe:formDefinition formId=…>`, so a credential-bearing URL formKey (`//user:pass@…`) must be
+  // REJECTED at the semantic boundary — not merely redacted in the preview projection — so it can never
+  // reach the compiled/deployed BPMN at all. (The preview redactor on `humanNodes[].formKey` remains as
+  // residual defence-in-depth for an opaque query-bearing form id the URL/credential gate does not catch.)
+  const errors = await compileFail({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "https://forms.example.com/approve?token=abc" } }],
     edges: [],
   });
-  const h = r.humanNodes.find((n) => n.nodeId === "h");
-  assert(h?.formKey !== undefined && !h.formKey.includes("user:pass") && !h.formKey.includes("token=abc"), `credential stripped from preview formKey: ${h?.formKey}`);
-  // An ordinary opaque form id is preserved verbatim.
+  const e = errors.find((err) => err.path === "nodes[0].human.formKey");
+  assert(e !== undefined, `expected a formKey rejection, got ${JSON.stringify(errors)}`);
+  assert(!e.message.includes("token=abc"), `the formKey rejection message must redact the query token, got: ${e.message}`);
+  // An ordinary opaque form id is accepted and preserved verbatim in the preview projection.
   const plain = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "deploy-approval" } }], edges: [] });
   assertEquals(plain.humanNodes.find((n) => n.nodeId === "h")?.formKey, "deploy-approval");
+});
+
+test("#863 human.formKey: a quote-bearing formKey can never break out of the `<zeebe:formDefinition formId=…>` attribute (rendered via `attr()`)", async () => {
+  // A formKey is XML-attribute-safe but need not be injection-safe on its own: the compiler renders it
+  // through `attr()`, which switches the attribute delimiter to a single quote when the value contains a
+  // `"`, so a crafted `"/><bpmn:…` payload stays INSIDE the attribute instead of closing it. (A
+  // `"`-bearing formKey is not URL/credential/control-char shaped, so the validator admits it — defence
+  // in depth: even an admitted hostile key cannot inject.)
+  const r = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: 'a"/><bpmn:userTask id="pwn' } }],
+    edges: [],
+  });
+  // No raw `<bpmn:userTask id="pwn` element was injected — its `<`/`>` are entity-escaped INSIDE a
+  // single-quote-delimited attribute, so the payload stays contained as attribute text.
+  assert(!r.bpmn.includes('<bpmn:userTask id="pwn'), "a quote-bearing formKey must not inject a sibling element");
+  assert(
+    r.bpmn.includes(`formId='a"/&gt;&lt;bpmn:userTask id="pwn'`),
+    `formKey must be single-quote delimited with < > escaped, BPMN: ${r.bpmn.slice(r.bpmn.indexOf("formDefinition") - 10, r.bpmn.indexOf("formDefinition") + 90)}`,
+  );
 });
 
 test("#778 humanNodes: a credential-bearing emit `description` is redacted in the preview projection (raw only reaches runtime)", async () => {
@@ -1176,9 +1968,9 @@ test("a wait node's onTimeout: continue proceeds past the gate with NO escalatio
     "continue routes the not-ready boundary branch to the node end",
   );
   // escalate: `hard` keeps its escalation twin and routes not-ready to it.
-  assert(r.bpmn.includes(`delivery-human-task__${hardEl}__esc`), "escalate keeps the escalation user task");
+  assert(r.bpmn.includes(`delivery-human-task__${hardEl}__esc__wait`), "escalate keeps the escalation user task");
   assert(
-    r.bpmn.includes(`<bpmn:sequenceFlow id="${hardEl}_i4" name="not ready" sourceRef="${hardEl}_lastGw" targetRef="delivery-human-task__${hardEl}__esc" />`),
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${hardEl}_i4" name="not ready" sourceRef="${hardEl}_lastGw" targetRef="delivery-human-task__${hardEl}__esc__wait" />`),
     "escalate routes the not-ready boundary branch to the escalation task",
   );
 });
@@ -1229,6 +2021,14 @@ const PRODUCER_GATE = {
   edges: [{ from: "open.pr", to: "land" }],
 };
 
+/** The producer-contract expression an agent task publishes as `<el>_contractMet` (evaluated in the
+ * node's scope; the gate's success flow reads only that node-unique boolean). */
+function contractMetExpr(bpmn: string, el: string): string {
+  const m = bpmn.match(new RegExp(`<zeebe:output source='([^']*)' target="${el}_contractMet" />`));
+  assert(m, `the ${el} task publishes ${el}_contractMet`);
+  return m![1].replaceAll("&quot;", '"');
+}
+
 test("#731 producer status gate: an agent node inserts a post-completion contract gate that escalates a non-terminal status AT the producer", async () => {
   const r = await compileOk(PRODUCER_GATE);
   const el = elementForNode(r.bpmn, "open");
@@ -1248,8 +2048,10 @@ test("#731 producer status gate: an agent node inserts a post-completion contrac
   // `in_progress`/`blocked`/`failed` self-report falls through to the default → escalation.
   const g0 = r.bpmn.match(new RegExp(`<bpmn:sequenceFlow id="${el}_g0"[^>]*>(.*?)</bpmn:sequenceFlow>`, "s"));
   assert(g0, "the contract-met success flow exists");
-  assert(g0![1].includes('list contains(["done", "opened", "skipped"], status)'), "the success flow gates on the terminal-success status allowlist");
-  assert(g0![1].includes("not(is defined(status)) or status = null"), "an absent/null status is not itself the failure mode — it still proceeds");
+  assert(g0![1].includes(`=${el}_contractMet = true`), "the success flow reads the node-unique contract decision");
+  const cond = contractMetExpr(r.bpmn, el);
+  assert(cond.includes('list contains(["done", "opened", "skipped"], status)'), "the success flow gates on the terminal-success status allowlist");
+  assert(cond.includes("not(is defined(status)) or status = null"), "an absent/null status is not itself the failure mode — it still proceeds");
   // The contract escalation's read-only context names the node and its reported status (#731).
   const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
   assert(esc.includes("did not satisfy its producer contract"), "the contract escalation explains WHY it parked");
@@ -1263,7 +2065,7 @@ test("#731 required-emit gate: a producer's declared emit consumed as a required
   assert(g0, "the contract-met success flow exists");
   // `pr` is threaded to `land`'s connector payload as a required data dependency — so the gate proceeds
   // only when it is actually populated non-null (a null `pr`, as in instance 10746, escalates here).
-  assert(g0![1].includes("(is defined(pr) and pr != null)"), "a required-emit non-null clause gates the success flow on the populated fact");
+  assert(contractMetExpr(r.bpmn, el).includes("(is defined(pr) and pr != null)"), "a required-emit non-null clause gates the success flow on the populated fact");
   const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
   assert(esc.includes("Required emit &apos;pr&apos;"), "the escalation NAMES the required fact that was not emitted");
   // Resumable (#514 Defect-B mirror): a human/agent supplies the missing fact, VALIDATED on the task's
@@ -1295,8 +2097,9 @@ test("#731 routing-only emits stay optional: a fact referenced ONLY by an edge `
   const g0 = r.bpmn.match(new RegExp(`<bpmn:sequenceFlow id="${el}_g0"[^>]*>(.*?)</bpmn:sequenceFlow>`, "s"));
   assert(g0, "the contract-met success flow exists");
   // The status gate is still present, but there is NO `result` non-null clause — routing stays optional.
-  assert(g0![1].includes("list contains"), "the status gate is still present for the agent node");
-  assert(!g0![1].includes("result"), `a routing-only emit is NOT gated as a required data dependency, got: ${g0![1]}`);
+  const cond = contractMetExpr(r.bpmn, el);
+  assert(cond.includes("list contains"), "the status gate is still present for the agent node");
+  assert(!cond.includes("result"), `a routing-only emit is NOT gated as a required data dependency, got: ${cond}`);
   // The contract escalation for a status-only gate is inert (no emit resume field).
   const esc = escBlockForNodeSuffix(r.bpmn, "classify", "contract");
   assert(esc.includes('="none"') && esc.includes('target="emitMode"'), "a status-only contract escalation keeps its emit field hidden");
@@ -1913,7 +2716,7 @@ test("#778 the wait + human inner tasks carry the descriptive display name (not 
     name: "inner names",
     nodes: [
       { id: "gate", kind: "wait", wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" } } },
-      { id: "otp", kind: "human", human: { prompt: "Run the manual OTP publish", formKey: "publish-form" } },
+      { id: "otp", kind: "human", human: { prompt: "Run the manual OTP publish" } },
     ],
     edges: [{ from: "gate", to: "otp" }],
   };
@@ -2679,4 +3482,516 @@ test("#778 redactFreeText: redacts a URL query/fragment orphaned across a smuggl
   // Ordinary prose after a real whitespace break is not over-redacted.
   const prose = redactFreeText("visit //example.com then\nis this ok? yes");
   assert(prose.includes("is this ok? yes"), `prose after a whitespace break is intact: ${prose}`);
+});
+
+// ── node-scope hardening (instance 171774: three escalations with no actionable information) ────────
+
+test("node scope: an agent node declares its result vars node-local so parallel siblings never share a root status/pr", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  for (const v of ["status", "summary", "question", "error", "pr", "transcriptUrl", "delta", "decision", "value", "escalationNote"]) {
+    assert(io.includes(`source="=null" target="${v}"`), `'${v}' is declared node-local on the subProcess`);
+  }
+  // The plain `note` is declared node-local too — as a plan.md WORKER RESULT field via
+  // AGENT_RESULT_LOCAL_VARS, NOT as an escalation control (the retry-guidance control is the distinct
+  // `escalationNote`, PR #863 "Previously missed", deliveryGraphCompiler.ts:2156).
+  assert(io.includes(`source="=null" target="note"`), "the worker-result `note` is declared node-local (AGENT_RESULT_LOCAL_VARS)");
+});
+
+test("#863 node scope: an agent's documented optional `delta` result is node-local, so parallel senior:feature nodes never overwrite one another's delta at root", async () => {
+  // Regression guard (#863 review r4180629336): `delta` is a documented top-level implementer-result
+  // field (resources/prompts/feature.md). Omitted from AGENT_RESULT_LOCAL_VARS, a delivery node using
+  // `senior:feature` would write `delta` at ROOT scope, where a parallel node overwrites it and a retry
+  // leaves it stale. It must be declared node-local and cleared on retry.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  assert(io.includes(`source="=null" target="delta"`), "the agent's `delta` result is declared node-local");
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  assert(/<zeebe:output source="=null" target="delta" \/>/.test(reset), "the retry reset clears a stale `delta` from the previous attempt");
+});
+
+test("#863 node scope: every documented review/audit result field (plan-review/conformance) is node-local and cleared on retry — the canonical result contract cannot drift", async () => {
+  // Regression guard (PR #863 Copilot "Previously missed", deliveryGraphCompiler.ts:214): the node-local
+  // result list omitted documented agent result fields, so a parallel delivery node using those contracts
+  // leaked them to the shared root (and a retry left them stale). `plan-review.md` returns
+  // `approved`/`findings`; `conformance.md` returns `commentUrl`, `hasDeviations`, and the per-slice /
+  // deviation counts. Each must be declared node-local AND cleared on retry.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  for (const v of ["approved", "findings", "commentUrl", "hasDeviations", "slicesMet", "slicesReduced", "slicesNotVerified", "deviationsRaised", "deviationsUnraised"]) {
+    assert(io.includes(`source="=null" target="${v}"`), `the documented result field '${v}' is declared node-local`);
+    assert(new RegExp(`<zeebe:output source="=null" target="${v}" />`).test(reset), `the retry reset clears a stale '${v}'`);
+  }
+});
+
+test("#863 node scope: the remaining built-in prompt result contracts (fix-ci/rebase/adversarial-review/scope-classify/plan/trial-merge) are node-local and cleared on retry (r4181321969)", async () => {
+  // Regression guard (PR #863 Copilot High, thread r4181321969): the "canonical" result contract was
+  // incomplete relative to the built-in prompts it covers — `fix-ci.md`/`rebase.md` return `dependsOn`,
+  // `adversarial-review.md` returns `adversarialFindings`/`adversarialSummary`, `scope-classify.md`
+  // returns `scopeBlocked`/`scopeBlockReason`, `plan.md` returns `tasks`, `trial-merge.md` returns
+  // `result`/`conflicts`/`failing`. A delivery node using one of those shapes wrote the field at the
+  // shared ROOT, where a parallel node overwrites it and a retry retains a stale value. Each must be
+  // declared node-local AND cleared on retry.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  for (const v of ["dependsOn", "adversarialFindings", "adversarialSummary", "scopeBlocked", "scopeBlockReason", "tasks", "result", "conflicts", "failing"]) {
+    assert(io.includes(`source="=null" target="${v}"`), `the documented result field '${v}' is declared node-local`);
+    assert(new RegExp(`<zeebe:output source="=null" target="${v}" />`).test(reset), `the retry reset clears a stale '${v}'`);
+  }
+});
+
+test("node scope: a connector node localises every declared emit source var so two parallel connectors with the same emit never cross-publish", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4179717614): a `DeliveryNodeConnector` permits
+  // `emits` too, and its emit source is the fact's own name. Without localising it on the connector's
+  // subProcess, two parallel connectors declaring the same field read/write it at ROOT scope, so a
+  // timed-out connector could publish a sibling connector's result through its own `<el>_<fact>` output.
+  const graph = {
+    name: "two-connectors",
+    nodes: [
+      { id: "notifyA", kind: "connector", connector: { target: "slack:#a", payload: { pr: null } }, emits: [{ name: "ack", type: "string" }] },
+      { id: "notifyB", kind: "connector", connector: { target: "slack:#b", payload: { pr: null } }, emits: [{ name: "ack", type: "string" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  for (const nodeId of ["notifyA", "notifyB"]) {
+    const el = elementForNode(r.bpmn, nodeId);
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    assert(io.includes(`source="=null" target="ack"`), `connector '${nodeId}' declares its 'ack' emit source var node-local on the subProcess`);
+    // And it still publishes its own node's value onward under the flat node-unique name.
+    assert(io.includes(`target="${el}_ack"`), `connector '${nodeId}' still publishes its emit as the node-unique ${el}_ack`);
+  }
+});
+
+test("node scope: a human node localises its emit scratch + form controls so two parallel human nodes never cross-publish a sibling's answer", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4199949849 "Isolate human subprocess scratch state
+  // to prevent cross-run leakage"): a human user task captures the operator's answer into FIXED,
+  // non-node-unique scratch (`humanEmitValue`/`humanEmitArtifact`) by SELECTING from fixed form controls
+  // (`value`/`resolvedArtifact`/`note`). Left at the shared ROOT, if human A completes while human B times
+  // out WITHOUT producing a value, B's subProcess output reads A's root `humanEmitValue` and publishes it
+  // as B's own `<el>_<fact>` (the complete-one/timeout-the-other leak). Each human subProcess must declare
+  // this scratch + its form controls node-local so a value-less timeout fail-closes to its OWN null.
+  const graph = {
+    name: "two-humans",
+    nodes: [
+      { id: "approveA", kind: "human", human: { prompt: "approve A" }, emits: [{ name: "verdict", type: "string" }] },
+      { id: "approveB", kind: "human", human: { prompt: "approve B" }, emits: [{ name: "verdict", type: "string" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  for (const nodeId of ["approveA", "approveB"]) {
+    const el = elementForNode(r.bpmn, nodeId);
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    for (const v of ["humanEmitValue", "humanEmitArtifact", "humanOutcome", "humanNote", "value", "resolvedArtifact", "note"]) {
+      assert(io.includes(`source="=null" target="${v}"`), `human '${nodeId}' declares '${v}' node-local on the subProcess`);
+    }
+    // And it still publishes its own node's value onward under the flat node-unique name.
+    assert(io.includes(`target="${el}_verdict"`), `human '${nodeId}' still publishes its emit as the node-unique ${el}_verdict`);
+  }
+});
+
+test("node scope: a human node with a bespoke single-emit form localises the explicit FACT-NAMED control too", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4199949849): a bespoke single-emit human form
+  // captures the value under the FACT'S OWN NAME (`selectExpr` reads `<factName>` before the canonical
+  // control), so that control must ALSO be node-local — otherwise a blank completion reads a sibling's
+  // root value for that fact name.
+  const graph = {
+    name: "bespoke-human",
+    nodes: [
+      { id: "approve", kind: "human", human: { prompt: "approve", formKey: "bespoke-approval" }, emits: [{ name: "approval", type: "boolean" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "approve");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  assert(io.includes(`source="=null" target="approval"`), "the human subProcess declares the bespoke form's fact-named 'approval' control node-local");
+});
+
+test("node scope: a wait node localises its escalation controls + each declared emit source so two parallel timed-out waits never share a stale root value", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4200608648 "Localize wait escalation completion
+  // variables to prevent cross-wait leakage"): a `wait` node's SLA-timeout escalation parks on the
+  // generic form, whose completion writes `decision`/`value`/`escalationNote`, and on the escalate path
+  // the `_lastAttempt` probe + any value-resume materialise the emit source (`detail`/`resolvedArtifact`/
+  // `mergedSha`/`prCount`) — the interrupted probeLoop never ran its output mapping, so these do NOT
+  // reach the wait subProcess scope on their own. Left at the shared ROOT they cross-publish between
+  // parallel waits: a value-less completion on one wait reads a sibling's root `value`/emit and resumes
+  // from the sibling's answer. Each wait subProcess must declare the escalation controls + each emit
+  // source node-local, exactly as agent/connector/human do.
+  const graph = {
+    name: "two-waits",
+    nodes: [
+      { id: "waitA", kind: "wait", wait: { kind: "command", target: "a.sh", match: { exitCode: 0 }, onTimeout: "escalate" }, emits: [{ name: "token", type: "string" }] },
+      { id: "waitB", kind: "wait", wait: { kind: "command", target: "b.sh", match: { exitCode: 0 }, onTimeout: "escalate" }, emits: [{ name: "token", type: "string" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  for (const nodeId of ["waitA", "waitB"]) {
+    const el = elementForNode(r.bpmn, nodeId);
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    // The escalation controls (the generic form's completion vars) are node-local...
+    for (const v of ["decision", "value", "escalationNote"]) {
+      assert(io.includes(`source="=null" target="${v}"`), `wait '${nodeId}' declares escalation control '${v}' node-local on the subProcess`);
+    }
+    // ...and the declared emit's SOURCE var (a non-mergedSha/prCount/non-artifact string emit sources
+    // from the probe's `detail`) is node-local too, so a value-less timeout fail-closes to its OWN null.
+    assert(io.includes(`source="=null" target="detail"`), `wait '${nodeId}' declares its 'token' emit source var (detail) node-local on the subProcess`);
+    // And it still publishes its own node's value onward under the flat node-unique name.
+    assert(io.includes(`target="${el}_token"`), `wait '${nodeId}' still publishes its emit as the node-unique ${el}_token`);
+  }
+});
+
+test("node scope: a wait node localises the generic escalation form's `note` control so a timed-out wait's operator note never leaks to root", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4200916073 "Declare wait form note as a local
+  // variable"): a `wait` node's SLA-timeout escalation renders the GENERIC human form
+  // (`delivery-human-generic` — a wait has no retryElement, so `escalationTaskLines` picks it over the
+  // retry-capable `ESCALATION_FORM`). That form's controls are `value` + `note`, NOT the retry form's
+  // `decision`/`value`/`escalationNote`. `value` is already in ESCALATION_LOCAL_VARS, but the generic
+  // form's `note` control was NOT seeded node-local — so completing a timed-out wait with an operator
+  // note propagated `note` to the shared ROOT, letting parallel waits overwrite one another's note and
+  // exposing a wait-specific note to later jobs. Each wait subProcess must declare `note` node-local.
+  const graph = {
+    name: "two-waits-note",
+    nodes: [
+      { id: "waitA", kind: "wait", wait: { kind: "command", target: "a.sh", match: { exitCode: 0 }, onTimeout: "escalate" }, emits: [{ name: "token", type: "string" }] },
+      { id: "waitB", kind: "wait", wait: { kind: "command", target: "b.sh", match: { exitCode: 0 }, onTimeout: "escalate" }, emits: [{ name: "token", type: "string" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  for (const nodeId of ["waitA", "waitB"]) {
+    const el = elementForNode(r.bpmn, nodeId);
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    // The generic escalation form's `note` control is node-local (alongside `value`).
+    assert(io.includes(`source="=null" target="note"`), `wait '${nodeId}' declares the generic escalation form's 'note' control node-local on the subProcess`);
+    assert(io.includes(`source="=null" target="value"`), `wait '${nodeId}' declares the generic escalation form's 'value' control node-local on the subProcess`);
+  }
+});
+
+test("node scope: a wait node localises an artifact emit's `resolvedArtifact` source and a `mergedSha`/`prCount` emit's own-named source (each distinct emit source, not the fact name)", async () => {
+  // Thread r4200608648: factSourceVar maps a wait emit to a FIXED intermediate, never the fact's own
+  // name — an artifact emit sources from `resolvedArtifact`, a `mergedSha`/`prCount` emit from its own
+  // canonical probe bind. Each of those distinct source vars must be node-local, not just `detail`.
+  for (const emit of [
+    { fact: { name: "built", type: "artifact" }, source: "resolvedArtifact" },
+    { fact: { name: "mergedSha", type: "string" }, source: "mergedSha" },
+    { fact: { name: "prCount", type: "number" }, source: "prCount" },
+  ]) {
+    const graph = {
+      name: `wait-${emit.source}`,
+      nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target: "c.sh", match: { exitCode: 0 }, onTimeout: "escalate" }, emits: [emit.fact] }],
+      edges: [],
+    };
+    const r = await compileOk(graph);
+    const el = elementForNode(r.bpmn, "w");
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    assert(io.includes(`source="=null" target="${emit.source}"`), `a wait emitting '${emit.fact.name}' declares its '${emit.source}' emit source node-local`);
+  }
+});
+
+test("node scope: an agent/connector node never declares the human-only scratch (no cross-kind leakage of HUMAN_RESULT_LOCAL_VARS)", async () => {
+  // Fail-closed guard: the human scratch vars are human-specific; a service node must not declare them
+  // node-local, so the localisation sets stay disjoint-by-kind.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  for (const v of ["humanEmitValue", "humanEmitArtifact", "humanOutcome", "humanNote"]) {
+    assert(!io.includes(`target="${v}"`), `the agent node does not declare human-only '${v}'`);
+  }
+});
+
+test("connector timeout escalation is resumable with the connector's declared emits (Continue maps `value`; Retry clears them)", async () => {
+  // Regression guard (PR #863 Copilot review, "Previously missed" — connector emits lost during timeout
+  // escalation recovery): a connector has NO producer-contract gate (`contractGate === undefined`), so
+  // keying the timeout-escalation resume off the gate dropped its `emits` — `emitMode` was "none", a
+  // Continue mapped no `value`, and a Retry never cleared the stale emit. The resume must key off the
+  // connector's OWN emits (emit source = the fact's own name).
+  const graph = {
+    name: "connector-resume",
+    nodes: [
+      { id: "notify", kind: "connector", connector: { target: "slack:#a", payload: { pr: null } }, emits: [{ name: "ack", type: "string" }] },
+      { id: "use", kind: "agent", agent: { jobType: "j2" } },
+    ],
+    edges: [{ from: "notify.ack", to: "use" }],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "notify");
+  const esc = escBlockForNodeSuffix(r.bpmn, "notify", "esc");
+  // The typed-value field is presented (not forced to "none") and labelled with the declared emit…
+  assert(esc.includes(`target="emitMode"`), "the connector timeout escalation carries an emitMode input");
+  assert(esc.includes("typed") && !esc.includes('"none"'), "emitMode is 'typed' (the connector declares an emit), not 'none'");
+  assert(esc.includes("ack (string)"), "the emit label names the connector's declared emit");
+  // …and a Continue maps the operator's `value` onto the connector's emit-source var (the fact's name).
+  assert(esc.includes(`target="ack"`), "a Continue resume publishes the operator value under the emit source var 'ack'");
+  // The retry tail clears the connector's emit source var so a re-run never republishes a stale value.
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  assert(reset.includes(`target="ack"`), "the retry reset clears the connector's 'ack' emit source var");
+});
+
+test("#863 node scope: a connector's fixed result metadata (connectorOutcome/connectorDedupeKey/connectorDetail) is node-local and cleared on retry, so parallel connectors never overwrite one another's root-scoped result", async () => {
+  // Regression guard (PR #863 Copilot review, thread r4180856788): the delivery-connector worker returns
+  // `connectorOutcome`/`connectorDedupeKey`/`connectorDetail` on EVERY completion (app/deliveryConnector.ts).
+  // Nano propagates job-completion vars to the nearest scope that defines the name, else ROOT — so without a
+  // node-local declaration two parallel connectors overwrite ONE shared root result and an escalation /
+  // downstream read sees whichever connector finished last. They must be declared node-local AND cleared on retry.
+  const graph = {
+    name: "two-connectors-result",
+    nodes: [
+      { id: "notifyA", kind: "connector", connector: { target: "slack:#a", payload: { pr: null } } },
+      { id: "notifyB", kind: "connector", connector: { target: "slack:#b", payload: { pr: null } } },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  for (const nodeId of ["notifyA", "notifyB"]) {
+    const el = elementForNode(r.bpmn, nodeId);
+    const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+    const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+    const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+    for (const v of ["connectorOutcome", "connectorDedupeKey", "connectorDetail"]) {
+      assert(io.includes(`source="=null" target="${v}"`), `connector '${nodeId}' declares '${v}' node-local on the subProcess`);
+      assert(new RegExp(`<zeebe:output source="=null" target="${v}" />`).test(reset), `connector '${nodeId}' clears '${v}' on retry`);
+    }
+  }
+});
+
+test("#863 node scope: a connector retry reset never clears the non-local `note` (no null leak to shared root); an agent still clears it via its node-local result set", async () => {
+  // Regression guard (PR #863 Copilot Medium "Previously missed", deliveryGraphCompiler.ts:2181):
+  // `note` is a WORKER RESULT field declared node-local ONLY for an agent (it is in
+  // AGENT_RESULT_LOCAL_VARS). A connector does NOT declare it node-local (CONNECTOR_RESULT_LOCAL_VARS
+  // omits it; it is neither an escalation control nor a connector emit). An unconditional
+  // `note = null` in the retry reset therefore lands at the SHARED ROOT for a connector — leaking null
+  // across the node-isolation boundary and clobbering a parallel node's `note`. The reset must clear
+  // `note` ONLY where it is actually node-local.
+  const graph = {
+    name: "connector-note-leak",
+    nodes: [
+      { id: "notify", kind: "connector", connector: { target: "slack:#a", payload: { pr: null } } },
+    ],
+    edges: [],
+  };
+  const rc = await compileOk(graph);
+  const cel = elementForNode(rc.bpmn, "notify");
+  const csub = rc.bpmn.slice(rc.bpmn.indexOf(`<bpmn:subProcess id="${cel}"`));
+  const cio = csub.slice(0, csub.indexOf("</zeebe:ioMapping>"));
+  assert(!cio.includes(`target="note"`), "the connector does not declare `note` node-local (so clearing it would write to root)");
+  const creset = rc.bpmn.slice(rc.bpmn.indexOf(`id="${cel}_retry"`), rc.bpmn.indexOf("</bpmn:intermediateThrowEvent>", rc.bpmn.indexOf(`id="${cel}_retry"`)));
+  assert(!creset.includes(`target="note"`), "the connector retry reset never clears `note` (would leak null to the shared root)");
+  // The escalation controls ARE node-local for a connector, so the reset still clears them.
+  for (const v of ["decision", "value", "escalationNote"]) {
+    assert(new RegExp(`<zeebe:output source="=null" target="${v}" />`).test(creset), `the connector reset still clears the node-local escalation control '${v}'`);
+  }
+  // An agent, by contrast, DOES clear `note` on retry — it is node-local (AGENT_RESULT_LOCAL_VARS) —
+  // and does so exactly once (the reset must not duplicate it).
+  const ra = await compileOk(PRODUCER_GATE);
+  const ael = elementForNode(ra.bpmn, "open");
+  const areset = ra.bpmn.slice(ra.bpmn.indexOf(`id="${ael}_retry"`), ra.bpmn.indexOf("</bpmn:intermediateThrowEvent>", ra.bpmn.indexOf(`id="${ael}_retry"`)));
+  const noteClears = areset.match(/<zeebe:output source="=null" target="note" \/>/g) ?? [];
+  assertEquals(noteClears.length, 1, "the agent reset clears `note` exactly once (node-local, not duplicated)");
+});
+
+test("node scope: an agent node never declares the connector-only result metadata (no cross-kind leakage of CONNECTOR_RESULT_LOCAL_VARS)", async () => {
+  // Fail-closed guard: the connector result vars are connector-specific; an agent node must not declare
+  // them node-local (they are not part of an agent's completion contract), so the two localisation sets
+  // stay disjoint-by-kind.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const io = sub.slice(0, sub.indexOf("</zeebe:ioMapping>"));
+  for (const v of ["connectorOutcome", "connectorDedupeKey", "connectorDetail"]) {
+    assert(!io.includes(`target="${v}"`), `the agent node does not declare connector-only '${v}'`);
+  }
+});
+
+test("preflight: the inner service task asserts its runner-seeded nodeInputs before any job exists (leaf, not the subProcess)", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const task = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:serviceTask id="${el}_task"`));
+  const taskIo = task.slice(0, task.indexOf("</bpmn:serviceTask>"));
+  assert(taskIo.includes(`target="nodeInputsPresent"`), "the leaf task carries the preflight input");
+  assert(taskIo.includes(`nodeInputs.${el} is missing`), "the assert names the missing config so the incident is actionable");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  assert(!sub.slice(0, sub.indexOf("<bpmn:startEvent")).includes("nodeInputsPresent"), "never on the subProcess (nano-bpm#1334 skip)");
+});
+
+test("retry-node: both escalations route decision=retry through a reset back to the task; the reset is not a scriptTask", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  // Nested topology (Option A): each escalation (`__esc` timeout + `__contract`) grows its OWN retry
+  // gate (`${esc}Rg`) whose Retry branch funnels to the one shared reset; there is no single `${el}_rg`.
+  const escEl = `delivery-human-task__${el}__esc`;
+  const contractEl = `delivery-human-task__${el}__contract`;
+  assert(r.bpmn.includes(`<bpmn:exclusiveGateway id="${escEl}Rg"`), "the timeout escalation grows a retry gateway");
+  assert(r.bpmn.includes(`<bpmn:exclusiveGateway id="${contractEl}Rg"`), "the contract escalation grows a retry gateway");
+  assert(r.bpmn.includes(`=${el}_retryRequested = true`), "it reads the node-unique retry decision");
+  assert(r.bpmn.includes(`<bpmn:intermediateThrowEvent id="${el}_retry" name="Reset for retry">`), "the reset is a none throw event");
+  for (const suffix of ["esc", "contract"]) {
+    const esc = escBlockForNodeSuffix(r.bpmn, "open", suffix);
+    assert(esc.includes(`target="${el}_retryRequested"`), `the __${suffix} escalation publishes the retry decision`);
+  }
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  for (const v of ["status", "summary", "question", "pr", "decision", "note", "value", "escalationNote"]) {
+    assert(new RegExp(`target="${v}"`).test(reset), `the reset clears '${v}' from the previous attempt`);
+  }
+  assert(reset.includes(`target="appendPrompt"`), "the reset passes the operator note to the agent");
+  // The guidance paragraph reads the escalation-specific `escalationNote` control — NEVER the plain
+  // `note`, which is a plan.md worker RESULT field propagated into the same subProcess scope (PR #863
+  // "Previously missed", deliveryGraphCompiler.ts:2156).
+  const appendLine = reset.split("\n").find((l) => l.includes(`target="appendPrompt"`));
+  assert(appendLine?.includes("escalationNote"), "the guidance reads the escalationNote control");
+  assert(!/[( ]note[ )]/.test(appendLine.replaceAll("escalationNote", "")), "the guidance never reads the worker-result `note`");
+});
+
+test("retry-node: the reset clears the FULL declared agent result set, not only the five status fields", async () => {
+  // Regression guard (PR #863 Copilot "Previously missed"): the reset hardcoded only
+  // status/summary/question/output/error, while every field in AGENT_RESULT_LOCAL_VARS is declared
+  // node-local and persists across attempts. A retried worker that omits an optional result field
+  // (transcriptUrl, agentCheckpoint, a PR alias, exitCode, …) would otherwise let the previous
+  // attempt's value republish downstream (stale transcript/PR) or surface in the next escalation. The
+  // reset must clear the whole declared set — a class fix, not just the five named fields.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  // These are declared in AGENT_RESULT_LOCAL_VARS but are NOT emits of the fixture and NOT among the
+  // old five-field hardcode, so each is a field the old reset left stale across a retry.
+  for (const v of ["transcriptUrl", "agentCheckpoint", "prUrl", "pullRequest", "branch", "commits", "exitCode", "next_steps", "issue", "completed", "pushed", "truncated", "delta"]) {
+    assert(new RegExp(`<zeebe:output source="=null" target="${v}" />`).test(reset), `the reset clears '${v}' from the previous attempt`);
+  }
+});
+
+test("retry-node: the reset re-derives appendPrompt from the runner-seeded nodeInputs baseline, so retry notes never accumulate", async () => {
+  // Regression guard (PR #863 adversarial review): the reset previously built on the LIVE
+  // `appendPrompt`, which the subProcess seeds from `nodeInputs` only at ENTRY — so a second retry's
+  // note appended onto the first retry's already-appended prompt, growing one stale "Operator
+  // guidance…" paragraph per retry. The reset must read ONLY the runner-seeded baseline.
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const reset = r.bpmn.slice(r.bpmn.indexOf(`id="${el}_retry"`), r.bpmn.indexOf("</bpmn:intermediateThrowEvent>", r.bpmn.indexOf(`id="${el}_retry"`)));
+  const appendLine = reset.split("\n").find((l) => l.includes(`target="appendPrompt"`));
+  assert(appendLine, "the reset writes appendPrompt");
+  assert(appendLine.includes(`nodeInputs.${el}.appendPrompt`), "it builds on the runner-seeded baseline, not the live (note-carrying) appendPrompt");
+  assert(!/is defined\(appendPrompt\)/.test(appendLine), "it never reads the live appendPrompt var");
+});
+
+test("escalation form structure: the delivery-escalation form has a `decision` select defaulting to `continue` with `continue`/`retry` options (so Retry is reachable in the Tasks UI)", async () => {
+  // Regression guard (PR #863 Copilot "Previously missed", delivery-escalation.form:16): the compiled
+  // tasks only reference the form by ID and the E2E completes tasks programmatically, so renaming/
+  // removing the `decision` key or its `retry` option would leave the suite green yet make Retry
+  // unavailable in the Tasks UI. Parse the actual form and assert its select key, values, and default —
+  // the same contract the compiler's retry gateway reads (`decision = "retry"`).
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const formPath = fileURLToPath(new URL("../resources/forms/delivery-escalation.form", import.meta.url));
+  const form = JSON.parse(readFileSync(formPath, "utf8")) as {
+    components: { type: string; key?: string; defaultValue?: string; values?: { value: string }[] }[];
+  };
+  const select = form.components.find((c) => c.type === "select" && c.key === "decision");
+  assert(select, "the form exposes a `decision` select the retry gateway keys off");
+  assertEquals(select?.defaultValue, "continue", "the select defaults to `continue` (safe non-retry default)");
+  const optionValues = (select?.values ?? []).map((v) => v.value).sort();
+  assertEquals(optionValues.join(","), "continue,retry", "the select offers exactly `continue` and `retry`");
+});
+
+test("escalation form structure: the delivery-escalation value field states its single-emit boundary (a zero/multi-emit entry is discarded)", async () => {
+  // Regression guard (PR #863 Copilot "Previously missed", delivery-escalation.form:32): the compiler
+  // maps the operator's `value` onto an emit source ONLY when the node declares exactly one emit
+  // (`resumableEmit` — with zero emits there is nothing to resume; with >1 a single value cannot
+  // satisfy multiple distinct typed facts without corrupting them). The Tasks surface seeds no form
+  // variables, so a `conditional.hide` on `emitMode` cannot fire (issue #772) — the static form cannot
+  // disable the field per node. Its copy must therefore STATE the cardinality boundary, so an operator
+  // never enters a value that is silently discarded.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const formPath = fileURLToPath(new URL("../resources/forms/delivery-escalation.form", import.meta.url));
+  const form = JSON.parse(readFileSync(formPath, "utf8")) as {
+    components: { key?: string; label?: string; description?: string }[];
+  };
+  const value = form.components.find((c) => c.key === "value");
+  assert(value, "the escalation form keeps its single `value` field");
+  const copy = `${value?.label ?? ""}\n${value?.description ?? ""}`;
+  assert(/exactly one (emitted )?fact/i.test(copy), "the value field copy states the single-emit boundary");
+  assert(/more than one/i.test(copy) && /[Rr]etry/.test(copy), "the copy steers a multi-emit resolution to Retry (its value would be discarded)");
+  assert(/emits nothing/i.test(copy), "the copy tells a zero-emit step to leave the field blank");
+});
+
+test("human form structure: the delivery-human-generic value field states its single-value boundary generically (human node AND wait-gate escalation)", async () => {
+  // Regression guard (PR #863 review — "Use generic wording for wait-gate escalation forms"): the
+  // generic form is rendered for the scheduled human node (single value-emit) AND for every NON-retry
+  // escalation — notably a timed-out WAIT gate (`escalationTaskLines` with no `retryElement`). A wait
+  // gate may emit an ARTIFACT (this very `value` field is then mapped onto `resolvedArtifact` via
+  // `factSourceVar`) or declare MULTIPLE facts (multi-emit waits are allowed, not rejected). So the copy
+  // must NOT assert the scheduled-human-node-only restrictions the old wording did ("a step that
+  // publishes an artifact uses a dedicated form", "a step that must emit several facts is rejected at
+  // authoring time") — those are false for the wait-gate case that shares this form. The copy must
+  // describe the field generically and still tell a zero-emit step to leave it blank. Unlike the
+  // escalation form there is no Retry SELECT here, so the copy must NOT steer to a "Retry" control.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const formPath = fileURLToPath(new URL("../resources/forms/delivery-human-generic.form", import.meta.url));
+  const form = JSON.parse(readFileSync(formPath, "utf8")) as {
+    components: { key?: string; label?: string; description?: string }[];
+  };
+  const value = form.components.find((c) => c.key === "value");
+  assert(value, "the generic human form keeps its single `value` field");
+  const copy = `${value?.label ?? ""}\n${value?.description ?? ""}`;
+  assert(/single value this (task|step) hands forward/i.test(copy), "the value field copy states the single-value boundary generically");
+  assert(/wait gate/i.test(copy) && /artifact handle/i.test(copy), "the copy covers the shared wait-gate escalation case, where the value may be an artifact handle");
+  assert(/blank when the step emits nothing|leave it blank/i.test(copy), "the copy tells a zero-emit step to leave the field blank");
+  assert(!/dedicated form with a resolved-artifact field/i.test(copy), "the copy must not assert the human-node-only 'artifact uses a dedicated form' carve-out (false for a wait-gate artifact)");
+  assert(!/[Rr]etry/.test(copy), "the generic form has no Retry select, so its copy must not steer to one");
+});
+
+test("escalation forms: service-node escalations attach delivery-escalation (retry select); human + wait-gate tasks keep the generic form", async () => {
+  // Regression guard (PR #863 adversarial review): the retry Resolution select must render ONLY where
+  // retry semantics exist. The wait-gate escalation (no retryElement) and the plain human node share
+  // the generic form; the service timeout/contract escalations carry the select-bearing form.
+  const r = await compileOk(PRODUCER_GATE);
+  for (const suffix of ["esc", "contract"]) {
+    const esc = escBlockForNodeSuffix(r.bpmn, "open", suffix);
+    assert(esc.includes('formId="delivery-escalation"'), `the __${suffix} escalation attaches the retry-capable form`);
+    assert(!esc.includes('formId="delivery-human-generic"'), `the __${suffix} escalation no longer shares the generic human form`);
+  }
+  const waitGraph = await compileOk({
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:open" }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: "open.pr", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "open.pr", to: "merged" }],
+  });
+  const waitEsc = escBlockForNodeSuffix(waitGraph.bpmn, "merged", "esc__wait");
+  assert(waitEsc.includes('formId="delivery-human-generic"'), "the wait-gate escalation keeps the generic form (no retry semantics)");
+  assert(!waitEsc.includes('formId="delivery-escalation"'), "no retry select on a wait-gate escalation");
+  const humanGraph = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "approve" } }], edges: [] });
+  const humanTask = humanGraph.bpmn.slice(humanGraph.bpmn.indexOf("<bpmn:userTask"), humanGraph.bpmn.indexOf("</bpmn:userTask>"));
+  // A no-emit human node is a pure acknowledgement — resolveHumanForm selects the ack form (no value
+  // field), not the generic typed-emit form (PR #863 thread deliveryGraphCompiler.ts:1859).
+  assert(humanTask.includes('formId="delivery-human-ack"'), "a no-emit human node uses the acknowledgement form");
+  assert(!humanTask.includes('formId="delivery-escalation"'), "no retry select on a plain human step");
+});
+
+test("contract escalation context: carries the agent's own report, question, error, transcript and how to resolve", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  for (const s of ["Agent report: ", "Agent question: ", "Error: ", "Transcript: ", "Retry this step", "Continue"]) {
+    assert(esc.includes(s), `the context includes '${s}'`);
+  }
 });
