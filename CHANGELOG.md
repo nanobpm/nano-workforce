@@ -1,3 +1,9 @@
+## [0.201.1](https://github.com/nanobpm/nano-workforce/compare/v0.201.0...v0.201.1) (2026-10-07)
+
+### Bug Fixes
+
+* **delivery-graph:** actionable node escalations — node-local agent results, retry-node, inputs preflight ([#863](https://github.com/nanobpm/nano-workforce/issues/863)) ([50f7595](https://github.com/nanobpm/nano-workforce/commit/50f7595f3156b2e1e9d52e30e87d3e1c22951dc8)), closes [nano-bpm#1335](https://github.com/nanobpm/nano-bpm/issues/1335) [nano-bpm#1334](https://github.com/nanobpm/nano-bpm/issues/1334) [nano-bpm#1336](https://github.com/nanobpm/nano-bpm/issues/1336) [nanobpm/nano-workforce#866](https://github.com/nanobpm/nano-workforce/issues/866) [nano-bpm#1336](https://github.com/nanobpm/nano-bpm/issues/1336) [nano-bpm#1334](https://github.com/nanobpm/nano-bpm/issues/1334) [nano-bpm#946](https://github.com/nanobpm/nano-bpm/issues/946) [#543](https://github.com/nanobpm/nano-workforce/issues/543) [#866](https://github.com/nanobpm/nano-workforce/issues/866) [#778](https://github.com/nanobpm/nano-workforce/issues/778) [#772](https://github.com/nanobpm/nano-workforce/issues/772) [#772](https://github.com/nanobpm/nano-workforce/issues/772) [#461](https://github.com/nanobpm/nano-workforce/issues/461) [#876](https://github.com/nanobpm/nano-workforce/issues/876)
+
 ## [0.201.0](https://github.com/nanobpm/nano-workforce/compare/v0.200.9...v0.201.0) (2026-10-06)
 
 ### Features
