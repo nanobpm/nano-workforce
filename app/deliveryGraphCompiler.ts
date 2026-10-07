@@ -2395,7 +2395,19 @@ function escalationResumeFlagVar(
   if (resume === undefined || resume.emits.length === 0) return "";
   const reserved = new Set<string>(reservedTargets);
   for (const f of resume.emits) reserved.add(factSourceVar(resume.kind, f));
-  let flag = resumeValidVar(esc);
+  return growFlagClear(resumeValidVar(esc), reserved);
+}
+
+/** Grow a base internal-flag var ({@link resumeValidVar}) clear of a reserved set with a deterministic
+ * trailing `_`, so a user-declared fact/control whose name happens to EQUAL the generated flag can never
+ * shadow it. Shared by {@link escalationResumeFlagVar} (service-node emit-source vars) and the `human`
+ * node's completion gate (whose declared emit fact NAME is null-seeded node-local by {@link
+ * ioMappingLines} — a bare {@link resumeValidVar} would otherwise land in that null-seeded var and the
+ * immediately-following completion gateway would read the stale `null`, re-parking a valid answer
+ * forever; Copilot review #863, thread r4201222762). Returns the base unchanged when no collision, so
+ * the common case emits byte-identical output. */
+function growFlagClear(base: string, reserved: ReadonlySet<string>): string {
+  let flag = base;
   while (reserved.has(flag)) flag = `${flag}_`;
   return flag;
 }
@@ -2626,15 +2638,23 @@ function humanBodyLines(el: string, displayName: string, formId: string, singleE
   // presence included, so a blank required entry is invalid too), and a post-task exclusive gateway routes
   // a VALID completion to the node end while an INVALID one loops back to the human task for re-entry (the
   // human analogue of a re-park — a human node has no separate escalation twin to re-park onto). The flag is
-  // the node-unique, collision-free {@link resumeValidVar} (the emit source is the fixed `humanEmitValue`/
-  // `humanEmitArtifact`, never the fact's own name, so the generated flag can never collide with it).
+  // the node-unique {@link resumeValidVar} (the emit source is the fixed `humanEmitValue`/
+  // `humanEmitArtifact`, never the fact's own name) — GROWN collision-free (via {@link growFlagClear})
+  // against this node's node-local null-seeded vars (HUMAN_RESULT_LOCAL_VARS + the declared emit's fact
+  // NAME, which `ioMappingLines` null-seeds node-local). A required single emit named EXACTLY this flag
+  // would otherwise land the flag in that node-local null-seed and the completion gateway would read the
+  // stale `null`, re-parking a valid answer forever (Copilot review #863, thread r4201222762 — the same
+  // shadow class `escalationResumeFlagVar` already dodges for service-node emits).
   // Grown ONLY when the single emit is required — a routing-only/unconsumed emit keeps the direct
   // `task → end` flow (a routing-only null just takes a guarded split's deadlock-safe default, exactly
   // like the escalation resume's no-required-target case). The gateway routes on the SIMPLE
   // `<flag> = true` boolean (a gateway ioMapping is not visible downstream in the pinned engine —
   // verified — so the validity is computed here on the task output, not on the gateway).
   const gateRequired = requiredEmit && singleEmit !== undefined;
-  const flagVar = resumeValidVar(task);
+  const flagVar = growFlagClear(
+    resumeValidVar(task),
+    new Set<string>([...HUMAN_RESULT_LOCAL_VARS, ...(singleEmit !== undefined ? [singleEmit.name] : [])]),
+  );
   // The completion-validity flag MUST validate the SAME selection the emit publishes (`selectExpr`), not
   // the BARE canonical control: for an EXPLICIT bespoke form (`preferFactName`) the emit reads the
   // fact-named control (`<singleEmit.name>`) FIRST, so a flag keyed on the bare `value`/`resolvedArtifact`

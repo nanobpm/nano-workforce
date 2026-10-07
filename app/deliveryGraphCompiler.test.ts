@@ -1016,6 +1016,51 @@ test("#863 human required emit on an EXPLICIT bespoke form: the completion-valid
   assert(valueFeel.includes(explicitSel), `the emit source reads the fact-named control selection, got: ${valueFeel}`);
 });
 
+test("#863 review r4201222762: a human node's completion-gate flag dodges a declared emit named EXACTLY the generated flag — never shadowed by its node-local null-seed", async () => {
+  // The completion-validity flag (`resumeValidVar(delivery-human-task__<el>)`) is itself a legal
+  // fact-name string, and a human node null-seeds each declared emit's fact NAME node-local
+  // (`ioMappingLines`) so a parallel sibling's value can't leak in. If a required single emit is named
+  // EXACTLY the generated flag, the flag lands in that node-local null-seeded var — and the
+  // immediately-following completion gateway reads the stale `null` (the multi-instance `=null`-shadow
+  // gotcha), routing the default `_cbad` branch so even a VALID answer re-parks the human forever. The
+  // flag must grow collision-free (deterministic `_` suffix), exactly as `escalationResumeFlagVar` does
+  // for service-node emits. Probe-compile to learn the (topology-stable) element id, then name the emit
+  // the exact flag var.
+  const probe = await compileOk({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "answer" }, emits: [{ name: "probeFact", type: "string" }] },
+      { id: "c", kind: "agent", agent: { jobType: "senior:consumer" } },
+    ],
+    edges: [{ from: "h.probeFact", to: "c" }],
+  });
+  const collisionName = resumeValidVar(`delivery-human-task__${elementForNode(probe.bpmn, "h")}`);
+  assert(collisionName.includes("__flag__"), "sanity: the human flag var carries the internal infix");
+  const r = await compileOk({
+    nodes: [
+      { id: "h", kind: "human", human: { prompt: "answer" }, emits: [{ name: collisionName, type: "string" }] },
+      { id: "c", kind: "agent", agent: { jobType: "senior:consumer" } },
+    ],
+    edges: [{ from: `h.${collisionName}`, to: "c" }],
+  });
+  const el = elementForNode(r.bpmn, "h");
+  assertEquals(el, elementForNode(probe.bpmn, "h"), "sanity: renaming the emit leaves topology (and the element id) unchanged");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`));
+  const task = sub.slice(sub.indexOf("<bpmn:userTask"), sub.indexOf("</bpmn:userTask>"));
+  // The declared emit's fact name is STILL null-seeded node-local (its anti-leak isolation is untouched);
+  // the seed lives in the subProcess ioMapping, outside the userTask.
+  assert(r.bpmn.includes(`<zeebe:input source="=null" target="${collisionName}" />`), "the declared emit's fact name stays null-seeded node-local");
+  // The flag binds under a DISTINCT var — the collision-free `_`-suffixed name, never the emit's var.
+  const suffixedFlag = `${collisionName}_`;
+  assert(task.includes(`target="${suffixedFlag}"`), `the completion-validity flag binds under the distinct suffixed var, got: ${task}`);
+  // … and the gateway routes on that SAME suffixed flag var (never the colliding emit var), so a valid
+  // completion can actually reach the node end instead of re-parking forever.
+  assert(
+    sub.includes(`<bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${suffixedFlag} = true</bpmn:conditionExpression>`),
+    `the valid branch routes on the suffixed flag var, got: ${sub}`,
+  );
+  assert(!sub.includes(`=${collisionName} = true`), "the valid branch must NOT route on the colliding emit var (which is node-local null-seeded)");
+});
+
 // An agent that owes a required `pr` emit to a downstream consumer — its timeout `__esc` (and a
 // producer-contract `__contract`) is RESUMABLE with that emit (#872), so it is the natural surface
 // for the resume-validation gate (PR #876 review).
