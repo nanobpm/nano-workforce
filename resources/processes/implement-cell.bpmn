@@ -93,6 +93,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordEscalationIn" />
         </zeebe:properties>
         <zeebe:ioMapping>
+          <zeebe:input source="=null" target="agentSlaJobType" />
           <zeebe:output source="=question" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>

@@ -73,6 +73,7 @@
         <zeebe:ioMapping>
           <zeebe:input source="=false" target="agentSlaElapsed" />
           <zeebe:input source="=false" target="preserveConformance" />
+          <zeebe:input source="=null" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toRecordConformance</bpmn:incoming>

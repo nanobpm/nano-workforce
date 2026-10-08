@@ -270,6 +270,7 @@
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
           <zeebe:input source="=false" target="recordRound" />
           <zeebe:input source="=if (noProgressQuestion != null and trim(noProgressQuestion) != &#34;&#34;) then noProgressQuestion else &#34;Round &#34; + string(round) + &#34; reported the review comments were addressed, but the PR head did not advance (no commit was pushed), so another review round would loop on identical code. A human must decide how to proceed (reply to resume the loop).&#34;" target="question" />
+          <zeebe:input source="=null" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_huskEscalate</bpmn:incoming>
@@ -309,6 +310,7 @@
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
           <zeebe:input source="=false" target="recordRound" />
           <zeebe:input source="=&#34;No review arrived within the review-wait timeout (&#34; + reviewWaitTimeout + &#34;). A human must decide how to proceed (reply to resume the loop).&#34;" target="question" />
+          <zeebe:input source="=null" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_reviewStalled</bpmn:incoming>
@@ -321,6 +323,9 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="EscalationIn" />
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:input source="=null" target="agentSlaJobType" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_escalate</bpmn:incoming>
       <bpmn:outgoing>f_escGate</bpmn:outgoing>
@@ -346,6 +351,7 @@
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
           <zeebe:input source="=false" target="recordRound" />
           <zeebe:input source="=&#34;Not converged after &#34; + string(maxRounds) + &#34; rounds. A human must decide how to proceed.&#34;" target="question" />
+          <zeebe:input source="=null" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_guardMax</bpmn:incoming>
@@ -454,6 +460,7 @@
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
           <zeebe:input source="=false" target="recordRound" />
           <zeebe:input source="=convergeBlockReason" target="question" />
+          <zeebe:input source="=null" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_ackEscalate</bpmn:incoming>
@@ -493,6 +500,7 @@
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
           <zeebe:input source="=false" target="recordRound" />
           <zeebe:input source="=scopeBlockReason" target="question" />
+          <zeebe:input source="=null" target="agentSlaJobType" />
           <zeebe:output source="=true" target="scopePending" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>

@@ -565,6 +565,9 @@
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordTrialMergeIn" />
         </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:input source="=null" target="agentSlaJobType" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toRecordTrialMerge</bpmn:incoming>
       <bpmn:outgoing>f_toGwTrial</bpmn:outgoing>
