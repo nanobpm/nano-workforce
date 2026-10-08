@@ -110,6 +110,7 @@
         <zeebe:ioMapping>
           <zeebe:output source="=null" target="status" />
           <zeebe:output source="=null" target="ciBlockedReconciled" />
+          <zeebe:output source="=null" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_deps</bpmn:incoming>
@@ -258,7 +259,6 @@
         <zeebe:ioMapping>
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
           <zeebe:input source="=if mergeState = &#34;draft&#34; then &#34;This PR is in draft and can&#39;t be merged. Mark it ready (gh pr ready), then reply to retry.&#34; else if mergeState = &#34;waiting&#34; then &#34;GitHub never settled this PR&#39;s mergeability (still computing after repeated re-polls, or the state could not be read). Check the PR on GitHub — resolve any conflict or failing required check if present — then reply to retry.&#34; else &#34;This PR is not mergeable (state: &#34; + mergeState + &#34;). Resolve the conflict or failing required check on the branch, then reply to retry.&#34;" target="question" />
-          <zeebe:input source="=null" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_mDraft</bpmn:incoming>
@@ -279,7 +279,6 @@
           <zeebe:input source="=status" target="agentVerdict" />
           <zeebe:input source="=&#34;This PR cannot be merged and needs a human decision. &#34; + (if mergeState = &#34;conflict&#34; then &#34;The automated rebase agent could not resolve the merge conflicts on this branch. Resolve them manually (or reply with guidance), then reply to retry.&#34; else if mergeStatus = &#34;retry&#34; then &#34;The merge kept losing a race with concurrent updates to the base branch and exhausted its automatic retry budget (&#34; + string(mergeRetryMax) + &#34; retries). This is a repeated transient race, not a conflict, failing check, or permissions block. Reply to retry, or investigate why the base branch keeps moving.&#34; else if mergeState = &#34;ready&#34; then &#34;The merge attempt did not land (merge result: &#34; + mergeStatus + &#34;). Investigate why GitHub refused the merge, then reply to retry.&#34; else if status = &#34;blocked&#34; then &#34;The automated CI-fix agent could not make the required checks green. Fix the failing checks on the branch (or reply with guidance), then reply to retry.&#34; else &#34;The automated CI-fix agent exceeded its time budget (SLA) before the required checks went green. Check its progress or intervene, then reply to retry.&#34;)" target="question" />
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
-          <zeebe:input source="=null" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_gBlocked</bpmn:incoming>
@@ -466,6 +465,7 @@
         <bpmn:extensionElements>
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;escalate&#34;" target="ciOutcome" />
+            <zeebe:output source="=null" target="agentSlaJobType" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_cib_esc</bpmn:incoming>
@@ -582,6 +582,7 @@
         <bpmn:extensionElements>
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;escalate-attempt&#34;" target="rebaseOutcome" />
+            <zeebe:output source="=null" target="agentSlaJobType" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_blocked</bpmn:incoming>

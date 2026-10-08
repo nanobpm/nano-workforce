@@ -28,7 +28,7 @@
 // Plus the terminate semantics the refactor had to preserve: `MergeAbandoned`
 // terminates the whole instance (it stays at the root, not inside a sub-process).
 import { after, test } from "node:test";
-import { assert, assertStringIncludes } from "#test-assert";
+import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import { readFileSync } from "node:fs";
 import {
   assertThatInstance,
@@ -562,6 +562,10 @@ test("the fix-ci agent SLA interrupts the sub-process and escalates", async () =
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-attempt");
   assertStringIncludes(String(escalation(engine).question ?? ""), "time budget (SLA)", "the SLA escalation must name the SLA trigger");
+  // #879 regression: the trusted fix-ci SLA arm must deliver its job-type marker to the shared
+  // persist-escalation sink so the worker builds the never-started-vs-hung diagnosis — a =null
+  // input pin on the shared recorder silently clobbered this (PR #881 adversarial review).
+  assertEquals(escalation(engine).agentSlaJobType, "senior:fix-ci", "the fix-ci SLA arm must reach the recorder with its job-type marker");
 });
 
 // ---------------------------------------------------------------------------
@@ -613,8 +617,21 @@ test("the rebase agent SLA interrupts the sub-process and escalates as not-merge
   await engine.advanceTime(AGENT_SLA_MS + 1);
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-conflict");
+  // #879 regression: the trusted rebase SLA arm must deliver its job-type marker to the shared sink.
+  assertEquals(escalation(engine).agentSlaJobType, "senior:rebase", "the rebase SLA arm must reach the recorder with its job-type marker");
 });
 
+test("a non-SLA escalation carrying a spoofed agentSlaJobType is scrubbed before the recorder (#879 fail-closed)", async () => {
+  // The c8ctl harness hoists an agent's result-JSON keys into process scope, so a NON-SLA rebase
+  // agent that returns a bogus `agentSlaJobType` must NOT be able to fabricate an SLA diagnosis on
+  // the shared persist-escalation sink. The loop head / non-SLA escalate end events clear it.
+  const engine = await boot({ responses: { "senior:rebase": { status: "blocked", agentSlaJobType: "senior:evil" } } });
+  await driveToRebase(engine);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-attempt");
+  const spoofed = escalation(engine).agentSlaJobType;
+  assert(spoofed === null || spoofed === undefined, `a spoofed agentSlaJobType must be scrubbed, got ${JSON.stringify(spoofed)}`);
+});
 // ---------------------------------------------------------------------------
 // Escalation user task (mergeEscalationUserTask #256, mergeEscalationQuestion #329/#454)
 // ---------------------------------------------------------------------------
