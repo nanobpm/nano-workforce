@@ -80,6 +80,8 @@
           <nano:extend name="prNumber" type="integer" optional="true" />
           <nano:extend name="prUrl" type="string" optional="true" />
           <nano:extend name="abandonUrl" type="string" optional="true" />
+          <nano:extend name="agentSlaJobType" type="string" optional="true" />
+          <nano:extend name="agentSlaTimeout" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="EscalationOut" name="Record escalation — result">
           <nano:extend name="escalationId" type="integer" optional="true" />

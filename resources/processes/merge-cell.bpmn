@@ -48,7 +48,7 @@
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=&#34;suite-failed&#34;" target="result" />
-          <zeebe:input source="=&#34;The trial-merge agent exceeded its time budget (SLA &#34; + agentSlaTimeout + &#34;) without returning a machine-readable result — it is hung or looping. Acknowledge to record the timeout and decide whether to rerun the trial merge.&#34;" target="summary" />
+          <zeebe:input source="=&#34;senior:trial-merge&#34;" target="agentSlaJobType" />
           <zeebe:input source="=null" target="conflicts" />
           <zeebe:input source="=null" target="failing" />
         </zeebe:ioMapping>

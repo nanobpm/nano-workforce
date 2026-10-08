@@ -25,6 +25,8 @@
           <nano:extend name="hasDeviations" type="boolean" optional="true" />
           <nano:extend name="agentSlaElapsed" type="boolean" optional="true" />
           <nano:extend name="preserveConformance" type="boolean" optional="true" />
+          <nano:extend name="agentSlaJobType" type="string" optional="true" />
+          <nano:extend name="agentSlaTimeout" type="string" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
         </nano:shape>
       </nano:shapes>
@@ -85,7 +87,7 @@
         <zeebe:ioMapping>
           <zeebe:input source="=true" target="agentSlaElapsed" />
           <zeebe:input source="=false" target="preserveConformance" />
-          <zeebe:input source="=&#34;The spec-conformance agent exceeded its time budget (SLA &#34; + agentSlaTimeout + &#34;) without returning a verdict — it is hung or looping. Acknowledge to record the timeout and continue to the retrospective synthesis.&#34;" target="summary" />
+          <zeebe:input source="=&#34;senior:conformance&#34;" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_conformanceSla</bpmn:incoming>
@@ -100,7 +102,7 @@
         <zeebe:ioMapping>
           <zeebe:input source="=true" target="agentSlaElapsed" />
           <zeebe:input source="=true" target="preserveConformance" />
-          <zeebe:input source="=&#34;The retrospective-synthesis agent exceeded its time budget (SLA &#34; + agentSlaTimeout + &#34;) without completing — it is hung or looping. Acknowledge to record the timeout and continue.&#34;" target="summary" />
+          <zeebe:input source="=&#34;senior:retro&#34;" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_synthesizeSla</bpmn:incoming>

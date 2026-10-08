@@ -74,6 +74,8 @@
           <nano:extend name="conflicts" type="string" list="true" optional="true" />
           <nano:extend name="failing" type="string" list="true" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
+          <nano:extend name="agentSlaJobType" type="string" optional="true" />
+          <nano:extend name="agentSlaTimeout" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="RecordPlanReviewIn" name="Record plan review — input">
           <nano:extend name="planKey" type="string" />

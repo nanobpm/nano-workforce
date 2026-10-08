@@ -471,6 +471,7 @@
         <bpmn:extensionElements>
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;escalate&#34;" target="ciOutcome" />
+            <zeebe:output source="=&#34;senior:fix-ci&#34;" target="agentSlaJobType" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_sla</bpmn:incoming>
@@ -586,6 +587,7 @@
         <bpmn:extensionElements>
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;escalate-conflict&#34;" target="rebaseOutcome" />
+            <zeebe:output source="=&#34;senior:rebase&#34;" target="agentSlaJobType" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_sla</bpmn:incoming>

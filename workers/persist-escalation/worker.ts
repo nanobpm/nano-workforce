@@ -18,6 +18,7 @@
 // a token on a durable wait that has no escalation for a human to answer.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
+import { agentSlaEscalationQuestion } from "../../app/agentSlaEscalation.ts";
 import { classifyEscalation } from "../../app/escalationTaxonomy.ts";
 import { ensurePr, parsePr } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
@@ -60,16 +61,34 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const status = rawStatus ?? "needs_input";
   const transcript = transcriptOf(job.variables);
   const worker = workerOf(job.variables);
+  // Agent-task SLA path (issue #879): the merge-loop's fix-ci / rebase interrupting SLA timer boundary
+  // routed here with `agentSlaJobType` set on the SLA end event. Rather than the old blanket "exceeded
+  // its time budget … check its progress" FEEL `else` (which misdiagnoses a never-activated,
+  // queue-starved job as hung), build the accurate never-started-vs-hung question — naming the job type
+  // and how long it waited — from the durable activation ledger. `agentSlaJobType` is set ONLY on the
+  // SLA arm, so it authoritatively selects this path; every other escalation (agent verdict, merge
+  // blocked, rebase conflict) leaves it unset and keeps its FEEL-built `question`. It is CLEARED on
+  // every return below so a later non-SLA escalation in the same looping instance can never inherit a
+  // stale value.
+  const slaJobType = nonBlank(job.variables.agentSlaJobType);
+  const slaQuestion = slaJobType
+    ? await agentSlaEscalationQuestion(app.data, {
+        processInstanceKey: job.processInstanceKey != null ? String(job.processInstanceKey) : "",
+        jobType: slaJobType,
+        sla: nonBlank(job.variables.agentSlaTimeout) ?? "PT2H",
+        recovery: "Reply to retry, or investigate why no capacity was available.",
+      })
+    : undefined;
   // Classify this job through the single canonical taxonomy (ADR 0002 §1). Only a
   // decision-required escalation opens an answerable escalation row. A blank question (or any
   // non-human-blocking status that reached here defensively) is a NON-escalation: open nothing
   // and report `escalated:false` — never FABRICATE a question and never throw. The `gw-status`
   // gateway already routes blank-question rounds back into the durable review wait, so this is
   // defence-in-depth, not the primary guard.
-  const question = nonBlank(job.variables.question);
+  const question = slaQuestion ?? nonBlank(job.variables.question);
   const disposition = classifyEscalation({ kind: "review-round", status: rawStatus, question });
   if (disposition !== "decision-required" || question === undefined) {
-    return { escalationId: null, escalated: false };
+    return { escalationId: null, escalated: false, agentSlaJobType: null };
   }
   const kind = status === "needs_input" ? "question" : "blocker";
   const now = new Date().toISOString();
@@ -142,7 +161,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
     });
   });
 
-  return { escalationId: Number(escalationId), escalated: true, question };
+  return { escalationId: Number(escalationId), escalated: true, question, agentSlaJobType: null };
 };
 
 export default handler;

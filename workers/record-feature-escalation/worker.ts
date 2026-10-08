@@ -23,6 +23,7 @@
 // variables through the user-task query, so the process variable must be persisted while it is still in
 // scope on this job.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { agentSlaEscalationQuestion } from "../../app/agentSlaEscalation.ts";
 import { classifyEscalation } from "../../app/escalationTaxonomy.ts";
 import { featureRuns, recordFeatureEscalation } from "../../app/feature.ts";
 import { implementEscalationQuestion, NO_RESULT_QUESTION } from "../../app/implementEscalationReason.ts";
@@ -59,6 +60,13 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // blank-question case.
   const agentEscalated = classifyEscalation({ kind: "task", status: job.variables.status, question: rawQuestion }) ===
     "decision-required";
+  // Agent-task SLA path (issue #879): the interrupting SLA timer boundary (not the agent) routed here,
+  // so there is NO agent result to classify — the job either never started (queue starvation) or ran but
+  // overran its budget. `agentSlaJobType` is set ONLY on the SLA-boundary arm (`record-escalation-sla`),
+  // so its presence authoritatively selects the SLA builder, which reads the durable activation ledger
+  // to distinguish never-started from started-but-hung and names the job type + how long it waited —
+  // never the old blanket "hung or looping" misdiagnosis of a queue-starved job.
+  const slaJobType = str(job.variables.agentSlaJobType);
   // Build the escalation question through the single canonical builder (issue #865), ALWAYS — including
   // when the agent raised its own answerable question. Passing the agent's `question` lets the builder
   // lead with it AND fold in the agent's `summary` + transcript as supporting context (#865 review —
@@ -68,18 +76,26 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // such as `completed`) and from a reported non-completion status — never the false "no status was
   // reported" diagnosis for a reported `escalated`/`failed` (#865 review). The reason can never drift
   // from the reconcile step because both read the same canonical builder.
-  const question = implementEscalationQuestion({
-    status: job.variables.status,
-    question: rawQuestion,
-    summary: job.variables.summary,
-    transcriptUrl: job.variables.transcriptUrl,
-    // Delivery EVIDENCE (#865 review): the preserved PR (an `escalated`/`failed` with a blank question
-    // retains it — never claim "opened no pull request") and whether the reconcile step's GitHub lookup
-    // actually CONFIRMED the delivery state (only then may the reason say "none was found"). Both are
-    // process variables the upstream `reconcile-implement` step emits into scope.
-    pr: job.variables.pr,
-    deliveryVerified: job.variables.deliveryVerified,
-  });
+  const question = slaJobType
+    ? await agentSlaEscalationQuestion(app.data, {
+        processInstanceKey: job.processInstanceKey != null ? String(job.processInstanceKey) : "",
+        jobType: slaJobType,
+        sla: str(job.variables.agentSlaTimeout) ?? "PT2H",
+        recovery:
+          "Answer to resume (the run continues on its deterministic feat/<task.id> branch), or abandon it.",
+      })
+    : implementEscalationQuestion({
+        status: job.variables.status,
+        question: rawQuestion,
+        summary: job.variables.summary,
+        transcriptUrl: job.variables.transcriptUrl,
+        // Delivery EVIDENCE (#865 review): the preserved PR (an `escalated`/`failed` with a blank
+        // question retains it — never claim "opened no pull request") and whether the reconcile step's
+        // GitHub lookup actually CONFIRMED the delivery state (only then may the reason say "none was
+        // found"). Both are process variables the upstream `reconcile-implement` step emits into scope.
+        pr: job.variables.pr,
+        deliveryVerified: job.variables.deliveryVerified,
+      });
 
   // Append to the canonical `feature_escalations` audit log (the surviving table `pollUserTasks` reads),
   // keyed by `subjectKey` — the feature run's `feature_key`, or the epic's `plan_key` for a wave slice.
