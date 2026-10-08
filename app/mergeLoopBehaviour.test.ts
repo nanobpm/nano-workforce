@@ -632,6 +632,34 @@ test("a non-SLA escalation carrying a spoofed agentSlaJobType is scrubbed before
   const spoofed = escalation(engine).agentSlaJobType;
   assert(spoofed === null || spoofed === undefined, `a spoofed agentSlaJobType must be scrubbed, got ${JSON.stringify(spoofed)}`);
 });
+
+test("a spoofed agentSlaJobType surviving the CI-reconcile re-check route is scrubbed before a later merge-esc-conflict (#881 Previously-missed)", async () => {
+  // The CI reconcile route (fix-ci blocked/pushed:false → ci-reconcile → end_ci_recheck →
+  // gw-merge-entry) re-enters the merge wait WITHOUT passing through the loop head `arm-merge` or
+  // the non-SLA escalate clears. A hoisted (spoofable) agentSlaJobType from that fix-ci result
+  // would otherwise survive into a later draft / budget-exhausted merge and fabricate an SLA
+  // never-started/hung diagnosis on the shared merge-esc-conflict sink with NO SLA timer having
+  // fired. `end_ci_recheck` must clear it (PR #881 review, "Previously missed" r5451284362).
+  const engine = await boot({
+    responses: { "senior:fix-ci": { status: "blocked", pushed: false, agentSlaJobType: "senior:evil" } },
+  });
+  await driveToCiFix(engine); // blocked/pushed:false → ci-reconcile → end_ci_recheck → re-check mergeable
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElement("wait-mergeable")
+    .hasCompletedElements("ci-reconcile")
+    .hasVariable("ciBlockedReconciled", true);
+  assert(!completedElementIds(engine).has("merge-esc-conflict"), "the reconcile pass must not escalate yet");
+  // A later merge-ready reports the PR as draft → f_m_mDraft → merge-esc-conflict reads the marker
+  // directly (the fix-ci agent does NOT run again on this route).
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "draft" } });
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-conflict");
+  const spoofed = escalation(engine).agentSlaJobType;
+  assert(spoofed === null || spoofed === undefined, `the reconcile-route spoof must be scrubbed, got ${JSON.stringify(spoofed)}`);
+  // The human gets the genuine draft question, not a fabricated SLA diagnosis.
+  assertStringIncludes(String(escalation(engine).question ?? ""), "draft", "the escalation must be the genuine draft question, not an SLA diagnosis");
+});
 // ---------------------------------------------------------------------------
 // Escalation user task (mergeEscalationUserTask #256, mergeEscalationQuestion #329/#454)
 // ---------------------------------------------------------------------------

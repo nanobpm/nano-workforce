@@ -30,9 +30,11 @@
 // hoisted-agent-output hole is closed on these shared sinks a DIFFERENT way: every path that can
 // carry a hoisted (spoofable) value CLEARS `agentSlaJobType` to null via an OUTPUT mapping before
 // it reaches the recorder — at the loop head (`arm-merge`, scrubbing any stale/cross-iteration
-// value) and on the two non-SLA escalate end events that bypass the loop head (`end_ci_esc`,
-// `end_reb_blocked`). Only the trusted SLA arms leave it set. This guard therefore (a) requires the
-// shared sinks to NOT pin, and (b) requires those clears + the SLA-arm literals to exist.
+// value), on the two non-SLA escalate end events that bypass the loop head (`end_ci_esc`,
+// `end_reb_blocked`), and on the CI reconcile re-check exit (`end_ci_recheck`, which re-enters the
+// merge wait via `gw-merge-entry` without passing through `arm-merge`). Only the trusted SLA arms
+// leave it set. This guard therefore (a) requires the shared sinks to NOT pin, and (b) requires
+// those clears + the SLA-arm literals to exist.
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
@@ -150,9 +152,13 @@ test("DEFECT-CLASS GUARD: merge-loop's shared SLA sinks are fed a trusted agentS
   }
 
   // Every spoofable path that can carry a hoisted agentSlaJobType into a shared sink CLEARS it to
-  // null via output BEFORE the recorder: the loop head (stale/cross-iteration) and the two non-SLA
-  // escalate end events that bypass the loop head (same-iteration agent spoof).
-  for (const id of ["arm-merge", "end_ci_esc", "end_reb_blocked"]) {
+  // null via output BEFORE the recorder: the loop head (stale/cross-iteration), the two non-SLA
+  // escalate end events that bypass the loop head (same-iteration agent spoof), and the CI
+  // reconcile re-check exit (`end_ci_recheck`), which re-enters the merge wait via `gw-merge-entry`
+  // — bypassing `arm-merge` — so a fix-ci result with status:"blocked"/pushed:false carrying a
+  // hoisted marker would otherwise reach `merge-esc-conflict` on a later draft/budget-exhausted
+  // merge with no SLA timer having fired (PR #881 review, "Previously missed" r5451284362).
+  for (const id of ["arm-merge", "end_ci_esc", "end_reb_blocked", "end_ci_recheck"]) {
     const block = elementBlock(xml, id);
     assert(block, `merge-loop.bpmn: expected "${id}" to exist`);
     assert(

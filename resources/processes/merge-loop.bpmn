@@ -449,6 +449,7 @@
         <bpmn:extensionElements>
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;recheck&#34;" target="ciOutcome" />
+            <zeebe:output source="=null" target="agentSlaJobType" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_cib_armed</bpmn:incoming>
