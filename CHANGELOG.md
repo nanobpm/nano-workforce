@@ -1,3 +1,9 @@
+## [0.201.2](https://github.com/nanobpm/nano-workforce/compare/v0.201.1...v0.201.2) (2026-10-08)
+
+### Bug Fixes
+
+* distinguish never-started agent jobs from hung ones in SLA escalations ([#881](https://github.com/nanobpm/nano-workforce/issues/881)) ([da2bc79](https://github.com/nanobpm/nano-workforce/commit/da2bc7915c6cd8ef72bae7bdec2069d09ba091eb)), closes [#879](https://github.com/nanobpm/nano-workforce/issues/879) [#879](https://github.com/nanobpm/nano-workforce/issues/879) [#879](https://github.com/nanobpm/nano-workforce/issues/879)
+
 ## [0.201.1](https://github.com/nanobpm/nano-workforce/compare/v0.201.0...v0.201.1) (2026-10-07)
 
 ### Bug Fixes
