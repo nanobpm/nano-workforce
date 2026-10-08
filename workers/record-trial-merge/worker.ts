@@ -2,6 +2,7 @@
 // Only `suite-failed` escalates. `clean` and textual `merge-conflict` proceed; D2/D6 own textual
 // conflict ordering, while D3 owns clean-merge/combined-suite-red semantic conflicts.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { agentSlaEscalationQuestion } from "../../app/agentSlaEscalation.ts";
 import {
   recordTrialMergeAudit,
   type TrialMergeResult,
@@ -46,7 +47,21 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const planKey = job.variables.planKey;
   const wave = waveNo(job.variables.trialMergeWave ?? job.variables.currentWave);
   const result = parseResult(job.variables.result);
-  const summary = str(job.variables.summary) ??
+  // Agent-task SLA path (issue #879): the interrupting SLA timer boundary routed here with
+  // `agentSlaJobType` set, so there is no agent result — build the accurate never-started-vs-hung
+  // summary (named job type + wait duration) from the durable activation ledger instead of the old
+  // blanket "hung or looping" wording. On every other caller (a real agent result, the plan-fanout D3
+  // gate) `agentSlaJobType` is unset and the summary is derived from the agent's own `summary`/result.
+  const slaJobType = str(job.variables.agentSlaJobType);
+  const slaSummary = slaJobType
+    ? await agentSlaEscalationQuestion(app.data, {
+        processInstanceKey: job.processInstanceKey != null ? String(job.processInstanceKey) : "",
+        jobType: slaJobType,
+        sla: str(job.variables.agentSlaTimeout) ?? "PT2H",
+        recovery: "Acknowledge to record the timeout, then decide whether to rerun the trial merge.",
+      })
+    : undefined;
+  const summary = slaSummary ?? str(job.variables.summary) ??
     (result === "suite-failed" ? "Trial merge suite failed or returned no machine-readable result" : result);
   const legacyJobKey = Reflect.get(job, "key");
   const jobKey = job.jobKey ?? (legacyJobKey == null ? null : String(legacyJobKey));

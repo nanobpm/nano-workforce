@@ -110,6 +110,7 @@
         <zeebe:ioMapping>
           <zeebe:output source="=null" target="status" />
           <zeebe:output source="=null" target="ciBlockedReconciled" />
+          <zeebe:output source="=null" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_deps</bpmn:incoming>
@@ -302,6 +303,7 @@
         <zeebe:ioMapping>
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
           <zeebe:input source="=&#34;This PR was reported as added to the merge queue but did not land within the merge-queue landing timeout (&#34; + landedWaitTimeout + &#34;). The repository may not have actually enqueued it — e.g. a Mergify repo where a plain merge does not queue and an explicit `@Mergifyio queue` is required, or a native merge queue that dropped it silently. Add the PR to the merge queue (or merge it) manually, then reply to retry.&#34;" target="question" />
+          <zeebe:input source="=null" target="agentSlaJobType" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_landedStalled</bpmn:incoming>
@@ -447,6 +449,7 @@
         <bpmn:extensionElements>
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;recheck&#34;" target="ciOutcome" />
+            <zeebe:output source="=null" target="agentSlaJobType" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_cib_armed</bpmn:incoming>
@@ -463,6 +466,7 @@
         <bpmn:extensionElements>
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;escalate&#34;" target="ciOutcome" />
+            <zeebe:output source="=null" target="agentSlaJobType" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_cib_esc</bpmn:incoming>
@@ -471,6 +475,7 @@
         <bpmn:extensionElements>
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;escalate&#34;" target="ciOutcome" />
+            <zeebe:output source="=&#34;senior:fix-ci&#34;" target="agentSlaJobType" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_sla</bpmn:incoming>
@@ -578,6 +583,7 @@
         <bpmn:extensionElements>
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;escalate-attempt&#34;" target="rebaseOutcome" />
+            <zeebe:output source="=null" target="agentSlaJobType" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_blocked</bpmn:incoming>
@@ -586,6 +592,7 @@
         <bpmn:extensionElements>
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;escalate-conflict&#34;" target="rebaseOutcome" />
+            <zeebe:output source="=&#34;senior:rebase&#34;" target="agentSlaJobType" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_sla</bpmn:incoming>

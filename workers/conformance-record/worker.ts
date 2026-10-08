@@ -9,6 +9,7 @@
 // reads `status`/`pr`/`summary` through), and exposes the raw transcript under the
 // `io.nanobpm.agentResult` envelope's `.output`.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { agentSlaEscalationQuestion } from "../../app/agentSlaEscalation.ts";
 import { markConformanceSynthesisSla, recordConformance } from "../../app/conformance.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -50,7 +51,20 @@ const handler: AppJobHandler<In> = async (job, app) => {
 
   const commentUrl = asStr(job.variables.commentUrl);
   const status = asStatus(job.variables.status, commentUrl !== null);
-  const summary = asStr(job.variables.summary);
+  // Agent-task SLA path (issue #879): the conformance/synthesize agent's interrupting timer boundary
+  // routed here with `agentSlaJobType` set, so there is no agent-produced summary — build the accurate
+  // never-started-vs-hung reason (named job type + wait duration) from the durable activation ledger,
+  // replacing the old blanket "hung or looping" wording. Unset on the normal path, where the agent's
+  // own hoisted `summary` is used.
+  const slaJobType = asStr(job.variables.agentSlaJobType);
+  const summary = slaJobType
+    ? await agentSlaEscalationQuestion(app.data, {
+        processInstanceKey: job.processInstanceKey != null ? String(job.processInstanceKey) : "",
+        jobType: slaJobType,
+        sla: asStr(job.variables.agentSlaTimeout) ?? "PT2H",
+        recovery: "Acknowledge to record the timeout and continue the retrospective.",
+      })
+    : asStr(job.variables.summary);
 
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const env = (job.variables as Record<string, unknown>)[AGENT_RESULT_KEY] as { output?: unknown } | undefined;

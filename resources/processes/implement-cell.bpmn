@@ -11,6 +11,8 @@
           <nano:extend name="transcriptUrl" type="string" optional="true" />
           <nano:extend name="pr" type="string" optional="true" />
           <nano:extend name="deliveryVerified" type="boolean" optional="true" />
+          <nano:extend name="agentSlaJobType" type="string" optional="true" />
+          <nano:extend name="agentSlaTimeout" type="string" optional="true" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>
@@ -91,6 +93,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordEscalationIn" />
         </zeebe:properties>
         <zeebe:ioMapping>
+          <zeebe:input source="=null" target="agentSlaJobType" />
           <zeebe:output source="=question" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
@@ -104,7 +107,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordEscalationIn" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;The implementation agent exceeded its time budget (SLA &#34; + agentSlaTimeout + &#34;) without completing — it is hung or looping. Check its progress or intervene, then answer to resume (the run continues on its deterministic feat/&#60;task.id&#62; branch), or abandon it.&#34;" target="question" />
+          <zeebe:input source="=&#34;senior:feature&#34;" target="agentSlaJobType" />
           <zeebe:output source="=question" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>

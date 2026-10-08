@@ -307,13 +307,25 @@ describe("agent-task SLA boundary — rerouted recorder→escalation arms (#849 
       );
       const task = await openTaskById(app, processKey, "trial-merge-decision");
       assert.ok(task?.userTaskKey, "the merge-cell parked a completable trial-merge decision task");
+
+      // UNKNOWN activation fixture (issue #881 review): no activation-ledger row exists for this attempt
+      // (the in-test poller records none), so the recorder must word the escalation honestly as
+      // "activation unknown" — never the removed blanket "hung or looping".
+      const slaAudit = (
+        await app.db
+          .table<{ id: number; plan_key: string; summary: string | null }>("plan_trial_merges", "id")
+          .find({ plan_key: "owner/repo#1" })
+      ).sort((a, b) => b.id - a.id)[0];
+      assert.ok(
+        (slaAudit?.summary ?? "").includes("no worker-activation was ever recorded"),
+        `an unobserved job escalates with honest ambiguity (got: ${slaAudit?.summary})`,
+      );
     } finally {
       await app.stop();
       rmSync(dbDir, { recursive: true, force: true });
     }
   });
 
-  // Regression for PR #864 review r3: on an SLA during a RERUN the recorder must not replay the
   // prior COMPLETED attempt's process-scope `result`/`summary`/`conflicts`/`failing`. The
   // `=null` ioMapping on `trial-merge` is task-local, so without a dedicated SLA recorder the
   // interrupted second attempt would inherit attempt one's stale verdict. Drive ONE instance: a
@@ -381,6 +393,19 @@ describe("agent-task SLA boundary — rerouted recorder→escalation arms (#849 
       );
 
       // The second agent hangs; the SLA fires. The DEDICATED SLA recorder must pin the TIMEOUT verdict.
+      // Seed an ACTIVATED activation-ledger fixture for THIS attempt (issue #881 review) so the recorder
+      // reads the ledger and produces the activation-aware "started but hung" reason — exercising the
+      // builder's activated branch end-to-end through record-trial-merge-sla, not just the pure builder.
+      await app.db.table("agent_job_activations", "id").insert({
+        id: `${processKey}:senior:trial-merge`,
+        process_instance_key: processKey,
+        job_type: "senior:trial-merge",
+        first_seen_at: "2024-01-01T00:00:00Z",
+        activated_at: "2024-01-01T00:05:00Z",
+        worker: "agent-stuck",
+        job_key: "rerun-attempt",
+        updated_at: "2024-01-01T00:05:00Z",
+      });
       await advancePastTimer(app, PAST_AGENT_SLA_MS);
       flows = takenFlows(app);
       assert.ok(
@@ -402,11 +427,15 @@ describe("agent-task SLA boundary — rerouted recorder→escalation arms (#849 
         .find({ plan_key: "owner/repo#1" });
       const slaRow = audits.sort((a, b) => b.id - a.id)[0];
       assert.equal(slaRow.result, "suite-failed", "the SLA row records the timeout verdict");
-      assert.equal(
-        slaRow.summary,
-        `The trial-merge agent exceeded its time budget (SLA ${AGENT_SLA_TIMEOUT}) without returning a machine-readable result — it is hung or looping. Acknowledge to record the timeout and decide whether to rerun the trial merge.`,
-        "the SLA row pins the timeout summary, not the stale prior-attempt summary",
+      // Activation-aware summary: names the job type, the leasing worker, and the hung diagnosis — NOT
+      // the stale first-attempt summary, and NOT the removed blanket wording.
+      assert.ok(
+        (slaRow.summary ?? "").includes("senior:trial-merge") &&
+          (slaRow.summary ?? "").includes("hung or looping") &&
+          (slaRow.summary ?? "").includes("agent-stuck"),
+        `the SLA row pins the activation-aware timeout summary (got: ${slaRow.summary})`,
       );
+      assert.equal((slaRow.summary ?? "").includes("stale prior-attempt summary"), false, "not the stale summary");
       assert.equal(slaRow.conflicts, null, "the SLA row clears the stale prior-attempt conflicts");
       assert.equal(slaRow.failing, null, "the SLA row clears the stale prior-attempt failing list");
     } finally {
@@ -552,7 +581,20 @@ describe("agent-task SLA boundary — rerouted recorder→escalation arms (#849 
       assert.equal(filed?.status, "filed", "the conformance verdict was filed before synthesize");
       assert.equal(filed?.slices_met, 3);
 
-      // Fire the synthesize SLA.
+      // Fire the synthesize SLA. Seed a QUEUED (never-activated) activation-ledger fixture for the
+      // synthesize (senior:retro) attempt (issue #881 review) so the recorder reads it and APPENDS the
+      // activation-aware never-observed-activated reason — exercising the builder's queued branch
+      // end-to-end through conformance-record, not just the pure builder.
+      await app.db.table("agent_job_activations", "id").insert({
+        id: `${processKey}:senior:retro`,
+        process_instance_key: processKey,
+        job_type: "senior:retro",
+        first_seen_at: "2024-01-01T00:00:00Z",
+        activated_at: null,
+        worker: null,
+        job_key: "synthesize-attempt",
+        updated_at: "2024-01-01T00:00:00Z",
+      });
       await advancePastTimer(app, PAST_AGENT_SLA_MS);
       const flows = takenFlows(app);
       assert.ok(
@@ -587,8 +629,9 @@ describe("agent-task SLA boundary — rerouted recorder→escalation arms (#849 
         `the audit summary is preserved and the SLA reason appended (got: ${row?.summary})`,
       );
       assert.ok(
-        (row?.summary ?? "").includes("retrospective-synthesis agent exceeded its time budget"),
-        "the synthesis-timeout context is appended to the summary",
+        (row?.summary ?? "").includes("No worker was ever observed to pick up") &&
+          (row?.summary ?? "").includes("senior:retro"),
+        `the activation-aware synthesis-timeout context is appended to the summary (got: ${row?.summary})`,
       );
     } finally {
       await app.stop();

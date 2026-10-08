@@ -10,6 +10,7 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { matchAdjudication, prAdjudications, resetAdjudications } from "./adjudications.ts";
+import { AGENT_SLA_JOB_TYPES, recordAgentJobObservation } from "./agentActivationLedger.ts";
 import { completeEscalationAutoApplied, escalationFormId } from "./agentCompletion.ts";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import {
@@ -1733,6 +1734,98 @@ interface JobSearchItem {
   /** The job's `zeebe:taskDefinition` type — read to defensively re-filter the wire `$in` type
    * filter so a non-agent job can never masquerade as a leasing convergence agent. */
   type?: string;
+  /** The owning process instance — keyed into the activation ledger (issue #879). */
+  processInstanceKey?: string;
+  /** The engine job key — the unique id of THIS job attempt. The activation ledger uses it to tell one
+   * attempt of a retrying agent task from the next (issue #879 review). */
+  jobKey?: string;
+}
+
+/** One agent-activation ledger poll pass (issue #879). Unlike {@link pollJobActivationImpl} (which
+ * tracks only the review-round for the pages grid), this records — for EVERY bounded agent job type —
+ * whether a worker ever picked the job up, into the durable `agent_job_activations` ledger. When an
+ * agent-task SLA boundary later cancels a job, the job's engine state is gone, so the escalation
+ * recorder cannot ask the engine whether it was ever activated; this ledger, captured WHILE the job is
+ * live, is what lets the escalation distinguish a NEVER-ACTIVATED (queue-starved) job from an
+ * ACTIVATED-but-hung one.
+ *
+ * It reads the same activation signal as the review-round pass: the Camunda-8 `/v2/jobs/search` wire
+ * API collapses Activated -> CREATED (no ACTIVATED enum), so a leased job is recognised by its
+ * `worker`/`deadline` fields. One paged search across all bounded agent types per pass upserts the
+ * ledger by (processInstanceKey, type), keyed to the current attempt by `jobKey`. Best-effort: a
+ * transport failure leaves the ledger untouched and the next pass retries. */
+async function pollAgentActivations(
+  data: DataLayer,
+  restAddress: string,
+  engineToken: string | undefined,
+) {
+  const base = restAddress.replace(/\/+$/, "");
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (engineToken) headers.authorization = `Bearer ${engineToken}`;
+  await pollAgentActivationsImpl(data, base, headers);
+}
+
+/** Testable core of {@link pollAgentActivations}: query the engine for every CREATED bounded-agent job
+ * and upsert the activation ledger. Split out so tests can drive it with a stubbed `fetch`. */
+export async function pollAgentActivationsImpl(
+  data: DataLayer,
+  base: string,
+  headers: Record<string, string>,
+) {
+  // Page through EVERY matching open job: a single first-page read would, under fleet saturation, let
+  // long-lived jobs occupy the page on every pass while later jobs time out with their activation never
+  // recorded — exactly when the never-started/hung distinction matters most. Mirror the paging contract
+  // the other engine sweeps use (`page: { from, limit }`, stop on a short page). (#881 review)
+  const ts = now();
+  const limit = 200;
+  let from = 0;
+  for (let guard = 0; guard < 1000; guard++) {
+    let items: JobSearchItem[] = [];
+    try {
+      const res = await fetch(`${base}/jobs/search`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          filter: {
+            type: { $in: [...AGENT_SLA_JOB_TYPES] },
+            // A merely-created (queued) AND an activated-but-not-yet-completed job both project to
+            // CREATED on the wire (Camunda has no ACTIVATED enum) — so this one filter captures both,
+            // and the leasing `worker` field discriminates them at upsert time.
+            state: "CREATED",
+          },
+          page: { from, limit },
+        }),
+      });
+      if (!res.ok) return; // engine unhappy → keep the ledger as-is, retry next pass
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const body = (await res.json()) as { items?: JobSearchItem[] };
+      items = body.items ?? [];
+    } catch (err) {
+      console.error(`[poller] agent-activation search: ${err}`);
+      return;
+    }
+    for (const j of items) {
+      const jobType = j.type ?? "";
+      const pik = j.processInstanceKey ?? "";
+      // Defensively re-filter the wire `$in` type filter and require a process instance to key on.
+      if (pik.length === 0 || !AGENT_SLA_JOB_TYPES.includes(jobType)) continue;
+      const worker = typeof j.worker === "string" && j.worker.length > 0 ? j.worker : null;
+      const jobKey = typeof j.jobKey === "string" && j.jobKey.length > 0 ? j.jobKey : null;
+      try {
+        await recordAgentJobObservation(data, {
+          processInstanceKey: pik,
+          jobType,
+          worker,
+          jobKey,
+          now: ts,
+        });
+      } catch (err) {
+        console.error(`[poller] agent-activation upsert ${pik}:${jobType}: ${err}`);
+      }
+    }
+    if (items.length < limit) break; // last page
+    from += items.length;
+  }
 }
 
 /** One job-activation poll pass. The `converging` status means the process is parked at a
@@ -3717,6 +3810,7 @@ export async function pollOnce(
     await pollWaveGatesImpl(data, engine, token, base, headers);
     await pollCapabilityGatesImpl(data, engine, base, headers);
     await pollJobActivation(data, engineRest.restAddress, engineRest.token);
+    await pollAgentActivations(data, engineRest.restAddress, engineRest.token);
     await pollIncidents(data, engineRest.restAddress, engineRest.token);
   }
 }
