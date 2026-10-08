@@ -101,3 +101,26 @@ test("poll leaves the ledger untouched when the engine search fails", async () =
   }
   assertEquals(await getAgentJobActivation(data, "PI-13", "senior:feature"), undefined);
 });
+
+test("poll records the merge-loop bounded agent jobs (senior:fix-ci, senior:rebase)", async () => {
+  // Regression for the #881 adversarial finding: merge-loop.bpmn arms an interrupting SLA boundary
+  // on its fix-ci and rebase agent tasks and routes the escalation through agentSlaEscalationQuestion
+  // — but if AGENT_SLA_JOB_TYPES omits those job types the poller never observes them and every such
+  // escalation degrades to "activation unknown" instead of the never-started/hung distinction.
+  const { data } = memDataFor(["119_agent_job_activations.sql"]);
+  const prev = globalThis.fetch;
+  globalThis.fetch = jobsFetch([
+    { type: "senior:fix-ci", processInstanceKey: "PI-20", state: "CREATED" },
+    { type: "senior:rebase", processInstanceKey: "PI-20", worker: "agent-r", deadline: "2024-01-01T00:15:00Z", state: "CREATED" },
+  ]) as typeof fetch;
+  try {
+    await pollAgentActivationsImpl(data, "http://engine/v2", headers);
+  } finally {
+    globalThis.fetch = prev;
+  }
+  const fixCi = await getAgentJobActivation(data, "PI-20", "senior:fix-ci");
+  assertEquals(fixCi?.activated_at, null);
+  const rebase = await getAgentJobActivation(data, "PI-20", "senior:rebase");
+  assertEquals(rebase?.worker, "agent-r");
+  assertEquals(typeof rebase?.activated_at === "string", true);
+});

@@ -32,6 +32,8 @@ export const AGENT_SLA_JOB_TYPES: readonly string[] = [
   "senior:trial-merge", // merge-cell
   "senior:conformance", // retro conformance
   "senior:retro", // retro synthesize
+  "senior:fix-ci", // merge-loop CI-fix cell (be_fixci_sla)
+  "senior:rebase", // merge-loop rebase cell (be_rebase_sla)
 ];
 
 /** One ledger row: whether (and when) a worker picked up an agent job for a given process instance. */
