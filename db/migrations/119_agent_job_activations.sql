@@ -23,6 +23,14 @@
 -- escalation accurately — "never started (queue starvation)" vs "started but exceeded its budget" —
 -- including the job type and how long it waited.
 --
+-- `job_key` holds the engine job key of the CURRENT attempt so the row tracks that attempt, not a
+-- stale earlier one: the same (process_instance_key, job_type) runs MULTIPLE times within one instance
+-- when its cell retries (implement-cell `ic_reImplement`, merge-cell `mc_rerun`, merge-loop fix-ci /
+-- rebase reloops). Keyed only by (instance, job_type) a sticky first-activation would make a later
+-- queued retry read the EARLIER attempt's worker and misdiagnose it as started/hung. When the poller
+-- observes a different `job_key` for the pair it RESETS the row to the new attempt (first_seen_at /
+-- activated_at / worker), so the escalation always reflects the attempt the SLA boundary cancelled.
+--
 -- Keyed by a surrogate TEXT id (`<process_instance_key>:<job_type>`) so the single-pk `data.table`
 -- accessor can upsert it; the (process_instance_key, job_type) pair is unique per id. FK-free by
 -- design — the owning instance lives in the durable ENGINE store, not app.db, so there is no app-tier
@@ -36,6 +44,7 @@ CREATE TABLE IF NOT EXISTS agent_job_activations (
   first_seen_at        TEXT NOT NULL,     -- ISO ts the poller first observed the job (CREATED/queued)
   activated_at         TEXT,              -- ISO ts first observed ACTIVATED (leasing worker seen); NULL = never started
   worker               TEXT,              -- the leasing worker's name at activation; NULL until activated
+  job_key              TEXT,              -- the engine job key of the CURRENT attempt; a new key RESETS the row (retry isolation)
   updated_at           TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_agent_job_activations_instance ON agent_job_activations (process_instance_key);

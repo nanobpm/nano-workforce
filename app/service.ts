@@ -1736,6 +1736,9 @@ interface JobSearchItem {
   type?: string;
   /** The owning process instance — keyed into the activation ledger (issue #879). */
   processInstanceKey?: string;
+  /** The engine job key — the unique id of THIS job attempt. The activation ledger uses it to tell one
+   * attempt of a retrying agent task from the next (issue #879 review). */
+  jobKey?: string;
 }
 
 /** One agent-activation ledger poll pass (issue #879). Unlike {@link pollJobActivationImpl} (which
@@ -1748,9 +1751,9 @@ interface JobSearchItem {
  *
  * It reads the same activation signal as the review-round pass: the Camunda-8 `/v2/jobs/search` wire
  * API collapses Activated -> CREATED (no ACTIVATED enum), so a leased job is recognised by its
- * `worker`/`deadline` fields. One unscoped search across all bounded agent types per pass upserts the
- * ledger by (processInstanceKey, type). Best-effort: a transport failure leaves the ledger untouched
- * and the next pass retries. */
+ * `worker`/`deadline` fields. One paged search across all bounded agent types per pass upserts the
+ * ledger by (processInstanceKey, type), keyed to the current attempt by `jobKey`. Best-effort: a
+ * transport failure leaves the ledger untouched and the next pass retries. */
 async function pollAgentActivations(
   data: DataLayer,
   restAddress: string,
@@ -1769,47 +1772,59 @@ export async function pollAgentActivationsImpl(
   base: string,
   headers: Record<string, string>,
 ) {
-  let items: JobSearchItem[] = [];
-  try {
-    const res = await fetch(`${base}/jobs/search`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        filter: {
-          type: { $in: [...AGENT_SLA_JOB_TYPES] },
-          // A merely-created (queued) AND an activated-but-not-yet-completed job both project to
-          // CREATED on the wire (Camunda has no ACTIVATED enum) — so this one filter captures both,
-          // and the leasing `worker` field discriminates them at upsert time.
-          state: "CREATED",
-        },
-        page: { limit: 200 },
-      }),
-    });
-    if (!res.ok) return; // engine unhappy → keep the ledger as-is, retry next pass
-    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const body = (await res.json()) as { items?: JobSearchItem[] };
-    items = body.items ?? [];
-  } catch (err) {
-    console.error(`[poller] agent-activation search: ${err}`);
-    return;
-  }
+  // Page through EVERY matching open job: a single first-page read would, under fleet saturation, let
+  // long-lived jobs occupy the page on every pass while later jobs time out with their activation never
+  // recorded — exactly when the never-started/hung distinction matters most. Mirror the paging contract
+  // the other engine sweeps use (`page: { from, limit }`, stop on a short page). (#881 review)
   const ts = now();
-  for (const j of items) {
-    const jobType = j.type ?? "";
-    const pik = j.processInstanceKey ?? "";
-    // Defensively re-filter the wire `$in` type filter and require a process instance to key on.
-    if (pik.length === 0 || !AGENT_SLA_JOB_TYPES.includes(jobType)) continue;
-    const worker = typeof j.worker === "string" && j.worker.length > 0 ? j.worker : null;
+  const limit = 200;
+  let from = 0;
+  for (let guard = 0; guard < 1000; guard++) {
+    let items: JobSearchItem[] = [];
     try {
-      await recordAgentJobObservation(data, {
-        processInstanceKey: pik,
-        jobType,
-        worker,
-        now: ts,
+      const res = await fetch(`${base}/jobs/search`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          filter: {
+            type: { $in: [...AGENT_SLA_JOB_TYPES] },
+            // A merely-created (queued) AND an activated-but-not-yet-completed job both project to
+            // CREATED on the wire (Camunda has no ACTIVATED enum) — so this one filter captures both,
+            // and the leasing `worker` field discriminates them at upsert time.
+            state: "CREATED",
+          },
+          page: { from, limit },
+        }),
       });
+      if (!res.ok) return; // engine unhappy → keep the ledger as-is, retry next pass
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const body = (await res.json()) as { items?: JobSearchItem[] };
+      items = body.items ?? [];
     } catch (err) {
-      console.error(`[poller] agent-activation upsert ${pik}:${jobType}: ${err}`);
+      console.error(`[poller] agent-activation search: ${err}`);
+      return;
     }
+    for (const j of items) {
+      const jobType = j.type ?? "";
+      const pik = j.processInstanceKey ?? "";
+      // Defensively re-filter the wire `$in` type filter and require a process instance to key on.
+      if (pik.length === 0 || !AGENT_SLA_JOB_TYPES.includes(jobType)) continue;
+      const worker = typeof j.worker === "string" && j.worker.length > 0 ? j.worker : null;
+      const jobKey = typeof j.jobKey === "string" && j.jobKey.length > 0 ? j.jobKey : null;
+      try {
+        await recordAgentJobObservation(data, {
+          processInstanceKey: pik,
+          jobType,
+          worker,
+          jobKey,
+          now: ts,
+        });
+      } catch (err) {
+        console.error(`[poller] agent-activation upsert ${pik}:${jobType}: ${err}`);
+      }
+    }
+    if (items.length < limit) break; // last page
+    from += items.length;
   }
 }
 

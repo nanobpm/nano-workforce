@@ -28,7 +28,7 @@ test("humanizeIsoDuration humanizes the SLA budget", () => {
   assertEquals(humanizeIsoDuration("PT15M"), "15m");
 });
 
-test("never-started: queue starvation is NOT reported as hung or looping", () => {
+test("never-observed-activated: queue starvation is reported hedged, NOT as hung or looping", () => {
   const reason = buildAgentSlaEscalationReason({
     jobType: "senior:feature",
     sla: "PT2H",
@@ -38,13 +38,16 @@ test("never-started: queue starvation is NOT reported as hung or looping", () =>
     recovery: RECOVERY,
   });
   assertStringIncludes(reason, "senior:feature");
-  assertStringIncludes(reason, "never started");
+  // Observational, hedged wording — never the over-confident "the agent never started".
+  assertStringIncludes(reason, "No worker was ever observed to pick up");
   assertStringIncludes(reason, "queue starvation");
   // Names how long it waited and the SLA budget.
   assertStringIncludes(reason, "2h");
-  // Must NOT misdiagnose it as hung/looping — it explicitly rules that out.
-  assertStringIncludes(reason, "NOT a hung or looping");
+  // Acknowledges the poll-window race rather than claiming certainty (issue #881 review).
+  assertStringIncludes(reason, "that would not have been recorded");
+  // Must NOT misdiagnose it as hung/looping.
   assertEquals(reason.includes("may be hung or looping"), false);
+  assertEquals(reason.includes("agent never started"), false);
   assertStringIncludes(reason, RECOVERY);
 });
 
@@ -98,7 +101,7 @@ test("agentSlaEscalationQuestion reads the ledger and distinguishes never-starte
     recovery: RECOVERY,
     now: "2024-01-01T02:00:00Z",
   });
-  assertStringIncludes(q, "never started");
+  assertStringIncludes(q, "No worker was ever observed to pick up");
   assertEquals(q.includes("may be hung or looping"), false);
 });
 

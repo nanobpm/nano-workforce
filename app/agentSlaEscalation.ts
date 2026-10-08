@@ -2,10 +2,12 @@
 // the human-facing escalation raised when an agent service task's interrupting SLA timer boundary
 // fires. It distinguishes the two outcomes the old wording conflated:
 //
-//   • NEVER STARTED — no worker ever picked the job up (queue starvation / no capacity for the job
-//     type). The job sat CREATED for the whole SLA budget and was cancelled by the boundary. Telling
-//     the human it is "hung or looping" and to "check its progress" is a false diagnosis — there is no
-//     progress to check; the fix is CAPACITY, not intervention.
+//   • NEVER OBSERVED ACTIVATED — no worker was ever observed to pick the job up (almost certainly
+//     queue starvation / no capacity for the job type). The job sat CREATED for ~the whole SLA budget
+//     and was cancelled by the boundary. Telling the human it is "hung or looping" and to "check its
+//     progress" is a false diagnosis — the likely fix is CAPACITY, not intervention. The wording is
+//     hedged (a worker could lease it in the final moment before the boundary fires, between activation
+//     polls, unrecorded), so it reports the likely cause without over-claiming certainty.
 //   • STARTED BUT EXCEEDED — a worker leased the job (an agent ran) but did not complete within the
 //     budget — it may genuinely be hung or looping, and intervening / checking its progress is apt.
 //
@@ -113,13 +115,18 @@ export function buildAgentSlaEscalationReason(input: AgentSlaEscalationInput): s
     );
   }
 
-  // NEVER STARTED: observed queued, never leased → queue starvation, not a hung/looping agent.
+  // NEVER OBSERVED ACTIVATED: seen queued, never seen leased. This is the best-effort observation of
+  // queue starvation — hedged, because a worker could in principle lease the job in the final moment
+  // before the boundary cancels it, between activation polls, and that would not be recorded. We report
+  // the likely diagnosis (and its capacity fix) without over-claiming certainty.
   return (
-    `The ${jobType} agent never started: no worker picked up the job for the entire SLA budget ` +
-    `(SLA ${sla} ≈ ${slaHuman}) — it sat queued for ~${waited}, then the SLA boundary cancelled it. ` +
-    `This is queue starvation (no capacity for ${jobType}), NOT a hung or looping agent, so there is no ` +
-    `progress to check — add capacity for ${jobType} (enrol a worker that serves it, or reduce ` +
-    `concurrent demand). ${recovery}`
+    `No worker was ever observed to pick up the ${jobType} agent's job for its entire SLA budget ` +
+    `(SLA ${sla} ≈ ${slaHuman}): it was seen queued for ~${waited}, then the SLA boundary cancelled it. ` +
+    `This is almost certainly queue starvation (no capacity for ${jobType}) rather than a hung or ` +
+    `looping agent, so the likely fix is to add capacity for ${jobType} (enrol a worker that serves it, ` +
+    `or reduce concurrent demand) rather than to check a non-existent agent's progress. (If a worker ` +
+    `leased it in the final moment before the boundary fired, between activation polls, that would not ` +
+    `have been recorded here.) ${recovery}`
   );
 }
 

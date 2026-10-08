@@ -15,7 +15,12 @@ function jobsFetch(items: JobItem[], opts: { ignoreTypeFilter?: boolean } = {}) 
     const body = init?.body ? JSON.parse(init.body) : {};
     const t = body.filter?.type;
     const wanted: string[] | null = Array.isArray(t?.$in) ? t.$in : typeof t === "string" ? [t] : null;
-    const out = opts.ignoreTypeFilter || wanted == null ? items : items.filter((j) => wanted.includes(j.type ?? ""));
+    const matched = opts.ignoreTypeFilter || wanted == null ? items : items.filter((j) => wanted.includes(j.type ?? ""));
+    // Honour the `page: { from, limit }` paging contract so a pagination regression can observe
+    // whether the poller actually advances past the first page.
+    const from = typeof body.page?.from === "number" ? body.page.from : 0;
+    const limit = typeof body.page?.limit === "number" ? body.page.limit : matched.length;
+    const out = matched.slice(from, from + limit);
     return Promise.resolve(
       new Response(JSON.stringify({ items: out }), { status: 200, headers: { "content-type": "application/json" } }),
     );
@@ -123,4 +128,53 @@ test("poll records the merge-loop bounded agent jobs (senior:fix-ci, senior:reba
   const rebase = await getAgentJobActivation(data, "PI-20", "senior:rebase");
   assertEquals(rebase?.worker, "agent-r");
   assertEquals(typeof rebase?.activated_at === "string", true);
+});
+
+test("poll records jobs BEYOND the first page (pagination)", async () => {
+  // Issue #881 review: a single first-page read lets long-lived jobs occupy the page every pass while
+  // later jobs time out with no activation recorded. 450 queued jobs > one 200-item page must all land.
+  const { data } = memDataFor(["119_agent_job_activations.sql"]);
+  const many: JobItem[] = Array.from({ length: 450 }, (_v, i) => ({
+    type: "senior:feature",
+    processInstanceKey: `PI-${i}`,
+    jobKey: `J-${i}`,
+    state: "CREATED",
+  }));
+  const prev = globalThis.fetch;
+  globalThis.fetch = jobsFetch(many) as typeof fetch;
+  try {
+    await pollAgentActivationsImpl(data, "http://engine/v2", headers);
+  } finally {
+    globalThis.fetch = prev;
+  }
+  // A job on the first page, one straddling the page boundary, and the very last job are all recorded.
+  assertEquals((await getAgentJobActivation(data, "PI-0", "senior:feature"))?.first_seen_at != null, true);
+  assertEquals((await getAgentJobActivation(data, "PI-200", "senior:feature"))?.first_seen_at != null, true);
+  assertEquals((await getAgentJobActivation(data, "PI-449", "senior:feature"))?.first_seen_at != null, true);
+});
+
+test("poll resets the ledger to a retry (new jobKey) so an earlier attempt's activation is not replayed", async () => {
+  // Issue #881 review: a retrying agent task reuses (instance, jobType); a new engine jobKey is a new
+  // attempt and must reset the activation the recorder reads.
+  const { data } = memDataFor(["119_agent_job_activations.sql"]);
+  const prev = globalThis.fetch;
+  try {
+    globalThis.fetch = jobsFetch([
+      { type: "senior:feature", processInstanceKey: "PI-30", jobKey: "A1", worker: "agent-a", deadline: "2024-01-01T00:15:00Z", state: "CREATED" },
+    ]) as typeof fetch;
+    await pollAgentActivationsImpl(data, "http://engine/v2", headers);
+    assertEquals((await getAgentJobActivation(data, "PI-30", "senior:feature"))?.worker, "agent-a");
+
+    // The retry is a different jobKey, still queued → the recorder must see never-activated, not agent-a.
+    globalThis.fetch = jobsFetch([
+      { type: "senior:feature", processInstanceKey: "PI-30", jobKey: "A2", state: "CREATED" },
+    ]) as typeof fetch;
+    await pollAgentActivationsImpl(data, "http://engine/v2", headers);
+    const row = await getAgentJobActivation(data, "PI-30", "senior:feature");
+    assertEquals(row?.activated_at, null);
+    assertEquals(row?.worker, null);
+    assertEquals(row?.job_key, "A2");
+  } finally {
+    globalThis.fetch = prev;
+  }
 });

@@ -48,6 +48,10 @@ export interface AgentJobActivation {
   activated_at: string | null;
   /** The leasing worker's name at activation; NULL until activated. */
   worker: string | null;
+  /** The engine job key of the attempt this row currently tracks; NULL when unknown (an old row or a
+   * caller that did not supply one). A poll observation carrying a DIFFERENT job key is a new attempt
+   * and resets the row — see {@link recordAgentJobObservation}. */
+  job_key: string | null;
   updated_at: string;
 }
 
@@ -62,21 +66,32 @@ export const agentActivations = (data: DataLayer) =>
   data.table<AgentJobActivation>("agent_job_activations", "id");
 
 /** Upsert one poll observation of an agent job. On first sight records `first_seen_at`; the FIRST time
- * a leasing `worker` is observed it records `activated_at` + `worker` (a later re-observation never
- * moves the first-activation timestamp). Idempotent — a steady state writes nothing after activation
- * is captured. */
+ * a leasing `worker` is observed it records `activated_at` + `worker` (a later re-observation of the
+ * SAME attempt never moves the first-activation timestamp). Idempotent on a steady state.
+ *
+ * Retry isolation (issue #879 review): the same (process instance, job type) runs MULTIPLE times within
+ * one instance when its cell retries (`ic_reImplement`, `mc_rerun`, merge-loop fix-ci/rebase reloops).
+ * Each attempt is a distinct engine job with its own `jobKey`, so when an observation carries a job key
+ * DIFFERENT from the one the row tracks, it is a NEW attempt and the row is RESET to it (first_seen_at /
+ * activated_at / worker), discarding the earlier attempt's activation. Without this a sticky
+ * first-activation row would make a later queued retry read the earlier attempt's worker and misdiagnose
+ * a queue-starved retry as started/hung, and its elapsed times would fold in the prior attempt + human
+ * wait. When the job key is unknown on either side the row keeps its prior first-sticky-activation
+ * behaviour (the caller cannot prove a new attempt). */
 export async function recordAgentJobObservation(
   data: DataLayer,
   input: {
     processInstanceKey: string;
     jobType: string;
     worker: string | null;
+    jobKey?: string | null;
     now: string;
   },
 ): Promise<void> {
   const table = agentActivations(data);
   const id = agentActivationId(input.processInstanceKey, input.jobType);
   const worker = input.worker && input.worker.length > 0 ? input.worker : null;
+  const jobKey = input.jobKey && input.jobKey.length > 0 ? input.jobKey : null;
   const existing = await table.get(id);
   if (!existing) {
     await table.insert({
@@ -86,13 +101,35 @@ export async function recordAgentJobObservation(
       first_seen_at: input.now,
       activated_at: worker ? input.now : null,
       worker,
+      job_key: jobKey,
       updated_at: input.now,
     });
     return;
   }
-  // Capture the FIRST activation only; never overwrite an earlier one, never clear it.
+  const existingKey = existing.job_key && existing.job_key.length > 0 ? existing.job_key : null;
+  // A different engine job key for the same (instance, jobType) is a NEW attempt — reset the row so it
+  // reflects only the current attempt, never a stale earlier activation/wait.
+  if (jobKey && existingKey && jobKey !== existingKey) {
+    await table.update(id, {
+      first_seen_at: input.now,
+      activated_at: worker ? input.now : null,
+      worker,
+      job_key: jobKey,
+      updated_at: input.now,
+    });
+    return;
+  }
+  // Same attempt (or job key unknown): capture the FIRST activation only, and adopt a newly-known job
+  // key so a subsequent different one is recognised as a new attempt.
+  const patch: Partial<AgentJobActivation> = {};
   if (worker && !existing.activated_at) {
-    await table.update(id, { activated_at: input.now, worker, updated_at: input.now });
+    patch.activated_at = input.now;
+    patch.worker = worker;
+  }
+  if (jobKey && !existingKey) patch.job_key = jobKey;
+  if (Object.keys(patch).length > 0) {
+    patch.updated_at = input.now;
+    await table.update(id, patch);
   }
 }
 
