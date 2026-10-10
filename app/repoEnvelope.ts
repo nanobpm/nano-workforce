@@ -187,19 +187,25 @@ export function repoEnvelopeVars(
         // omission — the harness then clones the head branch tip, the pre-#324 behaviour. Omitted too
         // when the PR has no durable push-checkpoint yet.
         ...(isCommitSha(commitSha) ? { sha: commitSha } : {}),
-        // Pre-PR provisioning (issue #684): the implementation path (feature.bpmn / plan-fanout's
-        // implement-cell) dispatches its agent BEFORE any PR exists, so `ref` is the BASE branch, not a
-        // head. `branchCreate` asks the harness to cut the deterministic `feat/<task.id>` feature branch
-        // off that base itself (the agent-guide's `feat/*` convention) instead of the agent branching by
-        // hand — making the isolated clone land on the right branch deterministically across a resume.
-        // The PR-based paths (review/fix-ci/rebase) ALSO pass `branchCreate = ref` (the PR head): without
-        // it the harness's base-branch guard (jwulf/c8ctl-plugin-nano#231) cuts a throwaway
-        // `nano/agent-work/*` fallback OFF the PR; with `ref == create == head` it commits/pushes to the
-        // head branch. Only a blank/omitted value drops the key.
-        ...(typeof branchCreate === "string" && branchCreate.trim() !== ""
-          ? { branch: { create: branchCreate.trim() } }
-          : {}),
       },
+      // Pre-PR provisioning (issue #684): the implementation path (feature.bpmn / plan-fanout's
+      // implement-cell) dispatches its agent BEFORE any PR exists, so `ref` is the BASE branch, not a
+      // head. `branchCreate` asks the harness to cut the deterministic `feat/<task.id>` feature branch
+      // off that base itself (the agent-guide's `feat/*` convention) instead of the agent branching by
+      // hand — making the isolated clone land on the right branch deterministically across a resume.
+      // The PR-based paths (review/fix-ci/rebase) ALSO pass `branchCreate = ref` (the PR head): without
+      // it the harness's base-branch guard (jwulf/c8ctl-plugin-nano#231) cuts a throwaway
+      // `nano/agent-work/*` fallback OFF the PR; with `ref == create == head` it commits/pushes to the
+      // head branch. Only a blank/omitted value drops the key.
+      //
+      // `branch` is a TOP-LEVEL sibling of `repository` (issue #882) — the harness's
+      // `normalizeTaskEnvelope` reads it from the envelope root (`isPlainObject(raw.branch)`), NOT from
+      // `repository.branch`. Nesting it under `repository` was the two-sides-of-one-contract drift
+      // (#227) that left `branch.create` silently unread (retries couldn't resume, pushes were
+      // refused — nanobpm/nano-bpm#1344).
+      ...(typeof branchCreate === "string" && branchCreate.trim() !== ""
+        ? { branch: { create: branchCreate.trim() } }
+        : {}),
       // Repo-provisioning auth gate (issue #770): c8ctl-plugin-nano (≥1.60.2) only resolves the
       // git credential (GITHUB_TOKEN, or the `gh` default when it's absent) for repository
       // provisioning when `task.allowPr` is truthy — `resolveJobSecrets` pulls the token behind that
@@ -251,10 +257,13 @@ export function agentNodeRepoEnvelope(repo: string, base: string | null, branchC
         // A per-node base (declared, or defaulted from the run level) — the branch the harness cuts its
         // `feat/<node.id>` off. Omitted when unknown so the harness clones the repo's default branch.
         ...(ref ? { ref, baseRef: ref } : {}),
-        // The deterministic isolation branch the harness cuts (issue #776), so the agent can never be
-        // left committing on the checked-out base branch. Off `ref` when known, else off the default tip.
-        ...(create ? { branch: { create } } : {}),
       },
+      // The deterministic isolation branch the harness cuts (issue #776), so the agent can never be
+      // left committing on the checked-out base branch. Off `ref` when known, else off the default tip.
+      // `branch` is a TOP-LEVEL sibling of `repository` (issue #882) — the harness's
+      // `normalizeTaskEnvelope` reads it from the envelope root, NOT from `repository.branch`, so the
+      // flattened per-cell header is `io.nanobpm.agentTask.branch.create` (not `…repository.branch.create`).
+      ...(create ? { branch: { create } } : {}),
       // Repo-provisioning auth gate (issue #770): as in `repoEnvelopeVars`, a repo-backed cell must
       // opt the harness into git-credential resolution (`task.allowPr`) or the clone fails with
       // `unable to get password from user`. Emitted on every resolved cell (past the `owner/repo`
