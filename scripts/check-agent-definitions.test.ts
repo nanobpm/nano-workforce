@@ -4,7 +4,10 @@
 // `<zeebe:agentDefinition agentType="external" />` marker (the omission that left every delivery-graph
 // agent run without a durable transcript). These cases assert the scanner wiring flags an unmarked
 // prompt-bearing task and that the gate's compiled-output half sees a real compiled agent cell.
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals } from "#test-assert";
 import {
   agentTaskTypesMissingExternalMarker,
@@ -12,6 +15,8 @@ import {
 } from "../app/agentic/vocab/job-types.ts";
 import { AGENT_JOB_TYPE_PROMPT } from "../app/deliveryGraphCompiler.ts";
 import { checkAuthoredProcesses, checkCompiledOutput, checkJobTypePromptMappings } from "./check-agent-definitions.ts";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("check-agent-definitions: the canonical scanner flags an unmarked prompt-bearing senior:* task", () => {
   // The gate's red path rests entirely on the canonical scanner — pin that wiring here so the gate
@@ -133,5 +138,84 @@ test("check-agent-definitions: the authored half still flags a prompt-BEARING ta
   assert(
     r.errors.some((e) => e.includes("bad.bpmn") && e.includes("senior:feature")),
     `the error names the unmarked prompt-bearing task, got ${JSON.stringify(r.errors)}`,
+  );
+});
+
+test("check-agent-definitions: a registry mapping that diverges from the authored corpus link fails", () => {
+  // Advisory (PR #886 review): the registry duplicates the job-type→prompt links the authored BPMN
+  // corpus authors per task. The gate must COMPARE each mapped type against the corpus's actual link,
+  // so `senior:feature` → the EXISTING `prompts/plan.md` (a wrong-but-deployed prompt) fails instead
+  // of silently compiling feature cells with the plan base contract. Inject a corpus that links
+  // `senior:feature` → prompts/feature.md and a registry that maps it to prompts/plan.md.
+  const corpus = `
+    <bpmn:serviceTask id="agent">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:feature" />
+        <zeebe:agentDefinition agentType="external" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="prompts/feature.md" linkName="prompt" />
+        </zeebe:linkedResources>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  const r = checkJobTypePromptMappings({ "senior:feature": "prompts/plan.md" }, [{ file: "c.bpmn", xml: corpus }]);
+  assert(!r.ok, "a mapping that diverges from the authored corpus link must fail the gate");
+  assert(
+    r.errors.some((e) => e.includes("senior:feature") && e.includes("prompts/plan.md") && e.includes("prompts/feature.md")),
+    `the error names the job type, the registry value, and the corpus link, got ${JSON.stringify(r.errors)}`,
+  );
+});
+
+test("check-agent-definitions: a registry mapping matching the authored corpus link passes", () => {
+  const corpus = `
+    <bpmn:serviceTask id="agent">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:feature" />
+        <zeebe:agentDefinition agentType="external" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="prompts/feature.md" linkName="prompt" />
+        </zeebe:linkedResources>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  const r = checkJobTypePromptMappings({ "senior:feature": "prompts/feature.md" }, [{ file: "c.bpmn", xml: corpus }]);
+  assert(r.ok, `a mapping matching the authored corpus link must pass, got ${JSON.stringify(r.errors)}`);
+});
+
+test("check-agent-definitions: an authored agent job type with NO registry mapping fails (coverage)", () => {
+  // The corpus links a prompt for senior:feature but the registry omits that job type entirely —
+  // compiled cells of that type would silently get no base prompt. Require mapped coverage for every
+  // authored agent type so the two producers cannot diverge by omission.
+  const corpus = `
+    <bpmn:serviceTask id="agent">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:feature" />
+        <zeebe:agentDefinition agentType="external" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="prompts/feature.md" linkName="prompt" />
+        </zeebe:linkedResources>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  const r = checkJobTypePromptMappings({ "senior:plan": "prompts/plan.md" }, [{ file: "c.bpmn", xml: corpus }]);
+  assert(!r.ok, "an authored agent job type missing from the registry must fail the gate");
+  assert(
+    r.errors.some((e) => e.includes("senior:feature")),
+    `the error names the unmapped authored job type, got ${JSON.stringify(r.errors)}`,
+  );
+});
+
+test("check-agent-definitions: the real registry matches the real authored corpus (no drift)", () => {
+  // The live invariant: every AGENT_JOB_TYPE_PROMPT entry resolves to a deployed resource AND equals
+  // the authored corpus's prompt link for that job type, and every authored agent type is mapped.
+  const r = checkJobTypePromptMappings();
+  assert(r.ok, `registry and authored corpus must agree, got ${JSON.stringify(r.errors)}`);
+});
+
+test("check-agent-definitions: AGENTS.md documents the check:agent-definitions CI gate", () => {
+  // Advisory (PR #886 review): adding the `check:agent-definitions` CI command left the contributor
+  // guide's "Runtime & CI gates" list stale — AGENTS.md tells contributors how to match CI locally
+  // but did not name the new gate. Pin the doc so the gate cannot silently drop out of the guide.
+  const agents = readFileSync(join(ROOT, "AGENTS.md"), "utf8");
+  assert(
+    agents.includes("check:agent-definitions"),
+    "AGENTS.md must document the check:agent-definitions gate in its Runtime & CI gates list",
   );
 });

@@ -48,6 +48,7 @@ import { fileURLToPath } from "node:url";
 import {
   missingExternalMarkerAgentTaskTypes,
   promptBearingTaskTypes,
+  promptLinkByTaskType,
 } from "../app/agentic/vocab/job-types.ts";
 import { AGENT_JOB_TYPE_PROMPT, compileDeliveryGraph } from "../app/deliveryGraphCompiler.ts";
 
@@ -182,11 +183,21 @@ export async function checkCompiledOutput(): Promise<AgentDefinitionCheckResult>
  * resourceId while CI stays green, and the engine would silently omit the link (the compiled agent
  * runs prompt-less). This gate derives the deployed prompt-resource ids the SAME way urban's
  * convention walk does (every file under `resources/`, id = path relative to `resources/`) and
- * fails on any mapping that names a resource id outside that set. `mappings` is injectable so the
- * red-path test can exercise a drifting entry without touching the real registry.
+ * fails on any mapping that names a resource id outside that set.
+ *
+ * It ALSO pins the registry against the hand-authored corpus (PR #886 review): the registry
+ * DUPLICATES the job-type→prompt links the authored BPMN authors per task, so the two producers can
+ * silently diverge — a mapping to a DIFFERENT but still-deployed prompt (e.g. `senior:feature` →
+ * `prompts/plan.md`) passes a resolve-only check while compiled feature cells receive the wrong base
+ * contract. The gate derives the corpus's actual job-type→prompt link via `promptLinkByTaskType` and
+ * fails on (a) any mapped type whose registry value differs from the corpus's link, and (b) any
+ * authored agent job type the registry omits (compiled cells of that type would get no base prompt).
+ * `mappings` and `docs` are injectable so the red-path test can exercise a drifting entry / corpus
+ * without touching the real registry or corpus.
  */
 export function checkJobTypePromptMappings(
   mappings: Readonly<Record<string, string>> = AGENT_JOB_TYPE_PROMPT,
+  docs: readonly AuthoredDoc[] = authoredDocs(),
 ): AgentDefinitionCheckResult {
   const errors: string[] = [];
   // The deployed resource ids, derived the SAME way urban's convention walk deploys them: every
@@ -205,6 +216,13 @@ export function checkJobTypePromptMappings(
     }
   };
   walk(RESOURCES_DIR);
+  // The authored corpus's actual job-type→prompt links (the relationship the registry duplicates).
+  const corpusLink: Record<string, string> = {};
+  for (const { xml } of docs) {
+    for (const [type, resourceId] of Object.entries(promptLinkByTaskType(xml))) {
+      if (!Object.hasOwn(corpusLink, type)) corpusLink[type] = resourceId;
+    }
+  }
   const agentTypes: string[] = [];
   for (const [jobType, resourceId] of Object.entries(mappings).sort(([a], [b]) => a.localeCompare(b))) {
     agentTypes.push(jobType);
@@ -215,6 +233,28 @@ export function checkJobTypePromptMappings(
           "compiled cell of this job type would run prompt-less. Point the mapping at a deployed " +
           "resources/prompts/*.md file (or add the prompt), and keep it in lock-step with the " +
           "hand-authored corpus's link for the same job type",
+      );
+    }
+    // Drift vs. the authored corpus: the registry must point at the SAME prompt the corpus links for
+    // this job type, or a compiled cell silently gets a different base contract than the authored task.
+    const authored = corpusLink[jobType];
+    if (authored !== undefined && authored !== resourceId) {
+      errors.push(
+        `AGENT_JOB_TYPE_PROMPT maps ${jobType} → "${resourceId}", but the hand-authored corpus links ` +
+          `"${authored}" for the same job type — the two producers have diverged, so a compiled cell ` +
+          "would receive a different base prompt than the authored task. Align the registry with the " +
+          "corpus link (or update the corpus) so both name the same deployed prompt",
+      );
+    }
+  }
+  // Coverage: every authored agent job type must have a registry mapping, or a compiled cell of that
+  // type would silently get no base prompt.
+  for (const type of Object.keys(corpusLink).sort()) {
+    if (!Object.hasOwn(mappings, type)) {
+      errors.push(
+        `the hand-authored corpus links a prompt for ${type} ("${corpusLink[type]}"), but ` +
+          "AGENT_JOB_TYPE_PROMPT has NO mapping for that job type — a compiled cell of it would run " +
+          "prompt-less. Add the mapping so the registry covers every authored agent job type",
       );
     }
   }
