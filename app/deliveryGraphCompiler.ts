@@ -136,8 +136,12 @@ export const AGENT_REPO_SPEC_HEADER = `${AGENT_TASK_NS}.__repoSpec`;
  * (the output/result contract, branch/PR discipline) that no per-node `prompt` carries — the exact
  * composition the hand-authored processes use (base prompt link + `appendPrompt`). Keyed by the FULL
  * job type so a newly-introduced `senior:<task>` with no deployed prompt is ABSENT here (no silent
- * wrong-prompt link); the compiler then emits NO link for it (see below) rather than guessing. */
-const AGENT_JOB_TYPE_PROMPT: Readonly<Record<string, string>> = {
+ * wrong-prompt link); the compiler then emits NO link for it (see below) rather than guessing.
+ * Exported so the repo-wide gate (`scripts/check-agent-definitions.ts`) can resolve EVERY entry
+ * against the deployed `resources/` prompt set — `check:prompts` scans only the hand-authored
+ * corpus's XML links, so without that gate an entry here could drift to an undeployed/typo'd
+ * resourceId while CI stays green and the engine silently omits the link (PR #886 review). */
+export const AGENT_JOB_TYPE_PROMPT: Readonly<Record<string, string>> = {
   "senior:adversarial-review": "prompts/adversarial-review.md",
   "senior:conformance": "prompts/conformance.md",
   "senior:feature": "prompts/feature.md",

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { assert, assertEquals } from "#test-assert";
 import type { Capability } from "@nanobpm/agentic/protocol";
 import { crewResolver } from "./crew-vocab.ts";
-import { jobTypeToRoutingToken, promptBearingTaskTypes } from "./job-types.ts";
+import { externalAgentTaskTypesMissingMarker, jobTypeToRoutingToken, promptBearingTaskTypes } from "./job-types.ts";
 
 const PROCESSES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../resources/processes");
 
@@ -104,4 +104,74 @@ test("DEFECT-CLASS GUARD: every deployed prompt-bearing agent job type resolves 
       `deployed agent job type ${jobType} resolves to ${token}, which no enrolled senior worker supplies — wire it into the crew vocab`,
     );
   }
+});
+
+test("externalAgentTaskTypesMissingMarker flags an UNMAPPED (prompt-less) agent task with no marker", () => {
+  // The prompt-keyed scanner (`agentTaskTypesMissingExternalMarker`) cannot see this block — it has no
+  // prompt link. The marker scan must key on the colon-form job type ALONE (issue #886 review): a
+  // compiled delivery-graph cell for a bespoke `senior:<task>` (no deployed base prompt, deliberately
+  // prompt-less) must still carry the marker or it runs transcript-less.
+  const xml = `
+    <bpmn:serviceTask id="agent">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:bespoke" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(externalAgentTaskTypesMissingMarker(xml), ["senior:bespoke"]);
+});
+
+test("externalAgentTaskTypesMissingMarker passes a marked prompt-less agent task and ignores a plain host task", () => {
+  const xml = `
+    <bpmn:serviceTask id="host">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.finalize" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="agent">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:bespoke" />
+        <zeebe:agentDefinition agentType="external" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(externalAgentTaskTypesMissingMarker(xml), []);
+});
+
+test("externalAgentTaskTypesMissingMarker flags a marked-outside-extensionElements task (placement contract)", () => {
+  // A marker sitting OUTSIDE `<bpmn:extensionElements>` is ignored by the engine, so it must not
+  // "cover" the task here either (the same placement scope the prompt-keyed scanner enforces).
+  const xml = `
+    <bpmn:serviceTask id="agent">
+      <zeebe:agentDefinition agentType="external" />
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:bespoke" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(externalAgentTaskTypesMissingMarker(xml), ["senior:bespoke"]);
+});
+
+test("externalAgentTaskTypesMissingMarker ignores malformed/non-agent types (no false positives)", () => {
+  // Only a `<rank>:<task>` colon-form type (the `jobTypeToRoutingToken` grammar) keys a block as an
+  // agent task: a dot-form host job, a typeless block, and a malformed colon form are all out of
+  // scope — the scanner must not flag them as unmarked agents.
+  const xml = `
+    <bpmn:serviceTask id="host1">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.finalize" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="host2">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:feature:extra" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="host3">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="host4">
+      <bpmn:extensionElements>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(externalAgentTaskTypesMissingMarker(xml), []);
 });
