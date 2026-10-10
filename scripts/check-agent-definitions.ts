@@ -6,41 +6,47 @@
 // so the agent run persists NO durable agentic transcript — the exact #884 failure (269 failed creates
 // on omarchy across three compiled delivery-graph processes).
 //
-// The defect CLASS is "every agent service task the app generates", and there are TWO producers:
+// The defect CLASS is "every agent service task the app generates", and there are TWO producers.
+// Both are checked against the SAME union invariant `missingExternalMarkerAgentTaskTypes`
+// (`app/agentic/vocab/job-types.ts`) — the union of the two marker scanners, each of which alone has
+// a blind spot (PR #886 review):
 //
-//   1. The HAND-AUTHORED corpus — `resources/processes/*.bpmn`. The canonical scanner
-//      (`agentTaskTypesMissingExternalMarker`, `app/agentic/vocab/job-types.ts`) keys a service task as
-//      an AGENT by its `<zeebe:linkedResource … linkName="prompt">` (the base-prompt link every fleet
-//      agent task carries) and fails any such task with no external marker. This is the SAME scan the
-//      `agent-marker.test.ts` unit guard runs — kept here as a standalone, fast CI gate (alongside
-//      `check:prompts`) so the corpus invariant is visible as its own check, not only inside the test
-//      suite.
+//   • the prompt-keyed `agentTaskTypesMissingExternalMarker` keys a task as an AGENT by its
+//     `<zeebe:linkedResource … linkName="prompt">` (the base-prompt link a fleet agent task carries),
+//     so it cannot see a DELIBERATELY prompt-less agent cell; and
+//   • the type-keyed `externalAgentTaskTypesMissingMarker` keys it by its `<rank>:<task>` colon-form
+//     type ALONE, covering the prompt-less case.
+//
+// Scanning a corpus with only ONE leaves the other's blind spot open — a `senior:*` task that loses
+// BOTH its prompt link and its marker would pass a prompt-keyed-only gate. The union closes that for
+// every producer:
+//
+//   1. The HAND-AUTHORED corpus — `resources/processes/**.bpmn`. `checkAuthoredProcesses` runs the
+//      union over every deployed model. This is the SAME invariant the `agent-marker.test.ts` unit
+//      guard rests on — kept here as a standalone, fast CI gate (alongside `check:prompts`) so the
+//      corpus invariant is visible as its own check, not only inside the test suite.
 //
 //   2. The delivery-graph COMPILER (`app/deliveryGraphCompiler.ts`) — the producer #884 caught. Its
 //      compiled cells carried NO marker AND no prompt link, so they were invisible to the
 //      prompt-link-keyed scanner. The compiler now emits the marker on EVERY `agent` cell and links
-//      the job type's base prompt via `AGENT_JOB_TYPE_PROMPT` for a MAPPED job type (a bespoke
+//      the job type's base prompt via `promptForJobType` for a MAPPED job type (a bespoke
 //      `senior:<task>` with no deployed prompt is deliberately prompt-LESS). This gate compiles a
-//      representative graph — including an UNMAPPED, prompt-less probe cell — and runs BOTH scanners
-//      over the OUTPUT: the prompt-keyed one (mapped cells) and the type-keyed
-//      `externalAgentTaskTypesMissingMarker`, which keys a task as an agent by its `<rank>:<task>`
-//      colon-form type ALONE, so a marker regression on a prompt-less cell cannot hide behind the
-//      prompt-keyed scan's blind spot (PR #886 review). It also resolves EVERY
-//      `AGENT_JOB_TYPE_PROMPT` entry against the deployed `resources/` prompt set, so a mapping
-//      cannot drift to an undeployed resourceId while CI stays green (the engine silently omits an
-//      unresolvable link — the agent would run prompt-less).
+//      representative graph — including an UNMAPPED, prompt-less probe cell — and runs the SAME union
+//      over the OUTPUT, so a marker regression on a prompt-less cell cannot hide behind the
+//      prompt-keyed scan's blind spot. It also resolves EVERY `AGENT_JOB_TYPE_PROMPT` entry against
+//      the deployed `resources/` prompt set, so a mapping cannot drift to an undeployed resourceId
+//      while CI stays green (the engine silently omits an unresolvable link — the agent would run
+//      prompt-less).
 //
-// In the hand-authored corpus a `senior:*` task is identified by its prompt link (not the `senior:`
-// prefix alone) because that is what makes it a fleet AGENT task the harness serves; a plain host job
-// (`pr.finalize`) carries no prompt link and is correctly out of scope there. The scanners are the
-// ONE canonical implementations — this gate DERIVES all its halves from them rather than
-// re-implementing a second, driftable regex.
+// In the hand-authored corpus a `senior:*` task is identified by its prompt link OR its colon-form
+// type; a plain host job (`pr.finalize`, dot-form, no prompt link) is correctly out of scope. The
+// scanners are the ONE canonical implementations — this gate DERIVES all its halves from them rather
+// than re-implementing a second, driftable regex.
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  agentTaskTypesMissingExternalMarker,
-  externalAgentTaskTypesMissingMarker,
+  missingExternalMarkerAgentTaskTypes,
   promptBearingTaskTypes,
 } from "../app/agentic/vocab/job-types.ts";
 import { AGENT_JOB_TYPE_PROMPT, compileDeliveryGraph } from "../app/deliveryGraphCompiler.ts";
@@ -74,14 +80,29 @@ export interface AgentDefinitionCheckResult {
   agentTypes: string[];
 }
 
-/** Scan the HAND-AUTHORED deployed corpus (`resources/processes/*.bpmn`). */
-export function checkAuthoredProcesses(): AgentDefinitionCheckResult {
+/** One hand-authored BPMN document to scan: its path (relative to `resources/processes`) and XML. */
+export interface AuthoredDoc {
+  file: string;
+  xml: string;
+}
+
+/** Read the hand-authored deployed corpus (`resources/processes/**.bpmn`) off disk. */
+function authoredDocs(): AuthoredDoc[] {
+  return bpmnFiles().map((file) => ({ file, xml: readFileSync(join(PROCESSES_DIR, file), "utf8") }));
+}
+
+/**
+ * Scan the HAND-AUTHORED deployed corpus (`resources/processes/**.bpmn`). `docs` is injectable so the
+ * red-path test can feed a drifting document without writing to the corpus; it defaults to the real
+ * on-disk corpus. Every agent task — prompt-bearing OR deliberately prompt-less — must carry the
+ * external marker, so this holds the SAME union invariant as the compiled half (PR #886 review).
+ */
+export function checkAuthoredProcesses(docs: readonly AuthoredDoc[] = authoredDocs()): AgentDefinitionCheckResult {
   const errors: string[] = [];
   const agentTypes = new Set<string>();
-  for (const file of bpmnFiles()) {
-    const xml = readFileSync(join(PROCESSES_DIR, file), "utf8");
+  for (const { file, xml } of docs) {
     for (const t of promptBearingTaskTypes(xml)) agentTypes.add(t);
-    const missing = agentTaskTypesMissingExternalMarker(xml);
+    const missing = missingExternalMarkerAgentTaskTypes(xml);
     if (missing.length > 0) {
       errors.push(
         `resources/processes/${file}: agent task(s) missing <zeebe:agentDefinition agentType="external" /> — ` +
@@ -128,23 +149,18 @@ export async function checkCompiledOutput(): Promise<AgentDefinitionCheckResult>
         "prompt (linkName=\"prompt\"), so the agentDefinition scan cannot see them (issue #884)",
     );
   }
-  const missing = agentTaskTypesMissingExternalMarker(r.bpmn);
+  // Inspect EVERY generated agent service task for the marker via the single union invariant
+  // (`missingExternalMarkerAgentTaskTypes`) — it keys a task by its prompt link AND by its colon-form
+  // type, so it sees the prompt-less unmapped probe cell too. A compiler regression that drops the
+  // marker on a cell whose prompt link is absent (or was dropped with it) can no longer hide behind
+  // the prompt-keyed scan's blind spot (PR #886 review). The prompt-bearing assertion above is a
+  // separate, stronger check (the mapped cells must ALSO stay prompt-bearing), not a marker scan.
+  const missing = missingExternalMarkerAgentTaskTypes(r.bpmn);
   if (missing.length > 0) {
     errors.push(
       `compiled delivery-graph agent cell(s) missing <zeebe:agentDefinition agentType="external" /> — ` +
-        `${missing.join(", ")} (the compiler must emit the marker on every agent cell, issue #884)`,
-    );
-  }
-  // … then inspect EVERY generated agent service task for the marker INDEPENDENTLY of prompt-bearing
-  // status (PR #886 review): the type-keyed scan sees the prompt-less unmapped probe cell too, so a
-  // compiler regression that drops the marker on a cell whose prompt link is absent (or was dropped
-  // with it) can no longer hide behind the prompt-keyed scan's blind spot.
-  const missingTypeKeyed = externalAgentTaskTypesMissingMarker(r.bpmn);
-  if (missingTypeKeyed.length > 0) {
-    errors.push(
-      `compiled delivery-graph agent cell(s) missing <zeebe:agentDefinition agentType="external" /> ` +
-        `(type-keyed scan, prompt-link-independent) — ${missingTypeKeyed.join(", ")} (the compiler must ` +
-        "emit the marker on EVERY agent cell, including a prompt-less unmapped one, issue #884)",
+        `${missing.join(", ")} (the compiler must emit the marker on EVERY agent cell, including a ` +
+        "prompt-less unmapped one, issue #884)",
     );
   }
   // Sanity: the unmapped probe cell really compiled into the output (the type-keyed scan is not

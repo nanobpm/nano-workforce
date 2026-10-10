@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { assert, assertEquals } from "#test-assert";
 import type { Capability } from "@nanobpm/agentic/protocol";
 import { crewResolver } from "./crew-vocab.ts";
-import { externalAgentTaskTypesMissingMarker, jobTypeToRoutingToken, promptBearingTaskTypes } from "./job-types.ts";
+import { externalAgentTaskTypesMissingMarker, jobTypeToRoutingToken, missingExternalMarkerAgentTaskTypes, promptBearingTaskTypes } from "./job-types.ts";
 
 const PROCESSES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../resources/processes");
 
@@ -174,4 +174,66 @@ test("externalAgentTaskTypesMissingMarker ignores malformed/non-agent types (no 
       </bpmn:extensionElements>
     </bpmn:serviceTask>`;
   assertEquals(externalAgentTaskTypesMissingMarker(xml), []);
+});
+
+test("missingExternalMarkerAgentTaskTypes unions BOTH scanners — catches a prompt-bearing AND a prompt-less unmarked agent task", () => {
+  // The single "every agent task carries the external marker" invariant (PR #886 review): a
+  // prompt-BEARING senior:* task that loses its marker is caught only by the prompt-keyed scanner,
+  // while a prompt-LESS senior:* task that loses its marker is caught only by the type-keyed scanner.
+  // Scanning by just one leaves the other's blind spot open, so the union must flag BOTH in one pass.
+  const xml = `
+    <bpmn:serviceTask id="prompted">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:feature" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="prompts/feature.md" linkName="prompt" />
+        </zeebe:linkedResources>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="bespoke">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:bespoke" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(missingExternalMarkerAgentTaskTypes(xml), ["senior:feature", "senior:bespoke"]);
+});
+
+test("missingExternalMarkerAgentTaskTypes passes when every agent task is marked and ignores host tasks", () => {
+  const xml = `
+    <bpmn:serviceTask id="host">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.finalize" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="prompted">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:feature" />
+        <zeebe:agentDefinition agentType="external" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="prompts/feature.md" linkName="prompt" />
+        </zeebe:linkedResources>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="bespoke">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:bespoke" />
+        <zeebe:agentDefinition agentType="external" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(missingExternalMarkerAgentTaskTypes(xml), []);
+});
+
+test("missingExternalMarkerAgentTaskTypes de-duplicates a type caught by both scanners", () => {
+  // A prompt-bearing task missing its marker is seen by BOTH the prompt-keyed and the type-keyed
+  // scanner; the union must report it ONCE, not twice.
+  const xml = `
+    <bpmn:serviceTask id="prompted">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:feature" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="prompts/feature.md" linkName="prompt" />
+        </zeebe:linkedResources>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(missingExternalMarkerAgentTaskTypes(xml), ["senior:feature"]);
 });

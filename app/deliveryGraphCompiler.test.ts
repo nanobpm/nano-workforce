@@ -248,6 +248,25 @@ test("#884 linkedResource: a compiled agent cell links its job type's deployed b
   assert(!bespoke.bpmn.includes('linkName="prompt"'), "an unmapped job type links no base prompt (never a wrong/nonexistent one)");
 });
 
+test("#884 linkedResource: a prototype-chain jobType links NO base prompt (own-property guard)", async () => {
+  // Bug class (PR #886 review): `AGENT_JOB_TYPE_PROMPT` is a plain object used as a lookup map, and
+  // `jobType` is graph-author input. A `jobType` that names an INHERITED `Object.prototype` key
+  // (`constructor`, `__proto__`, `toString`, `hasOwnProperty`, …) resolves through the prototype
+  // chain to a function/object — `!== undefined` — so a bare-index guard emits a BOGUS linkedResource
+  // (e.g. `resourceId="function Object() { [native code] }"`) instead of linking NOTHING as the
+  // contract promises for an unmapped job type. The accessor must require an OWN entry. None of these
+  // is a real deployed prompt, so each must link nothing — exactly like any other unmapped job type.
+  for (const jobType of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+    const r = await compileOk({ nodes: [{ id: "p", kind: "agent", agent: { jobType } }], edges: [] });
+    assert(
+      !r.bpmn.includes('linkName="prompt"'),
+      `prototype-chain jobType ${JSON.stringify(jobType)} must link NO base prompt, got:\n${
+        r.bpmn.split("\n").filter((l) => l.includes("linkedResource")).join("\n")
+      }`,
+    );
+  }
+});
+
 test("late-binding: a fact-qualified edge threads a boundFacts input into the consumer subProcess", async () => {
   const r = await compileOk(RELEASE_RUNBOOK);
   // `publish.resolvedArtifact -> consume`: the connector subProcess receives the human's emitted fact as

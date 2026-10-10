@@ -157,6 +157,19 @@ export const AGENT_JOB_TYPE_PROMPT: Readonly<Record<string, string>> = {
   "senior:trial-merge": "prompts/trial-merge.md",
 };
 
+/**
+ * Resolve a graph-authored `jobType` to its DEPLOYED base-prompt resource id, or `undefined` when the
+ * job type names no deployed prompt. `AGENT_JOB_TYPE_PROMPT` is a plain object used as a lookup map
+ * and `jobType` is graph-author input, so a bare `map[jobType]` index would resolve an INHERITED
+ * `Object.prototype` key (`constructor`, `__proto__`, `toString`, `hasOwnProperty`, …) to a
+ * function/object — `!== undefined` — and emit a BOGUS `linkedResource` instead of linking nothing as
+ * the contract promises for an unmapped job type (PR #886 review). The own-property check fails closed:
+ * only a real OWN entry resolves, so every unmapped job type (prototype-chain name or not) links
+ * nothing. This is the ONE accessor for the map — index it nowhere else with raw input. */
+export function promptForJobType(jobType: string): string | undefined {
+  return Object.hasOwn(AGENT_JOB_TYPE_PROMPT, jobType) ? AGENT_JOB_TYPE_PROMPT[jobType] : undefined;
+}
+
 /** The engine-native BODY every node kind delegates to (Decision 2 — the graph SCHEDULES, it does not
  * re-implement execution). Each node compiles to an EMBEDDED `bpmn:subProcess` (call activities are a
  * no-op on the pinned WASM engine — the child is never instantiated — so, like the rest of the
@@ -2162,16 +2175,18 @@ function serviceBodyLines(
     // linked base prompt supplies the SHARED agent contract (the output/result envelope, branch/PR
     // discipline) that the per-node `appendPrompt` steering never carries; `bindingType="latest"`
     // resolves the latest deployed prompt at job activation (a mid-run prompt update lands without a
-    // graph redeploy). Resolved from the RAW jobType via {@link AGENT_JOB_TYPE_PROMPT}; a job type
+    // graph redeploy). Resolved from the RAW jobType via {@link promptForJobType} (an own-property
+    // lookup over {@link AGENT_JOB_TYPE_PROMPT} — a prototype-chain jobType like `constructor` resolves
+    // to nothing, never a bogus link); a job type
     // with no deployed prompt (a bespoke/external `senior:<task>` the graph author names) links
     // NOTHING rather than a wrong/nonexistent prompt — the engine silently omits an unresolvable
     // link, so emitting one would be a silent no-op anyway, and the per-node `appendPrompt` still
     // steers the cell. `resourceId` comes from the fixed map (never the raw jobType), so no
     // graph-authored value reaches the attribute.
-    ...(kind === "agent" && jobType !== undefined && AGENT_JOB_TYPE_PROMPT[jobType] !== undefined
+    ...(kind === "agent" && jobType !== undefined && promptForJobType(jobType) !== undefined
       ? [
           "          <zeebe:linkedResources>",
-          `            <zeebe:linkedResource resourceId="${AGENT_JOB_TYPE_PROMPT[jobType]}" bindingType="latest" resourceType="GenericScript" linkName="prompt" />`,
+          `            <zeebe:linkedResource resourceId="${promptForJobType(jobType)}" bindingType="latest" resourceType="GenericScript" linkName="prompt" />`,
           "          </zeebe:linkedResources>",
         ]
       : []),

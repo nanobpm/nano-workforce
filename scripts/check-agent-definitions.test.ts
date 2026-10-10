@@ -97,3 +97,41 @@ test("check-agent-definitions: a mapping to an undeployed prompt resource fails"
     `the error names the drifting mapping, got ${JSON.stringify(r.errors)}`,
   );
 });
+
+test("check-agent-definitions: the authored half unions BOTH scanners — a prompt-less + marker-less senior:* task fails", () => {
+  // The authored-process half must hold the SAME "every senior:* task carries the marker" invariant
+  // the compiled half does (PR #886 review). A hand-authored senior:* task that loses BOTH its prompt
+  // link and its marker is invisible to the prompt-keyed scanner, so a prompt-keyed-only authored gate
+  // reports ok — the false-negative the compiled half already closes. Inject a doc with exactly that
+  // shape and assert the gate flags it (via the type-keyed half of the union).
+  const bad = `
+    <bpmn:serviceTask id="agent">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:bespoke-unmapped" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  const r = checkAuthoredProcesses([{ file: "bad.bpmn", xml: bad }]);
+  assert(!r.ok, "a prompt-less + marker-less senior:* authored task must fail the gate");
+  assert(
+    r.errors.some((e) => e.includes("bad.bpmn") && e.includes("senior:bespoke-unmapped")),
+    `the error names the unmarked prompt-less task, got ${JSON.stringify(r.errors)}`,
+  );
+});
+
+test("check-agent-definitions: the authored half still flags a prompt-BEARING task that lost its marker", () => {
+  const bad = `
+    <bpmn:serviceTask id="agent">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:feature" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="prompts/feature.md" linkName="prompt" />
+        </zeebe:linkedResources>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  const r = checkAuthoredProcesses([{ file: "bad.bpmn", xml: bad }]);
+  assert(!r.ok, "a prompt-bearing senior:* authored task without a marker must fail the gate");
+  assert(
+    r.errors.some((e) => e.includes("bad.bpmn") && e.includes("senior:feature")),
+    `the error names the unmarked prompt-bearing task, got ${JSON.stringify(r.errors)}`,
+  );
+});
