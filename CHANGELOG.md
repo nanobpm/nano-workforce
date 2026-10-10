@@ -1,3 +1,9 @@
+## [0.201.3](https://github.com/nanobpm/nano-workforce/compare/v0.201.2...v0.201.3) (2026-10-10)
+
+### Bug Fixes
+
+* **repo-envelope:** emit branch.create as a top-level sibling of repository ([#885](https://github.com/nanobpm/nano-workforce/issues/885)) ([abb7b1c](https://github.com/nanobpm/nano-workforce/commit/abb7b1cc8439229724668fa85ffac22afd95c470)), closes [nanobpm/nano-bpm#1344](https://github.com/nanobpm/nano-bpm/issues/1344) [#227](https://github.com/nanobpm/nano-workforce/issues/227) [#882](https://github.com/nanobpm/nano-workforce/issues/882)
+
 ## [0.201.2](https://github.com/nanobpm/nano-workforce/compare/v0.201.1...v0.201.2) (2026-10-08)
 
 ### Bug Fixes
