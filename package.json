@@ -37,6 +37,7 @@
     "typecheck": "tsc --noEmit",
     "pretypecheck": "urban gen",
     "check:prompts": "node --experimental-strip-types scripts/check-agent-prompts.ts",
+    "check:agent-definitions": "node --experimental-strip-types scripts/check-agent-definitions.ts",
     "check:migrations": "node --experimental-strip-types scripts/check-migrations.ts",
     "heal:migrations": "node --experimental-strip-types scripts/heal-migration-ledger.ts",
     "check:contracts": "node --experimental-strip-types scripts/check-contracts.ts",
