@@ -131,22 +131,24 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
     // rides down through the wave subprocess + `implement-cell-call` callActivity into each agent job.
     // The epic seed carries the BASE branch as `ref` but NO `branch.create` — each slice's
     // `feat/<task.id>` differs per MI child, so the agent cuts its own branch inside the clone.
-    let agentRepo: any = null;
+    let agentTask: any = null;
     await withApp(
       {
         "senior:plan": singleTaskPlan,
         "senior:plan-review": approveReview,
         "senior:feature": (job) => {
-          agentRepo = (job.variables as Record<string, any>)["io.nanobpm.agentTask"]?.repository ?? null;
+          agentTask = (job.variables as Record<string, any>)["io.nanobpm.agentTask"] ?? null;
           return { status: "blocked", summary: "n/a" };
         },
       },
       async ({ app }) => {
         await app.settle();
-        assert.ok(agentRepo, "the epic slice's senior:feature job carried the io.nanobpm.agentTask envelope");
+        assert.ok(agentTask, "the epic slice's senior:feature job carried the io.nanobpm.agentTask envelope");
+        const agentRepo = agentTask.repository;
         assert.equal(agentRepo.url, "https://github.com/owner/repo.git", "the harness clones the target repo");
         assert.equal(agentRepo.ref, "epic/e2e", "the epic seed checks out the BASE (integration) branch");
-        assert.equal("branch" in agentRepo, false, "the epic seed omits branch.create — the agent branches per slice");
+        // `branch` is a top-level sibling of `repository` (#882); the epic seed omits it entirely.
+        assert.equal("branch" in agentTask, false, "the epic seed omits branch.create — the agent branches per slice");
         assert.equal(agentRepo.singleBranch, true, "the blobless/single-branch monorepo shaping rides along");
         assert.equal(agentRepo.filter, "blob:none");
       },

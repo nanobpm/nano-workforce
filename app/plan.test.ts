@@ -244,10 +244,13 @@ test("startPlan pins the base branch: persisted on the row + seeded as baseBranc
   // Host-git provisioning (#684): the whole-epic repository envelope so each slice's implementation
   // agent gets an isolated clone. The epic seed checks out the BASE branch (`ref`) — each slice's
   // `feat/<task.id>` branch differs per MI child, so NO `branch.create` here (the agent branches).
-  const repo = seen["io.nanobpm.agentTask"].repository;
+  const ns = seen["io.nanobpm.agentTask"];
+  const repo = ns.repository;
   assertEquals(repo.url, "https://github.com/owner/repo.git");
   assertEquals(repo.ref, "epic/agent-protocol");
-  assertEquals("branch" in repo, false);
+  // No isolation branch on the epic seed — `branch` is a top-level sibling of `repository` (#882),
+  // and it is omitted entirely here.
+  assertEquals("branch" in ns, false);
   assertEquals(repo.singleBranch, true);
   assertEquals(repo.filter, "blob:none");
 });

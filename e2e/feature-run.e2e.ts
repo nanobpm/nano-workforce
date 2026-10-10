@@ -133,11 +133,11 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
     // carries — proof the implement-cell agent gets an ISOLATED clone (base branch + a harness-cut
     // `feat/<task.id>`) instead of inheriting the worker's launch dir. It rides the process variable
     // all the way down through feature.bpmn's `implement` callActivity into the cell's agent job.
-    let agentRepo: any = null;
+    let agentTask: any = null;
     await withApp(
       {
         "senior:feature": (job) => {
-          agentRepo = (job.variables as Record<string, any>)["io.nanobpm.agentTask"]?.repository ?? null;
+          agentTask = (job.variables as Record<string, any>)["io.nanobpm.agentTask"] ?? null;
           return { status: "opened", pr: "owner/repo#101", summary: "built it" };
         },
       },
@@ -150,10 +150,12 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
         );
         assert.ok(!flows.includes("gw-converge->converge"), "the converge hand-off branch was NOT taken");
 
-        assert.ok(agentRepo, "the senior:feature job carried the io.nanobpm.agentTask repository envelope");
+        assert.ok(agentTask, "the senior:feature job carried the io.nanobpm.agentTask repository envelope");
+        const agentRepo = agentTask.repository;
         assert.equal(agentRepo.url, "https://github.com/owner/repo.git", "the harness clones the target repo");
         assert.equal(agentRepo.ref, "epic/e2e", "a PRE-PR job checks out the BASE branch, not a head");
-        assert.equal(agentRepo.branch.create, "feat/issue-7", "the harness cuts the deterministic feature branch");
+        // `branch` is a TOP-LEVEL sibling of `repository` (issue #882) — the harness reads it from the root.
+        assert.equal(agentTask.branch.create, "feat/issue-7", "the harness cuts the deterministic feature branch");
 
         const run = await featureRow(app, featureKey);
         assert.equal(run.status, "opened", "the run settled at opened");

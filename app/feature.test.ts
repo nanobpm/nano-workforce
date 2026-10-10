@@ -196,11 +196,13 @@ test("startFeature: seeds the pre-PR repository envelope so the harness provisio
   // shared launch dir; with it, the harness clones a throwaway workspace. The implementation path is
   // PRE-PR, so it checks out the BASE branch (`ref`) and the harness cuts the deterministic
   // `feat/<task.id>` feature branch off it (`branch.create`).
-  const repo = (captured.variables as Record<string, any>)["io.nanobpm.agentTask"].repository;
+  const ns = (captured.variables as Record<string, any>)["io.nanobpm.agentTask"];
+  const repo = ns.repository;
   assertEquals(repo.url, "https://github.com/owner/repo.git");
   assertEquals(repo.ref, "epic/x");
-  assertEquals(repo.branch.create, "feat/issue-42");
-  assertEquals(repo.branch.create, `feat/${featureTaskId(PARSED.number)}`);
+  // `branch` is a TOP-LEVEL sibling of `repository` (issue #882) — the harness reads it from the root.
+  assertEquals(ns.branch.create, "feat/issue-42");
+  assertEquals(ns.branch.create, `feat/${featureTaskId(PARSED.number)}`);
   // The blobless/single-branch monorepo shaping rides along, exactly like the PR-based envelope.
   assertEquals(repo.singleBranch, true);
   assertEquals(repo.filter, "blob:none");

@@ -1415,27 +1415,30 @@ test("repoEnvelopeVars emits the push-checkpoint under the harness-read `sha` ke
 // to `ref`) so the harness commits/pushes to the PR head branch instead of cutting a throwaway
 // `nano/agent-work/*` fallback (jwulf/c8ctl-plugin-nano#231); see the PR-path test below.
 test("repoEnvelopeVars emits branch.create only for a non-blank pre-PR branch (#684)", () => {
-  const repo = (repoEnvelopeVars("owner/repo", "main", null, null, "feat/issue-7") as any)["io.nanobpm.agentTask"]
-    .repository;
+  const envelope = repoEnvelopeVars("owner/repo", "main", null, null, "feat/issue-7") as any;
+  const ns = envelope["io.nanobpm.agentTask"];
+  const repo = ns.repository;
   assertEquals(repo.ref, "main", "the pre-PR envelope checks out the BASE branch as its ref");
-  assertEquals(repo.branch.create, "feat/issue-7", "the harness cuts the deterministic feature branch off the base");
+  // `branch` is a TOP-LEVEL sibling of `repository` (issue #882) — the harness reads it from the
+  // envelope root, NOT from `repository.branch`.
+  assertEquals(ns.branch.create, "feat/issue-7", "the harness cuts the deterministic feature branch off the base");
+  assertEquals("branch" in repo, false, "branch must NOT be nested under repository — the harness never reads it there");
   // Still branch-scoped and blobless like the PR-based envelope.
   assertEquals(repo.singleBranch, true);
   assertEquals(repo.filter, "blob:none");
   // A whitespace-tainted branch is trimmed; a blank/absent one omits the `branch` key entirely so the
   // PR-based paths (and any caller that doesn't pre-create a branch) are unaffected.
   assertEquals(
-    (repoEnvelopeVars("owner/repo", "main", null, null, "  feat/issue-9  ") as any)["io.nanobpm.agentTask"].repository
+    (repoEnvelopeVars("owner/repo", "main", null, null, "  feat/issue-9  ") as any)["io.nanobpm.agentTask"]
       .branch.create,
     "feat/issue-9",
   );
   for (const blank of [null, undefined, "", "   "]) {
-    const r = (repoEnvelopeVars("owner/repo", "main", null, null, blank as any) as any)["io.nanobpm.agentTask"]
-      .repository;
+    const r = (repoEnvelopeVars("owner/repo", "main", null, null, blank as any) as any)["io.nanobpm.agentTask"];
     assertEquals("branch" in r, false, `expected no branch key for ${JSON.stringify(blank)}`);
   }
   // The default (4-arg) PR-based call never emits a branch.create.
-  assertEquals("branch" in (repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"].repository, false);
+  assertEquals("branch" in (repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"], false);
 });
 
 // PR-path provisioning (jwulf/c8ctl-plugin-nano#231): the review-round / fix-ci / rebase call sites
@@ -1445,11 +1448,13 @@ test("repoEnvelopeVars emits branch.create only for a non-blank pre-PR branch (#
 // `ref == create == head` the harness does a no-op `checkout -B <head>` and commits/pushes to the PR
 // head branch itself.
 test("repoEnvelopeVars emits branch.create = head on the PR path (ref == create == head) (#231)", () => {
-  const repo = (repoEnvelopeVars("owner/repo", "feat/issue-12", "main", null, "feat/issue-12") as any)[
+  const ns = (repoEnvelopeVars("owner/repo", "feat/issue-12", "main", null, "feat/issue-12") as any)[
     "io.nanobpm.agentTask"
-  ].repository;
+  ];
+  const repo = ns.repository;
   assertEquals(repo.ref, "feat/issue-12", "the PR-path envelope checks out the head branch");
-  assertEquals(repo.branch.create, "feat/issue-12", "and asks the harness to work on that same head branch, not a fallback");
+  // `branch` is a TOP-LEVEL sibling of `repository` (issue #882), read by the harness from the root.
+  assertEquals(ns.branch.create, "feat/issue-12", "and asks the harness to work on that same head branch, not a fallback");
   // Still branch-scoped and blobless, and the base tip stays reachable for the 3-dot diff.
   assertEquals(repo.singleBranch, true);
   assertEquals(repo.filter, "blob:none");
@@ -1496,9 +1501,9 @@ test("submitPr threads the resolved PR head into the envelope branch.create (#23
       url: "https://github.com/owner/repo/pull/12",
       prKey: "owner/repo#12",
     });
-    const repo = (get()?.["io.nanobpm.agentTask"] as any)?.repository;
-    assertEquals(repo?.ref, "feat/issue-12", "submitPr checks out the PR head branch");
-    assertEquals(repo?.branch?.create, "feat/issue-12", "submitPr passes headRef as branch.create, not a fallback");
+    const ns = get()?.["io.nanobpm.agentTask"] as any;
+    assertEquals(ns?.repository?.ref, "feat/issue-12", "submitPr checks out the PR head branch");
+    assertEquals(ns?.branch?.create, "feat/issue-12", "submitPr passes headRef as branch.create, not a fallback");
   });
 });
 
@@ -1521,9 +1526,9 @@ test("startMerge threads the resolved PR head into the envelope branch.create (#
       prKey: "owner/repo#13",
       round: 2,
     });
-    const repo = (get()?.["io.nanobpm.agentTask"] as any)?.repository;
-    assertEquals(repo?.ref, "feat/issue-13", "startMerge checks out the PR head branch");
-    assertEquals(repo?.branch?.create, "feat/issue-13", "startMerge passes headRef as branch.create, not a fallback");
+    const ns = get()?.["io.nanobpm.agentTask"] as any;
+    assertEquals(ns?.repository?.ref, "feat/issue-13", "startMerge checks out the PR head branch");
+    assertEquals(ns?.branch?.create, "feat/issue-13", "startMerge passes headRef as branch.create, not a fallback");
   });
 });
 
