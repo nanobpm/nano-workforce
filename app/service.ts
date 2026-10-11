@@ -2586,7 +2586,10 @@ export async function pollPromotion(data: DataLayer, engine: EngineClient, token
         }
         if (prStatus === null) {
           const parsed = parsePr(plan.promotion_pr);
-          if (parsed) await submitPr(data, engine, parsed);
+          // Thread the epic's escalation-steward opt-in (issue #889 review) so a re-enrolled
+          // promotion PR inherits the parent epic's enrolment rather than dropping to the `false`
+          // default (which would also overwrite a previously persisted opt-in with 0).
+          if (parsed) await submitPr(data, engine, parsed, [], MAX_ROUNDS, false, null, false, plan.auto_resolve_escalations === 1);
         }
         continue;
       }
@@ -2623,7 +2626,9 @@ export async function pollPromotion(data: DataLayer, engine: EngineClient, token
         updated_at: now(),
       });
       const parsed = parsePr(promotionPrKey);
-      if (parsed) await submitPr(data, engine, parsed);
+      // Thread the epic's escalation-steward opt-in (issue #889 review) so the freshly opened
+      // promotion PR is enrolled with the parent epic's enrolment, not the `false` default.
+      if (parsed) await submitPr(data, engine, parsed, [], MAX_ROUNDS, false, null, false, plan.auto_resolve_escalations === 1);
       console.log(
         `[poller] promotion PR ${result.created ? "opened" : "reused"} ${promotionPrKey} (${base} -> ${target})`,
       );
@@ -2732,6 +2737,10 @@ export async function pollFeatureDelivery(
             run.auto_merge !== 1,
             run.feature_key,
             run.human_approval === 1,
+            // Thread the run's escalation-steward opt-in (issue #889 review) so a re-enrolled PR
+            // inherits the feature run's enrolment — and a partial-enrollment repair never overwrites
+            // the PR row's previously persisted opt-in with the `false` default.
+            run.auto_resolve_escalations === 1,
           );
         }
       }

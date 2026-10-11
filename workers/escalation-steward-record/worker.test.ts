@@ -14,6 +14,7 @@ import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
 import { taskCompletions } from "../../app/agentCompletion.ts";
+import { recordAgentJobObservation } from "../../app/agentActivationLedger.ts";
 import { claimEscalations, escalationAutoResolutions, LOOP_GUARD_MAX_RESOLUTIONS, recordResolution } from "../../app/escalationSteward.ts";
 import type { UserTaskRow } from "../../app/userTasks.ts";
 import handler from "./worker.ts";
@@ -118,6 +119,24 @@ test("record worker: a destructive/irreversible choice (abandon) is abstained, n
   );
 });
 
+test("record worker: a benign `choice` paired with a destructive `variables` value is abstained (variables win over the hint)", async () => {
+  await run(
+    // The auxiliary `choice` says "retry" but the submitted variables carry `resolution: "abandon"` —
+    // the destructive guard must derive the selected value from the variables FIRST, never wave the
+    // destructive submission through on the benign hint.
+    [{ userTaskKey: "UT-1", outcome: "resolved", choice: "retry", variables: { resolution: "abandon" }, rationale: "agent contradicts itself" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({})], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 0, "a destructive value in variables is NEVER submitted, regardless of the choice hint");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+      assertEquals(rows[0].outcome, "abstained");
+      assert(/destructive|irreversible/i.test(rows[0].rationale ?? ""), "the rationale names the destructive guard");
+    },
+  );
+});
+
 test("record worker: the loop guard abstains once a subject hits the resolution cap", async () => {
   await run(
     [{ userTaskKey: "UT-NEW", outcome: "resolved", choice: "retry", variables: { answer: "retry again" } }],
@@ -172,7 +191,7 @@ test("record worker: malformed (non-object) decision entries are skipped, never 
   );
 });
 
-test("record worker: a hallucinated key with no live claim held by THIS run is abstained, never submitted", async () => {
+test("record worker: a hallucinated key with no live claim held by THIS run is skipped, never recorded over the foreign claim", async () => {
   await run(
     [{ userTaskKey: "UT-FOREIGN", outcome: "resolved", choice: "retry", variables: { answer: "x" } }],
     async (data) => {
@@ -182,10 +201,28 @@ test("record worker: a hallucinated key with no live claim held by THIS run is a
     async (data, completed) => {
       assertEquals(completed.length, 0, "an unowned/foreign key is NEVER submitted");
       const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-FOREIGN" });
-      // Fail-closed: the decision is recorded `abstained` (the escalation is left for a human), and the
-      // claim placeholder is finalised so it never lingers as a live claim.
-      assertEquals(rows[0].outcome, "abstained");
-      assert(/no live claim|unclaimed|foreign/i.test(rows[0].rationale ?? ""), "the rationale names the ownership fence");
+      // Fail-closed: the decision is SKIPPED entirely — never recorded over the foreign claim. The
+      // claim row stays a LIVE `claimed` placeholder owned by the other run (recordResolution is
+      // keyed only on user_task_key, so writing here would finalise a claim this run does not own).
+      assertEquals(rows[0].outcome, "claimed", "the foreign claim is left untouched, not finalised");
+      assertEquals(rows[0].claimed_by, "PI-OTHER");
+    },
+  );
+});
+
+test("record worker: an abstained decision for a foreign key is skipped, never finalising another run's claim", async () => {
+  await run(
+    // An ABSTAINED decision carries no submission, but recording it would still finalise the foreign
+    // claim (recordResolution overwrites the claimed placeholder keyed on user_task_key alone).
+    [{ userTaskKey: "UT-FOREIGN", outcome: "abstained", rationale: "unclear" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-FOREIGN" })], "PI-OTHER");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 0);
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-FOREIGN" });
+      assertEquals(rows[0].outcome, "claimed", "an abstained decision for a foreign key is skipped, not recorded");
+      assertEquals(rows[0].claimed_by, "PI-OTHER");
     },
   );
 });
@@ -217,6 +254,34 @@ test("record worker: a `resolved` decision with malformed `variables` is recorde
       const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
       assertEquals(rows[0].outcome, "abstained", "fail-closed: malformed variables never record a false resolved");
       assertEquals(rows[0].submitted_variables, null);
+    },
+  );
+});
+
+test("record worker: agent_job_key records the ANSWERING agent's activation key, not the record task's job key", async () => {
+  await run(
+    [{ userTaskKey: "UT-1", outcome: "resolved", choice: "retry", variables: { answer: "Retry." }, rationale: "ok" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({})], "PI-STEWARD");
+      // The poller observed the senior:escalation-steward AGENT job (key J-AGENT) activated on this
+      // steward process instance — distinct from the record task's own job key (J-1 in `run`).
+      await recordAgentJobObservation(data, {
+        processInstanceKey: "PI-STEWARD",
+        jobType: "senior:escalation-steward",
+        worker: "agent-a",
+        jobKey: "J-AGENT",
+        now: new Date().toISOString(),
+      });
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 1);
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+      assertEquals(rows[0].outcome, "resolved");
+      assertEquals(
+        rows[0].agent_job_key,
+        "J-AGENT",
+        "provenance points at the agent job that made the decision, not the record service job (J-1)",
+      );
     },
   );
 });

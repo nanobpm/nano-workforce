@@ -163,6 +163,25 @@ test("pollPromotion: a landed epic on an epic/* base opens exactly one epic/*→
   assert(prRow, "promotion PR row registered by submitPr");
 });
 
+test("pollPromotion: the promotion PR inherits the epic's escalation-steward opt-in (issue #889 review)", async () => {
+  const { data, stores } = memData();
+  const { engine, instances } = recordingEngine();
+  // An OPTED-IN epic — its promotion PR must be enrolled with the steward opt-in, not the `false` default.
+  stores.plans = [
+    { plan_key: "o/r#295", repo: "o/r", title: "Assertion DSL", status: "done", base_branch: "epic/test-dsl", delivery: "landed", promotion_pr: null, promotion_state: null, auto_resolve_escalations: 1 },
+  ];
+  stores.plan_tasks = [{ id: 1, plan_key: "o/r#295", pr_key: "o/r#299" }];
+  stores.pull_requests = [{ pr_key: "o/r#299", status: "merged" }];
+  const state = freshRepo();
+
+  await withGithub(state, () => pollPromotion(data, engine, "tok"));
+
+  assertEquals(instances.length, 1);
+  assertEquals(instances[0].variables.autoResolveEscalations, true, "the promotion PR is enrolled opted-in");
+  const prRow = stores.pull_requests.find((p) => p.pr_key === "o/r#500");
+  assertEquals(prRow?.auto_resolve_escalations, 1, "the PR row persists the opt-in");
+});
+
 test("pollPromotion: re-running is idempotent — no duplicate promotion PR", async () => {
   const { data, stores } = memData();
   const { engine } = recordingEngine();

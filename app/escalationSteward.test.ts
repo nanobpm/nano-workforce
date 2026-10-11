@@ -212,6 +212,22 @@ test("reviewResolution: dismiss/intervene fold review_state off pending, idempot
   });
 });
 
+test("reviewResolution: an in-flight (claimed, not yet final) record can NOT be reviewed away", async () => {
+  await withData(async (data) => {
+    // A claim placeholder starts life `review_state='pending'` too — but it is an in-flight steward
+    // action, not a reviewable decision. Reviewing it must be a no-op so a guessed/old claim id can
+    // never be dismissed before it finalises (which would let its resolution bypass the review queue).
+    await claimEscalations(data, [taskRow({})], "s");
+    const id = (await escalationAutoResolutions(data).find({ user_task_key: "UT-1" }))[0].id;
+
+    assertEquals(await reviewResolution(data, id, "dismissed", "alice", "premature"), false, "an in-flight claim is not reviewable");
+    const row = (await escalationAutoResolutions(data).find({ user_task_key: "UT-1" }))[0];
+    assertEquals(row.outcome, "claimed", "still an in-flight claim");
+    assertEquals(row.review_state, "pending", "the claim's review state is untouched");
+    assertEquals(row.reviewed_by, null);
+  });
+});
+
 test("optInByProcessKey: derives the opt-in flag from every subject table, keyed by process instance", async () => {
   await withData(async (data) => {
     const ts = new Date().toISOString();

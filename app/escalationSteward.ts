@@ -293,7 +293,11 @@ export async function liveClaimedTaskKeys(data: DataLayer): Promise<Set<string>>
 }
 
 /** Mark a record dismissed (reviewed, no action) or intervened (operator stepped in), with an optional
- *  note. Only a `pending` record transitions; an already-reviewed record is left alone (idempotent). */
+ *  note. Only a FINAL (`resolved`/`abstained`), still-`pending` record transitions — an in-flight
+ *  `claimed` placeholder starts life `review_state='pending'` too, so without the outcome guard a
+ *  guessed/old claim id could be "reviewed" before it finalises, letting its eventual resolution slip
+ *  past the pending-review queue (matching the list/read-model, which only ever surfaces final rows).
+ *  An already-reviewed record is left alone (idempotent). */
 export async function reviewResolution(
   data: DataLayer,
   id: number,
@@ -304,7 +308,7 @@ export async function reviewResolution(
   const res = await data.open().exec(
     `UPDATE "escalation_auto_resolutions"
        SET "review_state" = ?, "reviewed_by" = ?, "reviewed_at" = ?, "review_note" = ?
-     WHERE "id" = ? AND "review_state" = 'pending'`,
+     WHERE "id" = ? AND "review_state" = 'pending' AND "outcome" IN ('resolved', 'abstained')`,
     [action, reviewedBy, now(), note, id],
   );
   return res.changed === 1;

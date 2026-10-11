@@ -34,6 +34,11 @@ export const AGENT_SLA_JOB_TYPES: readonly string[] = [
   "senior:retro", // retro synthesize
   "senior:fix-ci", // merge-loop CI-fix cell (be_fixci_sla)
   "senior:rebase", // merge-loop rebase cell (be_rebase_sla)
+  // Tracked for AUDIT PROVENANCE, not an SLA boundary (issue #889 review): the escalation-steward
+  // record step reads this row's `job_key` to persist the ACTUAL answering agent's activation key on
+  // the durable auto-resolution (rather than its own record-task key), so the review surface points at
+  // the job that made the decision.
+  "senior:escalation-steward", // escalation-steward agent (escalation-steward.bpmn)
 ];
 
 /** One ledger row: whether (and when) a worker picked up an agent job for a given process instance. */

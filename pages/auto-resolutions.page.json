@@ -114,6 +114,7 @@
           { "label": "All", "filter": [] }
         ],
         "columns": [
+          { "field": "id", "header": "ID" },
           { "field": "outcome", "header": "Outcome", "badge": true },
           { "field": "escalation_kind", "header": "Kind" },
           {
@@ -153,6 +154,7 @@
         "detail": {
           "linkField": "subject_url",
           "fields": [
+            { "field": "id", "label": "Record id" },
             { "field": "question", "label": "Question" },
             { "field": "options", "label": "Options offered" },
             { "field": "submitted_variables", "label": "Submitted variables" },

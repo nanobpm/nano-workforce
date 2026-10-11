@@ -21,9 +21,11 @@
 //     plain object is converted to `abstained` BEFORE completion, so no false `resolved` record is
 //     ever written for a submission that never happened.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { getAgentJobActivation } from "../../app/agentActivationLedger.ts";
 import { completeEscalationAsAgent } from "../../app/agentCompletion.ts";
 import {
   countSubjectResolutions,
+  ESCALATION_STEWARD_JOB_TYPE,
   escalationAutoResolutions,
   isDestructiveOption,
   LOOP_GUARD_MAX_RESOLUTIONS,
@@ -62,17 +64,20 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  *  a `choice`-less decision that still smuggles an `abandon` in its form variables is caught. */
 const SELECTED_VALUE_KEYS = ["choice", "resolution", "action", "decision", "answer"] as const;
 
-/** Derive the option value a decision actually selected — the auxiliary `choice` first, then the
- *  well-known form-variable keys. This is what the destructive guard tests, so it reflects what the
- *  completion would really submit rather than trusting a single optional field. */
+/** Derive the option value a decision actually selected — the well-known form-variable keys FIRST
+ *  (the values the completion would really submit), then the auxiliary `choice` hint only as a
+ *  fallback. The destructive guard tests this, so it must reflect what the completion submits rather
+ *  than trusting a single optional field: an agent returning `choice: "retry"` with
+ *  `variables: { resolution: "abandon" }` must be caught by the `abandon` in its variables, never
+ *  waved through by the benign hint. */
 function selectedOption(d: StewardDecision): string | null {
-  if (typeof d.choice === "string" && d.choice.trim() !== "") return d.choice;
   if (isPlainObject(d.variables)) {
     for (const k of SELECTED_VALUE_KEYS) {
       const v = d.variables[k];
       if (typeof v === "string" && v.trim() !== "") return v;
     }
   }
+  if (typeof d.choice === "string" && d.choice.trim() !== "") return d.choice;
   return null;
 }
 
@@ -106,29 +111,44 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   // `claimed_by`, so the record step only ever finalises tasks THIS run claimed.
   const stewardKey = job.processInstanceKey != null ? String(job.processInstanceKey) : `steward-${Date.now()}`;
   const agentId = `escalation-steward:${job.processInstanceKey != null ? String(job.processInstanceKey) : "unknown"}`;
-  const jobKey = job.jobKey != null ? String(job.jobKey) : null;
+  // Provenance (issue #889 review): `job.jobKey` here is the `pr.escalation-steward-record` SERVICE
+  // job, NOT the preceding `senior:escalation-steward` AGENT job that actually made the decisions.
+  // Persisting the record key as `agent_job_key` would give the audit record the wrong provenance, so
+  // read the agent's activation key from the durable activation ledger (keyed by this SAME steward
+  // process instance + the agent job type) — the poller records it while the agent job is live. Fall
+  // back to the record job key only when the ledger has no row (agent never observed activated), so
+  // the column is never left blank on a real resolution.
+  const recordJobKey = job.jobKey != null ? String(job.jobKey) : null;
+  const agentActivation =
+    job.processInstanceKey != null
+      ? await getAgentJobActivation(app.data, String(job.processInstanceKey), ESCALATION_STEWARD_JOB_TYPE).catch(() => undefined)
+      : undefined;
+  const agentJobKey = agentActivation?.job_key ?? recordJobKey;
 
   for (const d of decisions) {
     const key = typeof d.userTaskKey === "string" ? d.userTaskKey.trim() : "";
     if (!key) continue;
+    // Claim/ownership fence (fail-closed, applied to EVERY decision — not only `resolved`). This
+    // steward instance must hold a LIVE claim for the key. Without it a hallucinated key could
+    // complete an unclaimed — or a non-opted-in, or another run's — task. Crucially the fence is a
+    // SKIP, not a downgrade-to-abstain: `recordResolution` finalises the claim row keyed only by
+    // `user_task_key`, so recording ANY decision (even an `abstained`) for a key this run does not own
+    // would finalise ANOTHER run's live claim. Skip every decision not owned by this run instead.
+    const claimRows = await escalationAutoResolutions(app.data).find({ user_task_key: key });
+    const claim = claimRows.find((r) => r.outcome === "claimed");
+    const ownedByThisRun = claim != null && claim.claimed_by === stewardKey;
+    if (!ownedByThisRun) {
+      app.log.warn("escalation-steward record: no owned claim for key, skipping decision (leaving the claim untouched)", { userTaskKey: key });
+      continue;
+    }
+
     // Default to abstain on any malformed/unsafe decision — never submit on ambiguity.
     let outcome: "resolved" | "abstained" = d.outcome === "resolved" ? "resolved" : "abstained";
     let rationale = typeof d.rationale === "string" ? d.rationale : null;
 
-    // Claim/ownership fence (fail-closed): this steward instance must hold a LIVE claim for the key.
-    // Without it a hallucinated key could complete an unclaimed — or a non-opted-in, or another run's —
-    // task. The claim row is the durable record the collect step wrote for THIS run.
-    const claimRows = await escalationAutoResolutions(app.data).find({ user_task_key: key });
-    const claim = claimRows.find((r) => r.outcome === "claimed");
-    const ownedByThisRun = claim != null && claim.claimed_by === stewardKey;
-    if (outcome === "resolved" && !ownedByThisRun) {
-      outcome = "abstained";
-      rationale = `abstained: no live claim held by this steward run for ${key} — refusing to complete an unclaimed/foreign task`;
-      app.log.warn("escalation-steward record: no owned claim for key, recorded abstained", { userTaskKey: key });
-    }
-
     // Destructive/irreversible-option guard (host-side, fail-closed). Derive the selected value from the
-    // decision's own variables (not only the optional `choice`), so a `choice`-less `abandon` is caught.
+    // decision's own variables FIRST (not only the optional `choice`), so a `choice`-less `abandon` — or
+    // a benign `choice` paired with a destructive `variables` value — is caught.
     if (outcome === "resolved") {
       const selected = selectedOption(d);
       if (selected != null && isDestructiveOption(selected)) {
@@ -192,7 +212,7 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
       rationale,
       evidence: typeof d.evidence === "string" ? d.evidence : null,
       options: Array.isArray(d.options) ? d.options : null,
-      agentJobKey: jobKey,
+      agentJobKey,
       worker: null,
       model: null,
     });
