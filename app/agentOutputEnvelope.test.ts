@@ -99,12 +99,12 @@ async function boot(opts: { responses?: Record<string, Responder>; vars?: Record
       typeof responder === "function" ? responder(job as { variables: Record<string, unknown> }) : (responder ?? {}),
     );
   }
-  await engine.createInstance({
+  const created = await engine.createInstance({
     processDefinitionId: "convergence-loop",
     awaitCompletion: false,
     variables: { ...DEFAULT_VARS, ...(opts.vars ?? {}) },
   });
-  return engine;
+  return { engine, processInstanceKey: created.processInstanceKey };
 }
 
 function instanceVars(engine: WasmEngineClient): Record<string, unknown> {
@@ -112,8 +112,16 @@ function instanceVars(engine: WasmEngineClient): Record<string, unknown> {
   return snap.instances?.[0]?.variables ?? {};
 }
 
+/** Read one variable's deserialized value via the engine read channel — works on a COMPLETED instance. */
+async function variableValue(engine: WasmEngineClient, processInstanceKey: string, name: string): Promise<unknown> {
+  const rows = await engine.searchVariables({ processInstanceKey, name });
+  const row = rows.find((v) => v.name === name);
+  assert(row, `expected variable ${name} to be present`);
+  return JSON.parse(row.value);
+}
+
 test("a review-round agent echoing round:\"4\" does not clobber the engine-owned counter or wedge gw-guard", async () => {
-  const engine = await boot({
+  const { engine } = await boot({
     responses: { "senior:pr-review": { status: "addressed", summary: "fixed", round: "4" } },
   });
   // gw-guard evaluates `round >= maxRounds`. If the agent's string "4" clobbered `round`, the engine
@@ -126,7 +134,7 @@ test("a review-round agent echoing round:\"4\" does not clobber the engine-owned
 
 test("a review-round agent echoing numeric engine counters cannot alter them", async () => {
   // A well-formed numeric echo must still be ignored — the agent owns NONE of these control variables.
-  const engine = await boot({
+  const { engine } = await boot({
     responses: {
       "senior:pr-review": { status: "addressed", summary: "fixed", round: 99, maxRounds: 1, prKey: "evil/repo#999" },
     },
@@ -137,4 +145,96 @@ test("a review-round agent echoing numeric engine counters cannot alter them", a
   assertEquals(vars.round, 1, "round must be unchanged");
   assertEquals(vars.maxRounds, 20, "maxRounds must be unchanged");
   assertEquals(vars.prKey, "o/r#1", "prKey correlation key must be unchanged");
+});
+
+test("a review-round agent echoing PR identity inputs cannot alter them", async () => {
+  // `repo`/`prNumber`/`prUrl` are the agent's declared *inputs* (PrReviewRoundIn), not its outputs —
+  // but the engine merges a completion UNFILTERED, so an input-echo would replace the valid process
+  // identity that `progress-check`, `converge-gate`, and `finalize` go on to read. The snapshot/restore
+  // guard must pin them.
+  const { engine } = await boot({
+    responses: {
+      "senior:pr-review": {
+        status: "addressed",
+        summary: "fixed",
+        repo: "evil/repo",
+        prNumber: 999,
+        prUrl: "https://evil.test/pr/999",
+      },
+    },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  const vars = instanceVars(engine);
+  assertEquals(vars.repo, "o/r", "repo must be unchanged");
+  assertEquals(vars.prNumber, 1, "prNumber must be unchanged");
+  assertEquals(vars.prUrl, "https://example.test/pr/1", "prUrl must be unchanged");
+});
+
+// The adversarial reviewer (`senior:adversarial-review`) and scope classifier
+// (`senior:scope-classify`) are hardened by the SAME snapshot/restore mappings as `review-round`;
+// these drive each of those tasks with an engine-owned-field echo so removing either task's guard
+// turns this suite red (the `review-round` regressions above would stay green).
+
+test("an adversarial-review agent echoing engine counters cannot alter them", async () => {
+  // advMax: 1 makes the adversarial pass due on round 1. The agent echoes `advPass`/`advMax` (and a
+  // counter) as the WRONG type; the guard must keep the engine's own increment (0 → 1) and budget.
+  const { engine } = await boot({
+    vars: { advMax: 1 },
+    responses: {
+      "senior:adversarial-review": { adversarialFindings: "", adversarialSummary: "clean", advPass: "7", advMax: "0", round: "9" },
+    },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  const vars = instanceVars(engine);
+  assertEquals(vars.advPass, 1, "advPass must be the engine increment (0 → 1), not the agent's \"7\"");
+  assertEquals(vars.advMax, 1, "advMax budget ceiling must be unchanged");
+  assertEquals(vars.round, 1, "round must be unchanged");
+});
+
+test("an adversarial-review agent echoing PR identity inputs cannot alter them", async () => {
+  const { engine } = await boot({
+    vars: { advMax: 1 },
+    responses: {
+      "senior:adversarial-review": {
+        adversarialFindings: "",
+        adversarialSummary: "clean",
+        repo: "evil/repo",
+        prNumber: 999,
+        prUrl: "https://evil.test/pr/999",
+      },
+    },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  const vars = instanceVars(engine);
+  assertEquals(vars.repo, "o/r", "repo must be unchanged");
+  assertEquals(vars.prNumber, 1, "prNumber must be unchanged");
+  assertEquals(vars.prUrl, "https://example.test/pr/1", "prUrl must be unchanged");
+});
+
+test("a scope-classify agent echoing engine-owned fields cannot alter them", async () => {
+  // Drive to the scope classifier via a `converged` review. The classifier echoes prKey + the PR
+  // identity inputs; the guard must keep them. The instance runs to completion, so read the
+  // variables back through the read channel (a completed instance's `snapshot().variables` is folded).
+  const { engine, processInstanceKey } = await boot({
+    responses: {
+      "senior:pr-review": { status: "converged", summary: "done" },
+      "senior:scope-classify": {
+        scopeBlocked: false,
+        scopeBlockReason: "",
+        prKey: "evil/repo#999",
+        repo: "evil/repo",
+        prNumber: 999,
+        prUrl: "https://evil.test/pr/999",
+      },
+    },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  assertEquals(await variableValue(engine, processInstanceKey, "prKey"), "o/r#1", "prKey correlation key must be unchanged");
+  assertEquals(await variableValue(engine, processInstanceKey, "repo"), "o/r", "repo must be unchanged");
+  assertEquals(await variableValue(engine, processInstanceKey, "prNumber"), 1, "prNumber must be unchanged");
+  assertEquals(await variableValue(engine, processInstanceKey, "prUrl"), "https://example.test/pr/1", "prUrl must be unchanged");
 });

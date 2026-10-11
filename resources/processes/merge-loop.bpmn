@@ -371,6 +371,9 @@
             <zeebe:input source="=mergeStallRounds" target="guardMergeStallRounds" />
             <zeebe:input source="=mergeStallMax" target="guardMergeStallMax" />
             <zeebe:input source="=prKey" target="guardPrKey" />
+            <zeebe:input source="=repo" target="guardRepo" />
+            <zeebe:input source="=prNumber" target="guardPrNumber" />
+            <zeebe:input source="=prUrl" target="guardPrUrl" />
             <zeebe:output source="=guardCiFixRound + 1" target="ciFixRound" />
             <zeebe:output source="=guardCiFixMax" target="ciFixMax" />
             <zeebe:output source="=guardRebaseRound" target="rebaseRound" />
@@ -380,6 +383,9 @@
             <zeebe:output source="=guardMergeStallRounds" target="mergeStallRounds" />
             <zeebe:output source="=guardMergeStallMax" target="mergeStallMax" />
             <zeebe:output source="=guardPrKey" target="prKey" />
+            <zeebe:output source="=guardRepo" target="repo" />
+            <zeebe:output source="=guardPrNumber" target="prNumber" />
+            <zeebe:output source="=guardPrUrl" target="prUrl" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_s0</bpmn:incoming>
@@ -550,6 +556,9 @@
             <zeebe:input source="=mergeStallRounds" target="guardMergeStallRounds" />
             <zeebe:input source="=mergeStallMax" target="guardMergeStallMax" />
             <zeebe:input source="=prKey" target="guardPrKey" />
+            <zeebe:input source="=repo" target="guardRepo" />
+            <zeebe:input source="=prNumber" target="guardPrNumber" />
+            <zeebe:input source="=prUrl" target="guardPrUrl" />
             <zeebe:output source="=guardRebaseRound + 1" target="rebaseRound" />
             <zeebe:output source="=guardCiFixRound" target="ciFixRound" />
             <zeebe:output source="=guardCiFixMax" target="ciFixMax" />
@@ -559,6 +568,9 @@
             <zeebe:output source="=guardMergeStallRounds" target="mergeStallRounds" />
             <zeebe:output source="=guardMergeStallMax" target="mergeStallMax" />
             <zeebe:output source="=guardPrKey" target="prKey" />
+            <zeebe:output source="=guardRepo" target="repo" />
+            <zeebe:output source="=guardPrNumber" target="prNumber" />
+            <zeebe:output source="=guardPrUrl" target="prUrl" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_s0</bpmn:incoming>

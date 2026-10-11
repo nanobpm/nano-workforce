@@ -428,6 +428,38 @@ Notes:
   `answer`/`scopePending` (inputs the agent consumes) stay cleared on the
   review-round output.
 
+- **Engine-owned process variables are restored around every external-agent task
+  (issue #887).** The engine merges **every** variable an external agent returns
+  into process scope **unfiltered** — the `io.nanobpm.dataEnvelope.out` shape is
+  codegen/typing-only and applies **no** runtime filtering or coercion. An agent
+  that echoes an engine-owned variable with a colliding name or drifted type (a
+  `senior:pr-review` job that returned `round: "4"` — a string) therefore
+  overwrites the real process value, and the next FEEL guard that reads it
+  (`round >= maxRounds` at `gw-guard`) raises `comparison not defined for string
+  and number` and wedges the loop on an unrecoverable incident. The categorical
+  guard is a **snapshot/restore** on each external-agent task (`review-round`,
+  `adversarial-review`, `classify-scope`): before the agent runs, each
+  engine-owned variable is copied into a task-**local** `guard<Name>` input
+  (`<zeebe:input source="=round" target="guardRound"/>` …), and the task's output
+  mapping **restores** the process variable from that snapshot
+  (`<zeebe:output source="=guardRound" target="round"/>`). Because the snapshot
+  holds the pre-merge value, the restore overwrites whatever the completion
+  merged in, so the agent's real outputs (`status`/`summary`/`question`,
+  `adversarialFindings`, the scope verdict) flow through but it can never alter
+  the protected set. The protected set is **every engine-owned variable the loop
+  relies on that the agent does not own as an output**: the control counters and
+  budgets (`round`, `maxRounds`, `advPass`, `advMax`, `ackRetryRound`,
+  `ackRetryMax`, `huskRetries`, `reviewWaitTimeout`), the `prKey` correlation
+  key, **and** the PR identity inputs (`repo`, `prNumber`, `prUrl`) — the last
+  three because the unfiltered merge lets an input-echo replace the identity that
+  `progress-check`, `converge-gate`, and `finalize` go on to read (a wrong
+  `prNumber` would make `finalize` start the merge loop for the wrong PR). A
+  counter the task itself advances is incremented **from the snapshot**
+  (`adversarial-review` computes `advPass` as `(if guardAdvPass = null then 0
+  else guardAdvPass) + 1`), never from the mergeable process variable. Any new
+  external-agent task added to this loop must apply the same guard to every
+  engine-owned variable in scope.
+
 
 ## 5. Agent job contract (`senior:pr-review`)
 
@@ -803,6 +835,16 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   `pr.persist-escalation` worker as the review stage (status `escalated`), answered
   via the native `wait-merge-answer` `userTask` (the same `completeUserTask` door as
   the review escalation, #256); answering re-arms and retries.
+- **Engine-owned variable guard (issue #887)** — the merge-loop applies the same
+  snapshot/restore invariant as the convergence loop (§4) around its external-agent
+  tasks (`fix-ci`, `rebase`). Each guards the loop counters and budgets
+  (`ciFixRound`, `ciFixMax`, `rebaseRound`, `rebaseMax`, `mergeRetryRound`,
+  `mergeRetryMax`, `mergeStallRounds`, `mergeStallMax`), the `prKey` correlation
+  key, and the PR identity inputs (`repo`, `prNumber`, `prUrl`) — the last three
+  because `pr.merge` reads them directly for GitHub operations after the agent
+  re-arms the poller, so an input-echo that replaced them would merge the wrong
+  PR. The counter the task advances is incremented from the snapshot
+  (`ciFixRound`/`rebaseRound` become `guard<Name> + 1`).
 - **Terminal** — `merged` (with `merged_at`), or `converged` when
   `NANO_PR_AUTO_MERGE=0` (review-only), or `abandoned` on cancel.
 

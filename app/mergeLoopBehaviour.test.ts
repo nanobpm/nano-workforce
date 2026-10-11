@@ -609,7 +609,7 @@ test("a no-verdict rebase result reconciles from ground truth, not escalation (#
 // `senior:fix-ci`/`senior:rebase` agent echoing a loop counter (`ciFixRound`, `rebaseRound`, …) with
 // the wrong type/value would corrupt it — and because the counter feeds the task's own `+ 1`
 // increment and the `ciFixRound < ciFixMax` / `rebaseRound < rebaseMax` guards, a string echo wedges
-// the sub-process on an "comparison/arithmetic not defined for string and number" incident. The fix
+// the sub-process on a "comparison/arithmetic not defined for string and number" incident. The fix
 // snapshots each engine-owned counter into a task-local input before the agent runs and restores it
 // on the task output (driving the increment from the snapshot), so the agent can never alter it.
 
@@ -633,6 +633,37 @@ test("a rebase agent echoing rebaseRound:\"9\" cannot clobber the counter or wed
     .hasCompletedElements("rebase")
     .hasVariable("rebaseRound", 1) // the engine increment (0 → 1), NOT the agent's "9"
     .hasVariable("rebaseMax", 3); // the budget ceiling is engine-owned, unclobbered
+});
+
+test("a fix-ci agent echoing PR identity inputs cannot clobber them (#887)", async () => {
+  // `repo`/`prNumber`/`prUrl` are the agent's declared *inputs* (FixCiIn), not its outputs — but the
+  // engine merges a completion UNFILTERED, so an input-echo would replace the process identity that
+  // `pr.merge` reads for GitHub operations after re-arming. The snapshot/restore guard must pin them.
+  const engine = await boot({
+    responses: { "senior:fix-ci": { status: "fixed", repo: "evil/repo", prNumber: 999, prUrl: "https://evil.test/pr/999" } },
+  });
+  await driveToCiFix(engine);
+  assertEquals((await engine.searchIncidents()).length, 0, "the agent echo must not raise an incident");
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("fix-ci")
+    .hasVariable("repo", "acme/app")
+    .hasVariable("prNumber", 1)
+    .hasVariable("prUrl", "https://example.test/pr/1");
+});
+
+test("a rebase agent echoing PR identity inputs cannot clobber them (#887)", async () => {
+  const engine = await boot({
+    responses: { "senior:rebase": { status: "rebased", repo: "evil/repo", prNumber: 999, prUrl: "https://evil.test/pr/999" } },
+  });
+  await driveToRebase(engine);
+  assertEquals((await engine.searchIncidents()).length, 0, "the agent echo must not raise an incident");
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("repo", "acme/app")
+    .hasVariable("prNumber", 1)
+    .hasVariable("prUrl", "https://example.test/pr/1");
 });
 
 test("rebase budget exhaustion escalates as not-mergeable without running the agent", async () => {
