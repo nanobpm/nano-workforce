@@ -317,3 +317,76 @@ test("a scope-classify agent echoing humanApproval/convergeOnly cannot alter the
   assertEquals(await variableValue(engine, processInstanceKey, "humanApproval"), true, "humanApproval gate must be unchanged");
   assertEquals(await variableValue(engine, processInstanceKey, "convergeOnly"), true, "convergeOnly flag must be unchanged");
 });
+
+// ---------------------------------------------------------------------------
+// Issue #887 (round 4 — Copilot "previously missed"): `reviewStale` and
+// `roundEntryHead` are ALSO process-owned and readable by downstream decisions,
+// so an agent completion must not overwrite them:
+//   * `f_guardMax` escalates only when `round >= maxRounds and reviewStale != true`
+//     — a forged `reviewStale:true` suppresses the max-round escalation.
+//   * `check-progress` (pr.progress-check) consumes `roundEntryHead` as the
+//     within-round baseline — a forged head falsifies the progress decision.
+// The snapshot/restore guard pins both on all three agent tasks.
+// ---------------------------------------------------------------------------
+
+test("a review-round agent echoing reviewStale:true cannot suppress the max-round escalation", async () => {
+  // Seeded at the max-round boundary with reviewStale false. The agent echoes reviewStale:true;
+  // without the guard, gw-guard's `reviewStale != true` arm would go false and suppress escalation.
+  const { engine } = await boot({
+    vars: { round: 20, maxRounds: 20, reviewStale: false },
+    responses: { "senior:pr-review": { status: "addressed", summary: "fixed", reviewStale: true } },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  assertEquals(instanceVars(engine).reviewStale, false, "seeded reviewStale:false must survive the agent's true echo");
+});
+
+test("a review-round agent echoing a forged roundEntryHead cannot falsify the progress baseline", async () => {
+  // capture-head seeds roundEntryHead="sha-entry"; the agent echoes a forged head. The restore must keep it.
+  const { engine } = await boot({
+    responses: { "senior:pr-review": { status: "addressed", summary: "fixed", roundEntryHead: "sha-forged" } },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  assertEquals(instanceVars(engine).roundEntryHead, "sha-entry", "captured roundEntryHead must survive the agent's forged echo");
+});
+
+test("an adversarial-review agent echoing reviewStale/roundEntryHead cannot alter them", async () => {
+  const { engine } = await boot({
+    vars: { advMax: 1, reviewStale: false },
+    responses: {
+      "senior:adversarial-review": {
+        adversarialFindings: "",
+        adversarialSummary: "clean",
+        reviewStale: true,
+        roundEntryHead: "sha-forged",
+      },
+    },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  const vars = instanceVars(engine);
+  assertEquals(vars.reviewStale, false, "reviewStale must be unchanged");
+  assertEquals(vars.roundEntryHead, "sha-entry", "roundEntryHead must be unchanged");
+});
+
+test("a scope-classify agent echoing reviewStale/roundEntryHead cannot alter them", async () => {
+  // Drive to the scope classifier via a `converged` review; the classifier echoes both. With
+  // humanApproval:false the instance runs to completion, so read the vars back via the channel.
+  const { engine, processInstanceKey } = await boot({
+    vars: { reviewStale: false },
+    responses: {
+      "senior:pr-review": { status: "converged", summary: "done" },
+      "senior:scope-classify": {
+        scopeBlocked: false,
+        scopeBlockReason: "",
+        reviewStale: true,
+        roundEntryHead: "sha-forged",
+      },
+    },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  assertEquals(await variableValue(engine, processInstanceKey, "reviewStale"), false, "reviewStale must be unchanged");
+  assertEquals(await variableValue(engine, processInstanceKey, "roundEntryHead"), "sha-entry", "roundEntryHead must be unchanged");
+});

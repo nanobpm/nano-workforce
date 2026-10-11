@@ -471,7 +471,15 @@ Notes:
   `=(guardHumanApproval = true) or (humanApproval = true)`: it recovers the
   snapshot's `true`, honours a concurrent adopter's `true`, and ignores an agent
   echo of `false`. The direction is **fail-safe** — the only state it can force
-  is *more* human review, never a merge the loop would otherwise have gated. A
+  is *more* human review, never a merge the loop would otherwise have gated. The
+  protected set also covers the two **progress bookkeeping** values the loop
+  reads back after the agent returns: `reviewStale` (the converge-gate's
+  stale-body signal — `f_guardMax` escalates only when `round >= maxRounds and
+  reviewStale != true`, so a forged `reviewStale: true` would suppress the
+  max-round escalation) and `roundEntryHead` (the within-round baseline
+  `pr.capture-head` captures and `pr.progress-check` consumes — a forged head
+  would falsify the no-progress decision). Both are plain process-owned reads, so
+  the usual `=guardReviewStale` / `=guardRoundEntryHead` restore pins them. A
   counter the task itself advances is incremented **from the snapshot**
   (`adversarial-review` computes `advPass` as `(if guardAdvPass = null then 0
   else guardAdvPass) + 1`), never from the mergeable process variable. Any new
@@ -869,7 +877,13 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   `mergeableRepollInterval`). Left unguarded, a `{status:"blocked", pushed:false,
   ciBlockedReconciled:true}` completion would **skip** the mandatory first
   reconcile and page a human immediately, and a clobbered timeout would silently
-  reshape a wait a later loop pass re-arms. The counter the task advances is
+  reshape a wait a later loop pass re-arms. The guard also pins the two values
+  `pr.merge` (attempt-merge) consumes directly after a successful fix/rebase
+  re-arms the poller: `round` (the converged round `ensurePr` records on the
+  merge audit row) and `abandonUrl` (the cooperative-abandon capability URL whose
+  token the merge worker extracts). A completion echoing either would corrupt the
+  recorded round or replace the abandon token, so `=guardRound` /
+  `=guardAbandonUrl` restores pin both. The counter the task advances is
   incremented from the snapshot (`ciFixRound`/`rebaseRound` become
   `guard<Name> + 1`).
 - **Terminal** — `merged` (with `merged_at`), or `converged` when

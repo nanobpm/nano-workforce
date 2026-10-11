@@ -379,6 +379,8 @@
             <zeebe:input source="=landedWaitTimeout" target="guardLandedWaitTimeout" />
             <zeebe:input source="=mergeableWaitTimeout" target="guardMergeableWaitTimeout" />
             <zeebe:input source="=mergeableRepollInterval" target="guardMergeableRepollInterval" />
+            <zeebe:input source="=round" target="guardRound" />
+            <zeebe:input source="=abandonUrl" target="guardAbandonUrl" />
             <zeebe:output source="=guardCiFixRound + 1" target="ciFixRound" />
             <zeebe:output source="=guardCiFixMax" target="ciFixMax" />
             <zeebe:output source="=guardRebaseRound" target="rebaseRound" />
@@ -396,6 +398,8 @@
             <zeebe:output source="=guardLandedWaitTimeout" target="landedWaitTimeout" />
             <zeebe:output source="=guardMergeableWaitTimeout" target="mergeableWaitTimeout" />
             <zeebe:output source="=guardMergeableRepollInterval" target="mergeableRepollInterval" />
+            <zeebe:output source="=guardRound" target="round" />
+            <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_s0</bpmn:incoming>
@@ -574,6 +578,8 @@
             <zeebe:input source="=landedWaitTimeout" target="guardLandedWaitTimeout" />
             <zeebe:input source="=mergeableWaitTimeout" target="guardMergeableWaitTimeout" />
             <zeebe:input source="=mergeableRepollInterval" target="guardMergeableRepollInterval" />
+            <zeebe:input source="=round" target="guardRound" />
+            <zeebe:input source="=abandonUrl" target="guardAbandonUrl" />
             <zeebe:output source="=guardRebaseRound + 1" target="rebaseRound" />
             <zeebe:output source="=guardCiFixRound" target="ciFixRound" />
             <zeebe:output source="=guardCiFixMax" target="ciFixMax" />
@@ -591,6 +597,8 @@
             <zeebe:output source="=guardLandedWaitTimeout" target="landedWaitTimeout" />
             <zeebe:output source="=guardMergeableWaitTimeout" target="mergeableWaitTimeout" />
             <zeebe:output source="=guardMergeableRepollInterval" target="mergeableRepollInterval" />
+            <zeebe:output source="=guardRound" target="round" />
+            <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_s0</bpmn:incoming>

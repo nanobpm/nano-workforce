@@ -96,6 +96,8 @@ const DEFAULT_VARS: Record<string, unknown> = {
   mergeStatus: null,
   ciBlockedReconciled: null,
   failingChecks: 0,
+  round: 2,
+  abandonUrl: "http://host/app/api/hooks/abandon?token=tok-seeded",
 };
 
 /**
@@ -331,6 +333,24 @@ test("a rebase agent echoing engine-owned timeout state cannot clobber it (#887)
     .hasVariable("mergeableRepollInterval", "PT2M");
   // The forged lifecycle marker was pinned out too (the rebase path never reconciles).
   assert(instanceVars(engine).ciBlockedReconciled !== true, "a rebase agent must not forge ciBlockedReconciled:true");
+});
+
+test("a rebase agent echoing round/abandonUrl cannot corrupt the converged round or the abandon token (#887)", async () => {
+  // Same guard class as fix-ci: `round`/`abandonUrl` are seeded once and consumed by `pr.merge`
+  // after a successful rebase re-arms the poller. The restore must pin both against an agent echo.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "" },
+      "senior:rebase": { status: "rebased", round: 99, abandonUrl: "http://evil.test/abandon?token=forged" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("round", 2)
+    .hasVariable("abandonUrl", "http://host/app/api/hooks/abandon?token=tok-seeded");
 });
 
 test("a blocked PR probed on timeout reaches the CI-fix arm via the timeout path (#636)", async () => {
@@ -600,6 +620,24 @@ test("a fix-ci agent echoing seeded timeouts cannot clobber the re-armed merge/S
     .hasVariable("landedWaitTimeout", "PT30M")
     .hasVariable("mergeableWaitTimeout", "PT30M")
     .hasVariable("mergeableRepollInterval", "PT2M");
+});
+
+test("a fix-ci agent echoing round/abandonUrl cannot corrupt the converged round or the abandon token (#887)", async () => {
+  // `round` (the converged round recorded by ensurePr) and `abandonUrl` (the cooperative-abandon
+  // capability URL) are seeded once and consumed directly by `pr.merge` (attempt-merge). A fix-ci
+  // completion echoing either would corrupt the recorded round or replace the abandon token. The
+  // snapshot/restore guard pins both.
+  const engine = await boot({
+    responses: {
+      "senior:fix-ci": { status: "reattempt", round: 99, abandonUrl: "http://evil.test/abandon?token=forged" },
+    },
+  });
+  await driveToCiFix(engine);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElement("wait-mergeable")
+    .hasVariable("round", 2)
+    .hasVariable("abandonUrl", "http://host/app/api/hooks/abandon?token=tok-seeded");
 });
 
 test("a blocked CI verdict that already pushed escalates with a could-not-fix question", async () => {
