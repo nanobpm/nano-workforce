@@ -58,6 +58,17 @@ jobs:
       - name: Check agent prompt templates
         run: npm run check:prompts
 
+      # Agent-definition gate (issue #884): every `senior:*` agent service task the app deploys —
+      # hand-authored in resources/processes/*.bpmn OR produced by the delivery-graph compiler — must
+      # carry `<zeebe:agentDefinition agentType="external"/>`, or the engine refuses to mint an
+      # AgentInstance for it and the run persists no durable agentic transcript (the 269 failed
+      # creates on omarchy). Compiled agent cells are deliberately prompt-LESS (the resolved #884
+      # "Decide", Option (a)): the compiler emits the marker on EVERY agent cell unconditionally, and
+      # the gate keys agent-ness on the `<rank>:<task>` colon-form type (the type-keyed scanner), so a
+      # compiled cell that drops the marker fails here, not silently at runtime.
+      - name: Check agent task definitions (external marker)
+        run: npm run check:agent-definitions
+
       # Merge-safety gate: migrations are applied in numeric-prefix order, but each fan-out branch
       # picks "the next" prefix independently, so parallel siblings silently collide on one slot
       # (the historical 004/005/006/007 pairs; recurred on epic #142). This fails the build on any

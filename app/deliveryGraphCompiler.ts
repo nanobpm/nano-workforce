@@ -1931,7 +1931,7 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // be a leak here), but the `descriptor` is embedded by `serviceBodyLines` into the operator-visible
       // timeout / producer-contract escalation FEEL `prompt` — so it takes the SAME display redaction
       // `nodeDisplay` applies, never the raw value (issue #778 review — thread deliveryGraphCompiler.ts:1606).
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, "agent", nodeEmits);
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, "agent", nodeEmits, undefined);
     }
     case "connector": {
       // TRIM the target before building the escalation descriptor — `nodeDisplay` and the connector
@@ -2113,6 +2113,27 @@ function serviceBodyLines(
   const taskExt = [
     "        <bpmn:extensionElements>",
     `          <zeebe:taskDefinition ${taskDefAttr} />`,
+    // Issue #884: an `agent` cell MUST carry the engine-native AgentTask marker
+    // (`<zeebe:agentDefinition agentType="external"/>`, the `agentTask.agentDefinition` contract —
+    // issue #745) INSIDE its extensionElements, as a sibling of the dispatch verb. Without it the
+    // engine refuses to attach an AgentInstance to the element (`createAgentInstance failed — … has
+    // no agentDefinition`), so every delivery-graph agent run persisted NO durable agentic
+    // transcript (269 failed creates on omarchy). The hand-authored `senior:*` tasks all declare it
+    // (guarded by `agent-marker.test.ts`); the compiler emits it on EVERY agent cell it generates —
+    // the defect class is "every agent service task the app generates". A `connector` delegates to a
+    // HOST worker (`pr.delivery-connector`), not an external agent, so it is NOT marked.
+    ...(kind === "agent" ? ['          <zeebe:agentDefinition agentType="external" />'] : []),
+    // Issue #884 (the "Decide" half — resolved Option (a), PR #886 review): an agent cell carries ONLY
+    // the marker above and NO base-prompt `linkedResource`. The hand-authored process prompts
+    // (`prompts/feature.md`, `prompts/review-round.md`, …) are PROCESS-specific contracts, not generic
+    // cell contracts — they require process variables (`variables.task`/`variables.issue`) and a branch
+    // (`feat/<task.id>`) the generic compiled cell never supplies (it seeds only
+    // `{jobType, appendPrompt, timeout}` and the harness provisions `feat/<node.id>`, #776). Linking one
+    // would hand every compiled cell instructions referencing missing inputs and a conflicting branch.
+    // The cell is therefore deliberately prompt-LESS: the per-node `appendPrompt` FEEL (runner-seeded
+    // from `node.agent.prompt` + the emit/producer contracts) is its sole steering channel, matching the
+    // historically-intentional design (`deliveryRunner.ts` — "the delivery agent node carries no
+    // base-prompt resource"). The marker alone is what fixes the #884 `createAgentInstance` failure.
     ...(taskProps.length > 0 ? ["          <zeebe:properties>", ...taskProps, "          </zeebe:properties>"] : []),
     ...taskHeaders,
     "          <zeebe:ioMapping>",

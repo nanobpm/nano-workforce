@@ -141,6 +141,63 @@ export function agentTaskTypesMissingExternalMarker(xml: string): string[] {
 }
 
 /**
+ * Scan one BPMN document for the job types of agent service tasks — keyed by their `<rank>:<task>`
+ * colon-form `<zeebe:taskDefinition type>` ALONE, NOT by a prompt link — that are MISSING the
+ * engine-native AgentTask marker `<zeebe:agentDefinition agentType="external" />` (issue #884,
+ * PR #886 review). The prompt-keyed scanner (`agentTaskTypesMissingExternalMarker`) is blind to a
+ * DELIBERATELY prompt-less agent task — and EVERY compiled delivery-graph cell is prompt-less (the
+ * resolved #884 "Decide", Option (a): the cell carries the marker alone and is steered by its
+ * per-node `appendPrompt`, never a linked base prompt) — so a marker regression on exactly those
+ * cells would pass that scan vacuously. This scan keys a service task as an AGENT by the same grammar
+ * the crew bridge uses (`jobTypeToRoutingToken`: a single-colon `<rank>:<task>` whose rank is a bare
+ * routing segment), which needs no prompt link, so EVERY agent task — prompt-bearing or not — is
+ * inspected for the marker independently of its prompt status. A dot-form host job (`pr.finalize`),
+ * a typeless block, and a malformed colon form (`senior:feature:extra`) are not agent job types and
+ * are ignored (no false positives). The marker check is scoped to the block's
+ * `<bpmn:extensionElements>` (the engine-honoured PLACEMENT scope, via `extensionElementsOf`) — a
+ * marker sitting outside `extensionElements` is ignored by the engine, so it must not "cover" a
+ * task here either. Returns the offending task types in first-occurrence order (empty when every
+ * agent task is marked).
+ */
+export function externalAgentTaskTypesMissingMarker(xml: string): string[] {
+  const seen = new Set<string>();
+  const missing: string[] = [];
+  for (const [block] of xml.matchAll(SERVICE_TASK)) {
+    const type = block.match(TASK_DEFINITION_TYPE)?.[1];
+    if (type === undefined || jobTypeToRoutingToken(type) === undefined) continue;
+    if (EXTERNAL_AGENT_MARKER.test(extensionElementsOf(block))) continue;
+    if (seen.has(type)) continue;
+    seen.add(type);
+    missing.push(type);
+  }
+  return missing;
+}
+
+/**
+ * The SINGLE "every agent service task carries the engine-native `<zeebe:agentDefinition
+ * agentType="external" />` marker" invariant (issue #745/#884, PR #886 review), as the UNION of both
+ * marker scanners. The two scanners each have a blind spot: `agentTaskTypesMissingExternalMarker` keys
+ * a task as an agent by its PROMPT link, so it cannot see a deliberately prompt-less agent cell;
+ * `externalAgentTaskTypesMissingMarker` keys it by its `<rank>:<task>` colon-form type, so it covers
+ * the prompt-less case but is the newer path. Scanning a corpus with only one leaves the other's blind
+ * spot open — a hand-authored (or compiled) `senior:*` task that loses BOTH its prompt link and its
+ * marker would pass a prompt-keyed-only gate. Every producer of agent tasks (the hand-authored corpus
+ * AND the delivery-graph compiler) is checked against THIS union, so neither half can regress through
+ * the other's blind spot. Returns the distinct offending task types in first-occurrence order (the
+ * prompt-keyed matches first, then any type-keyed-only ones), empty when every agent task is marked.
+ */
+export function missingExternalMarkerAgentTaskTypes(xml: string): string[] {
+  const seen = new Set<string>();
+  const missing: string[] = [];
+  for (const type of [...agentTaskTypesMissingExternalMarker(xml), ...externalAgentTaskTypesMissingMarker(xml)]) {
+    if (seen.has(type)) continue;
+    seen.add(type);
+    missing.push(type);
+  }
+  return missing;
+}
+
+/**
  * Scan one BPMN document for the job types of agent service tasks that OPT OUT of the harness
  * `--auto` reconciliation (issue #779) — those carrying `<zeebe:property
  * name="io.nanobpm.agentTask.autoSubscribe" value="false" />` inside their extensionElements. An
