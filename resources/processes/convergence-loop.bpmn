@@ -159,6 +159,8 @@
           <zeebe:input source="=prNumber" target="guardPrNumber" />
           <zeebe:input source="=prUrl" target="guardPrUrl" />
           <zeebe:input source="=reviewWaitTimeout" target="guardReviewWaitTimeout" />
+          <zeebe:input source="=humanApproval" target="guardHumanApproval" />
+          <zeebe:input source="=convergeOnly" target="guardConvergeOnly" />
           <zeebe:output source="=null" target="answer" />
           <zeebe:output source="=false" target="scopePending" />
           <zeebe:output source="=null" target="adversarialFindings" />
@@ -174,6 +176,8 @@
           <zeebe:output source="=guardPrNumber" target="prNumber" />
           <zeebe:output source="=guardPrUrl" target="prUrl" />
           <zeebe:output source="=guardReviewWaitTimeout" target="reviewWaitTimeout" />
+          <zeebe:output source="=(guardHumanApproval = true) or (humanApproval = true)" target="humanApproval" />
+          <zeebe:output source="=guardConvergeOnly" target="convergeOnly" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_capture</bpmn:incoming>
@@ -241,6 +245,8 @@
           <zeebe:input source="=prNumber" target="guardPrNumber" />
           <zeebe:input source="=prUrl" target="guardPrUrl" />
           <zeebe:input source="=reviewWaitTimeout" target="guardReviewWaitTimeout" />
+          <zeebe:input source="=humanApproval" target="guardHumanApproval" />
+          <zeebe:input source="=convergeOnly" target="guardConvergeOnly" />
           <zeebe:output source="=adversarialFindings" target="adversarialFindings" />
           <zeebe:output source="=(if guardAdvPass = null then 0 else guardAdvPass) + 1" target="advPass" />
           <zeebe:output source="=(if adversarialFindings != null and trim(adversarialFindings) != &#34;&#34; then null else status)" target="status" />
@@ -257,6 +263,8 @@
           <zeebe:output source="=guardPrNumber" target="prNumber" />
           <zeebe:output source="=guardPrUrl" target="prUrl" />
           <zeebe:output source="=guardReviewWaitTimeout" target="reviewWaitTimeout" />
+          <zeebe:output source="=(guardHumanApproval = true) or (humanApproval = true)" target="humanApproval" />
+          <zeebe:output source="=guardConvergeOnly" target="convergeOnly" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_advDue</bpmn:incoming>
@@ -537,6 +545,8 @@
           <zeebe:input source="=prNumber" target="guardPrNumber" />
           <zeebe:input source="=prUrl" target="guardPrUrl" />
           <zeebe:input source="=reviewWaitTimeout" target="guardReviewWaitTimeout" />
+          <zeebe:input source="=humanApproval" target="guardHumanApproval" />
+          <zeebe:input source="=convergeOnly" target="guardConvergeOnly" />
           <zeebe:output source="=null" target="scopeAnswer" />
           <zeebe:output source="=guardRound" target="round" />
           <zeebe:output source="=guardMaxRounds" target="maxRounds" />
@@ -550,6 +560,8 @@
           <zeebe:output source="=guardPrNumber" target="prNumber" />
           <zeebe:output source="=guardPrUrl" target="prUrl" />
           <zeebe:output source="=guardReviewWaitTimeout" target="reviewWaitTimeout" />
+          <zeebe:output source="=(guardHumanApproval = true) or (humanApproval = true)" target="humanApproval" />
+          <zeebe:output source="=guardConvergeOnly" target="convergeOnly" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_convergeOk</bpmn:incoming>

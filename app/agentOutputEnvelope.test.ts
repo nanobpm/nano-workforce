@@ -81,6 +81,8 @@ const DEFAULT_VARS: Record<string, unknown> = {
   huskRetries: 0,
   progressed: true,
   escalated: null,
+  humanApproval: false,
+  convergeOnly: false,
 };
 
 const engines: WasmEngineClient[] = [];
@@ -237,4 +239,81 @@ test("a scope-classify agent echoing engine-owned fields cannot alter them", asy
   assertEquals(await variableValue(engine, processInstanceKey, "repo"), "o/r", "repo must be unchanged");
   assertEquals(await variableValue(engine, processInstanceKey, "prNumber"), 1, "prNumber must be unchanged");
   assertEquals(await variableValue(engine, processInstanceKey, "prUrl"), "https://example.test/pr/1", "prUrl must be unchanged");
+});
+
+// ---------------------------------------------------------------------------
+// Issue #887 (round 3): the seeded merge-control gates `humanApproval` and
+// `convergeOnly` are ALSO engine-owned and must survive an agent completion.
+// A converged review that echoes `humanApproval:false` would bypass `gw-approval`
+// (skip the required human merge approval), and `convergeOnly:false` would hand a
+// review-only PR to the merge loop. The snapshot/restore guard pins both.
+//
+// `humanApproval` is MONOTONIC (false→true only — the host flips it true via
+// `engine.setVariables` when a gated caller adopts a live loop, app/service.ts).
+// So its restore is `(guardHumanApproval = true) or (humanApproval = true)`: it
+// recovers a snapshot-true against an agent's false AND preserves a concurrent
+// host-set true, but never lets an agent force it back to false.
+// ---------------------------------------------------------------------------
+
+test("a review-round agent echoing humanApproval:false cannot bypass the approval gate", async () => {
+  // Seeded gated (humanApproval:true). The agent echoes false; the monotonic restore must keep it true.
+  const { engine } = await boot({
+    vars: { humanApproval: true },
+    responses: { "senior:pr-review": { status: "addressed", summary: "fixed", humanApproval: false } },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  assertEquals(instanceVars(engine).humanApproval, true, "seeded humanApproval:true must survive the agent's false echo");
+});
+
+test("a review-round agent echoing convergeOnly:false cannot re-target a review-only run at the merge loop", async () => {
+  // Seeded review-only (convergeOnly:true). The agent echoes false; the restore must keep it true.
+  const { engine } = await boot({
+    vars: { convergeOnly: true },
+    responses: { "senior:pr-review": { status: "addressed", summary: "fixed", convergeOnly: false } },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  assertEquals(instanceVars(engine).convergeOnly, true, "seeded convergeOnly:true must survive the agent's false echo");
+});
+
+test("an adversarial-review agent echoing humanApproval/convergeOnly cannot alter the seeded gates", async () => {
+  const { engine } = await boot({
+    vars: { advMax: 1, humanApproval: true, convergeOnly: true },
+    responses: {
+      "senior:adversarial-review": {
+        adversarialFindings: "",
+        adversarialSummary: "clean",
+        humanApproval: false,
+        convergeOnly: false,
+      },
+    },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  const vars = instanceVars(engine);
+  assertEquals(vars.humanApproval, true, "humanApproval gate must be unchanged");
+  assertEquals(vars.convergeOnly, true, "convergeOnly flag must be unchanged");
+});
+
+test("a scope-classify agent echoing humanApproval/convergeOnly cannot alter the seeded gates", async () => {
+  // Drive to the scope classifier via a `converged` review with the gates seeded true; the classifier
+  // echoes them false. With humanApproval:true the instance then parks at the merge-approval user task
+  // (still ACTIVE), so read the gates back through the variables channel after classify-scope ran.
+  const { engine, processInstanceKey } = await boot({
+    vars: { humanApproval: true, convergeOnly: true },
+    responses: {
+      "senior:pr-review": { status: "converged", summary: "done" },
+      "senior:scope-classify": {
+        scopeBlocked: false,
+        scopeBlockReason: "",
+        humanApproval: false,
+        convergeOnly: false,
+      },
+    },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  assertEquals(await variableValue(engine, processInstanceKey, "humanApproval"), true, "humanApproval gate must be unchanged");
+  assertEquals(await variableValue(engine, processInstanceKey, "convergeOnly"), true, "convergeOnly flag must be unchanged");
 });

@@ -453,7 +453,25 @@ Notes:
   key, **and** the PR identity inputs (`repo`, `prNumber`, `prUrl`) — the last
   three because the unfiltered merge lets an input-echo replace the identity that
   `progress-check`, `converge-gate`, and `finalize` go on to read (a wrong
-  `prNumber` would make `finalize` start the merge loop for the wrong PR). A
+  `prNumber` would make `finalize` start the merge loop for the wrong PR) — **and**
+  the gate controls `humanApproval` and `convergeOnly`. These last two are
+  decision flags the loop acts on after the agent returns: `humanApproval = true`
+  routes a converged PR through the `gw-approval` human gate instead of
+  auto-merging, and `convergeOnly = true` ends a review-only run without ever
+  handing the PR to the merge loop. Left unguarded, a converged completion that
+  echoed `humanApproval: false` would **bypass** the approval gate, and one that
+  echoed `convergeOnly: false` would hand a review-only PR to the merge loop.
+  `convergeOnly` is a plain seeded constant, so the usual `=guardConvergeOnly`
+  restore applies. `humanApproval` is the one engine-owned flag that is **also
+  legitimately mutated mid-flight** — a gated caller that adopts a live loop
+  raises it `false → true` via `engine.setVariables` (`submitPr` in
+  `app/service.ts`); it is **monotonic** (only ever rises). A plain
+  `=guardHumanApproval` restore would clobber that concurrent host-set true, so
+  the restore is the monotonic join
+  `=(guardHumanApproval = true) or (humanApproval = true)`: it recovers the
+  snapshot's `true`, honours a concurrent adopter's `true`, and ignores an agent
+  echo of `false`. The direction is **fail-safe** — the only state it can force
+  is *more* human review, never a merge the loop would otherwise have gated. A
   counter the task itself advances is incremented **from the snapshot**
   (`adversarial-review` computes `advPass` as `(if guardAdvPass = null then 0
   else guardAdvPass) + 1`), never from the mergeable process variable. Any new
@@ -843,8 +861,17 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   key, and the PR identity inputs (`repo`, `prNumber`, `prUrl`) — the last three
   because `pr.merge` reads them directly for GitHub operations after the agent
   re-arms the poller, so an input-echo that replaced them would merge the wrong
-  PR. The counter the task advances is incremented from the snapshot
-  (`ciFixRound`/`rebaseRound` become `guard<Name> + 1`).
+  PR. It further guards the **lifecycle marker and timeout config** the loop
+  re-arms on every pass: `ciBlockedReconciled` (arm-merge seeds it `null`;
+  `ci-reconcile` sets it `true`; `gw-ci-blocked` runs the one-shot ground-truth
+  reconcile exactly once per episode while it is `!= true`) and the seeded timer
+  durations (`agentSlaTimeout`, `landedWaitTimeout`, `mergeableWaitTimeout`,
+  `mergeableRepollInterval`). Left unguarded, a `{status:"blocked", pushed:false,
+  ciBlockedReconciled:true}` completion would **skip** the mandatory first
+  reconcile and page a human immediately, and a clobbered timeout would silently
+  reshape a wait a later loop pass re-arms. The counter the task advances is
+  incremented from the snapshot (`ciFixRound`/`rebaseRound` become
+  `guard<Name> + 1`).
 - **Terminal** — `merged` (with `merged_at`), or `converged` when
   `NANO_PR_AUTO_MERGE=0` (review-only), or `abandoned` on cancel.
 

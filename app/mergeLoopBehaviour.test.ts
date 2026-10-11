@@ -303,6 +303,36 @@ test("a CONFLICTING PR whose poller never signalled reaches the rebase arm via t
     .hasVariable("rebaseRound", 1);
 });
 
+test("a rebase agent echoing engine-owned timeout state cannot clobber it (#887)", async () => {
+  // Same guard class as fix-ci: the rebase agent must not reshape the seeded timers that later loop
+  // passes re-arm, nor forge `ciBlockedReconciled`. Drive to the rebase arm via the timeout path with
+  // the agent echoing a forged marker and tiny timeouts; the restore must pin the timers.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "" },
+      "senior:rebase": {
+        status: "rebased",
+        ciBlockedReconciled: true,
+        agentSlaTimeout: "PT1S",
+        landedWaitTimeout: "PT1S",
+        mergeableWaitTimeout: "PT1S",
+        mergeableRepollInterval: "PT1S",
+      },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("agentSlaTimeout", "PT30M")
+    .hasVariable("landedWaitTimeout", "PT30M")
+    .hasVariable("mergeableWaitTimeout", "PT30M")
+    .hasVariable("mergeableRepollInterval", "PT2M");
+  // The forged lifecycle marker was pinned out too (the rebase path never reconciles).
+  assert(instanceVars(engine).ciBlockedReconciled !== true, "a rebase agent must not forge ciBlockedReconciled:true");
+});
+
 test("a blocked PR probed on timeout reaches the CI-fix arm via the timeout path (#636)", async () => {
   const engine = await boot({
     responses: {
@@ -527,6 +557,49 @@ test("a blocked CI verdict with nothing pushed reconciles once before escalating
     .hasCompletedElements("ci-reconcile")
     .hasVariable("ciBlockedReconciled", true); // the one-shot reconcile is marked spent
   assert(!completedElementIds(engine).has("merge-esc-attempt"), "the first block episode must reconcile, not page a human");
+});
+
+test("a fix-ci agent echoing ciBlockedReconciled:true cannot skip the one-shot ground-truth reconcile (#887)", async () => {
+  // `ciBlockedReconciled` is an engine-owned lifecycle marker (arm-merge seeds it null; ci-reconcile
+  // sets it true). gw-ci-blocked reconciles exactly once per episode while it is != true. If the agent's
+  // completion could echo `ciBlockedReconciled:true`, a `{status:"blocked", pushed:false}` verdict would
+  // skip the mandatory first reconcile and page a human immediately. The snapshot/restore guard pins it,
+  // so the engine still reconciles once.
+  const engine = await boot({
+    responses: { "senior:fix-ci": { status: "blocked", pushed: false, ciBlockedReconciled: true } },
+  });
+  await driveToCiFix(engine);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElement("wait-mergeable")
+    .hasCompletedElements("ci-reconcile") // the reconcile STILL runs — the agent's echo was pinned out
+    .hasVariable("ciBlockedReconciled", true);
+  assert(!completedElementIds(engine).has("merge-esc-attempt"), "an agent-forged reconciled flag must not skip the first reconcile");
+});
+
+test("a fix-ci agent echoing seeded timeouts cannot clobber the re-armed merge/SLA timers (#887)", async () => {
+  // The seeded timeout/interval config (agentSlaTimeout, landedWaitTimeout, mergeableWaitTimeout,
+  // mergeableRepollInterval) drives timers re-armed on every loop pass. A `reattempt` re-arms the
+  // merge wait, so a clobbered timeout would silently reshape the next wait. The guard restores them.
+  const engine = await boot({
+    responses: {
+      "senior:fix-ci": {
+        status: "reattempt",
+        agentSlaTimeout: "PT1S",
+        landedWaitTimeout: "PT1S",
+        mergeableWaitTimeout: "PT1S",
+        mergeableRepollInterval: "PT1S",
+      },
+    },
+  });
+  await driveToCiFix(engine);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElement("wait-mergeable")
+    .hasVariable("agentSlaTimeout", "PT30M")
+    .hasVariable("landedWaitTimeout", "PT30M")
+    .hasVariable("mergeableWaitTimeout", "PT30M")
+    .hasVariable("mergeableRepollInterval", "PT2M");
 });
 
 test("a blocked CI verdict that already pushed escalates with a could-not-fix question", async () => {
