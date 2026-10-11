@@ -173,7 +173,7 @@ test("listAutoResolutions + pendingAutoResolutionCount: only FINAL records are l
     // One resolved (pending review), one abstained (pending), one dismissed.
     await claimEscalations(data, [taskRow({ user_task_key: "UT-1" })], "s");
     await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } });
-    await claimEscalations(data, [taskRow({ user_task_key: "UT-2", element_id: "feature-escalation", escalation_kind: "Feature escalation" })], "s");
+    await claimEscalations(data, [taskRow({ user_task_key: "UT-2", element_id: "feature-escalation", kind_label: "Feature escalation" })], "s");
     await recordResolution(data, "UT-2", { outcome: "abstained", rationale: "unclear" });
     await claimEscalations(data, [taskRow({ user_task_key: "UT-3" })], "s");
     await recordResolution(data, "UT-3", { outcome: "resolved", submittedVariables: { answer: "y" } });

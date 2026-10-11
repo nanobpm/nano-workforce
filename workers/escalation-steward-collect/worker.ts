@@ -20,6 +20,7 @@ import {
   isEligibleEscalation,
   liveClaimedTaskKeys,
   optInByProcessKey,
+  optInBySubjectKey,
 } from "../../app/escalationSteward.ts";
 import { type UserTaskRow, userTasks } from "../../app/userTasks.ts";
 
@@ -48,16 +49,23 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   }
 
   const open = await userTasks(app.data).all();
-  const optIn = await optInByProcessKey(app.data);
+  const optInByProc = await optInByProcessKey(app.data);
+  const optInBySubject = await optInBySubjectKey(app.data);
   const claimedKeys = await liveClaimedTaskKeys(app.data);
   const at = Date.now();
 
-  // Resolve each task's opt-in from its owning instance (direct, else its root ancestor for a
-  // callActivity-child escalation). A task with no tracked subject is NOT opted in (fail-closed).
+  // Resolve each task's opt-in from its owning subject. A top-level escalation's `process_key` IS the
+  // subject's instance; an escalation parked INSIDE a callActivity child cell (the shared
+  // `human-escalation`/`implement-cell`) instead carries the CHILD's `process_key` (no subject row
+  // tracks it) but the PARENT run's `subject_key` (pollUserTasks correlates it via the root instance).
+  // So check the direct `process_key` first, then fall back to the correlated `subject_key`. A task
+  // with no tracked subject either way is NOT opted in (fail-closed).
   const eligible: UserTaskRow[] = [];
   for (const row of open) {
     const procKey = row.process_key ?? "";
-    const optedIn = procKey !== "" && optIn.get(procKey) === true;
+    const optedIn =
+      (procKey !== "" && optInByProc.get(procKey) === true) ||
+      (row.subject_key != null && row.subject_key !== "" && optInBySubject.get(row.subject_key) === true);
     if (isEligibleEscalation(row, { optedIn, minAgeMs, claimedUserTaskKeys: claimedKeys, at })) {
       eligible.push(row);
     }

@@ -51,7 +51,16 @@ async function run(
   const completed: { userTaskKey: string; variables: Record<string, unknown> }[] = [];
   try {
     await seed(app.db);
+    // The record worker completes through `completeEscalationAsAgent`, which resolves the open task via
+    // `openUserTasks` (CREATED only) before calling `completeUserTask`. Report every claimed task as an
+    // open `wait-answer` escalation so the door resolves it (a key with no open task is a no-op).
     const engine = {
+      openUserTasks: async () => {
+        const claims = await escalationAutoResolutions(app.db).all();
+        return claims
+          .filter((c) => c.outcome === "claimed")
+          .map((c) => ({ userTaskKey: c.user_task_key, elementId: "wait-answer", processInstanceKey: "PI-1" }));
+      },
       completeUserTask: (userTaskKey: string, variables: Record<string, unknown>) => {
         completed.push({ userTaskKey, variables });
         return Promise.resolve();
@@ -143,6 +152,71 @@ test("record worker: an abstained decision is recorded without any engine comple
       assertEquals(rows[0].outcome, "abstained");
       assertEquals(rows[0].submitted_variables, null);
       assertEquals(rows[0].rationale, "unclear — needs a human");
+    },
+  );
+});
+
+test("record worker: malformed (non-object) decision entries are skipped, never thrown on", async () => {
+  await run(
+    // `[null]` / a scalar are valid JSON but not decision objects — they must be skipped without
+    // incidenting the record task (which would wedge the steward's overlap guard).
+    [null, "not-an-object", { userTaskKey: "UT-1", outcome: "resolved", choice: "retry", variables: { answer: "ok" } }] as unknown as Record<string, unknown>[],
+    async (data) => {
+      await claimEscalations(data, [taskRow({})], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      // Only the one well-formed entry is processed; the malformed ones are skipped.
+      assertEquals(completed.length, 1);
+      assertEquals(completed[0].userTaskKey, "UT-1");
+    },
+  );
+});
+
+test("record worker: a hallucinated key with no live claim held by THIS run is abstained, never submitted", async () => {
+  await run(
+    [{ userTaskKey: "UT-FOREIGN", outcome: "resolved", choice: "retry", variables: { answer: "x" } }],
+    async (data) => {
+      // Claim UT-FOREIGN for a DIFFERENT steward run — this run holds no claim for it.
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-FOREIGN" })], "PI-OTHER");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 0, "an unowned/foreign key is NEVER submitted");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-FOREIGN" });
+      // Fail-closed: the decision is recorded `abstained` (the escalation is left for a human), and the
+      // claim placeholder is finalised so it never lingers as a live claim.
+      assertEquals(rows[0].outcome, "abstained");
+      assert(/no live claim|unclaimed|foreign/i.test(rows[0].rationale ?? ""), "the rationale names the ownership fence");
+    },
+  );
+});
+
+test("record worker: a destructive value smuggled in `variables` (no `choice`) is abstained", async () => {
+  await run(
+    // No `choice` field — the destructive option is only in the form variables (`resolution`).
+    [{ userTaskKey: "UT-1", outcome: "resolved", variables: { resolution: "abandon" }, rationale: "agent chose abandon" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({})], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 0, "a destructive option derived from variables is NEVER submitted");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+      assertEquals(rows[0].outcome, "abstained");
+      assert(/destructive|irreversible/i.test(rows[0].rationale ?? ""), "the rationale names the destructive guard");
+    },
+  );
+});
+
+test("record worker: a `resolved` decision with malformed `variables` is recorded abstained, not falsely resolved", async () => {
+  await run(
+    [{ userTaskKey: "UT-1", outcome: "resolved", variables: null, rationale: "claims resolved" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({})], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 0, "no completion without valid variables");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+      assertEquals(rows[0].outcome, "abstained", "fail-closed: malformed variables never record a false resolved");
+      assertEquals(rows[0].submitted_variables, null);
     },
   );
 });

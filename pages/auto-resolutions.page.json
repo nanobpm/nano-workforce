@@ -125,6 +125,8 @@
           },
           { "field": "rationale", "header": "Rationale", "truncate": true },
           { "field": "worker", "header": "Worker" },
+          { "field": "process_instance_key", "header": "Agent", "template": "Transcript", "truncate": true, "link": { "kind": "page", "page": "cockpit", "keyField": "process_key" } },
+          { "field": "process_instance_key", "header": "Engine instance", "truncate": true, "link": { "kind": "processExplorer", "keyField": "process_instance_key" } },
           { "field": "created_at", "header": "When", "format": "datetime" },
           { "field": "review_state", "header": "Review", "badge": true }
         ],
@@ -162,6 +164,22 @@
             { "field": "agent_job_key", "label": "Agent job" },
             { "field": "review_note", "label": "Review note" }
           ]
+        }
+      }
+    },
+    {
+      "type": "actionForm",
+      "id": "intervene-with-note",
+      "props": {
+        "title": "Intervene with guidance",
+        "submitLabel": "Record intervention",
+        "fields": [
+          { "key": "id", "label": "Record id (the pending auto-resolution to intervene on)", "type": "number", "required": true },
+          { "key": "note", "label": "Guidance for stepping in (recorded as the review note)", "type": "text" }
+        ],
+        "action": {
+          "path": "/app/api/auto-resolutions/review",
+          "body": { "id": "{{form.id}}", "action": "intervene", "note": "{{form.note}}" }
         }
       }
     }

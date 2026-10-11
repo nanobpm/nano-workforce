@@ -1310,6 +1310,49 @@ re-park (a human node has no separate escalation twin to re-park onto). The gate
 like the escalation resume's no-required-target case), and a no-emit acknowledgement node
 has nothing to validate.
 
+## 13.4 Escalation steward (`escalation-steward.bpmn`) — issue #889
+
+An **opt-in**, timer-paced loop that reviews a run's OPEN escalations and submits a recommended
+choice for each, so work keeps moving when no human is watching — while every automatic decision
+stays **reviewable after the fact** in the Auto-resolutions view. It is strictly opt-in: only work
+whose start request set `autoResolveEscalations: true` (persisted as `auto_resolve_escalations` on
+the subject row) is ever touched; everything else is fail-closed out.
+
+- **Pacing + master switch.** `pollEscalationSteward` (a `pollOnce` pass) starts ONE
+  `escalation-steward` instance per interval — `NANO_ESCALATION_STEWARD_INTERVAL` (default `PT30M`,
+  parsed through the canonical `isoDurationToMs`) — when the loop is enabled (`NANO_ESCALATION_STEWARD`,
+  default on) and no prior tick is still ACTIVE. The pass is **best-effort and isolated**: a
+  steward-specific failure is caught and logged so it never starves the poller's other liveness
+  passes, and the tick timestamp advances only after a successful start (a failed start retries next
+  pass).
+- **Eligibility + the claim fence.** The collect step (`pr.escalation-steward-collect`) gathers the
+  open escalation user tasks whose owning subject OPTED IN — resolved off the subject row by
+  `process_key`, falling back to the root-correlated `subject_key` so an escalation parked inside a
+  callActivity child cell (`human-escalation`/`implement-cell`) inherits its parent run's opt-in —
+  that are past a short minimum age (`NANO_ESCALATION_STEWARD_MIN_AGE_MS`, default 5 min, so a human
+  already answering wins), of a steward-answerable kind, and not already claimed. It claims them with
+  a durable compare-and-swap lease (`escalation_auto_resolutions` `claimed` placeholder + a partial
+  UNIQUE index), so two overlapping ticks (or a tick racing a human) never double-answer; an expired
+  lease is released so a crashed steward never wedges a task.
+- **The agent + the record.** The `senior:escalation-steward` agent reviews the claimed escalations
+  and returns one decision each (`resolved` + typed form `variables`, or `abstained`). The record
+  step (`pr.escalation-steward-record`) submits each resolution through the ONE canonical attributed
+  door (`completeEscalationAsAgent`, AGENT attribution — never a human decision, ADR 0046) and writes
+  exactly one durable `escalation_auto_resolutions` row per acted escalation.
+- **Fail-closed guards (defence-in-depth under the prompt's own abstain rules).** Before any
+  submission the record step enforces, in one place: the **claim/ownership fence** (this run must
+  hold a live claim for the key — a hallucinated key is abstained); the **destructive-option guard**
+  (`abandon`/`force-merge`/credential, derived from the decision's own selected value — abstained,
+  never submitted); the **loop guard** (a subject auto-resolved `LOOP_GUARD_MAX_RESOLUTIONS` times
+  that escalates again is abstained); and the **malformed-decision guards** (a non-object entry is
+  skipped; a `resolved` decision with no valid `variables` object is recorded `abstained`, never a
+  false `resolved`). Human-only / irreversible kinds (`merge-approval`, `acp-permission`,
+  readiness gates, `feature-blocked`, `conformance-`/`empty-plan-`escalation) are refused before the
+  agent is even dispatched.
+- **The reviewable record.** Every final decision (`resolved`/`abstained`) is listed in
+  Auto-resolutions, attributed to the steward agent, where an operator can **Dismiss** (reviewed, no
+  action) or **Intervene** (stepped in) with a note — a record is never a hidden machine decision.
+
 ## 14. Open questions / future
 
 - **Provisioning the existing PR branch** — resolved: the `c8ctl` host-git

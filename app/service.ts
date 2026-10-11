@@ -99,7 +99,7 @@ import { ENGINE_TERMINAL_STATES } from "./reconcile.ts";
 // (submitPr/startMerge) and re-exported below so the long-standing `import { repoEnvelopeVars } from
 // "./service.ts"` call sites (and its tests) keep resolving.
 import { repoEnvelopeVars } from "./repoEnvelope.ts";
-import { clampNudgeMinutes, isReviewStale, reviewWaitTimeout } from "./reviewWait.ts";
+import { clampNudgeMinutes, isoDurationToMs, isReviewStale, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
   buildUserTaskRow,
@@ -682,6 +682,15 @@ async function submitPrCritical(
       if (state !== null && !ENGINE_TERMINAL_STATES.has(state)) {
         await engine.setVariables({ scopeKey: loopKey, variables: { humanApproval: true } });
       }
+    }
+    // Steward opt-in is monotonic too (issue #889 review): an opted-in caller adopting a live loop —
+    // possibly a non-opted-in one another run started — widens it to opted-in so the steward can serve
+    // its escalations, rather than silently inheriting the loop's non-opted-in state. The steward reads
+    // the flag off the SUBJECT row (`optInByProcessKey`), not a process variable, so the durable row
+    // update is the whole propagation — no `setVariables` is needed (or possible: the loop never reads
+    // it). Idempotent; a retry against our own opted-in loop is a no-op write.
+    if (autoResolveEscalations && existing.auto_resolve_escalations !== 1) {
+      await table.update(parsed.prKey, { auto_resolve_escalations: 1 });
     }
     return { prKey: parsed.prKey, alreadyRunning: true };
   }
@@ -3807,23 +3816,30 @@ let lastStewardTick = 0;
 export async function pollEscalationSteward(engine: EngineClient) {
   const disabled = /^(0|off|false|no)$/i.test(readEnvOr("NANO_ESCALATION_STEWARD", "1"));
   if (disabled) return;
-  // Parse the interval's `PT…` duration part (the cycle is `R/PT30M`; the period is what paces us).
-  const cycle = readEnvOr("NANO_ESCALATION_STEWARD_INTERVAL", "R/PT30M");
-  const m = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/i.exec(cycle);
-  const intervalMs = m
-    ? (Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0)) * 1000
-    : 30 * 60 * 1000;
+  // Parse the interval through the ONE canonical ISO-8601 duration parser (`isoDurationToMs`,
+  // app/reviewWait.ts) so the pacing can never drift from the grammar every other timer in the app
+  // uses. The env may carry a bare duration (`PT30M`) or a repeat interval (`R/PT30M`); strip an
+  // optional `R…/` prefix and parse the `P…` period. A malformed value falls back to 30 min; a
+  // zero/negative interval is clamped to that fallback so a steward never starts every poll.
+  const DEFAULT_INTERVAL_MS = 30 * 60 * 1000;
+  const cycle = readEnvOr("NANO_ESCALATION_STEWARD_INTERVAL", "PT30M");
+  const period = cycle.includes("/") ? cycle.slice(cycle.lastIndexOf("/") + 1) : cycle;
+  const parsedMs = isoDurationToMs(period, "PT30M");
+  const intervalMs = parsedMs > 0 ? parsedMs : DEFAULT_INTERVAL_MS;
   const nowMs = Date.now();
   if (nowMs - lastStewardTick < intervalMs) return;
   // Overlap guard (cheap, pre-start): don't start a new tick while a prior one is still ACTIVE.
   const active = await engine.searchProcessInstances({ processDefinitionId: ESCALATION_STEWARD_PROCESS_ID, state: "ACTIVE" });
   if (active.length > 0) return;
-  lastStewardTick = nowMs;
   const minAgeMs = Number(readEnvOr("NANO_ESCALATION_STEWARD_MIN_AGE_MS", "300000"));
+  // Advance the tick ONLY after a successful start: if `createInstance` throws, leaving
+  // `lastStewardTick` untouched lets the next pass retry immediately rather than suppressing retries
+  // for the whole interval (the "retried next pass" contract).
   await engine.createInstance({
     processDefinitionId: ESCALATION_STEWARD_PROCESS_ID,
     variables: { minAgeMs },
   });
+  lastStewardTick = nowMs;
 }
 
 /** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
@@ -3846,7 +3862,15 @@ export async function pollOnce(
   await pollFeatureDelivery(data, engine);
   await pollLineage(data);
   await pollUserTasks(data, engine, engineRest);
-  await pollEscalationSteward(engine);
+  // The escalation steward is an OPTIONAL, best-effort pass: a steward-specific failure (a search or
+  // instance-start error) must never reject `pollOnce` and starve the unrelated epic / taskless-plan /
+  // delivery-graph reconciliation passes that follow it. Catch + log it independently so the canonical
+  // poller always continues (issue #889 review).
+  try {
+    await pollEscalationSteward(engine);
+  } catch (err) {
+    console.error(`[poller] escalation-steward tick: ${err instanceof Error ? err.message : String(err)}`);
+  }
   await pollEpicPhase(data, engine, engineRest);
   await pollTasklessPlanTermination(data, engine);
   await pollDeliveryGraphPhase(data, engine);

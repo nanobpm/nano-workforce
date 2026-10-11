@@ -1954,6 +1954,9 @@ components:
         autoMerge:
           type: boolean
           description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
         convergeOnly:
           type: boolean
           deprecated: true
@@ -1978,6 +1981,9 @@ components:
         autoMerge:
           type: boolean
           description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
         convergeOnly:
           type: boolean
           deprecated: true
@@ -2035,6 +2041,9 @@ components:
             buffer — and fires any merge-to-default side effect per task — so admission will reject
             (400) unless confirmed with true (no effect for a non-default base). Accepted by the schema
             today but currently has no runtime effect.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
     PlanStartByUrl:
       type: object
       additionalProperties: false
@@ -2067,6 +2076,9 @@ components:
             Accepted by the schema today but currently has no runtime effect. When implemented it
             will be the required acknowledgement when `baseBranch` names the repository default
             branch. See `PlanStartByIssue.confirmDefaultBase`.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
     ReadinessProbe:
       description: >-
         A single durable readiness probe (issue #258, #295) the feature run must satisfy before its
@@ -2646,6 +2658,9 @@ components:
             segment starting with `.` or ending in `.lock`, etc.) is rejected at submit. This pattern
             mirrors the authoritative server-side gate (`isPlausibleBranchName`, app/baseBranch.ts) so the
             documented contract and the door agree.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
     DeliveryGraphDispatchRepoless:
       description: >-
         The checkout-less dispatch shape (#729): an EXPLICIT `repoless: true` opt-out of repository
@@ -2699,6 +2714,9 @@ components:
             fields are not members of this variant, so supplying either alongside `repoless: true` fails
             `oneOf` matching and is a 400. To provision a repository, use the repository variant (supply
             `repository` + `baseBranch`) and omit `repoless` entirely.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
     DeliveryGraphDispatchNodeProvisioned:
       description: >-
         The FULLY node-provisioned dispatch shape (#739): supplies NEITHER a run-level `repository`/
@@ -2745,6 +2763,9 @@ components:
           description: >-
             OPTIONAL run-level ISO-8601 SLA for `human` nodes (#505) before they record an `escalated`
             outcome. Absent → the `P1D` default. An invalid duration is rejected at submit.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
     DeliveryGraphDismissRequest:
       description: >-
         The OPERATOR dismiss request (#520). The cockpit's staged-proposals grid posts the content
@@ -3624,6 +3645,9 @@ components:
             its handles against — the consumer dependency whose published provenance must carry each
             awaited upstream. When present, `blockedOn` desugars to `capability` probes and the
             resolved `pkg@version` is late-bound into the implementation agent's brief.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this run's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
     FeatureStartByUrl:
       type: object
       additionalProperties: false
@@ -3680,6 +3704,9 @@ components:
           type: string
           minLength: 1
           description: OPTIONAL package the `blockedOn` handles resolve against. See `FeatureStartByIssue.consumerPackage`.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this run's escalations into the escalation steward (issue #889). See `FeatureStartByIssue.autoResolveEscalations`.
     MessageResult:
       type: object
       description: The result of publishing a message / answering an escalation. Shape varies by message
@@ -4830,6 +4857,9 @@ paths:
                     autoMerge:
                       type: boolean
                       description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
+                    autoResolveEscalations:
+                      type: boolean
+                      description: Opt this loop's escalations into the escalation steward (issue
                     convergeOnly:
                       type: boolean
                       deprecated: true
@@ -4853,6 +4883,9 @@ paths:
                     autoMerge:
                       type: boolean
                       description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
+                    autoResolveEscalations:
+                      type: boolean
+                      description: Opt this loop's escalations into the escalation steward (issue
                     convergeOnly:
                       type: boolean
                       deprecated: true
@@ -4905,6 +4938,9 @@ paths:
                     confirmDefaultBase:
                       type: boolean
                       description: 'Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). When implemented it will be the required acknowledgement when `baseBranch` names the repository default branch: targeting the default lands every task directly on it with no integration buffer — and fires any merge-to-default side effect per task — so admission will reject (400) unless confirmed with true (no effect for a non-default base). Accepted by the schema today but currently has no runtime effect.'
+                    autoResolveEscalations:
+                      type: boolean
+                      description: Opt this epic's (and its child loops') escalations into the escalation steward (issue
                 - type: object
                   additionalProperties: false
                   required:
@@ -4926,6 +4962,9 @@ paths:
                     confirmDefaultBase:
                       type: boolean
                       description: Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). Accepted by the schema today but currently has no runtime effect. When implemented it will be the required acknowledgement when `baseBranch` names the repository default branch. See `PlanStartByIssue.confirmDefaultBase`.
+                    autoResolveEscalations:
+                      type: boolean
+                      description: Opt this epic's (and its child loops') escalations into the escalation steward (issue
               type: object
               # END generated:mcp-body
       responses:
@@ -6559,6 +6598,9 @@ paths:
                       type: string
                       minLength: 1
                       description: OPTIONAL npm package name (e.g. `@nanobpm/engine-wasm`) the `blockedOn` shorthand resolves its handles against — the consumer dependency whose published provenance must carry each awaited upstream. When present, `blockedOn` desugars to `capability` probes and the resolved `pkg@version` is late-bound into the implementation agent's brief.
+                    autoResolveEscalations:
+                      type: boolean
+                      description: Opt this run's escalations into the escalation steward (issue
                 - type: object
                   additionalProperties: false
                   required:
@@ -6707,6 +6749,9 @@ paths:
                       type: string
                       minLength: 1
                       description: OPTIONAL package the `blockedOn` handles resolve against. See `FeatureStartByIssue.consumerPackage`.
+                    autoResolveEscalations:
+                      type: boolean
+                      description: Opt this run's escalations into the escalation steward (issue
               type: object
               # END generated:mcp-body
       responses:

@@ -27,13 +27,24 @@ import type { DataLayer } from "@nanobpm/urban";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import type { UserTaskRow } from "./userTasks.ts";
 
-/** The minimal shape of a subject row that carries the opt-in flag. */
+/** The minimal shape of a subject row that carries the opt-in flag. The index signature lets the
+ *  steward read each table's distinct PRIMARY-KEY column generically (see {@link optInBySubjectKey}). */
 interface OptInSubjectRow {
   process_key: string | null;
   auto_resolve_escalations: number;
+  [column: string]: string | number | null;
 }
 
 const now = () => new Date().toISOString();
+
+/** Read a string field off a subject row by dynamic column name, returning `null` when it is absent
+ *  or not a string. The row is widened to a string-indexed record via its own type (no `as` cast), so
+ *  the generic per-table key read in {@link optInBySubjectKey} stays type-safe. */
+function keyOf(row: OptInSubjectRow, column: string): string | null {
+  const record: Record<string, unknown> = row;
+  const v: unknown = record[column];
+  return typeof v === "string" && v !== "" ? v : null;
+}
 
 /** The `senior:escalation-steward` agent's job type (the dispatch verb the steward process emits). */
 export const ESCALATION_STEWARD_JOB_TYPE = "senior:escalation-steward";
@@ -337,5 +348,34 @@ export async function optInByProcessKey(data: DataLayer): Promise<Map<string, bo
   await collect("plans", "plan_key");
   await collect("pull_requests", "pr_key");
   await collect("delivery_graph_runs", "run_key");
+  return out;
+}
+
+/** The same opt-in derivation keyed by the SUBJECT's primary key (`feature_key`/`plan_key`/`pr_key`/
+ *  `run_key`) rather than its engine `process_key`. The collect step needs BOTH: an escalation that
+ *  parks INSIDE a callActivity child cell (the shared `human-escalation`/`implement-cell`, ADR 0006 S4)
+ *  is denormalised onto `user_tasks` with the CHILD's `process_key` (which no subject row tracks) but
+ *  the PARENT run's `subject_key` (which `pollUserTasks` correlates via the root instance, #603/#633).
+ *  Resolving eligibility off the subject key lets those child-cell escalations opt in exactly as their
+ *  owning run did, where a `process_key`-only lookup would always read them as non-opted-in. */
+export async function optInBySubjectKey(data: DataLayer): Promise<Map<string, boolean>> {
+  const out = new Map<string, boolean>();
+  // Each subject table's PRIMARY-KEY column differs, so read it generically: the row's key field is
+  // the one named `key`. A missing/blank key is dropped (the `out.delete("")` below) so it never
+  // matches a real escalation subject.
+  const collect = async (table: string, key: string) => {
+    const rows: OptInSubjectRow[] = await data.table<OptInSubjectRow>(table, key).all();
+    for (const r of rows) {
+      // Read the subject's primary-key column generically (it differs per table). `keyOf` is a type
+      // guard, not an `as` cast, so the dynamic read stays type-safe.
+      const keyValue = keyOf(r, key);
+      out.set(keyValue ?? "", r.auto_resolve_escalations === 1);
+    }
+  };
+  await collect("feature_runs", "feature_key");
+  await collect("plans", "plan_key");
+  await collect("pull_requests", "pr_key");
+  await collect("delivery_graph_runs", "run_key");
+  out.delete("");
   return out;
 }
