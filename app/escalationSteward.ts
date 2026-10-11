@@ -102,6 +102,10 @@ export interface EscalationAutoResolution {
   outcome: "resolved" | "abstained" | "claimed";
   /** JSON of the variables submitted; NULL when abstained. */
   submitted_variables: string | null;
+  /** The option value the steward actually selected (derived host-side from the decision's own form
+   *  variables at record time), so the review surface shows WHAT was chosen without decoding
+   *  `submitted_variables`. NULL when abstained / not derivable. */
+  selected_option: string | null;
   rationale: string | null;
   /** JSON/markdown: what the agent checked, with links. */
   evidence: string | null;
@@ -203,6 +207,7 @@ export async function claimEscalations(
         options: null,
         outcome: "claimed",
         submitted_variables: null,
+        selected_option: null,
         rationale: null,
         evidence: null,
         steward_instance_key: stewardInstanceKey,
@@ -247,6 +252,7 @@ export async function recordResolution(
   patch: {
     outcome: "resolved" | "abstained";
     submittedVariables?: Record<string, unknown> | null;
+    selectedOption?: string | null;
     rationale?: string | null;
     evidence?: string | null;
     options?: unknown[] | null;
@@ -257,12 +263,13 @@ export async function recordResolution(
 ): Promise<void> {
   await data.open().exec(
     `UPDATE "escalation_auto_resolutions"
-       SET "outcome" = ?, "submitted_variables" = ?, "rationale" = ?, "evidence" = ?, "options" = ?,
+       SET "outcome" = ?, "submitted_variables" = ?, "selected_option" = ?, "rationale" = ?, "evidence" = ?, "options" = ?,
            "agent_job_key" = ?, "worker" = ?, "model" = ?, "claimed_by" = NULL, "claimed_until" = NULL
      WHERE "user_task_key" = ? AND "outcome" = 'claimed'`,
     [
       patch.outcome,
       patch.submittedVariables != null ? JSON.stringify(patch.submittedVariables) : null,
+      patch.selectedOption ?? null,
       patch.rationale ?? null,
       patch.evidence ?? null,
       patch.options != null ? JSON.stringify(patch.options) : null,
@@ -288,6 +295,22 @@ export async function liveClaimedTaskKeys(data: DataLayer): Promise<Set<string>>
   const at = now();
   for (const r of rows) {
     if (r.claimed_until != null && r.claimed_until >= at) out.add(r.user_task_key);
+  }
+  return out;
+}
+
+/** The set of `user_task_key`s the steward has ALREADY finally recorded (`resolved`/`abstained`).
+ *  The claim fence's partial UNIQUE index only fences an OPEN (`claimed`) claim, so once a row is
+ *  finalised it leaves that index — and because an abstention does NOT complete the user task, the
+ *  task stays open and every later tick would otherwise re-claim the SAME `user_task_key` and record
+ *  another abstention indefinitely (issue #889 review). Exclude already-final keys from eligibility so
+ *  a task the steward already answered/abstained is never re-claimed. (A genuinely NEW escalation of
+ *  the same work gets a NEW engine `user_task_key`, so this never blocks a fresh escalation.) */
+export async function finalRecordedTaskKeys(data: DataLayer): Promise<Set<string>> {
+  const rows = await escalationAutoResolutions(data).all();
+  const out = new Set<string>();
+  for (const r of rows) {
+    if (r.outcome === "resolved" || r.outcome === "abstained") out.add(r.user_task_key);
   }
   return out;
 }

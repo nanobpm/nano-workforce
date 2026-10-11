@@ -116,6 +116,7 @@
         "columns": [
           { "field": "id", "header": "ID" },
           { "field": "outcome", "header": "Outcome", "badge": true },
+          { "field": "selected_option", "header": "Chose" },
           { "field": "escalation_kind", "header": "Kind" },
           {
             "field": "subject_key",
@@ -126,7 +127,7 @@
           },
           { "field": "rationale", "header": "Rationale", "truncate": true },
           { "field": "worker", "header": "Worker" },
-          { "field": "process_instance_key", "header": "Agent", "template": "Transcript", "truncate": true, "link": { "kind": "page", "page": "cockpit", "keyField": "process_key" } },
+          { "field": "process_key", "header": "Agent", "template": "Transcript", "truncate": true, "link": { "kind": "page", "page": "cockpit", "keyField": "process_key" } },
           { "field": "process_instance_key", "header": "Engine instance", "truncate": true, "link": { "kind": "processExplorer", "keyField": "process_instance_key" } },
           { "field": "created_at", "header": "When", "format": "datetime" },
           { "field": "review_state", "header": "Review", "badge": true }
@@ -156,6 +157,7 @@
           "fields": [
             { "field": "id", "label": "Record id" },
             { "field": "question", "label": "Question" },
+            { "field": "selected_option", "label": "Selected option" },
             { "field": "options", "label": "Options offered" },
             { "field": "submitted_variables", "label": "Submitted variables" },
             { "field": "rationale", "label": "Rationale" },

@@ -22,7 +22,7 @@
 //     ever written for a submission that never happened.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { getAgentJobActivation } from "../../app/agentActivationLedger.ts";
-import { completeEscalationAsAgent } from "../../app/agentCompletion.ts";
+import { completeEscalationAsAgent, snapshotEscalationFormOptions } from "../../app/agentCompletion.ts";
 import {
   countSubjectResolutions,
   ESCALATION_STEWARD_JOB_TYPE,
@@ -115,15 +115,15 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   // job, NOT the preceding `senior:escalation-steward` AGENT job that actually made the decisions.
   // Persisting the record key as `agent_job_key` would give the audit record the wrong provenance, so
   // read the agent's activation key from the durable activation ledger (keyed by this SAME steward
-  // process instance + the agent job type) — the poller records it while the agent job is live. Fall
-  // back to the record job key only when the ledger has no row (agent never observed activated), so
-  // the column is never left blank on a real resolution.
-  const recordJobKey = job.jobKey != null ? String(job.jobKey) : null;
+  // process instance + the agent job type) — the poller records it while the agent job is live. When
+  // the ledger has no row (the best-effort activation poll missed a fast agent job, or engine REST is
+  // not configured), preserve NULL rather than store the record task's own key — a key known to
+  // identify a DIFFERENT job is a confidently-wrong provenance, worse than an honest "unknown".
   const agentActivation =
     job.processInstanceKey != null
       ? await getAgentJobActivation(app.data, String(job.processInstanceKey), ESCALATION_STEWARD_JOB_TYPE).catch(() => undefined)
       : undefined;
-  const agentJobKey = agentActivation?.job_key ?? recordJobKey;
+  const agentJobKey = agentActivation?.job_key ?? null;
 
   for (const d of decisions) {
     const key = typeof d.userTaskKey === "string" ? d.userTaskKey.trim() : "";
@@ -145,12 +145,15 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     // Default to abstain on any malformed/unsafe decision — never submit on ambiguity.
     let outcome: "resolved" | "abstained" = d.outcome === "resolved" ? "resolved" : "abstained";
     let rationale = typeof d.rationale === "string" ? d.rationale : null;
+    // The option value the decision actually selected, derived host-side from its OWN form variables
+    // (never the agent's optional `choice` hint alone). Computed ONCE here so the destructive guard and
+    // the persisted `selected_option` review column read the SAME value (issue #889 review).
+    const selected = selectedOption(d);
 
     // Destructive/irreversible-option guard (host-side, fail-closed). Derive the selected value from the
     // decision's own variables FIRST (not only the optional `choice`), so a `choice`-less `abandon` — or
     // a benign `choice` paired with a destructive `variables` value — is caught.
     if (outcome === "resolved") {
-      const selected = selectedOption(d);
       if (selected != null && isDestructiveOption(selected)) {
         outcome = "abstained";
         rationale = `abstained: '${selected}' is a destructive/irreversible option — left for a human`;
@@ -178,6 +181,17 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     if (outcome === "resolved" && vars === null) {
       outcome = "abstained";
       rationale = "abstained: `resolved` decision carried no valid `variables` object — left for a human";
+    }
+
+    // Evidence-before-choosing guard (fail-closed, issue #889 review): the PR's promise is that every
+    // automatic resolution carries a reviewable audit record — a non-blank rationale AND the evidence
+    // the agent checked. A `resolved` decision that omits either would auto-complete an escalation
+    // with no reviewable basis, so convert it to `abstained` (left for a human) exactly as malformed
+    // variables are. Read the agent's evidence once so the guard and the record agree.
+    const evidence = typeof d.evidence === "string" && d.evidence.trim() !== "" ? d.evidence : null;
+    if (outcome === "resolved" && (rationale == null || rationale.trim() === "" || evidence === null)) {
+      outcome = "abstained";
+      rationale = "abstained: `resolved` decision carried no rationale/evidence — the audit record would be incomplete; left for a human";
     }
 
     let submitted: Record<string, unknown> | null = null;
@@ -209,9 +223,13 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     await recordResolution(app.data, key, {
       outcome,
       submittedVariables: submitted,
+      selectedOption: selected,
       rationale,
-      evidence: typeof d.evidence === "string" ? d.evidence : null,
-      options: Array.isArray(d.options) ? d.options : null,
+      evidence,
+      // Snapshot the REAL form choices host-side from the claimed task's deployed `.form` (issue #889
+      // review) — never the deciding agent's self-reported `options` array, which the agent may omit or
+      // misstate. The claim row carries the task's `element_id`, the canonical form-contract key.
+      options: claim.element_id != null ? snapshotEscalationFormOptions(claim.element_id) : null,
       agentJobKey,
       worker: null,
       model: null,

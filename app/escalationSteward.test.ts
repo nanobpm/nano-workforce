@@ -246,3 +246,27 @@ test("optInByProcessKey: derives the opt-in flag from every subject table, keyed
     assertEquals(map.get("PI-UNKNOWN"), undefined, "an untracked instance is absent (fail-closed)");
   });
 });
+
+test("read model: projects the steward's process as `process_key` (cockpit link) and the persisted `selected_option`", async () => {
+  await withData(async (data) => {
+    // A resolved record whose steward ran under PI-STEWARD (distinct from the subject's process PI-1).
+    await claimEscalations(data, [taskRow({ process_key: "PI-1" })], "PI-STEWARD");
+    await recordResolution(data, "UT-1", {
+      outcome: "resolved",
+      submittedVariables: { answer: "retry" },
+      selectedOption: "retry",
+      rationale: "ok",
+      evidence: "checked",
+    });
+    const rows = (await data.open().query(
+      `SELECT "process_key", "process_instance_key", "steward_instance_key", "selected_option" FROM "escalation_auto_resolutions__read_model" WHERE "user_task_key" = 'UT-1'`,
+    )) as unknown as { process_key: string | null; process_instance_key: string | null; steward_instance_key: string | null; selected_option: string | null }[];
+    assertEquals(rows.length, 1);
+    // The cockpit "Agent" transcript link keys on `process_key`, which must be the ANSWERING steward's
+    // process — NOT `process_instance_key` (the escalated subject's process) (issue #889 review).
+    assertEquals(rows[0].process_key, "PI-STEWARD", "the cockpit link focuses the steward transcript");
+    assertEquals(rows[0].process_instance_key, "PI-1", "the subject's engine instance stays distinct");
+    assertEquals(rows[0].steward_instance_key, "PI-STEWARD");
+    assertEquals(rows[0].selected_option, "retry", "the selected option is projected for the grid");
+  });
+});

@@ -3,19 +3,21 @@
 // no action) or `intervened` (the operator stepped in), with an optional note. Both fold the
 // record's `review_state` off `pending` — idempotently, so an already-reviewed record is a 404-style
 // no-op — and record who reviewed it and when. Reopening the completed user task is NOT required.
+//
+// AUTHORIZATION (issue #889 review): this is an OPERATOR-PAGE mutation, driven by the declarative
+// Dismiss/Intervene row actions + the guidance form on `pages/auto-resolutions.page.json`. Like every
+// other UI-driven operator door (`acknowledgePr`/`acknowledgeDone`/`acknowledgeEpic`/`dismissProposal`)
+// it carries NO `x-hook-secret` guard — declarative page actions structurally cannot attach that header
+// (see `pages/mcp.page.json`), so guarding on it would 401 the very UI it exists to serve on any
+// secured deployment. The guard is instead the read-model's derived `pending_review` flag the button
+// reads via `showWhenField`, enforced host-side by `reviewResolution` (which only transitions a FINAL,
+// still-`pending` record) — the same "affordance and guard read one oracle" pattern as `acknowledgeVia`.
 import { reviewResolution } from "../app/escalationSteward.ts";
-import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
-
-const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
-export default defineOperation("reviewAutoResolution", async ({ req, body }, app) => {
-  if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
-    app.log.warn("reviewAutoResolution rejected: missing/invalid shared secret");
-    return { status: 401, body: { ok: false, error: "unauthorized" } };
-  }
+export default defineOperation("reviewAutoResolution", async ({ body }, app) => {
   if (!body || typeof body !== "object") {
     app.log.warn("reviewAutoResolution rejected: missing request body");
     return { status: 400, body: { ok: false, error: "id and action are required" } };

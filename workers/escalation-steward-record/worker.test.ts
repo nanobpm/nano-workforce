@@ -60,7 +60,9 @@ async function run(
         const claims = await escalationAutoResolutions(app.db).all();
         return claims
           .filter((c) => c.outcome === "claimed")
-          .map((c) => ({ userTaskKey: c.user_task_key, elementId: "wait-answer", processInstanceKey: "PI-1" }));
+          // Report each claimed task under its OWN element_id so the completer validates against the
+          // task's real form contract (a trial-merge-decision validates `action`, not `answer`).
+          .map((c) => ({ userTaskKey: c.user_task_key, elementId: c.element_id ?? "wait-answer", processInstanceKey: "PI-1" }));
       },
       completeUserTask: (userTaskKey: string, variables: Record<string, unknown>) => {
         completed.push({ userTaskKey, variables });
@@ -179,7 +181,7 @@ test("record worker: malformed (non-object) decision entries are skipped, never 
   await run(
     // `[null]` / a scalar are valid JSON but not decision objects — they must be skipped without
     // incidenting the record task (which would wedge the steward's overlap guard).
-    [null, "not-an-object", { userTaskKey: "UT-1", outcome: "resolved", choice: "retry", variables: { answer: "ok" } }] as unknown as Record<string, unknown>[],
+    [null, "not-an-object", { userTaskKey: "UT-1", outcome: "resolved", choice: "retry", variables: { answer: "ok" }, rationale: "ok", evidence: "checked" }] as unknown as Record<string, unknown>[],
     async (data) => {
       await claimEscalations(data, [taskRow({})], "PI-STEWARD");
     },
@@ -260,7 +262,7 @@ test("record worker: a `resolved` decision with malformed `variables` is recorde
 
 test("record worker: agent_job_key records the ANSWERING agent's activation key, not the record task's job key", async () => {
   await run(
-    [{ userTaskKey: "UT-1", outcome: "resolved", choice: "retry", variables: { answer: "Retry." }, rationale: "ok" }],
+    [{ userTaskKey: "UT-1", outcome: "resolved", choice: "retry", variables: { answer: "Retry." }, rationale: "ok", evidence: "ls-remote empty" }],
     async (data) => {
       await claimEscalations(data, [taskRow({})], "PI-STEWARD");
       // The poller observed the senior:escalation-steward AGENT job (key J-AGENT) activated on this
@@ -281,6 +283,80 @@ test("record worker: agent_job_key records the ANSWERING agent's activation key,
         rows[0].agent_job_key,
         "J-AGENT",
         "provenance points at the agent job that made the decision, not the record service job (J-1)",
+      );
+    },
+  );
+});
+
+test("record worker: agent_job_key is NULL (never the record task's own key) when the ledger has no activation row", async () => {
+  await run(
+    // No recordAgentJobObservation — the best-effort poll missed the fast agent job. The fallback must
+    // be an honest NULL, NOT the record service task's own job key (J-1), which is known to identify a
+    // DIFFERENT job and would give the audit record confidently-wrong provenance.
+    [{ userTaskKey: "UT-1", outcome: "resolved", choice: "retry", variables: { answer: "Retry." }, rationale: "ok", evidence: "checked" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({})], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 1);
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+      assertEquals(rows[0].outcome, "resolved");
+      assertEquals(rows[0].agent_job_key, null, "unknown provenance stays NULL — never the record task's own key (J-1)");
+    },
+  );
+});
+
+test("record worker: a `resolved` decision with no rationale/evidence is abstained (fail-closed audit record)", async () => {
+  await run(
+    // `resolved` but NO rationale and NO evidence — the PR's promise is a reviewable audit record for
+    // every automatic resolution, so this must degrade to `abstained` (left for a human), never
+    // auto-complete an escalation with no reviewable basis.
+    [{ userTaskKey: "UT-1", outcome: "resolved", choice: "retry", variables: { answer: "x" } }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({})], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 0, "a resolved decision with no rationale/evidence is NEVER submitted");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+      assertEquals(rows[0].outcome, "abstained", "fail-closed: an unauditable resolved is abstained");
+      assert(/rationale|evidence|audit/i.test(rows[0].rationale ?? ""), "the rationale names the missing audit record");
+    },
+  );
+});
+
+test("record worker: the SELECTED option is persisted on the record (the review surface shows what was chosen)", async () => {
+  await run(
+    // The chosen value is carried in the form variables (`answer`) — `selectedOption` derives it
+    // host-side and the record persists it as a first-class column.
+    [{ userTaskKey: "UT-1", outcome: "resolved", variables: { answer: "retry" }, rationale: "ok", evidence: "checked" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({})], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 1);
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+      assertEquals(rows[0].outcome, "resolved");
+      assertEquals(rows[0].selected_option, "retry", "the selected option is a first-class column, not buried in submitted_variables");
+    },
+  );
+});
+
+test("record worker: `options` snapshots the REAL form choices host-side, never the agent's self-reported array", async () => {
+  await run(
+    // The agent MISSTATES the choices (`options: ["only-this"]`), but the trial-merge-decision form's
+    // real `action` select is [proceed, rebase, abandon]. The record must persist the host-side snapshot.
+    [{ userTaskKey: "UT-TM", outcome: "resolved", variables: { action: "proceed" }, rationale: "ok", evidence: "checked", options: ["only-this"] }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-TM", element_id: "trial-merge-decision", kind_label: "Trial merge" })], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 1);
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-TM" });
+      assertEquals(rows[0].outcome, "resolved");
+      assertEquals(
+        rows[0].options,
+        JSON.stringify(["proceed", "rebase", "abandon"]),
+        "the record snapshots the deployed form's real choices, not the agent's self-reported array",
       );
     },
   );

@@ -296,6 +296,22 @@ export function validateEscalationVariables(
   return null;
 }
 
+/** Snapshot the REAL option values an escalation's deployed `.form` offers (the union of every `select`
+ *  field's allowed `values`), read from the canonical form contract host-side. The escalation-steward
+ *  record step persists THIS — never the deciding agent's self-reported `options` array, which the agent
+ *  may omit or misstate (issue #889 review) — so the reviewable record shows the choices that were
+ *  genuinely on offer. Returns `null` when the element has no linked form (nothing to snapshot). */
+export function snapshotEscalationFormOptions(elementId: string): string[] | null {
+  const formId = escalationFormId(elementId);
+  if (!formId) return null;
+  const { allowed } = formContract(formId);
+  const out: string[] = [];
+  for (const values of Object.values(allowed)) {
+    for (const v of values) if (!out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
 /** The canonical attributed completer. Records an attribution row in `task_completions` and THEN
  *  completes the user task with the exact typed `variables` — so the ledger row can never be lost by a
  *  resume that fires before the write. If the engine completion throws (a failed/rejected completion,

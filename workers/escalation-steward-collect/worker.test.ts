@@ -113,3 +113,23 @@ test("collect worker: the overlap guard makes a tick a no-op while a prior stewa
     assertEquals(out.claimed.length, 0);
   });
 });
+
+test("collect worker: an escalation the steward ALREADY abstained/resolved is never re-claimed (no repeated abstentions)", async () => {
+  await withApp(async (data, run) => {
+    const { recordResolution } = await import("../../app/escalationSteward.ts");
+    await seedEscalation(data, { userTaskKey: "UT-1", processKey: "PI-PR", optedIn: true });
+    // First tick claims + abstains (the task stays OPEN — an abstention does not complete it).
+    const first = await run({});
+    assertEquals(first.claimed.length, 1, "the first tick claims the eligible escalation");
+    await recordResolution(data, "UT-1", { outcome: "abstained", rationale: "unclear — needs a human" });
+    // The NEXT tick must NOT re-claim the same `user_task_key`: the partial claim fence no longer
+    // covers the finalised row, so without the final-record exclusion the steward would abstain the
+    // same open task every tick forever (issue #889 review).
+    const second = await run({});
+    assertEquals(second.claimed.length, 0, "an already-abstained task is never re-claimed");
+    assertEquals(second.eligibleCount, 0);
+    const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+    assertEquals(rows.length, 1, "exactly ONE durable row — no repeated abstention records");
+    assertEquals(rows[0].outcome, "abstained");
+  });
+});

@@ -17,6 +17,7 @@ import {
   claimEscalations,
   DEFAULT_MIN_AGE_MS,
   ESCALATION_STEWARD_PROCESS_ID,
+  finalRecordedTaskKeys,
   isEligibleEscalation,
   liveClaimedTaskKeys,
   optInByProcessKey,
@@ -51,7 +52,13 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const open = await userTasks(app.data).all();
   const optInByProc = await optInByProcessKey(app.data);
   const optInBySubject = await optInBySubjectKey(app.data);
+  // The claim fence's partial UNIQUE index only fences an OPEN claim; once a row is finalised
+  // (`resolved`/`abstained`) it leaves that index, and because an abstention does NOT complete the
+  // task, the same `user_task_key` would be re-claimed every tick (issue #889 review). Union the
+  // already-final keys into the exclusion set so a task the steward already answered/abstained is
+  // never re-claimed (a genuinely NEW escalation gets a NEW engine key, so this never blocks one).
   const claimedKeys = await liveClaimedTaskKeys(app.data);
+  for (const k of await finalRecordedTaskKeys(app.data)) claimedKeys.add(k);
   const at = Date.now();
 
   // Resolve each task's opt-in from its owning subject. A top-level escalation's `process_key` IS the
