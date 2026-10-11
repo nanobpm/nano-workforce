@@ -1,3 +1,9 @@
+## [0.201.5](https://github.com/nanobpm/nano-workforce/compare/v0.201.4...v0.201.5) (2026-10-11)
+
+### Bug Fixes
+
+* protect engine-owned process vars from agent-completion clobber (Closes [#887](https://github.com/nanobpm/nano-workforce/issues/887)) ([#888](https://github.com/nanobpm/nano-workforce/issues/888)) ([4245287](https://github.com/nanobpm/nano-workforce/commit/4245287e3d7553881f29bdda50cbd6d2b60b6268))
+
 ## [0.201.4](https://github.com/nanobpm/nano-workforce/compare/v0.201.3...v0.201.4) (2026-10-11)
 
 ### Bug Fixes
