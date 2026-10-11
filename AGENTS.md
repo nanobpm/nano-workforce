@@ -393,7 +393,7 @@ npm run typecheck                                     # tsc --noEmit (Node)
 npm run check                                         # urban check (manifest validation)
 npm run layout:check                                  # BPMN diagram freshness (no drift)
 npm run check:prompts                                 # agent-prompt linkedResource resolution
-npm run check:agent-definitions                       # every senior:* agent task carries the agentDefinition marker + registry matches corpus
+npm run check:agent-definitions                       # every senior:* agent task (authored corpus + compiled delivery-graph output) carries the agentDefinition marker
 npm run check:migrations                              # migration prefixes + immutability (no rename/delete/edit of a merged migration)
 npm run check:contracts                               # contract registry (no synonyms / undeclared env keys)
 npm test                                              # unit tests (node --test)
