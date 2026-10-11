@@ -14,7 +14,7 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
-import { agentTaskTypesMissingExternalMarker } from "./agentic/vocab/job-types.ts";
+import { missingExternalMarkerAgentTaskTypes } from "./agentic/vocab/job-types.ts";
 import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText, resumeValidVar } from "./deliveryGraphCompiler.ts";
 import { isDeliveryEscalationTwin } from "./deliveryHuman.ts";
 
@@ -166,14 +166,14 @@ test("#884 agentDefinition: every compiled agent cell carries the engine-native 
   // persisted NO durable agentic transcript. The hand-authored processes declare the marker on every
   // `senior:*` task (issue #745); the compiler must emit it on every agent cell it generates — the
   // defect CLASS is "every agent service task the app generates", so this guards the compiler output
-  // through the SAME canonical scanner (`agentTaskTypesMissingExternalMarker`, the one the
-  // hand-authored-corpus guard in `agent-marker.test.ts` uses) rather than a second, driftable regex.
+  // through the SAME canonical union scanner (`missingExternalMarkerAgentTaskTypes`, the one the
+  // repo-wide gate in `check-agent-definitions.ts` uses) rather than a second, driftable regex.
   const r = await compileOk(RELEASE_RUNBOOK);
   // RELEASE_RUNBOOK has exactly one agent node (`open-b` → `senior:feature`); its compiled service
-  // task is `<el>_task`. The scanner keys a task as an agent by its prompt link, and the compiler
-  // links the job type's base prompt onto every agent cell (see the linkedResource test below), so
-  // the marker must be present on THAT cell — not merely somewhere in the document (a stray marker
-  // on a DIFFERENT element would not make THIS cell eligible for AgentInstance minting).
+  // task is `<el>_task`. A compiled agent cell is prompt-LESS (the resolved #884 "Decide", Option (a)),
+  // so it is the type-keyed half of the union scanner (keyed by the `<rank>:<task>` colon-form type)
+  // that sees it — and the marker must be present on THAT cell, not merely somewhere in the document
+  // (a stray marker on a DIFFERENT element would not make THIS cell eligible for AgentInstance minting).
   const taskBlock = [...r.bpmn.matchAll(/<bpmn:serviceTask id="n\d+_task"[\s\S]*?<\/bpmn:serviceTask>/g)]
     .map((m) => m[0])
     .find((b) => b.includes('<zeebe:taskDefinition type="senior:feature" />')) ?? "";
@@ -185,11 +185,10 @@ test("#884 agentDefinition: every compiled agent cell carries the engine-native 
   );
   // The marker is a SIBLING of the dispatch verb, which stays (per #464): both must be present.
   assert(/<zeebe:taskDefinition type="senior:feature" \/>/.test(ext), "the dispatch verb stays alongside the marker");
-  // And the CANONICAL scanner — the one the repo-wide guard applies to the hand-authored corpus —
-  // finds NO unmarked agent task in the whole compiled document (it keys on the prompt link, which
-  // the compiled agent cell now carries; a connector/wait/host task is not prompt-bearing and is
-  // correctly ignored).
-  assertEquals(agentTaskTypesMissingExternalMarker(r.bpmn), []);
+  // And the CANONICAL union scanner — the one the repo-wide guard applies — finds NO unmarked agent
+  // task in the whole compiled document (it keys an agent by its colon-form type, which every compiled
+  // agent cell carries; a connector/wait/host task is not colon-form and is correctly ignored).
+  assertEquals(missingExternalMarkerAgentTaskTypes(r.bpmn), []);
 });
 
 test("#884 agentDefinition: EVERY agent cell in a multi-agent graph is marked (not just the first)", async () => {
@@ -219,48 +218,21 @@ test("#884 agentDefinition: EVERY agent cell in a multi-agent graph is marked (n
   }
 });
 
-test("#884 linkedResource: a compiled agent cell links its job type's deployed base prompt (latest)", async () => {
-  // The "Decide" half of #884: a compiled agent cell links the job type's DEPLOYED base prompt
-  // (`prompts/<token>.md`, the blessed linkedResource path per AGENTS.md) with `bindingType="latest"`,
-  // so the cell gets the SHARED agent contract (output/result envelope, branch/PR discipline) the
-  // per-node `appendPrompt` steering never carries — the SAME composition every hand-authored
-  // `senior:*` task uses. The link resolves from the RAW jobType through the compiler's fixed
-  // job-type→prompt map; a job type with no deployed prompt links NOTHING (never a wrong prompt).
-  const r = await compileOk(RELEASE_RUNBOOK); // open-b → senior:feature
-  const taskBlock = [...r.bpmn.matchAll(/<bpmn:serviceTask id="n\d+_task"[\s\S]*?<\/bpmn:serviceTask>/g)]
-    .map((m) => m[0])
-    .find((b) => b.includes('<zeebe:taskDefinition type="senior:feature" />')) ?? "";
-  assert(
-    taskBlock.includes('<zeebe:linkedResource resourceId="prompts/feature.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />'),
-    `the senior:feature cell links prompts/feature.md (latest), got:\n${taskBlock}`,
-  );
-  // The `senior:pr-review` → review-round mapping is the one non-basename case (the job-type suffix
-  // is NOT the prompt file stem) — pin it so a naive `prompts/<suffix>.md` derivation can't regress it.
-  const review = await compileOk({ nodes: [{ id: "rw", kind: "agent", agent: { jobType: "senior:pr-review" } }], edges: [] });
-  assert(
-    review.bpmn.includes('<zeebe:linkedResource resourceId="prompts/review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />'),
-    "senior:pr-review links prompts/review-round.md (not a basename-derived prompts/pr-review.md)",
-  );
-  // A job type with NO deployed prompt (a bespoke/external senior:<task>) links nothing — the engine
-  // silently omits an unresolvable link, so emitting one would be a silent no-op; the per-node
-  // appendPrompt still steers the cell.
-  const bespoke = await compileOk({ nodes: [{ id: "bx", kind: "agent", agent: { jobType: "senior:no-such-prompt" } }], edges: [] });
-  assert(!bespoke.bpmn.includes('linkName="prompt"'), "an unmapped job type links no base prompt (never a wrong/nonexistent one)");
-});
-
-test("#884 linkedResource: a prototype-chain jobType links NO base prompt (own-property guard)", async () => {
-  // Bug class (PR #886 review): `AGENT_JOB_TYPE_PROMPT` is a plain object used as a lookup map, and
-  // `jobType` is graph-author input. A `jobType` that names an INHERITED `Object.prototype` key
-  // (`constructor`, `__proto__`, `toString`, `hasOwnProperty`, …) resolves through the prototype
-  // chain to a function/object — `!== undefined` — so a bare-index guard emits a BOGUS linkedResource
-  // (e.g. `resourceId="function Object() { [native code] }"`) instead of linking NOTHING as the
-  // contract promises for an unmapped job type. The accessor must require an OWN entry. None of these
-  // is a real deployed prompt, so each must link nothing — exactly like any other unmapped job type.
-  for (const jobType of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+test("#884 prompt-less: a compiled agent cell carries NO base-prompt link (Option (a))", async () => {
+  // The resolved "Decide" half of #884 (Option (a), PR #886 review): a compiled agent cell is
+  // deliberately prompt-LESS. The hand-authored process prompts (`prompts/feature.md`, …) are
+  // process-specific contracts — they require process variables (`variables.task`/`variables.issue`)
+  // and a `feat/<task.id>` branch the generic compiled cell never supplies (it seeds only
+  // `{jobType, appendPrompt, timeout}` and the harness provisions `feat/<node.id>`, #776) — so linking
+  // one hands the cell instructions referencing missing inputs and a conflicting branch. The cell is
+  // steered by its per-node `appendPrompt` alone; the marker alone fixes the createAgentInstance
+  // failure. Pin that NO compiled agent cell emits a prompt `linkedResource` — for a mapped-looking
+  // type, a bespoke type, AND a prototype-chain jobType (which must never resolve to a bogus link).
+  for (const jobType of ["senior:feature", "senior:pr-review", "senior:no-such-prompt", "constructor", "__proto__", "toString"]) {
     const r = await compileOk({ nodes: [{ id: "p", kind: "agent", agent: { jobType } }], edges: [] });
     assert(
       !r.bpmn.includes('linkName="prompt"'),
-      `prototype-chain jobType ${JSON.stringify(jobType)} must link NO base prompt, got:\n${
+      `compiled agent cell ${JSON.stringify(jobType)} must link NO base prompt (prompt-less, Option (a)), got:\n${
         r.bpmn.split("\n").filter((l) => l.includes("linkedResource")).join("\n")
       }`,
     );

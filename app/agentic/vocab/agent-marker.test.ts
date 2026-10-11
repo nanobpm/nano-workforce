@@ -10,7 +10,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assert, assertEquals } from "#test-assert";
 import { compileDeliveryGraph } from "../../deliveryGraphCompiler.ts";
-import { agentTaskTypesMissingExternalMarker, promptBearingTaskTypes } from "./job-types.ts";
+import { agentTaskTypesMissingExternalMarker, missingExternalMarkerAgentTaskTypes, promptBearingTaskTypes } from "./job-types.ts";
 
 const PROCESSES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../resources/processes");
 
@@ -77,12 +77,13 @@ test("DEFECT-CLASS GUARD: every deployed prompt-bearing agent task carries the e
 test("DEFECT-CLASS GUARD (compiler output, issue #884): every COMPILED delivery-graph agent cell carries the marker", async () => {
   // The hand-authored corpus above is only HALF the class — the delivery-graph COMPILER
   // (`app/deliveryGraphCompiler.ts`) is the other producer of agent service tasks, and it emitted
-  // cells with NO `agentDefinition` (and no prompt link) until #884: every delivery-graph agent run
-  // failed AgentInstance creation (`… has no agentDefinition`) and persisted no durable transcript
-  // (269 failed creates on omarchy). The canonical scanner keys a task as an agent by its prompt
-  // link, which a compiled cell now carries (the compiler links the job type's base prompt); apply
-  // the SAME scanner to the compiler's OUTPUT so a compiler regression that drops the marker (or the
-  // link that makes the cell visible to the scanner) fails here — not silently at runtime.
+  // cells with NO `agentDefinition` until #884: every delivery-graph agent run failed AgentInstance
+  // creation (`… has no agentDefinition`) and persisted no durable transcript (269 failed creates on
+  // omarchy). Per the resolved "Decide" half of #884 (Option (a), PR #886 review) a compiled cell is
+  // prompt-LESS (no base-prompt link), so the prompt-keyed scanner cannot see it — it is the
+  // type-keyed half of the union scanner (`missingExternalMarkerAgentTaskTypes`, keyed by the
+  // `<rank>:<task>` colon-form type) that sees these cells. Apply the SAME union to the compiler's
+  // OUTPUT so a compiler regression that drops the marker fails here — not silently at runtime.
   const r = await compileDeliveryGraph({
     nodes: [
       { id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "implement #1" }, emits: [{ name: "pr", type: "pr" }] },
@@ -91,9 +92,10 @@ test("DEFECT-CLASS GUARD (compiler output, issue #884): every COMPILED delivery-
     edges: [{ from: "impl", to: "review" }],
   });
   assert(r.ok, `expected the graph to compile, got ${JSON.stringify(r)}`);
-  // The compiled agent cells ARE prompt-bearing now (the linked base prompt), so the scanner sees them.
-  assert(promptBearingTaskTypes(r.bpmn).length > 0, "the compiled agent cells are prompt-bearing (the scanner sees them)");
-  const missing = agentTaskTypesMissingExternalMarker(r.bpmn);
+  // The compiled agent cells are prompt-LESS (Option (a)), so the prompt-keyed scan sees none — the
+  // union's type-keyed half is what covers them.
+  assertEquals(promptBearingTaskTypes(r.bpmn), []);
+  const missing = missingExternalMarkerAgentTaskTypes(r.bpmn);
   assert(
     missing.length === 0,
     `compiled delivery-graph agent cell(s) missing <zeebe:agentDefinition agentType="external" /> — ${missing.join(", ")}`,

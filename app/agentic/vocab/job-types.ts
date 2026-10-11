@@ -115,36 +115,6 @@ export function promptBearingTaskTypes(xml: string): string[] {
   return types;
 }
 
-// The base-prompt resource id a prompt link names: `<zeebe:linkedResource resourceId="…" …
-// linkName="prompt" …>`. The attribute ORDER is not fixed in the authored corpus, so match the
-// resourceId and the linkName="prompt" marker independently within the one element.
-const PROMPT_LINK_RESOURCE = /<(?:\w+:)?linkedResource\b[^>]*\bresourceId="([^"]*)"[^>]*\blinkName="prompt"|<(?:\w+:)?linkedResource\b[^>]*\blinkName="prompt"[^>]*\bresourceId="([^"]*)"/;
-
-/**
- * Scan one BPMN document for the job-type → base-prompt resource id link of each PROMPT-BEARING agent
- * service task — the relationship the hand-authored corpus authors per task and the compiler's
- * `AGENT_JOB_TYPE_PROMPT` registry DUPLICATES (issue #884, PR #886 review). A task contributes an
- * entry iff it carries a `<zeebe:linkedResource … linkName="prompt">` naming a `resourceId`; a
- * prompt-less agent cell (no link) and a non-prompt `linkName` contribute nothing. The gate compares
- * THIS derived map against the registry so the two producers cannot silently diverge (a registry
- * entry pointing at a DIFFERENT — but deployed — prompt, or an authored agent type the registry omits,
- * both fail). Returns a plain object keyed by job type; the first occurrence of a type wins.
- */
-export function promptLinkByTaskType(xml: string): Record<string, string> {
-  const map: Record<string, string> = {};
-  for (const [block] of xml.matchAll(SERVICE_TASK)) {
-    if (!PROMPT_LINK.test(block)) continue;
-    const type = block.match(TASK_DEFINITION_TYPE)?.[1];
-    if (type === undefined || type.length === 0) continue;
-    const m = block.match(PROMPT_LINK_RESOURCE);
-    const resourceId = m?.[1] ?? m?.[2];
-    if (resourceId === undefined || resourceId.length === 0) continue;
-    if (Object.hasOwn(map, type)) continue;
-    map[type] = resourceId;
-  }
-  return map;
-}
-
 /**
  * Scan one BPMN document for the job types of PROMPT-BEARING agent service tasks that are MISSING the
  * engine-native AgentTask marker `<zeebe:agentDefinition agentType="external" />` (issue #745). Every
@@ -175,12 +145,12 @@ export function agentTaskTypesMissingExternalMarker(xml: string): string[] {
  * colon-form `<zeebe:taskDefinition type>` ALONE, NOT by a prompt link — that are MISSING the
  * engine-native AgentTask marker `<zeebe:agentDefinition agentType="external" />` (issue #884,
  * PR #886 review). The prompt-keyed scanner (`agentTaskTypesMissingExternalMarker`) is blind to a
- * DELIBERATELY prompt-less agent task — e.g. a compiled delivery-graph cell for a bespoke
- * `senior:<task>` with no deployed base prompt (`AGENT_JOB_TYPE_PROMPT` has no entry, so the
- * compiler emits no link) — so a marker regression on exactly those cells would pass that scan
- * vacuously. This scan keys a service task as an AGENT by the same grammar the crew bridge uses
- * (`jobTypeToRoutingToken`: a single-colon `<rank>:<task>` whose rank is a bare routing segment),
- * which needs no prompt link, so EVERY agent task — mapped or unmapped, prompt-bearing or not — is
+ * DELIBERATELY prompt-less agent task — and EVERY compiled delivery-graph cell is prompt-less (the
+ * resolved #884 "Decide", Option (a): the cell carries the marker alone and is steered by its
+ * per-node `appendPrompt`, never a linked base prompt) — so a marker regression on exactly those
+ * cells would pass that scan vacuously. This scan keys a service task as an AGENT by the same grammar
+ * the crew bridge uses (`jobTypeToRoutingToken`: a single-colon `<rank>:<task>` whose rank is a bare
+ * routing segment), which needs no prompt link, so EVERY agent task — prompt-bearing or not — is
  * inspected for the marker independently of its prompt status. A dot-form host job (`pr.finalize`),
  * a typeless block, and a malformed colon form (`senior:feature:extra`) are not agent job types and
  * are ignored (no false positives). The marker check is scoped to the block's

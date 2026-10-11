@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { assert, assertEquals } from "#test-assert";
 import type { Capability } from "@nanobpm/agentic/protocol";
 import { crewResolver } from "./crew-vocab.ts";
-import { externalAgentTaskTypesMissingMarker, jobTypeToRoutingToken, missingExternalMarkerAgentTaskTypes, promptBearingTaskTypes, promptLinkByTaskType } from "./job-types.ts";
+import { externalAgentTaskTypesMissingMarker, jobTypeToRoutingToken, missingExternalMarkerAgentTaskTypes, promptBearingTaskTypes } from "./job-types.ts";
 
 const PROCESSES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../resources/processes");
 
@@ -236,55 +236,4 @@ test("missingExternalMarkerAgentTaskTypes de-duplicates a type caught by both sc
       </bpmn:extensionElements>
     </bpmn:serviceTask>`;
   assertEquals(missingExternalMarkerAgentTaskTypes(xml), ["senior:feature"]);
-});
-
-test("promptLinkByTaskType maps each prompt-bearing agent task to its linked prompt resource", () => {
-  const xml = `
-    <bpmn:serviceTask id="a">
-      <bpmn:extensionElements>
-        <zeebe:taskDefinition type="senior:feature" />
-        <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="prompts/feature.md" linkName="prompt" />
-        </zeebe:linkedResources>
-      </bpmn:extensionElements>
-    </bpmn:serviceTask>
-    <bpmn:serviceTask id="b">
-      <bpmn:extensionElements>
-        <zeebe:taskDefinition type="senior:pr-review" />
-        <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="prompts/review-round.md" linkName="prompt" />
-        </zeebe:linkedResources>
-      </bpmn:extensionElements>
-    </bpmn:serviceTask>
-    <bpmn:serviceTask id="host">
-      <bpmn:extensionElements>
-        <zeebe:taskDefinition type="pr.finalize" />
-      </bpmn:extensionElements>
-    </bpmn:serviceTask>`;
-  assertEquals(promptLinkByTaskType(xml), {
-    "senior:feature": "prompts/feature.md",
-    "senior:pr-review": "prompts/review-round.md",
-  });
-});
-
-test("promptLinkByTaskType ignores a prompt-less agent task and a non-prompt link", () => {
-  // A prompt-less agent cell (no linkedResource) contributes NO entry — the registry comparison only
-  // covers job types the corpus actually links a prompt for. A linkedResource with a different
-  // linkName is not the base-prompt link.
-  const xml = `
-    <bpmn:serviceTask id="unmapped">
-      <bpmn:extensionElements>
-        <zeebe:taskDefinition type="senior:bespoke-unmapped" />
-        <zeebe:agentDefinition agentType="external" />
-      </bpmn:extensionElements>
-    </bpmn:serviceTask>
-    <bpmn:serviceTask id="otherlink">
-      <bpmn:extensionElements>
-        <zeebe:taskDefinition type="senior:plan" />
-        <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="prompts/plan.md" linkName="schema" />
-        </zeebe:linkedResources>
-      </bpmn:extensionElements>
-    </bpmn:serviceTask>`;
-  assertEquals(promptLinkByTaskType(xml), {});
 });

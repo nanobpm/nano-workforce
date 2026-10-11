@@ -649,19 +649,22 @@ the app, which deploys on boot), and the next agent job of that type picks it up
 > prompt-link-only discovery. The delivery-graph compiler's GENERATED agent BPMN —
 > deployed at run time by `runDeliveryGraph`, not authored under `resources/` — is the
 > second producer of agent service tasks, and it is covered too (issue #884): the
-> compiler emits the marker on **every** `agent` cell it compiles and links the job
-> type's deployed base prompt (`AGENT_JOB_TYPE_PROMPT` → `prompts/<token>.md`, the same
-> linkedResource shape the hand-authored tasks use; a bespoke `senior:<task>` with no
-> deployed prompt is deliberately prompt-less). `npm run check:agent-definitions`
+> compiler emits the marker on **every** `agent` cell it compiles. Per the resolved
+> "Decide" half of #884 (Option (a), PR #886 review) a compiled cell carries **no**
+> base-prompt link — the hand-authored process prompts (`prompts/feature.md`, …) are
+> process-specific contracts that require process variables (`variables.task`/
+> `variables.issue`) and a `feat/<task.id>` branch the generic compiled cell never
+> supplies (it seeds only `{jobType, appendPrompt, timeout}` and the harness provisions
+> `feat/<node.id>`, #776), so linking one would hand the cell instructions referencing
+> missing inputs and a conflicting branch. The cell is deliberately prompt-less, steered
+> by its per-node `appendPrompt` alone; the marker alone fixes the #884
+> `createAgentInstance` failure. `npm run check:agent-definitions`
 > (CI gate `check:agent-definitions`, `scripts/check-agent-definitions.ts`) compiles a
-> representative graph — including an unmapped, prompt-less probe cell — and scans the
+> representative graph — including a prompt-less probe cell — and scans the
 > output with both the prompt-keyed scanner and the prompt-link-independent
 > `externalAgentTaskTypesMissingMarker` (a task is an agent by its `<rank>:<task>`
 > colon-form type alone), so a compiler regression that drops the marker fails the
-> build rather than silently at runtime; the same gate resolves every
-> `AGENT_JOB_TYPE_PROMPT` entry against the deployed `resources/` prompt set, so a
-> mapping cannot drift to an undeployed resourceId (the engine silently omits an
-> unresolvable link). To **exclude** a task from `--auto` — one that must be served only by a
+> build rather than silently at runtime. To **exclude** a task from `--auto` — one that must be served only by a
 > worker that explicitly subscribes (`--job-type <type>` / a profile capability) — add
 > the inert opt-out property inside its `extensionElements`, nested in the
 > `<zeebe:properties>` wrapper the models and engine expect (as

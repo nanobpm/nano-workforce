@@ -128,48 +128,6 @@ function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait"
  * an internal marker the harness never reads. */
 export const AGENT_REPO_SPEC_HEADER = `${AGENT_TASK_NS}.__repoSpec`;
 
-/** The DEPLOYED base-prompt resource ids (`prompts/<token>.md`, the ADR 0062 `resources/`-relative
- * convention id) a compiled `agent` cell links by its `senior:<task>` job type (issue #884 — the
- * blessed linkedResource path per AGENTS.md, the SAME one every hand-authored `senior:*` task uses).
- * A compiled cell's per-task steering rides the `appendPrompt` FEEL (runner-seeded from
- * `node.agent.prompt`); the linked base prompt supplies the SHARED contract every fleet agent needs
- * (the output/result contract, branch/PR discipline) that no per-node `prompt` carries — the exact
- * composition the hand-authored processes use (base prompt link + `appendPrompt`). Keyed by the FULL
- * job type so a newly-introduced `senior:<task>` with no deployed prompt is ABSENT here (no silent
- * wrong-prompt link); the compiler then emits NO link for it (see below) rather than guessing.
- * Exported so the repo-wide gate (`scripts/check-agent-definitions.ts`) can resolve EVERY entry
- * against the deployed `resources/` prompt set — `check:prompts` scans only the hand-authored
- * corpus's XML links, so without that gate an entry here could drift to an undeployed/typo'd
- * resourceId while CI stays green and the engine silently omits the link (PR #886 review). */
-export const AGENT_JOB_TYPE_PROMPT: Readonly<Record<string, string>> = {
-  "senior:adversarial-review": "prompts/adversarial-review.md",
-  "senior:conformance": "prompts/conformance.md",
-  "senior:feature": "prompts/feature.md",
-  "senior:fix-ci": "prompts/fix-ci.md",
-  "senior:plan": "prompts/plan.md",
-  "senior:plan-review": "prompts/plan-review.md",
-  // `senior:pr-review` links the review-ROUND prompt (convergence-loop.bpmn's `review-round` task is
-  // the canonical `senior:pr-review` cell) — the job-type suffix is NOT the prompt basename here.
-  "senior:pr-review": "prompts/review-round.md",
-  "senior:rebase": "prompts/rebase.md",
-  "senior:retro": "prompts/retro.md",
-  "senior:scope-classify": "prompts/scope-classify.md",
-  "senior:trial-merge": "prompts/trial-merge.md",
-};
-
-/**
- * Resolve a graph-authored `jobType` to its DEPLOYED base-prompt resource id, or `undefined` when the
- * job type names no deployed prompt. `AGENT_JOB_TYPE_PROMPT` is a plain object used as a lookup map
- * and `jobType` is graph-author input, so a bare `map[jobType]` index would resolve an INHERITED
- * `Object.prototype` key (`constructor`, `__proto__`, `toString`, `hasOwnProperty`, …) to a
- * function/object — `!== undefined` — and emit a BOGUS `linkedResource` instead of linking nothing as
- * the contract promises for an unmapped job type (PR #886 review). The own-property check fails closed:
- * only a real OWN entry resolves, so every unmapped job type (prototype-chain name or not) links
- * nothing. This is the ONE accessor for the map — index it nowhere else with raw input. */
-export function promptForJobType(jobType: string): string | undefined {
-  return Object.hasOwn(AGENT_JOB_TYPE_PROMPT, jobType) ? AGENT_JOB_TYPE_PROMPT[jobType] : undefined;
-}
-
 /** The engine-native BODY every node kind delegates to (Decision 2 — the graph SCHEDULES, it does not
  * re-implement execution). Each node compiles to an EMBEDDED `bpmn:subProcess` (call activities are a
  * no-op on the pinned WASM engine — the child is never instantiated — so, like the rest of the
@@ -1973,7 +1931,7 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // be a leak here), but the `descriptor` is embedded by `serviceBodyLines` into the operator-visible
       // timeout / producer-contract escalation FEEL `prompt` — so it takes the SAME display redaction
       // `nodeDisplay` applies, never the raw value (issue #778 review — thread deliveryGraphCompiler.ts:1606).
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, "agent", nodeEmits, undefined, node.agent.jobType);
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, "agent", nodeEmits, undefined);
     }
     case "connector": {
       // TRIM the target before building the escalation descriptor — `nodeDisplay` and the connector
@@ -2137,10 +2095,6 @@ function serviceBodyLines(
   // onto a consumed fact (issue #872). Defaults to the contract gate's required emits (an agent); a
   // connector passes its own required subset explicitly (it has no gate to derive from).
   resumeEmits: readonly DeliveryFact[] = contractGate?.requiredEmits ?? [],
-  // The node's RAW job type (agent only — `node.agent.jobType`), used to resolve the base-prompt
-  // linkedResource the cell carries (issue #884). NOT derivable from `taskDefAttr` (already
-  // XML-escaped) without un-escaping; the caller has the raw value, so it is threaded explicitly.
-  jobType?: string,
 ): string[] {
   const esc = escalationTaskElement(el);
   const isAgent = contractGate !== undefined;
@@ -2169,27 +2123,17 @@ function serviceBodyLines(
     // the defect class is "every agent service task the app generates". A `connector` delegates to a
     // HOST worker (`pr.delivery-connector`), not an external agent, so it is NOT marked.
     ...(kind === "agent" ? ['          <zeebe:agentDefinition agentType="external" />'] : []),
-    // Issue #884 (the "Decide" half): an agent cell ALSO links its job type's DEPLOYED base prompt
-    // (`prompts/<token>.md`, the blessed linkedResource path per AGENTS.md) — the SAME composition
-    // every hand-authored `senior:*` task uses (base-prompt link + per-task `appendPrompt`). The
-    // linked base prompt supplies the SHARED agent contract (the output/result envelope, branch/PR
-    // discipline) that the per-node `appendPrompt` steering never carries; `bindingType="latest"`
-    // resolves the latest deployed prompt at job activation (a mid-run prompt update lands without a
-    // graph redeploy). Resolved from the RAW jobType via {@link promptForJobType} (an own-property
-    // lookup over {@link AGENT_JOB_TYPE_PROMPT} — a prototype-chain jobType like `constructor` resolves
-    // to nothing, never a bogus link); a job type
-    // with no deployed prompt (a bespoke/external `senior:<task>` the graph author names) links
-    // NOTHING rather than a wrong/nonexistent prompt — the engine silently omits an unresolvable
-    // link, so emitting one would be a silent no-op anyway, and the per-node `appendPrompt` still
-    // steers the cell. `resourceId` comes from the fixed map (never the raw jobType), so no
-    // graph-authored value reaches the attribute.
-    ...(kind === "agent" && jobType !== undefined && promptForJobType(jobType) !== undefined
-      ? [
-          "          <zeebe:linkedResources>",
-          `            <zeebe:linkedResource resourceId="${promptForJobType(jobType)}" bindingType="latest" resourceType="GenericScript" linkName="prompt" />`,
-          "          </zeebe:linkedResources>",
-        ]
-      : []),
+    // Issue #884 (the "Decide" half — resolved Option (a), PR #886 review): an agent cell carries ONLY
+    // the marker above and NO base-prompt `linkedResource`. The hand-authored process prompts
+    // (`prompts/feature.md`, `prompts/review-round.md`, …) are PROCESS-specific contracts, not generic
+    // cell contracts — they require process variables (`variables.task`/`variables.issue`) and a branch
+    // (`feat/<task.id>`) the generic compiled cell never supplies (it seeds only
+    // `{jobType, appendPrompt, timeout}` and the harness provisions `feat/<node.id>`, #776). Linking one
+    // would hand every compiled cell instructions referencing missing inputs and a conflicting branch.
+    // The cell is therefore deliberately prompt-LESS: the per-node `appendPrompt` FEEL (runner-seeded
+    // from `node.agent.prompt` + the emit/producer contracts) is its sole steering channel, matching the
+    // historically-intentional design (`deliveryRunner.ts` — "the delivery agent node carries no
+    // base-prompt resource"). The marker alone is what fixes the #884 `createAgentInstance` failure.
     ...(taskProps.length > 0 ? ["          <zeebe:properties>", ...taskProps, "          </zeebe:properties>"] : []),
     ...taskHeaders,
     "          <zeebe:ioMapping>",

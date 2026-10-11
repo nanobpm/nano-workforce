@@ -13,8 +13,7 @@ import {
   agentTaskTypesMissingExternalMarker,
   externalAgentTaskTypesMissingMarker,
 } from "../app/agentic/vocab/job-types.ts";
-import { AGENT_JOB_TYPE_PROMPT } from "../app/deliveryGraphCompiler.ts";
-import { checkAuthoredProcesses, checkCompiledOutput, checkJobTypePromptMappings } from "./check-agent-definitions.ts";
+import { checkAuthoredProcesses, checkCompiledOutput } from "./check-agent-definitions.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -44,23 +43,23 @@ test("check-agent-definitions: the hand-authored corpus passes (every senior:* t
 test("check-agent-definitions: the compiled-output half sees a real compiled agent cell and finds it marked", async () => {
   const r = await checkCompiledOutput();
   assert(r.ok, `expected the compiled output to pass, got ${JSON.stringify(r.errors)}`);
-  // The compiled agent cells must be prompt-bearing (the linked base prompt) — that is what makes
-  // them VISIBLE to the marker scanner. If a compiler regression dropped the link, this assertion
-  // fails (the scan would otherwise pass vacuously over invisible cells).
-  assert(r.agentTypes.length > 0, "the compiled agent cells are prompt-bearing (visible to the scanner)");
+  // Every compiled agent cell is prompt-LESS (Option (a)), so it is the type-keyed half of the union
+  // scanner (keyed by the `<rank>:<task>` colon-form type) that sees them. The probe's agent types are
+  // derived by that same grammar — assert the cells really compiled (the scan is not vacuously green).
+  assert(r.agentTypes.length > 0, "the compiled probe declares senior:* agent cells");
   assert(r.agentTypes.includes("senior:feature"), "the compiled senior:feature cell is scanned");
 });
 
-test("check-agent-definitions: the compiled probe includes an UNMAPPED (prompt-less) agent cell, and it is marked", async () => {
-  // A compiled cell for a bespoke `senior:<task>` with no deployed base prompt is DELIBERATELY
-  // prompt-less, so the prompt-keyed scanner never sees it — the gate must probe one and assert its
-  // marker with the type-keyed scan, or a compiler regression that drops the marker on exactly those
-  // cells reports ok (the false-negative path from the PR #886 review).
+test("check-agent-definitions: the compiled probe includes a prompt-LESS agent cell, and it is marked", async () => {
+  // Every compiled agent cell is deliberately prompt-less (the resolved #884 "Decide", Option (a)), so
+  // the prompt-keyed scanner never sees it — the gate must probe one and assert its marker with the
+  // type-keyed scan, or a compiler regression that drops the marker on exactly those cells reports ok
+  // (the false-negative path from the PR #886 review).
   const r = await checkCompiledOutput();
   assert(r.ok, `expected the compiled output to pass, got ${JSON.stringify(r.errors)}`);
   assert(
-    r.agentTypes.includes("senior:bespoke-unmapped"),
-    `the compiled probe includes an unmapped (prompt-less) agent cell, got [${r.agentTypes.join(", ")}]`,
+    r.agentTypes.includes("senior:bespoke-promptless"),
+    `the compiled probe includes a prompt-less agent cell, got [${r.agentTypes.join(", ")}]`,
   );
 });
 
@@ -70,37 +69,11 @@ test("check-agent-definitions: the type-keyed scanner flags a prompt-less compil
   const xml = `
     <bpmn:serviceTask id="n0_task">
       <bpmn:extensionElements>
-        <zeebe:taskDefinition type="senior:bespoke-unmapped" />
+        <zeebe:taskDefinition type="senior:bespoke-promptless" />
       </bpmn:extensionElements>
     </bpmn:serviceTask>`;
   assertEquals(agentTaskTypesMissingExternalMarker(xml), []);
-  assertEquals(externalAgentTaskTypesMissingMarker(xml), ["senior:bespoke-unmapped"]);
-});
-
-test("check-agent-definitions: every AGENT_JOB_TYPE_PROMPT entry resolves to a deployed prompt resource", () => {
-  // The compiler's job-type→prompt registry duplicates the relationship the hand-authored BPMN corpus
-  // authors per task, but `check:prompts` scans only the corpus's XML links — a registry entry can
-  // drift to an undeployed/typo'd resourceId and CI stays green while the engine silently omits the
-  // link (the agent runs prompt-less). The gate iterates EVERY mapping and resolves it against the
-  // deployed `resources/` set, so no entry drifts undetected (PR #886 review).
-  const r = checkJobTypePromptMappings();
-  assert(r.ok, `expected every job-type→prompt mapping to resolve, got ${JSON.stringify(r.errors)}`);
-  // Sanity: the registry really is populated (the guard is not vacuously green) and covers the
-  // hand-authored corpus's agent job types.
-  const mapped = Object.keys(AGENT_JOB_TYPE_PROMPT);
-  assert(mapped.length > 0, "AGENT_JOB_TYPE_PROMPT is populated");
-  for (const t of ["senior:feature", "senior:pr-review", "senior:plan", "senior:retro"]) {
-    assert(mapped.includes(t), `${t} has a job-type→prompt mapping`);
-  }
-});
-
-test("check-agent-definitions: a mapping to an undeployed prompt resource fails", () => {
-  const r = checkJobTypePromptMappings({ "senior:bogus": "prompts/does-not-exist.md" });
-  assert(!r.ok, "a mapping to an undeployed resourceId must fail the gate");
-  assert(
-    r.errors.some((e) => e.includes("senior:bogus") && e.includes("prompts/does-not-exist.md")),
-    `the error names the drifting mapping, got ${JSON.stringify(r.errors)}`,
-  );
+  assertEquals(externalAgentTaskTypesMissingMarker(xml), ["senior:bespoke-promptless"]);
 });
 
 test("check-agent-definitions: the authored half unions BOTH scanners — a prompt-less + marker-less senior:* task fails", () => {
@@ -112,13 +85,13 @@ test("check-agent-definitions: the authored half unions BOTH scanners — a prom
   const bad = `
     <bpmn:serviceTask id="agent">
       <bpmn:extensionElements>
-        <zeebe:taskDefinition type="senior:bespoke-unmapped" />
+        <zeebe:taskDefinition type="senior:bespoke-promptless" />
       </bpmn:extensionElements>
     </bpmn:serviceTask>`;
   const r = checkAuthoredProcesses([{ file: "bad.bpmn", xml: bad }]);
   assert(!r.ok, "a prompt-less + marker-less senior:* authored task must fail the gate");
   assert(
-    r.errors.some((e) => e.includes("bad.bpmn") && e.includes("senior:bespoke-unmapped")),
+    r.errors.some((e) => e.includes("bad.bpmn") && e.includes("senior:bespoke-promptless")),
     `the error names the unmarked prompt-less task, got ${JSON.stringify(r.errors)}`,
   );
 });
@@ -139,74 +112,6 @@ test("check-agent-definitions: the authored half still flags a prompt-BEARING ta
     r.errors.some((e) => e.includes("bad.bpmn") && e.includes("senior:feature")),
     `the error names the unmarked prompt-bearing task, got ${JSON.stringify(r.errors)}`,
   );
-});
-
-test("check-agent-definitions: a registry mapping that diverges from the authored corpus link fails", () => {
-  // Advisory (PR #886 review): the registry duplicates the job-type→prompt links the authored BPMN
-  // corpus authors per task. The gate must COMPARE each mapped type against the corpus's actual link,
-  // so `senior:feature` → the EXISTING `prompts/plan.md` (a wrong-but-deployed prompt) fails instead
-  // of silently compiling feature cells with the plan base contract. Inject a corpus that links
-  // `senior:feature` → prompts/feature.md and a registry that maps it to prompts/plan.md.
-  const corpus = `
-    <bpmn:serviceTask id="agent">
-      <bpmn:extensionElements>
-        <zeebe:taskDefinition type="senior:feature" />
-        <zeebe:agentDefinition agentType="external" />
-        <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="prompts/feature.md" linkName="prompt" />
-        </zeebe:linkedResources>
-      </bpmn:extensionElements>
-    </bpmn:serviceTask>`;
-  const r = checkJobTypePromptMappings({ "senior:feature": "prompts/plan.md" }, [{ file: "c.bpmn", xml: corpus }]);
-  assert(!r.ok, "a mapping that diverges from the authored corpus link must fail the gate");
-  assert(
-    r.errors.some((e) => e.includes("senior:feature") && e.includes("prompts/plan.md") && e.includes("prompts/feature.md")),
-    `the error names the job type, the registry value, and the corpus link, got ${JSON.stringify(r.errors)}`,
-  );
-});
-
-test("check-agent-definitions: a registry mapping matching the authored corpus link passes", () => {
-  const corpus = `
-    <bpmn:serviceTask id="agent">
-      <bpmn:extensionElements>
-        <zeebe:taskDefinition type="senior:feature" />
-        <zeebe:agentDefinition agentType="external" />
-        <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="prompts/feature.md" linkName="prompt" />
-        </zeebe:linkedResources>
-      </bpmn:extensionElements>
-    </bpmn:serviceTask>`;
-  const r = checkJobTypePromptMappings({ "senior:feature": "prompts/feature.md" }, [{ file: "c.bpmn", xml: corpus }]);
-  assert(r.ok, `a mapping matching the authored corpus link must pass, got ${JSON.stringify(r.errors)}`);
-});
-
-test("check-agent-definitions: an authored agent job type with NO registry mapping fails (coverage)", () => {
-  // The corpus links a prompt for senior:feature but the registry omits that job type entirely —
-  // compiled cells of that type would silently get no base prompt. Require mapped coverage for every
-  // authored agent type so the two producers cannot diverge by omission.
-  const corpus = `
-    <bpmn:serviceTask id="agent">
-      <bpmn:extensionElements>
-        <zeebe:taskDefinition type="senior:feature" />
-        <zeebe:agentDefinition agentType="external" />
-        <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="prompts/feature.md" linkName="prompt" />
-        </zeebe:linkedResources>
-      </bpmn:extensionElements>
-    </bpmn:serviceTask>`;
-  const r = checkJobTypePromptMappings({ "senior:plan": "prompts/plan.md" }, [{ file: "c.bpmn", xml: corpus }]);
-  assert(!r.ok, "an authored agent job type missing from the registry must fail the gate");
-  assert(
-    r.errors.some((e) => e.includes("senior:feature")),
-    `the error names the unmapped authored job type, got ${JSON.stringify(r.errors)}`,
-  );
-});
-
-test("check-agent-definitions: the real registry matches the real authored corpus (no drift)", () => {
-  // The live invariant: every AGENT_JOB_TYPE_PROMPT entry resolves to a deployed resource AND equals
-  // the authored corpus's prompt link for that job type, and every authored agent type is mapped.
-  const r = checkJobTypePromptMappings();
-  assert(r.ok, `registry and authored corpus must agree, got ${JSON.stringify(r.errors)}`);
 });
 
 test("check-agent-definitions: AGENTS.md documents the check:agent-definitions CI gate", () => {
