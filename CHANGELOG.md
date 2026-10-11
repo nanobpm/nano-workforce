@@ -1,3 +1,9 @@
+## [0.201.4](https://github.com/nanobpm/nano-workforce/compare/v0.201.3...v0.201.4) (2026-10-11)
+
+### Bug Fixes
+
+* **delivery-graph:** emit zeebe:agentDefinition marker on every compiled agent cell (prompt-less, Option (a)) ([#886](https://github.com/nanobpm/nano-workforce/issues/886)) ([1e4fa4f](https://github.com/nanobpm/nano-workforce/commit/1e4fa4f46aad542b2e6fc175a3af0b46d0980f50)), closes [#464](https://github.com/nanobpm/nano-workforce/issues/464) [#745](https://github.com/nanobpm/nano-workforce/issues/745) [#884](https://github.com/nanobpm/nano-workforce/issues/884) [#884](https://github.com/nanobpm/nano-workforce/issues/884) [#776](https://github.com/nanobpm/nano-workforce/issues/776) [#884](https://github.com/nanobpm/nano-workforce/issues/884) [#884](https://github.com/nanobpm/nano-workforce/issues/884) [#884](https://github.com/nanobpm/nano-workforce/issues/884)
+
 ## [0.201.3](https://github.com/nanobpm/nano-workforce/compare/v0.201.2...v0.201.3) (2026-10-10)
 
 ### Bug Fixes
