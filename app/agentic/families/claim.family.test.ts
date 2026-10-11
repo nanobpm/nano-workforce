@@ -56,6 +56,10 @@ function releaseFrame(instance: string, jobKey: string): Frame {
   return { lane: "control", family: RELEASE_FAMILY, seq: 1, payload: { instance, jobKey } };
 }
 
+function resyncFrame(instance: string, jobKeys: string[]): Frame {
+  return { lane: "control", family: CLAIM_FAMILY, seq: 1, payload: { instance, jobKeys } };
+}
+
 function mountClaim(): { hub: AgenticHub; transport: ReturnType<typeof memTransport> } {
   const transport = memTransport();
   const hub = new AgenticHub({ transport: transport.transport, authenticator, sweepIntervalMs: 0 });
@@ -183,6 +187,95 @@ test("a malformed claim payload is rejected without touching the registry (advis
     const reg = currentClaimRegistry();
     assert(reg);
     assertEquals(reg.jobKeysFor("wk-a"), ["8420"]);
+    assertEquals(reg.count(), 1);
+  } finally {
+    family.teardown?.();
+  }
+});
+
+test("a resync snapshot frame REPLACES an instance's claims — a RELEASE lost during an outage no longer strands the job", async () => {
+  const { transport } = mountClaim();
+  try {
+    const peer = fakeConn("c1", "host-supervisor");
+    transport.connect(peer.conn);
+    await flush();
+    peer.feed(claimFrame("wk-a", "8420"));
+    peer.feed(claimFrame("wk-a", "8421"));
+    await flush();
+
+    const reg = currentClaimRegistry();
+    assert(reg);
+    assertEquals(reg.jobKeysFor("wk-a"), ["8420", "8421"]);
+
+    // The hub missed the `release` for 8420 during an outage. On reconnect the supervisor restates its
+    // authoritative snapshot: wk-a now owns only 8421. The non-re-asserted 8420 is dropped.
+    peer.feed(resyncFrame("wk-a", ["8421"]));
+    await flush();
+    assertEquals(reg.jobKeysFor("wk-a"), ["8421"], "the stranded claim was dropped on resync");
+    assertEquals(reg.count(), 1);
+  } finally {
+    family.teardown?.();
+  }
+});
+
+test("a resync snapshot does NOT blank a jobKey that moved to another instance", async () => {
+  const { transport } = mountClaim();
+  try {
+    const peer = fakeConn("c1", "host-supervisor");
+    transport.connect(peer.conn);
+    await flush();
+    peer.feed(claimFrame("wk-a", "8420"));
+    peer.feed(claimFrame("wk-b", "8420")); // 8420 moved to wk-b
+    await flush();
+
+    // wk-a's authoritative resync no longer mentions 8420 — and must not blank the live owner wk-b.
+    peer.feed(resyncFrame("wk-a", []));
+    await flush();
+
+    const reg = currentClaimRegistry();
+    assert(reg);
+    assertEquals(reg.jobKeysFor("wk-b"), ["8420"], "the current owner's claim survives");
+    assertEquals(reg.ownerOf("8420"), "wk-b");
+  } finally {
+    family.teardown?.();
+  }
+});
+
+test("a supervisor that never sends a resync snapshot keeps today's additive claim behaviour", async () => {
+  const { transport } = mountClaim();
+  try {
+    const peer = fakeConn("c1", "host-supervisor");
+    transport.connect(peer.conn);
+    await flush();
+    // Only per-job claims, no snapshot frame — a claim is never dropped except by an explicit release.
+    peer.feed(claimFrame("wk-a", "8420"));
+    peer.feed(claimFrame("wk-a", "8421"));
+    await flush();
+
+    const reg = currentClaimRegistry();
+    assert(reg);
+    assertEquals(reg.jobKeysFor("wk-a"), ["8420", "8421"], "additive — neither claim is dropped");
+    assertEquals(reg.count(), 2);
+  } finally {
+    family.teardown?.();
+  }
+});
+
+test("a resync snapshot with a non-string instance is ignored (advisory, connection kept)", async () => {
+  const { transport } = mountClaim();
+  try {
+    const peer = fakeConn("c1", "host-supervisor");
+    transport.connect(peer.conn);
+    await flush();
+    peer.feed(claimFrame("wk-a", "8420"));
+    await flush();
+    // A malformed snapshot (no instance) is rejected without touching the registry.
+    peer.feed({ lane: "control", family: CLAIM_FAMILY, seq: 1, payload: { jobKeys: ["8421"] } });
+    await flush();
+
+    const reg = currentClaimRegistry();
+    assert(reg);
+    assertEquals(reg.jobKeysFor("wk-a"), ["8420"], "the registry was untouched by the malformed snapshot");
     assertEquals(reg.count(), 1);
   } finally {
     family.teardown?.();

@@ -52,7 +52,9 @@ export interface ClaimSnapshot {
  * It needs no durable backing: claims are ephemeral and re-announced. On a WS reconnect the supervisor
  * re-`register`s every worker and re-`claim`s every active jobKey, so the registry is rebuilt from that
  * full-state resync — which is exactly what makes it survive the reconnect that the old relay-derived
- * path stranded the jobKey across.
+ * path stranded the jobKey across. A supervisor may close its resync with an AUTHORITATIVE snapshot via
+ * {@link replaceInstance} (issue #893), dropping any claim it did not re-assert so a lost `release`
+ * cannot strand a job; omitting it keeps the additive re-claim behaviour.
  */
 export class ClaimRegistry {
   /** worker instance → the set of jobKeys it currently owns (insertion-ordered). */
@@ -105,6 +107,38 @@ export class ClaimRegistry {
     if (!jobs) return;
     for (const jobKey of jobs) this.#ownerOf.delete(jobKey);
     this.#jobsOf.delete(instance);
+  }
+
+  /**
+   * Authoritatively REPLACE every claim held by `instance` with `jobKeys` — the reconnect-resync
+   * contract (issue #893). A reconnecting supervisor restates the full, current ownership snapshot for
+   * one worker instance; its view WINS. Every claim this instance held that is NOT in `jobKeys` is
+   * dropped (so a `release` lost during a hub outage no longer strands the job as "working" until the
+   * worker exits entirely), and every jobKey in `jobKeys` is (re-)claimed — an idempotent no-op for one
+   * it already owned, a {@link claim} move for one another instance held.
+   *
+   * It keeps the registry's existing guarantees: a jobKey that has MOVED to another instance is never
+   * blanked by the OLD instance's resync (the old instance no longer holds it, so the drop pass cannot
+   * touch it), and repeated resyncs are safe. Only `instance`'s own claims are considered — a sibling's
+   * claims are untouched. An empty `instance` is ignored; empty jobKeys in the snapshot are skipped.
+   *
+   * This is ADDITIVE on the wire: a supervisor that never sends a resync snapshot keeps the pre-#893
+   * merge behaviour (claims cleared only by an explicit `release` or the presence-driven
+   * {@link reconcile}). Authoritative replacement is safe precisely because ownership is advisory,
+   * short-lived visibility the supervisor can always restate (ADR 0056 — the registry never gates a
+   * BPMN flow).
+   */
+  replaceInstance(instance: string, jobKeys: Iterable<string>): void {
+    if (instance === "") return;
+    const next = new Set<string>();
+    for (const jobKey of jobKeys) if (jobKey !== "") next.add(jobKey);
+    const current = this.#jobsOf.get(instance);
+    if (current) {
+      for (const jobKey of [...current]) {
+        if (!next.has(jobKey)) this.release(instance, jobKey);
+      }
+    }
+    for (const jobKey of next) this.claim(instance, jobKey);
   }
 
   /**

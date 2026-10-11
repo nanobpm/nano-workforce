@@ -13,7 +13,11 @@
 // the frame, NOT the connection id (`conn.id`); that is what lets one per-host supervisor multiplex N
 // distinct workers' ownership over a single connection. On a reconnect the supervisor re-`register`s
 // every worker and re-`claim`s every active jobKey, and the (idempotent) claim handler rebuilds the
-// registry from that resync.
+// registry from that resync. A supervisor may additionally close its resync with an AUTHORITATIVE
+// snapshot frame (`claim` carrying the full `jobKeys` set for an instance, issue #893): the handler
+// then `replaceInstance`s, dropping any claim the supervisor did NOT re-assert — so a `release` lost
+// during a hub outage no longer strands the job. A supervisor that omits the snapshot keeps the
+// pre-#893 additive behaviour.
 //
 // Liveness: a worker holding a claim reads "working" even with ZERO transcript — visibility no longer
 // depends on terminal bytes landing/correlating. A bounded-memory maintenance tick reconciles the
@@ -46,6 +50,22 @@ function readString(value: unknown, key: string): string | undefined {
   return typeof field === "string" ? field : undefined;
 }
 
+/**
+ * Read a resync snapshot's `jobKeys` array (the authoritative full jobKey set an instance owns) from a
+ * `claim` frame, or undefined when the field is absent / not an array of strings. Its PRESENCE is the
+ * discriminant that tells an authoritative resync snapshot (`{ instance, jobKeys }`, issue #893) apart
+ * from a classic per-job claim (`{ instance, jobKey }`). It rides the existing `claim` wire family as a
+ * forward-compatible enrichment — the protocol's structural validators tolerate the extra field, so an
+ * older hub ignores it and keeps additive behaviour.
+ */
+function readJobKeys(value: unknown): readonly string[] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  if (!Object.hasOwn(value, "jobKeys")) return undefined;
+  const field = Object.getOwnPropertyDescriptor(value, "jobKeys")?.value;
+  if (!Array.isArray(field) || !field.every((k) => typeof k === "string")) return undefined;
+  return field;
+}
+
 interface MountState {
   readonly registry: ClaimRegistry;
   timer: ReturnType<typeof setTimeout> | undefined;
@@ -72,6 +92,20 @@ export const family: AgenticFamily = {
     // malformed payload is rejected before it touches the registry (advisory: logged, connection
     // kept). Both mutations are idempotent, matching the wire contract.
     ctx.hub.registerFamilyHandler(CLAIM_FAMILY, (frame: Frame, _conn: HubConnection) => {
+      // An authoritative resync SNAPSHOT (`{ instance, jobKeys }`, issue #893): the reconnecting
+      // supervisor restates the full current ownership for one instance and its view WINS —
+      // `replaceInstance` drops every claim it did NOT re-assert (so a `release` lost during a hub
+      // outage no longer strands the job). A supervisor that never sends it keeps additive behaviour.
+      const jobKeys = readJobKeys(frame.payload);
+      if (jobKeys !== undefined) {
+        const instance = readString(frame.payload, "instance");
+        if (!instance) {
+          ctx.log.warn("agentic claim resync: missing instance", {});
+          return;
+        }
+        registry.replaceInstance(instance, jobKeys);
+        return;
+      }
       const result = validatePayload(CLAIM_FAMILY, frame.payload);
       if (!result.ok) {
         ctx.log.warn("agentic claim: malformed payload", { errors: result.errors.map((e) => e.code) });

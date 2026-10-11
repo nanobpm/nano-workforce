@@ -112,6 +112,67 @@ test("reconnect-resync: re-register + re-claim rebuilds the same claim (never bl
   assert.equal(reg.count(), 1);
 });
 
+test("replaceInstance: an authoritative resync drops a claim the supervisor did NOT re-assert (a lost RELEASE no longer strands the job)", () => {
+  const reg = new ClaimRegistry();
+  reg.claim("wk-a", "8420");
+  reg.claim("wk-a", "8421");
+  // The hub missed the `release` for 8420 during an outage. On reconnect the supervisor restates its
+  // authoritative snapshot: wk-a now owns only 8421. The non-re-asserted 8420 is dropped.
+  reg.replaceInstance("wk-a", ["8421"]);
+  assert.deepEqual(reg.jobKeysFor("wk-a"), ["8421"]);
+  assert.equal(reg.isClaimed("8420"), false, "the stranded claim was dropped");
+  assert.equal(reg.count(), 1);
+});
+
+test("replaceInstance: a re-asserted claim is unchanged; an added one is claimed", () => {
+  const reg = new ClaimRegistry();
+  reg.claim("wk-a", "8420");
+  reg.replaceInstance("wk-a", ["8420", "8421"]);
+  assert.deepEqual(reg.jobKeysFor("wk-a"), ["8420", "8421"]);
+  assert.equal(reg.ownerOf("8420"), "wk-a");
+  assert.equal(reg.ownerOf("8421"), "wk-a");
+});
+
+test("replaceInstance: an empty snapshot drops every claim the instance held", () => {
+  const reg = new ClaimRegistry();
+  reg.claim("wk-a", "8420");
+  reg.claim("wk-a", "8421");
+  reg.replaceInstance("wk-a", []);
+  assert.deepEqual(reg.jobKeysFor("wk-a"), []);
+  assert.equal(reg.count(), 0);
+});
+
+test("replaceInstance: a jobKey that moved to another instance is NOT dropped by the old instance's resync", () => {
+  const reg = new ClaimRegistry();
+  reg.claim("wk-a", "8420");
+  reg.claim("wk-b", "8420"); // 8420 moved to wk-b
+  // wk-a's authoritative resync no longer mentions 8420 (it does not run it) — and must not blank the
+  // live owner wk-b.
+  reg.replaceInstance("wk-a", []);
+  assert.deepEqual(reg.jobKeysFor("wk-b"), ["8420"], "the current owner's claim survives");
+  assert.equal(reg.ownerOf("8420"), "wk-b");
+});
+
+test("replaceInstance: only the resyncing instance's claims are touched; siblings are untouched", () => {
+  const reg = new ClaimRegistry();
+  reg.claim("wk-a", "8420");
+  reg.claim("wk-b", "8500");
+  reg.replaceInstance("wk-a", []);
+  assert.deepEqual(reg.jobKeysFor("wk-a"), []);
+  assert.deepEqual(reg.jobKeysFor("wk-b"), ["8500"], "an unrelated instance's claim is untouched");
+});
+
+test("replaceInstance is idempotent and ignores empty jobKeys / an empty instance", () => {
+  const reg = new ClaimRegistry();
+  reg.claim("wk-a", "8420");
+  reg.replaceInstance("wk-a", ["8420", ""]); // the empty jobKey is ignored
+  reg.replaceInstance("wk-a", ["8420"]); // repeat — no churn
+  assert.deepEqual(reg.jobKeysFor("wk-a"), ["8420"]);
+  reg.replaceInstance("", ["9999"]); // an empty instance is ignored
+  assert.equal(reg.isClaimed("9999"), false);
+  assert.equal(reg.count(), 1);
+});
+
 test("reconcile drops claims for absent instances, keeps present ones, and reports the released", () => {
   const reg = new ClaimRegistry();
   reg.claim("wk-a", "8420");
