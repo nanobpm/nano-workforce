@@ -443,6 +443,14 @@ export const WIRE_CONTRACTS = {
       "Op-tagged relay control frame a worker terminal chunk producer emits and the hub consumes. The op-tagged shape superseded the legacy positional `{stream, offset, chunk}` frame (nano-ide #234/#236); a producer must emit the op-tagged shape or the hub rejects it as `malformed relay message payload`.",
     shape: '{ op: "produce", incarnation: number, stream: string, offset: number, chunk: string }',
   },
+  "claim.snapshot": {
+    category: "wire",
+    name: "claim.snapshot",
+    owner: "app/agentic/families/claim.family.ts (hub consumer); nano-supervisor#63 (producer)",
+    semantics:
+      "Authoritative reconnect-resync snapshot riding the EXISTING `claim` wire family (wire code 8, nano-ide#542) as a forward-compatible enrichment — the issue #893 resync boundary. A reconnecting supervisor closes its per-instance resync with ONE snapshot frame carrying the full current jobKey set for that instance; the hub validates it (as the snapshot XOR per-job union — the pinned `@nanobpm/agentic` validator predates this variant and requires a non-empty `jobKey`, so the union is validated hub-side until nano-ide versions the shape into the canonical protocol payloads) and calls `ClaimRegistry.replaceInstance(instance, jobKeys)`, dropping every claim the supervisor did NOT re-assert so a `release` lost during a hub outage no longer strands the job. `jobKeys` MAY be empty (the meaningful 'owns nothing now' resync — this is why the producer emits one snapshot per instance INCLUDING empty sets). The frame's explicit `instance` is the owning worker, never the connection id. Compatibility: the protocol's structural validators tolerate the extra field, so an older hub ignores it and keeps additive behaviour; a supervisor that never sends a snapshot keeps the pre-#893 additive behaviour. Distinct from the classic per-job claim `{ instance, jobKey }` (the `@nanobpm/agentic` `ClaimPayload`) — consume this ONE shape for the resync boundary, do not re-declare a synonym.",
+    shape: '{ instance: string, jobKeys: string[] } — a `claim` (wire code 8) frame whose `jobKeys` array presence is the discriminant; XOR the per-job `{ instance: string, jobKey: string }`',
+  },
   "io.nanobpm.agentTask.repository": {
     category: "wire",
     name: "io.nanobpm.agentTask.repository",

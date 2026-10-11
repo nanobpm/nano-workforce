@@ -140,8 +140,11 @@ without limit across the outage.
 
 To close that, a supervisor may end its resync with an **authoritative
 snapshot**: a `claim` frame carrying the full set of jobKeys the instance still
-owns (`{ instance, jobKeys: [...] }`). The hub then **replaces** that instance's
-claims with the snapshot — dropping any it did not re-assert. The supervisor's
+owns (`{ instance, jobKeys: [...] }` — possibly empty, meaning "this instance
+now owns nothing"). The hub validates the frame as the snapshot-or-per-job
+union (a malformed snapshot is dropped before it touches the registry) and then
+**replaces** that instance's claims with the snapshot — dropping any it did not
+re-assert. The supervisor's
 view wins, because ownership is advisory, short-lived visibility it can always
 restate (it never gates a BPMN flow, ADR 0056). A jobKey that has moved to
 another instance is never blanked by the old instance's resync, and a supervisor

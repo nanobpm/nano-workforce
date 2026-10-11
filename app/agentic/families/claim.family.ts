@@ -14,10 +14,10 @@
 // distinct workers' ownership over a single connection. On a reconnect the supervisor re-`register`s
 // every worker and re-`claim`s every active jobKey, and the (idempotent) claim handler rebuilds the
 // registry from that resync. A supervisor may additionally close its resync with an AUTHORITATIVE
-// snapshot frame (`claim` carrying the full `jobKeys` set for an instance, issue #893): the handler
-// then `replaceInstance`s, dropping any claim the supervisor did NOT re-assert — so a `release` lost
-// during a hub outage no longer strands the job. A supervisor that omits the snapshot keeps the
-// pre-#893 additive behaviour.
+// snapshot frame (`claim` carrying the full `jobKeys` set for an instance, issue #893 — the
+// `claim.snapshot` wire contract in `app/contracts.ts`): the handler then `replaceInstance`s, dropping
+// any claim the supervisor did NOT re-assert — so a `release` lost during a hub outage no longer
+// strands the job. A supervisor that omits the snapshot keeps the pre-#893 additive behaviour.
 //
 // Liveness: a worker holding a claim reads "working" even with ZERO transcript — visibility no longer
 // depends on terminal bytes landing/correlating. A bounded-memory maintenance tick reconciles the
@@ -66,6 +66,39 @@ function readJobKeys(value: unknown): readonly string[] | undefined {
   return field;
 }
 
+/**
+ * The `claim` family carries TWO payload variants (issue #893 — the `claim.snapshot` wire contract in
+ * `app/contracts.ts`): the classic per-job claim `{ instance, jobKey }` and the authoritative resync
+ * snapshot `{ instance, jobKeys }`. The pinned `@nanobpm/agentic` validator predates the snapshot
+ * variant and REQUIRES a non-empty `jobKey`, so it cannot validate the union — routing a snapshot
+ * through `validatePayload` would reject the very frame that closes a resync. Validate the union
+ * locally instead: a payload is well-formed iff it is EITHER a valid snapshot (non-empty `instance`
+ * plus a `jobKeys` array of strings — an EMPTY array is the meaningful "owns nothing now" resync) XOR
+ * a valid per-job claim per the canonical validator. This also closes the bypass hole: a frame
+ * carrying BOTH fields is validated as a snapshot AND must still pass the per-job validator, so a
+ * malformed `jobKey` can no longer smuggle past on a snapshot frame.
+ */
+function validateClaimPayload(payload: unknown): { ok: boolean; codes: string[] } {
+  const jobKeys = readJobKeys(payload);
+  if (jobKeys !== undefined) {
+    const instance = readString(payload, "instance");
+    if (instance) {
+      // A frame carrying BOTH variants must satisfy both — the snapshot branch must never launder a
+      // malformed per-job field past validation. (readJobKeys defined the value as an object.)
+      if (typeof payload === "object" && payload !== null && !Object.hasOwn(payload, "jobKey")) {
+        return { ok: true, codes: [] };
+      }
+      const both = validatePayload(CLAIM_FAMILY, payload);
+      return both.ok ? { ok: true, codes: [] } : { ok: false, codes: both.errors.map((e) => e.code) };
+    }
+    // A snapshot-shaped payload with a missing/empty instance is NOT a valid per-job claim either
+    // (jobKey is absent) — report the snapshot violation precisely.
+    return { ok: false, codes: ["bad-instance"] };
+  }
+  const result = validatePayload(CLAIM_FAMILY, payload);
+  return result.ok ? { ok: true, codes: [] } : { ok: false, codes: result.errors.map((e) => e.code) };
+}
+
 interface MountState {
   readonly registry: ClaimRegistry;
   timer: ReturnType<typeof setTimeout> | undefined;
@@ -96,19 +129,20 @@ export const family: AgenticFamily = {
       // supervisor restates the full current ownership for one instance and its view WINS —
       // `replaceInstance` drops every claim it did NOT re-assert (so a `release` lost during a hub
       // outage no longer strands the job). A supervisor that never sends it keeps additive behaviour.
-      const jobKeys = readJobKeys(frame.payload);
-      if (jobKeys !== undefined) {
-        const instance = readString(frame.payload, "instance");
-        if (!instance) {
-          ctx.log.warn("agentic claim resync: missing instance", {});
-          return;
-        }
-        registry.replaceInstance(instance, jobKeys);
+      // EVERY claim frame is validated first — as the snapshot XOR per-job union — so the snapshot
+      // branch never bypasses validation (a malformed frame is dropped before it touches the
+      // registry, exactly like a malformed per-job claim).
+      const valid = validateClaimPayload(frame.payload);
+      if (!valid.ok) {
+        ctx.log.warn("agentic claim: malformed payload", { errors: valid.codes });
         return;
       }
-      const result = validatePayload(CLAIM_FAMILY, frame.payload);
-      if (!result.ok) {
-        ctx.log.warn("agentic claim: malformed payload", { errors: result.errors.map((e) => e.code) });
+      const jobKeys = readJobKeys(frame.payload);
+      if (jobKeys !== undefined) {
+        // Validated above, so the instance is present and non-empty.
+        const instance = readString(frame.payload, "instance");
+        if (!instance) return;
+        registry.replaceInstance(instance, jobKeys);
         return;
       }
       const instance = readString(frame.payload, "instance");

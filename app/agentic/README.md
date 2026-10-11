@@ -91,10 +91,21 @@ every worker and re-`claim`s every active jobKey. Re-claims alone are *additive*
 re-asserted is never dropped, so a `release` lost during a hub outage would leave the job shown as
 "working" until the worker exits entirely. To close that gap a supervisor may end its resync with an
 **authoritative snapshot**: a `claim` frame enriched with the full `jobKeys` set it currently owns
-(`{ instance, jobKeys: [...] }`). The hub then calls `ClaimRegistry.replaceInstance(instance, jobKeys)`,
-which **drops every claim that instance held but did not re-assert** and (re-)claims the snapshot's set.
-The snapshot rides the existing `claim` wire family as a forward-compatible enrichment (the protocol's
-structural validators tolerate the extra field), so **no new wire code** is needed.
+(`{ instance, jobKeys: [...] }` — possibly empty, the meaningful "owns nothing now" resync). The hub
+then calls `ClaimRegistry.replaceInstance(instance, jobKeys)`, which **drops every claim that instance
+held but did not re-assert** and (re-)claims the snapshot's set. The snapshot rides the existing
+`claim` wire family as a forward-compatible enrichment (the protocol's structural validators tolerate
+the extra field), so **no new wire code** is needed.
+
+The `claim` family thus carries **two payload variants** — the classic per-job claim
+`{ instance, jobKey }` and the resync snapshot `{ instance, jobKeys }` (the `claim.snapshot` wire
+contract in `app/contracts.ts`). The pinned `@nanobpm/agentic` validator predates the snapshot variant
+and requires a non-empty `jobKey`, so the hub validates the **union** itself: a frame is well-formed
+iff it is a valid snapshot (non-empty `instance` + a `jobKeys` string array) XOR a valid per-job
+claim — and a frame carrying *both* fields must satisfy *both*, so the snapshot branch never bypasses
+validation. Versioning the snapshot into the canonical `@nanobpm/agentic` protocol payloads is the
+nano-ide follow-up issue #893 scopes ("coordinate with the `@nanobpm/agentic` package owners"); the
+producer half (one snapshot per instance, including empty sets) is nano-supervisor#63.
 
 Guarantees `replaceInstance` keeps:
 

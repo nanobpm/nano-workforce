@@ -282,6 +282,74 @@ test("a resync snapshot with a non-string instance is ignored (advisory, connect
   }
 });
 
+test("a snapshot frame carrying BOTH jobKeys and a malformed jobKey is rejected — the snapshot branch never bypasses validation", async () => {
+  const { transport } = mountClaim();
+  try {
+    const peer = fakeConn("c1", "host-supervisor");
+    transport.connect(peer.conn);
+    await flush();
+    peer.feed(claimFrame("wk-a", "8420"));
+    await flush();
+    // The bypass the reviewer flagged: `jobKeys` present routed the frame straight to replaceInstance,
+    // so a smuggled empty `jobKey` was never validated. The union validator rejects it.
+    peer.feed({ lane: "control", family: CLAIM_FAMILY, seq: 1, payload: { instance: "wk-a", jobKey: "", jobKeys: ["8421"] } });
+    await flush();
+
+    const reg = currentClaimRegistry();
+    assert(reg);
+    assertEquals(reg.jobKeysFor("wk-a"), ["8420"], "the malformed both-fields frame touched nothing");
+    assertEquals(reg.count(), 1);
+  } finally {
+    family.teardown?.();
+  }
+});
+
+test("a snapshot frame with a malformed jobKeys array falls through to per-job validation (rejected without a jobKey)", async () => {
+  const { transport } = mountClaim();
+  try {
+    const peer = fakeConn("c1", "host-supervisor");
+    transport.connect(peer.conn);
+    await flush();
+    peer.feed(claimFrame("wk-a", "8420"));
+    await flush();
+    // `jobKeys` present but not a string array → NOT a snapshot; with no `jobKey` it is a malformed
+    // per-job claim and must be rejected, never mistaken for a resync.
+    peer.feed({ lane: "control", family: CLAIM_FAMILY, seq: 1, payload: { instance: "wk-a", jobKeys: "8421" } });
+    await flush();
+
+    const reg = currentClaimRegistry();
+    assert(reg);
+    assertEquals(reg.jobKeysFor("wk-a"), ["8420"], "the malformed frame touched nothing");
+    assertEquals(reg.count(), 1);
+  } finally {
+    family.teardown?.();
+  }
+});
+
+test("an EMPTY snapshot is a valid authoritative resync — the supervisor asserting it now owns nothing", async () => {
+  const { transport } = mountClaim();
+  try {
+    const peer = fakeConn("c1", "host-supervisor");
+    transport.connect(peer.conn);
+    await flush();
+    peer.feed(claimFrame("wk-a", "8420"));
+    await flush();
+
+    const reg = currentClaimRegistry();
+    assert(reg);
+    assertEquals(reg.jobKeysFor("wk-a"), ["8420"]);
+
+    // The producer emits one snapshot per instance INCLUDING empty sets — an empty `jobKeys` is the
+    // meaningful "owns nothing now" resync, not a malformed frame.
+    peer.feed(resyncFrame("wk-a", []));
+    await flush();
+    assertEquals(reg.jobKeysFor("wk-a"), [], "the empty snapshot cleared the instance's claims");
+    assertEquals(reg.count(), 0);
+  } finally {
+    family.teardown?.();
+  }
+});
+
 test("teardown clears the singleton", () => {
   mountClaim();
   assert(currentClaimRegistry() !== undefined);
