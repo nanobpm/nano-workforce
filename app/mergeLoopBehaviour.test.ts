@@ -602,6 +602,39 @@ test("a no-verdict rebase result reconciles from ground truth, not escalation (#
   assert(!completedElementIds(engine).has("merge-esc-attempt"), "a missing rebase status must not escalate");
 });
 
+// ---------------------------------------------------------------------------
+// #887 — an external-agent completion must not clobber engine-owned counters
+// ---------------------------------------------------------------------------
+// The engine merges EVERY variable an external agent returns into process scope unfiltered, so a
+// `senior:fix-ci`/`senior:rebase` agent echoing a loop counter (`ciFixRound`, `rebaseRound`, …) with
+// the wrong type/value would corrupt it — and because the counter feeds the task's own `+ 1`
+// increment and the `ciFixRound < ciFixMax` / `rebaseRound < rebaseMax` guards, a string echo wedges
+// the sub-process on an "comparison/arithmetic not defined for string and number" incident. The fix
+// snapshots each engine-owned counter into a task-local input before the agent runs and restores it
+// on the task output (driving the increment from the snapshot), so the agent can never alter it.
+
+test("a fix-ci agent echoing ciFixRound:\"9\" cannot clobber the counter or wedge the increment (#887)", async () => {
+  const engine = await boot({ responses: { "senior:fix-ci": { status: "fixed", ciFixRound: "9", ciFixMax: "1" } } });
+  await driveToCiFix(engine);
+  assertEquals((await engine.searchIncidents()).length, 0, "the agent echo must not raise an incident");
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("fix-ci")
+    .hasVariable("ciFixRound", 1) // the engine increment (0 → 1), NOT the agent's "9"
+    .hasVariable("ciFixMax", 3); // the budget ceiling is engine-owned, unclobbered
+});
+
+test("a rebase agent echoing rebaseRound:\"9\" cannot clobber the counter or wedge the increment (#887)", async () => {
+  const engine = await boot({ responses: { "senior:rebase": { status: "rebased", rebaseRound: "9", rebaseMax: "1" } } });
+  await driveToRebase(engine);
+  assertEquals((await engine.searchIncidents()).length, 0, "the agent echo must not raise an incident");
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("rebaseRound", 1) // the engine increment (0 → 1), NOT the agent's "9"
+    .hasVariable("rebaseMax", 3); // the budget ceiling is engine-owned, unclobbered
+});
+
 test("rebase budget exhaustion escalates as not-mergeable without running the agent", async () => {
   const engine = await boot({ responses: { "senior:rebase": { status: "rebased" } }, vars: { rebaseMax: 0 } });
   await driveToRebase(engine);

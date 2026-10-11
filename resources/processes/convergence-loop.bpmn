@@ -147,9 +147,27 @@
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
+          <zeebe:input source="=round" target="guardRound" />
+          <zeebe:input source="=maxRounds" target="guardMaxRounds" />
+          <zeebe:input source="=advPass" target="guardAdvPass" />
+          <zeebe:input source="=advMax" target="guardAdvMax" />
+          <zeebe:input source="=ackRetryRound" target="guardAckRetryRound" />
+          <zeebe:input source="=ackRetryMax" target="guardAckRetryMax" />
+          <zeebe:input source="=huskRetries" target="guardHuskRetries" />
+          <zeebe:input source="=prKey" target="guardPrKey" />
+          <zeebe:input source="=reviewWaitTimeout" target="guardReviewWaitTimeout" />
           <zeebe:output source="=null" target="answer" />
           <zeebe:output source="=false" target="scopePending" />
           <zeebe:output source="=null" target="adversarialFindings" />
+          <zeebe:output source="=guardRound" target="round" />
+          <zeebe:output source="=guardMaxRounds" target="maxRounds" />
+          <zeebe:output source="=guardAdvPass" target="advPass" />
+          <zeebe:output source="=guardAdvMax" target="advMax" />
+          <zeebe:output source="=guardAckRetryRound" target="ackRetryRound" />
+          <zeebe:output source="=guardAckRetryMax" target="ackRetryMax" />
+          <zeebe:output source="=guardHuskRetries" target="huskRetries" />
+          <zeebe:output source="=guardPrKey" target="prKey" />
+          <zeebe:output source="=guardReviewWaitTimeout" target="reviewWaitTimeout" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_capture</bpmn:incoming>
@@ -205,11 +223,28 @@
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
+          <zeebe:input source="=round" target="guardRound" />
+          <zeebe:input source="=maxRounds" target="guardMaxRounds" />
+          <zeebe:input source="=advPass" target="guardAdvPass" />
+          <zeebe:input source="=advMax" target="guardAdvMax" />
+          <zeebe:input source="=ackRetryRound" target="guardAckRetryRound" />
+          <zeebe:input source="=ackRetryMax" target="guardAckRetryMax" />
+          <zeebe:input source="=huskRetries" target="guardHuskRetries" />
+          <zeebe:input source="=prKey" target="guardPrKey" />
+          <zeebe:input source="=reviewWaitTimeout" target="guardReviewWaitTimeout" />
           <zeebe:output source="=adversarialFindings" target="adversarialFindings" />
-          <zeebe:output source="=(if advPass = null then 0 else advPass) + 1" target="advPass" />
+          <zeebe:output source="=(if guardAdvPass = null then 0 else guardAdvPass) + 1" target="advPass" />
           <zeebe:output source="=(if adversarialFindings != null and trim(adversarialFindings) != &#34;&#34; then null else status)" target="status" />
           <zeebe:output source="=(if adversarialFindings != null and trim(adversarialFindings) != &#34;&#34; then null else summary)" target="summary" />
           <zeebe:output source="=(if adversarialFindings != null and trim(adversarialFindings) != &#34;&#34; then null else question)" target="question" />
+          <zeebe:output source="=guardRound" target="round" />
+          <zeebe:output source="=guardMaxRounds" target="maxRounds" />
+          <zeebe:output source="=guardAdvMax" target="advMax" />
+          <zeebe:output source="=guardAckRetryRound" target="ackRetryRound" />
+          <zeebe:output source="=guardAckRetryMax" target="ackRetryMax" />
+          <zeebe:output source="=guardHuskRetries" target="huskRetries" />
+          <zeebe:output source="=guardPrKey" target="prKey" />
+          <zeebe:output source="=guardReviewWaitTimeout" target="reviewWaitTimeout" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_advDue</bpmn:incoming>
@@ -478,7 +513,25 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrScopeClassifyOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
+          <zeebe:input source="=round" target="guardRound" />
+          <zeebe:input source="=maxRounds" target="guardMaxRounds" />
+          <zeebe:input source="=advPass" target="guardAdvPass" />
+          <zeebe:input source="=advMax" target="guardAdvMax" />
+          <zeebe:input source="=ackRetryRound" target="guardAckRetryRound" />
+          <zeebe:input source="=ackRetryMax" target="guardAckRetryMax" />
+          <zeebe:input source="=huskRetries" target="guardHuskRetries" />
+          <zeebe:input source="=prKey" target="guardPrKey" />
+          <zeebe:input source="=reviewWaitTimeout" target="guardReviewWaitTimeout" />
           <zeebe:output source="=null" target="scopeAnswer" />
+          <zeebe:output source="=guardRound" target="round" />
+          <zeebe:output source="=guardMaxRounds" target="maxRounds" />
+          <zeebe:output source="=guardAdvPass" target="advPass" />
+          <zeebe:output source="=guardAdvMax" target="advMax" />
+          <zeebe:output source="=guardAckRetryRound" target="ackRetryRound" />
+          <zeebe:output source="=guardAckRetryMax" target="ackRetryMax" />
+          <zeebe:output source="=guardHuskRetries" target="huskRetries" />
+          <zeebe:output source="=guardPrKey" target="prKey" />
+          <zeebe:output source="=guardReviewWaitTimeout" target="reviewWaitTimeout" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_convergeOk</bpmn:incoming>
