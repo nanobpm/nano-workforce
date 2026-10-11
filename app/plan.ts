@@ -98,6 +98,9 @@ export interface Plan {
   // admission); the column stays NULLABLE ONLY to grandfather pre-ADR-0003 / in-flight rows that
   // carry NULL — those must remain readable, so do NOT add a NOT NULL migration.
   base_branch: string | null;
+  // Opt-in escalation steward (120_escalation_auto_resolutions.sql, issue #889): 1 ⇒ this epic's
+  // escalations (and its spawned child loops) are eligible for steward auto-resolution. Default 0.
+  auto_resolve_escalations: number;
   // The derived epic delivery signal (029_plan_delivery.sql) was RETIRED as a stored column (epic
   // #412): `delivery` / `delivery_label` are now a DERIVED SQL VIEW (`plan_delivery` /
   // `plan_read_model`, 061), computed from the SAME pure `deriveDelivery`/`TERMINAL_STATUSES`
@@ -895,6 +898,9 @@ export interface StartPlanOptions {
   readinessProbes?: ReadinessProbe[];
   probeTimeout?: string;
   probePollEvery?: string;
+  /** Opt-in escalation steward (issue #889): when true, this epic's escalations — and every child
+   * convergence/merge loop it spawns — become eligible for steward auto-resolution. Default false. */
+  autoResolveEscalations?: boolean;
 }
 
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
@@ -981,6 +987,7 @@ export async function startPlan(
       epic_phase: EPIC_PHASE.PLANNING,
       blackboard_token: token,
       base_branch: base,
+      auto_resolve_escalations: opts.autoResolveEscalations === true ? 1 : 0,
       updated_at: ts,
     });
   } else {
@@ -996,6 +1003,7 @@ export async function startPlan(
       epic_phase: EPIC_PHASE.PLANNING,
       blackboard_token: token,
       base_branch: base,
+      auto_resolve_escalations: opts.autoResolveEscalations === true ? 1 : 0,
       created_at: ts,
       updated_at: ts,
     });
@@ -1022,6 +1030,10 @@ export async function startPlan(
       // `operators` candidate group); an operator/agent can claim/reassign via the task inbox.
       escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
       escalationAssignee: null,
+      // Opt-in escalation steward (issue #889): carried on the instance so child processes inherit it,
+      // AND persisted on the `plans` row (the durable source the steward's eligibility reads), so an
+      // agent-completion clobber of the variable can never silently opt an epic in or out (#887/#888).
+      autoResolveEscalations: opts.autoResolveEscalations === true,
       // Agent-task liveness SLA (issue #849): PRE-SEED the canonical bound for the fan-out's
       // external agent tasks. Each slice's implementation agent (via the implement-cell
       // callActivity's explicit `agentSlaTimeout` input mapping) is bounded today; the wave's own

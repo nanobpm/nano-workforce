@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:bpmndi_1="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_escalation_steward" targetNamespace="http://nanobpm.io/nano-workforce">
+  <bpmn:process id="escalation-steward" name="Escalation steward" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="StewardCollectIn" name="Collect eligible escalations — input">
+          <nano:extend name="minAgeMs" type="integer" optional="true" />
+        </nano:shape>
+        <nano:shape id="StewardCollectOut" name="Collect eligible escalations — output">
+          <nano:extend name="eligibleCount" type="integer" />
+          <nano:extend name="claimed" type="string" list="true" optional="true" />
+          <nano:extend name="skippedOverlap" type="boolean" optional="true" />
+        </nano:shape>
+        <nano:shape id="StewardRecordIn" name="Record steward resolutions — input">
+          <nano:extend name="resolutions" type="string" optional="true" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
+    <bpmn:startEvent id="tick" name="Steward tick">
+      <bpmn:outgoing>es_toCollect</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:serviceTask id="collect" name="Collect eligible escalations">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.escalation-steward-collect" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="StewardCollectIn" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="StewardCollectOut" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>es_toCollect</bpmn:incoming>
+      <bpmn:outgoing>es_collected</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw_any" name="any eligible?" default="es_done">
+      <bpmn:incoming>es_collected</bpmn:incoming>
+      <bpmn:outgoing>es_dispatch</bpmn:outgoing>
+      <bpmn:outgoing>es_done</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="steward-agent" name="Review escalations (agent)">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:escalation-steward" />
+        <zeebe:agentDefinition agentType="external" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="prompts/escalation-steward.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+        </zeebe:linkedResources>
+        <zeebe:ioMapping>
+          <zeebe:input source="=claimed" target="claimedTasks" />
+          <zeebe:output source="=if (is defined(resolutions)) then resolutions else null" target="resolutions" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>es_dispatch</bpmn:incoming>
+      <bpmn:outgoing>es_toRecord</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="record" name="Record steward resolutions">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.escalation-steward-record" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="StewardRecordIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>es_toRecord</bpmn:incoming>
+      <bpmn:outgoing>es_recorded</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:endEvent id="done" name="Tick complete">
+      <bpmn:incoming>es_done</bpmn:incoming>
+      <bpmn:incoming>es_recorded</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="es_toCollect" sourceRef="tick" targetRef="collect" />
+    <bpmn:sequenceFlow id="es_collected" sourceRef="collect" targetRef="gw_any" />
+    <bpmn:sequenceFlow id="es_dispatch" name="eligible" sourceRef="gw_any" targetRef="steward-agent">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=eligibleCount &gt; 0</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="es_done" name="none" sourceRef="gw_any" targetRef="done" />
+    <bpmn:sequenceFlow id="es_toRecord" sourceRef="steward-agent" targetRef="record" />
+    <bpmn:sequenceFlow id="es_recorded" sourceRef="record" targetRef="done" />
+  </bpmn:process>
+  <bpmndi_1:BPMNDiagram id="BPMNDiagram_escalation-steward">
+    <bpmndi_1:BPMNPlane id="BPMNPlane_escalation-steward" bpmnElement="escalation-steward">
+      <bpmndi_1:BPMNShape id="BPMNShape_tick" bpmnElement="tick">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="53" y="143" width="90" height="14" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_collect" bpmnElement="collect">
+        <dc:Bounds x="216" y="80" width="100" height="80" />
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_gw_any" bpmnElement="gw_any" isMarkerVisible="true">
+        <dc:Bounds x="416" y="95" width="50" height="50" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="408" y="62" width="67" height="28" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_steward-agent" bpmnElement="steward-agent">
+        <dc:Bounds x="566" y="240" width="100" height="80" />
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_record" bpmnElement="record">
+        <dc:Bounds x="766" y="240" width="100" height="80" />
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_done" bpmnElement="done">
+        <dc:Bounds x="966" y="102" width="36" height="36" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="953" y="69" width="63" height="28" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_es_toCollect" bpmnElement="es_toCollect">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_es_collected" bpmnElement="es_collected">
+        <di:waypoint x="316" y="120" />
+        <di:waypoint x="416" y="120" />
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_es_done" bpmnElement="es_done">
+        <di:waypoint x="466" y="120" />
+        <di:waypoint x="966" y="120" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="700" y="98" width="32" height="14" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_es_dispatch" bpmnElement="es_dispatch">
+        <di:waypoint x="441" y="145" />
+        <di:waypoint x="441" y="280" />
+        <di:waypoint x="566" y="280" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="446" y="206" width="60" height="14" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_es_toRecord" bpmnElement="es_toRecord">
+        <di:waypoint x="666" y="280" />
+        <di:waypoint x="766" y="280" />
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_es_recorded" bpmnElement="es_recorded">
+        <di:waypoint x="866" y="280" />
+        <di:waypoint x="984" y="280" />
+        <di:waypoint x="984" y="138" />
+      </bpmndi_1:BPMNEdge>
+    </bpmndi_1:BPMNPlane>
+  </bpmndi_1:BPMNDiagram>
+</bpmn:definitions>

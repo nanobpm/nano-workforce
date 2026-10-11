@@ -76,6 +76,7 @@ The body is flat. Fields:
 | `autoMerge` | boolean | **Positive per-request setting.** `false` = review only, stopping at `converged`, regardless of the global default; `true` = converge **then merge** when `NANO_PR_AUTO_MERGE` is enabled. |
 | `maxRounds` | integer | per-submit cap before escalating (clamped 1–100; default from `NANO_PR_MAX_ROUNDS`, 20). |
 | `dependsOn` | string[] | other `prKey`s that must land before this one merges (merge-loop barrier). |
+| `autoResolveEscalations` | boolean | **Opt in to the escalation steward** (issue #889). When `true`, this loop's open escalations become eligible for the steward to review and auto-resolve every 30 min (recorded reviewably in **Auto-resolutions**, §3). Default `false` — escalations stay human-only. |
 
 **Converge-only vs. converge-and-merge — choose deliberately:**
 
@@ -115,6 +116,12 @@ The body is flat: `issue` (or `url`) — `owner/repo#123` or an issue URL — pl
 blank/absent base is rejected with a 400. Starting a
 plan is idempotent on the plan key; an already-running plan short-circuits. The
 response (202) echoes the `planKey` and engine `processKey`.
+
+Both epic (`startPlanFanout`) and feature (`startFeature`) accept the optional
+**`autoResolveEscalations`** boolean (issue #889, default `false`). When `true`, the run opts in to
+the escalation steward, and the opt-in **propagates to every child it spawns** — an epic's
+implementation tasks and each enrolled convergence/merge loop, a feature run's handed-off PR. Only
+escalations raised under opted-in work are eligible for the steward (§3).
 
 **Single issue, one PR (feature run, `startFeature`)** — no planning or fan-out. Same body and
 base-branch admission, plus `converge` (enrol the PR in §1) and `autoMerge`:
@@ -312,6 +319,37 @@ live in the `escalations` table (surfaced read-only per PR on the Convergence pa
 Guidance for the human you assist: read the escalation `question` or plan-review
 `findings` first, decide the smallest unblocking answer, and answer it precisely —
 the answer becomes the agent's next-round context.
+
+### The escalation steward (opt-in auto-resolution, issue #889)
+
+Escalations are **still for humans** — unless the work opted in. Each initiation
+pathway (§1, §2, §9) accepts `autoResolveEscalations` (default off). When a piece of
+work opts in, the **escalation steward** reviews its open escalations every 30 minutes
+(configurable via `NANO_ESCALATION_STEWARD_INTERVAL`; `NANO_ESCALATION_STEWARD=off`
+disables the loop entirely) and submits a recommended choice for each — keeping the
+fleet moving instead of parking for hours on a decision with a clear best option.
+
+The steward is deliberately conservative:
+
+- It only touches escalations on **opted-in** work, past a short minimum age (so a
+  human already answering wins), and never a human-only / irreversible / credential
+  kind (merge approval, a permission prompt, a readiness gate, a blocked/conformance
+  ack, an *abandon*).
+- It **abstains** — leaving the escalation for a human — when the right choice is
+  unclear, and a **loop guard** abstains once a subject has been auto-resolved twice
+  and escalates again (the automatic answer isn't working).
+- Every resolution goes through the canonical `completeUserTask` door with **agent**
+  attribution (ADR 0046) — never recorded as a human decision.
+
+**Reviewing auto-resolutions.** Every resolution *and* abstention is written to a
+durable record and shown in the **Auto-resolutions** view (a pending-count badge sits
+in the nav). The default list shows `pending` records, newest first; open one to see
+the full question, the options offered, the submitted variables, the rationale and the
+evidence checked, plus links to the subject and the steward's transcript. From there
+you can **Dismiss** it (reviewed, no action) or **Intervene** (mark the record and
+record guidance for stepping in after the fact — reopening the completed user task is
+not required). Over MCP / curl, `listAutoResolutions` reads the records and
+`reviewAutoResolution` (`{ id, action: "dismiss" | "intervene", note? }`) reviews one.
 
 ---
 
@@ -694,15 +732,13 @@ curl -sS -X POST __BASE__/actions/compile-delivery-graph \
 ```
 
 - `200 { status:"ready", message, digest, preview, reviewUrl }` — the graph compiled and is
-  **staged for operator review**. `digest` is the content-address that NAMES the proposal (so
-  you can tell the operator exactly which one to dispatch); `preview` is `{ diagram,
-  sideEffects, humanNodes }` — `diagram` is a mermaid `flowchart` of the resolved graph,
-  `humanNodes[]` are the stop-points where it waits for a person, and `sideEffects[]` are the
-  `agent`/`connector` actions it **will** perform once an operator dispatches it; `reviewUrl`
-  is a **navigational** cockpit deep-link (a pointer only — **not** a dispatch handle). The
-  response carries **no run key, no token, and no process-instance key**: nothing you can
-  replay to start a run. Your role ends here — hand the operator the `digest` (or `reviewUrl`)
-  and ask them to preview and dispatch it.
+  **staged for operator review**. `digest` is the content-address that NAMES the proposal (tell the
+  operator exactly which one to dispatch); `preview` is `{ diagram, sideEffects, humanNodes }` —
+  `diagram` is a mermaid `flowchart` of the resolved graph, `humanNodes[]` are the stop-points where
+  it waits for a person, and `sideEffects[]` are the `agent`/`connector` actions it **will** perform
+  once dispatched; `reviewUrl` is a **navigational** cockpit deep-link (a pointer only — **not** a
+  dispatch handle). The response carries **no run key, token, or process-instance key**: nothing you
+  can replay to start a run. Hand the operator the `digest` (or `reviewUrl`) and ask them to dispatch.
 - `400 { ok:false, errors:[{ path, message }] }` — every error path-qualified
   (`nodes[2].kind`, `edges[1].from`, …) for unknown kind, dangling edge, a cycle, or an
   unresolvable `from` fact. Fix and recompile; nothing is staged.
@@ -711,13 +747,16 @@ curl -sS -X POST __BASE__/actions/compile-delivery-graph \
 `start` endpoint (Decision 5/7, issue #460). Dispatch is a human action: an operator opens
 the **Delivery Graphs** page in the cockpit, reviews the staged proposal's rendered preview
 (its diagram, the human stop-points, and the side effects a dispatch authorises), and clicks
-**Dispatch** on the one they approve. The operator clicking Dispatch **is** the approval — it
-is content-addressed to the exact digest they previewed, so it cannot be a replay of some
-other graph. Once dispatched, the graph deploys + runs engine-natively and registers as a run
-aggregate, so its current phase / parked node shows in the cockpit's **Active Delivery
-Graphs** grid (e.g. *"parked on human node: manual OTP publish"*). A `human` node parks on the
-**Tasks** inbox and is answered exactly as an escalation is (§3) — its completion emits any
-declared facts, which downstream edges bind.
+**Dispatch** on the one they approve. That click **is** the approval — content-addressed to the
+exact digest previewed, so it cannot replay some other graph. Once dispatched, the graph deploys +
+runs engine-natively and registers as a run aggregate, so its current phase / parked node shows in
+the cockpit's **Active Delivery Graphs** grid (e.g. *"parked on human node: manual OTP publish"*).
+A `human` node parks on the **Tasks** inbox and is answered exactly as an escalation is (§3) — its
+completion emits any declared facts, which downstream edges bind.
+
+The dispatch body accepts the optional **`autoResolveEscalations`** boolean (issue #889, default
+`false`): when `true`, the run opts in to the escalation steward (§3) — its `human` nodes, service-node
+escalation twins, and any `converge` connector's enrolled PR become eligible for auto-resolution.
 
 > **Completing a `wait` escalation proceeds *as not-ready* — it does NOT re-arm the gate.**
 > A `wait` node with `onTimeout: "escalate"` (the default) that elapses its bound parks a
@@ -892,7 +931,7 @@ Sometimes the thing you must wait for is not one PR but a **whole epic** — an 
 time. The **`wait` kind `epic`** (issue #568) gates on that epic reaching **"fully merged"**
 (every opened slice landed), keyed by its durable **`planKey`** (`owner/repo#NN` — the epic
 issue), so *"start feature B once epic A has fully landed"* is an automated edge, not a human
-babysitting a `confirm` gate.
+babysitting a gate.
 
 ```json
 {
@@ -915,26 +954,24 @@ Semantics:
 
 - **`target` is the `planKey`** (`owner/repo#NN`, the epic issue) — the *stable business id*,
   not the engine `processInstanceKey` (`64200`), so a resubmit/replay still resolves.
-- **`match.epicState`** is `merged` (default) or its synonym `done` — both mean "every opened
-  slice landed". The gate reads the app's own **aggregate** (the lineage read-model over
-  `NANO_WORKFORCE_BASE_URL`), so it is level-triggered like `pr` (no missed edge).
-- **A failed/abandoned/mixed epic never reports merged**, so it never falsely releases the
-  gate; the **bounded** wait elapses and routes via **`onTimeout`** (`escalate`/`continue`) —
-  it does **not** hang.
+- **`match.epicState`** is `merged` (default) or `done` — "every opened slice landed". The gate reads
+  the app's own **aggregate** (the lineage read-model over `NANO_WORKFORCE_BASE_URL`), so it is
+  level-triggered like `pr` (no missed edge). A failed/abandoned/mixed epic never reports merged, so
+  it never falsely releases the gate — the **bounded** wait routes via **`onTimeout`**, never hanging.
 - **Set `poll.timeoutMs` to a realistic budget.** An epic reaching "fully merged" is a
-  multi-day, human-paced event, so the example gives it `poll: { everyMs: 300000, timeoutMs:
-  259200000 }` (re-probe every 5 minutes, budget 3 days). **Omitting `poll` inherits the
-  30-minute default** (§9.1) — the gate would escalate long before the epic lands. Because this
-  gate binds `prCount`, that escalation is **validated** (§9.2): it **re-parks** unless the
-  operator supplies a valid `prCount`, rather than silently releasing `start-b` as not-ready.
+  multi-day, human-paced event, so the example budgets 3 days (`poll: { everyMs: 300000, timeoutMs:
+  259200000 }`). **Omitting `poll` inherits the 30-minute default** (§9.1) — the gate would escalate
+  long before the epic lands. Because this gate binds `prCount`, that escalation is **validated**
+  (§9.2): it **re-parks** unless the operator supplies a valid `prCount`, rather than silently
+  releasing `start-b` as not-ready.
 - On a fully-merged match it binds **`prCount`** (how many slice PRs the epic landed) as an
   output fact, so a downstream node can consume it (parity with the `pr` kind's `mergedSha`).
 - **It also gates a single-PR *feature run*, not just a plan-fanout epic.** The gate resolves the
   lineage thread whose **`rootRequestKey`** matches `target` **regardless of the thread's `kind`**
   (`feature` | `epic` | `pr` | `delivery`), and `app/lineage.ts` lands a *feature* thread on
   `stage:"merged"` once its PR merges. So `wait[epic]` targeting a feature/epic **root issue**
-  observes that thread's aggregate frontier and releases on `stage:"merged" && active:false` either
-  way — see `getDeliveryGraphVocabulary` (the `epic` probe entry) for the structured contract.
+  releases on `stage:"merged" && active:false` either way — see `getDeliveryGraphVocabulary` (the
+  `epic` probe entry) for the structured contract.
 
 ---
 
@@ -956,6 +993,8 @@ until it does, only the curl door in the third column exists on the deployment:
 | Every PR in flight (§0/§5) | `listActivePrs` | `curl __BASE__/status` |
 | List open escalations (§3) | `listEscalations` *(projected by sibling #666; curl door until then)* | `curl __BASE__/../../tasks/api/tasks` (the answerable list — carries each `userTaskKey`); `/status` filtered with the jq recipe just below this table is only a quick *indicator* (it surfaces `openEscalation` as a question string, **no `userTaskKey`**, so you can't answer from it) |
 | Answer an escalation (§3) | `completeUserTask` (agent-assignee: `agentCompleteEscalation`) | `curl -X POST __BASE__/actions/complete-user-task` |
+| List auto-resolutions (§3) | `listAutoResolutions` | `curl __BASE__/auto-resolutions` |
+| Review an auto-resolution (dismiss / intervene) (§3) | `reviewAutoResolution` | `curl -X POST __BASE__/auto-resolutions/review` |
 | Cancel an instance (record-consistent) (§7) | `cancelInstance` *(projected by sibling #667; curl door until then)* | `curl -X POST __BASE__/../actions/cancel` *(the `/app/actions/cancel` door, outside `__BASE__`)* |
 | Publish a BPMN message (§7) | `postMessage` | `curl -X POST __BASE__/actions/message` |
 | The operator guide itself | `getAgentInstructions` (full) / `getAgentGuide(section?)` (addressable) | `curl __BASE__/agent` / `curl __BASE__/agent/guide` |

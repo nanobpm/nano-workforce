@@ -50,6 +50,23 @@
             }
           },
           {
+            "label": "Auto-resolutions",
+            "page": "auto-resolutions",
+            "badge": {
+              "source": "app",
+              "table": "escalation_auto_resolutions__read_model",
+              "filter": [
+                {
+                  "field": "review_state",
+                  "eq": "pending"
+                }
+              ],
+              "tone": "warn",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
             "label": "Cockpit",
             "page": "cockpit"
           },
@@ -89,7 +106,8 @@
           { "key": "issue", "label": "owner/repo#123 or a GitHub issue URL", "type": "text", "required": true, "requiredMessage": "An issue reference is required (owner/repo#123 or an issue URL)" },
           { "key": "baseBranch", "label": "Base branch: e.g. epic/agent-protocol to land the whole epic on an integration branch. A missing epic/* branch is auto-created off default HEAD; a non-epic/* branch must already exist.", "type": "text", "required": true, "requiredMessage": "Name the branch the PR targets (e.g. main or epic/agent-protocol)" },
           { "key": "confirmDefaultBase", "label": "Confirm landing on the default branch \u2014 required only when the base above IS the repository default (every task lands directly on it, with any merge-to-default side effect firing per task)", "type": "checkbox" },
-          { "key": "allowSharedBase", "label": "Allow sharing a custom integration branch with another active epic \u2014 required only when another in-flight epic already targets this same custom base", "type": "checkbox" }
+          { "key": "allowSharedBase", "label": "Allow sharing a custom integration branch with another active epic \u2014 required only when another in-flight epic already targets this same custom base", "type": "checkbox" },
+          { "key": "autoResolveEscalations", "label": "Automatically resolve escalations \u2014 the opt-in escalation steward reviews this epic's (and its child loops') open escalations every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions", "type": "checkbox" }
         ]
       }
     },

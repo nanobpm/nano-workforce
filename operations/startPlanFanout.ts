@@ -49,7 +49,9 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     }
     throw err;
   }
-  const result = await startPlan(app.data, app.engine, parsed, normalizedBase);
+  // Opt-in escalation steward (issue #889): propagate to every child the epic spawns.
+  const autoResolveEscalations = "autoResolveEscalations" in body && body.autoResolveEscalations === true;
+  const result = await startPlan(app.data, app.engine, parsed, normalizedBase, { autoResolveEscalations });
   const alreadyRunning = "alreadyRunning" in result && result.alreadyRunning === true;
   app.log.info("plan fan-out started", {
     planKey: parsed.planKey,
@@ -58,6 +60,7 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     // request — not the effective base — to keep the log honest.
     requestedBaseBranch: normalizedBase,
     alreadyRunning,
+    autoResolveEscalations,
   });
   return { status: 202, body: result };
 });

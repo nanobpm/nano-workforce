@@ -50,6 +50,23 @@
             }
           },
           {
+            "label": "Auto-resolutions",
+            "page": "auto-resolutions",
+            "badge": {
+              "source": "app",
+              "table": "escalation_auto_resolutions__read_model",
+              "filter": [
+                {
+                  "field": "review_state",
+                  "eq": "pending"
+                }
+              ],
+              "tone": "warn",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
             "label": "Cockpit",
             "page": "cockpit"
           },

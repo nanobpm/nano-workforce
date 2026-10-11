@@ -140,6 +140,22 @@ test("startFeature: humanApproval is persisted as 0/1 and seeded onto the instan
   }
 });
 
+test("startFeature: autoResolveEscalations is persisted as 0/1 and seeded onto the instance (issue #889)", async () => {
+  for (const autoResolve of [true, false]) {
+    const stores = { feature_runs: { rows: [] as any[], key: "feature_key" } };
+    let vars: any = null;
+    const engine = {
+      createInstance: (req: any) => {
+        vars = req.variables;
+        return Promise.resolve({ processInstanceKey: "PI-1" });
+      },
+    } as any;
+    await startFeature(memData(stores), engine, PARSED, "main", true, true, null, {}, false, autoResolve);
+    assertEquals(stores.feature_runs.rows[0].auto_resolve_escalations, autoResolve ? 1 : 0);
+    assertEquals(vars.autoResolveEscalations, autoResolve);
+  }
+});
+
 test("startFeature: seeds the single task slice + base-branch brief onto the instance", async () => {
   let captured: any = null;
   const engine = {

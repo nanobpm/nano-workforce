@@ -167,12 +167,17 @@ const handler: AppJobHandler<In, ConnectorDispatchResult> = async (job, app) => 
             });
             return { detail: `${converge.parsed.prKey} already terminal — enrollment skipped (at-most-once resume-safe)` };
           }
-          await submitPr(app.data, app.engine, converge.parsed, converge.dependsOn, MAX_ROUNDS, converge.convergeOnly, dedupeKey);
+          // Propagate the delivery run's escalation-steward opt-in (issue #889) to the enrolled PR:
+          // the runner seeds it as a run-root `autoResolveEscalations` variable (in scope here), and
+          // the durable `delivery_graph_runs` row is the record the steward's eligibility reads.
+          const autoResolve = job.variables.autoResolveEscalations === true;
+          await submitPr(app.data, app.engine, converge.parsed, converge.dependsOn, MAX_ROUNDS, converge.convergeOnly, dedupeKey, false, autoResolve);
           app.log.info("delivery-connector: enrolled PR into convergence loop", {
             target,
             dedupeKey,
             prKey: converge.parsed.prKey,
             convergeOnly: converge.convergeOnly,
+            autoResolveEscalations: autoResolve,
           });
           return { detail: `enrolled ${converge.parsed.prKey} into convergence loop (convergeOnly=${converge.convergeOnly})` };
         }

@@ -273,4 +273,16 @@ export const PORTS: readonly PortEntry[] = [
     model: "human-escalation",
     blockedReason: `${MULTI_START_END_BLOCK} (human-escalation: 1 start, 3 ends)`,
   },
+  {
+    model: "escalation-steward",
+    blockedReason:
+      "blocked (agent-task marker + gateway merge): single top-level start/end, but its " +
+      "`senior:escalation-steward` task carries the <zeebe:agentDefinition agentType=\"external\" /> " +
+      "marker issue #745 requires on every prompt-bearing senior:* task (a marker the published " +
+      "@nanobpm/workflow compiler cannot emit — the class-3 block), AND its `any eligible?` " +
+      "exclusive gateway is a two-way split whose `eligible`/`none` out-edges re-converge on the " +
+      "shared `done` end event (an explicit-join topology the structured-only builder cannot emit " +
+      "without inserting its own gateway). Awaits an agent-marker option on task() and an " +
+      "arbitrary-graph / explicit-join builder upstream in @nanobpm/workflow (nano-ide).",
+  },
 ];

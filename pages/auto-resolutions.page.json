@@ -1,0 +1,169 @@
+{
+  "schemaVersion": "1.0",
+  "title": "Auto-resolutions",
+  "nodes": [
+    {
+      "type": "nav",
+      "id": "nav",
+      "props": {
+        "variant": "bar",
+        "title": "Nano Workforce",
+        "items": [
+          {
+            "label": "Overview",
+            "page": "overview"
+          },
+          {
+            "label": "Connect over MCP",
+            "page": "mcp"
+          },
+          {
+            "label": "Lineage",
+            "page": "lineage"
+          },
+          {
+            "label": "Convergence",
+            "page": "home"
+          },
+          {
+            "label": "Epics",
+            "page": "epic"
+          },
+          {
+            "label": "Feature",
+            "page": "feature"
+          },
+          {
+            "label": "Delivery Graphs",
+            "page": "delivery-graphs"
+          },
+          {
+            "label": "Tasks",
+            "page": "tasks",
+            "badge": {
+              "source": "app",
+              "table": "user_tasks",
+              "filter": [],
+              "tone": "danger",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
+            "label": "Auto-resolutions",
+            "page": "auto-resolutions",
+            "badge": {
+              "source": "app",
+              "table": "escalation_auto_resolutions__read_model",
+              "filter": [
+                {
+                  "field": "review_state",
+                  "eq": "pending"
+                }
+              ],
+              "tone": "warn",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
+            "label": "Cockpit",
+            "page": "cockpit"
+          },
+          {
+            "label": "Board",
+            "page": "board"
+          },
+          {
+            "label": "Velocity",
+            "page": "velocity"
+          }
+        ],
+        "sticky": true
+      }
+    },
+    {
+      "type": "text",
+      "id": "title",
+      "props": { "text": "Auto-resolutions", "variant": "heading" }
+    },
+    {
+      "type": "text",
+      "id": "subtitle",
+      "props": {
+        "text": "Every escalation the opt-in escalation steward (issue #889) resolved or abstained from, as a durable, reviewable record. The default list shows pending records — examine one, then Dismiss it (reviewed, no action) or Intervene (mark it and record guidance for stepping in after the fact). Abstentions carry their own badge. A record is never a hidden machine decision: it is attributed to the steward agent, never to a human.",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "auto-resolutions",
+      "props": {
+        "title": "Auto-resolutions",
+        "rowKey": "id",
+        "refreshMs": 5000,
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "escalation_auto_resolutions__read_model",
+          "orderBy": { "field": "created_at", "dir": "desc" }
+        },
+        "tabs": [
+          { "label": "Pending", "filter": [{ "field": "review_state", "in": ["pending"] }] },
+          { "label": "Reviewed", "filter": [{ "field": "review_state", "in": ["dismissed", "intervened"] }] },
+          { "label": "All", "filter": [] }
+        ],
+        "columns": [
+          { "field": "outcome", "header": "Outcome", "badge": true },
+          { "field": "escalation_kind", "header": "Kind" },
+          {
+            "field": "subject_key",
+            "template": "{{subject_key}}",
+            "header": "Subject",
+            "truncate": true,
+            "linkField": "subject_url"
+          },
+          { "field": "rationale", "header": "Rationale", "truncate": true },
+          { "field": "worker", "header": "Worker" },
+          { "field": "created_at", "header": "When", "format": "datetime" },
+          { "field": "review_state", "header": "Review", "badge": true }
+        ],
+        "rowActions": [
+          {
+            "label": "Dismiss",
+            "confirm": "Dismiss this auto-resolution (reviewed, no action)?",
+            "showWhenField": "pending_review",
+            "action": {
+              "path": "/app/api/auto-resolutions/review",
+              "body": { "id": "{{row.id}}", "action": "dismiss" }
+            }
+          },
+          {
+            "label": "Intervene",
+            "confirm": "Mark this auto-resolution as intervened (you are stepping in after the fact)?",
+            "showWhenField": "pending_review",
+            "action": {
+              "path": "/app/api/auto-resolutions/review",
+              "body": { "id": "{{row.id}}", "action": "intervene" }
+            }
+          }
+        ],
+        "detail": {
+          "linkField": "subject_url",
+          "fields": [
+            { "field": "question", "label": "Question" },
+            { "field": "options", "label": "Options offered" },
+            { "field": "submitted_variables", "label": "Submitted variables" },
+            { "field": "rationale", "label": "Rationale" },
+            { "field": "evidence", "label": "Evidence" },
+            { "field": "subject_key", "label": "Subject" },
+            { "field": "process_instance_key", "label": "Process instance" },
+            { "field": "steward_instance_key", "label": "Steward instance" },
+            { "field": "agent_job_key", "label": "Agent job" },
+            { "field": "review_note", "label": "Review note" }
+          ]
+        }
+      }
+    }
+  ]
+}

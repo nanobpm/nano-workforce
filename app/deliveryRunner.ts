@@ -55,6 +55,10 @@ export interface DeliveryRunTimeouts {
   probePollEvery?: string;
   /** Optional explicit assignee for `human` nodes + escalation tasks (else candidate-group routed). */
   escalationAssignee?: string | null;
+  /** Opt-in escalation steward (issue #889): when true, this run's escalations (human nodes, service
+   * node escalation twins, and any `converge*` connector's enrolled PR) become eligible for steward
+   * auto-resolution. Seeded as a run-root variable and persisted on the `delivery_graph_runs` row. */
+  autoResolveEscalations?: boolean;
 }
 
 export interface DeliveryRunOptions extends DeliveryRunTimeouts {
@@ -96,7 +100,7 @@ export interface DeliveryRunOptions extends DeliveryRunTimeouts {
   repoless?: boolean;
 }
 
-const DEFAULTS: Required<Omit<DeliveryRunTimeouts, "escalationAssignee">> = {
+const DEFAULTS: Required<Omit<DeliveryRunTimeouts, "escalationAssignee" | "autoResolveEscalations">> = {
   nodeTimeout: DELIVERY_NODE_DEFAULT_TIMEOUT,
   probeTimeout: "PT30M",
   probePollEvery: msToIsoDuration(DEFAULT_EVERY_MS),
@@ -253,6 +257,10 @@ export async function runDeliveryGraph(
       // bounds a node's whole retry budget; this seeds the shared `agentSlaTimeout` knob so any
       // agent cell modelled with the fleet-wide SLA boundary resolves it too.
       agentSlaTimeout: AGENT_SLA_TIMEOUT,
+      // Opt-in escalation steward (issue #889): seeded as a run-root variable so every node's
+      // escalation (and the delivery-connector's `converge*` enrollment) inherits the opt-in. The
+      // durable record the steward's eligibility reads is the `delivery_graph_runs` row (dispatch).
+      autoResolveEscalations: options.autoResolveEscalations === true,
     },
   });
   // The engine can yield a numeric key; `DeliveryRunHandle.processInstanceKey` is typed `string` and

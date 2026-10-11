@@ -52,6 +52,9 @@ export interface DeliveryGraphRun {
    *  the `delivery_graph_read_model` VIEW folds its `list_bucket` to 'history'; NULL while the run is
    *  live or terminal-but-undismissed (it stays in Active until an operator ticks it off). */
   acknowledged_at: string | null;
+  /** Opt-in escalation steward (120_escalation_auto_resolutions.sql, issue #889): 1 ⇒ this run's
+   * escalations are eligible for steward auto-resolution. Default 0. */
+  auto_resolve_escalations: number;
 }
 
 /** The run lifecycle. `awaiting-approval` is RESERVED but no longer produced (issue #460 moved dispatch
@@ -493,6 +496,7 @@ export function buildDeliveryGraphRunRow(input: {
   processDefinitionId?: string | null;
   humanLabels?: Record<string, string>;
   createdAt?: string;
+  autoResolveEscalations?: boolean;
 }): DeliveryGraphRun {
   const at = now();
   return {
@@ -509,6 +513,7 @@ export function buildDeliveryGraphRunRow(input: {
     phase: input.phase,
     phase_node_id: null,
     human_labels: input.humanLabels ? JSON.stringify(input.humanLabels) : null,
+    auto_resolve_escalations: input.autoResolveEscalations === true ? 1 : 0,
     created_at: input.createdAt ?? at,
     updated_at: at,
     acknowledged_at: null,

@@ -39,7 +39,7 @@ import { applyMigrationSet, readMigrationSetFromDisk } from "../test/migrations.
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const READ_MODEL_MIGRATION = "096_delivery_graph_read_model_list_bucket.sql";
+const READ_MODEL_MIGRATION = "121_delivery_graph_read_model_auto_resolve.sql";
 
 // A minimal in-memory DB carrying the base `delivery_graph_runs` / `pull_requests` shapes the VIEW
 // reads, plus stand-ins for the managed `<table>__tracking` derived VIEWs urban provisions at mount
@@ -53,7 +53,7 @@ function viewDb(): DatabaseSync {
        run_key TEXT PRIMARY KEY, process_key TEXT, process_definition_id TEXT, digest TEXT,
        status TEXT, side_effecting INTEGER, node_count INTEGER, human_node_count INTEGER,
        side_effect_count INTEGER, title TEXT, phase TEXT, phase_node_id TEXT, human_labels TEXT,
-       created_at TEXT, updated_at TEXT, acknowledged_at TEXT, derived_status_override TEXT);
+       created_at TEXT, updated_at TEXT, acknowledged_at TEXT, auto_resolve_escalations INTEGER, derived_status_override TEXT);
      CREATE TABLE pull_requests (pr_key TEXT PRIMARY KEY, root_request_key TEXT, status TEXT,
        derived_status_override TEXT);`,
   );

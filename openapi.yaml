@@ -239,6 +239,134 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Escalation"
+    AutoResolution:
+      type: object
+      description: One escalation-steward auto-resolution record (issue #889) — a reviewable record of an escalation the steward resolved or abstained from.
+      additionalProperties: false
+      required:
+        - id
+        - userTaskKey
+        - outcome
+        - reviewState
+        - createdAt
+      properties:
+        id:
+          type: integer
+        userTaskKey:
+          type: string
+        kind:
+          type: string
+          nullable: true
+        elementId:
+          type: string
+          nullable: true
+        subjectType:
+          type: string
+          nullable: true
+        subjectKey:
+          type: string
+          nullable: true
+        subjectUrl:
+          type: string
+          nullable: true
+        processInstanceKey:
+          type: string
+          nullable: true
+        question:
+          type: string
+          nullable: true
+        options:
+          type: array
+          nullable: true
+          items: {}
+        outcome:
+          type: string
+          enum: [resolved, abstained]
+        submittedVariables:
+          type: object
+          nullable: true
+          additionalProperties: true
+        rationale:
+          type: string
+          nullable: true
+        evidence:
+          type: string
+          nullable: true
+        stewardInstanceKey:
+          type: string
+          nullable: true
+        agentJobKey:
+          type: string
+          nullable: true
+        worker:
+          type: string
+          nullable: true
+        model:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+        reviewState:
+          type: string
+          enum: [pending, dismissed, intervened]
+        reviewedBy:
+          type: string
+          nullable: true
+        reviewedAt:
+          type: string
+          nullable: true
+        reviewNote:
+          type: string
+          nullable: true
+    AutoResolutionList:
+      type: object
+      additionalProperties: false
+      required:
+        - count
+        - pendingCount
+        - records
+      properties:
+        count:
+          type: integer
+        pendingCount:
+          type: integer
+          description: The number of `pending` (not-yet-reviewed) records — the nav badge count.
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutoResolution"
+    AutoResolutionReview:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - action
+      properties:
+        id:
+          type: integer
+          description: The auto-resolution record id (from `listAutoResolutions`).
+        action:
+          type: string
+          enum: [dismiss, intervene]
+          description: "`dismiss` = reviewed, no action; `intervene` = operator stepped in."
+        operator:
+          type: string
+          description: The reviewing operator's handle (for the audit trail). Optional — defaults to `operator`.
+        note:
+          type: string
+          description: An optional review note (e.g. the intervention guidance).
+    AutoResolutionReviewResult:
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        id:
+          type: integer
+        reviewState:
+          type: string
     LineagePrView:
       type: object
       description: A member PR of a lineage thread (issue #245).
@@ -3885,6 +4013,118 @@ paths:
                 $ref: "#/components/schemas/CancelInstanceResult"
         "503":
           description: The app has no data source configured, so the cancel cannot be reconciled into the record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /auto-resolutions:
+    get:
+      operationId: listAutoResolutions
+      summary: List the escalation steward's auto-resolution records (reviewable), newest first.
+      description: >-
+        The durable, reviewable record of every escalation the opt-in steward (issue #889) resolved
+        or abstained from. Filter by `reviewState` (`pending` | `dismissed` | `intervened`),
+        `subject` (a PR/feature/plan/delivery key) or `kind` (an escalation element id or label).
+        Each record carries the question, the options offered, the submitted variables, the
+        rationale and evidence, the steward provenance, and its operator review state.
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        - name: reviewState
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, dismissed, intervened]
+          description: Filter to one review state (the Auto-resolutions view defaults to `pending`).
+        - name: subject
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter to one subject key (e.g. `owner/repo#123` or a delivery run key).
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter to one escalation kind (an element id or kind label).
+      responses:
+        "200":
+          description: The auto-resolution records.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutoResolutionList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /auto-resolutions/review:
+    post:
+      operationId: reviewAutoResolution
+      summary: Mark an auto-resolution record dismissed (reviewed, no action) or intervened (operator stepped in).
+      description: >-
+        The Auto-resolutions view's review affordance (issue #889). `dismiss` marks the record
+        reviewed with no further action; `intervene` marks it and records the operator's guidance for
+        stepping in after the fact. Both fold `review_state` off `pending` (idempotently — an
+        already-reviewed record is left unchanged) and record who reviewed it, when, and an optional
+        note. Reopening the completed user task is NOT required.
+      security:
+        - hookSecret: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              # BEGIN generated:mcp-body source=#/components/schemas/AutoResolutionReview (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              type: object
+              additionalProperties: false
+              required:
+                - id
+                - action
+              properties:
+                id:
+                  type: integer
+                  description: The auto-resolution record id (from `listAutoResolutions`).
+                action:
+                  type: string
+                  enum:
+                    - dismiss
+                    - intervene
+                  description: '`dismiss` = reviewed, no action; `intervene` = operator stepped in.'
+                operator:
+                  type: string
+                  description: The reviewing operator's handle (for the audit trail). Optional — defaults to `operator`.
+                note:
+                  type: string
+                  description: An optional review note (e.g. the intervention guidance).
+              # END generated:mcp-body
+      responses:
+        "200":
+          description: The record was reviewed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutoResolutionReviewResult"
+        "400":
+          description: The request was malformed (missing id/action, or an unknown action).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: No pending record with that id (already reviewed, or unknown).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
             application/json:
               schema:

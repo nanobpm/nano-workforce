@@ -38,6 +38,7 @@ import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels, reconcileOrig
 import { decodeLivePrompt, deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement, needsLiveDeliveryPrompt } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
+import { ESCALATION_STEWARD_PROCESS_ID } from "./escalationSteward.ts";
 import { deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun } from "./feature.ts";
 import {
   classifyMergeability,
@@ -399,6 +400,9 @@ export interface PullRequest {
   // `pr_key` so the Lineage UI join resolves; a legacy NULL is tolerated the same way by the
   // lineage read projection (`pollLineage`), which self-roots on `pr_key`.
   root_request_key: string | null;
+  // Opt-in escalation steward (120_escalation_auto_resolutions.sql, issue #889): 1 ⇒ this PR's open
+  // escalations are eligible for the steward to auto-resolve (recorded reviewably). Default 0.
+  auto_resolve_escalations: number;
 }
 
 interface PrDependency {
@@ -621,9 +625,10 @@ export async function submitPr(
   convergeOnly = false,
   rootRequestKey: string | null = null,
   humanApproval = false,
+  autoResolveEscalations = false,
 ) {
   return withPrSubmitLock(parsed.prKey, () =>
-    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval),
+    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations),
   );
 }
 
@@ -636,6 +641,7 @@ async function submitPrCritical(
   convergeOnly = false,
   rootRequestKey: string | null = null,
   humanApproval = false,
+  autoResolveEscalations = false,
 ) {
   // Human approval before merge (issue #826) gates only a PR that `pr.finalize` would hand to the
   // merge-loop — its own predicate, `AUTO_MERGE && convergeOnly !== true`. A run that won't merge
@@ -759,6 +765,7 @@ async function submitPrCritical(
       current_round: 1,
       abandon_token: abandonToken,
       root_request_key: effectiveRoot,
+      auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
       created_at: ts,
       updated_at: ts,
     });
@@ -808,6 +815,10 @@ async function submitPrCritical(
       // Human approval before merge (issue #826): a converged PR parks at the `merge-approval` user
       // task before `pr.finalize` hands it to the merge-loop. Pinned off when the PR won't merge.
       humanApproval: gated,
+      // Opt-in escalation steward (issue #889): carried on the instance AND persisted on the
+      // `pull_requests` row (the durable source the steward's eligibility reads), so a clobbered
+      // variable can never silently opt a PR in or out (#887/#888).
+      autoResolveEscalations,
       // Cooperative abandon check (#76): the capability URL + the abort brief appended to the
       // review-round agent's prompt, so it can stop before pushing if the run is cancelled.
       abandonUrl: abUrl,
@@ -884,6 +895,9 @@ async function submitPrCritical(
         merged_at: null,
         abandon_token: abandonToken,
         root_request_key: effectiveRoot,
+        // Record the opt-in on the row (the durable source the steward's eligibility reads) so a
+        // fresh run's flag is authoritative even across a reopen (issue #889).
+        auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
         // Publish the fresh run's identity in the SAME write as the status flip (may be null if the
         // instance could not be created — a phantom row a retry re-enrolls, as on first submit).
         process_key: processKey,
@@ -1018,6 +1032,9 @@ export interface ActivePr {
   activeWorker: string | null;
   /** ISO ts the current activation lease expires; null when not activated. */
   leaseUntil: string | null;
+  /** Whether this PR opted in to the escalation steward (issue #889) — its open escalations are
+   * eligible for steward auto-resolution. Shown in `/status` per PR. */
+  autoResolveEscalations: boolean;
 }
 
 /** Every tracked PR not in a terminal state (converged/abandoned), newest-updated first. Backs
@@ -1073,6 +1090,7 @@ export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
     updatedAt: p.updated_at,
     activeWorker: p.active_worker ?? null,
     leaseUntil: p.lease_until ?? null,
+    autoResolveEscalations: p.auto_resolve_escalations === 1,
   }));
 }
 
@@ -3779,6 +3797,35 @@ export async function pollUserTasks(
   }
 }
 
+/** Escalation-steward tick (issue #889): start ONE `escalation-steward` instance per interval when the
+ * loop is enabled (`NANO_ESCALATION_STEWARD` not off) and the previous tick's instance has finished.
+ * The collect step's own overlap guard is the authoritative no-op for a still-active prior run; this
+ * pass adds the interval pacing + the master switch. Self-scheduled via `pollOnce`; the interval is
+ * `NANO_ESCALATION_STEWARD_INTERVAL` (default `R/PT30M` — the poll reads its `PT…` duration part).
+ * Best-effort + idempotent — a failed start is logged and retried next pass, never wedges the loop. */
+let lastStewardTick = 0;
+export async function pollEscalationSteward(engine: EngineClient) {
+  const disabled = /^(0|off|false|no)$/i.test(readEnvOr("NANO_ESCALATION_STEWARD", "1"));
+  if (disabled) return;
+  // Parse the interval's `PT…` duration part (the cycle is `R/PT30M`; the period is what paces us).
+  const cycle = readEnvOr("NANO_ESCALATION_STEWARD_INTERVAL", "R/PT30M");
+  const m = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/i.exec(cycle);
+  const intervalMs = m
+    ? (Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0)) * 1000
+    : 30 * 60 * 1000;
+  const nowMs = Date.now();
+  if (nowMs - lastStewardTick < intervalMs) return;
+  // Overlap guard (cheap, pre-start): don't start a new tick while a prior one is still ACTIVE.
+  const active = await engine.searchProcessInstances({ processDefinitionId: ESCALATION_STEWARD_PROCESS_ID, state: "ACTIVE" });
+  if (active.length > 0) return;
+  lastStewardTick = nowMs;
+  const minAgeMs = Number(readEnvOr("NANO_ESCALATION_STEWARD_MIN_AGE_MS", "300000"));
+  await engine.createInstance({
+    processDefinitionId: ESCALATION_STEWARD_PROCESS_ID,
+    variables: { minAgeMs },
+  });
+}
+
 /** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
  * (when the engine REST endpoint is supplied) the job-activation visibility pass and the
  * technical-incident surfacing pass. Called on the self-scheduling loop in `main.ts`.
@@ -3799,6 +3846,7 @@ export async function pollOnce(
   await pollFeatureDelivery(data, engine);
   await pollLineage(data);
   await pollUserTasks(data, engine, engineRest);
+  await pollEscalationSteward(engine);
   await pollEpicPhase(data, engine, engineRest);
   await pollTasklessPlanTermination(data, engine);
   await pollDeliveryGraphPhase(data, engine);

@@ -57,6 +57,7 @@ test("every corpus model is either ported or has a documented blocker", () => {
     "merge-cell",
     "wait-gate",
     "human-escalation",
+    "escalation-steward",
   ];
   assertEquals(
     PORTS.map((p) => p.model),
