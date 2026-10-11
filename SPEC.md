@@ -428,6 +428,79 @@ Notes:
   `answer`/`scopePending` (inputs the agent consumes) stay cleared on the
   review-round output.
 
+- **Engine-owned process variables are restored around every external-agent task
+  (issue #887).** The engine merges **every** variable an external agent returns
+  into process scope **unfiltered** — the `io.nanobpm.dataEnvelope.out` shape is
+  codegen/typing-only and applies **no** runtime filtering or coercion. An agent
+  that echoes an engine-owned variable with a colliding name or drifted type (a
+  `senior:pr-review` job that returned `round: "4"` — a string) therefore
+  overwrites the real process value, and the next FEEL guard that reads it
+  (`round >= maxRounds` at `gw-guard`) raises `comparison not defined for string
+  and number` and wedges the loop on an unrecoverable incident. The categorical
+  guard is a **snapshot/restore** on each external-agent task (`review-round`,
+  `adversarial-review`, `classify-scope`): before the agent runs, each
+  engine-owned variable is copied into a task-**local** `guard<Name>` input
+  (`<zeebe:input source="=round" target="guardRound"/>` …), and the task's output
+  mapping **restores** the process variable from that snapshot
+  (`<zeebe:output source="=guardRound" target="round"/>`). Because the snapshot
+  holds the pre-merge value, the restore overwrites whatever the completion
+  merged in, so the agent's real outputs (`status`/`summary`/`question`,
+  `adversarialFindings`, the scope verdict) flow through but it can never alter
+  the protected set. The protected set is **every engine-owned variable the loop
+  relies on that the agent does not own as an output**: the control counters and
+  budgets (`round`, `maxRounds`, `advPass`, `advMax`, `ackRetryRound`,
+  `ackRetryMax`, `huskRetries`, `reviewWaitTimeout`), the `prKey` correlation
+  key, **and** the PR identity inputs (`repo`, `prNumber`, `prUrl`) — the last
+  three because the unfiltered merge lets an input-echo replace the identity that
+  `progress-check`, `converge-gate`, and `finalize` go on to read (a wrong
+  `prNumber` would make `finalize` start the merge loop for the wrong PR) — **and**
+  the gate controls `humanApproval` and `convergeOnly`. These last two are
+  decision flags the loop acts on after the agent returns: `humanApproval = true`
+  routes a converged PR through the `gw-approval` human gate instead of
+  auto-merging, and `convergeOnly = true` ends a review-only run without ever
+  handing the PR to the merge loop. Left unguarded, a converged completion that
+  echoed `humanApproval: false` would **bypass** the approval gate, and one that
+  echoed `convergeOnly: false` would hand a review-only PR to the merge loop.
+  `convergeOnly` is a plain seeded constant, so the usual `=guardConvergeOnly`
+  restore applies. `humanApproval` is the one engine-owned flag that is **also
+  legitimately mutated mid-flight** — a gated caller that adopts a live loop
+  raises it `false → true` via `engine.setVariables` (`submitPr` in
+  `app/service.ts`); it is **monotonic** (only ever rises). A plain
+  `=guardHumanApproval` restore would clobber that concurrent host-set true, so
+  the restore is the monotonic join
+  `=(guardHumanApproval = true) or (humanApproval = true)`: it recovers the
+  snapshot's `true`, honours a concurrent adopter's `true`, and ignores an agent
+  echo of `false`. The direction is **fail-safe** — the only state it can force
+  is *more* human review, never a merge the loop would otherwise have gated. The
+  protected set also covers the two **progress bookkeeping** values the loop
+  reads back after the agent returns: `reviewStale` (the converge-gate's
+  stale-body signal — `f_guardMax` escalates only when `round >= maxRounds and
+  reviewStale != true`, so a forged `reviewStale: true` would suppress the
+  max-round escalation) and `roundEntryHead` (the within-round baseline
+  `pr.capture-head` captures and `pr.progress-check` consumes — a forged head
+  would falsify the no-progress decision). Both are plain process-owned reads, so
+  the usual `=guardReviewStale` / `=guardRoundEntryHead` restore pins them. The
+  protected set further covers the two **seeded cooperative-abandon** reads:
+  `abandonUrl` (the capability `pr.persist-round`/`pr.persist-escalation`/
+  `pr.finalize` record for a human — a forged echo would redirect the abandon
+  token) and `abandonBrief` (which feeds the NEXT agent task's `appendPrompt`
+  input `=(if abandonBrief = null then "" else abandonBrief)` — a non-string echo
+  would carry a wrong/non-string brief into that later prompt). Both are plain
+  process-owned reads, pinned by the usual `=guardAbandonUrl` / `=guardAbandonBrief`
+  restore. The reserved **`io.nanobpm.agentTask`** repository envelope is
+  *deliberately not* in this list: it is a flat dotted framework key with no
+  FEEL-path access, so snapshotting it would need backtick-escaped FEEL
+  (`` =`io.nanobpm.agentTask` ``) that has no precedent on this engine and would,
+  if evaluated as the default dotted path, resolve to `null` and **null the
+  fleet-critical envelope on restore** — a strictly worse failure than the
+  hypothetical clobber (an agent would have to emit a result-JSON key literally
+  named `io.nanobpm.agentTask`). A counter the task itself advances is incremented
+  **from the snapshot** (`adversarial-review` computes `advPass` as
+  `(if guardAdvPass = null then 0
+  else guardAdvPass) + 1`), never from the mergeable process variable. Any new
+  external-agent task added to this loop must apply the same guard to every
+  engine-owned variable in scope.
+
 
 ## 5. Agent job contract (`senior:pr-review`)
 
@@ -817,6 +890,37 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   `pr.persist-escalation` worker as the review stage (status `escalated`), answered
   via the native `wait-merge-answer` `userTask` (the same `completeUserTask` door as
   the review escalation, #256); answering re-arms and retries.
+- **Engine-owned variable guard (issue #887)** — the merge-loop applies the same
+  snapshot/restore invariant as the convergence loop (§4) around its external-agent
+  tasks (`fix-ci`, `rebase`). Each guards the loop counters and budgets
+  (`ciFixRound`, `ciFixMax`, `rebaseRound`, `rebaseMax`, `mergeRetryRound`,
+  `mergeRetryMax`, `mergeStallRounds`, `mergeStallMax`), the `prKey` correlation
+  key, and the PR identity inputs (`repo`, `prNumber`, `prUrl`) — the last three
+  because `pr.merge` reads them directly for GitHub operations after the agent
+  re-arms the poller, so an input-echo that replaced them would merge the wrong
+  PR. It further guards the **lifecycle marker and timeout config** the loop
+  re-arms on every pass: `ciBlockedReconciled` (arm-merge seeds it `null`;
+  `ci-reconcile` sets it `true`; `gw-ci-blocked` runs the one-shot ground-truth
+  reconcile exactly once per episode while it is `!= true`) and the seeded timer
+  durations (`agentSlaTimeout`, `landedWaitTimeout`, `mergeableWaitTimeout`,
+  `mergeableRepollInterval`). Left unguarded, a `{status:"blocked", pushed:false,
+  ciBlockedReconciled:true}` completion would **skip** the mandatory first
+  reconcile and page a human immediately, and a clobbered timeout would silently
+  reshape a wait a later loop pass re-arms. The guard also pins the two values
+  `pr.merge` (attempt-merge) consumes directly after a successful fix/rebase
+  re-arms the poller: `round` (the converged round `ensurePr` records on the
+  merge audit row) and `abandonUrl` (the cooperative-abandon capability URL whose
+  token the merge worker extracts). A completion echoing either would corrupt the
+  recorded round or replace the abandon token, so `=guardRound` /
+  `=guardAbandonUrl` restores pin both. It likewise guards `abandonBrief`, which
+  feeds the fix-ci/rebase `appendPrompt` input (`=(if abandonBrief = null then ""
+  else abandonBrief)`) on the next re-arm — a non-string echo would carry a
+  non-string brief into that later prompt. (As in the convergence loop (§4), the
+  reserved dotted `io.nanobpm.agentTask` repository envelope is *not* guarded: it
+  has no FEEL-path access and a backtick-escaped restore, untested on this engine,
+  would risk nulling the envelope used for later agent provisioning.) The counter
+  the task advances is incremented from the snapshot (`ciFixRound`/`rebaseRound`
+  become `guard<Name> + 1`).
 - **Terminal** — `merged` (with `merged_at`), or `converged` when
   `NANO_PR_AUTO_MERGE=0` (review-only), or `abandoned` on cancel.
 

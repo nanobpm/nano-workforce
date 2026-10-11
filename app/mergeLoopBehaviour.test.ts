@@ -89,13 +89,15 @@ const DEFAULT_VARS: Record<string, unknown> = {
   mergeableRepollInterval: "PT2M",
   mergeStallRounds: 0,
   mergeStallMax: 3,
-  abandonBrief: null,
+  abandonBrief: "\n\n---\nAbort if cancelled: curl …",
   failingChecksList: null,
   status: null,
   mergeState: null,
   mergeStatus: null,
   ciBlockedReconciled: null,
   failingChecks: 0,
+  round: 2,
+  abandonUrl: "http://host/app/api/hooks/abandon?token=tok-seeded",
 };
 
 /**
@@ -301,6 +303,86 @@ test("a CONFLICTING PR whose poller never signalled reaches the rebase arm via t
     .hasActiveElement("wait-mergeable")
     .hasCompletedElements("merge-stall-probe", "rebase") // reached the rebase arm via the timeout path
     .hasVariable("rebaseRound", 1);
+});
+
+test("a rebase agent echoing engine-owned timeout state cannot clobber it (#887)", async () => {
+  // Same guard class as fix-ci: the rebase agent must not reshape the seeded timers that later loop
+  // passes re-arm, nor forge `ciBlockedReconciled`. Drive to the rebase arm via the timeout path with
+  // the agent echoing a forged marker and tiny timeouts; the restore must pin the timers.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "" },
+      "senior:rebase": {
+        status: "rebased",
+        ciBlockedReconciled: true,
+        agentSlaTimeout: "PT1S",
+        landedWaitTimeout: "PT1S",
+        mergeableWaitTimeout: "PT1S",
+        mergeableRepollInterval: "PT1S",
+      },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("agentSlaTimeout", "PT30M")
+    .hasVariable("landedWaitTimeout", "PT30M")
+    .hasVariable("mergeableWaitTimeout", "PT30M")
+    .hasVariable("mergeableRepollInterval", "PT2M");
+  // The forged lifecycle marker was pinned out too (the rebase path never reconciles).
+  assert(instanceVars(engine).ciBlockedReconciled !== true, "a rebase agent must not forge ciBlockedReconciled:true");
+});
+
+test("a rebase agent echoing round/abandonUrl cannot corrupt the converged round or the abandon token (#887)", async () => {
+  // Same guard class as fix-ci: `round`/`abandonUrl` are seeded once and consumed by `pr.merge`
+  // after a successful rebase re-arms the poller. The restore must pin both against an agent echo.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "" },
+      "senior:rebase": { status: "rebased", round: 99, abandonUrl: "http://evil.test/abandon?token=forged" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("round", 2)
+    .hasVariable("abandonUrl", "http://host/app/api/hooks/abandon?token=tok-seeded");
+});
+
+test("a rebase agent echoing abandonBrief cannot corrupt the seeded abort brief (#887 round 5)", async () => {
+  // `abandonBrief` feeds the fix-ci/rebase `appendPrompt` input on the NEXT re-arm; a non-string
+  // echo would make that later prompt mapping carry a non-string brief. The restore must pin it.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "" },
+      "senior:rebase": { status: "rebased", abandonBrief: 42 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("abandonBrief", "\n\n---\nAbort if cancelled: curl …");
+});
+
+test("a fix-ci agent echoing abandonBrief cannot corrupt the seeded abort brief (#887 round 5)", async () => {
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "blocked", failingChecks: 1, failingChecksList: "build" },
+      "senior:fix-ci": { status: "fixed", abandonBrief: 42 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("merge-stall-probe", "fix-ci")
+    .hasVariable("abandonBrief", "\n\n---\nAbort if cancelled: curl …");
 });
 
 test("a blocked PR probed on timeout reaches the CI-fix arm via the timeout path (#636)", async () => {
@@ -529,6 +611,67 @@ test("a blocked CI verdict with nothing pushed reconciles once before escalating
   assert(!completedElementIds(engine).has("merge-esc-attempt"), "the first block episode must reconcile, not page a human");
 });
 
+test("a fix-ci agent echoing ciBlockedReconciled:true cannot skip the one-shot ground-truth reconcile (#887)", async () => {
+  // `ciBlockedReconciled` is an engine-owned lifecycle marker (arm-merge seeds it null; ci-reconcile
+  // sets it true). gw-ci-blocked reconciles exactly once per episode while it is != true. If the agent's
+  // completion could echo `ciBlockedReconciled:true`, a `{status:"blocked", pushed:false}` verdict would
+  // skip the mandatory first reconcile and page a human immediately. The snapshot/restore guard pins it,
+  // so the engine still reconciles once.
+  const engine = await boot({
+    responses: { "senior:fix-ci": { status: "blocked", pushed: false, ciBlockedReconciled: true } },
+  });
+  await driveToCiFix(engine);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElement("wait-mergeable")
+    .hasCompletedElements("ci-reconcile") // the reconcile STILL runs — the agent's echo was pinned out
+    .hasVariable("ciBlockedReconciled", true);
+  assert(!completedElementIds(engine).has("merge-esc-attempt"), "an agent-forged reconciled flag must not skip the first reconcile");
+});
+
+test("a fix-ci agent echoing seeded timeouts cannot clobber the re-armed merge/SLA timers (#887)", async () => {
+  // The seeded timeout/interval config (agentSlaTimeout, landedWaitTimeout, mergeableWaitTimeout,
+  // mergeableRepollInterval) drives timers re-armed on every loop pass. A `reattempt` re-arms the
+  // merge wait, so a clobbered timeout would silently reshape the next wait. The guard restores them.
+  const engine = await boot({
+    responses: {
+      "senior:fix-ci": {
+        status: "reattempt",
+        agentSlaTimeout: "PT1S",
+        landedWaitTimeout: "PT1S",
+        mergeableWaitTimeout: "PT1S",
+        mergeableRepollInterval: "PT1S",
+      },
+    },
+  });
+  await driveToCiFix(engine);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElement("wait-mergeable")
+    .hasVariable("agentSlaTimeout", "PT30M")
+    .hasVariable("landedWaitTimeout", "PT30M")
+    .hasVariable("mergeableWaitTimeout", "PT30M")
+    .hasVariable("mergeableRepollInterval", "PT2M");
+});
+
+test("a fix-ci agent echoing round/abandonUrl cannot corrupt the converged round or the abandon token (#887)", async () => {
+  // `round` (the converged round recorded by ensurePr) and `abandonUrl` (the cooperative-abandon
+  // capability URL) are seeded once and consumed directly by `pr.merge` (attempt-merge). A fix-ci
+  // completion echoing either would corrupt the recorded round or replace the abandon token. The
+  // snapshot/restore guard pins both.
+  const engine = await boot({
+    responses: {
+      "senior:fix-ci": { status: "reattempt", round: 99, abandonUrl: "http://evil.test/abandon?token=forged" },
+    },
+  });
+  await driveToCiFix(engine);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElement("wait-mergeable")
+    .hasVariable("round", 2)
+    .hasVariable("abandonUrl", "http://host/app/api/hooks/abandon?token=tok-seeded");
+});
+
 test("a blocked CI verdict that already pushed escalates with a could-not-fix question", async () => {
   const engine = await boot({ responses: { "senior:fix-ci": { status: "blocked", pushed: true } } });
   await driveToCiFix(engine);
@@ -600,6 +743,70 @@ test("a no-verdict rebase result reconciles from ground truth, not escalation (#
   await driveToRebase(engine);
   assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-mergeable");
   assert(!completedElementIds(engine).has("merge-esc-attempt"), "a missing rebase status must not escalate");
+});
+
+// ---------------------------------------------------------------------------
+// #887 — an external-agent completion must not clobber engine-owned counters
+// ---------------------------------------------------------------------------
+// The engine merges EVERY variable an external agent returns into process scope unfiltered, so a
+// `senior:fix-ci`/`senior:rebase` agent echoing a loop counter (`ciFixRound`, `rebaseRound`, …) with
+// the wrong type/value would corrupt it — and because the counter feeds the task's own `+ 1`
+// increment and the `ciFixRound < ciFixMax` / `rebaseRound < rebaseMax` guards, a string echo wedges
+// the sub-process on a "comparison/arithmetic not defined for string and number" incident. The fix
+// snapshots each engine-owned counter into a task-local input before the agent runs and restores it
+// on the task output (driving the increment from the snapshot), so the agent can never alter it.
+
+test("a fix-ci agent echoing ciFixRound:\"9\" cannot clobber the counter or wedge the increment (#887)", async () => {
+  const engine = await boot({ responses: { "senior:fix-ci": { status: "fixed", ciFixRound: "9", ciFixMax: "1" } } });
+  await driveToCiFix(engine);
+  assertEquals((await engine.searchIncidents()).length, 0, "the agent echo must not raise an incident");
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("fix-ci")
+    .hasVariable("ciFixRound", 1) // the engine increment (0 → 1), NOT the agent's "9"
+    .hasVariable("ciFixMax", 3); // the budget ceiling is engine-owned, unclobbered
+});
+
+test("a rebase agent echoing rebaseRound:\"9\" cannot clobber the counter or wedge the increment (#887)", async () => {
+  const engine = await boot({ responses: { "senior:rebase": { status: "rebased", rebaseRound: "9", rebaseMax: "1" } } });
+  await driveToRebase(engine);
+  assertEquals((await engine.searchIncidents()).length, 0, "the agent echo must not raise an incident");
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("rebaseRound", 1) // the engine increment (0 → 1), NOT the agent's "9"
+    .hasVariable("rebaseMax", 3); // the budget ceiling is engine-owned, unclobbered
+});
+
+test("a fix-ci agent echoing PR identity inputs cannot clobber them (#887)", async () => {
+  // `repo`/`prNumber`/`prUrl` are the agent's declared *inputs* (FixCiIn), not its outputs — but the
+  // engine merges a completion UNFILTERED, so an input-echo would replace the process identity that
+  // `pr.merge` reads for GitHub operations after re-arming. The snapshot/restore guard must pin them.
+  const engine = await boot({
+    responses: { "senior:fix-ci": { status: "fixed", repo: "evil/repo", prNumber: 999, prUrl: "https://evil.test/pr/999" } },
+  });
+  await driveToCiFix(engine);
+  assertEquals((await engine.searchIncidents()).length, 0, "the agent echo must not raise an incident");
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("fix-ci")
+    .hasVariable("repo", "acme/app")
+    .hasVariable("prNumber", 1)
+    .hasVariable("prUrl", "https://example.test/pr/1");
+});
+
+test("a rebase agent echoing PR identity inputs cannot clobber them (#887)", async () => {
+  const engine = await boot({
+    responses: { "senior:rebase": { status: "rebased", repo: "evil/repo", prNumber: 999, prUrl: "https://evil.test/pr/999" } },
+  });
+  await driveToRebase(engine);
+  assertEquals((await engine.searchIncidents()).length, 0, "the agent echo must not raise an incident");
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("repo", "acme/app")
+    .hasVariable("prNumber", 1)
+    .hasVariable("prUrl", "https://example.test/pr/1");
 });
 
 test("rebase budget exhaustion escalates as not-mergeable without running the agent", async () => {

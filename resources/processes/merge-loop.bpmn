@@ -362,7 +362,46 @@
           </zeebe:properties>
           <zeebe:ioMapping>
             <zeebe:input source="=(if (failingChecksList = null or failingChecksList = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Failing checks to make green:&#10;&#34; + failingChecksList) + (if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
-            <zeebe:output source="=ciFixRound + 1" target="ciFixRound" />
+            <zeebe:input source="=ciFixRound" target="guardCiFixRound" />
+            <zeebe:input source="=ciFixMax" target="guardCiFixMax" />
+            <zeebe:input source="=rebaseRound" target="guardRebaseRound" />
+            <zeebe:input source="=rebaseMax" target="guardRebaseMax" />
+            <zeebe:input source="=mergeRetryRound" target="guardMergeRetryRound" />
+            <zeebe:input source="=mergeRetryMax" target="guardMergeRetryMax" />
+            <zeebe:input source="=mergeStallRounds" target="guardMergeStallRounds" />
+            <zeebe:input source="=mergeStallMax" target="guardMergeStallMax" />
+            <zeebe:input source="=prKey" target="guardPrKey" />
+            <zeebe:input source="=repo" target="guardRepo" />
+            <zeebe:input source="=prNumber" target="guardPrNumber" />
+            <zeebe:input source="=prUrl" target="guardPrUrl" />
+            <zeebe:input source="=ciBlockedReconciled" target="guardCiBlockedReconciled" />
+            <zeebe:input source="=agentSlaTimeout" target="guardAgentSlaTimeout" />
+            <zeebe:input source="=landedWaitTimeout" target="guardLandedWaitTimeout" />
+            <zeebe:input source="=mergeableWaitTimeout" target="guardMergeableWaitTimeout" />
+            <zeebe:input source="=mergeableRepollInterval" target="guardMergeableRepollInterval" />
+            <zeebe:input source="=round" target="guardRound" />
+            <zeebe:input source="=abandonUrl" target="guardAbandonUrl" />
+            <zeebe:input source="=abandonBrief" target="guardAbandonBrief" />
+            <zeebe:output source="=guardCiFixRound + 1" target="ciFixRound" />
+            <zeebe:output source="=guardCiFixMax" target="ciFixMax" />
+            <zeebe:output source="=guardRebaseRound" target="rebaseRound" />
+            <zeebe:output source="=guardRebaseMax" target="rebaseMax" />
+            <zeebe:output source="=guardMergeRetryRound" target="mergeRetryRound" />
+            <zeebe:output source="=guardMergeRetryMax" target="mergeRetryMax" />
+            <zeebe:output source="=guardMergeStallRounds" target="mergeStallRounds" />
+            <zeebe:output source="=guardMergeStallMax" target="mergeStallMax" />
+            <zeebe:output source="=guardPrKey" target="prKey" />
+            <zeebe:output source="=guardRepo" target="repo" />
+            <zeebe:output source="=guardPrNumber" target="prNumber" />
+            <zeebe:output source="=guardPrUrl" target="prUrl" />
+            <zeebe:output source="=guardCiBlockedReconciled" target="ciBlockedReconciled" />
+            <zeebe:output source="=guardAgentSlaTimeout" target="agentSlaTimeout" />
+            <zeebe:output source="=guardLandedWaitTimeout" target="landedWaitTimeout" />
+            <zeebe:output source="=guardMergeableWaitTimeout" target="mergeableWaitTimeout" />
+            <zeebe:output source="=guardMergeableRepollInterval" target="mergeableRepollInterval" />
+            <zeebe:output source="=guardRound" target="round" />
+            <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
+            <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_s0</bpmn:incoming>
@@ -524,7 +563,46 @@
           </zeebe:properties>
           <zeebe:ioMapping>
             <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
-            <zeebe:output source="=rebaseRound + 1" target="rebaseRound" />
+            <zeebe:input source="=ciFixRound" target="guardCiFixRound" />
+            <zeebe:input source="=ciFixMax" target="guardCiFixMax" />
+            <zeebe:input source="=rebaseRound" target="guardRebaseRound" />
+            <zeebe:input source="=rebaseMax" target="guardRebaseMax" />
+            <zeebe:input source="=mergeRetryRound" target="guardMergeRetryRound" />
+            <zeebe:input source="=mergeRetryMax" target="guardMergeRetryMax" />
+            <zeebe:input source="=mergeStallRounds" target="guardMergeStallRounds" />
+            <zeebe:input source="=mergeStallMax" target="guardMergeStallMax" />
+            <zeebe:input source="=prKey" target="guardPrKey" />
+            <zeebe:input source="=repo" target="guardRepo" />
+            <zeebe:input source="=prNumber" target="guardPrNumber" />
+            <zeebe:input source="=prUrl" target="guardPrUrl" />
+            <zeebe:input source="=ciBlockedReconciled" target="guardCiBlockedReconciled" />
+            <zeebe:input source="=agentSlaTimeout" target="guardAgentSlaTimeout" />
+            <zeebe:input source="=landedWaitTimeout" target="guardLandedWaitTimeout" />
+            <zeebe:input source="=mergeableWaitTimeout" target="guardMergeableWaitTimeout" />
+            <zeebe:input source="=mergeableRepollInterval" target="guardMergeableRepollInterval" />
+            <zeebe:input source="=round" target="guardRound" />
+            <zeebe:input source="=abandonUrl" target="guardAbandonUrl" />
+            <zeebe:input source="=abandonBrief" target="guardAbandonBrief" />
+            <zeebe:output source="=guardRebaseRound + 1" target="rebaseRound" />
+            <zeebe:output source="=guardCiFixRound" target="ciFixRound" />
+            <zeebe:output source="=guardCiFixMax" target="ciFixMax" />
+            <zeebe:output source="=guardRebaseMax" target="rebaseMax" />
+            <zeebe:output source="=guardMergeRetryRound" target="mergeRetryRound" />
+            <zeebe:output source="=guardMergeRetryMax" target="mergeRetryMax" />
+            <zeebe:output source="=guardMergeStallRounds" target="mergeStallRounds" />
+            <zeebe:output source="=guardMergeStallMax" target="mergeStallMax" />
+            <zeebe:output source="=guardPrKey" target="prKey" />
+            <zeebe:output source="=guardRepo" target="repo" />
+            <zeebe:output source="=guardPrNumber" target="prNumber" />
+            <zeebe:output source="=guardPrUrl" target="prUrl" />
+            <zeebe:output source="=guardCiBlockedReconciled" target="ciBlockedReconciled" />
+            <zeebe:output source="=guardAgentSlaTimeout" target="agentSlaTimeout" />
+            <zeebe:output source="=guardLandedWaitTimeout" target="landedWaitTimeout" />
+            <zeebe:output source="=guardMergeableWaitTimeout" target="mergeableWaitTimeout" />
+            <zeebe:output source="=guardMergeableRepollInterval" target="mergeableRepollInterval" />
+            <zeebe:output source="=guardRound" target="round" />
+            <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
+            <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_s0</bpmn:incoming>
