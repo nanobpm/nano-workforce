@@ -89,7 +89,7 @@ const DEFAULT_VARS: Record<string, unknown> = {
   mergeableRepollInterval: "PT2M",
   mergeStallRounds: 0,
   mergeStallMax: 3,
-  abandonBrief: null,
+  abandonBrief: "\n\n---\nAbort if cancelled: curl …",
   failingChecksList: null,
   status: null,
   mergeState: null,
@@ -351,6 +351,38 @@ test("a rebase agent echoing round/abandonUrl cannot corrupt the converged round
     .hasCompletedElements("rebase")
     .hasVariable("round", 2)
     .hasVariable("abandonUrl", "http://host/app/api/hooks/abandon?token=tok-seeded");
+});
+
+test("a rebase agent echoing abandonBrief cannot corrupt the seeded abort brief (#887 round 5)", async () => {
+  // `abandonBrief` feeds the fix-ci/rebase `appendPrompt` input on the NEXT re-arm; a non-string
+  // echo would make that later prompt mapping carry a non-string brief. The restore must pin it.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "" },
+      "senior:rebase": { status: "rebased", abandonBrief: 42 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("abandonBrief", "\n\n---\nAbort if cancelled: curl …");
+});
+
+test("a fix-ci agent echoing abandonBrief cannot corrupt the seeded abort brief (#887 round 5)", async () => {
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "blocked", failingChecks: 1, failingChecksList: "build" },
+      "senior:fix-ci": { status: "fixed", abandonBrief: 42 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("merge-stall-probe", "fix-ci")
+    .hasVariable("abandonBrief", "\n\n---\nAbort if cancelled: curl …");
 });
 
 test("a blocked PR probed on timeout reaches the CI-fix arm via the timeout path (#636)", async () => {

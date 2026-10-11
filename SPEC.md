@@ -479,9 +479,24 @@ Notes:
   max-round escalation) and `roundEntryHead` (the within-round baseline
   `pr.capture-head` captures and `pr.progress-check` consumes — a forged head
   would falsify the no-progress decision). Both are plain process-owned reads, so
-  the usual `=guardReviewStale` / `=guardRoundEntryHead` restore pins them. A
-  counter the task itself advances is incremented **from the snapshot**
-  (`adversarial-review` computes `advPass` as `(if guardAdvPass = null then 0
+  the usual `=guardReviewStale` / `=guardRoundEntryHead` restore pins them. The
+  protected set further covers the two **seeded cooperative-abandon** reads:
+  `abandonUrl` (the capability `pr.persist-round`/`pr.persist-escalation`/
+  `pr.finalize` record for a human — a forged echo would redirect the abandon
+  token) and `abandonBrief` (which feeds the NEXT agent task's `appendPrompt`
+  input `=(if abandonBrief = null then "" else abandonBrief)` — a non-string echo
+  would carry a wrong/non-string brief into that later prompt). Both are plain
+  process-owned reads, pinned by the usual `=guardAbandonUrl` / `=guardAbandonBrief`
+  restore. The reserved **`io.nanobpm.agentTask`** repository envelope is
+  *deliberately not* in this list: it is a flat dotted framework key with no
+  FEEL-path access, so snapshotting it would need backtick-escaped FEEL
+  (`` =`io.nanobpm.agentTask` ``) that has no precedent on this engine and would,
+  if evaluated as the default dotted path, resolve to `null` and **null the
+  fleet-critical envelope on restore** — a strictly worse failure than the
+  hypothetical clobber (an agent would have to emit a result-JSON key literally
+  named `io.nanobpm.agentTask`). A counter the task itself advances is incremented
+  **from the snapshot** (`adversarial-review` computes `advPass` as
+  `(if guardAdvPass = null then 0
   else guardAdvPass) + 1`), never from the mergeable process variable. Any new
   external-agent task added to this loop must apply the same guard to every
   engine-owned variable in scope.
@@ -883,9 +898,15 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   merge audit row) and `abandonUrl` (the cooperative-abandon capability URL whose
   token the merge worker extracts). A completion echoing either would corrupt the
   recorded round or replace the abandon token, so `=guardRound` /
-  `=guardAbandonUrl` restores pin both. The counter the task advances is
-  incremented from the snapshot (`ciFixRound`/`rebaseRound` become
-  `guard<Name> + 1`).
+  `=guardAbandonUrl` restores pin both. It likewise guards `abandonBrief`, which
+  feeds the fix-ci/rebase `appendPrompt` input (`=(if abandonBrief = null then ""
+  else abandonBrief)`) on the next re-arm — a non-string echo would carry a
+  non-string brief into that later prompt. (As in the convergence loop (§4), the
+  reserved dotted `io.nanobpm.agentTask` repository envelope is *not* guarded: it
+  has no FEEL-path access and a backtick-escaped restore, untested on this engine,
+  would risk nulling the envelope used for later agent provisioning.) The counter
+  the task advances is incremented from the snapshot (`ciFixRound`/`rebaseRound`
+  become `guard<Name> + 1`).
 - **Terminal** — `merged` (with `merged_at`), or `converged` when
   `NANO_PR_AUTO_MERGE=0` (review-only), or `abandoned` on cancel.
 

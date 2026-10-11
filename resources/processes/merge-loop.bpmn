@@ -381,6 +381,7 @@
             <zeebe:input source="=mergeableRepollInterval" target="guardMergeableRepollInterval" />
             <zeebe:input source="=round" target="guardRound" />
             <zeebe:input source="=abandonUrl" target="guardAbandonUrl" />
+            <zeebe:input source="=abandonBrief" target="guardAbandonBrief" />
             <zeebe:output source="=guardCiFixRound + 1" target="ciFixRound" />
             <zeebe:output source="=guardCiFixMax" target="ciFixMax" />
             <zeebe:output source="=guardRebaseRound" target="rebaseRound" />
@@ -400,6 +401,7 @@
             <zeebe:output source="=guardMergeableRepollInterval" target="mergeableRepollInterval" />
             <zeebe:output source="=guardRound" target="round" />
             <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
+            <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_s0</bpmn:incoming>
@@ -580,6 +582,7 @@
             <zeebe:input source="=mergeableRepollInterval" target="guardMergeableRepollInterval" />
             <zeebe:input source="=round" target="guardRound" />
             <zeebe:input source="=abandonUrl" target="guardAbandonUrl" />
+            <zeebe:input source="=abandonBrief" target="guardAbandonBrief" />
             <zeebe:output source="=guardRebaseRound + 1" target="rebaseRound" />
             <zeebe:output source="=guardCiFixRound" target="ciFixRound" />
             <zeebe:output source="=guardCiFixMax" target="ciFixMax" />
@@ -599,6 +602,7 @@
             <zeebe:output source="=guardMergeableRepollInterval" target="mergeableRepollInterval" />
             <zeebe:output source="=guardRound" target="round" />
             <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
+            <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_s0</bpmn:incoming>

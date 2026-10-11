@@ -66,7 +66,8 @@ const DEFAULT_VARS: Record<string, unknown> = {
   reviewWaitTimeout: "PT30M",
   ackRetryRound: 0,
   ackRetryMax: 2,
-  abandonBrief: null,
+  abandonUrl: "https://hooks.test/abandon?token=seed",
+  abandonBrief: "\n\n---\nAbort if cancelled: curl …",
   status: null,
   question: null,
   summary: null,
@@ -389,4 +390,75 @@ test("a scope-classify agent echoing reviewStale/roundEntryHead cannot alter the
   assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
   assertEquals(await variableValue(engine, processInstanceKey, "reviewStale"), false, "reviewStale must be unchanged");
   assertEquals(await variableValue(engine, processInstanceKey, "roundEntryHead"), "sha-entry", "roundEntryHead must be unchanged");
+});
+
+// ---------------------------------------------------------------------------
+// Issue #887 (round 5 — Copilot "previously missed"): `abandonUrl` and
+// `abandonBrief` are ALSO seeded engine-owned state readable by downstream
+// persistence and prompt mappings:
+//   * `abandonUrl` is the cooperative-abandon capability recorded by
+//     `pr.persist-round`/`pr.persist-escalation`/`pr.finalize` (EscalationIn.abandonUrl,
+//     PrPersistRoundIn.abandonUrl, PrFinalizeIn.abandonUrl) — a forged echo
+//     redirects the abandon token persisted for a human.
+//   * `abandonBrief` feeds the `appendPrompt` input of the NEXT agent task
+//     (`=(if (abandonBrief = null) then "" else abandonBrief)`) — a non-string
+//     echo makes that later prompt mapping carry a non-string / wrong brief.
+// The snapshot/restore guard pins both on all three agent tasks. (The reserved
+// dotted `io.nanobpm.agentTask` envelope was DECLINED — it has no FEEL-path
+// access and a backtick-escaped restore, untested on this engine, would null the
+// fleet-critical repository envelope; see the PR discussion.)
+
+test("a review-round agent echoing abandonUrl/abandonBrief cannot clobber the seeded capability or brief", async () => {
+  const { engine } = await boot({
+    responses: {
+      "senior:pr-review": {
+        status: "addressed",
+        summary: "fixed",
+        abandonUrl: "https://evil.test/abandon?token=forged",
+        abandonBrief: 42,
+      },
+    },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  const vars = instanceVars(engine);
+  assertEquals(vars.abandonUrl, "https://hooks.test/abandon?token=seed", "seeded abandonUrl must survive the agent's forged echo");
+  assertEquals(vars.abandonBrief, "\n\n---\nAbort if cancelled: curl …", "seeded abandonBrief must survive the agent's non-string echo");
+});
+
+test("an adversarial-review agent echoing abandonUrl/abandonBrief cannot alter them", async () => {
+  const { engine } = await boot({
+    vars: { advMax: 1 },
+    responses: {
+      "senior:adversarial-review": {
+        adversarialFindings: "",
+        adversarialSummary: "clean",
+        abandonUrl: "https://evil.test/abandon?token=forged",
+        abandonBrief: 42,
+      },
+    },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  const vars = instanceVars(engine);
+  assertEquals(vars.abandonUrl, "https://hooks.test/abandon?token=seed", "abandonUrl must be unchanged");
+  assertEquals(vars.abandonBrief, "\n\n---\nAbort if cancelled: curl …", "abandonBrief must be unchanged");
+});
+
+test("a scope-classify agent echoing abandonUrl/abandonBrief cannot alter them", async () => {
+  const { engine, processInstanceKey } = await boot({
+    responses: {
+      "senior:pr-review": { status: "converged", summary: "done" },
+      "senior:scope-classify": {
+        scopeBlocked: false,
+        scopeBlockReason: "",
+        abandonUrl: "https://evil.test/abandon?token=forged",
+        abandonBrief: 42,
+      },
+    },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  assertEquals(await variableValue(engine, processInstanceKey, "abandonUrl"), "https://hooks.test/abandon?token=seed", "abandonUrl must be unchanged");
+  assertEquals(await variableValue(engine, processInstanceKey, "abandonBrief"), "\n\n---\nAbort if cancelled: curl …", "abandonBrief must be unchanged");
 });
