@@ -435,6 +435,62 @@ test("record worker: an `abandon` on trial-merge-decision is abstained (destruct
   );
 });
 
+test("record worker: a foreign SAFE key must NOT shadow a destructive own-form key (selection-key bypass, issue #889 review)", async () => {
+  await run(
+    // The exact bypass the reviewer cited: `trial-merge-decision`'s OWN select is `action`, but the
+    // decision ALSO carries a benign foreign `resolution: "rebase"`. The OLD first-nonblank sweep reads
+    // `resolution` BEFORE `action` in SELECTED_VALUE_KEYS, so it judged `rebase` (safe) and SUBMITTED the
+    // destructive `action: "abandon"`. The form-scoped guard must judge the own-form `action` — and the
+    // two DISTINCT recognized values are a conflict, so it abstains either way and NEVER submits.
+    [{ userTaskKey: "UT-TM", outcome: "resolved", variables: { resolution: "rebase", action: "abandon" }, rationale: "sneaky", evidence: "checked" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-TM", element_id: "trial-merge-decision", kind_label: "Trial merge", form_key: "trial-merge-decision" })], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 0, "a destructive own-form `action` shadowed by a foreign safe `resolution` is NEVER submitted");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-TM" });
+      assertEquals(rows[0].outcome, "abstained", "the conflicting/destructive decision is left for a human");
+    },
+  );
+});
+
+test("record worker: conflicting recognized selection fields are abstained as ambiguous (fail-closed), never guessed", async () => {
+  await run(
+    // Two DISTINCT recognized selection values on a form whose own select is `action` — even with both
+    // individually non-destructive-looking, the ambiguity itself must fail closed (the guard cannot
+    // attribute the decision to a single choice).
+    [{ userTaskKey: "UT-TM", outcome: "resolved", variables: { action: "rebase", mergeDecision: "approve" }, rationale: "ambiguous", evidence: "checked" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-TM", element_id: "trial-merge-decision", kind_label: "Trial merge", form_key: "trial-merge-decision" })], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 0, "an ambiguous multi-selection decision is never submitted");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-TM" });
+      assertEquals(rows[0].outcome, "abstained");
+      assert(/conflicting|ambiguous/i.test(rows[0].rationale ?? ""), "the rationale names the conflicting-selection fence");
+    },
+  );
+});
+
+test("record worker: a SINGLE safe own-form selection still resolves (the form-scoped guard does not over-abstain)", async () => {
+  await run(
+    // Only the own-form `action: "rebase"` (the steward-safe non-override path on trial-merge-decision),
+    // no foreign key — must resolve normally, proving the scoping did not break the legitimate path.
+    [{ userTaskKey: "UT-TM", outcome: "resolved", variables: { action: "rebase" }, rationale: "rerun the trial after a fix", evidence: "checked" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-TM", element_id: "trial-merge-decision", kind_label: "Trial merge", form_key: "trial-merge-decision" })], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 1, "a single safe own-form selection resolves normally");
+      assertEquals(completed[0].userTaskKey, "UT-TM");
+      assertEquals(completed[0].variables.action, "rebase");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-TM" });
+      assertEquals(rows[0].outcome, "resolved");
+      assertEquals(rows[0].selected_option, "rebase", "the persisted selected option is the own-form value");
+    },
+  );
+});
+
 test("record worker: a `directive`-keyed decision records its selected option (not NULL)", async () => {
   await run(
     // The plan-review-decision form's select key is `directive` (NOT `resolution`/`action`/`decision`).

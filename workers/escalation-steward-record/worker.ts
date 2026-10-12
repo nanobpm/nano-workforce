@@ -22,7 +22,7 @@
 //     ever written for a submission that never happened.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { getAgentJobActivation } from "../../app/agentActivationLedger.ts";
-import { completeEscalationAsAgent, priorAgentCompletion, snapshotEscalationFormOptions } from "../../app/agentCompletion.ts";
+import { completeEscalationAsAgent, escalationFormSelectKeys, priorAgentCompletion, snapshotEscalationFormOptions } from "../../app/agentCompletion.ts";
 import {
   countSubjectResolutions,
   ESCALATION_STEWARD_JOB_TYPE,
@@ -79,21 +79,60 @@ export const SELECTED_VALUE_KEYS = [
   "answer",
 ] as const;
 
-/** Derive the option value a decision actually selected — the well-known form-variable keys FIRST
- *  (the values the completion would really submit), then the auxiliary `choice` hint only as a
- *  fallback. The destructive guard tests this, so it must reflect what the completion submits rather
- *  than trusting a single optional field: an agent returning `choice: "retry"` with
- *  `variables: { resolution: "abandon" }` must be caught by the `abandon` in its variables, never
- *  waved through by the benign hint. */
-function selectedOption(d: StewardDecision): string | null {
-  if (isPlainObject(d.variables)) {
-    for (const k of SELECTED_VALUE_KEYS) {
-      const v = d.variables[k];
-      if (typeof v === "string" && v.trim() !== "") return v;
-    }
+/** Derive the option value a decision actually selected — scoped to the SELECT field(s) of the CLAIMED
+ *  task's ACTUAL form (`elementId`), never a first-nonblank sweep across every recognized key. The
+ *  destructive guard tests this, so it must reflect what the completion really submits for THIS task:
+ *  a `trial-merge-decision` (whose form's select is `action`) carrying `{ resolution: "rebase",
+ *  action: "abandon" }` must be judged on the destructive `action`, never waved through by the benign
+ *  foreign `resolution` (issue #889 review — the first-nonblank sweep let a safe foreign key shadow a
+ *  destructive own-form key).
+ *
+ *  Selection order:
+ *   1. The task's OWN form select keys (from the canonical form contract via
+ *      {@link escalationFormSelectKeys}) — the value the completion would genuinely submit.
+ *   2. CONFLICT fence (fail-closed): if variables carry MORE THAN ONE distinct nonblank recognized
+ *      selection value (across the full {@link SELECTED_VALUE_KEYS} set), the decision is ambiguous —
+ *      an agent stuffing a benign key beside a destructive one. Returns `null` so the caller abstains.
+ *   3. Fallback when the form has no resolvable select keys (a select-less / dynamic form): the single
+ *      nonblank recognized value, else the auxiliary `choice` hint.
+ *
+ *  Returns `{ value, conflict }`: `conflict` true means the decision is ambiguous and must be abstained
+ *  regardless of any single value's safety. */
+function selectedOption(d: StewardDecision, elementId: string | null): { value: string | null; conflict: boolean } {
+  if (!isPlainObject(d.variables)) {
+    return { value: typeof d.choice === "string" && d.choice.trim() !== "" ? d.choice : null, conflict: false };
   }
-  if (typeof d.choice === "string" && d.choice.trim() !== "") return d.choice;
-  return null;
+  const vars = d.variables;
+  // Collect every nonblank recognized selection value present, keyed by field.
+  const present = new Map<string, string>();
+  for (const k of SELECTED_VALUE_KEYS) {
+    const v = vars[k];
+    if (typeof v === "string" && v.trim() !== "") present.set(k, v.trim());
+  }
+  // Conflict fence: two or more DISTINCT recognized selection values is an ambiguous decision — never
+  // guess which the agent meant; abstain. (The same value repeated under two keys is not a conflict.)
+  const distinctValues = new Set(present.values());
+  if (distinctValues.size > 1) {
+    return { value: null, conflict: true };
+  }
+  // Scope to the task's OWN form select keys first — the value the completion actually submits.
+  const ownKeys = elementId != null ? escalationFormSelectKeys(elementId) : null;
+  if (ownKeys != null) {
+    for (const k of ownKeys) {
+      const v = present.get(k);
+      if (v != null) return { value: v, conflict: false };
+    }
+    // The form has select keys but none is set: no recognized selection on the real form. Fall through
+    // to any single recognized value (e.g. a free-text `answer`) before the choice hint.
+  }
+  // Single recognized value (no conflict) — use it.
+  if (present.size === 1) {
+    const only = present.values().next().value;
+    if (only != null) return { value: only, conflict: false };
+  }
+  // Fall back to the auxiliary hint.
+  if (typeof d.choice === "string" && d.choice.trim() !== "") return { value: d.choice, conflict: false };
+  return { value: null, conflict: false };
 }
 
 /** Narrow a parsed JSON entry to a {@link StewardDecision}: only a non-null plain object qualifies
@@ -179,9 +218,20 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     let outcome: "resolved" | "abstained" = d.outcome === "resolved" ? "resolved" : "abstained";
     let rationale = typeof d.rationale === "string" ? d.rationale : null;
     // The option value the decision actually selected, derived host-side from its OWN form variables
-    // (never the agent's optional `choice` hint alone). Computed ONCE here so the destructive guard and
-    // the persisted `selected_option` review column read the SAME value (issue #889 review).
-    const selected = selectedOption(d);
+    // scoped to the CLAIMED task's ACTUAL form (never the agent's optional `choice` hint alone, and never
+    // a first-nonblank sweep across every recognized key — a foreign safe key must not shadow a
+    // destructive own-form key). Computed ONCE here so the destructive guard and the persisted
+    // `selected_option` review column read the SAME value (issue #889 review).
+    const sel = selectedOption(d, claim.element_id ?? null);
+    const selected = sel.value;
+
+    // Conflicting-selection fence (fail-closed): the decision carries TWO OR MORE DISTINCT recognized
+    // selection values (e.g. `{ resolution: "rebase", action: "abandon" }`) — an ambiguous, possibly
+    // adversarial payload the guard cannot attribute to a single safe choice. Abstain rather than guess.
+    if (outcome === "resolved" && sel.conflict) {
+      outcome = "abstained";
+      rationale = "abstained: decision carried conflicting selection fields (more than one distinct recognized option value) — ambiguous; left for a human";
+    }
 
     // Destructive/irreversible-option guard (host-side, fail-closed, ELEMENT-AWARE). Derive the
     // selected value from the decision's own variables FIRST (not only the optional `choice`), so a
@@ -239,11 +289,15 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     if (outcome === "resolved" && vars !== null) {
       try {
         // The ONE canonical attributed door: resolves the open task against ESCALATION_TASK_ELEMENTS,
-        // validates its real form contract, and completes with AGENT attribution (ADR 0046).
+        // validates its real form contract, and completes with AGENT attribution (ADR 0046). Pass the
+        // claim row's `process_instance_key` so the resolve scans that ONE instance, not an engine-wide
+        // `openUserTasks()` per decision — a record tick finalises many claimed tasks in one pass, so an
+        // unfiltered global scan each is O(N²) REST load (issue #889 review).
         const result = await completeEscalationAsAgent(app.data, app.engine, {
           userTaskKey: key,
           variables: vars,
           agentId,
+          processInstanceKey: claim.process_instance_key ?? null,
         });
         if (result.ok) {
           submitted = vars;

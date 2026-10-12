@@ -1341,9 +1341,14 @@ the subject row) is ever touched; everything else is fail-closed out.
   exactly one durable `escalation_auto_resolutions` row per acted escalation.
 - **Fail-closed guards (defence-in-depth under the prompt's own abstain rules).** Before any
   submission the record step enforces, in one place: the **claim/ownership fence** (this run must
-  hold a live claim for the key — a hallucinated key is abstained); the **destructive-option guard**
-  (`abandon`/`force-merge`/credential, derived from the decision's own selected value — abstained,
-  never submitted); the **loop guard** (a subject auto-resolved `LOOP_GUARD_MAX_RESOLUTIONS` times
+  hold a live claim for the key — a hallucinated or foreign key is **skipped**, leaving any other
+  run's claim untouched, *not* recorded `abstained`: `recordResolution` finalises the claim row keyed
+  only by `user_task_key`, so writing even an `abstained` row for a key this run does not own would
+  finalise another run's live claim); the **destructive-option guard**
+  (`abandon`/`force-merge`/credential, derived from the decision's own selected value scoped to the
+  task's ACTUAL form — abstained, never submitted; a foreign safe key can never shadow a destructive
+  own-form key, and a decision carrying conflicting selection fields is abstained as ambiguous); the
+  **loop guard** (a subject auto-resolved `LOOP_GUARD_MAX_RESOLUTIONS` times
   that escalates again is abstained); and the **malformed-decision guards** (a non-object entry is
   skipped; a `resolved` decision with no valid `variables` object is recorded `abstained`, never a
   false `resolved`). Human-only / irreversible kinds (`merge-approval`, `acp-permission`,
