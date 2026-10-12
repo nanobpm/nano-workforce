@@ -230,14 +230,19 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     // Claim/ownership fence (fail-closed, applied to EVERY decision — not only `resolved`). This
     // steward instance must hold a LIVE claim for the key. Without it a hallucinated key could
     // complete an unclaimed — or a non-opted-in, or another run's — task. Crucially the fence is a
-    // SKIP, not a downgrade-to-abstain: `recordResolution` finalises the claim row keyed only by
-    // `user_task_key`, so recording ANY decision (even an `abstained`) for a key this run does not own
-    // would finalise ANOTHER run's live claim. Skip every decision not owned by this run instead.
+    // SKIP, not a downgrade-to-abstain: `recordResolution` finalises the claim row, so recording ANY
+    // decision (even an `abstained`) for a key this run does not own would finalise ANOTHER run's live
+    // claim. Skip every decision not owned by this run instead. This read is a fast pre-filter only —
+    // the ATOMIC guard is the owner+lease-scoped CAS in `recordResolution` below, which closes the
+    // read→finalise race (an overlapping tick reclaiming the task after this read). Require an
+    // UNEXPIRED lease here too: a lapsed claim is already reclaimable, so acting on it is the stale
+    // half of that race.
     const claimRows = await escalationAutoResolutions(app.data).find({ user_task_key: key });
     const claim = claimRows.find((r) => r.outcome === "claimed");
-    const ownedByThisRun = claim != null && claim.claimed_by === stewardKey;
+    const fenceNow = new Date().toISOString();
+    const ownedByThisRun = claim != null && claim.claimed_by === stewardKey && claim.claimed_until != null && claim.claimed_until >= fenceNow;
     if (!ownedByThisRun) {
-      app.log.warn("escalation-steward record: no owned claim for key, skipping decision (leaving the claim untouched)", { userTaskKey: key });
+      app.log.warn("escalation-steward record: no owned live claim for key, skipping decision (leaving the claim untouched)", { userTaskKey: key });
       continue;
     }
 
@@ -362,27 +367,40 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
       }
     }
 
-    await recordResolution(app.data, key, {
-      outcome,
-      submittedVariables: submitted,
-      // `selected_option` is the option the steward ACTUALLY submitted — so it is only meaningful on a
-      // `resolved` record. On an `abstained` record the steward submitted NOTHING, so persist NULL, not
-      // the derived (and possibly rejected/destructive) value: recording `abandon` on an abstention would
-      // tell the review surface the steward "chose abandon" when it in fact declined to choose (issue
-      // #889 review), contradicting the OpenAPI contract ("Null when abstained").
-      selectedOption: outcome === "resolved" ? selected : null,
-      rationale,
-      evidence,
-      // Carry through the REAL form choices snapshotted host-side at CLAIM time (from the task's
-      // engine-resolved `form_key`, issue #889 review) — never the deciding agent's self-reported
-      // `options`, which it may omit or misstate. The claim snapshot already resolves a delivery-graph
-      // human task's dynamic form (which `snapshotEscalationFormOptions(element_id)` alone cannot); fall
-      // back to the element's static form only when the claim carried no snapshot.
-      options: claimOptions(claim),
-      agentJobKey,
-      worker: null,
-      model: null,
-    });
+    // ATOMIC owner+lease CAS (issue #889 review): the completion above already landed, but the
+    // finalise is fenced on THIS run still holding an UNEXPIRED claim. If an overlapping tick released
+    // a lapsed lease and reclaimed the task between the read fence and now, this CAS changes ZERO rows
+    // and reports `false` — we then SKIP, leaving the real claim holder's row untouched rather than
+    // finalising it (the no-double-answer fence the reviewer cited).
+    const finalised = await recordResolution(
+      app.data,
+      key,
+      {
+        outcome,
+        submittedVariables: submitted,
+        // `selected_option` is the option the steward ACTUALLY submitted — so it is only meaningful on a
+        // `resolved` record. On an `abstained` record the steward submitted NOTHING, so persist NULL, not
+        // the derived (and possibly rejected/destructive) value: recording `abandon` on an abstention would
+        // tell the review surface the steward "chose abandon" when it in fact declined to choose (issue
+        // #889 review), contradicting the OpenAPI contract ("Null when abstained").
+        selectedOption: outcome === "resolved" ? selected : null,
+        rationale,
+        evidence,
+        // Carry through the REAL form choices snapshotted host-side at CLAIM time (from the task's
+        // engine-resolved `form_key`, issue #889 review) — never the deciding agent's self-reported
+        // `options`, which it may omit or misstate. The claim snapshot already resolves a delivery-graph
+        // human task's dynamic form (which `snapshotEscalationFormOptions(element_id)` alone cannot); fall
+        // back to the element's static form only when the claim carried no snapshot.
+        options: claimOptions(claim),
+        agentJobKey,
+        worker: null,
+        model: null,
+      },
+      stewardKey,
+    );
+    if (!finalised) {
+      app.log.warn("escalation-steward record: lost the owner+lease finalise CAS — an overlapping run reclaimed the task; leaving its claim untouched", { userTaskKey: key });
+    }
   }
   app.log.info("escalation-steward record", { processed: decisions.length });
   return {};

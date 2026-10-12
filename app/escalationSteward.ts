@@ -314,7 +314,18 @@ export async function releaseExpiredClaims(data: DataLayer): Promise<number> {
 
 /** Finalise a claim into a `resolved` or `abstained` record. Overwrites the placeholder row the claim
  *  created (matched by `user_task_key` + the `claimed` sentinel), so there is exactly ONE durable row
- *  per steward-acted escalation. */
+ *  per steward-acted escalation.
+ *
+ *  ATOMIC OWNER+LEASE CAS (issue #889 review): when `owner` is supplied the UPDATE is fenced on
+ *  `claimed_by = owner AND claimed_until >= now`, and the function returns whether that guarded UPDATE
+ *  actually flipped the row. The completion→finalise pair is NOT atomic — the engine completion lands
+ *  first, then this row write — so between the worker's claim read and this finalise an overlapping
+ *  tick can release a lapsed lease and RECLAIM the task. An unfenced `WHERE user_task_key + outcome =
+ *  'claimed'` would then finalise the OTHER run's live claim (violating the no-double-answer fence).
+ *  Fencing on the current owner + an unexpired lease makes the finalise a compare-and-swap: SQLite
+ *  serialises the writes, so a stale/foreign owner changes ZERO rows and reports `false`, leaving the
+ *  real claim holder's row untouched. (When `owner` is omitted the legacy unfenced behaviour is kept
+ *  for back-compat callers and `true` is returned.) */
 export async function recordResolution(
   data: DataLayer,
   userTaskKey: string,
@@ -329,25 +340,37 @@ export async function recordResolution(
     worker?: string | null;
     model?: string | null;
   },
-): Promise<void> {
-  await data.open().exec(
-    `UPDATE "escalation_auto_resolutions"
+  owner?: string,
+): Promise<boolean> {
+  const params = [
+    patch.outcome,
+    patch.submittedVariables != null ? JSON.stringify(patch.submittedVariables) : null,
+    patch.selectedOption ?? null,
+    patch.rationale ?? null,
+    patch.evidence ?? null,
+    patch.options != null ? JSON.stringify(patch.options) : null,
+    patch.agentJobKey ?? null,
+    patch.worker ?? null,
+    patch.model ?? null,
+    userTaskKey,
+  ];
+  const res =
+    owner == null
+      ? await data.open().exec(
+          `UPDATE "escalation_auto_resolutions"
        SET "outcome" = ?, "submitted_variables" = ?, "selected_option" = ?, "rationale" = ?, "evidence" = ?, "options" = ?,
            "agent_job_key" = ?, "worker" = ?, "model" = ?, "claimed_by" = NULL, "claimed_until" = NULL
      WHERE "user_task_key" = ? AND "outcome" = 'claimed'`,
-    [
-      patch.outcome,
-      patch.submittedVariables != null ? JSON.stringify(patch.submittedVariables) : null,
-      patch.selectedOption ?? null,
-      patch.rationale ?? null,
-      patch.evidence ?? null,
-      patch.options != null ? JSON.stringify(patch.options) : null,
-      patch.agentJobKey ?? null,
-      patch.worker ?? null,
-      patch.model ?? null,
-      userTaskKey,
-    ],
-  );
+          params,
+        )
+      : await data.open().exec(
+          `UPDATE "escalation_auto_resolutions"
+       SET "outcome" = ?, "submitted_variables" = ?, "selected_option" = ?, "rationale" = ?, "evidence" = ?, "options" = ?,
+           "agent_job_key" = ?, "worker" = ?, "model" = ?, "claimed_by" = NULL, "claimed_until" = NULL
+     WHERE "user_task_key" = ? AND "outcome" = 'claimed' AND "claimed_by" = ? AND "claimed_until" IS NOT NULL AND "claimed_until" >= ?`,
+          [...params, owner, now()],
+        );
+  return res.changed > 0;
 }
 
 /** Count a subject's prior steward RESOLUTIONS (for the loop guard). Only `resolved` rows count — an

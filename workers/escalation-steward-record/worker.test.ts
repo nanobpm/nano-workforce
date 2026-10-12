@@ -273,6 +273,30 @@ test("record worker: an abstained decision for a foreign key is skipped, never f
   );
 });
 
+test("record worker: an overlapping tick that RECLAIMED the task mid-run is not finalised by this run's stale write (atomic CAS)", async () => {
+  // The race the reviewer cited (issue #889): this run reads its claim on UT-1 and proceeds; before it
+  // finalises, its lease lapses and an OVERLAPPING tick (PI-OTHER) releases + reclaims UT-1. This run's
+  // recordResolution must then LOSE the owner+lease-scoped CAS — never finalise PI-OTHER's fresh claim.
+  await run(
+    [{ userTaskKey: "UT-1", outcome: "resolved", choice: "retry", variables: { answer: "x" }, rationale: "ok", evidence: "checked" }],
+    async (data) => {
+      // This run (PI-STEWARD, the handler's processInstanceKey) claims UT-1 with an ALREADY-EXPIRED
+      // lease — by the time it finalises, its claim is stale.
+      await claimEscalations(data, [taskRow({})], "PI-STEWARD", -1);
+      // The overlapping tick releases the expired claim and reclaims UT-1 for itself.
+      const { releaseExpiredClaims } = await import("../../app/escalationSteward.ts");
+      await releaseExpiredClaims(data);
+      await claimEscalations(data, [taskRow({})], "PI-OTHER");
+    },
+    async (data, completed) => {
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+      // The stale owner's finalise must NOT have overwritten the overlapping run's live claim.
+      assertEquals(rows[0].outcome, "claimed", "the overlapping run's claim is not finalised by the stale owner");
+      assertEquals(rows[0].claimed_by, "PI-OTHER", "the live claim still belongs to the overlapping run");
+    },
+  );
+});
+
 test("record worker: a destructive value smuggled in `variables` (no `choice`) is abstained", async () => {
   await run(
     // No `choice` field — the destructive option is only in the form variables (`resolution`).

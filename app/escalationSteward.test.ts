@@ -209,6 +209,38 @@ test("recordResolution: finalises a claim into a resolved record; the fence then
   });
 });
 
+test("recordResolution: the finalise CAS is scoped to the claim OWNER — a non-owner loses the fence and finalises nothing", async () => {
+  await withData(async (data) => {
+    // steward-A holds the live claim on UT-1.
+    await claimEscalations(data, [taskRow({})], "steward-A");
+    // A NON-OWNER (steward-B, an overlapping tick that never owned this key) attempts to finalise it.
+    // The CAS must change ZERO rows and report the loss — otherwise steward-B would finalise steward-A's
+    // live claim (the no-double-answer fence the reviewer cited, issue #889 review).
+    const won = await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-B");
+    assertEquals(won, false, "a non-owner must lose the finalise CAS");
+    const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+    assertEquals(rows[0].outcome, "claimed", "the foreign claim is left untouched, not finalised");
+    assertEquals(rows[0].claimed_by, "steward-A", "still owned by the real claim holder");
+    // The true owner CAN finalise its own claim.
+    const wonByOwner = await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-A");
+    assertEquals(wonByOwner, true, "the owner wins its own finalise CAS");
+    assertEquals((await escalationAutoResolutions(data).find({ user_task_key: "UT-1" }))[0].outcome, "resolved");
+  });
+});
+
+test("recordResolution: the finalise CAS refuses an EXPIRED lease — a crashed owner's stale write finalises nothing", async () => {
+  await withData(async (data) => {
+    // steward-A claims UT-1 with an ALREADY-EXPIRED lease (a crashed/stalled run whose TTL elapsed).
+    await claimEscalations(data, [taskRow({})], "steward-A", -1);
+    // The expired owner must NOT be able to finalise — its lease lapsed, so an overlapping tick may
+    // have reclaimed the task; letting the stale owner write would finalise the NEW owner's claim.
+    const won = await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-A");
+    assertEquals(won, false, "an expired lease loses the finalise CAS");
+    const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+    assertEquals(rows[0].outcome, "claimed", "the expired claim is not finalised by its stale owner");
+  });
+});
+
 test("countSubjectResolutions: only RESOLVED rows count toward the loop guard (abstentions do not)", async () => {
   await withData(async (data) => {
     // Two resolved + one abstained for the same subject.

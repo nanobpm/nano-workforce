@@ -131,8 +131,15 @@ export const MCP_TOOL_COUNT_BUDGET = 60;
  * and `reviewAutoResolution` (dismiss/intervene) — plus the `autoResolveEscalations` opt-in field on
  * the start bodies. Measured 88,866 bytes serialized (over the old ceiling's 866-byte headroom).
  * Deliberate, documented growth of a real new reviewable-record surface — not schema fat.
+ *
+ * RAISE PROVENANCE — 89_500 → 91_000 (#889 review): ten `openapi.yaml` descriptions that reference
+ * `(issue #889)` were unquoted plain scalars, so the `#` comment marker silently truncated each at
+ * `(issue` — the projected MCP schemas carried the cut text. Quoting them restores the full,
+ * intended description text (a correctness fix, not new surface). Measured 90,420 bytes serialized
+ * (over the old ceiling's 920-byte headroom). Deliberate, documented growth of restored description
+ * text — not schema fat.
  */
-export const MCP_SURFACE_BYTES_BUDGET = 89_500;
+export const MCP_SURFACE_BYTES_BUDGET = 91_000;
 
 /**
  * The eagerly-loaded curated subset MUST stay materially smaller than the full surface — otherwise it
