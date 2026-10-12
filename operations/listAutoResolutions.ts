@@ -51,6 +51,9 @@ function toView(r: EscalationAutoResolution) {
     options: parseJsonArray(r.options),
     outcome: r.outcome === "resolved" ? ("resolved" as const) : ("abstained" as const),
     submittedVariables: parseJsonObject(r.submitted_variables),
+    // The first-class "what the steward chose" value (issue #889 review): derived host-side at record
+    // time, so consumers read it directly instead of decoding `submittedVariables`. NULL when abstained.
+    selectedOption: r.selected_option ?? null,
     rationale: r.rationale,
     evidence: r.evidence,
     stewardInstanceKey: r.steward_instance_key,

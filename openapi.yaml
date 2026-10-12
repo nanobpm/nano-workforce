@@ -293,6 +293,13 @@ components:
           type: object
           nullable: true
           additionalProperties: true
+        selectedOption:
+          type: string
+          nullable: true
+          description: >-
+            The option value the steward actually selected (derived host-side at record time), so a
+            consumer sees WHAT was chosen without decoding `submittedVariables`. Null when abstained /
+            not derivable.
         rationale:
           type: string
           nullable: true
