@@ -106,3 +106,18 @@ test("pollEscalationSteward: a zero/negative interval is clamped so the steward 
   await withEnv({ NANO_ESCALATION_STEWARD: "1", NANO_ESCALATION_STEWARD_INTERVAL: "PT0S" }, () => poll(engine));
   assertEquals(created.length, 1, "a zero interval is clamped — the immediate re-tick is suppressed");
 });
+
+test("pollEscalationSteward: the steward start seeds the canonical agentSlaTimeout so its agent boundary can fire", async () => {
+  const poll = await freshPoller();
+  const { engine, created } = stubEngine();
+  await withEnv(STEWARD_ENV, () => poll(engine));
+  assertEquals(created.length, 1, "the tick starts an instance");
+  // The `be_steward_sla` interrupting timer boundary (escalation-steward.bpmn) evaluates
+  // `<bpmn:timeDuration>=agentSlaTimeout</…>` at timer creation (FEEL). If the start does not seed
+  // `agentSlaTimeout` the boundary can never arm and a hung steward agent parks the instance ACTIVE
+  // forever — the overlap guard then suppresses every later tick (issue #889 review). Assert the
+  // seeded variable is a non-blank ISO-8601 duration (the canonical AGENT_SLA_TIMEOUT default).
+  const seeded = created[0].variables.agentSlaTimeout;
+  assertEquals(typeof seeded, "string", "agentSlaTimeout is seeded as a string");
+  assertEquals(/^P/.test(seeded), true, `agentSlaTimeout is an ISO-8601 duration (got ${JSON.stringify(seeded)})`);
+});

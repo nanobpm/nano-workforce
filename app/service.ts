@@ -3893,9 +3893,13 @@ export async function pollEscalationSteward(engine: EngineClient) {
   // Advance the tick ONLY after a successful start: if `createInstance` throws, leaving
   // `lastStewardTick` untouched lets the next pass retry immediately rather than suppressing retries
   // for the whole interval (the "retried next pass" contract).
+  // Seed the canonical agent-task SLA (`agentSlaTimeout`, issue #849) so the steward-agent's
+  // interrupting timer boundary (`be_steward_sla`) bounds a hung agent run — without it a wedged
+  // agent parks the instance ACTIVE forever and the overlap guard above suppresses every later tick
+  // (issue #889 review).
   await engine.createInstance({
     processDefinitionId: ESCALATION_STEWARD_PROCESS_ID,
-    variables: { minAgeMs },
+    variables: { minAgeMs, agentSlaTimeout: AGENT_SLA_TIMEOUT },
   });
   lastStewardTick = nowMs;
 }

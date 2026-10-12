@@ -380,14 +380,27 @@ export type AdmittedEpicInput = Omit<AdmittedEpic, "created_at">;
 
 /** Stage one admitted epic (issue #292 slice S2). Idempotent on `plan_key`: a re-submitted set that
  * re-admits the same epic is a no-op returning the existing staged row, so the whole set door stays
- * idempotent (mirroring {@link recordAdmittedPlanDep}). */
+ * idempotent (mirroring {@link recordAdmittedPlanDep}).
+ *
+ * The escalation-steward opt-in is MONOTONIC on the existing row (issue #889 review): if an opted-out
+ * admission was staged and the request crashed before lowering, a retry that now opts in must WIDEN
+ * the staged row to opted-in — otherwise the epic starts opted out despite the caller's opt-in. This
+ * mirrors `submitPr`'s live-loop adoption (service.ts): an opted-in caller adopting an existing
+ * non-opted-in row widens it, never narrows an opted-in row back. Only ever flips 0→1. */
 export async function recordAdmittedEpic(
   data: DataLayer,
   epic: AdmittedEpicInput,
 ): Promise<AdmittedEpic> {
   const table = admittedEpics(data);
   const existing = await table.get(epic.plan_key);
-  if (existing) return existing;
+  if (existing) {
+    // Widen the staged opt-in when this admission opts in and the staged row does not (0→1 only).
+    if (epic.auto_resolve_escalations === 1 && existing.auto_resolve_escalations !== 1) {
+      await table.update(epic.plan_key, { auto_resolve_escalations: 1 });
+      return { ...existing, auto_resolve_escalations: 1 };
+    }
+    return existing;
+  }
   // Default the opt-in to 0 (opted out) when a caller omits it, so the staged row always carries the
   // flag explicitly and the lowering never reads an undefined it would silently coerce.
   const row: AdmittedEpic = { ...epic, auto_resolve_escalations: epic.auto_resolve_escalations ?? 0, created_at: now() };

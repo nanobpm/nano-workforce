@@ -113,6 +113,7 @@ function dispatchControl(p, pending) {
   if (isPending(pending, "dispatch", p.digest)) {
     const repository = typeof pending.repository === "string" ? pending.repository : "";
     const baseBranch = typeof pending.baseBranch === "string" ? pending.baseBranch : "";
+    const autoResolve = pending.autoResolveEscalations === true;
     const mode = pending.mode;
     const provDisabled = mode === "fallback" ? "" : " disabled";
     return `<span class="confirm" data-confirm="dispatch">
@@ -123,6 +124,7 @@ function dispatchControl(p, pending) {
       <span class="confirm-msg">Use node repositories sends no run-level repository settings; the server validates that every agent node is provisioned. A run-level repository is a fallback for nodes without their own repository, not an override of node declarations. Checkout-less explicitly opts out of repository provisioning.</span>
       <label class="confirm-field">Repository <input class="confirm-input" type="text" data-dispatch-repository="${esc(p.digest)}" value="${esc(repository)}" placeholder="owner/repo" aria-label="Repository (owner/repo)"${provDisabled} /></label>
       <label class="confirm-field">Base branch <input class="confirm-input" type="text" data-dispatch-base="${esc(p.digest)}" value="${esc(baseBranch)}" placeholder="main" aria-label="Base branch"${provDisabled} /></label>
+      <label class="confirm-check"><input type="checkbox" data-dispatch-autoresolve="${esc(p.digest)}"${autoResolve ? " checked" : ""} /> Automatically resolve escalations (the escalation steward answers this run's eligible escalations; every automatic decision stays reviewable)</label>
       <button class="btn btn-primary" type="button" data-dispatch-confirm="${esc(p.digest)}">Confirm dispatch</button>
       <button class="btn btn-ghost" type="button" data-dispatch-cancel="${esc(p.digest)}">Cancel</button>
     </span>`;
@@ -458,7 +460,7 @@ export function mountStagedProposals(host, config = {}) {
   function openConfirm(kind, digest, name) {
     const staged = typeof digest === "string" ? digest.trim() : "";
     if (staged === "") return;
-    pending = { kind, digest: staged, name: typeof name === "string" ? name : "", repository: "", baseBranch: "", mode: "nodes" };
+    pending = { kind, digest: staged, name: typeof name === "string" ? name : "", repository: "", baseBranch: "", mode: "nodes", autoResolveEscalations: false };
     rerender();
     // Move focus into the name input so the operator can type immediately (best-effort; not all hosts
     // implement focus()).
@@ -514,8 +516,16 @@ export function mountStagedProposals(host, config = {}) {
     }
   });
 
-  // Preserve fallback text across mode changes, but only enable and submit it in fallback mode.
+  // Preserve fallback text across mode changes, but only enable and submit it in fallback mode. Also
+  // track the "Automatically resolve escalations" checkbox (a checkbox fires `change`, not `input`).
   listEl.addEventListener("change", (ev) => {
+    if (pending != null && pending.kind === "dispatch") {
+      const autoResolve = ev.target && ev.target.closest ? ev.target.closest("[data-dispatch-autoresolve]") : null;
+      if (autoResolve && autoResolve.getAttribute("data-dispatch-autoresolve") === pending.digest) {
+        pending.autoResolveEscalations = autoResolve.checked === true;
+        return;
+      }
+    }
     const choice = ev.target && ev.target.closest ? ev.target.closest("[data-dispatch-mode]") : null;
     if (choice && choice.checked && pending != null && pending.kind === "dispatch" &&
         choice.getAttribute("data-dispatch-mode") === pending.digest &&
@@ -562,10 +572,12 @@ export function mountStagedProposals(host, config = {}) {
         return;
       }
       // Construct only the selected mode's fields: disabled fallback text must never leak into node
-      // or checkout-less dispatches, and repoless must never be inferred from blank fields.
+      // or checkout-less dispatches, and repoless must never be inferred from blank fields. The
+      // escalation-steward opt-in is mode-independent — include it whenever the operator checked it.
+      const autoResolve = pending.autoResolveEscalations === true ? { autoResolveEscalations: true } : {};
       const payload = mode === "fallback"
-        ? { digest, repository, baseBranch }
-        : mode === "repoless" ? { digest, repoless: true } : { digest };
+        ? { digest, repository, baseBranch, ...autoResolve }
+        : mode === "repoless" ? { digest, repoless: true, ...autoResolve } : { digest, ...autoResolve };
       closeConfirm();
       doDispatch(payload);
       return;

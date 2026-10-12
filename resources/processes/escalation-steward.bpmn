@@ -50,6 +50,12 @@
       <bpmn:incoming>es_dispatch</bpmn:incoming>
       <bpmn:outgoing>es_toRecord</bpmn:outgoing>
     </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_steward_sla" name="Agent SLA elapsed" attachedToRef="steward-agent">
+      <bpmn:outgoing>es_sla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_steward_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
     <bpmn:serviceTask id="record" name="Record steward resolutions">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.escalation-steward-record" />
@@ -63,6 +69,7 @@
     <bpmn:endEvent id="done" name="Tick complete">
       <bpmn:incoming>es_done</bpmn:incoming>
       <bpmn:incoming>es_recorded</bpmn:incoming>
+      <bpmn:incoming>es_sla</bpmn:incoming>
     </bpmn:endEvent>
     <bpmn:sequenceFlow id="es_toCollect" sourceRef="tick" targetRef="collect" />
     <bpmn:sequenceFlow id="es_collected" sourceRef="collect" targetRef="gw_any" />
@@ -72,6 +79,7 @@
     <bpmn:sequenceFlow id="es_done" name="none" sourceRef="gw_any" targetRef="done" />
     <bpmn:sequenceFlow id="es_toRecord" sourceRef="steward-agent" targetRef="record" />
     <bpmn:sequenceFlow id="es_recorded" sourceRef="record" targetRef="done" />
+    <bpmn:sequenceFlow id="es_sla" name="agent SLA elapsed" sourceRef="be_steward_sla" targetRef="done" />
   </bpmn:process>
   <bpmndi_1:BPMNDiagram id="BPMNDiagram_escalation-steward">
     <bpmndi_1:BPMNPlane id="BPMNPlane_escalation-steward" bpmnElement="escalation-steward">
@@ -100,6 +108,12 @@
         <dc:Bounds x="966" y="102" width="36" height="36" />
         <bpmndi_1:BPMNLabel>
           <dc:Bounds x="953" y="69" width="63" height="28" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_be_steward_sla" bpmnElement="be_steward_sla">
+        <dc:Bounds x="598" y="302" width="36" height="36" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="580" y="363" width="72" height="28" />
         </bpmndi_1:BPMNLabel>
       </bpmndi_1:BPMNShape>
       <bpmndi_1:BPMNEdge id="BPMNEdge_es_toCollect" bpmnElement="es_toCollect">
@@ -133,6 +147,15 @@
         <di:waypoint x="866" y="280" />
         <di:waypoint x="984" y="280" />
         <di:waypoint x="984" y="138" />
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_es_sla" bpmnElement="es_sla">
+        <di:waypoint x="616" y="338" />
+        <di:waypoint x="616" y="358" />
+        <di:waypoint x="984" y="358" />
+        <di:waypoint x="984" y="138" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="765" y="325" width="70" height="28" />
+        </bpmndi_1:BPMNLabel>
       </bpmndi_1:BPMNEdge>
     </bpmndi_1:BPMNPlane>
   </bpmndi_1:BPMNDiagram>
