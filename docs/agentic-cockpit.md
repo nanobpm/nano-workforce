@@ -124,6 +124,40 @@ when a worker ages out past the liveness TTL. On (re)mount the presence family
 reconciles the store against live connections, so a worker that vanished while
 the app was down does not linger as a ghost row after a restart.
 
+### Job ownership: authoritative reconnect resync
+
+A worker's **jobs** are tracked by the explicit job-ownership claim registry
+(`app/agentic/claim-registry.ts`): a supervisor sends a `claim` frame when a
+worker picks up a job and a `release` when it finishes. Each frame names its
+owning `instance` explicitly, so one per-host supervisor connection can carry
+many workers' ownership.
+
+On a WS reconnect a supervisor re-`claim`s every active jobKey. Those re-claims
+are **additive** on their own — a claim that is not re-asserted is never dropped
+— so a `release` lost during a hub outage would leave the job shown as *working*
+until the worker exits entirely, forcing the supervisor to buffer every RELEASE
+without limit across the outage.
+
+To close that, a supervisor may end its resync with an **authoritative
+snapshot**: a `claim` frame carrying the full set of jobKeys the instance still
+owns (`{ instance, jobKeys: [...] }` — the empty **array** is allowed, meaning
+"this instance now owns nothing", but every **element** must be a non-empty
+string). The hub validates the frame as the snapshot-or-per-job
+union (a malformed snapshot is dropped before it touches the registry — the
+*presence* of `jobKeys`, not its validity, selects the snapshot variant, so a
+present-but-malformed `jobKeys` — a non-array, a non-string element, or an
+empty-string element — is rejected rather than laundered through the
+per-job path; an empty-string element can't masquerade as an "owns nothing"
+snapshot and clear real claims) and then
+**replaces** that instance's claims with the snapshot — dropping any it did not
+re-assert. The supervisor's
+view wins, because ownership is advisory, short-lived visibility it can always
+restate (it never gates a BPMN flow, ADR 0056). A jobKey that has moved to
+another instance is never blanked by the old instance's resync, and a supervisor
+that sends no snapshot keeps the old additive behaviour. This authoritative
+contract lets a hub client (nano-supervisor#63) **bound** its RELEASE buffer
+during an outage.
+
 ## What you will NOT find here (and where it lives)
 
 - **Demand×supply matrix, missing-agent-type reds, diversity-SLO lights** →

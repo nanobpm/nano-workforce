@@ -79,6 +79,54 @@ derivation half:
   a chosen offset, so an exited session can be branched and replayed independently, offset-parity
   preserved. Byte-replay and resume-from-offset (`transcript-read.ts`) are untouched.
 
+## Job-ownership claims & authoritative reconnect resync (#713, #893)
+
+The `claim` / `release` family (`families/claim.family.ts`) backs the {@link ClaimRegistry}
+(`claim-registry.ts`) — the authoritative "which jobs a worker instance is running" visibility source
+the supply snapshot reads. Each `claim` (wire code 8) / `release` (wire code 9) frame names its OWNING
+`instance` explicitly, so one per-host supervisor connection can carry many workers' ownership frames.
+
+**Authoritative resync (the supervisor's view wins).** On a WS reconnect a supervisor re-`register`s
+every worker and re-`claim`s every active jobKey. Re-claims alone are *additive* — a claim that is not
+re-asserted is never dropped, so a `release` lost during a hub outage would leave the job shown as
+"working" until the worker exits entirely. To close that gap a supervisor may end its resync with an
+**authoritative snapshot**: a `claim` frame enriched with the full `jobKeys` set it currently owns
+(`{ instance, jobKeys: [...] }` — possibly empty, the meaningful "owns nothing now" resync). The hub
+then calls `ClaimRegistry.replaceInstance(instance, jobKeys)`, which **drops every claim that instance
+held but did not re-assert** and (re-)claims the snapshot's set. The snapshot rides the existing
+`claim` wire family as a forward-compatible enrichment (the protocol's structural validators tolerate
+the extra field), so **no new wire code** is needed.
+
+The `claim` family thus carries **two payload variants** — the classic per-job claim
+`{ instance, jobKey }` and the resync snapshot `{ instance, jobKeys }` (the `claim.snapshot` wire
+contract in `app/contracts.ts`). The pinned `@nanobpm/agentic` validator predates the snapshot variant
+and requires a non-empty `jobKey`, so the hub validates the **union** itself: a frame is well-formed
+iff it is a valid snapshot (non-empty `instance` + a `jobKeys` array of **non-empty** strings) or a
+valid per-job claim. This is a **union with a validated overlap**, not an exclusive-or: a frame
+carrying *both* fields is accepted, but only when *both* halves validate, so the snapshot branch never
+bypasses validation. The **presence** of `jobKeys` (not its validity) is the snapshot discriminant, so
+a present-but-malformed `jobKeys` — a non-array, a non-string element, **or an empty-string element**
+(held to the same non-empty bar as the per-job `jobKey`) — is a broken snapshot and is **rejected**,
+never treated as absent and laundered through the per-job validator (which would accept it on any
+frame that also carries a valid `jobKey`). The empty *array* remains the meaningful "owns nothing now"
+resync — only empty *elements* are rejected. Versioning the snapshot into the canonical `@nanobpm/agentic` protocol payloads is the
+nano-ide follow-up issue #893 scopes ("coordinate with the `@nanobpm/agentic` package owners"); the
+producer half (one snapshot per instance, including empty sets) is nano-supervisor#63.
+
+Guarantees `replaceInstance` keeps:
+
+- A claim re-asserted in the snapshot is unchanged.
+- A jobKey that has **moved to another instance** is never blanked by the old instance's resync (the
+  old instance no longer holds it, so the drop pass cannot touch it).
+- Repeated resyncs are safe (idempotent).
+- **Compatibility:** a supervisor that never sends a snapshot keeps the pre-#893 additive behaviour —
+  claims are then cleared only by an explicit `release` or the presence-driven `reconcile`.
+
+Authoritative replacement is safe because ownership is advisory, short-lived visibility the supervisor
+can always restate; the registry never gates a BPMN flow (ADR 0056). This is what lets a downstream hub
+client (nano-supervisor#63) **bound** its RELEASE buffer during an outage instead of buffering every
+RELEASE without limit.
+
 ## Invariants (ADR 0056)
 
 - **App-tier only** — never the engine. The Camunda-8 job protocol (worker⇄engine) is untouched;
