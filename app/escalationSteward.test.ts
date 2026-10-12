@@ -21,6 +21,7 @@ import {
   isDestructiveOption,
   isEligibleEscalation,
   isStewardAnswerableElement,
+  isStewardAnswerableForm,
   listAutoResolutions,
   liveClaimedTaskKeys,
   loopGuardTripped,
@@ -96,6 +97,39 @@ test("isStewardAnswerableElement: refuses human-only / irreversible / credential
   for (const el of ["wait-answer", "wait-merge-answer", "feature-escalation", "escalation", "plan-review-decision", "trial-merge-decision"]) {
     assertEquals(isStewardAnswerableElement(el), true, `${el} is steward-answerable`);
   }
+});
+
+test("isStewardAnswerableForm: a delivery-human task is form-aware and fails closed for manual/credential forms", () => {
+  // A dynamic delivery-human element is steward-answerable ONLY on the known-safe decision/typed-value
+  // forms; the bespoke CATEGORY forms (manual publish / click-done ack) and any absent/unknown form
+  // must fail closed, because the agent completer does NOT validate dynamic delivery-human forms.
+  for (const el of ["delivery-human-task", "delivery-human-task__publish-step"]) {
+    assertEquals(isStewardAnswerableForm(el, "delivery-human-generic"), true, `${el}+generic is answerable`);
+    assertEquals(isStewardAnswerableForm(el, "delivery-escalation"), true, `${el}+escalation is answerable`);
+    assertEquals(isStewardAnswerableForm(el, "delivery-human-publish"), false, `${el}+publish (credential) fails closed`);
+    assertEquals(isStewardAnswerableForm(el, "delivery-human-ack"), false, `${el}+ack (manual) fails closed`);
+    assertEquals(isStewardAnswerableForm(el, "some-unknown-form"), false, `${el}+unknown fails closed`);
+    assertEquals(isStewardAnswerableForm(el, null), false, `${el}+absent fails closed`);
+  }
+  // A FIXED-form escalation is governed by its element id (the completer validates it), so its form is
+  // not gated here — even a null/credential-named form passes the form guard (the element guard owns it).
+  for (const el of ["wait-answer", "plan-review-decision", "trial-merge-decision"]) {
+    assertEquals(isStewardAnswerableForm(el, null), true, `${el} form is not gated`);
+    assertEquals(isStewardAnswerableForm(el, "delivery-human-publish"), true, `${el} form is not gated`);
+  }
+});
+
+test("isEligibleEscalation: a delivery-human credential/manual task is never eligible even when opted in", () => {
+  const base = { optedIn: true, minAgeMs: 300_000, claimedUserTaskKeys: new Set<string>(), at: Date.now() };
+  // Opted-in, past-age, unclaimed — eligible ONLY when the resolved form is steward-safe.
+  const safe = taskRow({ user_task_key: "UT-DG", element_id: "delivery-human-task__step", form_key: "delivery-human-generic" });
+  assertEquals(isEligibleEscalation(safe, base), true, "delivery-human + generic form → eligible");
+  for (const form of ["delivery-human-publish", "delivery-human-ack", "no-such-form"]) {
+    const row = taskRow({ user_task_key: "UT-DG", element_id: "delivery-human-task__publish", form_key: form });
+    assertEquals(isEligibleEscalation(row, base), false, `delivery-human + ${form} → ineligible (fail closed)`);
+  }
+  const noForm = taskRow({ user_task_key: "UT-DG", element_id: "delivery-human-task__x", form_key: null });
+  assertEquals(isEligibleEscalation(noForm, base), false, "delivery-human + absent form → ineligible (fail closed)");
 });
 
 // ── Destructive-option + loop guards ─────────────────────────────────────────────────────────────

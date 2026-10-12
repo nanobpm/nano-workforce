@@ -26,6 +26,7 @@
 import type { DataLayer } from "@nanobpm/urban";
 import { snapshotUserTaskFormOptions } from "./agentCompletion.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
+import { ESCALATION_FORM, GENERIC_HUMAN_FORM, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import type { UserTaskRow } from "./userTasks.ts";
 
 /** The minimal shape of a subject row that carries the opt-in flag. The index signature lets the
@@ -135,18 +136,48 @@ export function isStewardAnswerableElement(elementId: string): boolean {
   return !STEWARD_NEVER_RESOLVE_ELEMENTS.has(elementId);
 }
 
+/** The ONLY delivery-graph `human` forms a steward may auto-answer. A delivery-graph `human` node
+ *  renders a DIFFERENT form per node (explicit → category → generic → agent-router,
+ *  `app/deliveryHuman.ts` `resolveHumanForm`), and — unlike the fixed-form escalations — the agent
+ *  completer (`completeEscalationAsAgent`) intentionally does NOT validate these dynamic forms (their
+ *  typed-emit contract is bound, not field-validated). So ELIGIBILITY, not the completer, is the
+ *  fail-closed fence for them. Only the typed-value/decision forms are something an agent can
+ *  legitimately produce: the GENERIC typed-emit capture and the continue/retry service-node
+ *  ESCALATION form. The bespoke CATEGORY forms are manual/out-of-band human work the steward cannot
+ *  perform — `delivery-human-publish` is a manual OTP/OIDC credential publish, `delivery-human-ack` is
+ *  a "do X out of band, then click done" acknowledgement — so admitting a delivery-human task on ANY
+ *  other (or an absent/unknown) form would let a mis-prompted steward blind-complete a
+ *  credential/manual task (issue #889 review). Hence an ALLOWLIST: fail closed for everything else. */
+export const STEWARD_SAFE_DELIVERY_HUMAN_FORMS: ReadonlySet<string> = new Set([
+  GENERIC_HUMAN_FORM,
+  ESCALATION_FORM,
+]);
+
+/** Pure, form-aware fail-closed guard for the dynamic delivery-graph `human` task. A FIXED-form
+ *  escalation (plan-review-decision, wait-answer, …) is governed by its element id and validated by
+ *  the completer, so its form is NOT gated here (returns true). A DYNAMIC delivery-human element,
+ *  whose form is only known at runtime and is unvalidated by the completer, is steward-answerable
+ *  ONLY when its resolved `formKey` is a known-safe form ({@link STEWARD_SAFE_DELIVERY_HUMAN_FORMS});
+ *  an absent/unknown/category form fails closed. */
+export function isStewardAnswerableForm(elementId: string, formKey: string | null | undefined): boolean {
+  if (!isDeliveryHumanElement(elementId)) return true;
+  return formKey != null && STEWARD_SAFE_DELIVERY_HUMAN_FORMS.has(formKey);
+}
+
 /** Pure: is one open escalation user task ELIGIBLE for the steward right now? Requires:
  *   • the owning work opted in (`optedIn` — derived by the caller from the subject row);
  *   • the kind is steward-answerable ({@link isStewardAnswerableElement});
+ *   • for a dynamic delivery-human task, its resolved form is steward-safe ({@link isStewardAnswerableForm});
  *   • the task is past the minimum age (`minAgeMs`) so a human already answering wins;
  *   • the task is not currently claimed by a live steward run (`claimedUserTaskKeys`).
  * `at` is the current time (ms epoch); the task's `created_at` is its open-since timestamp. */
 export function isEligibleEscalation(
-  row: Pick<UserTaskRow, "user_task_key" | "element_id" | "created_at">,
+  row: Pick<UserTaskRow, "user_task_key" | "element_id" | "created_at" | "form_key">,
   opts: { optedIn: boolean; minAgeMs: number; claimedUserTaskKeys: ReadonlySet<string>; at: number },
 ): boolean {
   if (!opts.optedIn) return false;
   if (!isStewardAnswerableElement(row.element_id)) return false;
+  if (!isStewardAnswerableForm(row.element_id, row.form_key)) return false;
   if (opts.claimedUserTaskKeys.has(row.user_task_key)) return false;
   const openedAt = Date.parse(row.created_at);
   if (Number.isNaN(openedAt)) return false;

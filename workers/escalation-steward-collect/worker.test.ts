@@ -48,7 +48,7 @@ async function withApp(
 /** Seed an open user_tasks row + its owning subject (with the given opt-in flag). */
 async function seedEscalation(
   data: DataLayer,
-  opts: { userTaskKey: string; processKey: string; optedIn: boolean; elementId?: string; ageMinutes?: number; subjectKey?: string },
+  opts: { userTaskKey: string; processKey: string; optedIn: boolean; elementId?: string; ageMinutes?: number; subjectKey?: string; formKey?: string },
 ): Promise<void> {
   const ts = new Date().toISOString();
   const created = new Date(Date.now() - (opts.ageMinutes ?? 10) * 60 * 1000).toISOString();
@@ -59,7 +59,7 @@ async function seedEscalation(
   await data.table("user_tasks", "user_task_key").insert({
     user_task_key: opts.userTaskKey, element_id: opts.elementId ?? "wait-answer", kind_label: "PR review",
     subject_type: "pr", subject_key: opts.subjectKey ?? "o/r#1", subject_title: "t", subject_url: "u",
-    question: "q", process_key: opts.processKey, form_key: "pr-escalation", created_at: created, updated_at: ts,
+    question: "q", process_key: opts.processKey, form_key: opts.formKey ?? "pr-escalation", created_at: created, updated_at: ts,
   });
 }
 
@@ -93,6 +93,28 @@ test("collect worker: a human-only kind (merge-approval) is never collected even
     await seedEscalation(data, { userTaskKey: "UT-1", processKey: "PI-PR", optedIn: true, elementId: "merge-approval" });
     const out = await run();
     assertEquals(out.eligibleCount, 0, "a human-only kind is never steward-collected");
+  });
+});
+
+test("collect worker: a delivery-human CREDENTIAL/manual task is never collected even when opted in", async () => {
+  // A dynamic delivery-human task whose resolved form is the manual OTP/OIDC credential publish form
+  // must fail closed — the agent completer does NOT validate dynamic delivery-human forms, so a
+  // mis-prompted steward could otherwise blind-complete a credential task (issue #889 review).
+  for (const formKey of ["delivery-human-publish", "delivery-human-ack", "no-such-form"]) {
+    await withApp(async (data, run) => {
+      await seedEscalation(data, { userTaskKey: "UT-DG", processKey: "PI-PR", optedIn: true, elementId: "delivery-human-task__publish", formKey });
+      const out = await run();
+      assertEquals(out.eligibleCount, 0, `delivery-human + ${formKey} is never steward-collected`);
+      assertEquals((await escalationAutoResolutions(data).all()).length, 0, "no claim row is written");
+    });
+  }
+});
+
+test("collect worker: a delivery-human task on a steward-safe form IS collected when opted in", async () => {
+  await withApp(async (data, run) => {
+    await seedEscalation(data, { userTaskKey: "UT-DG", processKey: "PI-PR", optedIn: true, elementId: "delivery-human-task__step", formKey: "delivery-human-generic" });
+    const out = await run();
+    assertEquals(out.eligibleCount, 1, "delivery-human + generic (typed-value) form is steward-answerable");
   });
 });
 
