@@ -7,7 +7,7 @@
 // stays HERE (the runtime does not enforce OpenAPI `security`): when NANO_PR_WEBHOOK_SECRET is set,
 // callers must present it via the x-hook-secret header. Unset → open (unchanged default).
 
-import { activePrs } from "../app/service.ts";
+import { activeDeliveries, activePrs } from "../app/service.ts";
 import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -20,6 +20,6 @@ export default defineOperation("listActivePrs", async ({ req }, app) => {
     app.log.warn("listActivePrs rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
   }
-  const prs = await activePrs(app.data);
-  return { status: 200, body: { count: prs.length, prs } };
+  const [prs, deliveries] = await Promise.all([activePrs(app.data), activeDeliveries(app.data)]);
+  return { status: 200, body: { count: prs.length, prs, deliveries } };
 });

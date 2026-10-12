@@ -28,6 +28,7 @@ import type { CompileDeliveryGraphResult } from "../nano-generated/api-io.d.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { redactFreeText } from "./deliveryGraphCompiler.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement, stripDeliveryEscalationTwinSuffix } from "./deliveryHuman.ts";
+import { derivedTrackingTable } from "./instanceTracking.ts";
 
 const now = () => new Date().toISOString();
 
@@ -100,6 +101,18 @@ export const DELIVERY_PHASE = {
 /** The `delivery_graph_runs` aggregate accessor — the durable run store keyed by `run_key`. */
 export const deliveryGraphRuns = (data: DataLayer) =>
   data.table<DeliveryGraphRun>("delivery_graph_runs", "run_key");
+
+/** A `delivery_graph_runs` row as seen through its derived tracking VIEW
+ *  (`delivery_graph_runs__tracking`): the base columns plus urban's ADR-0065 `derived_status`, which
+ *  folds the reconciler's terminal edge (out-of-band terminate → `failed`) over the worker-owned
+ *  transient. */
+export type TrackedDeliveryGraphRun = DeliveryGraphRun & { derived_status: string };
+/** Read-only accessor over the delivery-run derived tracking VIEW. Use this — and read
+ *  `derived_status`, not `status` — for any terminal-edge classification (e.g. the `/status` active
+ *  list), so an out-of-band-terminated run (whose base row is still `running`) is correctly seen as
+ *  `failed`. Mirrors `prsTracking` / `featureRunsTracking`. Writes stay on `deliveryGraphRuns`. */
+export const deliveryGraphRunsTracking = (data: DataLayer) =>
+  derivedTrackingTable<TrackedDeliveryGraphRun>(data, "delivery_graph_runs", "run_key");
 
 /** One row of the `delivery_graph_run_identity` SIDE table (migration 113) — the run's LOSSLESS
  * content-identity fingerprint, kept OFF the heavily-projected `delivery_graph_runs` base row so no

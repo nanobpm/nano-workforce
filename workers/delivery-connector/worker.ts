@@ -41,12 +41,32 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  *  clobberable: an upstream agent node that completes with `autoResolveEscalations: false` in its
  *  output overwrites the run-root variable downstream, so reading it here would enroll the PR with the
  *  WRONG opt-in — contradicting the durable-source guarantee the steward's eligibility relies on. The
- *  run row is the record of truth. FAIL CLOSED: no matching run row (or a non-1 flag) ⇒ not opted in. */
+ *  run row is the record of truth. FAIL CLOSED: no matching run row (or a non-1 flag) ⇒ not opted in.
+ *
+ *  LAUNCH RACE (issue #889 review): `dispatchDeliveryGraphRun` claims the run row with
+ *  `process_key = NULL`, starts the engine instance, and only THEN stamps the returned key
+ *  (`app/deliveryGraphDispatch.ts`). This connector job can activate BEFORE that post-launch write, so
+ *  a single read keyed on `process_key` finds NO match and would convert the launch-in-flight row to a
+ *  permanent opted-OUT enrollment. A NULL `process_key` is TRANSIENT (launch in flight), not proof of
+ *  "no run" — so re-poll across the launch window until the stamp lands (or the budget runs out, after
+ *  which we fail closed as before). */
+const LAUNCH_STAMP_POLLS = 20;
+const LAUNCH_STAMP_POLL_MS = 250;
 async function resolveAutoResolveEscalations(data: DataLayer, processInstanceKey: string | null): Promise<boolean> {
   if (!processInstanceKey) return false;
-  const rows = await deliveryGraphRuns(data).all();
-  const run = rows.find((r) => r.process_key != null && String(r.process_key) === String(processInstanceKey));
-  return run != null && run.auto_resolve_escalations === 1;
+  const runs = deliveryGraphRuns(data);
+  for (let attempt = 0; attempt < LAUNCH_STAMP_POLLS; attempt++) {
+    const rows = await runs.all();
+    const run = rows.find((r) => r.process_key != null && String(r.process_key) === String(processInstanceKey));
+    if (run != null) return run.auto_resolve_escalations === 1;
+    // No row carries this process_key yet. If a launch-in-flight row (NULL process_key) is still
+    // waiting for its stamp, re-poll; otherwise there is genuinely no run for this instance — fail
+    // closed without burning the remaining budget.
+    const launchInFlight = rows.some((r) => r.process_key == null && r.status === "running");
+    if (!launchInFlight) return false;
+    if (attempt < LAUNCH_STAMP_POLLS - 1) await new Promise((r) => setTimeout(r, LAUNCH_STAMP_POLL_MS));
+  }
+  return false;
 }
 
 /** Validate + normalise the untyped job variables into the shape the connector surface accepts. Job

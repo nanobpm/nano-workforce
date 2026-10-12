@@ -8,7 +8,7 @@ import { noopLog } from "../test/log.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import handler from "./listActivePrs.ts";
 
-function memApp(rows: any[], userTaskRows: any[] = []): AppApi {
+function memApp(rows: any[], userTaskRows: any[] = [], deliveryRows: any[] = []): AppApi {
   const table = (name: string) => {
     if (name === "user_tasks") {
       return {
@@ -17,6 +17,13 @@ function memApp(rows: any[], userTaskRows: any[] = []): AppApi {
         },
         async find(where: Record<string, unknown>) {
           return userTaskRows.filter((t) => Object.entries(where).every(([k, v]) => t[k] === v));
+        },
+      };
+    }
+    if (name === "delivery_graph_runs") {
+      return {
+        async all() {
+          return deliveryRows;
         },
       };
     }
@@ -114,4 +121,56 @@ test("shared-secret guard rejects a missing secret when configured", async () =>
     if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
     else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
   }
+});
+
+test("surfaces each in-flight delivery run with its durable escalation-steward opt-in (issue #889 §1)", async () => {
+  // `/status` must show the opt-in for each PR AND each delivery. A terminal (`done`) run drops out;
+  // a live run carries its durable `auto_resolve_escalations` flag (never a clobbered process var) and
+  // its open escalation pointer (derived from the SAME `user_tasks` read model, subject_type
+  // "delivery", keyed by run_key).
+  const app = memApp(
+    [],
+    [
+      {
+        user_task_key: "ut-d1",
+        element_id: "delivery-human-taskish",
+        kind_label: "Delivery approval",
+        subject_type: "delivery",
+        subject_key: "run-live",
+        subject_title: "Ship it",
+        subject_url: null,
+        question: "approve the release?",
+        process_key: "pk-live",
+        form_key: null,
+        created_at: "2026-03-02",
+        updated_at: "2026-03-02",
+      },
+    ],
+    [
+      { run_key: "run-live", process_key: "pk-live", status: "running", phase: "Running", title: "Ship it", auto_resolve_escalations: 1, updated_at: "2026-03-02" },
+      { run_key: "run-done", process_key: "pk-done", status: "done", phase: "Done", title: "Old", auto_resolve_escalations: 0, updated_at: "2026-03-01" },
+    ],
+  );
+  const res = (await handler(input(), app)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.deliveries.length, 1, "a terminal (done) run drops out of the active list");
+  const d = res.body.deliveries[0];
+  assertEquals(d.runKey, "run-live");
+  assertEquals(d.autoResolveEscalations, true, "the durable opt-in flag is surfaced for the delivery");
+  assertEquals(d.processKey, "pk-live");
+  assertEquals(d.openEscalation, { userTaskKey: "ut-d1", kind: "delivery-human-taskish", summary: "approve the release?" });
+});
+
+test("a delivery run with no opt-in row flag surfaces autoResolveEscalations false and a null escalation", async () => {
+  const app = memApp(
+    [],
+    [],
+    [{ run_key: "run-plain", process_key: null, status: "running", phase: null, title: null, auto_resolve_escalations: 0, updated_at: "2026-03-03" }],
+  );
+  const res = (await handler(input(), app)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.deliveries.length, 1);
+  assertEquals(res.body.deliveries[0].autoResolveEscalations, false);
+  assertEquals(res.body.deliveries[0].openEscalation, null);
+  assertEquals(res.body.deliveries[0].processKey, null, "a launch-in-flight run has no stamped process_key yet");
 });

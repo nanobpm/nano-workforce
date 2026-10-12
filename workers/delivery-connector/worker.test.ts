@@ -350,3 +350,36 @@ test("handler: the escalation-steward opt-in FAILS CLOSED when no delivery_graph
     assertEquals(created[0]?.variables?.autoResolveEscalations, false, "no durable run row ⇒ fail closed to opted-out, never trust the process variable");
   });
 });
+
+test("handler: a launch-in-flight run row (process_key not yet stamped) is retried, NOT converted to opted-out (issue #889 review — launch race)", async () => {
+  await withGithubOff(async () => {
+    const { app, stores, created } = fakeApp();
+    // THE LAUNCH RACE: `dispatchDeliveryGraphRun` claims the run row with `process_key = NULL`, starts
+    // the engine instance, and only THEN stamps the returned key. This connector job activated BEFORE
+    // that post-launch write, so the row is present (opted IN) but its `process_key` is still NULL. A
+    // single read keyed on `process_key` finds NO match → false → permanently enrolls the opted-in PR
+    // as opted OUT. The lookup must treat a NULL process_key as TRANSIENT and re-poll until the stamp
+    // lands. The memTable closure reads the shared `rows` array live on every `all()`, so flipping
+    // `process_key` after a short delay mimics the dispatch's `runs.update(runKey, { process_key })`
+    // landing AFTER the connector job activated (the poll loop sleeps between reads).
+    const row: Record<string, unknown> = { run_key: "run-1", process_key: null, auto_resolve_escalations: 1, status: "running" };
+    stores.delivery_graph_runs.rows.push(row);
+    const stamp = setTimeout(() => {
+      row.process_key = "PI-graph";
+    }, 600);
+    try {
+      await handler(
+        { variables: { target: "converge-merge", payload: { pr: "owner/repo#23" } }, processInstanceKey: "PI-graph", elementId: "n2" } as never,
+        app,
+      );
+    } finally {
+      clearTimeout(stamp);
+    }
+    assertEquals(created.length, 1, "the PR was enrolled");
+    assertEquals(
+      created[0]?.variables?.autoResolveEscalations,
+      true,
+      "a launch-in-flight run row is retried until its process_key stamp lands — never read as opted-out",
+    );
+  });
+});

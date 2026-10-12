@@ -34,7 +34,7 @@ import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
 import { DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
-import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
+import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRuns, deliveryGraphRunsTracking, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
 import { decodeLivePrompt, deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement, needsLiveDeliveryPrompt } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
@@ -1100,6 +1100,55 @@ export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
     activeWorker: p.active_worker ?? null,
     leaseUntil: p.lease_until ?? null,
     autoResolveEscalations: p.auto_resolve_escalations === 1,
+  }));
+}
+
+/** A delivery-graph run currently in flight, as reported by the status endpoint (issue #889 §1 —
+ *  "Show it in `/status` for each PR or delivery"). Mirrors {@link ActivePr} for the delivery side. */
+export interface ActiveDelivery {
+  runKey: string;
+  title: string | null;
+  status: string;
+  phase: string | null;
+  processKey: string | null;
+  openEscalation: OpenEscalation | null;
+  updatedAt: string;
+  /** Whether this run opted in to the escalation steward (issue #889) — its open escalations are
+   * eligible for steward auto-resolution. Derived from the durable `auto_resolve_escalations` flag,
+   * never a clobbered process variable. Shown in `/status` per delivery. */
+  autoResolveEscalations: boolean;
+}
+
+/** Every delivery-graph run not in a terminal state (done/failed/abandoned), newest-updated first.
+ *  Backs the delivery half of the GET status endpoint (issue #889 §1): a delivery run that opted in to
+ *  the escalation steward must surface that durable flag alongside its live escalation, exactly as a PR
+ *  does. The structured `openEscalation` pointer is derived from the SAME `user_tasks` read model as
+ *  `activePrs` (subject_type `delivery`, keyed by `run_key`), so a delivery node's parked human/escalation
+ *  task carries its completable `userTaskKey` here too. */
+export async function activeDeliveries(data: DataLayer): Promise<ActiveDelivery[]> {
+  // `derived_status` is a plain `string` (the tracking VIEW's fold column), while the terminal set is
+  // the narrow `DeliveryGraphRunStatus` union — classify via a `readonly string[]` view (the SAME
+  // idiom `TERMINAL_STATUSES: readonly string[]` gives the PR side) rather than a banned `as` cast.
+  const terminal: readonly string[] = DELIVERY_GRAPH_TERMINAL_STATUSES;
+  const active = (await deliveryGraphRunsTracking(data).all())
+    .filter((r) => !terminal.includes(r.derived_status))
+    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+  const openEscByRun = new Map<string, OpenEscalation>();
+  for (const t of (await userTasks(data).find({ subject_type: "delivery" })).sort((a, b) =>
+    a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0,
+  )) {
+    if (openEscByRun.has(t.subject_key)) continue;
+    openEscByRun.set(t.subject_key, toOpenEscalation(t));
+  }
+  return active.map((r) => ({
+    runKey: r.run_key,
+    title: r.title ?? null,
+    status: r.status,
+    phase: r.phase ?? null,
+    processKey: r.process_key ?? null,
+    openEscalation: openEscByRun.get(r.run_key) ?? null,
+    updatedAt: r.updated_at,
+    autoResolveEscalations: r.auto_resolve_escalations === 1,
   }));
 }
 

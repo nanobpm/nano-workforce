@@ -160,6 +160,7 @@ components:
       required:
         - count
         - prs
+        - deliveries
       properties:
         count:
           type: integer
@@ -167,6 +168,68 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ActivePr"
+        deliveries:
+          type: array
+          description: >-
+            Every delivery-graph run currently in flight (not done/failed/abandoned), newest-updated
+            first (issue #889 §1 — the opt-in is shown for each PR AND each delivery).
+          items:
+            $ref: "#/components/schemas/ActiveDelivery"
+    ActiveDelivery:
+      type: object
+      description: A delivery-graph run currently in flight, as reported by the status endpoint.
+      additionalProperties: false
+      required:
+        - runKey
+        - title
+        - status
+        - phase
+        - processKey
+        - openEscalation
+        - updatedAt
+        - autoResolveEscalations
+      properties:
+        runKey:
+          type: string
+        title:
+          type: string
+          nullable: true
+        status:
+          type: string
+        phase:
+          type: string
+          nullable: true
+        processKey:
+          type: string
+          nullable: true
+          description: The engine process instance key; null while the launch claim has not been stamped yet.
+        openEscalation:
+          type: object
+          nullable: true
+          additionalProperties: false
+          description: >-
+            The structured pointer to this run's OPEN escalation/human task when parked awaiting an
+            answer (derived from the same `user_tasks` read model as `listEscalations`), else null.
+          required:
+            - userTaskKey
+            - kind
+            - summary
+          properties:
+            userTaskKey:
+              type: string
+            kind:
+              type: string
+            summary:
+              type: string
+              nullable: true
+        updatedAt:
+          type: string
+        autoResolveEscalations:
+          type: boolean
+          description: >-
+            Whether this delivery run opted into automatic escalation resolution by the escalation
+            steward (issue #889). Derived from the durable `auto_resolve_escalations` flag, never a
+            clobbered process variable.
     Escalation:
       type: object
       description: >-
