@@ -288,10 +288,14 @@ export async function recordResolution(
 }
 
 /** Count a subject's prior steward RESOLUTIONS (for the loop guard). Only `resolved` rows count — an
- *  abstention did not apply an answer, so it must not trip the guard. */
-export async function countSubjectResolutions(data: DataLayer, subjectKey: string): Promise<number> {
+ *  abstention did not apply an answer, so it must not trip the guard. Scoped by BOTH `subject_type`
+ *  AND `subject_key` (issue #889 review): a bare `subject_key` collides across subject types (a plan
+ *  `o/r#1` and a PR `o/r#1` share the key), so an unscoped count would let one subject's resolutions
+ *  trip an UNRELATED subject's guard. */
+export async function countSubjectResolutions(data: DataLayer, subjectType: string | null, subjectKey: string): Promise<number> {
   const rows = await escalationAutoResolutions(data).find({ subject_key: subjectKey, outcome: "resolved" });
-  return rows.length;
+  if (subjectType == null) return rows.length;
+  return rows.filter((r) => r.subject_type === subjectType).length;
 }
 
 /** The set of `user_task_key`s currently claimed by a live steward run (unexpired, unfinalised). */

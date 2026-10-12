@@ -457,6 +457,30 @@ export async function latestCompletion(
   return newest;
 }
 
+/** The newest NON-reverted completion an AGENT recorded for a user-task key under a specific
+ *  `agentId`, or undefined. The escalation-steward record step uses this to make its
+ *  completion→record pair idempotent across a service-job retry (issue #889 review): the engine
+ *  completion lands first, then the record worker finalises the claim row — if that finalise fails
+ *  transiently, the retry finds the user task already COMPLETED (the attributed door reports "no open
+ *  completable task") and must NOT degrade the already-applied decision to a false `abstained`.
+ *  Detecting the prior agent-attributed row lets the retry recover the original submitted variables
+ *  and finalise the SAME decision instead. Reverted rows are excluded: a human overrode that
+ *  completion, so it is not a live applied decision to recover. */
+export async function priorAgentCompletion(
+  data: DataLayer,
+  userTaskKey: string,
+  agentId: string,
+): Promise<TaskCompletion | undefined> {
+  const rows = await taskCompletions(data).find({ user_task_key: userTaskKey });
+  let newest: TaskCompletion | undefined;
+  for (const row of rows) {
+    if (row.actor_kind !== "agent" || row.actor_id !== agentId) continue;
+    if (row.reverted === 1) continue;
+    if (!newest || row.id > newest.id) newest = row;
+  }
+  return newest;
+}
+
 export interface AgentCompleteResult {
   ok: boolean;
   reason?: string;

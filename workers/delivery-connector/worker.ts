@@ -7,7 +7,7 @@
 // envelope) so it is unit-testable without the engine and shares ONE implementation with any other
 // caller; this worker is the thin engine adapter that resolves the effective dedupe key from the job's
 // author-supplied `dedupeKey` or its stable engine identity (`processInstanceKey:elementId`).
-import type { AppJobHandler } from "@nanobpm/urban";
+import type { AppJobHandler, DataLayer } from "@nanobpm/urban";
 import {
   type BoundFact,
   type ConnectorDispatchResult,
@@ -17,6 +17,7 @@ import {
   isConvergeTarget,
   resolveConvergePr,
 } from "../../app/deliveryConnector.ts";
+import { deliveryGraphRuns } from "../../app/deliveryGraphRun.ts";
 import { isPrSettled, MAX_ROUNDS, type ParsedPr, parsePr, submitPr } from "../../app/service.ts";
 
 // Typed off the compiled `connector` subProcess ioMapping (a RUNTIME-generated definition, so there is
@@ -32,6 +33,20 @@ interface In extends Record<string, unknown> {
 /** A plain (non-array, non-null) object — the only shape a connector `payload` may take. */
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Resolve the escalation-steward opt-in for THIS delivery run from the DURABLE
+ *  `delivery_graph_runs.auto_resolve_escalations` flag (keyed by the run's `process_key`), NOT the
+ *  inherited `autoResolveEscalations` process variable (issue #889 review). The process variable is
+ *  clobberable: an upstream agent node that completes with `autoResolveEscalations: false` in its
+ *  output overwrites the run-root variable downstream, so reading it here would enroll the PR with the
+ *  WRONG opt-in — contradicting the durable-source guarantee the steward's eligibility relies on. The
+ *  run row is the record of truth. FAIL CLOSED: no matching run row (or a non-1 flag) ⇒ not opted in. */
+async function resolveAutoResolveEscalations(data: DataLayer, processInstanceKey: string | null): Promise<boolean> {
+  if (!processInstanceKey) return false;
+  const rows = await deliveryGraphRuns(data).all();
+  const run = rows.find((r) => r.process_key != null && String(r.process_key) === String(processInstanceKey));
+  return run != null && run.auto_resolve_escalations === 1;
 }
 
 /** Validate + normalise the untyped job variables into the shape the connector surface accepts. Job
@@ -167,10 +182,12 @@ const handler: AppJobHandler<In, ConnectorDispatchResult> = async (job, app) => 
             });
             return { detail: `${converge.parsed.prKey} already terminal — enrollment skipped (at-most-once resume-safe)` };
           }
-          // Propagate the delivery run's escalation-steward opt-in (issue #889) to the enrolled PR:
-          // the runner seeds it as a run-root `autoResolveEscalations` variable (in scope here), and
-          // the durable `delivery_graph_runs` row is the record the steward's eligibility reads.
-          const autoResolve = job.variables.autoResolveEscalations === true;
+          // Propagate the delivery run's escalation-steward opt-in (issue #889) to the enrolled PR.
+          // Resolve it from the DURABLE `delivery_graph_runs` row (keyed by this job's process
+          // instance), NOT the inherited `autoResolveEscalations` process variable — an upstream agent
+          // completion can clobber that variable, so the durable row is the only trustworthy source
+          // (issue #889 review). Fails closed (false) when no run row matches.
+          const autoResolve = await resolveAutoResolveEscalations(app.data, job.processInstanceKey != null ? String(job.processInstanceKey) : null);
           await submitPr(app.data, app.engine, converge.parsed, converge.dependsOn, MAX_ROUNDS, converge.convergeOnly, dedupeKey, false, autoResolve);
           app.log.info("delivery-connector: enrolled PR into convergence loop", {
             target,

@@ -41,6 +41,7 @@ function fakeApp() {
     escalations: { rows: [], key: "id" },
     pr_dependencies: { rows: [], key: "pr_key" },
     delivery_connector_dispatches: { rows: [], key: "id" },
+    delivery_graph_runs: { rows: [], key: "run_key" },
   };
   const created: { processDefinitionId?: string; variables?: Record<string, unknown> }[] = [];
   let nextId = 1;
@@ -315,5 +316,37 @@ test("handler: a misconfigured converge connector (no parseable pr) fails CLOSED
     assert(threw, "a converge connector with no target PR fails closed");
     assertEquals(created.length, 0, "no convergence-loop instance is started");
     assertEquals(stores.delivery_connector_dispatches.rows.length, 0, "no junk ledger row is claimed");
+  });
+});
+
+test("handler: the escalation-steward opt-in is resolved from the DURABLE delivery_graph_runs row, NOT the clobberable process variable (issue #889 review)", async () => {
+  await withGithubOff(async () => {
+    const { app, stores, created } = fakeApp();
+    // The run row for THIS process instance OPTED IN (auto_resolve_escalations = 1), keyed by
+    // `process_key` = the connector job's processInstanceKey.
+    stores.delivery_graph_runs.rows.push({ run_key: "run-1", process_key: "PI-graph", auto_resolve_escalations: 1, status: "running" });
+    // ...but an upstream agent completion CLOBBERED the inherited process variable to `false`. Before
+    // the fix the connector read `job.variables.autoResolveEscalations === true` → false, enrolling the
+    // PR as opted-OUT and contradicting the durable record. The durable row must win.
+    await handler(
+      { variables: { target: "converge-merge", payload: { pr: "owner/repo#21" }, autoResolveEscalations: false }, processInstanceKey: "PI-graph", elementId: "n2" } as never,
+      app,
+    );
+    assertEquals(created.length, 1, "the PR was enrolled");
+    assertEquals(created[0]?.variables?.autoResolveEscalations, true, "the durable run row's opt-in wins over the clobbered process variable");
+  });
+});
+
+test("handler: the escalation-steward opt-in FAILS CLOSED when no delivery_graph_runs row matches this process instance", async () => {
+  await withGithubOff(async () => {
+    const { app, created } = fakeApp();
+    // No delivery_graph_runs row for PI-graph (and the process variable claims opted-IN). With no
+    // durable record the connector must NOT trust the clobberable variable — fail closed to opted-OUT.
+    await handler(
+      { variables: { target: "converge-merge", payload: { pr: "owner/repo#22" }, autoResolveEscalations: true }, processInstanceKey: "PI-graph", elementId: "n2" } as never,
+      app,
+    );
+    assertEquals(created.length, 1, "the PR was still enrolled");
+    assertEquals(created[0]?.variables?.autoResolveEscalations, false, "no durable run row ⇒ fail closed to opted-out, never trust the process variable");
   });
 });

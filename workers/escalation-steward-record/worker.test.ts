@@ -177,6 +177,31 @@ test("record worker: an abstained decision is recorded without any engine comple
   );
 });
 
+test("record worker: the loop guard is scoped by subject_type — a DIFFERENT subject type sharing the key is NOT tripped (issue #889 review)", async () => {
+  await run(
+    // A PLAN subject `plan:o/r#1` escalates. A PR subject `pr:o/r#1` (SAME key, DIFFERENT type) has
+    // already hit the resolution cap. Before the fix the guard counted by bare `subject_key`, so the
+    // PR's resolutions tripped the UNRELATED plan's guard on its FIRST escalation.
+    [{ userTaskKey: "UT-PLAN", outcome: "resolved", variables: { directive: "proceed" }, rationale: "ok", evidence: "checked" }],
+    async (data) => {
+      // Seed LOOP_GUARD_MAX_RESOLUTIONS prior RESOLVED rows for the PR subject (subject_type "pr").
+      for (let i = 0; i < LOOP_GUARD_MAX_RESOLUTIONS; i++) {
+        const key = `UT-PR-${i}`;
+        await claimEscalations(data, [taskRow({ user_task_key: key, subject_type: "pr", subject_key: "o/r#1" })], "s");
+        await recordResolution(data, key, { outcome: "resolved", submittedVariables: { answer: "x" } });
+      }
+      // The fresh escalation is for a PLAN subject with the SAME key but a DIFFERENT type.
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-PLAN", subject_type: "plan", subject_key: "o/r#1", element_id: "plan-review-decision", kind_label: "Plan review", form_key: "plan-review-decision" })], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      // The plan subject has ZERO prior resolutions of its OWN type, so the guard must NOT trip.
+      assertEquals(completed.length, 1, "a different subject type sharing the key is not tripped by the other's cap");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-PLAN" });
+      assertEquals(rows[0].outcome, "resolved", "the unrelated subject type resolves normally");
+    },
+  );
+});
+
 test("record worker: malformed (non-object) decision entries are skipped, never thrown on", async () => {
   await run(
     // `[null]` / a scalar are valid JSON but not decision objects — they must be skipped without
@@ -400,4 +425,65 @@ test("record worker: SELECTED_VALUE_KEYS covers EVERY escalation form's select k
   const covered = new Set<string>(SELECTED_VALUE_KEYS);
   const missing = [...selectKeys].filter((k) => !covered.has(k));
   assertEquals(missing, [], `every form select key must be in SELECTED_VALUE_KEYS; missing: ${missing.join(", ")}`);
+});
+
+test("record worker: a service-job RETRY after the engine completion landed recovers the prior agent completion (idempotent, never a false abstain)", async () => {
+  // The completion→record pair is NOT atomic: the engine completion lands first, then the claim-row
+  // finalise is a SEPARATE write. If that finalise failed transiently, the record service job is
+  // retried with the user task ALREADY COMPLETED — `completeEscalationAsAgent` reports "no open
+  // completable task". Before the fix the retry degraded the applied decision to `abstained`, losing
+  // the submitted variables and falsely auditing an applied automatic decision as a human hand-off
+  // (issue #889 review). The retry must detect the prior agent-attributed completion and finalise the
+  // ORIGINAL decision idempotently.
+  const dir = mkdtempSync(join(tmpdir(), "nwf-steward-rec-retry-"));
+  const app = await bootTestApp(APP_ROOT, { env: { NANO_APP_DB_URL: `file:${join(dir, "app.db")}` } });
+  try {
+    // Claim UT-1 for THIS steward run.
+    await claimEscalations(app.db, [taskRow({})], "PI-STEWARD");
+    // Simulate the PRIOR attempt: the engine completion already landed, recorded as an AGENT
+    // completion under THIS steward's agentId — but the claim-row finalise never happened (the row is
+    // still `claimed`). Insert the attribution row directly (the engine call already happened).
+    const agentId = "escalation-steward:PI-STEWARD";
+    await taskCompletions(app.db).insert({
+      user_task_key: "UT-1",
+      process_instance_key: "PI-1",
+      element_id: "wait-answer",
+      actor_kind: "agent",
+      actor_id: agentId,
+      variables_json: JSON.stringify({ answer: "Retry with a note." }),
+      reversible: 1,
+      auto_applied: 0,
+      source_adjudication_id: null,
+      reverted: 0,
+      reverted_by: null,
+      reverted_note: null,
+      reverted_at: null,
+      created_at: new Date().toISOString(),
+    });
+    // On the retry the task is NO LONGER OPEN (already completed) — the mock engine reports no open
+    // tasks, so the attributed door returns "no open completable task".
+    const completed: { userTaskKey: string }[] = [];
+    const engine = {
+      openUserTasks: async () => [] as { userTaskKey: string }[],
+      completeUserTask: (userTaskKey: string) => {
+        completed.push({ userTaskKey });
+        return Promise.resolve();
+      },
+    };
+    const job = {
+      jobKey: "J-1",
+      processInstanceKey: "PI-STEWARD",
+      variables: { resolutions: JSON.stringify([{ userTaskKey: "UT-1", outcome: "resolved", variables: { answer: "Retry with a note." }, rationale: "nothing pushed", evidence: "ls-remote empty" }]) },
+    };
+    await handler(job as never, { data: app.db, engine: engine as never, log: { info: () => {}, warn: () => {}, error: () => {} } } as never);
+    // The retry must NOT re-complete the task NOR record a false abstain — it recovers the prior
+    // agent completion and finalises the claim `resolved` with the original variables.
+    assertEquals(completed.length, 0, "no SECOND engine completion on the retry");
+    const rows = await escalationAutoResolutions(app.db).find({ user_task_key: "UT-1" });
+    assertEquals(rows[0].outcome, "resolved", "the applied decision is recovered as resolved, not falsely abstained");
+    assertEquals(JSON.parse(rows[0].submitted_variables ?? "null"), { answer: "Retry with a note." }, "the original submitted variables are recovered, not lost");
+  } finally {
+    await app.stop?.();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

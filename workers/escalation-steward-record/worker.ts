@@ -22,7 +22,7 @@
 //     ever written for a submission that never happened.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { getAgentJobActivation } from "../../app/agentActivationLedger.ts";
-import { completeEscalationAsAgent, snapshotEscalationFormOptions } from "../../app/agentCompletion.ts";
+import { completeEscalationAsAgent, priorAgentCompletion, snapshotEscalationFormOptions } from "../../app/agentCompletion.ts";
 import {
   countSubjectResolutions,
   ESCALATION_STEWARD_JOB_TYPE,
@@ -194,14 +194,19 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     }
 
     if (outcome === "resolved") {
-      // Loop guard: look up the subject from the claim row and refuse to keep re-answering a subject
-      // that has already been auto-resolved LOOP_GUARD_MAX_RESOLUTIONS times.
-      const subjectKey = claimRows[0]?.subject_key ?? null;
+      // Loop guard: look up the subject from the OWNED claim row and refuse to keep re-answering a
+      // subject that has already been auto-resolved LOOP_GUARD_MAX_RESOLUTIONS times. Count by BOTH
+      // `subject_type` AND `subject_key` (issue #889 review): a bare `subject_key` collides across
+      // subject types (a plan `o/r#1` and a PR `o/r#1` share the key), so an unscoped count would let
+      // one subject's resolutions force an UNRELATED subject to abstain on its first escalation. Use
+      // the owned claim's own subject identity, not `claimRows[0]` (which may be a foreign run's row).
+      const subjectType = claim.subject_type ?? null;
+      const subjectKey = claim.subject_key ?? null;
       if (subjectKey) {
-        const prior = await countSubjectResolutions(app.data, subjectKey);
+        const prior = await countSubjectResolutions(app.data, subjectType, subjectKey);
         if (loopGuardTripped(prior, LOOP_GUARD_MAX_RESOLUTIONS)) {
           outcome = "abstained";
-          rationale = `abstained: subject ${subjectKey} already auto-resolved ${prior}× and escalated again — the automatic answer isn't working; a human must decide`;
+          rationale = `abstained: subject ${subjectType ?? "?"}:${subjectKey} already auto-resolved ${prior}× and escalated again — the automatic answer isn't working; a human must decide`;
         }
       }
     }
@@ -240,9 +245,29 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
         if (result.ok) {
           submitted = vars;
         } else {
-          outcome = "abstained";
-          rationale = `abstained: completion refused (${result.reason ?? "unknown"}) — left for a human`;
-          app.log.warn("escalation-steward record: completion refused, recorded abstained", { userTaskKey: key, reason: result.reason });
+          // Idempotent-retry recovery (issue #889 review): the completion→record pair is NOT atomic.
+          // The engine completion lands first; the claim-row finalise below is a SEPARATE write. If
+          // that finalise failed transiently on a prior attempt, this service job is retried with the
+          // user task ALREADY COMPLETED — the door then reports "no open completable task". That must
+          // NOT degrade the already-applied decision to a false `abstained` (which would lose the
+          // submitted variables and mis-audit an applied automatic decision as a human hand-off).
+          // Detect the prior agent-attributed completion and finalise the SAME decision idempotently.
+          const prior = await priorAgentCompletion(app.data, key, agentId).catch(() => undefined);
+          if (prior) {
+            let recovered: Record<string, unknown> | null = null;
+            try {
+              const parsedVars: unknown = JSON.parse(prior.variables_json);
+              if (isPlainObject(parsedVars)) recovered = parsedVars;
+            } catch {
+              // Malformed stored variables_json — fall back to this attempt's variables below.
+            }
+            submitted = recovered ?? vars;
+            app.log.info("escalation-steward record: recovered a prior agent completion on retry — finalising the original decision idempotently", { userTaskKey: key, completionId: prior.id });
+          } else {
+            outcome = "abstained";
+            rationale = `abstained: completion refused (${result.reason ?? "unknown"}) — left for a human`;
+            app.log.warn("escalation-steward record: completion refused, recorded abstained", { userTaskKey: key, reason: result.reason });
+          }
         }
       } catch (err) {
         // A failed completion (task already answered by a human, or gone) degrades to abstain — the

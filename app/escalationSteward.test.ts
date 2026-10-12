@@ -164,8 +164,8 @@ test("countSubjectResolutions: only RESOLVED rows count toward the loop guard (a
     }
     await claimEscalations(data, [taskRow({ user_task_key: "UT-3" })], "steward-A");
     await recordResolution(data, "UT-3", { outcome: "abstained", rationale: "unclear" });
-    assertEquals(await countSubjectResolutions(data, "o/r#1"), 2, "only the two resolved rows count");
-    assertEquals(loopGuardTripped(await countSubjectResolutions(data, "o/r#1")), true, "the guard trips at the cap");
+    assertEquals(await countSubjectResolutions(data, "pr", "o/r#1"), 2, "only the two resolved rows count");
+    assertEquals(loopGuardTripped(await countSubjectResolutions(data, "pr", "o/r#1")), true, "the guard trips at the cap");
   });
 });
 
