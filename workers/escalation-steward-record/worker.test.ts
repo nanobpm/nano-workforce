@@ -370,7 +370,9 @@ test("record worker: `options` snapshots the REAL form choices host-side, never 
   await run(
     // The agent MISSTATES the choices (`options: ["only-this"]`), but the trial-merge-decision form's
     // real `action` select is [proceed, rebase, abandon]. The record must persist the host-side snapshot.
-    [{ userTaskKey: "UT-TM", outcome: "resolved", variables: { action: "proceed" }, rationale: "ok", evidence: "checked", options: ["only-this"] }],
+    // Uses `rebase` (the steward-safe non-override path on this red gate) so the destructive/override
+    // guard doesn't abstain it — this test asserts the OPTIONS snapshot, not the override guard.
+    [{ userTaskKey: "UT-TM", outcome: "resolved", variables: { action: "rebase" }, rationale: "ok", evidence: "checked", options: ["only-this"] }],
     async (data) => {
       await claimEscalations(data, [taskRow({ user_task_key: "UT-TM", element_id: "trial-merge-decision", kind_label: "Trial merge", form_key: "trial-merge-decision" })], "PI-STEWARD");
     },
@@ -383,6 +385,52 @@ test("record worker: `options` snapshots the REAL form choices host-side, never 
         JSON.stringify(["proceed", "rebase", "abandon"]),
         "the record snapshots the deployed form's real choices, not the agent's self-reported array",
       );
+    },
+  );
+});
+
+test("record worker: a `proceed` on trial-merge-decision OVERRIDES a red integration gate — abstained, never auto-applied (issue #889 review)", async () => {
+  await run(
+    // On `trial-merge-decision`, `action: "proceed"` explicitly overrides a `suite-failed` D3 trial
+    // merge and lets the wave continue past a RED integration gate (SPEC.md §13.2). A value-only guard
+    // (`isDestructiveOption("proceed")` is false) would let the steward auto-bypass that red gate. The
+    // element-aware guard must abstain it — only the non-override `rebase` path is steward-safe there.
+    [{ userTaskKey: "UT-TM", outcome: "resolved", variables: { action: "proceed" }, rationale: "override the red trial", evidence: "checked" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-TM", element_id: "trial-merge-decision", kind_label: "Trial merge", form_key: "trial-merge-decision" })], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 0, "a red-gate OVERRIDE (proceed on trial-merge-decision) is NEVER auto-applied");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-TM" });
+      assertEquals(rows[0].outcome, "abstained", "the override is left for a human");
+      assert(/override|red|destructive|irreversible/i.test(rows[0].rationale ?? ""), "the rationale names the red-gate/override guard");
+    },
+  );
+});
+
+test("record worker: an `abandon` on trial-merge-decision is abstained (destructive), and a `proceed` on a NON-trial-merge element is unaffected", async () => {
+  await run(
+    // Two decisions: (1) abandon on trial-merge-decision — destructive, abstained; (2) proceed on
+    // wait-answer (a NON-trial-merge element) — the element-aware guard must NOT abstain a benign
+    // `proceed` elsewhere (no over-broadening).
+    [
+      { userTaskKey: "UT-TM", outcome: "resolved", variables: { action: "abandon" }, rationale: "give up", evidence: "checked" },
+      { userTaskKey: "UT-WA", outcome: "resolved", variables: { answer: "proceed" }, rationale: "ok", evidence: "checked" },
+    ],
+    async (data) => {
+      await claimEscalations(data, [
+        taskRow({ user_task_key: "UT-TM", element_id: "trial-merge-decision", kind_label: "Trial merge", form_key: "trial-merge-decision" }),
+        taskRow({ user_task_key: "UT-WA", element_id: "wait-answer", kind_label: "PR review", form_key: "pr-escalation" }),
+      ], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      // Only the benign non-trial-merge proceed is submitted; the trial-merge abandon is abstained.
+      assertEquals(completed.length, 1, "the benign proceed on a non-trial-merge element is unaffected");
+      assertEquals(completed[0].userTaskKey, "UT-WA");
+      const tm = await escalationAutoResolutions(data).find({ user_task_key: "UT-TM" });
+      assertEquals(tm[0].outcome, "abstained", "abandon on the trial merge is abstained");
+      const wa = await escalationAutoResolutions(data).find({ user_task_key: "UT-WA" });
+      assertEquals(wa[0].outcome, "resolved", "the benign proceed elsewhere resolves normally");
     },
   );
 });

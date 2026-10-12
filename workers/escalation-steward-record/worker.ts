@@ -28,7 +28,7 @@ import {
   ESCALATION_STEWARD_JOB_TYPE,
   type EscalationAutoResolution,
   escalationAutoResolutions,
-  isDestructiveOption,
+  isUnsafeAutoOption,
   LOOP_GUARD_MAX_RESOLUTIONS,
   loopGuardTripped,
   recordResolution,
@@ -183,13 +183,16 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     // the persisted `selected_option` review column read the SAME value (issue #889 review).
     const selected = selectedOption(d);
 
-    // Destructive/irreversible-option guard (host-side, fail-closed). Derive the selected value from the
-    // decision's own variables FIRST (not only the optional `choice`), so a `choice`-less `abandon` — or
-    // a benign `choice` paired with a destructive `variables` value — is caught.
+    // Destructive/irreversible-option guard (host-side, fail-closed, ELEMENT-AWARE). Derive the
+    // selected value from the decision's own variables FIRST (not only the optional `choice`), so a
+    // `choice`-less `abandon` — or a benign `choice` paired with a destructive `variables` value — is
+    // caught. `isUnsafeAutoOption` also refuses an element-specific RED-GATE OVERRIDE: on
+    // `trial-merge-decision` a `proceed` overrides a `suite-failed` D3 trial merge (SPEC.md §13.2), so
+    // only the non-override `rebase` path is steward-safe there (issue #889 review).
     if (outcome === "resolved") {
-      if (selected != null && isDestructiveOption(selected)) {
+      if (selected != null && isUnsafeAutoOption(claim.element_id ?? null, selected)) {
         outcome = "abstained";
-        rationale = `abstained: '${selected}' is a destructive/irreversible option — left for a human`;
+        rationale = `abstained: '${selected}' is a destructive/irreversible or red-gate-override option on ${claim.element_id ?? "this element"} — left for a human`;
       }
     }
 

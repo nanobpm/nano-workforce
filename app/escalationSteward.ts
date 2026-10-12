@@ -170,6 +170,27 @@ export function isDestructiveOption(optionValue: string): boolean {
   return DESTRUCTIVE_OPTION_VALUES.test(optionValue.trim());
 }
 
+/** The `trial-merge-decision` element id (plan-fanout.bpmn) — the D3 trial-merge integration gate. */
+export const TRIAL_MERGE_DECISION_ELEMENT = "trial-merge-decision";
+
+/** Pure: is choosing this option on THIS element unsafe for the steward to apply automatically —
+ *  either generically destructive ({@link isDestructiveOption}) OR an element-specific override of a
+ *  red gate (issue #889 review)? On `trial-merge-decision`, `action: "proceed"` is NOT universally
+ *  safe: it explicitly overrides a `suite-failed` D3 trial merge and lets the wave continue past a red
+ *  integration gate (SPEC.md §13.2). Because `isDestructiveOption("proceed")` is false, a
+ *  value-only guard would let the steward auto-bypass that red gate — contrary to the fail-closed
+ *  rule for merging past failures. For that element only the NON-override path (`rebase` — rerun the
+ *  trial after a fix) is steward-safe; `proceed` (override) and `abandon` (give up / destroy the wave)
+ *  are left for a human. Element-aware so a benign `proceed` on any OTHER element is unaffected. */
+export function isUnsafeAutoOption(elementId: string | null, optionValue: string): boolean {
+  if (isDestructiveOption(optionValue)) return true;
+  if (elementId === TRIAL_MERGE_DECISION_ELEMENT) {
+    // Only the non-override "rerun the trial" path is steward-safe on the red integration gate.
+    return optionValue.trim().toLowerCase() !== "rebase";
+  }
+  return false;
+}
+
 /** The claim/lease TTL: a steward instance that crashes mid-run releases its claims after this long,
  *  so a later tick can pick the escalation up. Generous relative to the agent SLA. */
 export const CLAIM_TTL_MS = 15 * 60 * 1000;
