@@ -375,8 +375,13 @@ export const admittedPlanDeps = (data: DataLayer) =>
   data.table<PlanDep>("admitted_plan_deps", "plan_key");
 
 /** The fields an admission caller supplies for one staged admitted epic; `created_at` is stamped
- * here (mirrors {@link PlanDepInput}). */
-export type AdmittedEpicInput = Omit<AdmittedEpic, "created_at">;
+ * here (mirrors {@link PlanDepInput}). The escalation-steward opt-in (issue #889) is OPTIONAL on the
+ * input even though it is required on the persisted {@link AdmittedEpic} row: `recordAdmittedEpic`
+ * defaults an omitted value to `0` (opted out), so the typed API matches that default-off behavior
+ * and a caller that does not care about the steward need not spell it out. */
+export type AdmittedEpicInput = Omit<AdmittedEpic, "created_at" | "auto_resolve_escalations"> & {
+  auto_resolve_escalations?: number;
+};
 
 /** Stage one admitted epic (issue #292 slice S2). Idempotent on `plan_key`: a re-submitted set that
  * re-admits the same epic is a no-op returning the existing staged row, so the whole set door stays

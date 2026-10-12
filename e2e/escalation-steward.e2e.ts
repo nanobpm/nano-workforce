@@ -71,6 +71,8 @@ describe("escalation-steward orchestration (engine-level)", () => {
   // The steward agent stub's captured state across activations.
   let agentCalls = 0;
   let capturedClaimedTasks: unknown;
+  // The review agent stub's activation counter (stateful: escalate first, converge on resume).
+  let reviewCalls = 0;
 
   before(async () => {
     for (const [k, v] of Object.entries(GITHUB_ENV_OVERRIDES)) {
@@ -79,9 +81,20 @@ describe("escalation-steward orchestration (engine-level)", () => {
     }
     app = await bootTestApp(APP_ROOT, { env: HARNESS_ENV });
 
-    // `senior:pr-review` is an externalTaskType (no app worker): round 1 escalates (needs_input +
-    // question) so the loop parks on the native `wait-answer` userTask; any resumed round converges.
-    await app.engine.registerWorker("senior:pr-review", () => ({ status: "needs_input", summary: "need a human decision", question: "Which retry cap?" }));
+    // `senior:pr-review` is an externalTaskType (no app worker), so register a STATEFUL stub (mirrors
+    // `e2e/convergence-escalation.e2e.ts`): round 1 escalates (needs_input + question) so the loop
+    // parks on the native `wait-answer` userTask; the resumed round (after the steward completes
+    // `wait-answer` and the BPMN loops record-answer → capture-head → review-round) CONVERGES. A
+    // stateless always-needs_input stub would re-park a fresh `wait-answer` on resume, contradicting
+    // both the stub's own "resumed round converges" contract and the eligible branch's final
+    // "no wait-answer remains" assertion.
+    await app.engine.registerWorker("senior:pr-review", () => {
+      reviewCalls += 1;
+      if (reviewCalls === 1) {
+        return { status: "needs_input", summary: "need a human decision", question: "Which retry cap?" };
+      }
+      return { status: "converged", summary: "resolved after the steward's answer" };
+    });
     // `senior:scope-classify` is likewise external — stub "scope delivered" so a converged round
     // finalizes rather than parking on an unserviced agent job.
     await app.engine.registerWorker("senior:scope-classify", () => ({ scopeBlocked: false, scopeBlockReason: "" }));
