@@ -1,3 +1,9 @@
+## [0.202.0](https://github.com/nanobpm/nano-workforce/compare/v0.201.5...v0.202.0) (2026-10-12)
+
+### Features
+
+* **agentic:** authoritative claim resync on supervisor reconnect (Closes [#893](https://github.com/nanobpm/nano-workforce/issues/893)) ([#894](https://github.com/nanobpm/nano-workforce/issues/894)) ([2f39fcb](https://github.com/nanobpm/nano-workforce/commit/2f39fcb680ccafa22f633b409e2f66674ae85a7c))
+
 ## [0.201.5](https://github.com/nanobpm/nano-workforce/compare/v0.201.4...v0.201.5) (2026-10-11)
 
 ### Bug Fixes
