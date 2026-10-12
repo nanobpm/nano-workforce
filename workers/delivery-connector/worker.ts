@@ -52,6 +52,15 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  *  which we fail closed as before). */
 const LAUNCH_STAMP_POLLS = 20;
 const LAUNCH_STAMP_POLL_MS = 250;
+/** The scheduler the poll loop sleeps on between launch-stamp reads. Overridable in tests via
+ * {@link setLaunchStampSleep} so a regression drives the retry by a deterministic READ COUNT (the fake
+ * table stamps `process_key` after N polls) rather than racing real wall-clock timers — AGENTS.md
+ * forbids a test whose outcome depends on scheduler load. */
+let launchStampSleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Test-only seam: override the inter-poll sleep. Pass no argument to restore the real timer. */
+export function setLaunchStampSleep(sleep?: (ms: number) => Promise<void>): void {
+  launchStampSleep = sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+}
 async function resolveAutoResolveEscalations(data: DataLayer, processInstanceKey: string | null): Promise<boolean> {
   if (!processInstanceKey) return false;
   const runs = deliveryGraphRuns(data);
@@ -64,7 +73,7 @@ async function resolveAutoResolveEscalations(data: DataLayer, processInstanceKey
     // closed without burning the remaining budget.
     const launchInFlight = rows.some((r) => r.process_key == null && r.status === "running");
     if (!launchInFlight) return false;
-    if (attempt < LAUNCH_STAMP_POLLS - 1) await new Promise((r) => setTimeout(r, LAUNCH_STAMP_POLL_MS));
+    if (attempt < LAUNCH_STAMP_POLLS - 1) await launchStampSleep(LAUNCH_STAMP_POLL_MS);
   }
   return false;
 }

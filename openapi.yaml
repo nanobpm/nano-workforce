@@ -1891,6 +1891,9 @@ components:
         confirmDefaultBase:
           type: boolean
           description: Acknowledge that `baseBranch` names the repository default branch. See `PlanStartByIssue.confirmDefaultBase`.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this epic (and every child convergence/merge loop it spawns) into escalation-steward auto-resolution. See `PlanStartByIssue.autoResolveEscalations`.
     EpicSetMemberByUrl:
       type: object
       additionalProperties: false
@@ -1913,6 +1916,9 @@ components:
         confirmDefaultBase:
           type: boolean
           description: Acknowledge landing on the default branch. See `PlanStartByIssue.confirmDefaultBase`.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this epic (and every child convergence/merge loop it spawns) into escalation-steward auto-resolution. See `PlanStartByIssue.autoResolveEscalations`.
     EpicSetDep:
       description: >-
         One inter-epic dependency edge: the `consumer` epic waits for the `producer` epic to publish
@@ -5102,6 +5108,9 @@ paths:
                           confirmDefaultBase:
                             type: boolean
                             description: Acknowledge that `baseBranch` names the repository default branch. See `PlanStartByIssue.confirmDefaultBase`.
+                          autoResolveEscalations:
+                            type: boolean
+                            description: Opt this epic (and every child convergence/merge loop it spawns) into escalation-steward auto-resolution. See `PlanStartByIssue.autoResolveEscalations`.
                       - type: object
                         additionalProperties: false
                         required:
@@ -5123,6 +5132,9 @@ paths:
                           confirmDefaultBase:
                             type: boolean
                             description: Acknowledge landing on the default branch. See `PlanStartByIssue.confirmDefaultBase`.
+                          autoResolveEscalations:
+                            type: boolean
+                            description: Opt this epic (and every child convergence/merge loop it spawns) into escalation-steward auto-resolution. See `PlanStartByIssue.autoResolveEscalations`.
                 deps:
                   type: array
                   description: The inter-epic dependency edges. Each declares `consumer` waits for `producer` to publish the `{ package, capabilityRef }` capability. Both endpoints must name epics in `epics`. Omit or pass `[]` for a set of independent (root) epics.

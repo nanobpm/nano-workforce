@@ -359,6 +359,10 @@ export interface AdmittedEpic {
   issue_number: number;
   issue_url: string;
   base_branch: string;
+  /** Escalation-steward opt-in staged at admission (issue #889). Persisted so the lowering
+   * (`lowerAdmittedSet`) can forward it to `startPlan` — without it a batch-admitted epic silently
+   * stayed opted out even when the caller opted in. 0|1 (SQLite boolean); absent on pre-124 rows ⇒ 0. */
+  auto_resolve_escalations: number;
   created_at: string;
 }
 export const admittedEpics = (data: DataLayer) =>
@@ -384,7 +388,9 @@ export async function recordAdmittedEpic(
   const table = admittedEpics(data);
   const existing = await table.get(epic.plan_key);
   if (existing) return existing;
-  const row: AdmittedEpic = { ...epic, created_at: now() };
+  // Default the opt-in to 0 (opted out) when a caller omits it, so the staged row always carries the
+  // flag explicitly and the lowering never reads an undefined it would silently coerce.
+  const row: AdmittedEpic = { ...epic, auto_resolve_escalations: epic.auto_resolve_escalations ?? 0, created_at: now() };
   try {
     await table.insert(row);
     return row;

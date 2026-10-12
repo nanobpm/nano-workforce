@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertThrows } from "#test-assert";
 import { PROCESS_ID } from "../../app/service.ts";
 import { withTrackingViews } from "../../test/trackingViews.ts";
-import handler, { readConnectorInput, readConvergeInput, safeStringify } from "./worker.ts";
+import handler, { readConnectorInput, readConvergeInput, safeStringify, setLaunchStampSleep } from "./worker.ts";
 
 function memTable(rows: Record<string, unknown>[], key: string) {
   return {
@@ -359,22 +359,27 @@ test("handler: a launch-in-flight run row (process_key not yet stamped) is retri
     // that post-launch write, so the row is present (opted IN) but its `process_key` is still NULL. A
     // single read keyed on `process_key` finds NO match → false → permanently enrolls the opted-in PR
     // as opted OUT. The lookup must treat a NULL process_key as TRANSIENT and re-poll until the stamp
-    // lands. The memTable closure reads the shared `rows` array live on every `all()`, so flipping
-    // `process_key` after a short delay mimics the dispatch's `runs.update(runKey, { process_key })`
-    // landing AFTER the connector job activated (the poll loop sleeps between reads).
+    // lands. DETERMINISTIC (AGENTS.md — no real-timer race): the inter-poll sleep is overridden to a
+    // test-controlled signal that stamps `process_key` after a fixed number of polls (poll 1 and 2 see
+    // the launch-in-flight NULL, poll 3 sees the stamp) — no wall-clock timer, so the outcome cannot
+    // depend on scheduler load.
     const row: Record<string, unknown> = { run_key: "run-1", process_key: null, auto_resolve_escalations: 1, status: "running" };
     stores.delivery_graph_runs.rows.push(row);
-    const stamp = setTimeout(() => {
-      row.process_key = "PI-graph";
-    }, 600);
+    let polls = 0;
+    setLaunchStampSleep(() => {
+      polls += 1;
+      if (polls === 2) row.process_key = "PI-graph"; // the dispatch's stamp lands after the 2nd poll
+      return Promise.resolve();
+    });
     try {
       await handler(
         { variables: { target: "converge-merge", payload: { pr: "owner/repo#23" } }, processInstanceKey: "PI-graph", elementId: "n2" } as never,
         app,
       );
     } finally {
-      clearTimeout(stamp);
+      setLaunchStampSleep();
     }
+    assert(polls >= 2, "the launch-in-flight row was re-polled across the launch window, not read once and converted to opted-out");
     assertEquals(created.length, 1, "the PR was enrolled");
     assertEquals(
       created[0]?.variables?.autoResolveEscalations,

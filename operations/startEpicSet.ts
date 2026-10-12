@@ -51,6 +51,8 @@ interface EpicMember {
   baseBranch: string;
   allowSharedBase: boolean;
   confirmDefaultBase: boolean;
+  /** Escalation-steward opt-in for this epic (issue #889) — carried through staging to `startPlan`. */
+  autoResolveEscalations: boolean;
 }
 
 export default defineOperation("startEpicSet", async ({ body }, app) => {
@@ -104,6 +106,7 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
       baseBranch: typeof m.baseBranch === "string" ? m.baseBranch : "",
       allowSharedBase: m.allowSharedBase === true,
       confirmDefaultBase: m.confirmDefaultBase === true,
+      autoResolveEscalations: m.autoResolveEscalations === true,
     });
     planKeys.push(parsed.planKey);
   }
@@ -125,7 +128,7 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
   // persisted. `selfPlanKey` excludes the epic's own active row so an idempotent re-submit does not
   // 409 against itself.
   const token = process.env.GITHUB_TOKEN ?? "";
-  const admitted: { parsed: ParsedIssue; baseBranch: string }[] = [];
+  const admitted: { parsed: ParsedIssue; baseBranch: string; autoResolveEscalations: boolean }[] = [];
   // Intra-set shared-base guard: admitPlan's rule 4 only inspects DURABLE `plans` rows, and S2
   // materializes none, so two members of THIS set reaching for the same custom integration branch
   // would both slip past it and silently defeat ADR 0003 rule 4. Track each admitted member's
@@ -151,7 +154,7 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
         if (claimed) claimed.add(normalizedBase);
         else claimedBases.set(member.parsed.repo, new Set([normalizedBase]));
       }
-      admitted.push({ parsed: member.parsed, baseBranch: normalizedBase });
+      admitted.push({ parsed: member.parsed, baseBranch: normalizedBase, autoResolveEscalations: member.autoResolveEscalations });
     } catch (err) {
       const mapped = admitPlanErrorResponse(err);
       if (mapped) {
@@ -183,6 +186,9 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
       issue_number: a.parsed.number,
       issue_url: a.parsed.url,
       base_branch: a.baseBranch,
+      // Carry the per-epic steward opt-in (issue #889) into staging so the lowering forwards it to
+      // `startPlan` — without it a batch-admitted epic stayed opted out despite the caller's choice.
+      auto_resolve_escalations: a.autoResolveEscalations ? 1 : 0,
     });
   }
   for (const edge of edges) {
