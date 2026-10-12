@@ -248,7 +248,7 @@ components:
             $ref: "#/components/schemas/Escalation"
     AutoResolution:
       type: object
-      description: One escalation-steward auto-resolution record (issue #889) — a reviewable record of an escalation the steward resolved or abstained from.
+      description: "One escalation-steward auto-resolution record (issue #889) — a reviewable record of an escalation the steward resolved or abstained from."
       additionalProperties: false
       required:
         - id
@@ -1970,7 +1970,7 @@ components:
           description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
         autoResolveEscalations:
           type: boolean
-          description: Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
+          description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
         convergeOnly:
           type: boolean
           deprecated: true
@@ -1997,7 +1997,7 @@ components:
           description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
         autoResolveEscalations:
           type: boolean
-          description: Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
+          description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
         convergeOnly:
           type: boolean
           deprecated: true
@@ -2057,7 +2057,7 @@ components:
             today but currently has no runtime effect.
         autoResolveEscalations:
           type: boolean
-          description: Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
+          description: "Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     PlanStartByUrl:
       type: object
       additionalProperties: false
@@ -2092,7 +2092,7 @@ components:
             branch. See `PlanStartByIssue.confirmDefaultBase`.
         autoResolveEscalations:
           type: boolean
-          description: Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
+          description: "Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     ReadinessProbe:
       description: >-
         A single durable readiness probe (issue #258, #295) the feature run must satisfy before its
@@ -2674,7 +2674,7 @@ components:
             documented contract and the door agree.
         autoResolveEscalations:
           type: boolean
-          description: Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
+          description: "Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     DeliveryGraphDispatchRepoless:
       description: >-
         The checkout-less dispatch shape (#729): an EXPLICIT `repoless: true` opt-out of repository
@@ -2730,7 +2730,7 @@ components:
             `repository` + `baseBranch`) and omit `repoless` entirely.
         autoResolveEscalations:
           type: boolean
-          description: Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
+          description: "Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     DeliveryGraphDispatchNodeProvisioned:
       description: >-
         The FULLY node-provisioned dispatch shape (#739): supplies NEITHER a run-level `repository`/
@@ -2779,7 +2779,7 @@ components:
             outcome. Absent → the `P1D` default. An invalid duration is rejected at submit.
         autoResolveEscalations:
           type: boolean
-          description: Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
+          description: "Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     DeliveryGraphDismissRequest:
       description: >-
         The OPERATOR dismiss request (#520). The cockpit's staged-proposals grid posts the content
@@ -3661,7 +3661,7 @@ components:
             resolved `pkg@version` is late-bound into the implementation agent's brief.
         autoResolveEscalations:
           type: boolean
-          description: Opt this run's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off.
+          description: "Opt this run's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     FeatureStartByUrl:
       type: object
       additionalProperties: false
@@ -3720,7 +3720,7 @@ components:
           description: OPTIONAL package the `blockedOn` handles resolve against. See `FeatureStartByIssue.consumerPackage`.
         autoResolveEscalations:
           type: boolean
-          description: Opt this run's escalations into the escalation steward (issue #889). See `FeatureStartByIssue.autoResolveEscalations`.
+          description: "Opt this run's escalations into the escalation steward (issue #889). See `FeatureStartByIssue.autoResolveEscalations`."
     MessageResult:
       type: object
       description: The result of publishing a message / answering an escalation. Shape varies by message
@@ -4864,7 +4864,7 @@ paths:
                       description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
                     autoResolveEscalations:
                       type: boolean
-                      description: Opt this loop's escalations into the escalation steward (issue
+                      description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
                     convergeOnly:
                       type: boolean
                       deprecated: true
@@ -4890,7 +4890,7 @@ paths:
                       description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
                     autoResolveEscalations:
                       type: boolean
-                      description: Opt this loop's escalations into the escalation steward (issue
+                      description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
                     convergeOnly:
                       type: boolean
                       deprecated: true
@@ -4945,7 +4945,7 @@ paths:
                       description: 'Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). When implemented it will be the required acknowledgement when `baseBranch` names the repository default branch: targeting the default lands every task directly on it with no integration buffer — and fires any merge-to-default side effect per task — so admission will reject (400) unless confirmed with true (no effect for a non-default base). Accepted by the schema today but currently has no runtime effect.'
                     autoResolveEscalations:
                       type: boolean
-                      description: Opt this epic's (and its child loops') escalations into the escalation steward (issue
+                      description: "Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
                 - type: object
                   additionalProperties: false
                   required:
@@ -4969,7 +4969,7 @@ paths:
                       description: Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). Accepted by the schema today but currently has no runtime effect. When implemented it will be the required acknowledgement when `baseBranch` names the repository default branch. See `PlanStartByIssue.confirmDefaultBase`.
                     autoResolveEscalations:
                       type: boolean
-                      description: Opt this epic's (and its child loops') escalations into the escalation steward (issue
+                      description: "Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
               type: object
               # END generated:mcp-body
       responses:
@@ -6605,7 +6605,7 @@ paths:
                       description: OPTIONAL npm package name (e.g. `@nanobpm/engine-wasm`) the `blockedOn` shorthand resolves its handles against — the consumer dependency whose published provenance must carry each awaited upstream. When present, `blockedOn` desugars to `capability` probes and the resolved `pkg@version` is late-bound into the implementation agent's brief.
                     autoResolveEscalations:
                       type: boolean
-                      description: Opt this run's escalations into the escalation steward (issue
+                      description: "Opt this run's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
                 - type: object
                   additionalProperties: false
                   required:
@@ -6756,7 +6756,7 @@ paths:
                       description: OPTIONAL package the `blockedOn` handles resolve against. See `FeatureStartByIssue.consumerPackage`.
                     autoResolveEscalations:
                       type: boolean
-                      description: Opt this run's escalations into the escalation steward (issue
+                      description: "Opt this run's escalations into the escalation steward (issue #889). See `FeatureStartByIssue.autoResolveEscalations`."
               type: object
               # END generated:mcp-body
       responses:

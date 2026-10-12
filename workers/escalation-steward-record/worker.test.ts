@@ -121,6 +121,25 @@ test("record worker: a destructive/irreversible choice (abandon) is abstained, n
   );
 });
 
+test("record worker: an abstained record clears selected_option — no proposed-but-rejected option leaks (issue #889 review)", async () => {
+  // The destructive guard converts a `resolved` abandon decision to `abstained`. Because the steward
+  // submitted NOTHING, the record's `selected_option` must be NULL — persisting the derived (rejected)
+  // `abandon` value would tell consumers the steward "chose abandon" on a record where it chose to
+  // abstain, contradicting the OpenAPI contract ("Null when abstained") and misrepresenting the audit.
+  await run(
+    [{ userTaskKey: "UT-1", outcome: "resolved", choice: "abandon", variables: { resolution: "abandon" }, rationale: "agent chose abandon" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({})], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 0, "a destructive option is NEVER submitted to the engine");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+      assertEquals(rows[0].outcome, "abstained");
+      assertEquals(rows[0].selected_option, null, "an abstained record has NO chosen option — the rejected value is not persisted");
+    },
+  );
+});
+
 test("record worker: a benign `choice` paired with a destructive `variables` value is abstained (variables win over the hint)", async () => {
   await run(
     // The auxiliary `choice` says "retry" but the submitted variables carry `resolution: "abandon"` —

@@ -24,7 +24,7 @@
 // door (`completeUserTaskAttributed`, app/agentCompletion.ts) with AGENT attribution — never recorded
 // as a human decision (ADR 0046).
 import type { DataLayer } from "@nanobpm/urban";
-import { snapshotUserTaskFormOptions } from "./agentCompletion.ts";
+import { ESCALATION_TASK_ELEMENTS, snapshotUserTaskFormOptions } from "./agentCompletion.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { ESCALATION_FORM, GENERIC_HUMAN_FORM, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import type { UserTaskRow } from "./userTasks.ts";
@@ -68,8 +68,9 @@ export const LOOP_GUARD_MAX_RESOLUTIONS = 2;
  *  prompt's own abstain rule), so the steward can never be the path that abandons work, approves a
  *  merge, grants a permission, or overrides a readiness gate.
  *
- *  This is deliberately a SUPERSET check independent of the agent-answerable `ESCALATION_TASK_ELEMENTS`
- *  set: an element is steward-eligible only if it is BOTH agent-answerable AND not in this guard set. */
+ *  This guard is INTERSECTED with the canonical agent-answerable allowlist (`ESCALATION_TASK_ELEMENTS`
+ *  + the dynamic delivery-human predicate): an element is steward-eligible only if it is BOTH
+ *  agent-answerable AND not in this guard set (see {@link isStewardAnswerableElement}). */
 export const STEWARD_NEVER_RESOLVE_ELEMENTS: ReadonlySet<string> = new Set([
   // Human-only merge approval (issue #826) — the fleet must never auto-approve a merge.
   "merge-approval",
@@ -131,9 +132,19 @@ export const escalationAutoResolutions = (data: DataLayer) =>
 
 /** Whether an escalation element kind is one the steward is permitted to answer at all. The agent
  *  prompt ALSO carries an abstain rule; this is the host-side fail-closed guard so a mis-prompted or
- *  misrouted steward can never touch a human-only / irreversible / credential kind. */
+ *  misrouted steward can never touch a human-only / irreversible / credential kind.
+ *
+ *  This is an ALLOWLIST gated on the canonical agent-answerable surface, not a denylist: an element is
+ *  steward-eligible only if it is BOTH agent-answerable (in `ESCALATION_TASK_ELEMENTS`, or a dynamic
+ *  delivery-human node matched by the single-source `isDeliveryHumanElement` predicate — the same
+ *  surface the completer resolves against) AND not in the explicit {@link STEWARD_NEVER_RESOLVE_ELEMENTS}
+ *  safety guard. Gating on the allowlist (issue #889 review) means an arbitrary/unknown user task that
+ *  merely escapes the NEVER_RESOLVE set is refused up front, instead of being claimed and dispatched
+ *  only for the completer to refuse it — which would record a spurious abstention and permanently
+ *  exclude that task from future steward ticks. */
 export function isStewardAnswerableElement(elementId: string): boolean {
-  return !STEWARD_NEVER_RESOLVE_ELEMENTS.has(elementId);
+  const agentAnswerable = ESCALATION_TASK_ELEMENTS.has(elementId) || isDeliveryHumanElement(elementId);
+  return agentAnswerable && !STEWARD_NEVER_RESOLVE_ELEMENTS.has(elementId);
 }
 
 /** The ONLY delivery-graph `human` forms a steward may auto-answer. A delivery-graph `human` node

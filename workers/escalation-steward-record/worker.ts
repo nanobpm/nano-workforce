@@ -365,7 +365,12 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     await recordResolution(app.data, key, {
       outcome,
       submittedVariables: submitted,
-      selectedOption: selected,
+      // `selected_option` is the option the steward ACTUALLY submitted — so it is only meaningful on a
+      // `resolved` record. On an `abstained` record the steward submitted NOTHING, so persist NULL, not
+      // the derived (and possibly rejected/destructive) value: recording `abandon` on an abstention would
+      // tell the review surface the steward "chose abandon" when it in fact declined to choose (issue
+      // #889 review), contradicting the OpenAPI contract ("Null when abstained").
+      selectedOption: outcome === "resolved" ? selected : null,
       rationale,
       evidence,
       // Carry through the REAL form choices snapshotted host-side at CLAIM time (from the task's

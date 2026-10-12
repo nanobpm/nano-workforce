@@ -99,6 +99,26 @@ test("isStewardAnswerableElement: refuses human-only / irreversible / credential
   }
 });
 
+test("isStewardAnswerableElement: gates on the canonical agent-answerable ALLOWLIST, not a denylist (issue #889 review)", () => {
+  // The canonical agent-answerable surface is `ESCALATION_TASK_ELEMENTS` (plus the dynamic
+  // delivery-human predicate). An element OUTSIDE that allowlist — an arbitrary/unknown user-task id
+  // that happens to not be in the NEVER_RESOLVE denylist — must FAIL CLOSED: otherwise the steward
+  // claims and dispatches it, the completer later refuses it, and the task is left with a spurious
+  // abstention that permanently excludes it from future steward ticks.
+  for (const unknown of ["some-random-task", "human-approval", "deploy-gate", "qa-signoff", ""]) {
+    assertEquals(isStewardAnswerableElement(unknown), false, `unknown/non-escalation '${unknown}' must fail closed (not in the allowlist)`);
+  }
+  // A delivery-human task IS in the canonical surface via the dynamic predicate, so it passes the
+  // element guard here (its FORM is gated separately by isStewardAnswerableForm).
+  assertEquals(isStewardAnswerableElement("delivery-human-task"), true, "delivery-human-task is in the canonical surface");
+  assertEquals(isStewardAnswerableElement("delivery-human-task__publish-step"), true, "an inlined delivery-human node is in the canonical surface");
+  // Belt-and-braces: a kind in the NEVER_RESOLVE guard is refused even though the allowlist may admit
+  // it (the explicit safety exclusion still wins). None currently overlap; assert the invariant holds.
+  for (const el of STEWARD_NEVER_RESOLVE_ELEMENTS) {
+    assertEquals(isStewardAnswerableElement(el), false, `${el} stays refused even though the allowlist may admit it`);
+  }
+});
+
 test("isStewardAnswerableForm: a delivery-human task is form-aware and fails closed for manual/credential forms", () => {
   // A dynamic delivery-human element is steward-answerable ONLY on the known-safe decision/typed-value
   // forms; the bespoke CATEGORY forms (manual publish / click-done ack) and any absent/unknown form
