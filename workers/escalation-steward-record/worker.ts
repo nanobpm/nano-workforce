@@ -66,9 +66,18 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  *  (merge-approval) submit unguarded and record `selected_option=NULL` (issue #889 review). The
  *  canonical keys today are `decision` (delivery), `directive` (plan-review / empty-plan),
  *  `resolution` (feature / readiness), `mergeDecision` (merge-approval) and `action` (trial-merge);
- *  `choice` is the auxiliary hint and `answer` the free-text field. A drift test
- *  (`worker.test.ts`) derives the form key set and fails if any is absent, so a NEW form select key
- *  can't silently fall out of this guard. */
+ *  `choice` is the auxiliary hint.
+ *
+ *  A FREE-TEXT field (`answer`, see {@link FREE_TEXT_VALUE_KEYS}) is deliberately NOT here: it carries
+ *  prose, not a discrete selection, so it must never participate in the selection-CONFLICT fence nor
+ *  shadow/override a real select. Including `answer` here was the bug class the reviewer cited — a valid
+ *  feature/readiness answer-path payload (`{ resolution: "answer", answer: "corrective guidance" }`,
+ *  where the free-text `answer` accompanies the `resolution` SELECT) presents two distinct "selection"
+ *  values and is always force-abstained as an ambiguous conflict, blocking a supported escalation path
+ *  (issue #889 review). Two drift tests (`worker.test.ts`) key this both ways: every `.form` select key
+ *  is present, and NO key that is free-text in EVERY form (never a `select`/`radio` anywhere) leaks in —
+ *  so neither a new select key silently falls out of the guard nor a free-text field silently falls into
+ *  the conflict fence. */
 export const SELECTED_VALUE_KEYS = [
   "choice",
   "resolution",
@@ -76,8 +85,15 @@ export const SELECTED_VALUE_KEYS = [
   "decision",
   "directive",
   "mergeDecision",
-  "answer",
 ] as const;
+
+/** Escalation-form FREE-TEXT field keys (`textarea`/`textfield`) whose value is prose, not a discrete
+ *  selection. These are read ONLY as the last-resort submitted value for a free-text-only form (e.g.
+ *  `pr-escalation`'s `answer`, which has no select at all) so the record still persists what was
+ *  submitted as `selected_option`. They are NEVER fed to the selection-conflict fence or the
+ *  destructive-option guard — prose is not an option choice, and treating it as one false-abstains the
+ *  answer path (issue #889 review). `answer` is the only such accompaniment today. */
+export const FREE_TEXT_VALUE_KEYS = ["answer"] as const;
 
 /** Derive the option value a decision actually selected — scoped to the SELECT field(s) of the CLAIMED
  *  task's ACTUAL form (`elementId`), never a first-nonblank sweep across every recognized key. The
@@ -93,8 +109,11 @@ export const SELECTED_VALUE_KEYS = [
  *   2. CONFLICT fence (fail-closed): if variables carry MORE THAN ONE distinct nonblank recognized
  *      selection value (across the full {@link SELECTED_VALUE_KEYS} set), the decision is ambiguous —
  *      an agent stuffing a benign key beside a destructive one. Returns `null` so the caller abstains.
- *   3. Fallback when the form has no resolvable select keys (a select-less / dynamic form): the single
- *      nonblank recognized value, else the auxiliary `choice` hint.
+ *   3. Fallback when no recognized SELECT value is present: the auxiliary `choice` hint, else the
+ *      single free-text value (`answer`, {@link FREE_TEXT_VALUE_KEYS}) a select-less form (e.g.
+ *      `pr-escalation`) submits — so the record still captures what was submitted. Free-text is read
+ *      ONLY here, never in the conflict fence above (prose is not a selection, so a `resolution`-SELECT
+ *      answer path carrying free-text `answer` is not a conflict — issue #889 review).
  *
  *  Returns `{ value, conflict }`: `conflict` true means the decision is ambiguous and must be abstained
  *  regardless of any single value's safety. */
@@ -103,13 +122,15 @@ function selectedOption(d: StewardDecision, elementId: string | null): { value: 
     return { value: typeof d.choice === "string" && d.choice.trim() !== "" ? d.choice : null, conflict: false };
   }
   const vars = d.variables;
-  // Collect every nonblank recognized selection value present, keyed by field.
+  // Collect every nonblank recognized SELECT value present, keyed by field. Free-text fields
+  // (FREE_TEXT_VALUE_KEYS) are deliberately excluded here — prose is not a selection, so it must never
+  // enter the conflict fence nor shadow a real select (issue #889 review).
   const present = new Map<string, string>();
   for (const k of SELECTED_VALUE_KEYS) {
     const v = vars[k];
     if (typeof v === "string" && v.trim() !== "") present.set(k, v.trim());
   }
-  // Conflict fence: two or more DISTINCT recognized selection values is an ambiguous decision — never
+  // Conflict fence: two or more DISTINCT recognized SELECT values is an ambiguous decision — never
   // guess which the agent meant; abstain. (The same value repeated under two keys is not a conflict.)
   const distinctValues = new Set(present.values());
   if (distinctValues.size > 1) {
@@ -123,15 +144,21 @@ function selectedOption(d: StewardDecision, elementId: string | null): { value: 
       if (v != null) return { value: v, conflict: false };
     }
     // The form has select keys but none is set: no recognized selection on the real form. Fall through
-    // to any single recognized value (e.g. a free-text `answer`) before the choice hint.
+    // to any single recognized value, then the choice hint, then the free-text submitted value.
   }
-  // Single recognized value (no conflict) — use it.
+  // Single recognized SELECT value (no conflict) — use it.
   if (present.size === 1) {
     const only = present.values().next().value;
     if (only != null) return { value: only, conflict: false };
   }
   // Fall back to the auxiliary hint.
   if (typeof d.choice === "string" && d.choice.trim() !== "") return { value: d.choice, conflict: false };
+  // Last resort: the free-text submitted value a select-less form (e.g. `pr-escalation`'s `answer`)
+  // carries — captured so the record is honest, but never fed to the conflict fence / destructive guard.
+  for (const k of FREE_TEXT_VALUE_KEYS) {
+    const v = vars[k];
+    if (typeof v === "string" && v.trim() !== "") return { value: v.trim(), conflict: false };
+  }
   return { value: null, conflict: false };
 }
 

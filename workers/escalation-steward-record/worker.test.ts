@@ -17,7 +17,7 @@ import { taskCompletions } from "../../app/agentCompletion.ts";
 import { recordAgentJobObservation } from "../../app/agentActivationLedger.ts";
 import { claimEscalations, escalationAutoResolutions, LOOP_GUARD_MAX_RESOLUTIONS, recordResolution } from "../../app/escalationSteward.ts";
 import type { UserTaskRow } from "../../app/userTasks.ts";
-import handler, { SELECTED_VALUE_KEYS } from "./worker.ts";
+import handler, { FREE_TEXT_VALUE_KEYS, SELECTED_VALUE_KEYS } from "./worker.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..", "..");
 
@@ -529,6 +529,79 @@ test("record worker: SELECTED_VALUE_KEYS covers EVERY escalation form's select k
   const covered = new Set<string>(SELECTED_VALUE_KEYS);
   const missing = [...selectKeys].filter((k) => !covered.has(k));
   assertEquals(missing, [], `every form select key must be in SELECTED_VALUE_KEYS; missing: ${missing.join(", ")}`);
+});
+
+test("record worker: a free-text-only form key (never a select/radio anywhere) must NOT leak into SELECTED_VALUE_KEYS (inverse drift guard)", async () => {
+  // Fix-the-class guard (the inverse of the drift guard above): a FREE-TEXT field (`textarea`/
+  // `textfield`) that is never a `select`/`radio` in ANY form is prose, not a discrete selection. If it
+  // leaks into SELECTED_VALUE_KEYS it enters the selection-CONFLICT fence, so a valid answer-path
+  // payload (`{ resolution: "answer", answer: "guidance" }` — free-text `answer` beside the `resolution`
+  // SELECT) presents two distinct "selection" values and is force-abstained as ambiguous, blocking the
+  // supported path (issue #889 review — `answer` was wrongly in the set). Derive the free-text-only keys
+  // from the forms and assert none is in SELECTED_VALUE_KEYS. (`choice` is a synthetic auxiliary hint,
+  // not a form field, so it is exempt.)
+  const formsDir = resolve(APP_ROOT, "resources", "forms");
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const selectKeys = new Set<string>();
+  const freeTextKeys = new Set<string>();
+  for (const file of readdirSync(formsDir)) {
+    if (!file.endsWith(".form")) continue;
+    const doc: { components?: { type?: string; key?: string }[] } = JSON.parse(readFileSync(join(formsDir, file), "utf8"));
+    for (const c of doc.components ?? []) {
+      if (typeof c.key !== "string" || !c.key) continue;
+      if (c.type === "select" || c.type === "radio") selectKeys.add(c.key);
+      else if (c.type === "textarea" || c.type === "textfield") freeTextKeys.add(c.key);
+    }
+  }
+  // A key that is free-text in some form AND never a select/radio anywhere is a pure free-text key.
+  const pureFreeText = [...freeTextKeys].filter((k) => !selectKeys.has(k));
+  const leaked = pureFreeText.filter((k) => (SELECTED_VALUE_KEYS as readonly string[]).includes(k));
+  assertEquals(leaked, [], `free-text-only keys must never be in SELECTED_VALUE_KEYS (they belong in FREE_TEXT_VALUE_KEYS); leaked: ${leaked.join(", ")}`);
+  // And `answer` — the one free-text accompaniment today — must be classified as free-text, not a select.
+  assert((FREE_TEXT_VALUE_KEYS as readonly string[]).includes("answer"), "`answer` must be a FREE_TEXT_VALUE_KEYS member");
+  assert(!(SELECTED_VALUE_KEYS as readonly string[]).includes("answer"), "`answer` (free text) must NOT be a SELECTED_VALUE_KEYS member");
+});
+
+test("record worker: a feature-escalation answer path (`resolution:answer` + free-text `answer`) RESOLVES, not abstained as a conflict (issue #889 review)", async () => {
+  await run(
+    // The exact High finding: on `feature-escalation` the SELECT `resolution` offers `answer` (re-dispatch
+    // with guidance) and the free-text `answer` textarea carries that guidance. The prior code treated
+    // `answer` as a selection key, so `{ resolution: "answer", answer: "..." }` presented two distinct
+    // "selection" values (`"answer"` and the guidance prose) and was ALWAYS force-abstained as a conflict,
+    // blocking a fully supported, safe escalation path. The free-text field must not enter the conflict
+    // fence: the decision resolves on the `resolution` SELECT (`answer`, a safe non-destructive option).
+    [{ userTaskKey: "UT-FE", outcome: "resolved", variables: { resolution: "answer", answer: "Re-run with the corrected base branch." }, rationale: "the task just needs the right base", evidence: "inspected the failing run" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-FE", element_id: "feature-escalation", kind_label: "Feature escalation", form_key: "feature-escalation" })], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 1, "a valid answer-path feature escalation is submitted, not abstained");
+      assertEquals(completed[0].userTaskKey, "UT-FE");
+      assertEquals(completed[0].variables.resolution, "answer");
+      assertEquals(completed[0].variables.answer, "Re-run with the corrected base branch.");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-FE" });
+      assertEquals(rows[0].outcome, "resolved", "the answer path resolves — the free-text field is not a selection conflict");
+      assertEquals(rows[0].selected_option, "answer", "the selected option is the `resolution` SELECT value, not the prose");
+    },
+  );
+});
+
+test("record worker: a select-less form still records its free-text submitted value as selected_option", async () => {
+  await run(
+    // `pr-escalation` (element `wait-answer`) has NO select at all — only the free-text `answer`. With
+    // `answer` out of SELECTED_VALUE_KEYS, the record must still capture the submitted prose as
+    // selected_option via the free-text fallback, so the review surface shows what was submitted.
+    [{ userTaskKey: "UT-WA", outcome: "resolved", variables: { answer: "proceed with the documented plan" }, rationale: "the plan is sound", evidence: "read the thread" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-WA", element_id: "wait-answer", kind_label: "PR review", form_key: "pr-escalation" })], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 1, "a select-less free-text answer still resolves");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-WA" });
+      assertEquals(rows[0].outcome, "resolved");
+      assertEquals(rows[0].selected_option, "proceed with the documented plan", "the free-text submitted value is captured as selected_option");
+    },
+  );
 });
 
 test("record worker: a service-job RETRY after the engine completion landed recovers the prior agent completion (idempotent, never a false abstain)", async () => {
