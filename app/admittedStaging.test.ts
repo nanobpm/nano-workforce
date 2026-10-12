@@ -23,6 +23,11 @@ function memData() {
           find: (q: any) =>
             Promise.resolve(rows.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v))),
           insert: (r: any) => {
+            // Enforce the PRIMARY KEY (plan_key) uniqueness the real SQLite table has, so the
+            // concurrent-insert race path (a colliding second insert throws) is exercisable.
+            if (rows.some((x) => x[key] === r[key])) {
+              return Promise.reject(new Error(`UNIQUE constraint failed: ${name}.${key}`));
+            }
             rows.push(r);
             return Promise.resolve(r);
           },
@@ -88,6 +93,41 @@ test("recordAdmittedEpic never narrows an opted-in staged row back to opted-out"
   const retried = await recordAdmittedEpic(data, { ...EPIC, auto_resolve_escalations: 0 });
   assertEquals(retried.auto_resolve_escalations, 1, "an opted-in staged row is never narrowed to 0");
   assertEquals(tables.get("admitted_epics")![0].auto_resolve_escalations, 1);
+});
+
+test("recordAdmittedEpic applies the monotonic widening on the concurrent-insert race path", async () => {
+  // Simulate the race the reviewer cited (issue #889): an opted-OUT admission's insert WINS, so by
+  // the time the opted-IN caller runs, the row already exists — but the opted-in caller's initial
+  // `get` raced ahead of that commit and observed NO row, so it proceeds to `insert`, collides on the
+  // PRIMARY KEY, and lands in the catch path. The catch must apply the SAME 0→1 widening before
+  // returning the raced row, or the opt-in is silently lost.
+  const { data, tables } = memData();
+  // The winning racer commits its opted-out row directly (as its own successful insert).
+  await recordAdmittedEpic(data, { ...EPIC, auto_resolve_escalations: 0 });
+  assertEquals(tables.get("admitted_epics")![0].auto_resolve_escalations, 0, "the racer staged opted-out");
+
+  // Force the opted-in caller's FIRST `get` to miss (the race window: it read before the racer's
+  // commit became visible); the catch-path re-read then sees the committed row.
+  const realTable = (data as any).table;
+  let missOnce = true;
+  (data as any).table = (name: string, key: string) => {
+    const t = realTable(name, key);
+    if (name !== "admitted_epics") return t;
+    return {
+      ...t,
+      get: (k: any) => (missOnce ? ((missOnce = false), Promise.resolve(null)) : t.get(k)),
+    };
+  };
+
+  // The opted-in caller: get misses → insert collides (mock enforces PK uniqueness) → catch path.
+  const raced = await recordAdmittedEpic(data, { ...EPIC, auto_resolve_escalations: 1 });
+  assertEquals(raced.auto_resolve_escalations, 1, "the catch path widens the raced opted-out row to 1");
+  assertEquals(
+    tables.get("admitted_epics")!.find((r) => r.plan_key === EPIC.plan_key)!.auto_resolve_escalations,
+    1,
+    "the widening is persisted on the raced row",
+  );
+  assertEquals(tables.get("admitted_epics")!.length, 1, "still exactly one staged row (no duplicate)");
 });
 
 test("recordAdmittedPlanDep stages an edge and stays out of plan_deps", async () => {

@@ -407,7 +407,12 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
         // back to the element's static form only when the claim carried no snapshot.
         options: claimOptions(claim),
         agentJobKey,
-        worker: null,
+        // Persist the leasing worker's provenance (issue #889 review): the activation ledger already
+        // captured WHICH worker picked up this exact agent job, and the Auto-resolutions grid's Worker
+        // column reads this field — leaving it null blanked a provenance the API/UI promise. NULL only
+        // when the ledger has no row (a fast job the best-effort activation poll missed), matching the
+        // `agentJobKey` null-when-unknown contract above. `model` has no ledger source, so it stays NULL.
+        worker: agentActivation?.worker ?? null,
         model: null,
       },
       stewardKey,

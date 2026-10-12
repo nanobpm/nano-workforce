@@ -379,6 +379,9 @@ test("record worker: agent_job_key records the ANSWERING agent's activation key,
         "J-AGENT",
         "provenance points at the agent job that made the decision, not the record service job (J-1)",
       );
+      // The leasing worker captured in the SAME activation row is persisted too (issue #889 review) —
+      // the Auto-resolutions grid's Worker column reads it, and it was always blank before.
+      assertEquals(rows[0].worker, "agent-a", "the leasing worker's provenance is persisted on the record");
     },
   );
 });
@@ -397,6 +400,7 @@ test("record worker: agent_job_key is NULL (never the record task's own key) whe
       const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
       assertEquals(rows[0].outcome, "resolved");
       assertEquals(rows[0].agent_job_key, null, "unknown provenance stays NULL — never the record task's own key (J-1)");
+      assertEquals(rows[0].worker, null, "no activation row ⇒ worker provenance stays NULL, never fabricated");
     },
   );
 });

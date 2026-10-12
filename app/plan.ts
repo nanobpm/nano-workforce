@@ -392,15 +392,19 @@ export async function recordAdmittedEpic(
   epic: AdmittedEpicInput,
 ): Promise<AdmittedEpic> {
   const table = admittedEpics(data);
-  const existing = await table.get(epic.plan_key);
-  if (existing) {
-    // Widen the staged opt-in when this admission opts in and the staged row does not (0→1 only).
-    if (epic.auto_resolve_escalations === 1 && existing.auto_resolve_escalations !== 1) {
+  // The ONE canonical widening (issue #889 review): an opted-in caller observing a non-opted-in
+  // staged row widens it 0→1 and returns the widened row; otherwise returns the row unchanged. Shared
+  // by BOTH the read-existing path AND the concurrent-insert catch path, so the race below can never
+  // skip the widening the single-threaded path applies.
+  const widen = async (staged: AdmittedEpic): Promise<AdmittedEpic> => {
+    if (epic.auto_resolve_escalations === 1 && staged.auto_resolve_escalations !== 1) {
       await table.update(epic.plan_key, { auto_resolve_escalations: 1 });
-      return { ...existing, auto_resolve_escalations: 1 };
+      return { ...staged, auto_resolve_escalations: 1 };
     }
-    return existing;
-  }
+    return staged;
+  };
+  const existing = await table.get(epic.plan_key);
+  if (existing) return widen(existing);
   // Default the opt-in to 0 (opted out) when a caller omits it, so the staged row always carries the
   // flag explicitly and the lowering never reads an undefined it would silently coerce.
   const row: AdmittedEpic = { ...epic, auto_resolve_escalations: epic.auto_resolve_escalations ?? 0, created_at: now() };
@@ -410,8 +414,11 @@ export async function recordAdmittedEpic(
   } catch (err) {
     // Concurrent re-admission of the same epic races on the PRIMARY KEY (plan_key); honour the
     // idempotent no-op contract by returning the winning row rather than surfacing the collision.
+    // The winning row may be an opted-OUT insert that beat an opted-IN caller — apply the SAME
+    // monotonic widening before returning it, or the raced opt-in is silently lost (issue #889
+    // review): the caller opted in but the staged row stays 0.
     const raced = await table.get(epic.plan_key);
-    if (raced) return raced;
+    if (raced) return widen(raced);
     throw err;
   }
 }
