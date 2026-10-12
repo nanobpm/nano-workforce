@@ -17,7 +17,7 @@ import { taskCompletions } from "../../app/agentCompletion.ts";
 import { recordAgentJobObservation } from "../../app/agentActivationLedger.ts";
 import { claimEscalations, escalationAutoResolutions, LOOP_GUARD_MAX_RESOLUTIONS, recordResolution } from "../../app/escalationSteward.ts";
 import type { UserTaskRow } from "../../app/userTasks.ts";
-import handler from "./worker.ts";
+import handler, { SELECTED_VALUE_KEYS } from "./worker.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..", "..");
 
@@ -347,7 +347,7 @@ test("record worker: `options` snapshots the REAL form choices host-side, never 
     // real `action` select is [proceed, rebase, abandon]. The record must persist the host-side snapshot.
     [{ userTaskKey: "UT-TM", outcome: "resolved", variables: { action: "proceed" }, rationale: "ok", evidence: "checked", options: ["only-this"] }],
     async (data) => {
-      await claimEscalations(data, [taskRow({ user_task_key: "UT-TM", element_id: "trial-merge-decision", kind_label: "Trial merge" })], "PI-STEWARD");
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-TM", element_id: "trial-merge-decision", kind_label: "Trial merge", form_key: "trial-merge-decision" })], "PI-STEWARD");
     },
     async (data, completed) => {
       assertEquals(completed.length, 1);
@@ -360,4 +360,44 @@ test("record worker: `options` snapshots the REAL form choices host-side, never 
       );
     },
   );
+});
+
+test("record worker: a `directive`-keyed decision records its selected option (not NULL)", async () => {
+  await run(
+    // The plan-review-decision form's select key is `directive` (NOT `resolution`/`action`/`decision`).
+    // Before the fix, `directive` was missing from SELECTED_VALUE_KEYS, so a valid `{directive:"proceed"}`
+    // resolution recorded selected_option=NULL — the review surface couldn't show what was chosen
+    // (issue #889 review). The selected option must be derived from the `directive` key.
+    [{ userTaskKey: "UT-PRD", outcome: "resolved", variables: { directive: "proceed" }, rationale: "plan is sound", evidence: "reviewed" }],
+    async (data) => {
+      await claimEscalations(data, [taskRow({ user_task_key: "UT-PRD", element_id: "plan-review-decision", kind_label: "Plan review", form_key: "plan-review-decision" })], "PI-STEWARD");
+    },
+    async (data, completed) => {
+      assertEquals(completed.length, 1, "a valid directive resolution is submitted");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-PRD" });
+      assertEquals(rows[0].outcome, "resolved");
+      assertEquals(rows[0].selected_option, "proceed", "a `directive`-keyed select must record its chosen value, never NULL");
+    },
+  );
+});
+
+test("record worker: SELECTED_VALUE_KEYS covers EVERY escalation form's select key (drift guard)", async () => {
+  // Fix-the-class guard: the selected-option / destructive guard reads the chosen value off these
+  // well-known keys, so a NEW `.form` select key that is NOT in SELECTED_VALUE_KEYS would silently
+  // record selected_option=NULL and let a destructive value on that key slip the guard (issue #889
+  // review — `directive`/`mergeDecision` were the instances). Derive the canonical key set from the
+  // deployed forms and assert the guard covers all of them.
+  const formsDir = resolve(APP_ROOT, "resources", "forms");
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const selectKeys = new Set<string>();
+  for (const file of readdirSync(formsDir)) {
+    if (!file.endsWith(".form")) continue;
+    const doc: { components?: { type?: string; key?: string }[] } = JSON.parse(readFileSync(join(formsDir, file), "utf8"));
+    for (const c of doc.components ?? []) {
+      if ((c.type === "select" || c.type === "radio") && typeof c.key === "string" && c.key) selectKeys.add(c.key);
+    }
+  }
+  const covered = new Set<string>(SELECTED_VALUE_KEYS);
+  const missing = [...selectKeys].filter((k) => !covered.has(k));
+  assertEquals(missing, [], `every form select key must be in SELECTED_VALUE_KEYS; missing: ${missing.join(", ")}`);
 });

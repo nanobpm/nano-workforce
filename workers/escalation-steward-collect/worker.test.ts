@@ -104,6 +104,29 @@ test("collect worker: a too-fresh escalation (under min age) is left for a human
   });
 });
 
+test("collect worker: an explicit process-key opt-OUT is trusted, never overridden by a colliding opted-in subject key in another table", async () => {
+  await withApp(async (data, run) => {
+    // The PR's OWN run opted OUT (auto_resolve=0). Its escalation parks with process_key=PI-PR,
+    // subject_type="pr", subject_key="o/r#1".
+    await seedEscalation(data, { userTaskKey: "UT-1", processKey: "PI-PR", optedIn: false });
+    // A DIFFERENT subject table has a row whose run_key COLLIDES with the PR's subject_key but opted IN.
+    const ts = new Date().toISOString();
+    await data.table("delivery_graph_runs", "run_key").insert({
+      run_key: "o/r#1", process_key: "PI-DELIVERY", digest: "d", status: "running",
+      auto_resolve_escalations: 1, created_at: ts, updated_at: ts,
+    });
+    const out = await run();
+    // Old bug: the un-scoped subject fallback matched the colliding delivery row (opted in) and OR-ed
+    // PAST the PR's explicit opt-OUT, collecting a task the PR owner opted OUT of. Fix: a direct opt-OUT
+    // is trusted (only an ABSENT direct lookup falls back) AND the fallback is compound-keyed by
+    // subject_type, so a cross-table key collision can never make a non-opted-in task eligible.
+    assertEquals(out.eligibleCount, 0, "an explicit opt-OUT is never overridden by a colliding opted-in subject key");
+    assertEquals(out.claimed.length, 0);
+    const rows = await escalationAutoResolutions(data).all();
+    assertEquals(rows.length, 0, "no claim row is written for an opted-out subject");
+  });
+});
+
 test("collect worker: the overlap guard makes a tick a no-op while a prior steward run is ACTIVE", async () => {
   await withApp(async (data, run) => {
     await seedEscalation(data, { userTaskKey: "UT-1", processKey: "PI-PR", optedIn: true });

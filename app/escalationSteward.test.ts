@@ -26,6 +26,7 @@ import {
   loopGuardTripped,
   LOOP_GUARD_MAX_RESOLUTIONS,
   optInByProcessKey,
+  optInBySubjectKey,
   pendingAutoResolutionCount,
   recordResolution,
   reviewResolution,
@@ -244,6 +245,61 @@ test("optInByProcessKey: derives the opt-in flag from every subject table, keyed
     assertEquals(map.get("PI-PR"), true, "the opted-in PR is eligible");
     assertEquals(map.get("PI-FEAT"), false, "the non-opted-in feature is not");
     assertEquals(map.get("PI-UNKNOWN"), undefined, "an untracked instance is absent (fail-closed)");
+  });
+});
+
+test("optInBySubjectKey: keys by subject_type:subject_key so colliding keys across tables never cross-match", async () => {
+  await withData(async (data) => {
+    const ts = new Date().toISOString();
+    // A PR and a plan whose primary keys COLLIDE in the shared string space ("X"): the PR opted OUT,
+    // the plan opted IN. An un-scoped map would let one clobber the other; the compound key keeps them
+    // distinct so a non-opted-in subject is never made eligible by a colliding opted-in one (#889 review).
+    await data.table("pull_requests", "pr_key").insert({
+      pr_key: "X", repo: "o/r", number: 1, url: "u", status: "converging", current_round: 0,
+      process_key: "PI-PR", auto_resolve_escalations: 0, created_at: ts, updated_at: ts,
+    });
+    await data.table("plans", "plan_key").insert({
+      plan_key: "X", repo: "o/r", issue_number: 9, issue_url: "u", status: "running",
+      process_key: "PI-PLAN", auto_resolve_escalations: 1, created_at: ts, updated_at: ts,
+    });
+    const map = await optInBySubjectKey(data);
+    assertEquals(map.get("pr:X"), false, "the opted-OUT PR stays opted out under its own type");
+    assertEquals(map.get("plan:X"), true, "the opted-IN plan stays opted in under its own type");
+    assertEquals(map.get("X"), undefined, "the bare (un-scoped) key never exists — no cross-table collision");
+  });
+});
+
+test("claimEscalations: snapshots a delivery-graph human task's REAL options from its engine form_key", async () => {
+  await withData(async (data) => {
+    // A delivery-graph human task's element id is DYNAMIC (`delivery-human-task__<node>`) and has no
+    // static `escalationFormId` mapping, so snapshotting options off `element_id` alone recorded NULL
+    // for exactly these tasks (issue #889 review). The real form is carried on the task's engine
+    // `form_key` — snapshot from THERE. `delivery-escalation`'s `decision` select is [continue, retry].
+    const claimed = await claimEscalations(
+      data,
+      [taskRow({ user_task_key: "UT-DG", element_id: "delivery-human-task__publish-step", kind_label: "Delivery decision", form_key: "delivery-escalation" })],
+      "steward-A",
+    );
+    assertEquals(claimed.length, 1);
+    assertEquals(
+      claimed[0].options,
+      JSON.stringify(["continue", "retry"]),
+      "the claim snapshots the deployed form resolved from form_key, not NULL",
+    );
+  });
+});
+
+test("claimEscalations: an unresolvable form_key degrades to NULL options, never throwing", async () => {
+  await withData(async (data) => {
+    // A `form_key` that names no bundled `.form` (and a dynamic element with no static form) must NOT
+    // throw inside the claim loop (which would wedge the steward) — it degrades to NULL options.
+    const claimed = await claimEscalations(
+      data,
+      [taskRow({ user_task_key: "UT-NF", element_id: "delivery-human-task__x", kind_label: "Delivery", form_key: "no-such-form-key" })],
+      "steward-A",
+    );
+    assertEquals(claimed.length, 1, "the claim still succeeds");
+    assertEquals(claimed[0].options, null, "an unresolvable form yields NULL options, not a throw");
   });
 });
 

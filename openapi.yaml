@@ -91,6 +91,7 @@ components:
         - updatedAt
         - activeWorker
         - leaseUntil
+        - autoResolveEscalations
       properties:
         prKey:
           type: string
@@ -148,6 +149,12 @@ components:
         leaseUntil:
           type: string
           nullable: true
+        autoResolveEscalations:
+          type: boolean
+          description: >-
+            Whether this PR's run opted into automatic escalation resolution by the escalation
+            steward (issue #889). Derived from the subject row's durable `auto_resolve_escalations`
+            flag, never a clobbered process variable.
     ActivePrList:
       type: object
       required:
@@ -4100,9 +4107,6 @@ paths:
         stepping in after the fact. Both fold `review_state` off `pending` (idempotently — an
         already-reviewed record is left unchanged) and record who reviewed it, when, and an optional
         note. Reopening the completed user task is NOT required.
-      security:
-        - hookSecret: []
-        - {}
       requestBody:
         required: true
         content:
@@ -4146,12 +4150,6 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
         "404":
           description: No pending record with that id (already reviewed, or unknown).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorBody"
-        "401":
-          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
             application/json:
               schema:

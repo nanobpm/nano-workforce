@@ -26,6 +26,7 @@ import { completeEscalationAsAgent, snapshotEscalationFormOptions } from "../../
 import {
   countSubjectResolutions,
   ESCALATION_STEWARD_JOB_TYPE,
+  type EscalationAutoResolution,
   escalationAutoResolutions,
   isDestructiveOption,
   LOOP_GUARD_MAX_RESOLUTIONS,
@@ -58,11 +59,25 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** The well-known escalation-form fields whose value carries the selected option (`feature-escalation`
- *  `resolution`, `trial-merge-decision` `action`, the delivery `decision`, a generic `choice`/`answer`).
- *  The destructive guard reads the selected value from the decision's OWN variables via these keys, so
- *  a `choice`-less decision that still smuggles an `abandon` in its form variables is caught. */
-const SELECTED_VALUE_KEYS = ["choice", "resolution", "action", "decision", "answer"] as const;
+/** The well-known escalation-form SELECT field keys whose value carries the chosen option. This set
+ *  MUST cover every `select`/`radio` key across `resources/forms/*.form`, so a destructive choice can
+ *  never slip through on a key the guard doesn't read — the missing-key class is what let a
+ *  `{directive:"abandon"}` (plan-review / empty-plan) or a `{mergeDecision:"force-merge"}`
+ *  (merge-approval) submit unguarded and record `selected_option=NULL` (issue #889 review). The
+ *  canonical keys today are `decision` (delivery), `directive` (plan-review / empty-plan),
+ *  `resolution` (feature / readiness), `mergeDecision` (merge-approval) and `action` (trial-merge);
+ *  `choice` is the auxiliary hint and `answer` the free-text field. A drift test
+ *  (`worker.test.ts`) derives the form key set and fails if any is absent, so a NEW form select key
+ *  can't silently fall out of this guard. */
+export const SELECTED_VALUE_KEYS = [
+  "choice",
+  "resolution",
+  "action",
+  "decision",
+  "directive",
+  "mergeDecision",
+  "answer",
+] as const;
 
 /** Derive the option value a decision actually selected — the well-known form-variable keys FIRST
  *  (the values the completion would really submit), then the auxiliary `choice` hint only as a
@@ -86,6 +101,24 @@ function selectedOption(d: StewardDecision): string | null {
  *  predicate, not an `as` cast, so the narrowing is a real runtime guard. */
 function isDecision(v: unknown): v is StewardDecision {
   return isPlainObject(v);
+}
+
+/** The REAL form choices for a claimed task, from the snapshot taken host-side at CLAIM time (parsed
+ *  from the claim row's `options` JSON). The claim snapshot already resolves a delivery-graph human
+ *  task's dynamic form via its engine `form_key` — which `snapshotEscalationFormOptions(element_id)`
+ *  cannot, since that task's element id has no static form linkage (issue #889 review). Fall back to the
+ *  element's static form only when the claim carried no snapshot (a legacy/pre-snapshot claim row), and
+ *  never throw on malformed stored JSON (degrade to the fallback / null). */
+function claimOptions(claim: EscalationAutoResolution): string[] | null {
+  if (claim.options != null) {
+    try {
+      const parsed: unknown = JSON.parse(claim.options);
+      if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === "string");
+    } catch {
+      // Malformed stored JSON — fall through to re-deriving from the element's static form.
+    }
+  }
+  return claim.element_id != null ? snapshotEscalationFormOptions(claim.element_id) : null;
 }
 
 const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
@@ -226,10 +259,12 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
       selectedOption: selected,
       rationale,
       evidence,
-      // Snapshot the REAL form choices host-side from the claimed task's deployed `.form` (issue #889
-      // review) — never the deciding agent's self-reported `options` array, which the agent may omit or
-      // misstate. The claim row carries the task's `element_id`, the canonical form-contract key.
-      options: claim.element_id != null ? snapshotEscalationFormOptions(claim.element_id) : null,
+      // Carry through the REAL form choices snapshotted host-side at CLAIM time (from the task's
+      // engine-resolved `form_key`, issue #889 review) — never the deciding agent's self-reported
+      // `options`, which it may omit or misstate. The claim snapshot already resolves a delivery-graph
+      // human task's dynamic form (which `snapshotEscalationFormOptions(element_id)` alone cannot); fall
+      // back to the element's static form only when the claim carried no snapshot.
+      options: claimOptions(claim),
       agentJobKey,
       worker: null,
       model: null,

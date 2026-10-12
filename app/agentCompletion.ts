@@ -304,12 +304,52 @@ export function validateEscalationVariables(
 export function snapshotEscalationFormOptions(elementId: string): string[] | null {
   const formId = escalationFormId(elementId);
   if (!formId) return null;
-  const { allowed } = formContract(formId);
+  return optionUnionForForm(formId);
+}
+
+/** The union of every `select` field's allowed option values in a deployed `.form`, or `null` when the
+ *  form id is blank/unreadable (a missing or non-`.form` key never throws — see the try/catch). Shared
+ *  by {@link snapshotEscalationFormOptions} (fixed-form escalations, keyed off the element) and
+ *  {@link snapshotUserTaskFormOptions} (keyed off the engine-resolved `form_key`). */
+function optionUnionForForm(formId: string): string[] | null {
+  let contract: FormContract;
+  try {
+    contract = formContract(formId);
+  } catch {
+    // `formContract` does a `readFileSync` and THROWS on a missing/unreadable `.form` — a `form_key`
+    // can be a key that doesn't name a bundled form. Treat that as "nothing to snapshot", never a throw
+    // that would incident the record tick.
+    return null;
+  }
   const out: string[] = [];
-  for (const values of Object.values(allowed)) {
+  for (const values of Object.values(contract.allowed)) {
     for (const v of values) if (!out.includes(v)) out.push(v);
   }
   return out;
+}
+
+/** Snapshot the REAL option values a parked user task's deployed form offers, resolving the form from
+ *  the engine-reported `formKey` FIRST and falling back to the element's static form linkage — the SAME
+ *  precedence the Tasks grid denormalises with (`app/service.ts`), so there is one derivation. This is
+ *  what the escalation-steward record step persists for a DELIVERY-GRAPH human task, whose element id is
+ *  dynamic (`delivery-human-task__<node>`) and so has NO static `escalationFormId` mapping — snapshotting
+ *  off `element_id` alone would record `NULL` options for exactly those tasks (issue #889 review). Reads
+ *  the `formKey` safely (a key that doesn't name a bundled `.form` yields `null`, never a throw).
+ *  Returns `null` when neither source resolves a readable form. */
+export function snapshotUserTaskFormOptions(
+  formKey: string | null | undefined,
+  elementId: string | null | undefined,
+): string[] | null {
+  const engineKey = typeof formKey === "string" ? formKey.trim() : "";
+  if (engineKey) {
+    const fromKey = optionUnionForForm(engineKey);
+    if (fromKey != null) return fromKey;
+  }
+  if (elementId) {
+    const formId = escalationFormId(elementId);
+    if (formId) return optionUnionForForm(formId);
+  }
+  return null;
 }
 
 /** The canonical attributed completer. Records an attribution row in `task_completions` and THEN

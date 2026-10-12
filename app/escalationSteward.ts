@@ -24,6 +24,7 @@
 // door (`completeUserTaskAttributed`, app/agentCompletion.ts) with AGENT attribution — never recorded
 // as a human decision (ADR 0046).
 import type { DataLayer } from "@nanobpm/urban";
+import { snapshotUserTaskFormOptions } from "./agentCompletion.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import type { UserTaskRow } from "./userTasks.ts";
 
@@ -195,6 +196,11 @@ export async function claimEscalations(
   await releaseExpiredClaims(data);
   for (const row of rows) {
     try {
+      // Snapshot the task's REAL form choices at claim time, resolving the form from the task's
+      // engine-reported `form_key` first (a delivery-graph human task's element id is dynamic and has
+      // no static form linkage, so an element-id-only snapshot would record NULL options for it —
+      // issue #889 review). Safe: a `form_key` that names no bundled form yields null, never a throw.
+      const optionSnapshot = snapshotUserTaskFormOptions(row.form_key, row.element_id);
       const id = await escalationAutoResolutions(data).insert({
         user_task_key: row.user_task_key,
         escalation_kind: row.kind_label,
@@ -204,7 +210,7 @@ export async function claimEscalations(
         subject_url: row.subject_url,
         process_instance_key: row.process_key,
         question: row.question,
-        options: null,
+        options: optionSnapshot != null ? JSON.stringify(optionSnapshot) : null,
         outcome: "claimed",
         submitted_variables: null,
         selected_option: null,
@@ -388,21 +394,23 @@ export async function optInByProcessKey(data: DataLayer): Promise<Map<string, bo
 export async function optInBySubjectKey(data: DataLayer): Promise<Map<string, boolean>> {
   const out = new Map<string, boolean>();
   // Each subject table's PRIMARY-KEY column differs, so read it generically: the row's key field is
-  // the one named `key`. A missing/blank key is dropped (the `out.delete("")` below) so it never
-  // matches a real escalation subject.
-  const collect = async (table: string, key: string) => {
+  // the one named `key`. The map is keyed by a `<subjectType>:<subjectKey>` COMPOUND key, never the
+  // bare subject key — a `feature_key`, `plan_key`, `pr_key` and `run_key` share one string space, so
+  // an un-scoped key would let one subject's opt-in (or opt-OUT) silently clobber a DIFFERENT subject
+  // type's row with a colliding key, making a non-opted-in task eligible (issue #889 review). A
+  // missing/blank key is dropped so it never matches a real escalation subject.
+  const collect = async (table: string, key: string, subjectType: string) => {
     const rows: OptInSubjectRow[] = await data.table<OptInSubjectRow>(table, key).all();
     for (const r of rows) {
       // Read the subject's primary-key column generically (it differs per table). `keyOf` is a type
       // guard, not an `as` cast, so the dynamic read stays type-safe.
       const keyValue = keyOf(r, key);
-      out.set(keyValue ?? "", r.auto_resolve_escalations === 1);
+      if (keyValue) out.set(`${subjectType}:${keyValue}`, r.auto_resolve_escalations === 1);
     }
   };
-  await collect("feature_runs", "feature_key");
-  await collect("plans", "plan_key");
-  await collect("pull_requests", "pr_key");
-  await collect("delivery_graph_runs", "run_key");
-  out.delete("");
+  await collect("feature_runs", "feature_key", "feature");
+  await collect("plans", "plan_key", "plan");
+  await collect("pull_requests", "pr_key", "pr");
+  await collect("delivery_graph_runs", "run_key", "delivery");
   return out;
 }

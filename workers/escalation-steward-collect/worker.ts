@@ -65,14 +65,21 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // subject's instance; an escalation parked INSIDE a callActivity child cell (the shared
   // `human-escalation`/`implement-cell`) instead carries the CHILD's `process_key` (no subject row
   // tracks it) but the PARENT run's `subject_key` (pollUserTasks correlates it via the root instance).
-  // So check the direct `process_key` first, then fall back to the correlated `subject_key`. A task
-  // with no tracked subject either way is NOT opted in (fail-closed).
+  // So check the direct `process_key` first; only when that lookup is ABSENT (no subject row keyed on
+  // this process instance at all) fall back to the correlated `<subject_type>:<subject_key>`. A direct
+  // lookup that returned `false` is an explicit opt-OUT and MUST be trusted — never OR-ed past with a
+  // subject-key fallback that could flip it back to eligible (issue #889 review). The subject fallback
+  // is COMPOUND-keyed by `subject_type` so a `plan_key`/`pr_key`/`run_key` colliding across tables
+  // can't cross-match. A task with no tracked subject either way is NOT opted in (fail-closed).
   const eligible: UserTaskRow[] = [];
   for (const row of open) {
     const procKey = row.process_key ?? "";
+    const directOptIn = procKey !== "" ? optInByProc.get(procKey) : undefined;
     const optedIn =
-      (procKey !== "" && optInByProc.get(procKey) === true) ||
-      (row.subject_key != null && row.subject_key !== "" && optInBySubject.get(row.subject_key) === true);
+      directOptIn !== undefined
+        ? directOptIn
+        : row.subject_key != null && row.subject_key !== "" &&
+          optInBySubject.get(`${row.subject_type}:${row.subject_key}`) === true;
     if (isEligibleEscalation(row, { optedIn, minAgeMs, claimedUserTaskKeys: claimedKeys, at })) {
       eligible.push(row);
     }

@@ -21,6 +21,8 @@ import {
   escalationFormId,
   latestCompletion,
   revertAgentCompletion,
+  snapshotEscalationFormOptions,
+  snapshotUserTaskFormOptions,
   type TaskCompletion,
   validateEscalationVariables,
 } from "./agentCompletion.ts";
@@ -956,5 +958,36 @@ test("feature-escalation demands non-blank answer on the answer path, but not on
     validateEscalationVariables("feature-escalation", { resolution: "abandon" }),
     null,
     "the abandon path does not demand the hidden answer field",
+  );
+});
+
+test("snapshotUserTaskFormOptions: resolves the engine form_key first (delivery-graph human tasks)", () => {
+  // A delivery-graph human task's element id is dynamic and has NO static escalationFormId mapping, so
+  // the element-only snapshot returns null — but its engine form_key names the real deployed form. The
+  // form_key must win so the options are the REAL choices, not NULL (issue #889 review).
+  assertEquals(snapshotEscalationFormOptions("delivery-human-task__publish"), null, "no static form for a dynamic element id");
+  assertEquals(
+    snapshotUserTaskFormOptions("delivery-escalation", "delivery-human-task__publish"),
+    ["continue", "retry"],
+    "the engine form_key resolves the deployed form's real options",
+  );
+});
+
+test("snapshotUserTaskFormOptions: falls back to the element's static form when form_key is blank", () => {
+  // No engine form_key — fall back to the fixed-form element's static linkage (trial-merge-decision →
+  // [proceed, rebase, abandon]).
+  assertEquals(snapshotUserTaskFormOptions(null, "trial-merge-decision"), ["proceed", "rebase", "abandon"]);
+  assertEquals(snapshotUserTaskFormOptions("   ", "trial-merge-decision"), ["proceed", "rebase", "abandon"], "a blank form_key falls through to the element form");
+});
+
+test("snapshotUserTaskFormOptions: an unresolvable form_key never throws (safe read)", () => {
+  // `formContract` does a readFileSync that THROWS on a missing file — a form_key that names no bundled
+  // form must degrade to the element fallback / null, never throw (a throw in the claim loop wedges the
+  // steward). With neither a resolvable form_key NOR a mappable element, the result is null.
+  assertEquals(snapshotUserTaskFormOptions("no-such-form", "delivery-human-task__x"), null, "unresolvable key + dynamic element → null, no throw");
+  assertEquals(
+    snapshotUserTaskFormOptions("no-such-form", "trial-merge-decision"),
+    ["proceed", "rebase", "abandon"],
+    "an unresolvable form_key falls back to the element's static form",
   );
 });
