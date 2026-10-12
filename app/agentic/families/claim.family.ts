@@ -51,19 +51,32 @@ function readString(value: unknown, key: string): string | undefined {
 }
 
 /**
- * Read a resync snapshot's `jobKeys` array (the authoritative full jobKey set an instance owns) from a
- * `claim` frame, or undefined when the field is absent / not an array of strings. Its PRESENCE is the
+ * The classification of a `claim` frame's `jobKeys` field. Its PRESENCE — NOT its validity — is the
  * discriminant that tells an authoritative resync snapshot (`{ instance, jobKeys }`, issue #893) apart
- * from a classic per-job claim (`{ instance, jobKey }`). It rides the existing `claim` wire family as a
- * forward-compatible enrichment — the protocol's structural validators tolerate the extra field, so an
- * older hub ignores it and keeps additive behaviour.
+ * from a classic per-job claim (`{ instance, jobKey }`). So a PRESENT-but-malformed `jobKeys` is a
+ * BROKEN snapshot and must be rejected; it must never be treated as "absent" and laundered through the
+ * per-job validator (which tolerates the extra field), because that would let a malformed snapshot
+ * field mutate ownership on a frame that merely carries a valid `jobKey`.
  */
-function readJobKeys(value: unknown): readonly string[] | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  if (!Object.hasOwn(value, "jobKeys")) return undefined;
+type JobKeysField =
+  | { present: false }
+  | { present: true; malformed: true }
+  | { present: true; malformed: false; jobKeys: readonly string[] };
+
+/**
+ * Classify a frame payload's `jobKeys` field. It rides the existing `claim` wire family as a
+ * forward-compatible enrichment — the protocol's structural validators tolerate the extra field, so an
+ * older hub ignores it and keeps additive behaviour. This is the SINGLE source that both the validator
+ * and the handler branch on, so the "present ⇒ snapshot" discriminant cannot drift between them.
+ */
+function readJobKeysField(value: unknown): JobKeysField {
+  if (!value || typeof value !== "object") return { present: false };
+  if (!Object.hasOwn(value, "jobKeys")) return { present: false };
   const field = Object.getOwnPropertyDescriptor(value, "jobKeys")?.value;
-  if (!Array.isArray(field) || !field.every((k) => typeof k === "string")) return undefined;
-  return field;
+  if (!Array.isArray(field) || !field.every((k) => typeof k === "string")) {
+    return { present: true, malformed: true };
+  }
+  return { present: true, malformed: false, jobKeys: field };
 }
 
 /**
@@ -79,12 +92,18 @@ function readJobKeys(value: unknown): readonly string[] | undefined {
  * malformed `jobKey` can no longer smuggle past on a snapshot frame.
  */
 function validateClaimPayload(payload: unknown): { ok: boolean; codes: string[] } {
-  const jobKeys = readJobKeys(payload);
-  if (jobKeys !== undefined) {
+  const field = readJobKeysField(payload);
+  if (field.present) {
+    // PRESENCE selects the snapshot variant unconditionally. A present-but-malformed `jobKeys` is a
+    // broken snapshot — reject it here rather than letting it fall through to the per-job validator,
+    // which would accept it (extra fields tolerated) on any frame that also carries a valid `jobKey`.
+    if (field.malformed) {
+      return { ok: false, codes: ["bad-jobKeys"] };
+    }
     const instance = readString(payload, "instance");
     if (instance) {
       // A frame carrying BOTH variants must satisfy both — the snapshot branch must never launder a
-      // malformed per-job field past validation. (readJobKeys defined the value as an object.)
+      // malformed per-job field past validation. (readJobKeysField defined the value as an object.)
       if (typeof payload === "object" && payload !== null && !Object.hasOwn(payload, "jobKey")) {
         return { ok: true, codes: [] };
       }
@@ -137,12 +156,13 @@ export const family: AgenticFamily = {
         ctx.log.warn("agentic claim: malformed payload", { errors: valid.codes });
         return;
       }
-      const jobKeys = readJobKeys(frame.payload);
-      if (jobKeys !== undefined) {
-        // Validated above, so the instance is present and non-empty.
+      const field = readJobKeysField(frame.payload);
+      if (field.present && !field.malformed) {
+        // Validated above, so the instance is present and non-empty (and a malformed `jobKeys` was
+        // already rejected, so `field.present && field.malformed` can never reach the registry).
         const instance = readString(frame.payload, "instance");
         if (!instance) return;
-        registry.replaceInstance(instance, jobKeys);
+        registry.replaceInstance(instance, field.jobKeys);
         return;
       }
       const instance = readString(frame.payload, "instance");

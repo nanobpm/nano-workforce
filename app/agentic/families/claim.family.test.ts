@@ -304,7 +304,7 @@ test("a snapshot frame carrying BOTH jobKeys and a malformed jobKey is rejected 
   }
 });
 
-test("a snapshot frame with a malformed jobKeys array falls through to per-job validation (rejected without a jobKey)", async () => {
+test("a frame with a valid jobKey but a PRESENT malformed jobKeys is rejected — a broken snapshot can't launder as a per-job claim", async () => {
   const { transport } = mountClaim();
   try {
     const peer = fakeConn("c1", "host-supervisor");
@@ -312,8 +312,31 @@ test("a snapshot frame with a malformed jobKeys array falls through to per-job v
     await flush();
     peer.feed(claimFrame("wk-a", "8420"));
     await flush();
-    // `jobKeys` present but not a string array → NOT a snapshot; with no `jobKey` it is a malformed
-    // per-job claim and must be rejected, never mistaken for a resync.
+    // The reviewer's case: `jobKeys` is PRESENT but malformed ("invalid"), while `jobKey` is valid.
+    // Presence — not validity — selects the snapshot variant, so a broken `jobKeys` must be rejected,
+    // never treated as absent and accepted as a bare per-job claim that mutates ownership.
+    peer.feed({ lane: "control", family: CLAIM_FAMILY, seq: 1, payload: { instance: "wk-a", jobKey: "8421", jobKeys: "invalid" } });
+    await flush();
+
+    const reg = currentClaimRegistry();
+    assert(reg);
+    assertEquals(reg.jobKeysFor("wk-a"), ["8420"], "the malformed-snapshot frame touched nothing");
+    assertEquals(reg.count(), 1);
+  } finally {
+    family.teardown?.();
+  }
+});
+
+test("a snapshot frame with a PRESENT malformed jobKeys array is rejected as a broken snapshot (presence is the discriminant)", async () => {
+  const { transport } = mountClaim();
+  try {
+    const peer = fakeConn("c1", "host-supervisor");
+    transport.connect(peer.conn);
+    await flush();
+    peer.feed(claimFrame("wk-a", "8420"));
+    await flush();
+    // `jobKeys` present but not a string array → a broken snapshot; it is rejected outright, never
+    // mistaken for a per-job claim. (No `jobKey` here either, but presence alone is enough to reject.)
     peer.feed({ lane: "control", family: CLAIM_FAMILY, seq: 1, payload: { instance: "wk-a", jobKeys: "8421" } });
     await flush();
 
