@@ -101,12 +101,15 @@ The `claim` family thus carries **two payload variants** — the classic per-job
 `{ instance, jobKey }` and the resync snapshot `{ instance, jobKeys }` (the `claim.snapshot` wire
 contract in `app/contracts.ts`). The pinned `@nanobpm/agentic` validator predates the snapshot variant
 and requires a non-empty `jobKey`, so the hub validates the **union** itself: a frame is well-formed
-iff it is a valid snapshot (non-empty `instance` + a `jobKeys` string array) XOR a valid per-job
-claim — and a frame carrying *both* fields must satisfy *both*, so the snapshot branch never bypasses
-validation. The **presence** of `jobKeys` (not its validity) is the snapshot discriminant, so a
-present-but-malformed `jobKeys` is a broken snapshot and is **rejected** — never treated as absent and
-laundered through the per-job validator (which would accept it on any frame that also carries a valid
-`jobKey`). Versioning the snapshot into the canonical `@nanobpm/agentic` protocol payloads is the
+iff it is a valid snapshot (non-empty `instance` + a `jobKeys` array of **non-empty** strings) or a
+valid per-job claim. This is a **union with a validated overlap**, not an exclusive-or: a frame
+carrying *both* fields is accepted, but only when *both* halves validate, so the snapshot branch never
+bypasses validation. The **presence** of `jobKeys` (not its validity) is the snapshot discriminant, so
+a present-but-malformed `jobKeys` — a non-array, a non-string element, **or an empty-string element**
+(held to the same non-empty bar as the per-job `jobKey`) — is a broken snapshot and is **rejected**,
+never treated as absent and laundered through the per-job validator (which would accept it on any
+frame that also carries a valid `jobKey`). The empty *array* remains the meaningful "owns nothing now"
+resync — only empty *elements* are rejected. Versioning the snapshot into the canonical `@nanobpm/agentic` protocol payloads is the
 nano-ide follow-up issue #893 scopes ("coordinate with the `@nanobpm/agentic` package owners"); the
 producer half (one snapshot per instance, including empty sets) is nano-supervisor#63.
 

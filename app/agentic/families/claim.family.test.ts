@@ -373,6 +373,38 @@ test("an EMPTY snapshot is a valid authoritative resync — the supervisor asser
   }
 });
 
+test("a snapshot whose jobKeys contains an EMPTY-STRING element is rejected — it can't masquerade as an 'owns nothing' resync and clear real claims", async () => {
+  const { transport } = mountClaim();
+  try {
+    const peer = fakeConn("c1", "host-supervisor");
+    transport.connect(peer.conn);
+    await flush();
+    peer.feed(claimFrame("wk-a", "8420"));
+    await flush();
+
+    const reg = currentClaimRegistry();
+    assert(reg);
+    assertEquals(reg.jobKeysFor("wk-a"), ["8420"]);
+
+    // The empty-ARRAY resync is valid ("owns nothing"), but a present `jobKeys` with an empty-STRING
+    // element is a BROKEN snapshot — `replaceInstance` silently skips empty keys, so `[""]` would
+    // otherwise masquerade as an authoritative empty snapshot and clear every real claim. It is held
+    // to the same non-empty bar as the per-job `jobKey` and rejected outright, touching nothing.
+    peer.feed({ lane: "control", family: CLAIM_FAMILY, seq: 1, payload: { instance: "wk-a", jobKeys: [""] } });
+    await flush();
+    assertEquals(reg.jobKeysFor("wk-a"), ["8420"], "the sole-empty-string snapshot did not clear the real claim");
+    assertEquals(reg.count(), 1);
+
+    // A MIXED array with one empty element is equally a broken snapshot — fail closed, not partial.
+    peer.feed({ lane: "control", family: CLAIM_FAMILY, seq: 1, payload: { instance: "wk-a", jobKeys: ["8421", ""] } });
+    await flush();
+    assertEquals(reg.jobKeysFor("wk-a"), ["8420"], "the mixed empty-element snapshot touched nothing — not even the valid element");
+    assertEquals(reg.count(), 1);
+  } finally {
+    family.teardown?.();
+  }
+});
+
 test("teardown clears the singleton", () => {
   mountClaim();
   assert(currentClaimRegistry() !== undefined);

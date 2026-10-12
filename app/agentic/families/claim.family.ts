@@ -73,7 +73,13 @@ function readJobKeysField(value: unknown): JobKeysField {
   if (!value || typeof value !== "object") return { present: false };
   if (!Object.hasOwn(value, "jobKeys")) return { present: false };
   const field = Object.getOwnPropertyDescriptor(value, "jobKeys")?.value;
-  if (!Array.isArray(field) || !field.every((k) => typeof k === "string")) {
+  // Each element must be a NON-EMPTY string — the canonical per-job validator requires a non-empty
+  // `jobKey`, so a snapshot entry is held to the same bar. An empty-string element is NOT a benign
+  // "owns nothing" signal (that is the empty ARRAY): `replaceInstance` silently skips empty keys, so
+  // `{ instance, jobKeys: [""] }` would otherwise masquerade as an authoritative empty snapshot and
+  // clear every real claim. Fail closed — a present `jobKeys` with any empty element is a broken
+  // snapshot and is rejected, never laundered through the per-job validator.
+  if (!Array.isArray(field) || !field.every((k) => typeof k === "string" && k !== "")) {
     return { present: true, malformed: true };
   }
   return { present: true, malformed: false, jobKeys: field };
@@ -86,10 +92,11 @@ function readJobKeysField(value: unknown): JobKeysField {
  * variant and REQUIRES a non-empty `jobKey`, so it cannot validate the union — routing a snapshot
  * through `validatePayload` would reject the very frame that closes a resync. Validate the union
  * locally instead: a payload is well-formed iff it is EITHER a valid snapshot (non-empty `instance`
- * plus a `jobKeys` array of strings — an EMPTY array is the meaningful "owns nothing now" resync) XOR
- * a valid per-job claim per the canonical validator. This also closes the bypass hole: a frame
- * carrying BOTH fields is validated as a snapshot AND must still pass the per-job validator, so a
- * malformed `jobKey` can no longer smuggle past on a snapshot frame.
+ * plus a `jobKeys` array of NON-EMPTY strings — an EMPTY array is the meaningful "owns nothing now"
+ * resync) OR a valid per-job claim per the canonical validator. This is a UNION with a VALIDATED
+ * OVERLAP, not an exclusive-or: a frame carrying BOTH fields is accepted, but only when BOTH halves
+ * validate — it is validated as a snapshot AND must still pass the per-job validator, so a malformed
+ * `jobKey` can no longer smuggle past on a snapshot frame.
  */
 function validateClaimPayload(payload: unknown): { ok: boolean; codes: string[] } {
   const field = readJobKeysField(payload);
@@ -148,7 +155,8 @@ export const family: AgenticFamily = {
       // supervisor restates the full current ownership for one instance and its view WINS —
       // `replaceInstance` drops every claim it did NOT re-assert (so a `release` lost during a hub
       // outage no longer strands the job). A supervisor that never sends it keeps additive behaviour.
-      // EVERY claim frame is validated first — as the snapshot XOR per-job union — so the snapshot
+      // EVERY claim frame is validated first — as the snapshot/per-job union (a both-fields frame is
+      // accepted only when both halves validate) — so the snapshot
       // branch never bypasses validation (a malformed frame is dropped before it touches the
       // registry, exactly like a malformed per-job claim).
       const valid = validateClaimPayload(frame.payload);
