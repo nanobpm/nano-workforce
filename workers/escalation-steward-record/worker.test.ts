@@ -297,6 +297,33 @@ test("record worker: an overlapping tick that RECLAIMED the task mid-run is not 
   );
 });
 
+test("record worker: an EXPIRED-but-still-owned claim is RENEWED and finalised, not discarded (unbounded agent run, issue #889 review)", async () => {
+  // The liveness bug the reviewer cited: the claim's 15-minute lease starts at claim time, but the
+  // `senior:escalation-steward` agent has NO bounded runtime. On a long agent run the lease lapses
+  // before this record step runs. Last round's owner+lease CAS then REJECTED the expired claim and
+  // SKIPPED every decision, so the valid agent result was thrown away and the next tick repeated the
+  // work. THIS run still owns the claim (no overlapping tick could have reclaimed it — the steward's
+  // overlap guard blocks any other tick while this run is ACTIVE), so the record step must RE-ACQUIRE
+  // (renew) its own lease atomically and finalise, not discard.
+  await run(
+    [{ userTaskKey: "UT-1", outcome: "resolved", choice: "retry", variables: { answer: "x" }, rationale: "ok", evidence: "checked" }],
+    async (data) => {
+      // This run (PI-STEWARD, the handler's processInstanceKey) claims UT-1 with an ALREADY-EXPIRED
+      // lease (ttlMs=-1), mimicking an agent that ran longer than the lease TTL. No overlapping tick
+      // reclaims it — the row stays `claimed` by PI-STEWARD, just with a lapsed `claimed_until`.
+      await claimEscalations(data, [taskRow({})], "PI-STEWARD", -1);
+    },
+    async (data, completed) => {
+      // The decision is RENEWED + submitted, not discarded.
+      assertEquals(completed.length, 1, "the owned claim is renewed and the decision is submitted");
+      assertEquals(completed[0].userTaskKey, "UT-1");
+      const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+      assertEquals(rows[0].outcome, "resolved", "the expired-but-owned claim is finalised, not left `claimed`");
+      assertEquals(rows[0].claimed_by, null, "finalising clears the claim");
+    },
+  );
+});
+
 test("record worker: a destructive value smuggled in `variables` (no `choice`) is abstained", async () => {
   await run(
     // No `choice` field — the destructive option is only in the form variables (`resolution`).

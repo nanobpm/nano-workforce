@@ -32,6 +32,7 @@ import {
   LOOP_GUARD_MAX_RESOLUTIONS,
   loopGuardTripped,
   recordResolution,
+  renewClaim,
 } from "../../app/escalationSteward.ts";
 
 interface In extends Record<string, unknown> {
@@ -227,6 +228,20 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   for (const d of decisions) {
     const key = typeof d.userTaskKey === "string" ? d.userTaskKey.trim() : "";
     if (!key) continue;
+    // Re-acquire (renew) THIS run's own claim lease BEFORE the ownership fence + finalise (issue #889
+    // review). The claim lease is a short crash-recovery TTL, but the `senior:escalation-steward`
+    // agent has no bounded runtime, so a long agent run can let the lease lapse before this record
+    // step runs. Without renewal the owner+lease CAS in `recordResolution` would REJECT the expired
+    // claim and DISCARD the agent's valid decision, and the next tick would repeat the work. The
+    // renew is owner-fenced (matched to THIS run), so a claim another run reclaimed — or a
+    // released/finalised row — renews nothing and is skipped, preserving the no-double-answer fence.
+    // The steward's overlap guard guarantees no OTHER tick touches claims while this run is ACTIVE, so
+    // matching `claimed_by` alone is a sufficient exclusivity fence for the renewal.
+    const renewed = await renewClaim(app.data, key, stewardKey);
+    if (!renewed) {
+      app.log.warn("escalation-steward record: claim no longer owned by this run (reclaimed/released), skipping decision", { userTaskKey: key });
+      continue;
+    }
     // Claim/ownership fence (fail-closed, applied to EVERY decision — not only `resolved`). This
     // steward instance must hold a LIVE claim for the key. Without it a hallucinated key could
     // complete an unclaimed — or a non-opted-in, or another run's — task. Crucially the fence is a
@@ -234,9 +249,8 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     // decision (even an `abstained`) for a key this run does not own would finalise ANOTHER run's live
     // claim. Skip every decision not owned by this run instead. This read is a fast pre-filter only —
     // the ATOMIC guard is the owner+lease-scoped CAS in `recordResolution` below, which closes the
-    // read→finalise race (an overlapping tick reclaiming the task after this read). Require an
-    // UNEXPIRED lease here too: a lapsed claim is already reclaimable, so acting on it is the stale
-    // half of that race.
+    // read→finalise race (an overlapping tick reclaiming the task after this read). The lease is
+    // UNEXPIRED here because the renew above just extended it for this owned claim.
     const claimRows = await escalationAutoResolutions(app.data).find({ user_task_key: key });
     const claim = claimRows.find((r) => r.outcome === "claimed");
     const fenceNow = new Date().toISOString();

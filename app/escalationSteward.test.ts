@@ -30,6 +30,7 @@ import {
   optInBySubjectKey,
   pendingAutoResolutionCount,
   recordResolution,
+  renewClaim,
   reviewResolution,
   STEWARD_NEVER_RESOLVE_ELEMENTS,
 } from "./escalationSteward.ts";
@@ -238,6 +239,43 @@ test("recordResolution: the finalise CAS refuses an EXPIRED lease — a crashed 
     assertEquals(won, false, "an expired lease loses the finalise CAS");
     const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
     assertEquals(rows[0].outcome, "claimed", "the expired claim is not finalised by its stale owner");
+  });
+});
+
+test("renewClaim: the OWNER re-acquires an expired-but-owned lease (unbounded agent run) so its finalise CAS then wins", async () => {
+  await withData(async (data) => {
+    // steward-A claims UT-1 with an ALREADY-EXPIRED lease (the agent ran longer than the TTL). No
+    // overlapping tick reclaimed it, so A still owns the row — it must be able to re-acquire.
+    await claimEscalations(data, [taskRow({})], "steward-A", -1);
+    // Before renewal the finalise CAS refuses the expired lease (safety: a stale write finalises nothing).
+    assertEquals(await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-A"), false);
+    // The owner renews its own claim (owner-fenced, NOT expiry-gated — the point is to recover a lapsed lease).
+    assertEquals(await renewClaim(data, "UT-1", "steward-A"), true, "the owner re-acquires its expired-but-owned lease");
+    // With the lease renewed, the owner's finalise CAS now wins and the record is written.
+    assertEquals(await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-A"), true, "the owner's finalise CAS wins after renewal");
+    assertEquals((await escalationAutoResolutions(data).find({ user_task_key: "UT-1" }))[0].outcome, "resolved");
+  });
+});
+
+test("renewClaim: a NON-OWNER cannot renew another run's claim (no lease theft)", async () => {
+  await withData(async (data) => {
+    // steward-A owns UT-1 (expired lease). A DIFFERENT run must NOT be able to renew/steal it — only
+    // the claim's own holder may re-acquire, so an overlapping tick can never resurrect a foreign claim.
+    await claimEscalations(data, [taskRow({})], "steward-A", -1);
+    assertEquals(await renewClaim(data, "UT-1", "steward-B"), false, "a non-owner loses the renew (owner-fenced)");
+    const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+    assertEquals(rows[0].claimed_by, "steward-A", "the claim still belongs to its real owner");
+  });
+});
+
+test("renewClaim: renewing a RELEASED (deleted) or already-finalised claim finalises nothing", async () => {
+  await withData(async (data) => {
+    // No claim row at all (released by a reclaim or never claimed) → renew changes nothing.
+    assertEquals(await renewClaim(data, "UT-GONE", "steward-A"), false, "no open claim row → renew loses");
+    // A finalised (`resolved`) row is no longer `claimed`, so renew must not resurrect it.
+    await claimEscalations(data, [taskRow({})], "steward-A");
+    await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-A");
+    assertEquals(await renewClaim(data, "UT-1", "steward-A"), false, "a finalised row is not `claimed` → renew loses");
   });
 });
 

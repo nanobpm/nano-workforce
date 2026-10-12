@@ -373,6 +373,37 @@ export async function recordResolution(
   return res.changed > 0;
 }
 
+/** Re-acquire (renew) THIS run's own claim lease before finalising it (issue #889 review).
+ *
+ *  Why it exists: the claim lease ({@link CLAIM_TTL_MS}) is a short CRASH-RECOVERY TTL, but the
+ *  `senior:escalation-steward` agent task it must survive has NO bounded runtime (no interrupting
+ *  boundary timer). On a long agent run the lease lapses before the record step runs, and
+ *  {@link recordResolution}'s owner+lease CAS would then REJECT the expired claim and discard the
+ *  agent's valid decision — the next tick would simply repeat the work. Renewing re-asserts the lease
+ *  so the finalise CAS can win.
+ *
+ *  Why owner-fenced but NOT expiry-gated: the whole point is to recover a LAPSED lease, so gating on
+ *  an unexpired lease would defeat it. Scoping to `claimed_by = owner` is a sufficient exclusivity
+ *  fence here because the steward's overlap guard (collect worker) blocks any OTHER tick from touching
+ *  claims while this run is ACTIVE — so no overlapping tick can have released+reclaimed the row out
+ *  from under this still-active run. A foreign reclaim (`claimed_by != owner`) or a released/finalised
+ *  row (no open `claimed` row) therefore changes ZERO rows and reports `false`, so a stale/foreign run
+ *  can never steal or resurrect a claim. Returns whether this run's claim was renewed. */
+export async function renewClaim(
+  data: DataLayer,
+  userTaskKey: string,
+  owner: string,
+  ttlMs: number = CLAIM_TTL_MS,
+): Promise<boolean> {
+  const until = new Date(Date.now() + ttlMs).toISOString();
+  const res = await data.open().exec(
+    `UPDATE "escalation_auto_resolutions" SET "claimed_until" = ?
+     WHERE "user_task_key" = ? AND "outcome" = 'claimed' AND "claimed_by" = ?`,
+    [until, userTaskKey, owner],
+  );
+  return res.changed > 0;
+}
+
 /** Count a subject's prior steward RESOLUTIONS (for the loop guard). Only `resolved` rows count — an
  *  abstention did not apply an answer, so it must not trip the guard. Scoped by BOTH `subject_type`
  *  AND `subject_key` (issue #889 review): a bare `subject_key` collides across subject types (a plan
