@@ -91,6 +91,7 @@ components:
         - updatedAt
         - activeWorker
         - leaseUntil
+        - autoResolveEscalations
       properties:
         prKey:
           type: string
@@ -148,11 +149,18 @@ components:
         leaseUntil:
           type: string
           nullable: true
+        autoResolveEscalations:
+          type: boolean
+          description: >-
+            Whether this PR's run opted into automatic escalation resolution by the escalation
+            steward (issue #889). Derived from the subject row's durable `auto_resolve_escalations`
+            flag, never a clobbered process variable.
     ActivePrList:
       type: object
       required:
         - count
         - prs
+        - deliveries
       properties:
         count:
           type: integer
@@ -160,6 +168,68 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ActivePr"
+        deliveries:
+          type: array
+          description: >-
+            Every delivery-graph run currently in flight (not done/failed/abandoned), newest-updated
+            first (issue #889 §1 — the opt-in is shown for each PR AND each delivery).
+          items:
+            $ref: "#/components/schemas/ActiveDelivery"
+    ActiveDelivery:
+      type: object
+      description: A delivery-graph run currently in flight, as reported by the status endpoint.
+      additionalProperties: false
+      required:
+        - runKey
+        - title
+        - status
+        - phase
+        - processKey
+        - openEscalation
+        - updatedAt
+        - autoResolveEscalations
+      properties:
+        runKey:
+          type: string
+        title:
+          type: string
+          nullable: true
+        status:
+          type: string
+        phase:
+          type: string
+          nullable: true
+        processKey:
+          type: string
+          nullable: true
+          description: The engine process instance key; null while the launch claim has not been stamped yet.
+        openEscalation:
+          type: object
+          nullable: true
+          additionalProperties: false
+          description: >-
+            The structured pointer to this run's OPEN escalation/human task when parked awaiting an
+            answer (derived from the same `user_tasks` read model as `listEscalations`), else null.
+          required:
+            - userTaskKey
+            - kind
+            - summary
+          properties:
+            userTaskKey:
+              type: string
+            kind:
+              type: string
+            summary:
+              type: string
+              nullable: true
+        updatedAt:
+          type: string
+        autoResolveEscalations:
+          type: boolean
+          description: >-
+            Whether this delivery run opted into automatic escalation resolution by the escalation
+            steward (issue #889). Derived from the durable `auto_resolve_escalations` flag, never a
+            clobbered process variable.
     Escalation:
       type: object
       description: >-
@@ -239,6 +309,141 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Escalation"
+    AutoResolution:
+      type: object
+      description: "One escalation-steward auto-resolution record (issue #889) — a reviewable record of an escalation the steward resolved or abstained from."
+      additionalProperties: false
+      required:
+        - id
+        - userTaskKey
+        - outcome
+        - reviewState
+        - createdAt
+      properties:
+        id:
+          type: integer
+        userTaskKey:
+          type: string
+        kind:
+          type: string
+          nullable: true
+        elementId:
+          type: string
+          nullable: true
+        subjectType:
+          type: string
+          nullable: true
+        subjectKey:
+          type: string
+          nullable: true
+        subjectUrl:
+          type: string
+          nullable: true
+        processInstanceKey:
+          type: string
+          nullable: true
+        question:
+          type: string
+          nullable: true
+        options:
+          type: array
+          nullable: true
+          items: {}
+        outcome:
+          type: string
+          enum: [resolved, abstained]
+        submittedVariables:
+          type: object
+          nullable: true
+          additionalProperties: true
+        selectedOption:
+          type: string
+          nullable: true
+          description: >-
+            The option value the steward actually selected (derived host-side at record time), so a
+            consumer sees WHAT was chosen without decoding `submittedVariables`. Null when abstained /
+            not derivable.
+        rationale:
+          type: string
+          nullable: true
+        evidence:
+          type: string
+          nullable: true
+        stewardInstanceKey:
+          type: string
+          nullable: true
+        agentJobKey:
+          type: string
+          nullable: true
+        worker:
+          type: string
+          nullable: true
+        model:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+        reviewState:
+          type: string
+          enum: [pending, dismissed, intervened]
+        reviewedBy:
+          type: string
+          nullable: true
+        reviewedAt:
+          type: string
+          nullable: true
+        reviewNote:
+          type: string
+          nullable: true
+    AutoResolutionList:
+      type: object
+      additionalProperties: false
+      required:
+        - count
+        - pendingCount
+        - records
+      properties:
+        count:
+          type: integer
+        pendingCount:
+          type: integer
+          description: The number of `pending` (not-yet-reviewed) records — the nav badge count.
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutoResolution"
+    AutoResolutionReview:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - action
+      properties:
+        id:
+          type: integer
+          description: The auto-resolution record id (from `listAutoResolutions`).
+        action:
+          type: string
+          enum: [dismiss, intervene]
+          description: "`dismiss` = reviewed, no action; `intervene` = operator stepped in."
+        operator:
+          type: string
+          description: The reviewing operator's handle (for the audit trail). Optional — defaults to `operator`.
+        note:
+          type: string
+          description: An optional review note (e.g. the intervention guidance).
+    AutoResolutionReviewResult:
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        id:
+          type: integer
+        reviewState:
+          type: string
     LineagePrView:
       type: object
       description: A member PR of a lineage thread (issue #245).
@@ -1686,6 +1891,9 @@ components:
         confirmDefaultBase:
           type: boolean
           description: Acknowledge that `baseBranch` names the repository default branch. See `PlanStartByIssue.confirmDefaultBase`.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this epic (and every child convergence/merge loop it spawns) into escalation-steward auto-resolution. See `PlanStartByIssue.autoResolveEscalations`.
     EpicSetMemberByUrl:
       type: object
       additionalProperties: false
@@ -1708,6 +1916,9 @@ components:
         confirmDefaultBase:
           type: boolean
           description: Acknowledge landing on the default branch. See `PlanStartByIssue.confirmDefaultBase`.
+        autoResolveEscalations:
+          type: boolean
+          description: Opt this epic (and every child convergence/merge loop it spawns) into escalation-steward auto-resolution. See `PlanStartByIssue.autoResolveEscalations`.
     EpicSetDep:
       description: >-
         One inter-epic dependency edge: the `consumer` epic waits for the `producer` epic to publish
@@ -1826,6 +2037,9 @@ components:
         autoMerge:
           type: boolean
           description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
+        autoResolveEscalations:
+          type: boolean
+          description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
         convergeOnly:
           type: boolean
           deprecated: true
@@ -1850,6 +2064,9 @@ components:
         autoMerge:
           type: boolean
           description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
+        autoResolveEscalations:
+          type: boolean
+          description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
         convergeOnly:
           type: boolean
           deprecated: true
@@ -1907,6 +2124,9 @@ components:
             buffer — and fires any merge-to-default side effect per task — so admission will reject
             (400) unless confirmed with true (no effect for a non-default base). Accepted by the schema
             today but currently has no runtime effect.
+        autoResolveEscalations:
+          type: boolean
+          description: "Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     PlanStartByUrl:
       type: object
       additionalProperties: false
@@ -1939,6 +2159,9 @@ components:
             Accepted by the schema today but currently has no runtime effect. When implemented it
             will be the required acknowledgement when `baseBranch` names the repository default
             branch. See `PlanStartByIssue.confirmDefaultBase`.
+        autoResolveEscalations:
+          type: boolean
+          description: "Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     ReadinessProbe:
       description: >-
         A single durable readiness probe (issue #258, #295) the feature run must satisfy before its
@@ -2518,6 +2741,9 @@ components:
             segment starting with `.` or ending in `.lock`, etc.) is rejected at submit. This pattern
             mirrors the authoritative server-side gate (`isPlausibleBranchName`, app/baseBranch.ts) so the
             documented contract and the door agree.
+        autoResolveEscalations:
+          type: boolean
+          description: "Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     DeliveryGraphDispatchRepoless:
       description: >-
         The checkout-less dispatch shape (#729): an EXPLICIT `repoless: true` opt-out of repository
@@ -2571,6 +2797,9 @@ components:
             fields are not members of this variant, so supplying either alongside `repoless: true` fails
             `oneOf` matching and is a 400. To provision a repository, use the repository variant (supply
             `repository` + `baseBranch`) and omit `repoless` entirely.
+        autoResolveEscalations:
+          type: boolean
+          description: "Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     DeliveryGraphDispatchNodeProvisioned:
       description: >-
         The FULLY node-provisioned dispatch shape (#739): supplies NEITHER a run-level `repository`/
@@ -2617,6 +2846,9 @@ components:
           description: >-
             OPTIONAL run-level ISO-8601 SLA for `human` nodes (#505) before they record an `escalated`
             outcome. Absent → the `P1D` default. An invalid duration is rejected at submit.
+        autoResolveEscalations:
+          type: boolean
+          description: "Opt this run's escalations (and any `converge*` connector's enrolled PR) into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     DeliveryGraphDismissRequest:
       description: >-
         The OPERATOR dismiss request (#520). The cockpit's staged-proposals grid posts the content
@@ -3496,6 +3728,9 @@ components:
             its handles against — the consumer dependency whose published provenance must carry each
             awaited upstream. When present, `blockedOn` desugars to `capability` probes and the
             resolved `pkg@version` is late-bound into the implementation agent's brief.
+        autoResolveEscalations:
+          type: boolean
+          description: "Opt this run's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
     FeatureStartByUrl:
       type: object
       additionalProperties: false
@@ -3552,6 +3787,9 @@ components:
           type: string
           minLength: 1
           description: OPTIONAL package the `blockedOn` handles resolve against. See `FeatureStartByIssue.consumerPackage`.
+        autoResolveEscalations:
+          type: boolean
+          description: "Opt this run's escalations into the escalation steward (issue #889). See `FeatureStartByIssue.autoResolveEscalations`."
     MessageResult:
       type: object
       description: The result of publishing a message / answering an escalation. Shape varies by message
@@ -3885,6 +4123,109 @@ paths:
                 $ref: "#/components/schemas/CancelInstanceResult"
         "503":
           description: The app has no data source configured, so the cancel cannot be reconciled into the record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /auto-resolutions:
+    get:
+      operationId: listAutoResolutions
+      summary: List the escalation steward's auto-resolution records (reviewable), newest first.
+      description: >-
+        The durable, reviewable record of every escalation the opt-in steward (issue #889) resolved
+        or abstained from. Filter by `reviewState` (`pending` | `dismissed` | `intervened`),
+        `subject` (a PR/feature/plan/delivery key) or `kind` (an escalation element id or label).
+        Each record carries the question, the options offered, the submitted variables, the
+        rationale and evidence, the steward provenance, and its operator review state.
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        - name: reviewState
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, dismissed, intervened]
+          description: Filter to one review state (the Auto-resolutions view defaults to `pending`).
+        - name: subject
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter to one subject key (e.g. `owner/repo#123` or a delivery run key).
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter to one escalation kind (an element id or kind label).
+      responses:
+        "200":
+          description: The auto-resolution records.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutoResolutionList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /auto-resolutions/review:
+    post:
+      operationId: reviewAutoResolution
+      summary: Mark an auto-resolution record dismissed (reviewed, no action) or intervened (operator stepped in).
+      description: >-
+        The Auto-resolutions view's review affordance (issue #889). `dismiss` marks the record
+        reviewed with no further action; `intervene` marks it and records the operator's guidance for
+        stepping in after the fact. Both fold `review_state` off `pending` (idempotently — an
+        already-reviewed record is left unchanged) and record who reviewed it, when, and an optional
+        note. Reopening the completed user task is NOT required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              # BEGIN generated:mcp-body source=#/components/schemas/AutoResolutionReview (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              type: object
+              additionalProperties: false
+              required:
+                - id
+                - action
+              properties:
+                id:
+                  type: integer
+                  description: The auto-resolution record id (from `listAutoResolutions`).
+                action:
+                  type: string
+                  enum:
+                    - dismiss
+                    - intervene
+                  description: '`dismiss` = reviewed, no action; `intervene` = operator stepped in.'
+                operator:
+                  type: string
+                  description: The reviewing operator's handle (for the audit trail). Optional — defaults to `operator`.
+                note:
+                  type: string
+                  description: An optional review note (e.g. the intervention guidance).
+              # END generated:mcp-body
+      responses:
+        "200":
+          description: The record was reviewed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutoResolutionReviewResult"
+        "400":
+          description: The request was malformed (missing id/action, or an unknown action).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: No pending record with that id (already reviewed, or unknown).
           content:
             application/json:
               schema:
@@ -4590,6 +4931,9 @@ paths:
                     autoMerge:
                       type: boolean
                       description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
+                    autoResolveEscalations:
+                      type: boolean
+                      description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
                     convergeOnly:
                       type: boolean
                       deprecated: true
@@ -4613,6 +4957,9 @@ paths:
                     autoMerge:
                       type: boolean
                       description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
+                    autoResolveEscalations:
+                      type: boolean
+                      description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
                     convergeOnly:
                       type: boolean
                       deprecated: true
@@ -4665,6 +5012,9 @@ paths:
                     confirmDefaultBase:
                       type: boolean
                       description: 'Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). When implemented it will be the required acknowledgement when `baseBranch` names the repository default branch: targeting the default lands every task directly on it with no integration buffer — and fires any merge-to-default side effect per task — so admission will reject (400) unless confirmed with true (no effect for a non-default base). Accepted by the schema today but currently has no runtime effect.'
+                    autoResolveEscalations:
+                      type: boolean
+                      description: "Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
                 - type: object
                   additionalProperties: false
                   required:
@@ -4686,6 +5036,9 @@ paths:
                     confirmDefaultBase:
                       type: boolean
                       description: Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). Accepted by the schema today but currently has no runtime effect. When implemented it will be the required acknowledgement when `baseBranch` names the repository default branch. See `PlanStartByIssue.confirmDefaultBase`.
+                    autoResolveEscalations:
+                      type: boolean
+                      description: "Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
               type: object
               # END generated:mcp-body
       responses:
@@ -4755,6 +5108,9 @@ paths:
                           confirmDefaultBase:
                             type: boolean
                             description: Acknowledge that `baseBranch` names the repository default branch. See `PlanStartByIssue.confirmDefaultBase`.
+                          autoResolveEscalations:
+                            type: boolean
+                            description: Opt this epic (and every child convergence/merge loop it spawns) into escalation-steward auto-resolution. See `PlanStartByIssue.autoResolveEscalations`.
                       - type: object
                         additionalProperties: false
                         required:
@@ -4776,6 +5132,9 @@ paths:
                           confirmDefaultBase:
                             type: boolean
                             description: Acknowledge landing on the default branch. See `PlanStartByIssue.confirmDefaultBase`.
+                          autoResolveEscalations:
+                            type: boolean
+                            description: Opt this epic (and every child convergence/merge loop it spawns) into escalation-steward auto-resolution. See `PlanStartByIssue.autoResolveEscalations`.
                 deps:
                   type: array
                   description: The inter-epic dependency edges. Each declares `consumer` waits for `producer` to publish the `{ package, capabilityRef }` capability. Both endpoints must name epics in `epics`. Omit or pass `[]` for a set of independent (root) epics.
@@ -6319,6 +6678,9 @@ paths:
                       type: string
                       minLength: 1
                       description: OPTIONAL npm package name (e.g. `@nanobpm/engine-wasm`) the `blockedOn` shorthand resolves its handles against — the consumer dependency whose published provenance must carry each awaited upstream. When present, `blockedOn` desugars to `capability` probes and the resolved `pkg@version` is late-bound into the implementation agent's brief.
+                    autoResolveEscalations:
+                      type: boolean
+                      description: "Opt this run's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
                 - type: object
                   additionalProperties: false
                   required:
@@ -6467,6 +6829,9 @@ paths:
                       type: string
                       minLength: 1
                       description: OPTIONAL package the `blockedOn` handles resolve against. See `FeatureStartByIssue.consumerPackage`.
+                    autoResolveEscalations:
+                      type: boolean
+                      description: "Opt this run's escalations into the escalation steward (issue #889). See `FeatureStartByIssue.autoResolveEscalations`."
               type: object
               # END generated:mcp-body
       responses:

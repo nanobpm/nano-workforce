@@ -120,6 +120,11 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     if (parsed.value !== undefined) timeouts[field] = parsed.value;
   }
 
+  // Opt-in escalation steward (issue #889) — when the dispatch body sets `autoResolveEscalations`,
+  // the run's escalations (and any `converge*` connector's enrolled PR) become eligible for steward
+  // auto-resolution. Default off.
+  const autoResolveEscalations = body && typeof body === "object" && "autoResolveEscalations" in body && body.autoResolveEscalations === true;
+
   // Host-git provisioning override (#684/#686) — the OPTIONAL `owner/repo` + base branch the run's
   // `agent` nodes implement against. When both are present the runner seeds the canonical
   // `io.nanobpm.agentTask.repository` isolation envelope (`repoEnvelopeVars`) onto every agent cell's
@@ -267,7 +272,7 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     }
   }
 
-  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: dispatchRunKey, title: proposal.title, repository, baseBranch, repoless, expectedDigest: digest, ...timeouts });
+  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: dispatchRunKey, title: proposal.title, repository, baseBranch, repoless, expectedDigest: digest, autoResolveEscalations, ...timeouts });
   if (!dispatched.ok) {
     app.log.warn("dispatch-delivery-graph refused: compile", { digest, errors: dispatched.errors.length });
     const outBody: DeliveryGraphTextResult = {

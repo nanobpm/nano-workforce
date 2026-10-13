@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertThrows } from "#test-assert";
 import { PROCESS_ID } from "../../app/service.ts";
 import { withTrackingViews } from "../../test/trackingViews.ts";
-import handler, { readConnectorInput, readConvergeInput, safeStringify } from "./worker.ts";
+import handler, { readConnectorInput, readConvergeInput, safeStringify, setLaunchStampSleep } from "./worker.ts";
 
 function memTable(rows: Record<string, unknown>[], key: string) {
   return {
@@ -41,6 +41,7 @@ function fakeApp() {
     escalations: { rows: [], key: "id" },
     pr_dependencies: { rows: [], key: "pr_key" },
     delivery_connector_dispatches: { rows: [], key: "id" },
+    delivery_graph_runs: { rows: [], key: "run_key" },
   };
   const created: { processDefinitionId?: string; variables?: Record<string, unknown> }[] = [];
   let nextId = 1;
@@ -315,5 +316,75 @@ test("handler: a misconfigured converge connector (no parseable pr) fails CLOSED
     assert(threw, "a converge connector with no target PR fails closed");
     assertEquals(created.length, 0, "no convergence-loop instance is started");
     assertEquals(stores.delivery_connector_dispatches.rows.length, 0, "no junk ledger row is claimed");
+  });
+});
+
+test("handler: the escalation-steward opt-in is resolved from the DURABLE delivery_graph_runs row, NOT the clobberable process variable (issue #889 review)", async () => {
+  await withGithubOff(async () => {
+    const { app, stores, created } = fakeApp();
+    // The run row for THIS process instance OPTED IN (auto_resolve_escalations = 1), keyed by
+    // `process_key` = the connector job's processInstanceKey.
+    stores.delivery_graph_runs.rows.push({ run_key: "run-1", process_key: "PI-graph", auto_resolve_escalations: 1, status: "running" });
+    // ...but an upstream agent completion CLOBBERED the inherited process variable to `false`. Before
+    // the fix the connector read `job.variables.autoResolveEscalations === true` → false, enrolling the
+    // PR as opted-OUT and contradicting the durable record. The durable row must win.
+    await handler(
+      { variables: { target: "converge-merge", payload: { pr: "owner/repo#21" }, autoResolveEscalations: false }, processInstanceKey: "PI-graph", elementId: "n2" } as never,
+      app,
+    );
+    assertEquals(created.length, 1, "the PR was enrolled");
+    assertEquals(created[0]?.variables?.autoResolveEscalations, true, "the durable run row's opt-in wins over the clobbered process variable");
+  });
+});
+
+test("handler: the escalation-steward opt-in FAILS CLOSED when no delivery_graph_runs row matches this process instance", async () => {
+  await withGithubOff(async () => {
+    const { app, created } = fakeApp();
+    // No delivery_graph_runs row for PI-graph (and the process variable claims opted-IN). With no
+    // durable record the connector must NOT trust the clobberable variable — fail closed to opted-OUT.
+    await handler(
+      { variables: { target: "converge-merge", payload: { pr: "owner/repo#22" }, autoResolveEscalations: true }, processInstanceKey: "PI-graph", elementId: "n2" } as never,
+      app,
+    );
+    assertEquals(created.length, 1, "the PR was still enrolled");
+    assertEquals(created[0]?.variables?.autoResolveEscalations, false, "no durable run row ⇒ fail closed to opted-out, never trust the process variable");
+  });
+});
+
+test("handler: a launch-in-flight run row (process_key not yet stamped) is retried, NOT converted to opted-out (issue #889 review — launch race)", async () => {
+  await withGithubOff(async () => {
+    const { app, stores, created } = fakeApp();
+    // THE LAUNCH RACE: `dispatchDeliveryGraphRun` claims the run row with `process_key = NULL`, starts
+    // the engine instance, and only THEN stamps the returned key. This connector job activated BEFORE
+    // that post-launch write, so the row is present (opted IN) but its `process_key` is still NULL. A
+    // single read keyed on `process_key` finds NO match → false → permanently enrolls the opted-in PR
+    // as opted OUT. The lookup must treat a NULL process_key as TRANSIENT and re-poll until the stamp
+    // lands. DETERMINISTIC (AGENTS.md — no real-timer race): the inter-poll sleep is overridden to a
+    // test-controlled signal that stamps `process_key` after a fixed number of polls (poll 1 and 2 see
+    // the launch-in-flight NULL, poll 3 sees the stamp) — no wall-clock timer, so the outcome cannot
+    // depend on scheduler load.
+    const row: Record<string, unknown> = { run_key: "run-1", process_key: null, auto_resolve_escalations: 1, status: "running" };
+    stores.delivery_graph_runs.rows.push(row);
+    let polls = 0;
+    setLaunchStampSleep(() => {
+      polls += 1;
+      if (polls === 2) row.process_key = "PI-graph"; // the dispatch's stamp lands after the 2nd poll
+      return Promise.resolve();
+    });
+    try {
+      await handler(
+        { variables: { target: "converge-merge", payload: { pr: "owner/repo#23" } }, processInstanceKey: "PI-graph", elementId: "n2" } as never,
+        app,
+      );
+    } finally {
+      setLaunchStampSleep();
+    }
+    assert(polls >= 2, "the launch-in-flight row was re-polled across the launch window, not read once and converted to opted-out");
+    assertEquals(created.length, 1, "the PR was enrolled");
+    assertEquals(
+      created[0]?.variables?.autoResolveEscalations,
+      true,
+      "a launch-in-flight run row is retried until its process_key stamp lands — never read as opted-out",
+    );
   });
 });

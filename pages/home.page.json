@@ -50,6 +50,23 @@
             }
           },
           {
+            "label": "Auto-resolutions",
+            "page": "auto-resolutions",
+            "badge": {
+              "source": "app",
+              "table": "escalation_auto_resolutions__read_model",
+              "filter": [
+                {
+                  "field": "review_state",
+                  "eq": "pending"
+                }
+              ],
+              "tone": "warn",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
             "label": "Cockpit",
             "page": "cockpit"
           },
@@ -107,6 +124,11 @@
           {
             "key": "autoMerge",
             "label": "Auto-merge \u2014 after convergence, drive the merge-loop",
+            "type": "checkbox"
+          },
+          {
+            "key": "autoResolveEscalations",
+            "label": "Automatically resolve escalations \u2014 the opt-in escalation steward reviews this loop's open escalations every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions",
             "type": "checkbox"
           }
         ]

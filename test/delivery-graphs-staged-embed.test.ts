@@ -126,6 +126,19 @@ test("#460/#511/#569: Dispatch is the operator's launch — posts the digest to 
   assert(!/approvalToken/.test(MOUNT_JS), "staged.mount.js must NOT carry the removed replayable approvalToken");
 });
 
+test("#889: the dispatch confirmation offers an escalation-steward opt-in and posts autoResolveEscalations", () => {
+  // Issue #889 §1 requires the opt-in on EVERY UI start pathway. The delivery-graph dispatch is one:
+  // the inline Dispatch confirmation must carry an "Automatically resolve escalations" checkbox, and
+  // the POST body must include `autoResolveEscalations: true` when the operator checks it (the dispatch
+  // door already accepts it — operations/dispatchDeliveryGraph.ts). Without the control a UI user can
+  // never opt a dispatched graph in.
+  assert(/data-dispatch-autoresolve=/.test(MOUNT_JS), "staged.mount.js must render an escalation-steward opt-in checkbox in the dispatch confirmation");
+  assert(/Automatically resolve escalations/.test(MOUNT_JS), "the opt-in control must be labelled for the operator");
+  // The checkbox state is tracked on the pending confirmation and included in the POST payload.
+  assert(/autoResolveEscalations/.test(MOUNT_JS), "staged.mount.js must thread autoResolveEscalations into the dispatch payload");
+  assert(/pending\.autoResolveEscalations/.test(MOUNT_JS), "the opt-in checkbox state is tracked on the pending dispatch confirmation");
+});
+
 test("#520/#569: Dismiss is the operator's discard — posts the digest to the dismiss door, behind an in-DOM confirm, and launches nothing", () => {
   assertModuleAnchored("dismissUrl", "app/api/actions/delivery-graph/dismiss");
   assert(/data-dismiss=/.test(MOUNT_JS), "staged.mount.js must render a per-row Dismiss affordance carrying the digest");

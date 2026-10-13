@@ -218,6 +218,29 @@ test("pollFeatureDelivery: the re-enroll keeps the run's human approval gate (is
   assertEquals(vars?.humanApproval, true, "a healed enrollment must not silently drop the approval gate");
 });
 
+test("pollFeatureDelivery: the re-enroll propagates the run's escalation-steward opt-in (issue #889 review)", async () => {
+  const { data, stores } = memData();
+  // An OPTED-IN converging run whose PR row is missing — the re-enroll must carry the run's
+  // `auto_resolve_escalations` onto the fresh PR row/instance, not drop it to the `false` default.
+  stores.feature_runs = [
+    { feature_key: "o/r#9", status: "converging", pr_key: "o/r#409", auto_merge: 1, human_approval: 0, auto_resolve_escalations: 1, delivery_label: null },
+  ];
+  stores.pull_requests = [];
+  let vars: Record<string, unknown> | undefined;
+  const engine = {
+    searchProcessInstances: async () => [],
+    createInstance: async (req: { variables?: Record<string, unknown> }) => {
+      vars = req.variables;
+      return { processInstanceKey: "pi-409" };
+    },
+  } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(vars?.autoResolveEscalations, true, "a healed enrollment must not silently drop the steward opt-in");
+  assertEquals(stores.pull_requests[0]?.auto_resolve_escalations, 1, "the PR row persists the opt-in");
+});
+
 test("pollFeatureDelivery: a converging run whose PR row is PARTIALLY enrolled (present, non-terminal, process_key NULL) is re-enrolled — a create-instance crash after the row insert does not wedge it (PR #809)", async () => {
   const { data, stores } = memData();
   stores.feature_runs = [

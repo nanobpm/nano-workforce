@@ -179,6 +179,29 @@ export const ENV_CONTRACTS = {
     semantics: "How long to wait for a review before nudging/escalating (FEEL/ISO-8601 duration).",
     default: "PT30M",
   },
+  NANO_ESCALATION_STEWARD: {
+    category: "env",
+    name: "NANO_ESCALATION_STEWARD",
+    owner: "app/escalationSteward.ts",
+    semantics:
+      "Escalation-steward master switch (issue #889): `off`/`0`/`false`/`no` disables the timer loop entirely; anything else (or unset) leaves it enabled.",
+  },
+  NANO_ESCALATION_STEWARD_INTERVAL: {
+    category: "env",
+    name: "NANO_ESCALATION_STEWARD_INTERVAL",
+    owner: "app/escalationSteward.ts",
+    semantics:
+      "How often the escalation-steward timer fires (FEEL/ISO-8601 duration or `R/PT…` cycle), pacing the steward tick (issue #889).",
+    default: "R/PT30M",
+  },
+  NANO_ESCALATION_STEWARD_MIN_AGE_MS: {
+    category: "env",
+    name: "NANO_ESCALATION_STEWARD_MIN_AGE_MS",
+    owner: "app/escalationSteward.ts",
+    semantics:
+      "Minimum age (ms) an open escalation must reach before the steward considers it, so a human already answering wins (issue #889).",
+    default: "300000",
+  },
   NANO_PR_REVIEW_NUDGE_MINUTES: {
     category: "env",
     name: "NANO_PR_REVIEW_NUDGE_MINUTES",

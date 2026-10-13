@@ -47,12 +47,17 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
     pr_key: parsed.prKey,
     updated_at: new Date().toISOString(),
   });
-  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, !autoMerge, featureKey, humanApproval);
+  // Propagate the feature run's escalation-steward opt-in (issue #889) to the convergence loop:
+  // read the durable flag off the `feature_runs` row (the source of truth) and hand it to `submitPr`.
+  const featureRow = await featureRuns(app.data).get(featureKey);
+  const autoResolve = featureRow?.auto_resolve_escalations === 1;
+  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, !autoMerge, featureKey, humanApproval, autoResolve);
   app.log.info("converge-feature: enrolled PR into convergence loop", {
     featureKey,
     prKey: parsed.prKey,
     convergeOnly: !autoMerge,
     humanApproval,
+    autoResolveEscalations: autoResolve,
   });
   return {};
 };

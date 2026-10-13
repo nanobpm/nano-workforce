@@ -215,7 +215,11 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       }
 
       try {
-        await submitPr(app.data, app.engine, parsed, depPrKeys, MAX_ROUNDS, false, planKey);
+        // Propagate the epic's escalation-steward opt-in (issue #889) to the child convergence loop:
+        // read the plan row's durable flag and hand it to `submitPr` so the enrolled PR inherits it.
+        const planRow = await plans(app.data).get(planKey);
+        const autoResolve = planRow?.auto_resolve_escalations === 1;
+        await submitPr(app.data, app.engine, parsed, depPrKeys, MAX_ROUNDS, false, planKey, false, autoResolve);
       } catch (err) {
         app.log.error(`record-wave: handoff failed for ${parsed.prKey}`, {
           err: String(err),

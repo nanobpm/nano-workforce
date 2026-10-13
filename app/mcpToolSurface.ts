@@ -63,6 +63,9 @@ export const CURATED_MCP_TOOLS: readonly string[] = [
   "listEscalations",
   "getLineage",
   "getPrHistory",
+  // ── Escalation steward (issue #889) ──────────────────────────────────────
+  "listAutoResolutions",
+  "reviewAutoResolution",
   // ── Engine-truth reads (wedge triage) ────────────────────────────────────
   "urban_debug_search_process_instances",
   "urban_debug_search_element_instance_wait_states",
@@ -122,8 +125,21 @@ export const MCP_TOOL_COUNT_BUDGET = 60;
  * `target` description in `openapi.yaml` documents the new accepted handle. Measured 87,559 bytes
  * serialized (87,497 → 87,559 — over the old ceiling's 3-byte headroom). Deliberate, documented
  * growth of a real new accepted input format — not schema fat.
+ *
+ * RAISE PROVENANCE — 88_000 → 89_500 (#889): the opt-in escalation steward adds two read/review
+ * tools — `listAutoResolutions` (the Auto-resolutions read, with the `AutoResolution` record schema)
+ * and `reviewAutoResolution` (dismiss/intervene) — plus the `autoResolveEscalations` opt-in field on
+ * the start bodies. Measured 88,866 bytes serialized (over the old ceiling's 866-byte headroom).
+ * Deliberate, documented growth of a real new reviewable-record surface — not schema fat.
+ *
+ * RAISE PROVENANCE — 89_500 → 91_000 (#889 review): ten `openapi.yaml` descriptions that reference
+ * `(issue #889)` were unquoted plain scalars, so the `#` comment marker silently truncated each at
+ * `(issue` — the projected MCP schemas carried the cut text. Quoting them restores the full,
+ * intended description text (a correctness fix, not new surface). Measured 90,420 bytes serialized
+ * (over the old ceiling's 920-byte headroom). Deliberate, documented growth of restored description
+ * text — not schema fat.
  */
-export const MCP_SURFACE_BYTES_BUDGET = 88_000;
+export const MCP_SURFACE_BYTES_BUDGET = 91_000;
 
 /**
  * The eagerly-loaded curated subset MUST stay materially smaller than the full surface — otherwise it

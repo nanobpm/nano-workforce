@@ -64,6 +64,9 @@ export interface FeatureRun {
   /** 1 ⇒ a human must approve the converged PR before the merge-loop runs (issue #826). Only
    * meaningful with `auto_merge = 1`; the `startFeature` operation pins it to 0 otherwise. */
   human_approval: number;
+  /** 1 ⇒ this run OPTED IN to the escalation steward (issue #889): its open escalations are eligible
+   * for the steward to auto-resolve (recorded reviewably). Default 0 — escalations stay human-only. */
+  auto_resolve_escalations: number;
   outcome: string | null;
   /** Human rollup detail. Projected by `pollFeatureDelivery` (fix: Feature history stuck at
    * `converging`) and also written by `pr.record-blocked-ack` with the operator's disposition
@@ -357,6 +360,7 @@ export async function startFeature(
   customInstructions: string | null = null,
   readiness: FeatureReadinessOptions = {},
   humanApproval = false,
+  autoResolveEscalations = false,
 ): Promise<StartFeatureResult> {
   // Intake-time readiness gate (issue #295): the probes the run must satisfy before it implements,
   // and the bound its preflight escalation timers fire off. Both are load-bearing together —
@@ -456,6 +460,7 @@ export async function startFeature(
       converge: converge ? 1 : 0,
       auto_merge: autoMerge ? 1 : 0,
       human_approval: humanApproval ? 1 : 0,
+      auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
       outcome: null,
       delivery_label: null,
       // Clear the operator tick-off so a re-dispatched run is NOT silently dropped into History when
@@ -479,6 +484,7 @@ export async function startFeature(
       converge: converge ? 1 : 0,
       auto_merge: autoMerge ? 1 : 0,
       human_approval: humanApproval ? 1 : 0,
+      auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
       outcome: null,
       delivery_label: null,
       created_at: ts,
@@ -516,6 +522,11 @@ export async function startFeature(
       autoMerge,
       // Park the converged PR at a human approval user task before the merge-loop (issue #826).
       humanApproval,
+      // Opt-in escalation steward (issue #889): seeded as an engine-owned process variable so the
+      // run's escalations carry the opt-in, AND persisted on the `feature_runs` row (above) — the
+      // steward's eligibility derivation reads the ROW (the durable source), so an agent-completion
+      // clobber of the variable can never silently opt a run in or out (#887/#888).
+      autoResolveEscalations,
       // A single-issue feature run OWNS its issue (the whole issue is the slice), so the agent may
       // claim it with a "starting work" comment on a first run (resources/prompts/feature.md). Epic slices
       // (plan-fanout) deliberately DO NOT set this — their `issue` is the shared parent epic, which

@@ -115,6 +115,8 @@ CI runs) fails if the block below drifts from the source. Never hand-edit it; ed
   "listEscalations",
   "getLineage",
   "getPrHistory",
+  "listAutoResolutions",
+  "reviewAutoResolution",
   "urban_debug_search_process_instances",
   "urban_debug_search_element_instance_wait_states",
   "urban_debug_search_incidents",

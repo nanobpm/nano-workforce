@@ -150,7 +150,12 @@ test("externalAgentTasksMissingSlaBoundary rejects a timer with no timeDuration,
 // exactly these processes so a regression on a *bounded* process is caught while the deferred
 // two stay out. merge-loop.bpmn's agent tasks (`fix-ci` / `rebase`) were bounded in an earlier
 // #849 commit, so it belongs here too — every already-bounded process stays regression-guarded.
-const BOUNDED_PROCESSES = ["implement-cell.bpmn", "merge-cell.bpmn", "merge-loop.bpmn", "retro.bpmn"] as const;
+// escalation-steward.bpmn's `steward-agent` was bounded for the #889 review (a hung steward
+// instance otherwise parks ACTIVE forever, suppressing every later tick via the poller's overlap
+// guard and wedging claim recovery); its boundary routes to `done` (the steward has no escalation
+// path of its own — on SLA the tick ends and the 15-min claim TTL frees its claims for the next
+// tick), which satisfies the guard's "routes somewhere" requirement.
+const BOUNDED_PROCESSES = ["implement-cell.bpmn", "merge-cell.bpmn", "merge-loop.bpmn", "retro.bpmn", "escalation-steward.bpmn"] as const;
 
 test("DEFECT-CLASS GUARD: every external agent task in a bounded process carries an interrupting timer SLA boundary", () => {
   let anyAgentTasks = false;

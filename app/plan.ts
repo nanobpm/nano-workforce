@@ -98,6 +98,9 @@ export interface Plan {
   // admission); the column stays NULLABLE ONLY to grandfather pre-ADR-0003 / in-flight rows that
   // carry NULL — those must remain readable, so do NOT add a NOT NULL migration.
   base_branch: string | null;
+  // Opt-in escalation steward (120_escalation_auto_resolutions.sql, issue #889): 1 ⇒ this epic's
+  // escalations (and its spawned child loops) are eligible for steward auto-resolution. Default 0.
+  auto_resolve_escalations: number;
   // The derived epic delivery signal (029_plan_delivery.sql) was RETIRED as a stored column (epic
   // #412): `delivery` / `delivery_label` are now a DERIVED SQL VIEW (`plan_delivery` /
   // `plan_read_model`, 061), computed from the SAME pure `deriveDelivery`/`TERMINAL_STATUSES`
@@ -356,6 +359,10 @@ export interface AdmittedEpic {
   issue_number: number;
   issue_url: string;
   base_branch: string;
+  /** Escalation-steward opt-in staged at admission (issue #889). Persisted so the lowering
+   * (`lowerAdmittedSet`) can forward it to `startPlan` — without it a batch-admitted epic silently
+   * stayed opted out even when the caller opted in. 0|1 (SQLite boolean); absent on pre-124 rows ⇒ 0. */
+  auto_resolve_escalations: number;
   created_at: string;
 }
 export const admittedEpics = (data: DataLayer) =>
@@ -368,28 +375,55 @@ export const admittedPlanDeps = (data: DataLayer) =>
   data.table<PlanDep>("admitted_plan_deps", "plan_key");
 
 /** The fields an admission caller supplies for one staged admitted epic; `created_at` is stamped
- * here (mirrors {@link PlanDepInput}). */
-export type AdmittedEpicInput = Omit<AdmittedEpic, "created_at">;
+ * here (mirrors {@link PlanDepInput}). The escalation-steward opt-in (issue #889) is OPTIONAL on the
+ * input even though it is required on the persisted {@link AdmittedEpic} row: `recordAdmittedEpic`
+ * defaults an omitted value to `0` (opted out), so the typed API matches that default-off behavior
+ * and a caller that does not care about the steward need not spell it out. */
+export type AdmittedEpicInput = Omit<AdmittedEpic, "created_at" | "auto_resolve_escalations"> & {
+  auto_resolve_escalations?: number;
+};
 
 /** Stage one admitted epic (issue #292 slice S2). Idempotent on `plan_key`: a re-submitted set that
  * re-admits the same epic is a no-op returning the existing staged row, so the whole set door stays
- * idempotent (mirroring {@link recordAdmittedPlanDep}). */
+ * idempotent (mirroring {@link recordAdmittedPlanDep}).
+ *
+ * The escalation-steward opt-in is MONOTONIC on the existing row (issue #889 review): if an opted-out
+ * admission was staged and the request crashed before lowering, a retry that now opts in must WIDEN
+ * the staged row to opted-in — otherwise the epic starts opted out despite the caller's opt-in. This
+ * mirrors `submitPr`'s live-loop adoption (service.ts): an opted-in caller adopting an existing
+ * non-opted-in row widens it, never narrows an opted-in row back. Only ever flips 0→1. */
 export async function recordAdmittedEpic(
   data: DataLayer,
   epic: AdmittedEpicInput,
 ): Promise<AdmittedEpic> {
   const table = admittedEpics(data);
+  // The ONE canonical widening (issue #889 review): an opted-in caller observing a non-opted-in
+  // staged row widens it 0→1 and returns the widened row; otherwise returns the row unchanged. Shared
+  // by BOTH the read-existing path AND the concurrent-insert catch path, so the race below can never
+  // skip the widening the single-threaded path applies.
+  const widen = async (staged: AdmittedEpic): Promise<AdmittedEpic> => {
+    if (epic.auto_resolve_escalations === 1 && staged.auto_resolve_escalations !== 1) {
+      await table.update(epic.plan_key, { auto_resolve_escalations: 1 });
+      return { ...staged, auto_resolve_escalations: 1 };
+    }
+    return staged;
+  };
   const existing = await table.get(epic.plan_key);
-  if (existing) return existing;
-  const row: AdmittedEpic = { ...epic, created_at: now() };
+  if (existing) return widen(existing);
+  // Default the opt-in to 0 (opted out) when a caller omits it, so the staged row always carries the
+  // flag explicitly and the lowering never reads an undefined it would silently coerce.
+  const row: AdmittedEpic = { ...epic, auto_resolve_escalations: epic.auto_resolve_escalations ?? 0, created_at: now() };
   try {
     await table.insert(row);
     return row;
   } catch (err) {
     // Concurrent re-admission of the same epic races on the PRIMARY KEY (plan_key); honour the
     // idempotent no-op contract by returning the winning row rather than surfacing the collision.
+    // The winning row may be an opted-OUT insert that beat an opted-IN caller — apply the SAME
+    // monotonic widening before returning it, or the raced opt-in is silently lost (issue #889
+    // review): the caller opted in but the staged row stays 0.
     const raced = await table.get(epic.plan_key);
-    if (raced) return raced;
+    if (raced) return widen(raced);
     throw err;
   }
 }
@@ -895,6 +929,9 @@ export interface StartPlanOptions {
   readinessProbes?: ReadinessProbe[];
   probeTimeout?: string;
   probePollEvery?: string;
+  /** Opt-in escalation steward (issue #889): when true, this epic's escalations — and every child
+   * convergence/merge loop it spawns — become eligible for steward auto-resolution. Default false. */
+  autoResolveEscalations?: boolean;
 }
 
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
@@ -981,6 +1018,7 @@ export async function startPlan(
       epic_phase: EPIC_PHASE.PLANNING,
       blackboard_token: token,
       base_branch: base,
+      auto_resolve_escalations: opts.autoResolveEscalations === true ? 1 : 0,
       updated_at: ts,
     });
   } else {
@@ -996,6 +1034,7 @@ export async function startPlan(
       epic_phase: EPIC_PHASE.PLANNING,
       blackboard_token: token,
       base_branch: base,
+      auto_resolve_escalations: opts.autoResolveEscalations === true ? 1 : 0,
       created_at: ts,
       updated_at: ts,
     });
@@ -1022,6 +1061,10 @@ export async function startPlan(
       // `operators` candidate group); an operator/agent can claim/reassign via the task inbox.
       escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
       escalationAssignee: null,
+      // Opt-in escalation steward (issue #889): carried on the instance so child processes inherit it,
+      // AND persisted on the `plans` row (the durable source the steward's eligibility reads), so an
+      // agent-completion clobber of the variable can never silently opt an epic in or out (#887/#888).
+      autoResolveEscalations: opts.autoResolveEscalations === true,
       // Agent-task liveness SLA (issue #849): PRE-SEED the canonical bound for the fan-out's
       // external agent tasks. Each slice's implementation agent (via the implement-cell
       // callActivity's explicit `agentSlaTimeout` input mapping) is bounded today; the wave's own

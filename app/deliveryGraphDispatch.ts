@@ -227,6 +227,9 @@ export async function dispatchDeliveryGraphRun(
     title,
     humanLabels: buildHumanLabels(compiled),
     createdAt: existing?.created_at,
+    // Opt-in escalation steward (issue #889): persist the run's opt-in so the steward's eligibility
+    // derivation reads it off the durable row.
+    autoResolveEscalations: options.autoResolveEscalations === true,
   };
 
   // Claim the run durably BEFORE the side effect (the at-most-once dispatch fence). A losing racer
@@ -344,6 +347,9 @@ export async function dispatchDeliveryGraphRun(
       repository: options.repository,
       baseBranch: options.baseBranch,
       repoless: options.repoless,
+      // Opt-in escalation steward (issue #889): seeded as a run-root variable so every node's
+      // escalation inherits it (and the delivery-connector propagates it to any enrolled PR).
+      autoResolveEscalations: options.autoResolveEscalations,
     });
   } catch (err) {
     await markClaimFailed();

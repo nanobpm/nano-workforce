@@ -35,13 +35,17 @@ export default defineOperation("startConvergenceLoop", async ({ body }, app) => 
   // callers that omit autoMerge retain the existing convergeOnly/global-default behavior.
   const hasAutoMerge = typeof body.autoMerge === "boolean";
   const convergeOnly = hasAutoMerge ? body.autoMerge !== true : body.convergeOnly === true;
-  const result = await submitPr(app.data, app.engine, parsed, dependsOn, maxRounds, convergeOnly);
+  // Opt-in escalation steward (issue #889): only when explicitly requested do this loop's
+  // escalations become eligible for steward auto-resolution. Default off.
+  const autoResolveEscalations = "autoResolveEscalations" in body && body.autoResolveEscalations === true;
+  const result = await submitPr(app.data, app.engine, parsed, dependsOn, maxRounds, convergeOnly, null, false, autoResolveEscalations);
   app.log.info("convergence loop started", {
     prKey: parsed.prKey,
     alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
     dependsOn: dependsOn.length,
     maxRounds,
     convergeOnly,
+    autoResolveEscalations,
   });
   return { status: 202, body: result };
 });

@@ -1142,6 +1142,42 @@ test("a gated submitPr adopting a live loop narrows it to humanApproval (issue #
   });
 });
 
+// Steward opt-in is monotonic too (issue #889 review): an opted-in caller adopting a live loop widens
+// the durable subject row to opted-in (the steward reads `auto_resolve_escalations` off the row, not a
+// process variable), and a non-opted-in retry must never downgrade an already-opted-in row. This is
+// safety-critical propagation — without it an opted-in adopter silently inherits a non-opted-in loop and
+// its escalations stay human-only. These pin both directions of the monotonic write at service.ts.
+test("steward opt-in adoption is monotonic: an opted-in adopter upgrades a live opted-out row (issue #889)", async () => {
+  await withGithubOff(async () => {
+    const pr = { repo: "owner/repo", number: 14, url: "https://github.com/owner/repo/pull/14", prKey: "owner/repo#14" };
+    // Live loop started WITHOUT the opt-in (auto_resolve_escalations unset → 0).
+    const live = adoptLoop("converging", "ACTIVE");
+    // An opted-in adopter (autoResolveEscalations = true, the 9th arg) must widen the row to opted-in.
+    assertEquals(
+      await submitPr(live.data, live.engine, pr, [], 20, false, null, false, true),
+      { prKey: pr.prKey, alreadyRunning: true },
+    );
+    const row = (await live.data.table("pull_requests", "pr_key").get(pr.prKey)) as { auto_resolve_escalations?: number } | null;
+    assertEquals(row?.auto_resolve_escalations, 1, "opted-in adopter upgrades the live row to opted-in");
+  });
+});
+
+test("steward opt-in adoption never downgrades: an opted-out retry leaves an opted-in row alone (issue #889)", async () => {
+  await withGithubOff(async () => {
+    const pr = { repo: "owner/repo", number: 14, url: "https://github.com/owner/repo/pull/14", prKey: "owner/repo#14" };
+    // Live loop already opted in.
+    const live = adoptLoop("converging", "ACTIVE");
+    (live.data.table("pull_requests", "pr_key") as any).update(pr.prKey, { auto_resolve_escalations: 1 });
+    // A non-opted-in adopter (autoResolveEscalations = false) must NOT clear the existing opt-in.
+    assertEquals(
+      await submitPr(live.data, live.engine, pr, [], 20, false, null, false, false),
+      { prKey: pr.prKey, alreadyRunning: true },
+    );
+    const row = (await live.data.table("pull_requests", "pr_key").get(pr.prKey)) as { auto_resolve_escalations?: number } | null;
+    assertEquals(row?.auto_resolve_escalations, 1, "an opted-out retry never downgrades an opted-in row");
+  });
+});
+
 test("human approval is pinned off when NANO_PR_AUTO_MERGE is off — the PR never merges (issue #826)", async () => {
   // `AUTO_MERGE` is read once at import, so load a fresh copy of the module under the env.
   const prev = process.env["NANO_PR_AUTO_MERGE"];

@@ -34,10 +34,11 @@ import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
 import { DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
-import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
+import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRuns, deliveryGraphRunsTracking, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
 import { decodeLivePrompt, deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement, needsLiveDeliveryPrompt } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
+import { ESCALATION_STEWARD_PROCESS_ID } from "./escalationSteward.ts";
 import { deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun } from "./feature.ts";
 import {
   classifyMergeability,
@@ -98,7 +99,7 @@ import { ENGINE_TERMINAL_STATES } from "./reconcile.ts";
 // (submitPr/startMerge) and re-exported below so the long-standing `import { repoEnvelopeVars } from
 // "./service.ts"` call sites (and its tests) keep resolving.
 import { repoEnvelopeVars } from "./repoEnvelope.ts";
-import { clampNudgeMinutes, isReviewStale, reviewWaitTimeout } from "./reviewWait.ts";
+import { clampNudgeMinutes, isoDurationToMs, isReviewStale, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
   buildUserTaskRow,
@@ -399,6 +400,9 @@ export interface PullRequest {
   // `pr_key` so the Lineage UI join resolves; a legacy NULL is tolerated the same way by the
   // lineage read projection (`pollLineage`), which self-roots on `pr_key`.
   root_request_key: string | null;
+  // Opt-in escalation steward (120_escalation_auto_resolutions.sql, issue #889): 1 ⇒ this PR's open
+  // escalations are eligible for the steward to auto-resolve (recorded reviewably). Default 0.
+  auto_resolve_escalations: number;
 }
 
 interface PrDependency {
@@ -621,9 +625,10 @@ export async function submitPr(
   convergeOnly = false,
   rootRequestKey: string | null = null,
   humanApproval = false,
+  autoResolveEscalations = false,
 ) {
   return withPrSubmitLock(parsed.prKey, () =>
-    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval),
+    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations),
   );
 }
 
@@ -636,6 +641,7 @@ async function submitPrCritical(
   convergeOnly = false,
   rootRequestKey: string | null = null,
   humanApproval = false,
+  autoResolveEscalations = false,
 ) {
   // Human approval before merge (issue #826) gates only a PR that `pr.finalize` would hand to the
   // merge-loop — its own predicate, `AUTO_MERGE && convergeOnly !== true`. A run that won't merge
@@ -676,6 +682,15 @@ async function submitPrCritical(
       if (state !== null && !ENGINE_TERMINAL_STATES.has(state)) {
         await engine.setVariables({ scopeKey: loopKey, variables: { humanApproval: true } });
       }
+    }
+    // Steward opt-in is monotonic too (issue #889 review): an opted-in caller adopting a live loop —
+    // possibly a non-opted-in one another run started — widens it to opted-in so the steward can serve
+    // its escalations, rather than silently inheriting the loop's non-opted-in state. The steward reads
+    // the flag off the SUBJECT row (`optInByProcessKey`), not a process variable, so the durable row
+    // update is the whole propagation — no `setVariables` is needed (or possible: the loop never reads
+    // it). Idempotent; a retry against our own opted-in loop is a no-op write.
+    if (autoResolveEscalations && existing.auto_resolve_escalations !== 1) {
+      await table.update(parsed.prKey, { auto_resolve_escalations: 1 });
     }
     return { prKey: parsed.prKey, alreadyRunning: true };
   }
@@ -759,6 +774,7 @@ async function submitPrCritical(
       current_round: 1,
       abandon_token: abandonToken,
       root_request_key: effectiveRoot,
+      auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
       created_at: ts,
       updated_at: ts,
     });
@@ -808,6 +824,10 @@ async function submitPrCritical(
       // Human approval before merge (issue #826): a converged PR parks at the `merge-approval` user
       // task before `pr.finalize` hands it to the merge-loop. Pinned off when the PR won't merge.
       humanApproval: gated,
+      // Opt-in escalation steward (issue #889): carried on the instance AND persisted on the
+      // `pull_requests` row (the durable source the steward's eligibility reads), so a clobbered
+      // variable can never silently opt a PR in or out (#887/#888).
+      autoResolveEscalations,
       // Cooperative abandon check (#76): the capability URL + the abort brief appended to the
       // review-round agent's prompt, so it can stop before pushing if the run is cancelled.
       abandonUrl: abUrl,
@@ -884,6 +904,9 @@ async function submitPrCritical(
         merged_at: null,
         abandon_token: abandonToken,
         root_request_key: effectiveRoot,
+        // Record the opt-in on the row (the durable source the steward's eligibility reads) so a
+        // fresh run's flag is authoritative even across a reopen (issue #889).
+        auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
         // Publish the fresh run's identity in the SAME write as the status flip (may be null if the
         // instance could not be created — a phantom row a retry re-enrolls, as on first submit).
         process_key: processKey,
@@ -1018,6 +1041,9 @@ export interface ActivePr {
   activeWorker: string | null;
   /** ISO ts the current activation lease expires; null when not activated. */
   leaseUntil: string | null;
+  /** Whether this PR opted in to the escalation steward (issue #889) — its open escalations are
+   * eligible for steward auto-resolution. Shown in `/status` per PR. */
+  autoResolveEscalations: boolean;
 }
 
 /** Every tracked PR not in a terminal state (converged/abandoned), newest-updated first. Backs
@@ -1073,6 +1099,56 @@ export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
     updatedAt: p.updated_at,
     activeWorker: p.active_worker ?? null,
     leaseUntil: p.lease_until ?? null,
+    autoResolveEscalations: p.auto_resolve_escalations === 1,
+  }));
+}
+
+/** A delivery-graph run currently in flight, as reported by the status endpoint (issue #889 §1 —
+ *  "Show it in `/status` for each PR or delivery"). Mirrors {@link ActivePr} for the delivery side. */
+export interface ActiveDelivery {
+  runKey: string;
+  title: string | null;
+  status: string;
+  phase: string | null;
+  processKey: string | null;
+  openEscalation: OpenEscalation | null;
+  updatedAt: string;
+  /** Whether this run opted in to the escalation steward (issue #889) — its open escalations are
+   * eligible for steward auto-resolution. Derived from the durable `auto_resolve_escalations` flag,
+   * never a clobbered process variable. Shown in `/status` per delivery. */
+  autoResolveEscalations: boolean;
+}
+
+/** Every delivery-graph run not in a terminal state (done/failed/abandoned), newest-updated first.
+ *  Backs the delivery half of the GET status endpoint (issue #889 §1): a delivery run that opted in to
+ *  the escalation steward must surface that durable flag alongside its live escalation, exactly as a PR
+ *  does. The structured `openEscalation` pointer is derived from the SAME `user_tasks` read model as
+ *  `activePrs` (subject_type `delivery`, keyed by `run_key`), so a delivery node's parked human/escalation
+ *  task carries its completable `userTaskKey` here too. */
+export async function activeDeliveries(data: DataLayer): Promise<ActiveDelivery[]> {
+  // `derived_status` is a plain `string` (the tracking VIEW's fold column), while the terminal set is
+  // the narrow `DeliveryGraphRunStatus` union — classify via a `readonly string[]` view (the SAME
+  // idiom `TERMINAL_STATUSES: readonly string[]` gives the PR side) rather than a banned `as` cast.
+  const terminal: readonly string[] = DELIVERY_GRAPH_TERMINAL_STATUSES;
+  const active = (await deliveryGraphRunsTracking(data).all())
+    .filter((r) => !terminal.includes(r.derived_status))
+    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+  const openEscByRun = new Map<string, OpenEscalation>();
+  for (const t of (await userTasks(data).find({ subject_type: "delivery" })).sort((a, b) =>
+    a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0,
+  )) {
+    if (openEscByRun.has(t.subject_key)) continue;
+    openEscByRun.set(t.subject_key, toOpenEscalation(t));
+  }
+  return active.map((r) => ({
+    runKey: r.run_key,
+    title: r.title ?? null,
+    status: r.status,
+    phase: r.phase ?? null,
+    processKey: r.process_key ?? null,
+    openEscalation: openEscByRun.get(r.run_key) ?? null,
+    updatedAt: r.updated_at,
+    autoResolveEscalations: r.auto_resolve_escalations === 1,
   }));
 }
 
@@ -2559,7 +2635,10 @@ export async function pollPromotion(data: DataLayer, engine: EngineClient, token
         }
         if (prStatus === null) {
           const parsed = parsePr(plan.promotion_pr);
-          if (parsed) await submitPr(data, engine, parsed);
+          // Thread the epic's escalation-steward opt-in (issue #889 review) so a re-enrolled
+          // promotion PR inherits the parent epic's enrolment rather than dropping to the `false`
+          // default (which would also overwrite a previously persisted opt-in with 0).
+          if (parsed) await submitPr(data, engine, parsed, [], MAX_ROUNDS, false, null, false, plan.auto_resolve_escalations === 1);
         }
         continue;
       }
@@ -2596,7 +2675,9 @@ export async function pollPromotion(data: DataLayer, engine: EngineClient, token
         updated_at: now(),
       });
       const parsed = parsePr(promotionPrKey);
-      if (parsed) await submitPr(data, engine, parsed);
+      // Thread the epic's escalation-steward opt-in (issue #889 review) so the freshly opened
+      // promotion PR is enrolled with the parent epic's enrolment, not the `false` default.
+      if (parsed) await submitPr(data, engine, parsed, [], MAX_ROUNDS, false, null, false, plan.auto_resolve_escalations === 1);
       console.log(
         `[poller] promotion PR ${result.created ? "opened" : "reused"} ${promotionPrKey} (${base} -> ${target})`,
       );
@@ -2705,6 +2786,10 @@ export async function pollFeatureDelivery(
             run.auto_merge !== 1,
             run.feature_key,
             run.human_approval === 1,
+            // Thread the run's escalation-steward opt-in (issue #889 review) so a re-enrolled PR
+            // inherits the feature run's enrolment — and a partial-enrollment repair never overwrites
+            // the PR row's previously persisted opt-in with the `false` default.
+            run.auto_resolve_escalations === 1,
           );
         }
       }
@@ -3779,6 +3864,46 @@ export async function pollUserTasks(
   }
 }
 
+/** Escalation-steward tick (issue #889): start ONE `escalation-steward` instance per interval when the
+ * loop is enabled (`NANO_ESCALATION_STEWARD` not off) and the previous tick's instance has finished.
+ * The collect step's own overlap guard is the authoritative no-op for a still-active prior run; this
+ * pass adds the interval pacing + the master switch. Self-scheduled via `pollOnce`; the interval is
+ * `NANO_ESCALATION_STEWARD_INTERVAL` (default `R/PT30M` — the poll reads its `PT…` duration part).
+ * Best-effort + idempotent — a failed start is logged and retried next pass, never wedges the loop. */
+let lastStewardTick = 0;
+export async function pollEscalationSteward(engine: EngineClient) {
+  const disabled = /^(0|off|false|no)$/i.test(readEnvOr("NANO_ESCALATION_STEWARD", "1"));
+  if (disabled) return;
+  // Parse the interval through the ONE canonical ISO-8601 duration parser (`isoDurationToMs`,
+  // app/reviewWait.ts) so the pacing can never drift from the grammar every other timer in the app
+  // uses. The env may carry a bare duration (`PT30M`) or a repeat interval (`R/PT30M`); strip an
+  // optional `R…/` prefix and parse the `P…` period. A malformed value falls back to 30 min; a
+  // zero/negative interval is clamped to that fallback so a steward never starts every poll.
+  const DEFAULT_INTERVAL_MS = 30 * 60 * 1000;
+  const cycle = readEnvOr("NANO_ESCALATION_STEWARD_INTERVAL", "PT30M");
+  const period = cycle.includes("/") ? cycle.slice(cycle.lastIndexOf("/") + 1) : cycle;
+  const parsedMs = isoDurationToMs(period, "PT30M");
+  const intervalMs = parsedMs > 0 ? parsedMs : DEFAULT_INTERVAL_MS;
+  const nowMs = Date.now();
+  if (nowMs - lastStewardTick < intervalMs) return;
+  // Overlap guard (cheap, pre-start): don't start a new tick while a prior one is still ACTIVE.
+  const active = await engine.searchProcessInstances({ processDefinitionId: ESCALATION_STEWARD_PROCESS_ID, state: "ACTIVE" });
+  if (active.length > 0) return;
+  const minAgeMs = Number(readEnvOr("NANO_ESCALATION_STEWARD_MIN_AGE_MS", "300000"));
+  // Advance the tick ONLY after a successful start: if `createInstance` throws, leaving
+  // `lastStewardTick` untouched lets the next pass retry immediately rather than suppressing retries
+  // for the whole interval (the "retried next pass" contract).
+  // Seed the canonical agent-task SLA (`agentSlaTimeout`, issue #849) so the steward-agent's
+  // interrupting timer boundary (`be_steward_sla`) bounds a hung agent run — without it a wedged
+  // agent parks the instance ACTIVE forever and the overlap guard above suppresses every later tick
+  // (issue #889 review).
+  await engine.createInstance({
+    processDefinitionId: ESCALATION_STEWARD_PROCESS_ID,
+    variables: { minAgeMs, agentSlaTimeout: AGENT_SLA_TIMEOUT },
+  });
+  lastStewardTick = nowMs;
+}
+
 /** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
  * (when the engine REST endpoint is supplied) the job-activation visibility pass and the
  * technical-incident surfacing pass. Called on the self-scheduling loop in `main.ts`.
@@ -3799,6 +3924,15 @@ export async function pollOnce(
   await pollFeatureDelivery(data, engine);
   await pollLineage(data);
   await pollUserTasks(data, engine, engineRest);
+  // The escalation steward is an OPTIONAL, best-effort pass: a steward-specific failure (a search or
+  // instance-start error) must never reject `pollOnce` and starve the unrelated epic / taskless-plan /
+  // delivery-graph reconciliation passes that follow it. Catch + log it independently so the canonical
+  // poller always continues (issue #889 review).
+  try {
+    await pollEscalationSteward(engine);
+  } catch (err) {
+    console.error(`[poller] escalation-steward tick: ${err instanceof Error ? err.message : String(err)}`);
+  }
   await pollEpicPhase(data, engine, engineRest);
   await pollTasklessPlanTermination(data, engine);
   await pollDeliveryGraphPhase(data, engine);

@@ -118,6 +118,9 @@ export default defineOperation("startFeature", async ({ body }, app) => {
   const autoMerge = converge && "autoMerge" in body && body.autoMerge === true;
   // Human approval gates the merge-loop, so it is moot (pinned off) without auto-merge (issue #826).
   const humanApproval = autoMerge && "humanApproval" in body && body.humanApproval === true;
+  // Opt-in escalation steward (issue #889): only when explicitly requested does this run's
+  // escalations become eligible for steward auto-resolution. Default off.
+  const autoResolveEscalations = "autoResolveEscalations" in body && body.autoResolveEscalations === true;
   // Optional operator steering threaded to the implementation agent's prompt. Empty/whitespace is
   // normalized to null downstream (startFeature) so it never appends an empty instruction block.
   const customInstructions = "customInstructions" in body && typeof body.customInstructions === "string"
@@ -179,6 +182,7 @@ export default defineOperation("startFeature", async ({ body }, app) => {
     customInstructions,
     { probes: readiness.probes, probeTimeout: readiness.probeTimeout, probePollEvery: readiness.probePollEvery },
     humanApproval,
+    autoResolveEscalations,
   );
   app.log.info("feature run intake", {
     featureKey: parsed.planKey,
@@ -186,6 +190,7 @@ export default defineOperation("startFeature", async ({ body }, app) => {
     converge,
     autoMerge,
     humanApproval,
+    autoResolveEscalations,
     hasCustomInstructions: typeof customInstructions === "string" && customInstructions.trim() !== "",
     readinessProbes: readiness.probes.length,
     outcome: result.outcome,

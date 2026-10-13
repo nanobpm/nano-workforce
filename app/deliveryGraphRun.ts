@@ -28,6 +28,7 @@ import type { CompileDeliveryGraphResult } from "../nano-generated/api-io.d.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { redactFreeText } from "./deliveryGraphCompiler.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement, stripDeliveryEscalationTwinSuffix } from "./deliveryHuman.ts";
+import { derivedTrackingTable } from "./instanceTracking.ts";
 
 const now = () => new Date().toISOString();
 
@@ -52,6 +53,9 @@ export interface DeliveryGraphRun {
    *  the `delivery_graph_read_model` VIEW folds its `list_bucket` to 'history'; NULL while the run is
    *  live or terminal-but-undismissed (it stays in Active until an operator ticks it off). */
   acknowledged_at: string | null;
+  /** Opt-in escalation steward (120_escalation_auto_resolutions.sql, issue #889): 1 ⇒ this run's
+   * escalations are eligible for steward auto-resolution. Default 0. */
+  auto_resolve_escalations: number;
 }
 
 /** The run lifecycle. `awaiting-approval` is RESERVED but no longer produced (issue #460 moved dispatch
@@ -97,6 +101,18 @@ export const DELIVERY_PHASE = {
 /** The `delivery_graph_runs` aggregate accessor — the durable run store keyed by `run_key`. */
 export const deliveryGraphRuns = (data: DataLayer) =>
   data.table<DeliveryGraphRun>("delivery_graph_runs", "run_key");
+
+/** A `delivery_graph_runs` row as seen through its derived tracking VIEW
+ *  (`delivery_graph_runs__tracking`): the base columns plus urban's ADR-0065 `derived_status`, which
+ *  folds the reconciler's terminal edge (out-of-band terminate → `failed`) over the worker-owned
+ *  transient. */
+export type TrackedDeliveryGraphRun = DeliveryGraphRun & { derived_status: string };
+/** Read-only accessor over the delivery-run derived tracking VIEW. Use this — and read
+ *  `derived_status`, not `status` — for any terminal-edge classification (e.g. the `/status` active
+ *  list), so an out-of-band-terminated run (whose base row is still `running`) is correctly seen as
+ *  `failed`. Mirrors `prsTracking` / `featureRunsTracking`. Writes stay on `deliveryGraphRuns`. */
+export const deliveryGraphRunsTracking = (data: DataLayer) =>
+  derivedTrackingTable<TrackedDeliveryGraphRun>(data, "delivery_graph_runs", "run_key");
 
 /** One row of the `delivery_graph_run_identity` SIDE table (migration 113) — the run's LOSSLESS
  * content-identity fingerprint, kept OFF the heavily-projected `delivery_graph_runs` base row so no
@@ -493,6 +509,7 @@ export function buildDeliveryGraphRunRow(input: {
   processDefinitionId?: string | null;
   humanLabels?: Record<string, string>;
   createdAt?: string;
+  autoResolveEscalations?: boolean;
 }): DeliveryGraphRun {
   const at = now();
   return {
@@ -509,6 +526,7 @@ export function buildDeliveryGraphRunRow(input: {
     phase: input.phase,
     phase_node_id: null,
     human_labels: input.humanLabels ? JSON.stringify(input.humanLabels) : null,
+    auto_resolve_escalations: input.autoResolveEscalations === true ? 1 : 0,
     created_at: input.createdAt ?? at,
     updated_at: at,
     acknowledged_at: null,

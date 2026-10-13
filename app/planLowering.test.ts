@@ -58,7 +58,7 @@ function makeData() {
   return { data, engine, tables, started };
 }
 
-function stageEpic(tables: Map<string, Record<string, unknown>[]>, planKey: string, base: string) {
+function stageEpic(tables: Map<string, Record<string, unknown>[]>, planKey: string, base: string, autoResolve = 0) {
   const rows = tables.get("admitted_epics") ?? [];
   tables.set("admitted_epics", rows);
   const [repo, num] = planKey.split("#");
@@ -68,6 +68,7 @@ function stageEpic(tables: Map<string, Record<string, unknown>[]>, planKey: stri
     issue_number: Number(num),
     issue_url: `https://github.com/${repo}/issues/${num}`,
     base_branch: base,
+    auto_resolve_escalations: autoResolve,
     created_at: "t0",
   });
 }
@@ -183,4 +184,28 @@ test("lowerAdmittedSet is idempotent: re-running neither double-starts an epic n
   await noFetch(() => lowerAdmittedSet(data, engine, ["o/r#1", "o/r#2"]));
   assertEquals(started.length, 2, "no epic re-started on a re-run");
   assertEquals((tables.get("plan_deps") ?? []).length, 1, "no duplicate durable edge on a re-run");
+});
+
+// ── issue #889: the escalation-steward opt-in reaches batch-admitted epics ──────────────────────
+test("lowerAdmittedSet forwards the staged escalation-steward opt-in to startPlan (issue #889 — batch epic path)", async () => {
+  const { data, engine, tables, started } = makeData();
+  // Stage one opted-IN epic and one opted-OUT epic. The batch door (`startEpicSet`) records the
+  // caller's per-epic `autoResolveEscalations` onto the staging row; the lowering must forward it to
+  // `startPlan` (which seeds the `autoResolveEscalations` instance variable + the durable plans row),
+  // exactly as the single-issue door does. Before the fix the flag was dropped at the staging seam,
+  // so every batch-admitted epic stayed opted out.
+  stageEpic(tables, "o/r#1", "epic/in", 1);
+  stageEpic(tables, "o/r#2", "epic/out", 0);
+
+  await noFetch(() => lowerAdmittedSet(data, engine, ["o/r#1", "o/r#2"]));
+
+  const byKey = new Map(started.map((s) => [s.variables?.["planKey"], s.variables ?? {}]));
+  assertEquals(byKey.get("o/r#1")?.["autoResolveEscalations"], true, "opted-in epic propagates the steward opt-in");
+  assertEquals(byKey.get("o/r#2")?.["autoResolveEscalations"], false, "opted-out epic stays opted out");
+
+  // And the durable plans rows carry it (the steward eligibility reads the durable row, not the var).
+  const plans = tables.get("plans") ?? [];
+  const planByKey = new Map(plans.map((p) => [p["plan_key"], p]));
+  assertEquals(planByKey.get("o/r#1")?.["auto_resolve_escalations"], 1, "opted-in plans row persisted");
+  assertEquals(planByKey.get("o/r#2")?.["auto_resolve_escalations"], 0, "opted-out plans row persisted");
 });

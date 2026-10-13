@@ -243,6 +243,14 @@
     {
       "taskType": "pr.reconcile-implement",
       "handler": "workers/reconcile-implement/worker.ts"
+    },
+    {
+      "taskType": "pr.escalation-steward-collect",
+      "handler": "workers/escalation-steward-collect/worker.ts"
+    },
+    {
+      "taskType": "pr.escalation-steward-record",
+      "handler": "workers/escalation-steward-record/worker.ts"
     }
   ],
   "externalTaskTypes": [
@@ -256,7 +264,8 @@
     "senior:retro",
     "senior:conformance",
     "senior:scope-classify",
-    "senior:adversarial-review"
+    "senior:adversarial-review",
+    "senior:escalation-steward"
   ],
   "surfaces": {
     "taskInbox": {

@@ -166,6 +166,11 @@ export async function lowerAdmittedSet(
       readinessProbes: gate?.probes,
       probeTimeout: gate?.probeTimeout,
       probePollEvery: gate?.probePollEvery,
+      // Forward the escalation-steward opt-in staged at admission (issue #889) so a batch-admitted
+      // epic honours the caller's choice exactly like the single-issue door. `=== 1` coerces the
+      // SQLite 0|1 (and any pre-124 row that predates the column reads as 0 ⇒ opted out, the safe
+      // default).
+      autoResolveEscalations: staged.auto_resolve_escalations === 1,
     });
   }
 

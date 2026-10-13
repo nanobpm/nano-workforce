@@ -1,0 +1,21 @@
+-- 124_admitted_epics_auto_resolve.sql — issue #889: carry the escalation-steward opt-in through the
+-- set/batch admission door (`startEpicSet`).
+--
+-- The single-issue door (`startPlanFanout`) already seeds `plans.auto_resolve_escalations` (added by
+-- 120) from the request body's `autoResolveEscalations`. The set/batch door dropped it: `startEpicSet`
+-- stages each admitted epic into `admitted_epics` and `lowerAdmittedSet` later reads that staging to
+-- call `startPlan` — but the staging row had no column for the flag, so every batch-admitted epic (and
+-- every child convergence/merge loop it spawns) stayed opted OUT even when the caller opted in. That
+-- contradicts the issue #889 contract that the opt-in reach "every initiation pathway".
+--
+-- Fix the class at the staging seam: persist the per-epic opt-in on the staged row so the lowering
+-- reads it back and forwards it to `startPlan`. Additive (nullable-free `NOT NULL DEFAULT 0`), so an
+-- existing install's already-staged rows read as opted-out (the safe default) and fresh admissions
+-- record the caller's choice. No read-model view selects from `admitted_epics`, so no VIEW re-emission
+-- is needed (unlike `pull_requests` — cf. 121/122).
+--
+-- Numbered 124: above this branch's highest committed prefix (123) and origin/main's (119), so a
+-- fan-out sibling forking at either point cannot collide. The runner wraps each file in its own
+-- transaction, so this file must NOT contain BEGIN/COMMIT.
+
+ALTER TABLE admitted_epics ADD COLUMN auto_resolve_escalations INTEGER NOT NULL DEFAULT 0;

@@ -1,0 +1,452 @@
+// Unit tests for the opt-in escalation steward domain core (issue #889).
+//
+// Covers the PURE eligibility/guard derivations and the record/claim I/O against the real
+// provisioned SQLite data layer:
+//   • eligibility — opted-in only, answerable kinds only, min-age, not-already-claimed;
+//   • the claim/lease fence — two claims for one task can never both win (no double-answer);
+//   • the destructive-option + loop guards — abstain, never submit;
+//   • record writing + dismiss/intervene review transitions;
+//   • the opt-in map derivation across every subject table.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { test } from "node:test";
+import { assert, assertEquals } from "#test-assert";
+import type { DataLayer } from "@nanobpm/urban";
+import { bootTestApp } from "@nanobpm/urban-testkit";
+import {
+  claimEscalations,
+  countSubjectResolutions,
+  escalationAutoResolutions,
+  isDestructiveOption,
+  isEligibleEscalation,
+  isStewardAnswerableElement,
+  isStewardAnswerableForm,
+  listAutoResolutions,
+  liveClaimedTaskKeys,
+  loopGuardTripped,
+  LOOP_GUARD_MAX_RESOLUTIONS,
+  optInByProcessKey,
+  optInBySubjectKey,
+  pendingAutoResolutionCount,
+  recordResolution,
+  renewClaim,
+  reviewResolution,
+  STEWARD_NEVER_RESOLVE_ELEMENTS,
+} from "./escalationSteward.ts";
+import type { UserTaskRow } from "./userTasks.ts";
+
+const APP_ROOT = resolve(import.meta.dirname, "..");
+
+async function withData(fn: (data: DataLayer) => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "nwf-steward-"));
+  const app = await bootTestApp(APP_ROOT, { env: { NANO_APP_DB_URL: `file:${join(dir, "app.db")}` } });
+  try {
+    await fn(app.db);
+  } finally {
+    await app.stop?.();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function taskRow(over: Partial<UserTaskRow>): UserTaskRow {
+  return {
+    user_task_key: "UT-1",
+    element_id: "wait-answer",
+    kind_label: "PR review",
+    subject_type: "pr",
+    subject_key: "o/r#1",
+    subject_title: "o/r#1",
+    subject_url: "https://github.com/o/r/pull/1",
+    question: "Which approach?",
+    process_key: "PI-1",
+    form_key: "pr-escalation",
+    created_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(), // 10 min old
+    updated_at: new Date().toISOString(),
+    ...over,
+  };
+}
+
+// ── Pure eligibility ─────────────────────────────────────────────────────────────────────────────
+
+test("isEligibleEscalation: requires opt-in (non-opted-in work is never touched)", () => {
+  const row = taskRow({});
+  const base = { minAgeMs: 300_000, claimedUserTaskKeys: new Set<string>(), at: Date.now() };
+  assertEquals(isEligibleEscalation(row, { ...base, optedIn: true }), true);
+  assertEquals(isEligibleEscalation(row, { ...base, optedIn: false }), false, "not opted in → ineligible");
+});
+
+test("isEligibleEscalation: enforces the minimum age so a human already answering wins", () => {
+  const fresh = taskRow({ created_at: new Date().toISOString() }); // just opened
+  const base = { optedIn: true, claimedUserTaskKeys: new Set<string>(), at: Date.now() };
+  assertEquals(isEligibleEscalation(fresh, { ...base, minAgeMs: 300_000 }), false, "too fresh → ineligible");
+  assertEquals(isEligibleEscalation(taskRow({}), { ...base, minAgeMs: 300_000 }), true, "past min age → eligible");
+});
+
+test("isEligibleEscalation: a task already claimed by a live steward run is skipped", () => {
+  const row = taskRow({});
+  const base = { optedIn: true, minAgeMs: 300_000, at: Date.now() };
+  assertEquals(isEligibleEscalation(row, { ...base, claimedUserTaskKeys: new Set(["UT-1"]) }), false, "claimed → ineligible");
+});
+
+test("isStewardAnswerableElement: refuses human-only / irreversible / credential kinds", () => {
+  for (const el of ["merge-approval", "acp-permission", "readiness-escalation", "readiness-escalation-pf", "feature-blocked", "conformance-escalation", "empty-plan-escalation"]) {
+    assertEquals(isStewardAnswerableElement(el), false, `${el} must never be steward-answered`);
+    assertEquals(STEWARD_NEVER_RESOLVE_ELEMENTS.has(el), true);
+  }
+  // The agent-answerable escalation kinds ARE steward-answerable.
+  for (const el of ["wait-answer", "wait-merge-answer", "feature-escalation", "escalation", "plan-review-decision", "trial-merge-decision"]) {
+    assertEquals(isStewardAnswerableElement(el), true, `${el} is steward-answerable`);
+  }
+});
+
+test("isStewardAnswerableElement: gates on the canonical agent-answerable ALLOWLIST, not a denylist (issue #889 review)", () => {
+  // The canonical agent-answerable surface is `ESCALATION_TASK_ELEMENTS` (plus the dynamic
+  // delivery-human predicate). An element OUTSIDE that allowlist — an arbitrary/unknown user-task id
+  // that happens to not be in the NEVER_RESOLVE denylist — must FAIL CLOSED: otherwise the steward
+  // claims and dispatches it, the completer later refuses it, and the task is left with a spurious
+  // abstention that permanently excludes it from future steward ticks.
+  for (const unknown of ["some-random-task", "human-approval", "deploy-gate", "qa-signoff", ""]) {
+    assertEquals(isStewardAnswerableElement(unknown), false, `unknown/non-escalation '${unknown}' must fail closed (not in the allowlist)`);
+  }
+  // A delivery-human task IS in the canonical surface via the dynamic predicate, so it passes the
+  // element guard here (its FORM is gated separately by isStewardAnswerableForm).
+  assertEquals(isStewardAnswerableElement("delivery-human-task"), true, "delivery-human-task is in the canonical surface");
+  assertEquals(isStewardAnswerableElement("delivery-human-task__publish-step"), true, "an inlined delivery-human node is in the canonical surface");
+  // Belt-and-braces: a kind in the NEVER_RESOLVE guard is refused even though the allowlist may admit
+  // it (the explicit safety exclusion still wins). None currently overlap; assert the invariant holds.
+  for (const el of STEWARD_NEVER_RESOLVE_ELEMENTS) {
+    assertEquals(isStewardAnswerableElement(el), false, `${el} stays refused even though the allowlist may admit it`);
+  }
+});
+
+test("isStewardAnswerableForm: a delivery-human task is form-aware and fails closed for manual/credential forms", () => {
+  // A dynamic delivery-human element is steward-answerable ONLY on the known-safe decision/typed-value
+  // forms; the bespoke CATEGORY forms (manual publish / click-done ack) and any absent/unknown form
+  // must fail closed, because the agent completer does NOT validate dynamic delivery-human forms.
+  for (const el of ["delivery-human-task", "delivery-human-task__publish-step"]) {
+    assertEquals(isStewardAnswerableForm(el, "delivery-human-generic"), true, `${el}+generic is answerable`);
+    assertEquals(isStewardAnswerableForm(el, "delivery-escalation"), true, `${el}+escalation is answerable`);
+    assertEquals(isStewardAnswerableForm(el, "delivery-human-publish"), false, `${el}+publish (credential) fails closed`);
+    assertEquals(isStewardAnswerableForm(el, "delivery-human-ack"), false, `${el}+ack (manual) fails closed`);
+    assertEquals(isStewardAnswerableForm(el, "some-unknown-form"), false, `${el}+unknown fails closed`);
+    assertEquals(isStewardAnswerableForm(el, null), false, `${el}+absent fails closed`);
+  }
+  // A FIXED-form escalation is governed by its element id (the completer validates it), so its form is
+  // not gated here — even a null/credential-named form passes the form guard (the element guard owns it).
+  for (const el of ["wait-answer", "plan-review-decision", "trial-merge-decision"]) {
+    assertEquals(isStewardAnswerableForm(el, null), true, `${el} form is not gated`);
+    assertEquals(isStewardAnswerableForm(el, "delivery-human-publish"), true, `${el} form is not gated`);
+  }
+});
+
+test("isEligibleEscalation: a delivery-human credential/manual task is never eligible even when opted in", () => {
+  const base = { optedIn: true, minAgeMs: 300_000, claimedUserTaskKeys: new Set<string>(), at: Date.now() };
+  // Opted-in, past-age, unclaimed — eligible ONLY when the resolved form is steward-safe.
+  const safe = taskRow({ user_task_key: "UT-DG", element_id: "delivery-human-task__step", form_key: "delivery-human-generic" });
+  assertEquals(isEligibleEscalation(safe, base), true, "delivery-human + generic form → eligible");
+  for (const form of ["delivery-human-publish", "delivery-human-ack", "no-such-form"]) {
+    const row = taskRow({ user_task_key: "UT-DG", element_id: "delivery-human-task__publish", form_key: form });
+    assertEquals(isEligibleEscalation(row, base), false, `delivery-human + ${form} → ineligible (fail closed)`);
+  }
+  const noForm = taskRow({ user_task_key: "UT-DG", element_id: "delivery-human-task__x", form_key: null });
+  assertEquals(isEligibleEscalation(noForm, base), false, "delivery-human + absent form → ineligible (fail closed)");
+});
+
+// ── Destructive-option + loop guards ─────────────────────────────────────────────────────────────
+
+test("isDestructiveOption: flags irreversible/destructive choices for abstention", () => {
+  for (const v of ["abandon", "abandon-run", "delete", "destroy", "discard", "force-merge", "merge-admin", "override-checks"]) {
+    assertEquals(isDestructiveOption(v), true, `${v} is destructive`);
+  }
+  for (const v of ["retry", "continue", "answer", "proceed", "revise", "rebase"]) {
+    assertEquals(isDestructiveOption(v), false, `${v} is safe`);
+  }
+});
+
+test("loopGuardTripped: trips once a subject has been auto-resolved the max times", () => {
+  assertEquals(loopGuardTripped(0), false);
+  assertEquals(loopGuardTripped(LOOP_GUARD_MAX_RESOLUTIONS - 1), false);
+  assertEquals(loopGuardTripped(LOOP_GUARD_MAX_RESOLUTIONS), true, "at the cap → abstain");
+  assertEquals(loopGuardTripped(LOOP_GUARD_MAX_RESOLUTIONS + 1), true);
+});
+
+// ── Claim/lease fence + record I/O against the real data layer ──────────────────────────────────
+
+test("claimEscalations: the durable fence lets only ONE steward claim a task (no double-answer)", async () => {
+  await withData(async (data) => {
+    const rows = [taskRow({})];
+    const first = await claimEscalations(data, rows, "steward-A");
+    assertEquals(first.length, 1, "the first claim wins");
+    // A second, overlapping steward run claiming the SAME task loses the fence (skipped, not an error).
+    const second = await claimEscalations(data, rows, "steward-B");
+    assertEquals(second.length, 0, "the second claim is fenced out — the task is never double-answered");
+    const live = await liveClaimedTaskKeys(data);
+    assertEquals(live.has("UT-1"), true, "the live claim is visible to the eligibility derivation");
+  });
+});
+
+test("recordResolution: finalises a claim into a resolved record; the fence then releases the task", async () => {
+  await withData(async (data) => {
+    await claimEscalations(data, [taskRow({})], "steward-A");
+    await recordResolution(data, "UT-1", {
+      outcome: "resolved",
+      submittedVariables: { answer: "Retry with a corrective note." },
+      rationale: "nothing was pushed — retry",
+      evidence: "git ls-remote showed no branch",
+      options: ["retry", "abandon"],
+      agentJobKey: "J-1",
+    });
+    const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0].outcome, "resolved");
+    assertEquals(rows[0].submitted_variables, JSON.stringify({ answer: "Retry with a corrective note." }));
+    assertEquals(rows[0].rationale, "nothing was pushed — retry");
+    assertEquals(rows[0].claimed_by, null, "finalised — the claim is released");
+    // A resolved row no longer holds the open-claim fence, so a FRESH escalation of the same task key
+    // (a re-escalation) can be claimed/recorded afresh.
+    const live = await liveClaimedTaskKeys(data);
+    assertEquals(live.has("UT-1"), false);
+  });
+});
+
+test("recordResolution: the finalise CAS is scoped to the claim OWNER — a non-owner loses the fence and finalises nothing", async () => {
+  await withData(async (data) => {
+    // steward-A holds the live claim on UT-1.
+    await claimEscalations(data, [taskRow({})], "steward-A");
+    // A NON-OWNER (steward-B, an overlapping tick that never owned this key) attempts to finalise it.
+    // The CAS must change ZERO rows and report the loss — otherwise steward-B would finalise steward-A's
+    // live claim (the no-double-answer fence the reviewer cited, issue #889 review).
+    const won = await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-B");
+    assertEquals(won, false, "a non-owner must lose the finalise CAS");
+    const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+    assertEquals(rows[0].outcome, "claimed", "the foreign claim is left untouched, not finalised");
+    assertEquals(rows[0].claimed_by, "steward-A", "still owned by the real claim holder");
+    // The true owner CAN finalise its own claim.
+    const wonByOwner = await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-A");
+    assertEquals(wonByOwner, true, "the owner wins its own finalise CAS");
+    assertEquals((await escalationAutoResolutions(data).find({ user_task_key: "UT-1" }))[0].outcome, "resolved");
+  });
+});
+
+test("recordResolution: the finalise CAS refuses an EXPIRED lease — a crashed owner's stale write finalises nothing", async () => {
+  await withData(async (data) => {
+    // steward-A claims UT-1 with an ALREADY-EXPIRED lease (a crashed/stalled run whose TTL elapsed).
+    await claimEscalations(data, [taskRow({})], "steward-A", -1);
+    // The expired owner must NOT be able to finalise — its lease lapsed, so an overlapping tick may
+    // have reclaimed the task; letting the stale owner write would finalise the NEW owner's claim.
+    const won = await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-A");
+    assertEquals(won, false, "an expired lease loses the finalise CAS");
+    const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+    assertEquals(rows[0].outcome, "claimed", "the expired claim is not finalised by its stale owner");
+  });
+});
+
+test("renewClaim: the OWNER re-acquires an expired-but-owned lease (unbounded agent run) so its finalise CAS then wins", async () => {
+  await withData(async (data) => {
+    // steward-A claims UT-1 with an ALREADY-EXPIRED lease (the agent ran longer than the TTL). No
+    // overlapping tick reclaimed it, so A still owns the row — it must be able to re-acquire.
+    await claimEscalations(data, [taskRow({})], "steward-A", -1);
+    // Before renewal the finalise CAS refuses the expired lease (safety: a stale write finalises nothing).
+    assertEquals(await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-A"), false);
+    // The owner renews its own claim (owner-fenced, NOT expiry-gated — the point is to recover a lapsed lease).
+    assertEquals(await renewClaim(data, "UT-1", "steward-A"), true, "the owner re-acquires its expired-but-owned lease");
+    // With the lease renewed, the owner's finalise CAS now wins and the record is written.
+    assertEquals(await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-A"), true, "the owner's finalise CAS wins after renewal");
+    assertEquals((await escalationAutoResolutions(data).find({ user_task_key: "UT-1" }))[0].outcome, "resolved");
+  });
+});
+
+test("renewClaim: a NON-OWNER cannot renew another run's claim (no lease theft)", async () => {
+  await withData(async (data) => {
+    // steward-A owns UT-1 (expired lease). A DIFFERENT run must NOT be able to renew/steal it — only
+    // the claim's own holder may re-acquire, so an overlapping tick can never resurrect a foreign claim.
+    await claimEscalations(data, [taskRow({})], "steward-A", -1);
+    assertEquals(await renewClaim(data, "UT-1", "steward-B"), false, "a non-owner loses the renew (owner-fenced)");
+    const rows = await escalationAutoResolutions(data).find({ user_task_key: "UT-1" });
+    assertEquals(rows[0].claimed_by, "steward-A", "the claim still belongs to its real owner");
+  });
+});
+
+test("renewClaim: renewing a RELEASED (deleted) or already-finalised claim finalises nothing", async () => {
+  await withData(async (data) => {
+    // No claim row at all (released by a reclaim or never claimed) → renew changes nothing.
+    assertEquals(await renewClaim(data, "UT-GONE", "steward-A"), false, "no open claim row → renew loses");
+    // A finalised (`resolved`) row is no longer `claimed`, so renew must not resurrect it.
+    await claimEscalations(data, [taskRow({})], "steward-A");
+    await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } }, "steward-A");
+    assertEquals(await renewClaim(data, "UT-1", "steward-A"), false, "a finalised row is not `claimed` → renew loses");
+  });
+});
+
+test("countSubjectResolutions: only RESOLVED rows count toward the loop guard (abstentions do not)", async () => {
+  await withData(async (data) => {
+    // Two resolved + one abstained for the same subject.
+    for (const key of ["UT-1", "UT-2"]) {
+      await claimEscalations(data, [taskRow({ user_task_key: key })], "steward-A");
+      await recordResolution(data, key, { outcome: "resolved", submittedVariables: { answer: "x" } });
+    }
+    await claimEscalations(data, [taskRow({ user_task_key: "UT-3" })], "steward-A");
+    await recordResolution(data, "UT-3", { outcome: "abstained", rationale: "unclear" });
+    assertEquals(await countSubjectResolutions(data, "pr", "o/r#1"), 2, "only the two resolved rows count");
+    assertEquals(loopGuardTripped(await countSubjectResolutions(data, "pr", "o/r#1")), true, "the guard trips at the cap");
+  });
+});
+
+test("listAutoResolutions + pendingAutoResolutionCount: only FINAL records are listed; filters work", async () => {
+  await withData(async (data) => {
+    // One resolved (pending review), one abstained (pending), one dismissed.
+    await claimEscalations(data, [taskRow({ user_task_key: "UT-1" })], "s");
+    await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } });
+    await claimEscalations(data, [taskRow({ user_task_key: "UT-2", element_id: "feature-escalation", kind_label: "Feature escalation" })], "s");
+    await recordResolution(data, "UT-2", { outcome: "abstained", rationale: "unclear" });
+    await claimEscalations(data, [taskRow({ user_task_key: "UT-3" })], "s");
+    await recordResolution(data, "UT-3", { outcome: "resolved", submittedVariables: { answer: "y" } });
+    // An in-flight claim (never finalised) must NOT appear in the review surface.
+    await claimEscalations(data, [taskRow({ user_task_key: "UT-4" })], "s");
+
+    const all = await listAutoResolutions(data);
+    assertEquals(all.length, 3, "the in-flight claim is not listed");
+    assertEquals(await pendingAutoResolutionCount(data), 3);
+    const pending = await listAutoResolutions(data, { reviewState: "pending" });
+    assertEquals(pending.length, 3);
+    const byKind = await listAutoResolutions(data, { kind: "feature-escalation" });
+    assertEquals(byKind.length, 1);
+    assertEquals(byKind[0].element_id, "feature-escalation");
+  });
+});
+
+test("reviewResolution: dismiss/intervene fold review_state off pending, idempotently", async () => {
+  await withData(async (data) => {
+    await claimEscalations(data, [taskRow({})], "s");
+    await recordResolution(data, "UT-1", { outcome: "resolved", submittedVariables: { answer: "x" } });
+    const id = (await escalationAutoResolutions(data).find({ user_task_key: "UT-1" }))[0].id;
+
+    assertEquals(await reviewResolution(data, id, "dismissed", "alice", "looks right"), true);
+    let row = (await escalationAutoResolutions(data).find({ user_task_key: "UT-1" }))[0];
+    assertEquals(row.review_state, "dismissed");
+    assertEquals(row.reviewed_by, "alice");
+    assertEquals(row.review_note, "looks right");
+    assertEquals(typeof row.reviewed_at, "string");
+
+    // A second review is a no-op (already off pending) — the record keeps its first review.
+    assertEquals(await reviewResolution(data, id, "intervened", "bob", "stepping in"), false);
+    row = (await escalationAutoResolutions(data).find({ user_task_key: "UT-1" }))[0];
+    assertEquals(row.review_state, "dismissed", "an already-reviewed record is unchanged");
+    assertEquals(await pendingAutoResolutionCount(data), 0);
+  });
+});
+
+test("reviewResolution: an in-flight (claimed, not yet final) record can NOT be reviewed away", async () => {
+  await withData(async (data) => {
+    // A claim placeholder starts life `review_state='pending'` too — but it is an in-flight steward
+    // action, not a reviewable decision. Reviewing it must be a no-op so a guessed/old claim id can
+    // never be dismissed before it finalises (which would let its resolution bypass the review queue).
+    await claimEscalations(data, [taskRow({})], "s");
+    const id = (await escalationAutoResolutions(data).find({ user_task_key: "UT-1" }))[0].id;
+
+    assertEquals(await reviewResolution(data, id, "dismissed", "alice", "premature"), false, "an in-flight claim is not reviewable");
+    const row = (await escalationAutoResolutions(data).find({ user_task_key: "UT-1" }))[0];
+    assertEquals(row.outcome, "claimed", "still an in-flight claim");
+    assertEquals(row.review_state, "pending", "the claim's review state is untouched");
+    assertEquals(row.reviewed_by, null);
+  });
+});
+
+test("optInByProcessKey: derives the opt-in flag from every subject table, keyed by process instance", async () => {
+  await withData(async (data) => {
+    const ts = new Date().toISOString();
+    // An opted-in PR and a NOT-opted-in feature run.
+    await data.table("pull_requests", "pr_key").insert({
+      pr_key: "o/r#1", repo: "o/r", number: 1, url: "u", status: "converging", current_round: 0,
+      process_key: "PI-PR", auto_resolve_escalations: 1, created_at: ts, updated_at: ts,
+    });
+    await data.table("feature_runs", "feature_key").insert({
+      feature_key: "o/r#2", repo: "o/r", issue_number: 2, issue_url: "u", base_branch: "main",
+      status: "running", process_key: "PI-FEAT", auto_resolve_escalations: 0, created_at: ts, updated_at: ts,
+    });
+    const map = await optInByProcessKey(data);
+    assertEquals(map.get("PI-PR"), true, "the opted-in PR is eligible");
+    assertEquals(map.get("PI-FEAT"), false, "the non-opted-in feature is not");
+    assertEquals(map.get("PI-UNKNOWN"), undefined, "an untracked instance is absent (fail-closed)");
+  });
+});
+
+test("optInBySubjectKey: keys by subject_type:subject_key so colliding keys across tables never cross-match", async () => {
+  await withData(async (data) => {
+    const ts = new Date().toISOString();
+    // A PR and a plan whose primary keys COLLIDE in the shared string space ("X"): the PR opted OUT,
+    // the plan opted IN. An un-scoped map would let one clobber the other; the compound key keeps them
+    // distinct so a non-opted-in subject is never made eligible by a colliding opted-in one (#889 review).
+    await data.table("pull_requests", "pr_key").insert({
+      pr_key: "X", repo: "o/r", number: 1, url: "u", status: "converging", current_round: 0,
+      process_key: "PI-PR", auto_resolve_escalations: 0, created_at: ts, updated_at: ts,
+    });
+    await data.table("plans", "plan_key").insert({
+      plan_key: "X", repo: "o/r", issue_number: 9, issue_url: "u", status: "running",
+      process_key: "PI-PLAN", auto_resolve_escalations: 1, created_at: ts, updated_at: ts,
+    });
+    const map = await optInBySubjectKey(data);
+    assertEquals(map.get("pr:X"), false, "the opted-OUT PR stays opted out under its own type");
+    assertEquals(map.get("plan:X"), true, "the opted-IN plan stays opted in under its own type");
+    assertEquals(map.get("X"), undefined, "the bare (un-scoped) key never exists — no cross-table collision");
+  });
+});
+
+test("claimEscalations: snapshots a delivery-graph human task's REAL options from its engine form_key", async () => {
+  await withData(async (data) => {
+    // A delivery-graph human task's element id is DYNAMIC (`delivery-human-task__<node>`) and has no
+    // static `escalationFormId` mapping, so snapshotting options off `element_id` alone recorded NULL
+    // for exactly these tasks (issue #889 review). The real form is carried on the task's engine
+    // `form_key` — snapshot from THERE. `delivery-escalation`'s `decision` select is [continue, retry].
+    const claimed = await claimEscalations(
+      data,
+      [taskRow({ user_task_key: "UT-DG", element_id: "delivery-human-task__publish-step", kind_label: "Delivery decision", form_key: "delivery-escalation" })],
+      "steward-A",
+    );
+    assertEquals(claimed.length, 1);
+    assertEquals(
+      claimed[0].options,
+      JSON.stringify(["continue", "retry"]),
+      "the claim snapshots the deployed form resolved from form_key, not NULL",
+    );
+  });
+});
+
+test("claimEscalations: an unresolvable form_key degrades to NULL options, never throwing", async () => {
+  await withData(async (data) => {
+    // A `form_key` that names no bundled `.form` (and a dynamic element with no static form) must NOT
+    // throw inside the claim loop (which would wedge the steward) — it degrades to NULL options.
+    const claimed = await claimEscalations(
+      data,
+      [taskRow({ user_task_key: "UT-NF", element_id: "delivery-human-task__x", kind_label: "Delivery", form_key: "no-such-form-key" })],
+      "steward-A",
+    );
+    assertEquals(claimed.length, 1, "the claim still succeeds");
+    assertEquals(claimed[0].options, null, "an unresolvable form yields NULL options, not a throw");
+  });
+});
+
+test("read model: projects the steward's process as `process_key` (cockpit link) and the persisted `selected_option`", async () => {
+  await withData(async (data) => {
+    // A resolved record whose steward ran under PI-STEWARD (distinct from the subject's process PI-1).
+    await claimEscalations(data, [taskRow({ process_key: "PI-1" })], "PI-STEWARD");
+    await recordResolution(data, "UT-1", {
+      outcome: "resolved",
+      submittedVariables: { answer: "retry" },
+      selectedOption: "retry",
+      rationale: "ok",
+      evidence: "checked",
+    });
+    const rows = (await data.open().query(
+      `SELECT "process_key", "process_instance_key", "steward_instance_key", "selected_option" FROM "escalation_auto_resolutions__read_model" WHERE "user_task_key" = 'UT-1'`,
+    )) as unknown as { process_key: string | null; process_instance_key: string | null; steward_instance_key: string | null; selected_option: string | null }[];
+    assertEquals(rows.length, 1);
+    // The cockpit "Agent" transcript link keys on `process_key`, which must be the ANSWERING steward's
+    // process — NOT `process_instance_key` (the escalated subject's process) (issue #889 review).
+    assertEquals(rows[0].process_key, "PI-STEWARD", "the cockpit link focuses the steward transcript");
+    assertEquals(rows[0].process_instance_key, "PI-1", "the subject's engine instance stays distinct");
+    assertEquals(rows[0].steward_instance_key, "PI-STEWARD");
+    assertEquals(rows[0].selected_option, "retry", "the selected option is projected for the grid");
+  });
+});

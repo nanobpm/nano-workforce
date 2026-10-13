@@ -296,6 +296,82 @@ export function validateEscalationVariables(
   return null;
 }
 
+/** Snapshot the REAL option values an escalation's deployed `.form` offers (the union of every `select`
+ *  field's allowed `values`), read from the canonical form contract host-side. The escalation-steward
+ *  record step persists THIS — never the deciding agent's self-reported `options` array, which the agent
+ *  may omit or misstate (issue #889 review) — so the reviewable record shows the choices that were
+ *  genuinely on offer. Returns `null` when the element has no linked form (nothing to snapshot). */
+export function snapshotEscalationFormOptions(elementId: string): string[] | null {
+  const formId = escalationFormId(elementId);
+  if (!formId) return null;
+  return optionUnionForForm(formId);
+}
+
+/** The SELECT-field KEYS a fixed-form escalation's deployed `.form` carries (e.g. `["action"]` for
+ *  `trial-merge-decision`, `["directive"]` for `plan-review-decision`), read from the SAME canonical
+ *  form contract the completer validates against — one derivation, no second field list. The
+ *  escalation-steward record step uses this to scope its destructive-option guard to the field the
+ *  task's ACTUAL form submits, so a foreign recognized key (a `resolution` on a `trial-merge-decision`,
+ *  whose own select is `action`) can never shadow the real destructive choice (issue #889 review).
+ *  Returns `null` when the element has no linked form (nothing to scope to — the caller falls back to
+ *  its conservative recognized-key sweep). Never throws on an unreadable form (yields `null`). */
+export function escalationFormSelectKeys(elementId: string): string[] | null {
+  const formId = escalationFormId(elementId);
+  if (!formId) return null;
+  let contract: FormContract;
+  try {
+    contract = formContract(formId);
+  } catch {
+    return null;
+  }
+  return Object.keys(contract.allowed);
+}
+
+/** The union of every `select` field's allowed option values in a deployed `.form`, or `null` when the
+ *  form id is blank/unreadable (a missing or non-`.form` key never throws — see the try/catch). Shared
+ *  by {@link snapshotEscalationFormOptions} (fixed-form escalations, keyed off the element) and
+ *  {@link snapshotUserTaskFormOptions} (keyed off the engine-resolved `form_key`). */
+function optionUnionForForm(formId: string): string[] | null {
+  let contract: FormContract;
+  try {
+    contract = formContract(formId);
+  } catch {
+    // `formContract` does a `readFileSync` and THROWS on a missing/unreadable `.form` — a `form_key`
+    // can be a key that doesn't name a bundled form. Treat that as "nothing to snapshot", never a throw
+    // that would incident the record tick.
+    return null;
+  }
+  const out: string[] = [];
+  for (const values of Object.values(contract.allowed)) {
+    for (const v of values) if (!out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+/** Snapshot the REAL option values a parked user task's deployed form offers, resolving the form from
+ *  the engine-reported `formKey` FIRST and falling back to the element's static form linkage — the SAME
+ *  precedence the Tasks grid denormalises with (`app/service.ts`), so there is one derivation. This is
+ *  what the escalation-steward record step persists for a DELIVERY-GRAPH human task, whose element id is
+ *  dynamic (`delivery-human-task__<node>`) and so has NO static `escalationFormId` mapping — snapshotting
+ *  off `element_id` alone would record `NULL` options for exactly those tasks (issue #889 review). Reads
+ *  the `formKey` safely (a key that doesn't name a bundled `.form` yields `null`, never a throw).
+ *  Returns `null` when neither source resolves a readable form. */
+export function snapshotUserTaskFormOptions(
+  formKey: string | null | undefined,
+  elementId: string | null | undefined,
+): string[] | null {
+  const engineKey = typeof formKey === "string" ? formKey.trim() : "";
+  if (engineKey) {
+    const fromKey = optionUnionForForm(engineKey);
+    if (fromKey != null) return fromKey;
+  }
+  if (elementId) {
+    const formId = escalationFormId(elementId);
+    if (formId) return optionUnionForForm(formId);
+  }
+  return null;
+}
+
 /** The canonical attributed completer. Records an attribution row in `task_completions` and THEN
  *  completes the user task with the exact typed `variables` — so the ledger row can never be lost by a
  *  resume that fires before the write. If the engine completion throws (a failed/rejected completion,
@@ -401,6 +477,30 @@ export async function latestCompletion(
   return newest;
 }
 
+/** The newest NON-reverted completion an AGENT recorded for a user-task key under a specific
+ *  `agentId`, or undefined. The escalation-steward record step uses this to make its
+ *  completion→record pair idempotent across a service-job retry (issue #889 review): the engine
+ *  completion lands first, then the record worker finalises the claim row — if that finalise fails
+ *  transiently, the retry finds the user task already COMPLETED (the attributed door reports "no open
+ *  completable task") and must NOT degrade the already-applied decision to a false `abstained`.
+ *  Detecting the prior agent-attributed row lets the retry recover the original submitted variables
+ *  and finalise the SAME decision instead. Reverted rows are excluded: a human overrode that
+ *  completion, so it is not a live applied decision to recover. */
+export async function priorAgentCompletion(
+  data: DataLayer,
+  userTaskKey: string,
+  agentId: string,
+): Promise<TaskCompletion | undefined> {
+  const rows = await taskCompletions(data).find({ user_task_key: userTaskKey });
+  let newest: TaskCompletion | undefined;
+  for (const row of rows) {
+    if (row.actor_kind !== "agent" || row.actor_id !== agentId) continue;
+    if (row.reverted === 1) continue;
+    if (!newest || row.id > newest.id) newest = row;
+  }
+  return newest;
+}
+
 export interface AgentCompleteResult {
   ok: boolean;
   reason?: string;
@@ -460,14 +560,20 @@ function isCompletableElement(elementId: string, allowed: ReadonlySet<string>): 
 export async function completeEscalationAsAgent(
   data: DataLayer,
   engine: EngineClient,
-  input: { userTaskKey: string; variables: Record<string, unknown>; agentId: string },
+  input: { userTaskKey: string; variables: Record<string, unknown>; agentId: string; processInstanceKey?: string | null },
 ): Promise<AgentCompleteResult> {
   const userTaskKey = input.userTaskKey.trim();
   if (!userTaskKey) return { ok: false, reason: "userTaskKey is required" };
   const agentId = input.agentId.trim();
   if (!agentId) return { ok: false, reason: "agentId is required" };
 
-  const resolved = await resolveEscalationTask(engine, userTaskKey);
+  // When the caller already knows the task's owning process instance (the escalation-steward record
+  // worker does — it holds the claim row's `process_instance_key`), scope the resolve scan to that ONE
+  // instance instead of an engine-wide `openUserTasks()` per decision. A record tick finalises MANY
+  // claimed tasks in one pass, so an unfiltered global scan each is O(N²) REST load (issue #889 review);
+  // the instance filter makes it O(N) and never changes the outcome (the task lives in exactly that
+  // instance). A bare-key caller (a one-off human/agent door) omits it and keeps the engine-wide scan.
+  const resolved = await resolveEscalationTask(engine, userTaskKey, ESCALATION_TASK_ELEMENTS, input.processInstanceKey ?? undefined);
   if (!resolved.ok) return resolved;
 
   const invalid = validateEscalationVariables(resolved.elementId, input.variables);

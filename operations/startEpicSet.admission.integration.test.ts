@@ -498,13 +498,13 @@ function makeSqliteApp(
   db.exec(
     "CREATE TABLE plans (plan_key TEXT PRIMARY KEY, repo TEXT, issue_number INTEGER, issue_url TEXT, " +
       "title TEXT, base_branch TEXT, status TEXT, task_count INTEGER, epic_phase TEXT, " +
-      "blackboard_token TEXT, list_bucket TEXT, ack_open INTEGER, created_at TEXT, updated_at TEXT);",
+      "blackboard_token TEXT, list_bucket TEXT, ack_open INTEGER, auto_resolve_escalations INTEGER, created_at TEXT, updated_at TEXT);",
   );
   for (const p of seedPlans) {
     db.prepare("INSERT INTO plans (plan_key, repo, base_branch, status) VALUES (?, ?, ?, ?)")
       .run(p.plan_key, p.repo, p.base_branch, p.status);
   }
-  for (const f of ["041_inter_epic_plan_deps.sql", "045_epic_set_admission_staging.sql"]) {
+  for (const f of ["041_inter_epic_plan_deps.sql", "045_epic_set_admission_staging.sql", "124_admitted_epics_auto_resolve.sql"]) {
     db.exec(readFileSync(fileURLToPath(new URL(`../db/migrations/${f}`, import.meta.url)), "utf8"));
   }
   const q = (id: string) => `"${id.replace(/"/g, '""')}"`;
