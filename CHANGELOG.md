@@ -1,3 +1,9 @@
+## [0.203.0](https://github.com/nanobpm/nano-workforce/compare/v0.202.0...v0.203.0) (2026-10-13)
+
+### Features
+
+* **escalation-steward:** opt-in auto-resolution of escalations with a reviewable record (Closes [#889](https://github.com/nanobpm/nano-workforce/issues/889)) ([#892](https://github.com/nanobpm/nano-workforce/issues/892)) ([cd1c9eb](https://github.com/nanobpm/nano-workforce/commit/cd1c9eb58bc44b7af0c66d4c1a7bc615920a46d2)), closes [887/#888](https://github.com/887/nano-workforce/issues/888) [#833](https://github.com/nanobpm/nano-workforce/issues/833) [o/r#1](https://github.com/o/r/issues/1) [o/r#1](https://github.com/o/r/issues/1)
+
 ## [0.202.0](https://github.com/nanobpm/nano-workforce/compare/v0.201.5...v0.202.0) (2026-10-12)
 
 ### Features
