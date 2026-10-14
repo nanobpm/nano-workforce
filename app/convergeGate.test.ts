@@ -852,6 +852,95 @@ test("converge-gate #799: an unknown review commit_id or unreadable HEAD is NOT 
   assertEquals(out.reviewStale, false);
 });
 
+// ── NON-GATING shadow persistence wiring (issue #811, through the handler) ────
+// The pure `recordConvergeShadow` path is unit-tested in convergeShadow.test.ts; these guard the
+// WORKER wiring the existing handler tests skip (they pass `{}` as the app, so `app?.data` is
+// falsy and the shadow branch never runs). They assert the handler (a) passes the real gate
+// input/result to a persisting datasource, and (b) leaves the returned verdict unchanged when the
+// datasource THROWS — the "a shadow failure never perturbs the gate" guarantee.
+
+function makeShadowApp(onInsert: (row: Record<string, unknown>) => void) {
+  return {
+    data: {
+      table() {
+        return {
+          async insert(row: Record<string, unknown>) {
+            onInsert(row);
+          },
+        };
+      },
+    },
+  };
+}
+
+test("converge-gate #811: the handler persists a shadow row carrying the real gate verdict", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["ok"] }],
+    readReviewBody: async () => "## Overview\nNo suppressed block.",
+  });
+  const rows: Record<string, unknown>[] = [];
+  const out = await handler(
+    { variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any,
+    makeShadowApp((r) => rows.push(r)) as any,
+  );
+  // Verdict unchanged (clean PR converges) …
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: false });
+  // … and exactly one shadow row was written, carrying the gate's own verdict as ground truth.
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].pr_key, "o/r#1");
+  assertEquals(rows[0].ground_truth, "converged");
+});
+
+test("converge-gate #812: a NEVER-SETTLING shadow write does not hold the gate open", async () => {
+  // The shadow write is best-effort AND non-gating, so it must never be on the gate's critical path.
+  // A locked/stalled SQLite write manifests as a promise that never settles (it does not reject, so
+  // recordConvergeShadow's own try/catch cannot rescue it). If the handler AWAITED it, this test
+  // would hang until the runner's timeout. Fire-and-forget dispatch means the handler returns on the
+  // gate's own clock regardless.
+  const handler = await makeUnderTest({
+    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["ok"] }],
+    readReviewBody: async () => "## Overview\nNo suppressed block.",
+  });
+  const stallingApp = {
+    data: {
+      table() {
+        return {
+          insert() {
+            return new Promise<void>(() => {}); // never settles
+          },
+        };
+      },
+    },
+  };
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, stallingApp as any);
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: false });
+});
+
+test("converge-gate #811: a THROWING shadow datasource leaves the gate verdict unchanged", async () => {
+  // An unresolved thread blocks; the shadow insert throws. The block verdict must survive intact —
+  // the shadow pass is best-effort and can never turn a block into an error or a converge.
+  const handler = await makeUnderTest({
+    readThreads: async () => [{ isResolved: false, path: "a.ts", bodies: ["please fix"] }],
+    readReviewBody: async () => "",
+  });
+  const throwingApp = {
+    data: {
+      table() {
+        return {
+          async insert() {
+            throw new Error("datasource unavailable");
+          },
+        };
+      },
+    },
+  };
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, throwingApp as any);
+  assertEquals(out.convergeBlocked, true);
+  assertStringIncludes(out.convergeBlockReason ?? "", "unresolved review thread");
+  assertEquals(out.convergeAckOnly, false);
+  assertEquals(out.reviewStale, false);
+});
+
 // ── Structural guard over the committed BPMN (no engine) ─────────────────────
 
 const bpmn = readFileSync("resources/processes/convergence-loop.bpmn", "utf8");
