@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:bpmndi_1="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_issue_triage" targetNamespace="http://nanobpm.io/nano-workforce">
+  <bpmn:process id="issue-triage" name="Issue triage" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="TriageCollectOut" name="Collect untriaged issues — output">
+          <nano:extend name="candidateCount" type="integer" />
+          <nano:extend name="candidates" type="string" list="true" optional="true" />
+          <nano:extend name="agentSlaTimeout" type="string" optional="true" />
+          <nano:extend name="skippedReason" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="TriageApplyIn" name="Apply triage proposals — input">
+          <nano:extend name="candidates" type="string" list="true" optional="true" />
+          <nano:extend name="proposals" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="TriageApplyOut" name="Apply triage proposals — output">
+          <nano:extend name="appliedCount" type="integer" />
+          <nano:extend name="escalatedCount" type="integer" />
+          <nano:extend name="rejectedCount" type="integer" />
+        </nano:shape>
+        <nano:shape id="TriageReviewIn" name="Carry out the triage review — input">
+          <nano:extend name="decision" type="string" optional="true" />
+          <nano:extend name="note" type="string" optional="true" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
+    <bpmn:startEvent id="tick" name="Daily triage tick">
+      <bpmn:outgoing>it_toCollect</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_triage_tick">
+        <bpmn:timeCycle xsi:type="bpmn:tFormalExpression">R/P1D</bpmn:timeCycle>
+      </bpmn:timerEventDefinition>
+    </bpmn:startEvent>
+    <bpmn:serviceTask id="collect" name="Collect untriaged issues">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.issue-triage-collect" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="TriageCollectOut" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>it_toCollect</bpmn:incoming>
+      <bpmn:outgoing>it_collected</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw_any" name="any issues?" default="it_none">
+      <bpmn:incoming>it_collected</bpmn:incoming>
+      <bpmn:outgoing>it_dispatch</bpmn:outgoing>
+      <bpmn:outgoing>it_none</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="triage-agent" name="Propose labels (agent)">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:issue-triage" />
+        <zeebe:agentDefinition agentType="external" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="prompts/issue-triage.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+        </zeebe:linkedResources>
+        <zeebe:ioMapping>
+          <zeebe:input source="=candidates" target="candidates" />
+          <zeebe:output source="=if (is defined(proposals)) then proposals else null" target="proposals" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>it_dispatch</bpmn:incoming>
+      <bpmn:outgoing>it_toApply</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_triage_sla" name="Agent SLA elapsed" attachedToRef="triage-agent">
+      <bpmn:outgoing>it_sla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_triage_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:serviceTask id="apply" name="Apply confident proposals">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.issue-triage-apply" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="TriageApplyIn" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="TriageApplyOut" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>it_toApply</bpmn:incoming>
+      <bpmn:outgoing>it_applied</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw_review" name="any to review?" default="it_noReview">
+      <bpmn:incoming>it_applied</bpmn:incoming>
+      <bpmn:outgoing>it_toReview</bpmn:outgoing>
+      <bpmn:outgoing>it_noReview</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="issue-triage-review" name="Review issue labels (human)">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="issue-triage-review" />
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="operators" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>it_toReview</bpmn:incoming>
+      <bpmn:outgoing>it_reviewed</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:serviceTask id="apply-review" name="Carry out the review">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.issue-triage-review" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="TriageReviewIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>it_reviewed</bpmn:incoming>
+      <bpmn:outgoing>it_reviewDone</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:endEvent id="done" name="Tick complete">
+      <bpmn:incoming>it_none</bpmn:incoming>
+      <bpmn:incoming>it_sla</bpmn:incoming>
+      <bpmn:incoming>it_noReview</bpmn:incoming>
+      <bpmn:incoming>it_reviewDone</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="it_toCollect" sourceRef="tick" targetRef="collect" />
+    <bpmn:sequenceFlow id="it_collected" sourceRef="collect" targetRef="gw_any" />
+    <bpmn:sequenceFlow id="it_dispatch" name="issues" sourceRef="gw_any" targetRef="triage-agent">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=candidateCount &gt; 0</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="it_none" name="none" sourceRef="gw_any" targetRef="done" />
+    <bpmn:sequenceFlow id="it_toApply" sourceRef="triage-agent" targetRef="apply" />
+    <bpmn:sequenceFlow id="it_sla" name="agent SLA elapsed" sourceRef="be_triage_sla" targetRef="done" />
+    <bpmn:sequenceFlow id="it_applied" sourceRef="apply" targetRef="gw_review" />
+    <bpmn:sequenceFlow id="it_toReview" name="low confidence" sourceRef="gw_review" targetRef="issue-triage-review">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=escalatedCount &gt; 0</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="it_noReview" name="all applied" sourceRef="gw_review" targetRef="done" />
+    <bpmn:sequenceFlow id="it_reviewed" sourceRef="issue-triage-review" targetRef="apply-review" />
+    <bpmn:sequenceFlow id="it_reviewDone" sourceRef="apply-review" targetRef="done" />
+  </bpmn:process>
+  <bpmndi_1:BPMNDiagram id="BPMNDiagram_issue-triage">
+    <bpmndi_1:BPMNPlane id="BPMNPlane_issue-triage" bpmnElement="issue-triage">
+      <bpmndi_1:BPMNShape id="BPMNShape_tick" bpmnElement="tick">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="55" y="143" width="87" height="28" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_collect" bpmnElement="collect">
+        <dc:Bounds x="216" y="80" width="100" height="80" />
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_gw_any" bpmnElement="gw_any" isMarkerVisible="true">
+        <dc:Bounds x="416" y="95" width="50" height="50" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="402" y="76" width="78" height="14" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_triage-agent" bpmnElement="triage-agent">
+        <dc:Bounds x="566" y="240" width="100" height="80" />
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_apply" bpmnElement="apply">
+        <dc:Bounds x="766" y="240" width="100" height="80" />
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_gw_review" bpmnElement="gw_review" isMarkerVisible="true">
+        <dc:Bounds x="966" y="255" width="50" height="50" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="963" y="222" width="56" height="28" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_issue-triage-review" bpmnElement="issue-triage-review">
+        <dc:Bounds x="1116" y="400" width="100" height="80" />
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_apply-review" bpmnElement="apply-review">
+        <dc:Bounds x="1316" y="400" width="100" height="80" />
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_done" bpmnElement="done">
+        <dc:Bounds x="1516" y="102" width="36" height="36" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="1503" y="69" width="63" height="28" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNShape id="BPMNShape_be_triage_sla" bpmnElement="be_triage_sla">
+        <dc:Bounds x="598" y="302" width="36" height="36" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="520" y="343" width="72" height="28" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNShape>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_it_toCollect" bpmnElement="it_toCollect">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_it_collected" bpmnElement="it_collected">
+        <di:waypoint x="316" y="120" />
+        <di:waypoint x="416" y="120" />
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_it_none" bpmnElement="it_none">
+        <di:waypoint x="466" y="120" />
+        <di:waypoint x="1516" y="120" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="975" y="98" width="32" height="14" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_it_noReview" bpmnElement="it_noReview">
+        <di:waypoint x="1016" y="280" />
+        <di:waypoint x="1534" y="280" />
+        <di:waypoint x="1534" y="138" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="1236" y="258" width="78" height="14" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_it_dispatch" bpmnElement="it_dispatch">
+        <di:waypoint x="441" y="145" />
+        <di:waypoint x="441" y="280" />
+        <di:waypoint x="566" y="280" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="446" y="206" width="46" height="14" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_it_toReview" bpmnElement="it_toReview">
+        <di:waypoint x="991" y="305" />
+        <di:waypoint x="991" y="440" />
+        <di:waypoint x="1116" y="440" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="996" y="359" width="74" height="28" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_it_toApply" bpmnElement="it_toApply">
+        <di:waypoint x="666" y="280" />
+        <di:waypoint x="766" y="280" />
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_it_applied" bpmnElement="it_applied">
+        <di:waypoint x="866" y="280" />
+        <di:waypoint x="966" y="280" />
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_it_reviewed" bpmnElement="it_reviewed">
+        <di:waypoint x="1216" y="440" />
+        <di:waypoint x="1316" y="440" />
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_it_reviewDone" bpmnElement="it_reviewDone">
+        <di:waypoint x="1416" y="440" />
+        <di:waypoint x="1534" y="440" />
+        <di:waypoint x="1534" y="138" />
+      </bpmndi_1:BPMNEdge>
+      <bpmndi_1:BPMNEdge id="BPMNEdge_it_sla" bpmnElement="it_sla">
+        <di:waypoint x="616" y="338" />
+        <di:waypoint x="616" y="498" />
+        <di:waypoint x="1534" y="498" />
+        <di:waypoint x="1534" y="138" />
+        <bpmndi_1:BPMNLabel>
+          <dc:Bounds x="1040" y="465" width="70" height="28" />
+        </bpmndi_1:BPMNLabel>
+      </bpmndi_1:BPMNEdge>
+    </bpmndi_1:BPMNPlane>
+  </bpmndi_1:BPMNDiagram>
+</bpmn:definitions>

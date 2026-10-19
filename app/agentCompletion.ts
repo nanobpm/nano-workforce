@@ -25,6 +25,7 @@ import type { DataLayer, EngineClient, GatewayDataSource } from "@nanobpm/urban"
 import { invalidateAdjudication, invalidateAdjudicationByCompletion } from "./adjudications.ts";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, isDeliveryEscalationTwin, isDeliveryHumanElement, isDeliveryWaitEscalationTwin } from "./deliveryHuman.ts";
+import { ISSUE_TRIAGE_REVIEW_ELEMENT } from "./issueTriage.ts";
 import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, PR_MERGE_APPROVAL_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT } from "./userTasks.ts";
 
 const now = () => new Date().toISOString();
@@ -139,6 +140,9 @@ export const HUMAN_COMPLETABLE_ELEMENTS: ReadonlySet<string> = new Set([
   // Human-only (issue #826): never agent-answerable, so it stays OUT of ESCALATION_TASK_ELEMENTS and the
   // fleet can never auto-approve a merge.
   PR_MERGE_APPROVAL_ELEMENT,
+  // Human-only (issue #896): approving low-confidence label proposals is exactly the call the
+  // confidence gate held back from the agent, so it stays OUT of ESCALATION_TASK_ELEMENTS.
+  ISSUE_TRIAGE_REVIEW_ELEMENT,
 ]);
 
 /** Each escalation `elementId` → the `.form` whose contract governs its completion variables (the
@@ -157,6 +161,7 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   [READINESS_ESCALATION_PF_TASK_ELEMENT]: "readiness-escalation",
   [READINESS_ESCALATION_TASK_ELEMENT]: "readiness-escalation",
   [PR_MERGE_APPROVAL_ELEMENT]: "merge-approval",
+  [ISSUE_TRIAGE_REVIEW_ELEMENT]: "issue-triage-review",
   // NOTE: the delivery-graph `human` node (`DELIVERY_HUMAN_ELEMENT`, ADR 0005 S3) is intentionally
   // ABSENT here. Unlike the fixed-form escalations above, ONE `delivery-human-task` element is DESIGNED
   // to render DIFFERENT forms per node (explicit → category → generic → agent-router, `app/deliveryHuman.ts`
