@@ -1,0 +1,29 @@
+{
+  "id": "issue-triage-review",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "text",
+      "label": "Review issue labels",
+      "text": "The daily issue-triage run proposed labels it was not confident enough to apply on its own. The task question lists each issue, the proposed labels and the agent's rationale. Apply them all, or skip them all: skipped issues are not proposed again, so label those by hand. Proposed labels are checked again against the repository's current labels before they are written."
+    },
+    {
+      "type": "select",
+      "key": "decision",
+      "label": "Decision",
+      "values": [
+        { "label": "Apply — add the proposed labels", "value": "apply" },
+        { "label": "Skip — leave these issues for manual triage", "value": "skip" }
+      ],
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "key": "note",
+      "label": "Note (optional, recorded on each decision)"
+    }
+  ]
+}

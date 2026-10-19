@@ -1358,6 +1358,46 @@ the subject row) is ever touched; everything else is fail-closed out.
   Auto-resolutions, attributed to the steward agent, where an operator can **Dismiss** (reviewed, no
   action) or **Intervene** (stepped in) with a note — a record is never a hidden machine decision.
 
+## 13.5 Issue triage (`issue-triage.bpmn`) — issue #896
+
+An **opt-in**, once-a-day loop that labels untriaged GitHub issues. The agent only **proposes**
+labels; the host validates every proposal and writes the confident ones with its own credential.
+Proposals it is not confident about go to one batched human review per tick. It is **off by default**
+(`NANO_ISSUE_TRIAGE`).
+
+- **Pacing in the model.** The process starts on a repeating **timer start event** (`R/P1D`). There
+  is no poller pass and no interval env var: changing the cadence is a model change. Every tick
+  starts an instance; when the loop is off, the instance ends at the first gateway.
+- **Collect** (`pr.issue-triage-collect`, app-side). No-op unless `NANO_ISSUE_TRIAGE` is on and
+  `NANO_ISSUE_TRIAGE_REPOS` names at least one repo. **Overlap guard:** if a previous tick is still
+  ACTIVE and is *not* parked on its human review (its issues are not yet in the ledger), this tick is
+  a no-op. A tick parked on review does not block, because its issues are already in the ledger.
+  Otherwise, per repo, it collects up to `NANO_ISSUE_TRIAGE_MAX_ISSUES` (default 20) open issues
+  (pull requests excluded) that have **no labels** and **no ledger row** (a `failed` row is
+  retried). Each candidate carries the repo's **applicable labels** (its labels minus the deny list).
+  An unreachable repo is logged and skipped. The step also seeds `agentSlaTimeout`, since a
+  timer-started instance has no start variables.
+- **Propose** (`senior:issue-triage`, external agent, prompt `prompts/issue-triage.md`), bounded by
+  the `agentSlaTimeout` boundary timer. It returns `proposals`: a JSON string encoding
+  `IssueTriageProposal[]` (`{ repo, issue, labels[], confidence, rationale, duplicateOf? }`, the
+  registered type contract that the planned classifier gate #242 reuses). An SLA-elapsed tick ends
+  without writing anything; its issues are collected again next tick.
+- **Apply** (`pr.issue-triage-apply`, app-side). Each proposal goes through the one validation
+  derivation (`validateProposal`): the **claim fence** (only issues this tick collected), the **label
+  allowlist** (only labels the repo has, re-read live; matched case-insensitively and written in the
+  repo's spelling), the **deny list** (`queued`/`dequeued` drive intake and are never applied), the
+  **cap** (3 labels per issue) and the **confidence threshold** (0.7). Labels are only ever *added*.
+  Every candidate gets exactly one ledger row in `issue_triage_decisions`: `applied`, `escalated`
+  (valid but below the threshold), `rejected` (no usable proposal) or `failed` (the GitHub read or
+  write failed; retried next tick). `duplicateOf` is advisory only: it is recorded and shown to the
+  reviewer, never acted on.
+- **Review** (`issue-triage-review` user task, form `issue-triage-review`). Reached only when
+  something was escalated. One task per tick lists every parked proposal in the Tasks inbox ("Issue
+  label review"). It is **human-only**: it is not in `ESCALATION_TASK_ELEMENTS`, so neither an agent
+  nor the escalation steward can complete it. `pr.issue-triage-review` carries out the decision:
+  `apply` writes the parked labels that still exist on the repo; `skip` records the issues as
+  `skipped` so they are not proposed again.
+
 ## 14. Open questions / future
 
 - **Provisioning the existing PR branch** — resolved: the `c8ctl` host-git

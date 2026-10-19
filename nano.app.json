@@ -251,6 +251,18 @@
     {
       "taskType": "pr.escalation-steward-record",
       "handler": "workers/escalation-steward-record/worker.ts"
+    },
+    {
+      "taskType": "pr.issue-triage-collect",
+      "handler": "workers/issue-triage-collect/worker.ts"
+    },
+    {
+      "taskType": "pr.issue-triage-apply",
+      "handler": "workers/issue-triage-apply/worker.ts"
+    },
+    {
+      "taskType": "pr.issue-triage-review",
+      "handler": "workers/issue-triage-review/worker.ts"
     }
   ],
   "externalTaskTypes": [
@@ -265,7 +277,8 @@
     "senior:conformance",
     "senior:scope-classify",
     "senior:adversarial-review",
-    "senior:escalation-steward"
+    "senior:escalation-steward",
+    "senior:issue-triage"
   ],
   "surfaces": {
     "taskInbox": {

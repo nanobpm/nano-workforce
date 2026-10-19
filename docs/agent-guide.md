@@ -351,6 +351,19 @@ record guidance for stepping in after the fact — reopening the completed user 
 not required). Over MCP / curl, `listAutoResolutions` reads the records and
 `reviewAutoResolution` (`{ id, action: "dismiss" | "intervene", note? }`) reviews one.
 
+### Issue triage (opt-in daily labelling, issue #896)
+
+When `NANO_ISSUE_TRIAGE=on`, the `issue-triage` process runs once a day for each repo in
+`NANO_ISSUE_TRIAGE_REPOS`. It takes up to `NANO_ISSUE_TRIAGE_MAX_ISSUES` (default 20) open
+issues with no labels, asks the `senior:issue-triage` agent to propose labels, and applies
+the confident proposals itself. The agent never writes to GitHub. The host only applies
+labels the repo already has, never `queued`/`dequeued`, and at most 3 per issue.
+
+Proposals below 0.7 confidence wait in the Tasks inbox as one **Issue label review** task
+per day. Answer it with `decision: "apply"` (add the proposed labels) or `"skip"`
+(leave those issues for manual triage; they are not proposed again), plus an optional
+`note`. This task is human-only: the escalation steward never answers it.
+
 ---
 
 ## 4. The lifecycle & statuses (so you can reason about state)

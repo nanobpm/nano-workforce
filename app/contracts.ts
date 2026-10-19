@@ -202,6 +202,28 @@ export const ENV_CONTRACTS = {
       "Minimum age (ms) an open escalation must reach before the steward considers it, so a human already answering wins (issue #889).",
     default: "300000",
   },
+  NANO_ISSUE_TRIAGE: {
+    category: "env",
+    name: "NANO_ISSUE_TRIAGE",
+    owner: "app/issueTriage.ts",
+    semantics:
+      "Issue-triage master switch (issue #896): `on`/`1`/`true`/`yes` enables the daily `issue-triage` tick; anything else (or unset) makes each timer-started instance a no-op. OFF by default.",
+    default: "off",
+  },
+  NANO_ISSUE_TRIAGE_REPOS: {
+    category: "env",
+    name: "NANO_ISSUE_TRIAGE_REPOS",
+    owner: "app/issueTriage.ts",
+    semantics:
+      "Comma-separated `owner/repo` list the issue-triage tick scans for unlabelled open issues (issue #896). Empty → nothing is triaged.",
+  },
+  NANO_ISSUE_TRIAGE_MAX_ISSUES: {
+    category: "env",
+    name: "NANO_ISSUE_TRIAGE_MAX_ISSUES",
+    owner: "app/issueTriage.ts",
+    semantics: "Maximum untriaged issues collected per repo per issue-triage tick (issue #896), bounding agent work and label writes.",
+    default: "20",
+  },
   NANO_PR_REVIEW_NUDGE_MINUTES: {
     category: "env",
     name: "NANO_PR_REVIEW_NUDGE_MINUTES",
@@ -602,6 +624,14 @@ export const WIRE_CONTRACTS = {
 } as const satisfies Record<string, WireContract>;
 
 export const TYPE_CONTRACTS = {
+  IssueTriageProposal: {
+    category: "type",
+    name: "IssueTriageProposal",
+    owner: "app/issueTriage.ts",
+    semantics:
+      "One agent-proposed classification of a GitHub issue (issue #896): `{ repo, issue, labels[], confidence (0..1), rationale, duplicateOf? }`. The issue-triage agent returns these as DATA; the host validates (label allowlist, deny-list, cap, confidence threshold, claim fence) before any write. The planned pre-plan classifier gate (#242) must reuse this shape rather than invent a second issue-classification verdict.",
+    module: "app/issueTriage.ts",
+  },
   PermissionPolicy: {
     category: "type",
     name: "PermissionPolicy",

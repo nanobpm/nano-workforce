@@ -59,6 +59,7 @@ import {
   requestCopilotReview,
 } from "./github.ts";
 import { activeStatusesFor, derivedTrackingTable } from "./instanceTracking.ts";
+import { escalatedForInstance, ISSUE_TRIAGE_REVIEW_ELEMENT, issueTriageDecisions, triageReviewQuestion } from "./issueTriage.ts";
 import { pollLineage } from "./lineage.ts";
 import { mergeableRepollInterval, mergeableWaitTimeout } from "./mergeableWait.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
@@ -3410,7 +3411,7 @@ export async function pollUserTasks(
 
   // Per-element subject type for an ORPHANED task (no subject row) — the kind implies its aggregate even
   // when tracking is lost, so the fallback row still buckets correctly on the page.
-  const DEFAULT_SUBJECT_TYPE: Readonly<Record<string, "feature" | "plan" | "pr">> = {
+  const DEFAULT_SUBJECT_TYPE: Readonly<Record<string, "feature" | "plan" | "pr" | "triage">> = {
     [FEATURE_ESCALATION_ELEMENT]: "feature",
     [HUMAN_ESCALATION_ELEMENT]: "feature",
     [FEATURE_BLOCKED_ELEMENT]: "feature",
@@ -3422,6 +3423,9 @@ export async function pollUserTasks(
     [PR_WAIT_ANSWER_ELEMENT]: "pr",
     [PR_WAIT_MERGE_ANSWER_ELEMENT]: "pr",
     [PR_MERGE_APPROVAL_ELEMENT]: "pr",
+    // The batched issue-triage review (issue #896) has no subject row: its subject is the triage
+    // instance itself (`subjectKey` falls back to the process instance key).
+    [ISSUE_TRIAGE_REVIEW_ELEMENT]: "triage",
   };
 
   // The SINGLE enrichment derivation both discovery paths feed: resolve one open escalation task (by
@@ -3483,6 +3487,10 @@ export async function pollUserTasks(
         // projection already rendered that clause on the subject row (`plans.wait_gate_label`, or the
         // feature preflight's `delivery_label`), with a static readiness-stalled fallback (#674).
         question = readinessEscalationQuestion(subj?.waitGateLabel ?? null);
+        break;
+      case ISSUE_TRIAGE_REVIEW_ELEMENT:
+        // The low-confidence proposals this triage instance parked, read from the decision ledger.
+        question = triageReviewQuestion(await escalatedForInstance(data, processInstanceKey));
         break;
     }
     // A delivery-graph `human` node's user-task id is inlined per node (`delivery-human-task__<node>`
@@ -3627,6 +3635,9 @@ export async function pollUserTasks(
     // `delivery-human-task__<node>` gate surfaces on this reduced-capability path exactly as it does on
     // the engine-first sweep — otherwise the typed-seam host silently drops every delivery human gate.
     for (const run of await deliveryGraphRuns(data).find({ status: "running" })) await scanInstance(run.process_key);
+    // An issue-triage instance parked on its batched review task (issue #896) is tracked only by its
+    // `escalated` ledger rows.
+    for (const row of await issueTriageDecisions(data).find({ status: "escalated" })) await scanInstance(row.process_key);
   }
 
   const desired = [...desiredByKey.values()];

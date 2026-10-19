@@ -285,4 +285,16 @@ export const PORTS: readonly PortEntry[] = [
       "without inserting its own gateway). Awaits an agent-marker option on task() and an " +
       "arbitrary-graph / explicit-join builder upstream in @nanobpm/workflow (nano-ide).",
   },
+  {
+    model: "issue-triage",
+    blockedReason:
+      "blocked (timer start + agent-task marker + gateway merge, issue #896): its start event is a " +
+      "repeating TIMER start (`R/P1D`), which the published @nanobpm/workflow builder has no start-event " +
+      "variant for; its `senior:issue-triage` task carries the <zeebe:agentDefinition " +
+      "agentType=\"external\" /> marker the compiler cannot emit (the class-3 block); and its two " +
+      "exclusive gateways plus the agent SLA boundary all re-converge on the shared `done` end event " +
+      "(the explicit-join topology the structured-only builder cannot emit). Awaits a timer-start " +
+      "option, an agent-marker option on task() and an explicit-join builder upstream in " +
+      "@nanobpm/workflow (nano-ide).",
+  },
 ];

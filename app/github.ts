@@ -2072,3 +2072,117 @@ export async function ensurePromotionPr(
   if (!created) return null;
   return { ...created, created: true };
 }
+
+// ── Issue triage (issue #896) ────────────────────────────────────────────────────────────────────
+// Read open issues + a repo's label set, and add labels to an issue. Same two-transport rule as the
+// rest of this module (gh when available/selected, else a token `fetch`). Reads return `null` when no
+// transport is usable so the caller can no-op; the label WRITE throws on failure so the apply worker
+// records the issue as failed rather than claiming a write that never happened.
+
+/** An open GitHub issue, narrowed to the fields triage reads. Pull requests (which the issues API
+ *  also returns) are filtered out by the reader. */
+export interface GhIssue {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  labels: string[];
+}
+
+/** One JSON call against the GitHub REST API via the configured transport. `null` when no transport
+ *  is usable (token mode without a token); throws on a transport/HTTP failure. The path is built by
+ *  the caller from a validated `owner/repo` (see {@link isRepoSlug}) and integers only, and `gh` is
+ *  invoked with an argument vector (no shell), so datastore values cannot inject a command. */
+async function githubJson(method: "GET" | "POST", path: string, token: string, body?: unknown): Promise<unknown | null> {
+  if (await useGh()) {
+    const args = ["api", "--method", method, path];
+    if (body !== undefined) args.push("--input", "-");
+    const out = body === undefined ? await runGh(args) : await runGhWithStdin(args, JSON.stringify(body));
+    return out.trim() ? JSON.parse(out) : null;
+  }
+  if (!token) return null;
+  const r = await fetch(`https://api.github.com/${path}`, {
+    method,
+    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`GitHub ${method} ${path} → HTTP ${r.status}`);
+  return await r.json();
+}
+
+/** `runGh` with a stdin payload (for `gh api --input -`). Same no-shell argument vector. */
+async function runGhWithStdin(args: string[], stdin: string): Promise<string> {
+  const { execFile } = await import("node:child_process");
+  return await new Promise<string>((resolve, reject) => {
+    const child = execFile("gh", args, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) reject(new Error(String(stderr || "").trim() || err.message));
+      else resolve(String(stdout));
+    });
+    child.stdin?.end(stdin);
+  });
+}
+
+/** True for a plain `owner/repo` slug — the only shape triage will put into an API path. */
+export function isRepoSlug(repo: string): boolean {
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) && !repo.includes("..");
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** List up to `limit` open issues (oldest-updated first is NOT guaranteed — GitHub's default
+ *  `created desc`), excluding pull requests. `null` when no transport is usable. */
+export async function listOpenIssues(repo: string, limit: number, token: string): Promise<GhIssue[] | null> {
+  if (!isRepoSlug(repo)) throw new Error(`invalid repo slug: ${repo}`);
+  const issues: GhIssue[] = [];
+  for (let page = 1; page <= 10 && issues.length < limit; page++) {
+    const res = await githubJson("GET", `repos/${repo}/issues?state=open&per_page=100&page=${page}`, token);
+    if (res === null) return page === 1 ? null : issues;
+    if (!Array.isArray(res) || res.length === 0) break;
+    for (const raw of res) {
+      if (!isRecord(raw)) continue;
+      const r = raw;
+      if (r.pull_request !== undefined || typeof r.number !== "number") continue;
+      const labels = Array.isArray(r.labels)
+        ? r.labels.map((l) => (typeof l === "string" ? l : isRecord(l) ? String(l.name ?? "") : "")).filter((n) => n !== "")
+        : [];
+      issues.push({
+        number: r.number,
+        title: typeof r.title === "string" ? r.title : "",
+        body: typeof r.body === "string" ? r.body : "",
+        url: typeof r.html_url === "string" ? r.html_url : `https://github.com/${repo}/issues/${r.number}`,
+        labels,
+      });
+    }
+    if (res.length < 100) break;
+  }
+  return issues;
+}
+
+/** The repo's label names. `null` when no transport is usable. */
+export async function listRepoLabels(repo: string, token: string): Promise<string[] | null> {
+  if (!isRepoSlug(repo)) throw new Error(`invalid repo slug: ${repo}`);
+  const names: string[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const res = await githubJson("GET", `repos/${repo}/labels?per_page=100&page=${page}`, token);
+    if (res === null) return page === 1 ? null : names;
+    if (!Array.isArray(res) || res.length === 0) break;
+    for (const raw of res) {
+      const name = isRecord(raw) ? raw.name : undefined;
+      if (typeof name === "string" && name !== "") names.push(name);
+    }
+    if (res.length < 100) break;
+  }
+  return names;
+}
+
+/** Add (never replace) labels on an issue. Throws on failure or when no transport is usable — a
+ *  write must never silently no-op. */
+export async function addIssueLabels(repo: string, issue: number, labels: string[], token: string): Promise<void> {
+  if (!isRepoSlug(repo)) throw new Error(`invalid repo slug: ${repo}`);
+  if (!Number.isInteger(issue) || issue < 1) throw new Error(`invalid issue number: ${issue}`);
+  if (labels.length === 0) return;
+  const res = await githubJson("POST", `repos/${repo}/issues/${issue}/labels`, token, { labels });
+  if (res === null) throw new Error("no GitHub transport available (gh absent and no GITHUB_TOKEN)");
+}
