@@ -52,3 +52,32 @@ which is live. Set `NANO_WORKFORCE_INSTANCES`, or write
 
 Then just say *"drive merlin"* — or let the skill probe reachability and ask which
 to use (off the LAN, `merlin.local` won't resolve, so it steers you to `remote`).
+
+## `nano-workforce-http`
+
+An **HTTP-only** operator skill for agents with no MCP client (for example nano-coder), or
+for when the MCP gateway is unreliable. It does the same bootstrap with `curl`:
+
+1. Resolve and name the instance, using the same `NANO_WORKFORCE_INSTANCES` /
+   `instances.json` / `NANO_WORKFORCE_URL` lookup as above.
+2. Authenticate. A Basic-Auth front door (for example over Tailscale) uses
+   `NANO_WORKFORCE_NETRC`, a netrc file; a shared secret uses `NANO_PR_WEBHOOK_SECRET`.
+3. Fetch the live guide (`GET /app/api/agent`).
+
+It also has a short quick reference and the traps the guide doesn't cover:
+- off-host, the engine base is `<origin>/v2`;
+- the cancel door is outside `/app/api`;
+- to change a running job's settings (`autoMerge`, `autoResolveEscalations`, …), set its
+  engine variables instead of cancelling and resubmitting (#904).
+
+### Install (nano-coder)
+
+nano-coder loads user skills from `~/.agents/skills`. Copy the skill there. A symlink
+won't work, because nano-coder skips skill folders whose real path is outside the skills
+directory. Re-copy after you pull:
+
+```bash
+mkdir -p ~/.agents/skills && cp -R skills/nano-workforce-http ~/.agents/skills/
+```
+
+For Copilot CLI or Claude, use `~/.copilot/skills` or `~/.claude/skills` instead.
