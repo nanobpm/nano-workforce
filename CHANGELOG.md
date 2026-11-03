@@ -1,3 +1,9 @@
+## [0.203.1](https://github.com/nanobpm/nano-workforce/compare/v0.203.0...v0.203.1) (2026-11-03)
+
+### Documentation
+
+* shorten the operator guide and skill (64 KB → 26 KB) ([#909](https://github.com/nanobpm/nano-workforce/issues/909)) ([3a0be17](https://github.com/nanobpm/nano-workforce/commit/3a0be17b9f061c006e718f38773ebfffdc690cb4)), closes [sibling/#NNN](https://github.com/sibling/nano-workforce/issues/NNN) [#908](https://github.com/nanobpm/nano-workforce/issues/908) [#666](https://github.com/nanobpm/nano-workforce/issues/666)
+
 ## [0.203.0](https://github.com/nanobpm/nano-workforce/compare/v0.202.0...v0.203.0) (2026-10-13)
 
 ### Features
