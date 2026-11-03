@@ -49,7 +49,7 @@ curl -sS -X POST __BASE__/actions/start/convergence-loop \
 | field | type | meaning |
 |---|---|---|
 | `pr` (or `url`) | string | `owner/repo#123` or a PR URL. Required. |
-| `autoMerge` | boolean | `false` = review only, stop at `converged`. `true` = converge **then merge** (when `NANO_PR_AUTO_MERGE` is on, the default). Choose deliberately. |
+| `autoMerge` | boolean | `false` = review only, stop at `converged`. `true` = converge **then merge**. **Omitted = merge** (the merge path is the default). Merging also requires `NANO_PR_AUTO_MERGE` on (the default); a per-request value only ever narrows to review-only, it never forces a merge when the global switch is off. Choose deliberately — to guarantee review-only, set `autoMerge: false` explicitly. |
 | `maxRounds` | integer | round cap before escalating (1–100; default `NANO_PR_MAX_ROUNDS`, 20). |
 | `dependsOn` | string[] | `prKey`s that must land before this one merges. |
 | `autoResolveEscalations` | boolean | opt in to the escalation steward (§3). Default `false`. |
