@@ -11,27 +11,15 @@ implements → converges** them across a fleet of coding agents, and runs
 **agent-authored delivery graphs** (heterogeneous cross-repo, human-in-the-loop
 DAGs — ADR 0005).
 
-**This skill is a thin bootstrap by design.** It does not describe the endpoints.
-Every running nwf instance is self-describing — over **MCP** where your client
-supports it, and over its **live operator guide** everywhere else. Your job is to
-reach that live surface and follow it, never to work from a cached copy that drifts
-across versions and instances.
-
-There are two paths. **Prefer MCP (§A).** If your client has no MCP support, use the
-fetch-the-live-guide fallback (§B). Both talk to the same app; MCP is a projection of
-the same OpenAPI contract, not a different system (ADR 0067).
+**This skill is a thin bootstrap.** Every running instance describes itself, over **MCP**
+(§A, preferred) or through its **live operator guide** (§B). Reach that live surface and
+follow it rather than a cached copy that drifts between versions.
 
 ## A. Preferred — drive over MCP
 
-The Urban runtime serves a Streamable-HTTP MCP endpoint at **`/app/mcp`** for every
-instance, with **zero app-side MCP code**: the app's operations are projected into
-tools from its OpenAPI spec, alongside a framework-owned engine-debug tool family
-(process instances, wait states, variables, incidents) and the app's projection
-reads. The operator **guide** (the same guide as §B) is itself one of those projected
-tools — `GET /app/api/agent` becomes the `getAgentInstructions` read tool — so the
-workflow knowledge (orient first, preview before dispatch, escalations are for humans)
-is discoverable over the same channel as the drive tools; the runtime additionally
-serves its derived **system brief** as an MCP resource plus an orientation prompt.
+Every instance serves a Streamable-HTTP MCP endpoint at **`/app/mcp`**. Its tools are the
+app's operations (projected from its OpenAPI spec) plus framework engine-debug tools. The
+operator guide itself is the `getAgentInstructions` tool.
 
 **Register one MCP server entry per instance.** Naming the instance
 (`"drive workforce-merlin"`) makes the wrong-instance mistake structurally
@@ -64,14 +52,9 @@ Then: start a session, confirm the `workforce-*` tools appear, and ask the agent
 use a **named** instance (`"Using workforce-local, show what's in flight and any open
 escalations"`). It should call the status operation tool, not curl.
 
-**Guard posture.** When `NANO_PR_WEBHOOK_SECRET` is **unset**, both reads (status,
-instances, incidents, projections, the operator guide) and mutations (submit work,
-answer escalations, cancel/retry/resolve) work from loopback with no credential. When it
-**is set**, that secret is required as an `x-hook-secret` header on **both reads and
-mutations** — read endpoints like `getAgentInstructions`/`getVersion` also return `401`
-without it — put it in the server entry's `headers`, never in chat. **Operator-only doors stay operator-only:** the delivery-graph
-dispatch/dismiss lifecycle (the human clicking Dispatch *is* the approval, ADR 0005)
-is `x-mcp`-excluded and is **not** a tool — dispatch stays a human action in the
+**Guard posture.** If `NANO_PR_WEBHOOK_SECRET` is set, every read and mutation needs it as an
+`x-hook-secret` header (otherwise `401`). Put it in the server entry's `headers`, never in
+chat. Delivery-graph dispatch is deliberately **not** a tool: it stays a human action in the
 cockpit.
 
 The full server-entry recipes (multiple instances, Basic-Auth-fronted instances,
@@ -129,45 +112,17 @@ curl -sS ${NANO_PR_WEBHOOK_SECRET:+-H "x-hook-secret: $NANO_PR_WEBHOOK_SECRET"} 
 `GET /app/api/agent` (`getAgentInstructions`) returns
 `{ format, appVersion, generatedAt, baseUrl, engineBase, instructions }` — the
 authoritative, version-matched operator guide, every example keyed to this
-instance. Read it in full and follow it for orientation, submitting work, answering
-escalations, and debugging. **Re-fetch it at the start of every session.** (This is
-the same prose the `getAgentInstructions` MCP tool serves in §A.)
-
-### B.3 Orient before acting
-
-```bash
-curl -sS "$BASE/version" | jq   # app/urban version, git sha, uptime
-curl -sS "$BASE/status"  | jq   # every PR/instance in flight + open escalations
-```
-
-`/status` is the primary situational-awareness endpoint — check it before you submit
-or unstick anything.
-
-### B.4 What you can drive (all detailed in the live guide)
-
-- **Submit a PR** for review convergence — `POST $BASE/actions/start/convergence-loop`.
-- **Submit an issue/epic** for plan → implement → converge — `POST $BASE/actions/start/plan-fanout`.
-- **Submit a delivery graph** (ADR 0005) — propose → preview → approve → **dispatch**.
-  Compile/preview is a pure, side-effect-free path; **dispatch is an operator action
-  in the cockpit**, not an agent door.
-- **Answer an escalation** — `POST $BASE/actions/complete-user-task`, or the agent
-  hook `POST $BASE/hooks/agent-complete` (`agentCompleteEscalation`).
-- **Debug** — relate an in-flight PR to its engine process instance via `processKey`
-  from `/status`, then inspect and unstick it against the engine REST base
-  (`engineBase` from the guide).
+instance. Read it and follow it: orientation, submitting work, answering escalations,
+debugging. **Re-fetch it every session.** For one section, use
+`GET $BASE/agent/guide?section=<id>` (no `section` = table of contents).
 
 ## Principles
 
-- **Discover, don't declare.** Prefer the live surface (MCP tools including the
-  operator-guide tool, or the live guide and `/status`) over any assumption baked into
-  this file. If this skill and the live surface disagree, the live surface wins.
-- **Confirm the target instance.** Never run a side-effecting call against an assumed
-  base URL. With MCP, name the server entry; with the fallback, know — and when
-  ambiguous, ask — which instance you're driving.
-- **Preview before dispatch.** For delivery graphs and any bulk action, use the pure
-  preview/validate path first and show the user the plan before the side-effecting
-  start. Dispatch itself is the operator's call.
-- **Idempotency.** Submissions carry dedupe keys; re-submitting the same work must not
-  double-dispatch. Honour the keys the guide documents.
-- **Escalations are for humans.** When the workforce parks on a human node, surface it
-  with options; don't silently auto-answer design/product decisions.
+- **The live surface wins.** If this skill and the instance disagree, follow the instance.
+- **Confirm the target instance** before any side-effecting call (name the MCP server entry,
+  or ask when the base URL is ambiguous).
+- **Preview before dispatch.** Show the user the plan before any bulk or side-effecting start.
+  Dispatching a delivery graph is the operator's call.
+- **Submissions are idempotent.** Re-submitting the same work must not double-dispatch.
+- **Escalations are for humans.** Surface them with options; don't silently answer design or
+  product decisions.
