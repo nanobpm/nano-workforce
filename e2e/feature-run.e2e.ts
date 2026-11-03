@@ -163,6 +163,46 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
 
         const prs = await app.db.table<PrRow>("pull_requests", "pr_key").find({});
         assert.equal(prs.length, 0, "raise-only did NOT enroll the PR into the convergence loop");
+
+        // Issue #907: the HOST posted exactly one idempotent "PR opened" comment on the claimed
+        // issue, and recorded the link on the run row so a repeated pass never double-posts.
+        // (Snapshot the issue's comments: the github state is shared across this file's tests.)
+        const comments = (githubState.issueComments.get(7) ?? []).filter((c) => c.body.includes("nwf:pr-linked:#101"));
+        assert.equal(comments.length, 1, "exactly one comment was posted on the claimed issue for PR #101");
+        assert.ok(comments[0].body.includes("Pull request opened: #101"), "the comment names the PR");
+        assert.ok(comments[0].body.includes("<!-- nwf:pr-linked:#101 -->"), "the comment carries the dedupe marker");
+        assert.equal(
+          (run as unknown as { pr_linked_pr_key: string | null }).pr_linked_pr_key,
+          "owner/repo#101",
+          "the durable link record was written",
+        );
+      },
+    );
+  });
+
+  test("idempotence: re-running record-feature for the SAME delivered PR posts nothing more (issue #907)", async () => {
+    // A retried at-least-once `record-feature` job (or a second reconcile pass) must never
+    // double-post the "PR opened" comment: the durable `pr_linked_pr_key` claim short-circuits the
+    // repeat before any GitHub write.
+    await withApp(
+      { "senior:feature": () => ({ status: "opened", pr: "owner/repo#101", summary: "built it" }) },
+      { baseBranch: "epic/e2e" },
+      async ({ app, featureKey }) => {
+        const before = (githubState.issueComments.get(7) ?? []).length;
+        assert.equal(before >= 0, true);
+        // Drive the REAL record-feature handler a second time with the same delivered PR (the
+        // at-least-once repeat / second reconcile pass), against the SAME live app DB.
+        const { default: recordFeature } = await import("../workers/record-feature/worker.ts");
+        const log = { info: () => {}, warn: () => {}, error: () => {} };
+        await recordFeature(
+          { jobKey: "repeat-1", variables: { featureKey, status: "opened", pr: "owner/repo#101", claimIssue: true } } as never,
+          { data: app.db, log } as never,
+        );
+        assert.equal(
+          (githubState.issueComments.get(7) ?? []).length,
+          before,
+          "a repeated record pass posted NO second comment",
+        );
       },
     );
   });
@@ -298,6 +338,13 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
         );
         assert.ok(!flows.includes("ic_gw_answer->ic_end"), "the abandon (default) flow was NOT taken");
         assert.equal(calls, 2, "the implementation agent was re-dispatched exactly once after the answer");
+
+        // Issue #907: the RETRY opened the PR — the host still posted exactly one "PR opened"
+        // comment on the claimed issue (the first, escalated pass delivered no PR, so nothing was
+        // posted before the answer). (Filtered to THIS PR's marker — the github state is shared.)
+        const comments = (githubState.issueComments.get(7) ?? []).filter((c) => c.body.includes("nwf:pr-linked:#103"));
+        assert.equal(comments.length, 1, "exactly one comment was posted across the escalate+resume");
+        assert.ok(comments[0].body.includes("Pull request opened: #103"), "the comment names the retry-opened PR");
       },
     );
   });
@@ -388,6 +435,13 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
             !tasks.some((t) => t.elementId === "escalation"),
             "no human-escalation task was created for the adopted run",
           );
+
+          // Issue #907: the ADOPTED PR was announced on the claimed issue exactly once — the
+          // reconcile path delivers the PR without the agent reporting it, and the host-side link
+          // covers it all the same. (Filtered to THIS PR's marker — the github state is shared.)
+          const comments = (githubState.issueComments.get(7) ?? []).filter((c) => c.body.includes("nwf:pr-linked:#801"));
+          assert.equal(comments.length, 1, "exactly one comment was posted for the adopted PR");
+          assert.ok(comments[0].body.includes("Pull request opened: #801"), "the comment names the adopted PR");
         },
       );
     } finally {

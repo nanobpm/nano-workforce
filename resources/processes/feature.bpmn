@@ -8,6 +8,7 @@
           <nano:extend name="status" type="string" optional="true" />
           <nano:extend name="pr" type="string" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
+          <nano:extend name="claimIssue" type="boolean" optional="true" />
         </nano:shape>
         <nano:shape id="RecordFeatureImplementingIn" name="Record feature implementing — input">
           <nano:extend name="featureKey" type="string" optional="true" />

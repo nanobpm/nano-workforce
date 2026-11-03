@@ -40,8 +40,9 @@ export function githubTransport(): GithubTransport {
 
 /** Run the host `gh` CLI with the given args (no shell — args are passed as a vector, so a
  * `repo`/`number` from the datastore cannot inject a command). Resolves stdout, rejects on a
- * non-zero exit with stderr as the message. */
-async function runGh(args: string[]): Promise<string> {
+ * non-zero exit with stderr as the message. Exported so sibling host-glue modules (e.g.
+ * app/issuePrLink.ts) ride the ONE gh transport instead of re-deriving it. */
+export async function runGh(args: string[]): Promise<string> {
   const { execFile } = await import("node:child_process");
   return await new Promise<string>((resolve, reject) => {
     execFile(
@@ -714,8 +715,9 @@ export async function requestCopilotReview(
 // The same two-transport model (gh | token) backs the merge stage: read a PR's merge state to
 // decide when it is landable, and perform the merge (directly or via the repo's merge queue).
 
-/** Whether to use the `gh` CLI for this pass, honouring `NANO_PR_GITHUB_TRANSPORT`. */
-async function useGh(): Promise<boolean> {
+/** Whether to use the `gh` CLI for this pass, honouring `NANO_PR_GITHUB_TRANSPORT`. Exported so
+ * sibling host-glue modules (e.g. app/issuePrLink.ts) resolve the SAME transport selection. */
+export async function useGh(): Promise<boolean> {
   const mode = githubTransport();
   return mode === "gh" || (mode === "auto" && (await isGhAvailable()));
 }
