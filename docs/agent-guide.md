@@ -362,7 +362,7 @@ into the next agent:
 
 ```json
 {
-  "name": "cross-repo release: merge #101 → un-draft+merge #202 → manual OTP publish → consume in #303",
+  "name": "cross-repo release: merge #101 → un-draft+merge #202 → manual OTP publish → consume in repo-3",
   "nodes": [
     { "id": "merge-a", "kind": "wait",
       "wait": { "kind": "pr", "target": "acme/repo-1#101", "match": { "prState": "merged" },
@@ -373,16 +373,17 @@ into the next agent:
       "human": { "prompt": "Run the manual OTP-authenticated `npm publish` for @acme/widget. Record the exact published version." },
       "emits": [ { "name": "publishedVersion", "type": "version" } ] },
     { "id": "open-pr-c", "kind": "agent",
-      "agent": { "jobType": "senior:feature", "repository": "acme/repo-3", "prompt": "Bump @acme/widget to the published version in acme/repo-3 and open a PR." } },
+      "agent": { "jobType": "senior:feature", "repository": "acme/repo-3", "prompt": "Bump @acme/widget to the published version in acme/repo-3 and open a PR." },
+      "emits": [ { "name": "pr", "type": "pr" } ] },
     { "id": "merge-c", "kind": "wait",
-      "wait": { "kind": "pr", "target": "acme/repo-3#303", "match": { "prState": "merged" },
+      "wait": { "kind": "pr", "target": "open-pr-c.pr", "match": { "prState": "merged" },
                 "poll": { "everyMs": 300000, "timeoutMs": 259200000 }, "onTimeout": "escalate" } }
   ],
   "edges": [
     { "from": "merge-a", "to": "undraft-merge-b" },
     { "from": "undraft-merge-b", "to": "manual-publish" },
     { "from": "manual-publish.publishedVersion", "to": "open-pr-c" },
-    { "from": "open-pr-c", "to": "merge-c" }
+    { "from": "open-pr-c.pr", "to": "merge-c" }
   ]
 }
 ```
