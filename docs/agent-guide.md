@@ -11,7 +11,9 @@ and runs agent-authored **delivery graphs**.
 
 **Tools first, curl as fallback.** Over MCP, call the projected tool named in each
 recipe. Without MCP, use the curl door in the §10 crosswalk. If the deployment sets
-`NANO_PR_WEBHOOK_SECRET`, add `-H "x-hook-secret: <secret>"` to every POST.
+`NANO_PR_WEBHOOK_SECRET`, add `-H "x-hook-secret: <secret>"` to **every** request — the
+read endpoints (`/version`, `/status`, `/escalations`, `/agent`, `/agent/guide`, …) are
+guarded too, not only the POSTs.
 
 ---
 
@@ -108,9 +110,10 @@ on a native BPMN user task until someone answers.
 curl -sS __BASE__/escalations | jq
 ```
 
-`/status` only shows `openEscalation` as text, without a `userTaskKey`, so you can't answer
-from it. The raw task inbox is `__BASE__/../../tasks/api/tasks`, and its UI for humans is at
-`__BASE__/../../tasks`.
+`/status` also carries a structured `openEscalation` pointer — `{ userTaskKey, kind, summary }`
+(or `null`) — so you can answer straight from it. `listEscalations` remains the fuller
+task-context surface (subject, question, findings). The raw task inbox is
+`__BASE__/../../tasks/api/tasks`, and its UI for humans is at `__BASE__/../../tasks`.
 
 **Answer** through the one door, `completeUserTask`, with the variables the task's kind
 expects. Answering as an agent assignee? Use `agentCompleteEscalation` instead: it records
@@ -320,7 +323,9 @@ omits the fact, the `default` branch is taken.
 **Result statuses are added automatically. Don't write them into your prompt.** Every agent
 node's prompt gets the allowed terminal statuses (`done` / `opened` / `skipped`). A completion
 moves on only with one of those statuses and every required emit present. Anything else parks
-the run on a human `__contract` escalation.
+the run on a human `__contract` escalation — **except** an absent/null `status`, which a legacy
+worker that populates its required emits may still advance with (the status contract binds only
+when a status is actually reported).
 
 ### 9.2 The agent loop: draft → compile → stage → ask an operator to dispatch
 
@@ -445,7 +450,7 @@ epic never reports merged, so the bounded wait routes via `onTimeout`. On a matc
 | PRs in flight (§0) | `listActivePrs` | `GET __BASE__/status` |
 | Submit a PR / epic / feature (§1–2) | `startConvergenceLoop` / `startPlanFanout` / `startFeature` | `POST __BASE__/actions/start/{convergence-loop,plan-fanout,feature}` |
 | List escalations (§3) | `listEscalations` | `GET __BASE__/escalations` |
-| Answer an escalation (§3) | `completeUserTask` (as agent: `agentCompleteEscalation`) | `POST __BASE__/actions/complete-user-task` |
+| Answer an escalation (§3) | `completeUserTask` (as agent: `agentCompleteEscalation`) | `POST __BASE__/actions/complete-user-task` (as agent: `POST __BASE__/hooks/agent-complete` with `agentId` required) |
 | Auto-resolutions (§3) | `listAutoResolutions` / `reviewAutoResolution` | `GET __BASE__/auto-resolutions` / `POST __BASE__/auto-resolutions/review` |
 | Cancel a run (§7) | `cancelInstance` | `POST __BASE__/actions/cancel` |
 | Publish a BPMN message | `postMessage` | `POST __BASE__/actions/message` |
