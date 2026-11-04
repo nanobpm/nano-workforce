@@ -1049,7 +1049,10 @@ export interface MergePolicy {
   /** `requested && enabled && !humanApproval` — the run merges with no further gate. */
   effective: boolean;
   /** WHY a requested merge will not proceed: the global env switch is off, or a human merge
-   * approval is pending. Null when the merge is effective or none was requested. */
+   * approval is outstanding. Null when the merge is effective or none was requested. The
+   * `merge-approval` task clears the loop's `humanApproval` variable on an explicit "approve"
+   * (convergence-loop.bpmn), so the blocker lifts as soon as approval is complete — even while
+   * the `pr.finalize` handoff is still queued or incidented. */
   blockedBy: "env" | "human-approval" | null;
 }
 
@@ -1157,7 +1160,11 @@ function mergePolicyDefault(): MergePolicy {
   return mergePolicyFrom(true, false);
 }
 
-/** Combine a merge intent + human-approval gate with the global switch into the effective policy. */
+/** Combine a merge intent + human-approval gate with the global switch into the effective policy.
+ *  `humanApproval` is the OUTSTANDING-approval signal: the loop seeds it when approval is required
+ *  and the `merge-approval` user task clears it on an explicit "approve", so an approved PR whose
+ *  finalization is still queued/incidented reads `effective` with no blocker rather than a stale
+ *  `blockedBy: "human-approval"`. */
 function mergePolicyFrom(requested: boolean, humanApproval: boolean): MergePolicy {
   const enabled = AUTO_MERGE;
   const effective = requested && enabled && !humanApproval;

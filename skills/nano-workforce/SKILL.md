@@ -129,4 +129,7 @@ debugging. **Re-fetch it every session.** For one section, use
 - **Merge intent is a read, not a write.** Every `/status` PR row carries a `merge` block —
   `requested` (the run's `autoMerge`), `enabled` (the deployment's `NANO_PR_AUTO_MERGE`),
   `effective`, and `blockedBy` (`"env"` | `"human-approval"` | `null`). Read it there; never
-  write variables onto a running loop to change it (a no-op — cancel and re-submit instead).
+  write variables onto a running loop to change it. Such writes are unsupported and
+  timing-dependent, not reliable no-ops — one landing while the loop awaits merge approval
+  reaches `pr.finalize` unrestored and can change whether merging starts. Cancel and re-submit
+  instead.

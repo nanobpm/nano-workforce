@@ -479,6 +479,7 @@
         <zeebe:ioMapping>
           <zeebe:input source="=prKey" target="prKey" />
           <zeebe:output source="=0" target="huskRetries" />
+          <zeebe:output source="=if mergeDecision = &#34;approve&#34; then false else humanApproval" target="humanApproval" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_needApproval</bpmn:incoming>

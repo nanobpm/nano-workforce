@@ -78,9 +78,11 @@ loop. The 202 response echoes `prKey` and `processKey`.
 `autoMerge` must be a JSON **boolean** — a string (`"true"`) is a `400` at every start door
 (`startConvergenceLoop`, `startFeature`), never a silent review-only run. To *read* the intent
 back, use the `merge` block in `/status` (§0). There is **no supported way to flip merge
-intent on a running loop**: writing variables onto a live instance (e.g. `autoMerge=true`) is
-a no-op — the loop's merge decision was seeded at submit time and is guard-restored against
-in-flight writes. To change it, cancel the run (`cancelInstance`, §7) and re-submit with the
+intent on a running loop**. Direct variable writes onto a live instance (e.g. `autoMerge=true`)
+are **unsupported and timing-dependent, not reliable no-ops**: the agent tasks guard-restore the
+seeded value, so a write is usually overwritten — but a write that lands while the loop awaits
+merge approval is never restored and reaches `pr.finalize`, where it can change whether merging
+starts. To change the intent, cancel the run (`cancelInstance`, §7) and re-submit with the
 intent you want.
 
 ---

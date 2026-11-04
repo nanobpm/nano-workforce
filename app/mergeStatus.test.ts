@@ -83,11 +83,21 @@ function prRow(over: Record<string, unknown>) {
 }
 
 async function mergeOf(vars: Record<string, unknown>, rowOver: Record<string, unknown> = {}) {
+  return mergeOfWith({ activePrs }, vars, rowOver);
+}
+
+/** `mergeOf` against an explicitly-loaded service module — for the env-switched tests that import
+ *  a fresh copy of app/service.ts (e.g. `NANO_PR_AUTO_MERGE=0`). */
+async function mergeOfWith(
+  mod: Pick<typeof import("./service.ts"), "activePrs">,
+  vars: Record<string, unknown>,
+  rowOver: Record<string, unknown> = {},
+) {
   const stores: Stores = {
     pull_requests: { rows: [prRow(rowOver)], key: "pr_key" },
     user_tasks: { rows: [], key: "id" },
   };
-  const [pr] = await activePrs(memData(stores), fakeEngine({ "PI-1": vars }));
+  const [pr] = await mod.activePrs(memData(stores), fakeEngine({ "PI-1": vars }));
   return pr.merge;
 }
 
@@ -112,6 +122,16 @@ test("merge policy: humanApproval gates the effective merge and is named as the 
   assertEquals(merge, { requested: true, enabled: true, effective: false, blockedBy: "human-approval" });
 });
 
+test("merge policy: an approved PR with finalization still pending reports no blocker (PR #917 review)", async () => {
+  // The `merge-approval` user task clears the loop's `humanApproval` variable on an explicit
+  // "approve" (convergence-loop.bpmn), so while `pr.finalize` is still queued or incidented the
+  // projection reads humanApproval=false and must NOT keep reporting a human-approval blocker for
+  // an approval that is already complete. (`status` stays non-terminal: `converged_at` is only
+  // stamped once `pr.finalize` actually runs.)
+  const merge = await mergeOf({ autoMerge: true, humanApproval: false }, { status: "converging" });
+  assertEquals(merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+});
+
 test("merge policy: a review-only request reads requested=false (distinct from env/human blocking)", async () => {
   const merge = await mergeOf({ autoMerge: false, convergeOnly: true });
   assertEquals(merge, { requested: false, enabled: true, effective: false, blockedBy: null });
@@ -128,4 +148,22 @@ test("merge policy: no readable instance key (or neither variable) defaults to t
   assertEquals(noKey.merge, { requested: true, enabled: true, effective: true, blockedBy: null });
   const bare = await mergeOf({});
   assertEquals(bare, { requested: true, enabled: true, effective: true, blockedBy: null });
+});
+
+test("merge policy: NANO_PR_AUTO_MERGE=0 blocks a requested merge as env, never a review-only one", async () => {
+  // `AUTO_MERGE` is read once at app/service.ts import time, so load a fresh copy of the module
+  // under the env (the same pattern app/service.test.ts uses) — every other test here runs with
+  // the switch ON (the default) and none exercised `blockedBy: "env"` before this one.
+  const prev = process.env["NANO_PR_AUTO_MERGE"];
+  process.env["NANO_PR_AUTO_MERGE"] = "0";
+  try {
+    const mod: typeof import("./service.ts") = await import(`./service.ts?mergeStatusAutoMergeOff=${Date.now()}`);
+    const requested = await mergeOfWith(mod, { autoMerge: true, humanApproval: true });
+    assertEquals(requested, { requested: true, enabled: false, effective: false, blockedBy: "env" });
+    const reviewOnly = await mergeOfWith(mod, { autoMerge: false });
+    assertEquals(reviewOnly, { requested: false, enabled: false, effective: false, blockedBy: null });
+  } finally {
+    if (prev === undefined) delete process.env["NANO_PR_AUTO_MERGE"];
+    else process.env["NANO_PR_AUTO_MERGE"] = prev;
+  }
 });
