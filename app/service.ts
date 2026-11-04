@@ -59,6 +59,7 @@ import {
   requestCopilotReview,
 } from "./github.ts";
 import { activeStatusesFor, derivedTrackingTable } from "./instanceTracking.ts";
+import { retryOutstandingIssuePrLinks } from "./issuePrLink.ts";
 import { pollLineage } from "./lineage.ts";
 import { mergeableRepollInterval, mergeableWaitTimeout } from "./mergeableWait.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
@@ -3922,6 +3923,8 @@ export async function pollOnce(
   await pollWaitGate(data);
   await pollPromotion(data, engine, token);
   await pollFeatureDelivery(data, engine);
+  // Issue #907: retry every owed-but-unconfirmed "PR opened" issue link (best-effort, never throws).
+  await retryOutstandingIssuePrLinks(data, token);
   await pollLineage(data);
   await pollUserTasks(data, engine, engineRest);
   // The escalation steward is an OPTIONAL, best-effort pass: a steward-specific failure (a search or
