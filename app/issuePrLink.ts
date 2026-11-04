@@ -251,12 +251,13 @@ export async function attemptIssuePrLink(
     // The title is best-effort, read from the PR's OWN repository.
     let title: string | null = null;
     try {
-      title = (await fetchPrMeta(pr.repo, pr.number, token))?.title ?? null;
+      title = (await fetchPrMeta(pr.repo, pr.number, token, ioTimeoutMs))?.title ?? null;
     } catch {
       title = null;
     }
     // Re-validate lease ownership IMMEDIATELY before the write. The scan + title lookup above are
-    // unbounded I/O: if this pass stalled past the lease expiry, the poller may have re-claimed the
+    // each bounded by ioTimeoutMs (so a hung read can never wedge pr.record-feature or the poller
+    // pass), but together they can still approach the lease: if this pass stalled past the lease expiry, the poller may have re-claimed the
     // lease and posted — and the after-the-fact confirm guard runs too late to stop a duplicate.
     // Re-claim a FRESH timestamp guarded on the one this pass holds: only the CURRENT holder flips
     // (changed=1), extending its lease through the write; a stale holder whose ts was overwritten

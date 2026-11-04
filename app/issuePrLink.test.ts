@@ -51,6 +51,8 @@ function stubGithub(
     throwPost?: boolean;
     /** Hang every comment POST until its abort signal fires (a POST stalled past its deadline). */
     stallPost?: boolean;
+    /** Hang the PR-title GET until its abort signal fires (a title lookup stalled past its deadline). */
+    stallTitle?: boolean;
     pages?: Record<number, { body: string }[]>;
     prTitles?: Record<string, string>;
     /** Fired once during the FIRST comment-list GET — simulates a concurrent pass acting while the
@@ -81,6 +83,13 @@ function stubGithub(
       return new Response(JSON.stringify(bodies), { status: 200 });
     }
     if (method === "GET" && /\/pulls\/\d+$/.test(u.pathname)) {
+      if (opts.stallTitle) {
+        const signal = init?.signal;
+        await new Promise<never>((_, reject) => {
+          if (!signal) return; // unbounded caller: hangs forever (the test then times out — RED)
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
       const title = opts.prTitles?.[u.pathname] ?? "the PR";
       return new Response(JSON.stringify({ title }), { status: 200 });
     }
@@ -501,6 +510,19 @@ test("a comment POST stalled past its deadline is aborted as post-failed — the
     assertEquals(out, "post-failed", "the hung POST was cut off at the deadline");
     assertEquals(rows[0].pr_linked_pr_key, null, "an aborted POST is never confirmed");
     assert(rows[0].pr_link_lease_at != null, "the lease stands as the retry backoff");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("a PR-title lookup stalled past its deadline is cut off — the comment still posts with no title", { timeout: 5000 }, async () => {
+  const gh = stubGithub([], { stallTitle: true });
+  const { data, rows } = fakeData([owedRow()]);
+  try {
+    const out = await attemptIssuePrLink(KEY, data, "t", () => new Date(), 20);
+    assertEquals(out, "posted", "a hung title read never wedges the attempt");
+    assertEquals(gh.posted.length, 1);
+    assertEquals(rows[0].pr_linked_pr_key, PR);
   } finally {
     gh.restore();
   }

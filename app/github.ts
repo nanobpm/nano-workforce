@@ -742,9 +742,13 @@ export async function fetchPrMeta(
   repo: string,
   number: number | string,
   token: string,
+  timeoutMs?: number,
 ): Promise<PrMeta | null> {
   if (await useGh()) {
-    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "title,body,headRefName,baseRefName"]);
+    const out = await runGh(
+      ["pr", "view", String(number), "--repo", repo, "--json", "title,body,headRefName,baseRefName"],
+      timeoutMs === undefined ? undefined : { timeoutMs },
+    );
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const j = JSON.parse(out) as { title?: string; body?: string; headRefName?: string | null; baseRefName?: string | null };
     return { title: j.title ?? null, body: j.body ?? "", headRef: j.headRefName ?? null, baseRef: j.baseRefName ?? null };
@@ -752,6 +756,7 @@ export async function fetchPrMeta(
   if (!token) return null;
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+    ...(timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
