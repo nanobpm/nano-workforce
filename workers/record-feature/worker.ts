@@ -11,8 +11,18 @@
 //
 // Enrollment itself lives in the separate `pr.converge-feature` worker (gated by the `converge?`
 // branch) so the hand-off is legible in the process, not buried in a persistence step.
+//
+// This is ALSO the one point every PR-delivering path passes through — the agent's own `opened`,
+// a retry's `opened`, and the implement-cell reconcile step's ADOPTED `opened` all land here — so
+// it is the canonical host-side writer of the idempotent "PR opened" comment on the claimed issue
+// (issue #907, app/issuePrLink.ts): a claimed single-issue run (`claimIssue`) that delivered a
+// keyed PR gets exactly one `🤖 Pull request opened: #n` comment on its issue, however the PR was
+// delivered. Epic slices never set `claimIssue`, so they never comment on the parent epic. The
+// comment is best-effort — a failure never fails the run; the owed link is persisted and the
+// poller's retry pass (app/service.ts → retryOutstandingIssuePrLinks) re-attempts it.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { type FeatureRunStatus, featureRuns } from "../../app/feature.ts";
+import { requestIssuePrLink } from "../../app/issuePrLink.ts";
 import { parsePr } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -57,6 +67,23 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     updated_at: ts,
   });
   app.log.info("record-feature", { featureKey, featureStatus, rowStatus, prKey });
+
+  // Issue #907: announce the delivered PR on the claimed issue — ONE idempotent comment, posted by
+  // the HOST so every delivery path (agent-opened, retry-opened, reconcile-adopted) covers it.
+  // Only a claimed single-issue run (`claimIssue`) with a keyed PR qualifies; epic slices never set
+  // `claimIssue`, so they never comment on the parent epic. The ISSUE target comes from the run row
+  // (`repo` + `issue_number`), never from the PR's repository, so a cross-repo PR still lands on the
+  // claimed issue. Best-effort: a failed attempt leaves the owed link for the poller to retry and
+  // never fails the run.
+  const link = await requestIssuePrLink(
+    {
+      featureKey,
+      prKey,
+      claimIssue: job.variables.claimIssue,
+    },
+    app.data,
+  );
+  if (link !== "skipped") app.log.info("record-feature: issue PR link", { featureKey, prKey, link });
 
   return { featureStatus, prKey };
 };

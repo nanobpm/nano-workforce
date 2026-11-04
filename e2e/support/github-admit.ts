@@ -20,6 +20,9 @@ export interface AdmitGithubState {
    *  head via `listPrsForHead`. Empty by default → the pulls listing returns `[]` (no adoptable PR),
    *  so suites that don't opt in keep exactly today's escalate behaviour. */
   openPrs: Map<string, { number: number; base?: string }>;
+  /** Issue comments keyed by issue number (issue #907): the record-feature "PR opened" link lists
+   *  existing comments (marker dedupe) and POSTs new ones here. Seeded empty. */
+  issueComments: Map<number, { body: string }[]>;
 }
 
 /** Build a fresh admit-github state with the default branch pre-seeded with a HEAD sha so an
@@ -35,6 +38,7 @@ export function admitGithubState(
     creates: [],
     resets: [],
     openPrs: new Map(),
+    issueComments: new Map(),
   };
 }
 
@@ -94,6 +98,35 @@ function admitFetch(state: AdmitGithubState) {
           },
         ]),
       );
+    }
+    // GET /repos/{repo}/pulls/{n} → a PR's meta (fetchPrMeta — the "PR opened" link's best-effort
+    // title read, issue #907). Served from the openPrs entry when one names this number.
+    const pullMatch = path.match(/^\/repos\/([^/]+\/[^/]+)\/pulls\/(\d+)$/);
+    if (method === "GET" && pullMatch) {
+      const number = Number(pullMatch[2]);
+      for (const [branch, hit] of state.openPrs) {
+        if (hit.number === number) {
+          return Promise.resolve(
+            json({ title: `PR #${number}`, body: "", head: { ref: branch }, base: { ref: hit.base ?? state.defaultBranch } }),
+          );
+        }
+      }
+      return Promise.resolve(json({ title: `PR #${number}`, body: "", head: { ref: null }, base: { ref: state.defaultBranch } }));
+    }
+    // GET /repos/{repo}/issues/{n}/comments → the issue's comments (the "PR opened" marker dedupe
+    // scan, issue #907). POST appends a comment.
+    const commentsMatch = path.match(/^\/repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/comments$/);
+    if (commentsMatch) {
+      const issueNumber = Number(commentsMatch[2]);
+      if (method === "GET") return Promise.resolve(json(state.issueComments.get(issueNumber) ?? []));
+      if (method === "POST") {
+        // biome-ignore lint/plugin: runtime contract boundary for parsed JSON
+        const body = JSON.parse(String(init?.body ?? "{}")) as { body?: string };
+        const list = state.issueComments.get(issueNumber) ?? [];
+        list.push({ body: String(body.body ?? "") });
+        state.issueComments.set(issueNumber, list);
+        return Promise.resolve(json({ id: list.length }, 201));
+      }
     }
     // Any other endpoint is a best-effort read the sealed transport used to skip → 404 (null).
     return Promise.resolve(new Response("Not Found", { status: 404 }));

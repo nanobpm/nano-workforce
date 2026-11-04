@@ -40,14 +40,16 @@ export function githubTransport(): GithubTransport {
 
 /** Run the host `gh` CLI with the given args (no shell — args are passed as a vector, so a
  * `repo`/`number` from the datastore cannot inject a command). Resolves stdout, rejects on a
- * non-zero exit with stderr as the message. */
-async function runGh(args: string[]): Promise<string> {
+ * non-zero exit with stderr as the message. Exported so sibling host-glue modules (e.g.
+ * app/issuePrLink.ts) ride the ONE gh transport instead of re-deriving it. */
+export async function runGh(args: string[], opts: { timeoutMs?: number } = {}): Promise<string> {
   const { execFile } = await import("node:child_process");
   return await new Promise<string>((resolve, reject) => {
     execFile(
       "gh",
       args,
-      { maxBuffer: 16 * 1024 * 1024 },
+      // `timeout` (0 = none) kills a hung `gh` so a bounded caller's deadline is actually enforced.
+      { maxBuffer: 16 * 1024 * 1024, timeout: opts.timeoutMs ?? 0 },
       (err, stdout, stderr) => {
         if (err) reject(new Error(String(stderr || "").trim() || err.message));
         else resolve(String(stdout));
@@ -714,8 +716,9 @@ export async function requestCopilotReview(
 // The same two-transport model (gh | token) backs the merge stage: read a PR's merge state to
 // decide when it is landable, and perform the merge (directly or via the repo's merge queue).
 
-/** Whether to use the `gh` CLI for this pass, honouring `NANO_PR_GITHUB_TRANSPORT`. */
-async function useGh(): Promise<boolean> {
+/** Whether to use the `gh` CLI for this pass, honouring `NANO_PR_GITHUB_TRANSPORT`. Exported so
+ * sibling host-glue modules (e.g. app/issuePrLink.ts) resolve the SAME transport selection. */
+export async function useGh(): Promise<boolean> {
   const mode = githubTransport();
   return mode === "gh" || (mode === "auto" && (await isGhAvailable()));
 }
@@ -739,9 +742,13 @@ export async function fetchPrMeta(
   repo: string,
   number: number | string,
   token: string,
+  timeoutMs?: number,
 ): Promise<PrMeta | null> {
   if (await useGh()) {
-    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "title,body,headRefName,baseRefName"]);
+    const out = await runGh(
+      ["pr", "view", String(number), "--repo", repo, "--json", "title,body,headRefName,baseRefName"],
+      timeoutMs === undefined ? undefined : { timeoutMs },
+    );
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const j = JSON.parse(out) as { title?: string; body?: string; headRefName?: string | null; baseRefName?: string | null };
     return { title: j.title ?? null, body: j.body ?? "", headRef: j.headRefName ?? null, baseRef: j.baseRefName ?? null };
@@ -749,6 +756,7 @@ export async function fetchPrMeta(
   if (!token) return null;
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+    ...(timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape

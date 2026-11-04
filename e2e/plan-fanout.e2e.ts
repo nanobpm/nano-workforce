@@ -57,6 +57,8 @@ type Stub = (job: EngineJob) => Record<string, unknown> | void;
 describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → userTask + form)", () => {
   const savedEnv = new Map<string, string | undefined>();
   let restoreGithub: (() => void) | undefined;
+  // The shared hermetic GitHub state (issue #907 asserts NO epic-slice comment lands on the parent).
+  const githubState = admitGithubState("owner/repo", "main");
 
   before(() => {
     for (const [k, v] of Object.entries(GITHUB_ENV_OVERRIDES)) {
@@ -65,7 +67,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
     }
     // ADR 0003: `startPlanFanout` + the `pr.ensure-base-branch` head task now pass through base
     // admission, which reads/creates the base ref. Pin the hermetic `token` transport + fetch stub.
-    restoreGithub = installAdmitGithub(admitGithubState("owner/repo", "main"));
+    restoreGithub = installAdmitGithub(githubState);
   });
 
   after(() => {
@@ -449,6 +451,27 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
     assert.ok(
       flows.includes("gw-trial-answer->record-results"),
       `abandon routed to record-results (flows: ${flows.join(", ")})`,
+    );
+  });
+
+  test("an epic slice that opens a PR posts NO comment on the parent epic (issue #907)", async () => {
+    // The "PR opened" issue link is gated on `claimIssue`, which only a single-issue feature run
+    // seeds (app/feature.ts). An epic slice's `issue` is the SHARED parent epic, which must never be
+    // claimed or commented per-slice — so a slice that opens its PR leaves the epic's thread empty.
+    const before = (githubState.issueComments.get(1) ?? []).length;
+    await withApp(
+      {
+        "senior:plan": singleTaskPlan,
+        "senior:plan-review": approveReview,
+        "senior:feature": () => ({ status: "opened", pr: "owner/repo#101", summary: "opened the slice" }),
+      },
+      async () => {
+        assert.equal(
+          (githubState.issueComments.get(1) ?? []).length,
+          before,
+          "the parent epic gained NO comment from the slice's delivered PR",
+        );
+      },
     );
   });
 

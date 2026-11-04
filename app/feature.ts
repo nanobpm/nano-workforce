@@ -74,6 +74,15 @@ export interface FeatureRun {
    * outcome is written to `status` itself; this carries the sub-state / note (e.g. "merged",
    * "waiting_review", or "operator: <note>"). */
   delivery_label: string | null;
+  /** CONFIRMED "PR opened" link (issue #907, app/issuePrLink.ts): the `owner/repo#N` PR key whose
+   * comment is known to be on the claimed issue (set only after a successful POST or marker match). */
+  pr_linked_pr_key?: string | null;
+  /** The PR key the claimed issue is OWED a "PR opened" link for (set by pr.record-feature for a
+   * claimed single-issue run only). Outstanding while it differs from `pr_linked_pr_key`; the
+   * poller's `pollIssuePrLinks` pass retries it until confirmed. */
+  pr_link_want_pr_key?: string | null;
+  /** In-flight link lease (ISO time) — a CAS-claimed, EXPIRING claim before any GitHub write. */
+  pr_link_lease_at?: string | null;
   /** Timestamp an operator dismissed a TERMINAL run (§5, `acknowledge-done`); NULL until then. When
    * set on a terminal row, `list_bucket` flips from 'active' to 'history'. Projection surface. */
   acknowledged_at: string | null;
