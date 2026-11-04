@@ -30,6 +30,7 @@
 import { after, test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import { readFileSync } from "node:fs";
+import { inboxContext, prefilledKeys } from "../test/inboxContext.ts";
 import {
   assertThatInstance,
   assertThatUserTask,
@@ -923,4 +924,33 @@ test("an abandoned merge ends the whole instance via the root terminate, without
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompleted().hasCompletedElements("MergeAbandoned");
   const open = await engine.searchUserTasks({});
   assert(open.length === 0, "the root terminate must leave nothing running (no re-armed poller, no parked escalation)");
+});
+
+// ---------------------------------------------------------------------------
+// Inbox prefill (issue #915, nanobpm/nano-ide#603): Urban's Tasks inbox prefills form inputs from the
+// task's process variables, and user-task output lands in process scope. A second escalation in the
+// same merge loop must therefore open with a BLANK `answer` — never the previous round's guidance.
+// ---------------------------------------------------------------------------
+
+test("a repeat merge escalation opens with a blank answer — the previous answer is not prefilled (#915)", async () => {
+  const engine = await boot({ responses: { "pr.merge": { mergeStatus: "queued" } } });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  const escalateViaLandingTimeout = async () => {
+    await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
+    await engine.advanceTime(LANDED_WAIT_MS + 1);
+    await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  };
+  await escalateViaLandingTimeout();
+  const first = (await engine.searchUserTasks({})).find((t) => t.elementId === "wait-merge-answer");
+  assert(first?.processInstanceKey, "the first escalation is open");
+  await engine.completeUserTask(first.userTaskKey, { answer: "queued it manually, retry" });
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-mergeable");
+
+  await escalateViaLandingTimeout();
+  const open = (await engine.openUserTasks()).filter((t) => t.elementId === "wait-merge-answer");
+  const second = open[0]?.userTaskKey;
+  assert(open.length === 1 && second !== first.userTaskKey, "a second escalation task opened");
+  const ctx = await inboxContext(engine, first.processInstanceKey);
+  assertEquals(await prefilledKeys(engine, first.processInstanceKey, ["answer"]), [], "the previous answer must not prefill the repeat escalation");
+  assert(ctx.prKey === "pr-1", "the intended prKey input is still shown");
 });

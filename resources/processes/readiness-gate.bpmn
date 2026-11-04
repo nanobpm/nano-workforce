@@ -169,6 +169,11 @@
         <zeebe:formDefinition formId="readiness-escalation" />
         <zeebe:userTask />
         <zeebe:assignmentDefinition candidateGroups="operators" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=resolution" target="readinessResolution" />
+          <zeebe:output source="=null" target="resolution" />
+          <zeebe:output source="=null" target="answer" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_escalate</bpmn:incoming>
       <bpmn:outgoing>f_toResolution</bpmn:outgoing>
@@ -223,7 +228,7 @@
     <bpmn:sequenceFlow id="f_toResolution" sourceRef="readiness-escalation" targetRef="gw-resolution" />
     <bpmn:sequenceFlow id="f_ack" name="acknowledge" sourceRef="gw-resolution" targetRef="gate-escalated" />
     <bpmn:sequenceFlow id="f_abandon" name="abandon" sourceRef="gw-resolution" targetRef="gate-failed">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "abandon"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=readinessResolution = "abandon"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
   </bpmn:process>
   <bpmndi:BPMNDiagram id="BPMNDiagram_readiness-gate">

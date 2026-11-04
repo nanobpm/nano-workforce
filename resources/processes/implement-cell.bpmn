@@ -80,6 +80,8 @@
           <zeebe:input source="=question" target="question" />
           <zeebe:input source="=if (is defined(escalationAssignee)) then escalationAssignee else null" target="escalationAssignee" />
           <zeebe:input source="=escalationSlaTimeout" target="escalationSlaTimeout" />
+          <zeebe:input source="=null" target="resolution" />
+          <zeebe:input source="=null" target="answer" />
           <zeebe:output source="=resolution" target="resolution" />
           <zeebe:output source="=if (is defined(answer)) then answer else null" target="answer" />
         </zeebe:ioMapping>

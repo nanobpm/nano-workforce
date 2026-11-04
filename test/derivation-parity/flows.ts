@@ -162,6 +162,8 @@ export const retroFlow: DeclarativeFlow = defineFlow(
               { source: "=planKey", target: "planKey" },
               { source: "=if (is defined(note)) then note else null", target: "note" },
             ],
+            // #915: clear the consumed note so a repeat conformance review opens blank.
+            output: [{ source: "=null", target: "note" }],
           },
         });
       },

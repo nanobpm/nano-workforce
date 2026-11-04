@@ -10,6 +10,7 @@ import { assert, assertEquals } from "#test-assert";
 import { assertThatInstance, byProcessId, createWasmEngineClient, type WasmEngineClient } from "@nanobpm/urban-testkit";
 import { ESCALATION_TASK_ELEMENTS, HUMAN_COMPLETABLE_ELEMENTS, validateEscalationVariables } from "./agentCompletion.ts";
 import { PR_MERGE_APPROVAL_ELEMENT } from "./userTasks.ts";
+import { inboxContext, prefilledKeys } from "../test/inboxContext.ts";
 
 const MODEL = readFileSync("resources/processes/convergence-loop.bpmn", "utf8");
 
@@ -142,4 +143,22 @@ test("merge-approval is human-only, and its form requires guidance only for requ
   assert(check({ mergeDecision: "revise" }) !== null, "request changes needs guidance");
   assert(check({ mergeDecision: "revise", answer: "  " }) !== null, "blank guidance is rejected");
   assert(check({ mergeDecision: "merge" }) !== null, "only approve/revise are accepted");
+});
+
+test("a re-asked merge approval opens blank — the previous decision and guidance are not prefilled (#915)", async () => {
+  // Urban's inbox prefills form inputs from process variables (nanobpm/nano-ide#603); a stale
+  // `mergeDecision` could otherwise open the re-asked approval on the previous choice.
+  const { engine, processInstanceKey } = await boot({ humanApproval: true });
+  const first = await openApproval(engine);
+  assert(first !== undefined, "the approval task is open");
+  await engine.completeUserTask(first, { mergeDecision: "revise", answer: "Rename foo to bar." });
+  const second = await openApproval(engine);
+  assert(second !== undefined && second !== first, "approval is asked again after the revision");
+  const pik = String(processInstanceKey);
+  assertEquals(await prefilledKeys(engine, pik, ["mergeDecision", "answer"]), [], "no stale form output prefilled");
+  assertEquals((await inboxContext(engine, pik)).prKey, "o/r#1", "the intended prKey input is still shown");
+  // The cleared decision still routes correctly: approving the re-asked task finalizes.
+  await engine.completeUserTask(second, { mergeDecision: "approve" });
+  loop(engine).hasCompleted().hasNoIncident();
+  assertEquals(completions(engine, "persist-converged"), 1);
 });

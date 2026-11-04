@@ -296,6 +296,21 @@ enabled): the converged PR waits in the Tasks inbox as "PR merge approval". Appr
 to merge, or request changes with guidance. The agent then updates the same PR,
 convergence re-runs, and approval is asked again.
 
+> **Tasks inbox prefill (operators).** Since `@nanobpm/urban` 0.98 (nanobpm/nano-ide#603) the
+> Tasks inbox and the pages form drawer load the task's **process variables**, render `{{var}}`
+> text and form `image` components, and **prefill form inputs** from those variables, as Camunda
+> Tasklist does. What you'll see:
+> - Readonly context inputs are filled in: the `question` and `prKey` on escalations, and the
+>   "Now do this" `prompt` on a standalone `delivery-human` step (the ack/publish forms previously
+>   showed it empty).
+> - Decision and answer inputs (`answer`, `mergeDecision`, `directive`, `notes`, `resolution`,
+>   `action`, `note`) still open **blank**, including on a repeat escalation or a re-asked approval
+>   in the same run. Each model clears these after it uses them (issue #915), so a quick submit
+>   can't re-send the previous round's guidance or a previous `approve`.
+> - Known gap: on a compiled delivery-graph human node, the `prompt` is local to the node's
+>   subprocess, not a process variable. The inbox only prefills process variables, so that prompt
+>   still renders empty there.
+
 ### Fleet mode: hand it an issue (plan → implement → converge)
 
 ```
