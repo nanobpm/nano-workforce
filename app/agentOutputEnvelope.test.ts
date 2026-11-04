@@ -319,6 +319,56 @@ test("a scope-classify agent echoing humanApproval/convergeOnly cannot alter the
   assertEquals(await variableValue(engine, processInstanceKey, "convergeOnly"), true, "convergeOnly flag must be unchanged");
 });
 
+// Issue #916: `autoMerge` is the canonical positive merge intent and is engine-owned like
+// `convergeOnly` — an agent echo in EITHER direction must not flip it.
+for (const seeded of [true, false]) {
+  test(`a review-round agent echoing autoMerge:${!seeded} cannot overwrite seeded autoMerge:${seeded}`, async () => {
+    const { engine } = await boot({
+      vars: { autoMerge: seeded },
+      responses: { "senior:pr-review": { status: "addressed", summary: "fixed", autoMerge: !seeded } },
+    });
+    const incidents = await engine.searchIncidents();
+    assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+    assertEquals(instanceVars(engine).autoMerge, seeded, "seeded autoMerge must survive the agent echo");
+  });
+
+  test(`an adversarial-review agent echoing autoMerge:${!seeded} cannot overwrite seeded autoMerge:${seeded}`, async () => {
+    const { engine } = await boot({
+      vars: { advMax: 1, autoMerge: seeded },
+      responses: {
+        "senior:adversarial-review": { adversarialFindings: "", adversarialSummary: "clean", autoMerge: !seeded },
+      },
+    });
+    const incidents = await engine.searchIncidents();
+    assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+    assertEquals(instanceVars(engine).autoMerge, seeded, "seeded autoMerge must survive the agent echo");
+  });
+
+  test(`a scope-classify agent echoing autoMerge:${!seeded} cannot overwrite seeded autoMerge:${seeded}`, async () => {
+    const { engine, processInstanceKey } = await boot({
+      vars: { humanApproval: true, autoMerge: seeded },
+      responses: {
+        "senior:pr-review": { status: "converged", summary: "done" },
+        "senior:scope-classify": { scopeBlocked: false, scopeBlockReason: "", autoMerge: !seeded },
+      },
+    });
+    const incidents = await engine.searchIncidents();
+    assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+    assertEquals(await variableValue(engine, processInstanceKey, "autoMerge"), seeded, "autoMerge must be unchanged");
+  });
+}
+
+test("an agent echoing autoMerge on a legacy (autoMerge-absent) run cannot inject a merge intent", async () => {
+  const { engine } = await boot({
+    vars: { convergeOnly: true },
+    responses: { "senior:pr-review": { status: "addressed", summary: "fixed", autoMerge: true } },
+  });
+  const incidents = await engine.searchIncidents();
+  assertEquals(incidents.length, 0, `no incident; got: ${JSON.stringify(incidents)}`);
+  const v = instanceVars(engine).autoMerge;
+  assertEquals(v == null, true, `legacy run must keep autoMerge absent so the convergeOnly fallback applies; got ${v}`);
+});
+
 // ---------------------------------------------------------------------------
 // Issue #887 (round 4 — Copilot "previously missed"): `reviewStale` and
 // `roundEntryHead` are ALSO process-owned and readable by downstream decisions,
