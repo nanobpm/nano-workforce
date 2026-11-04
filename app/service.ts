@@ -627,9 +627,10 @@ export async function submitPr(
   rootRequestKey: string | null = null,
   humanApproval = false,
   autoResolveEscalations = false,
+  autoMerge?: boolean,
 ) {
   return withPrSubmitLock(parsed.prKey, () =>
-    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations),
+    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge),
   );
 }
 
@@ -643,11 +644,20 @@ async function submitPrCritical(
   rootRequestKey: string | null = null,
   humanApproval = false,
   autoResolveEscalations = false,
+  autoMerge?: boolean,
 ) {
+  // Merge intent (issue #916): `autoMerge` is the CANONICAL positive form end to end — the same name
+  // the feature/convergence-loop/plan-fanout doors accept. The legacy inverted `convergeOnly`
+  // positional remains as a fallback: an explicit `autoMerge` wins; otherwise intent derives from
+  // `convergeOnly`. The instance carries BOTH (below): `autoMerge` so the intent is searchable under
+  // its positive name, and the `convergeOnly` mirror so in-flight consumers (and the guard-restore
+  // ioMappings on the loop's agent tasks) keep working unchanged.
+  const mergeIntent = autoMerge ?? !convergeOnly;
+  const effectiveConvergeOnly = !mergeIntent;
   // Human approval before merge (issue #826) gates only a PR that `pr.finalize` would hand to the
-  // merge-loop — its own predicate, `AUTO_MERGE && convergeOnly !== true`. A run that won't merge
+  // merge-loop — its own predicate, `AUTO_MERGE && merge intent on`. A run that won't merge
   // (review-only, or the global switch off) must not park for a pointless approval.
-  const gated = humanApproval && !convergeOnly && AUTO_MERGE;
+  const gated = humanApproval && mergeIntent && AUTO_MERGE;
   const table = prs(data);
   const existing = await table.get(parsed.prKey);
   // ADR-0065: classify "already running" on the DERIVED terminal edge, not the base transient. A
@@ -818,10 +828,14 @@ async function submitPrCritical(
       // descendant (and any message it correlates) is stitched back to the originating request.
       // A human/webhook PR that is its own root carries its own `pr_key` (never NULL — see above).
       rootRequestKey: effectiveRoot,
-      // Per-request review-only override: carried on the instance so `pr.finalize` can stop at
-      // `converged` for this PR without handing off to the merge-loop, independent of the global
-      // NANO_PR_AUTO_MERGE default. Only ever narrows (never forces merge on when auto-merge is off).
-      convergeOnly,
+      // Per-request merge intent (issue #916): `autoMerge` is the CANONICAL positive variable — the
+      // same name the doors accept — so a live loop's merge intent is searchable under `autoMerge`.
+      // `convergeOnly` is its inverse mirror, kept for in-flight compat: `pr.finalize` reads
+      // `autoMerge` first and falls back to `convergeOnly` when it is absent (a loop seeded before
+      // this variable existed). Merge intent only ever narrows (never forces merge on when the
+      // global NANO_PR_AUTO_MERGE switch is off).
+      autoMerge: mergeIntent,
+      convergeOnly: effectiveConvergeOnly,
       // Human approval before merge (issue #826): a converged PR parks at the `merge-approval` user
       // task before `pr.finalize` hands it to the merge-loop. Pinned off when the PR won't merge.
       humanApproval: gated,
@@ -1024,6 +1038,21 @@ export async function startMerge(
   return { prKey: pr.prKey, mergeProcessKey: processInstanceKey };
 }
 
+/** The effective merge policy for a PR run, surfaced on every `/status` row (issue #916). */
+export interface MergePolicy {
+  /** The run's merge intent: the canonical positive `autoMerge` process variable when present,
+   * else the inverse of the legacy `convergeOnly` variable (in-flight compat), else the historical
+   * default `true` when the instance key is unreadable or carries neither. */
+  requested: boolean;
+  /** The deployment's global `NANO_PR_AUTO_MERGE` switch. */
+  enabled: boolean;
+  /** `requested && enabled && !humanApproval` — the run merges with no further gate. */
+  effective: boolean;
+  /** WHY a requested merge will not proceed: the global env switch is off, or a human merge
+   * approval is pending. Null when the merge is effective or none was requested. */
+  blockedBy: "env" | "human-approval" | null;
+}
+
 /** A PR currently in flight, as reported by the status endpoint. */
 export interface ActivePr {
   prKey: string;
@@ -1045,6 +1074,9 @@ export interface ActivePr {
   /** Whether this PR opted in to the escalation steward (issue #889) — its open escalations are
    * eligible for steward auto-resolution. Shown in `/status` per PR. */
   autoResolveEscalations: boolean;
+  /** The effective merge policy (issue #916): what the run intends (`requested`), what the
+   * deployment allows (`enabled`), and what will actually happen (`effective`/`blockedBy`). */
+  merge: MergePolicy;
 }
 
 /** Every tracked PR not in a terminal state (converged/abandoned), newest-updated first. Backs
@@ -1058,7 +1090,10 @@ export interface ActivePr {
  * Both loops park on a native user task answered through the one canonical `completeUserTask` door
  * (#256), so deriving from the read model surfaces BOTH loops' escalations uniformly. Once the task is
  * completed its row is removed, so `openEscalation` derives back to null. */
-export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
+export async function activePrs(
+  data: DataLayer,
+  engine?: Pick<EngineClient, "searchVariables">,
+): Promise<ActivePr[]> {
   const all = await prsTracking(data).all();
   const active = all
     // ADR-0065: classify "in flight" on the DERIVED terminal edge, not the base transient. A PR whose
@@ -1086,6 +1121,16 @@ export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
     if (openEscByPr.has(t.subject_key)) continue;
     openEscByPr.set(t.subject_key, toOpenEscalation(t));
   }
+  // Merge intent (issue #916): read the loop's `autoMerge` / `convergeOnly` / `humanApproval`
+  // variables per PR so the effective merge policy is visible without opening the engine. One
+  // best-effort read per PR; a failure (engine unreachable, instance gone) degrades to the
+  // historical default (merge requested) rather than failing the whole status read.
+  const mergeByPr = new Map<string, MergePolicy>();
+  await Promise.all(
+    active.map(async (p) => {
+      mergeByPr.set(p.pr_key, await mergePolicyFor(p.process_key ?? null, engine));
+    }),
+  );
   return active.map((p) => ({
     prKey: p.pr_key,
     repo: p.repo,
@@ -1101,7 +1146,61 @@ export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
     activeWorker: p.active_worker ?? null,
     leaseUntil: p.lease_until ?? null,
     autoResolveEscalations: p.auto_resolve_escalations === 1,
+    merge: mergeByPr.get(p.pr_key) ?? mergePolicyDefault(),
   }));
+}
+
+/** The default merge policy when no instance variables are readable (mid-handoff row, engine
+ * unreachable, or a legacy loop carrying neither variable): the pre-#916 behaviour merged by
+ * default, so the projection must NOT read such a PR as review-only. */
+function mergePolicyDefault(): MergePolicy {
+  return mergePolicyFrom(true, false);
+}
+
+/** Combine a merge intent + human-approval gate with the global switch into the effective policy. */
+function mergePolicyFrom(requested: boolean, humanApproval: boolean): MergePolicy {
+  const enabled = AUTO_MERGE;
+  const effective = requested && enabled && !humanApproval;
+  const blockedBy = !requested ? null : !enabled ? "env" : humanApproval ? "human-approval" : null;
+  return { requested, enabled, effective, blockedBy };
+}
+
+/** Read one boolean process variable off a live instance; undefined when absent/unreadable. */
+async function readBoolVar(
+  engine: Pick<EngineClient, "searchVariables">,
+  processKey: string,
+  name: string,
+): Promise<boolean | undefined> {
+  const [row] = await engine.searchVariables({ processInstanceKey: processKey, name });
+  if (!row) return undefined;
+  try {
+    const v: unknown = JSON.parse(row.value);
+    return typeof v === "boolean" ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Derive a PR's effective merge policy from its loop's process variables (issue #916). The
+ * canonical positive `autoMerge` wins; the legacy inverted `convergeOnly` is the fallback for
+ * in-flight loops seeded before `autoMerge` existed. Best-effort: any read failure degrades to the
+ * historical default (merge requested) rather than failing the status read. */
+async function mergePolicyFor(
+  processKey: string | null,
+  engine: Pick<EngineClient, "searchVariables"> | undefined,
+): Promise<MergePolicy> {
+  if (processKey == null || !engine) return mergePolicyDefault();
+  try {
+    const [autoMerge, convergeOnly, humanApproval] = await Promise.all([
+      readBoolVar(engine, processKey, "autoMerge"),
+      readBoolVar(engine, processKey, "convergeOnly"),
+      readBoolVar(engine, processKey, "humanApproval"),
+    ]);
+    const requested = autoMerge ?? (convergeOnly === undefined ? true : !convergeOnly);
+    return mergePolicyFrom(requested, humanApproval === true);
+  } catch {
+    return mergePolicyDefault();
+  }
 }
 
 /** A delivery-graph run currently in flight, as reported by the status endpoint (issue #889 §1 —
@@ -2784,13 +2883,16 @@ export async function pollFeatureDelivery(
             parsed,
             [],
             MAX_ROUNDS,
-            run.auto_merge !== 1,
+            false,
             run.feature_key,
             run.human_approval === 1,
             // Thread the run's escalation-steward opt-in (issue #889 review) so a re-enrolled PR
             // inherits the feature run's enrolment — and a partial-enrollment repair never overwrites
             // the PR row's previously persisted opt-in with the `false` default.
             run.auto_resolve_escalations === 1,
+            // Merge intent (issue #916): the canonical positive `autoMerge`, derived from the run's
+            // durable `auto_merge` flag (mirrors `converge-feature`).
+            run.auto_merge === 1,
           );
         }
       }

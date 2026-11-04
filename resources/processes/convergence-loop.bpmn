@@ -103,6 +103,7 @@
           <nano:extend name="prUrl" type="string" />
           <nano:extend name="round" type="integer" />
           <nano:extend name="summary" type="string" optional="true" />
+          <nano:extend name="autoMerge" type="boolean" optional="true" />
           <nano:extend name="convergeOnly" type="boolean" optional="true" />
           <nano:extend name="abandonUrl" type="string" optional="true" />
         </nano:shape>

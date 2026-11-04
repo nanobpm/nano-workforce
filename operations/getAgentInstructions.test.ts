@@ -41,7 +41,22 @@ test("the guide covers every capability the endpoint promises", async () => {
   // Submit a PR (converge vs. merge), submit an epic, answer escalations…
   assert(md.includes("start/convergence-loop"), "covers submitting a PR for convergence");
   assert(md.includes("autoMerge"), "documents the per-request merge control");
-  assert(!md.includes("convergeOnly"), "does not expose the legacy merge control in agent guidance");
+  // Issue #916: the guide must document where to READ merge intent (the `/status` merge block) and
+  // that writing variables onto a running loop is not the way to change it. The legacy inverted
+  // `convergeOnly` name appears ONLY inside that sanctioned fallback explanation (a pre-`autoMerge`
+  // loop exposes its intent solely as `convergeOnly`) — never as a control the agent can set.
+  assert(md.includes('"merge": { "requested"'), "documents the /status merge block");
+  assert(md.includes("blockedBy"), "documents the env / human-approval distinction");
+  assert(
+    md.includes("no supported way to flip merge"),
+    "warns that writing variables onto a running loop is a no-op",
+  );
+  const legacyMentions = md.split("\n").filter((l) => l.includes("convergeOnly"));
+  assert(legacyMentions.length <= 1, `legacy convergeOnly appears only in the #916 fallback note; got: ${legacyMentions.join(" | ")}`);
+  assert(
+    legacyMentions.length === 1 && legacyMentions[0].includes("invert"),
+    "the one convergeOnly mention is the read-side fallback note (read it and invert it)",
+  );
   assert(md.includes("start/plan-fanout"), "covers submitting an epic");
   assert(md.includes("complete-user-task"), "covers answering escalations via the native user-task door");
   // …debug the system.

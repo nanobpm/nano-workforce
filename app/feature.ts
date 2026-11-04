@@ -524,9 +524,9 @@ export async function startFeature(
           `(\`gh issue view ${parsed.number} -R ${parsed.repo}\`), implement it completely, ` +
           `and open exactly one pull request that closes it.`,
       },
-      // Follow-on knobs, read by the record/converge workers. `autoMerge` maps to submitPr's
-      // `convergeOnly` (inverted): converge-only stops at `converged`; auto-merge drives the
-      // merge-loop. `converge=false` ⇒ merge is moot.
+      // Follow-on knobs, read by the record/converge workers. `autoMerge` is the canonical
+      // positive merge intent (issue #916), threaded to `submitPr` as-is: converge-only stops at
+      // `converged`; auto-merge drives the merge-loop. `converge=false` ⇒ merge is moot.
       converge,
       autoMerge,
       // Park the converged PR at a human approval user task before the merge-loop (issue #826).

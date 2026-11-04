@@ -92,6 +92,7 @@ components:
         - activeWorker
         - leaseUntil
         - autoResolveEscalations
+        - merge
       properties:
         prKey:
           type: string
@@ -155,6 +156,39 @@ components:
             Whether this PR's run opted into automatic escalation resolution by the escalation
             steward (issue #889). Derived from the subject row's durable `auto_resolve_escalations`
             flag, never a clobbered process variable.
+        merge:
+          type: object
+          additionalProperties: false
+          description: >-
+            The effective merge policy for this PR's run (issue #916). `requested` is the run's merge
+            intent — the canonical positive `autoMerge` process variable on its convergence loop
+            (falling back to the inverse of the legacy `convergeOnly` variable for a loop seeded
+            before `autoMerge` existed, and to the historical default `true` when the instance is
+            unreadable). `enabled` is the deployment's global `NANO_PR_AUTO_MERGE` switch.
+            `effective` is `requested && enabled && !humanApproval` — the run merges with no further
+            gate. `blockedBy` names WHY a requested merge will not proceed: `env` (the global switch
+            is off) or `human-approval` (parked at the merge-approval task); null when the merge is
+            effective or none was requested (converge-only).
+          required:
+            - requested
+            - enabled
+            - effective
+            - blockedBy
+          properties:
+            requested:
+              type: boolean
+              description: The run's merge intent (the loop's `autoMerge` variable, or the inverse of its legacy `convergeOnly`).
+            enabled:
+              type: boolean
+              description: The deployment's global NANO_PR_AUTO_MERGE switch.
+            effective:
+              type: boolean
+              description: requested && enabled && !humanApproval — the run merges with no further gate.
+            blockedBy:
+              type: string
+              nullable: true
+              enum: ["env", "human-approval", null]
+              description: Why a requested merge will not proceed; null when effective or converge-only.
     ActivePrList:
       type: object
       required:

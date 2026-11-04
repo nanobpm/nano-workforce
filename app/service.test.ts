@@ -1005,6 +1005,31 @@ test("submitPr defaults convergeOnly to false so the global auto-merge default g
   });
 });
 
+// Issue #916: the loop must ALSO carry the POSITIVE `autoMerge` variable — an operator searching a
+// live convergence loop's variables for `autoMerge` previously found nothing (only the inverted
+// `convergeOnly`), and concluded auto-merge had been dropped. `submitPr` seeds both, keeping them
+// consistent: `autoMerge` is canonical, `convergeOnly` its inverse mirror for in-flight compat.
+test("submitPr seeds the positive autoMerge variable alongside the convergeOnly mirror (issue #916)", async () => {
+  await withGithubOff(async () => {
+    const pr = (n: number) => ({ repo: "owner/repo", number: n, url: `https://github.com/owner/repo/pull/${n}`, prKey: `owner/repo#${n}` });
+    // Legacy positional form: convergeOnly=true ⇒ autoMerge=false (both seeded, consistent).
+    const legacy = captureVars();
+    await submitPr(legacy.data, legacy.engine, pr(30), [], 20, true);
+    assertEquals(legacy.get()?.autoMerge, false);
+    assertEquals(legacy.get()?.convergeOnly, true);
+    // Default (no override): merge intent on — the global default governs.
+    const dflt = captureVars();
+    await submitPr(dflt.data, dflt.engine, pr(31));
+    assertEquals(dflt.get()?.autoMerge, true);
+    assertEquals(dflt.get()?.convergeOnly, false);
+    // The positive trailing form wins over the legacy alias when both are supplied.
+    const both = captureVars();
+    await submitPr(both.data, both.engine, pr(32), [], 20, true, null, false, false, true);
+    assertEquals(both.get()?.autoMerge, true);
+    assertEquals(both.get()?.convergeOnly, false);
+  });
+});
+
 // #796 auto-ack budget seeding: `submitPr` is the ONLY production write that makes the retry budget
 // available to a fresh convergence instance — the engine behaviour tests seed `ackRetryRound` /
 // `ackRetryMax` directly and never exercise `submitPr`, so a regression dropping or misconfiguring

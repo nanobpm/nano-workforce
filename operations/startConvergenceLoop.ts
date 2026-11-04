@@ -32,19 +32,25 @@ export default defineOperation("startConvergenceLoop", async ({ body }, app) => 
   const dependsOn = body.dependsOn ?? [];
   const maxRounds = clampRounds(body.maxRounds, MAX_ROUNDS);
   // Prefer the positive autoMerge form so an unchecked UI box is explicitly review-only. Legacy
-  // callers that omit autoMerge retain the existing convergeOnly/global-default behavior.
+  // callers that omit autoMerge retain the existing convergeOnly/global-default behavior. A
+  // PRESENT-but-non-boolean `autoMerge` (e.g. the string "true") is a 400 (issue #916): it used to
+  // read as silently false (`=== true`), so a mistyped merge request ran review-only with no signal.
+  if ("autoMerge" in body && typeof body.autoMerge !== "boolean") {
+    app.log.warn("start-convergence rejected: autoMerge must be a boolean", { autoMerge: body.autoMerge });
+    return { status: 400, body: { error: "autoMerge must be a boolean (true or false)" } };
+  }
   const hasAutoMerge = typeof body.autoMerge === "boolean";
-  const convergeOnly = hasAutoMerge ? body.autoMerge !== true : body.convergeOnly === true;
+  const autoMerge = hasAutoMerge ? body.autoMerge : body.convergeOnly === true ? false : undefined;
   // Opt-in escalation steward (issue #889): only when explicitly requested do this loop's
   // escalations become eligible for steward auto-resolution. Default off.
   const autoResolveEscalations = "autoResolveEscalations" in body && body.autoResolveEscalations === true;
-  const result = await submitPr(app.data, app.engine, parsed, dependsOn, maxRounds, convergeOnly, null, false, autoResolveEscalations);
+  const result = await submitPr(app.data, app.engine, parsed, dependsOn, maxRounds, false, null, false, autoResolveEscalations, autoMerge);
   app.log.info("convergence loop started", {
     prKey: parsed.prKey,
     alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
     dependsOn: dependsOn.length,
     maxRounds,
-    convergeOnly,
+    autoMerge: autoMerge ?? body.convergeOnly !== true,
     autoResolveEscalations,
   });
   return { status: 202, body: result };

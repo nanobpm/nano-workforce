@@ -103,3 +103,38 @@ test("finalize with convergeOnly absent hands off to the merge-loop when auto-me
     assertEquals(pr.status, "waiting_deps");
   });
 });
+
+// Issue #916: `autoMerge` is the CANONICAL positive merge-intent variable on the convergence loop.
+// `pr.finalize` reads it first and falls back to the legacy inverted `convergeOnly` only when
+// `autoMerge` is absent — so an in-flight loop seeded before `autoMerge` existed keeps its behaviour.
+test("finalize with autoMerge=false rests at converged even when the legacy convergeOnly mirror is absent", async () => {
+  await withRetroOff(async () => {
+    const { app, stores, createdProcesses } = fakeApp();
+    // biome-ignore lint/plugin: constructing the framework's job envelope for the handler under test
+    await handler({ variables: { ...BASE_VARS, autoMerge: false } } as never, app as never);
+    assertEquals(createdProcesses.includes(MERGE_PROCESS_ID), false);
+    assertEquals(stores.pull_requests[0].status, "converged");
+  });
+});
+
+test("finalize with autoMerge=true hands off to the merge-loop (canonical positive variable)", async () => {
+  await withRetroOff(async () => {
+    const { app, stores, createdProcesses } = fakeApp();
+    // biome-ignore lint/plugin: constructing the framework's job envelope for the handler under test
+    await handler({ variables: { ...BASE_VARS, autoMerge: true } } as never, app as never);
+    assertEquals(createdProcesses.includes(MERGE_PROCESS_ID), true);
+    assertEquals(stores.pull_requests[0].status, "waiting_deps");
+  });
+});
+
+test("finalize prefers autoMerge over the legacy convergeOnly mirror when they disagree", async () => {
+  await withRetroOff(async () => {
+    const { app, stores, createdProcesses } = fakeApp();
+    // A contradictory pair (autoMerge=true, convergeOnly=true) can only arise from a hand-seeded or
+    // half-migrated instance: the positive canonical variable wins.
+    // biome-ignore lint/plugin: constructing the framework's job envelope for the handler under test
+    await handler({ variables: { ...BASE_VARS, autoMerge: true, convergeOnly: true } } as never, app as never);
+    assertEquals(createdProcesses.includes(MERGE_PROCESS_ID), true);
+    assertEquals(stores.pull_requests[0].status, "waiting_deps");
+  });
+});

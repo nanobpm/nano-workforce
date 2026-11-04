@@ -190,10 +190,20 @@ test("startConvergenceLoop defaults convergeOnly to false and does not truthy-co
     const stringy = captureApp();
     await startConvergenceLoop(input({ pr: "owner/repo#12", convergeOnly: "true" }), stringy.app);
     assertEquals(stringy.get(), false);
+  });
+});
 
-    const stringyAutoMerge = captureApp();
-    await startConvergenceLoop(input({ pr: "owner/repo#15", autoMerge: "true" }), stringyAutoMerge.app);
-    assertEquals(stringyAutoMerge.get(), false);
+// Issue #916: `autoMerge: "true"` (a STRING) was silently FALSE at the door — the delegate read
+// `body.autoMerge === true`, so a mistyped merge request ran review-only with no signal. The door
+// now REJECTS a present-but-non-boolean `autoMerge` with a 400 at every start door.
+test("startConvergenceLoop → 400 on a non-boolean autoMerge (issue #916)", async () => {
+  await withGithubOff(async () => {
+    const { app: capApp, get } = captureApp();
+    const res = await startConvergenceLoop(input({ pr: "owner/repo#15", autoMerge: "true" }), capApp);
+    const r = res as any;
+    assertEquals(r.status, 400);
+    assertEquals(typeof r.body.error, "string");
+    assertEquals(get(), undefined, "a rejected door never reaches the engine");
   });
 });
 
