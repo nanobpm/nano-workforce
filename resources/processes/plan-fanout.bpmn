@@ -208,6 +208,11 @@
           <zeebe:formDefinition formId="readiness-escalation" />
           <zeebe:userTask />
           <zeebe:assignmentDefinition candidateGroups="operators" />
+          <zeebe:ioMapping>
+            <zeebe:output source="=resolution" target="readinessResolution" />
+            <zeebe:output source="=null" target="resolution" />
+            <zeebe:output source="=null" target="answer" />
+          </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>pf_escalate</bpmn:incoming>
         <bpmn:outgoing>pf_toResolution</bpmn:outgoing>
@@ -240,7 +245,7 @@
       <bpmn:sequenceFlow id="pf_toResolution" sourceRef="readiness-escalation-pf" targetRef="pf_gw_res" />
       <bpmn:sequenceFlow id="pf_proceed" name="acknowledge" sourceRef="pf_gw_res" targetRef="pf_end" />
       <bpmn:sequenceFlow id="pf_abandon" name="abandon" sourceRef="pf_gw_res" targetRef="pf_end">
-        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "abandon"</bpmn:conditionExpression>
+        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=readinessResolution = "abandon"</bpmn:conditionExpression>
       </bpmn:sequenceFlow>
       <bpmn:sequenceFlow id="pf_sla" name="SLA auto-abandon" sourceRef="be_pf_sla" targetRef="pf_end" />
     </bpmn:subProcess>
@@ -298,6 +303,9 @@
         <zeebe:assignmentDefinition candidateGroups="operators" assignee="=escalationAssignee" />
         <zeebe:ioMapping>
           <zeebe:output source="=(if planFindings = null then &#34;&#34; else planFindings) + (if (notes = null or notes = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Human guidance:&#10;&#34; + notes)" target="planFindings" />
+          <zeebe:output source="=directive" target="planDirective" />
+          <zeebe:output source="=null" target="directive" />
+          <zeebe:output source="=null" target="notes" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_plan_empty</bpmn:incoming>
@@ -346,6 +354,9 @@
         <zeebe:ioMapping>
           <zeebe:output source="=(if planReviewEpoch = null then 0 else planReviewEpoch) + 1" target="planReviewEpoch" />
           <zeebe:output source="=(if planFindings = null then &#34;&#34; else planFindings) + (if (notes = null or notes = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Human guidance:&#10;&#34; + notes)" target="planFindings" />
+          <zeebe:output source="=directive" target="planDirective" />
+          <zeebe:output source="=null" target="directive" />
+          <zeebe:output source="=null" target="notes" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_plan_escalate</bpmn:incoming>
@@ -485,6 +496,10 @@
           <zeebe:formDefinition formId="feature-escalation" />
           <zeebe:userTask />
           <zeebe:assignmentDefinition candidateGroups="operators" assignee="=escalationAssignee" />
+          <zeebe:ioMapping>
+            <zeebe:output source="=resolution" target="taskResolution" />
+            <zeebe:output source="=null" target="resolution" />
+          </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>w_capsTimeout</bpmn:incoming>
         <bpmn:outgoing>w_toAnswerGw</bpmn:outgoing>
@@ -518,7 +533,7 @@
       <bpmn:sequenceFlow id="w_toEnd" sourceRef="implement-cell-call" targetRef="w_end" />
       <bpmn:sequenceFlow id="w_toAnswerGw" sourceRef="feature-escalation" targetRef="w_gw_answer" />
       <bpmn:sequenceFlow id="w_answerLoop" name="answer" sourceRef="w_gw_answer" targetRef="record-task-implementing">
-        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "answer"</bpmn:conditionExpression>
+        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=taskResolution = "answer"</bpmn:conditionExpression>
       </bpmn:sequenceFlow>
       <bpmn:sequenceFlow id="w_resetDone" sourceRef="record-task-implementing" targetRef="implement-cell-call" />
       <bpmn:sequenceFlow id="w_abandon" name="abandon" sourceRef="w_gw_answer" targetRef="w_end" />
@@ -582,6 +597,11 @@
         <zeebe:formDefinition formId="trial-merge-decision" />
         <zeebe:userTask />
         <zeebe:assignmentDefinition candidateGroups="operators" assignee="=escalationAssignee" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=action" target="trialAction" />
+          <zeebe:output source="=null" target="action" />
+          <zeebe:output source="=null" target="notes" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_trialEscalate</bpmn:incoming>
       <bpmn:outgoing>f_toGwTrialAnswer</bpmn:outgoing>
@@ -648,7 +668,7 @@
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_toGwEmptyAnswer" sourceRef="empty-plan-escalation" targetRef="gw-empty-plan-answer" />
     <bpmn:sequenceFlow id="f_empty_accept" name="accept (no-op)" sourceRef="gw-empty-plan-answer" targetRef="EndTasklessDone">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=directive = "accept"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=planDirective = "accept"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_empty_revise" name="revise" sourceRef="gw-empty-plan-answer" targetRef="plan" />
     <bpmn:sequenceFlow id="f_toReviewPlan" name="has tasks" sourceRef="gw-plan-empty" targetRef="review-plan" />
@@ -664,7 +684,7 @@
     <bpmn:sequenceFlow id="f_plan_sla" name="SLA auto-revise" sourceRef="be_plan_sla" targetRef="plan" />
     <bpmn:sequenceFlow id="f_toGwPlanAnswer" sourceRef="plan-review-decision" targetRef="gw-plan-answer" />
     <bpmn:sequenceFlow id="f_plan_answer_proceed" name="proceed" sourceRef="gw-plan-answer" targetRef="select-wave">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=directive = "proceed"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=planDirective = "proceed"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_plan_answer_revise" name="revise" sourceRef="gw-plan-answer" targetRef="plan" />
     <bpmn:sequenceFlow id="f_toImplement" sourceRef="select-wave" targetRef="implement" />
@@ -683,10 +703,10 @@
     <bpmn:sequenceFlow id="f_toGwTrialAnswer" sourceRef="trial-merge-decision" targetRef="resolve-trial-attention" />
     <bpmn:sequenceFlow id="f_resolveToTrialAnswer" sourceRef="resolve-trial-attention" targetRef="gw-trial-answer" />
     <bpmn:sequenceFlow id="f_trialAnswerProceed" name="proceed" sourceRef="gw-trial-answer" targetRef="gw-more">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=action = "proceed"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=trialAction = "proceed"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_trialAnswerAbandon" name="abandon" sourceRef="gw-trial-answer" targetRef="record-results">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=action = "abandon"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=trialAction = "abandon"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_trialAnswerRerun" name="rebase" sourceRef="gw-trial-answer" targetRef="trial-merge" />
     <bpmn:sequenceFlow id="f_trial_sla" name="SLA auto-rerun" sourceRef="be_trial_sla" targetRef="trial-merge" />

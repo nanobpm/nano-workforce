@@ -480,6 +480,8 @@
           <zeebe:input source="=prKey" target="prKey" />
           <zeebe:output source="=0" target="huskRetries" />
           <zeebe:output source="=if mergeDecision = &#34;approve&#34; then false else humanApproval" target="humanApproval" />
+          <zeebe:output source="=mergeDecision = &#34;approve&#34;" target="mergeApproved" />
+          <zeebe:output source="=null" target="mergeDecision" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_needApproval</bpmn:incoming>
@@ -654,7 +656,7 @@
     <bpmn:sequenceFlow id="f_noApproval" name="no approval / default" sourceRef="gw-approval" targetRef="persist-converged" />
     <bpmn:sequenceFlow id="f_toApproved" sourceRef="merge-approval" targetRef="gw-approved" />
     <bpmn:sequenceFlow id="f_approve" name="approved" sourceRef="gw-approved" targetRef="persist-converged">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=mergeDecision = "approve"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=mergeApproved = true</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_revise" name="changes requested / default" sourceRef="gw-approved" targetRef="capture-head" />
     <bpmn:sequenceFlow id="f_scopeEscGate" sourceRef="persist-escalation-scope" targetRef="gw-escalated" />

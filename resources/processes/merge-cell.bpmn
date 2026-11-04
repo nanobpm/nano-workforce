@@ -70,6 +70,11 @@
         <zeebe:formDefinition formId="trial-merge-decision" />
         <zeebe:userTask />
         <zeebe:assignmentDefinition candidateGroups="operators" assignee="=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != &#34;&#34;) then escalationAssignee else null" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=action" target="trialAction" />
+          <zeebe:output source="=null" target="action" />
+          <zeebe:output source="=null" target="notes" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>mc_escalate</bpmn:incoming>
       <bpmn:outgoing>mc_toResolve</bpmn:outgoing>
@@ -114,10 +119,10 @@
     <bpmn:sequenceFlow id="mc_toResolve" sourceRef="trial-merge-decision" targetRef="resolve-trial-attention" />
     <bpmn:sequenceFlow id="mc_toAnswerGw" sourceRef="resolve-trial-attention" targetRef="gw-trial-answer" />
     <bpmn:sequenceFlow id="mc_answerProceed" name="proceed" sourceRef="gw-trial-answer" targetRef="merge-passed">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=action = "proceed"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=trialAction = "proceed"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="mc_answerAbandon" name="abandon" sourceRef="gw-trial-answer" targetRef="merge-abandoned">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=action = "abandon"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=trialAction = "abandon"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="mc_rerun" name="rebase" sourceRef="gw-trial-answer" targetRef="trial-merge" />
     <bpmn:sequenceFlow id="mc_sla" name="SLA auto-rerun" sourceRef="be_trial_sla" targetRef="trial-merge" />

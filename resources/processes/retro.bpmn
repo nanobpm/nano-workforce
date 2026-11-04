@@ -129,6 +129,7 @@
         <zeebe:ioMapping>
           <zeebe:input source="=planKey" target="planKey" />
           <zeebe:input source="=if (is defined(note)) then note else null" target="note" />
+          <zeebe:output source="=null" target="note" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toConformanceAck</bpmn:incoming>

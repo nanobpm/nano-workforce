@@ -332,6 +332,7 @@
           <zeebe:input source="=prKey" target="prKey" />
           <zeebe:input source="=answer" target="answer" />
           <zeebe:input source="=&#34;merge&#34;" target="answerContext" />
+          <zeebe:output source="=null" target="answer" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_answerRecord</bpmn:incoming>
