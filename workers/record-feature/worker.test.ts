@@ -125,7 +125,10 @@ test("an opened run on a claimed issue posts the PR-opened comment and records t
     assertEquals(out.prKey, "owner/repo#101");
     assertEquals(gh.posted.length, 1, "the claimed issue got the PR-opened comment");
     assert(gh.posted[0].includes("Pull request opened: #101"), "the comment names the PR");
-    assert(gh.posted[0].includes("<!-- nwf:pr-linked:#101 -->"), "the comment carries the dedupe marker");
+    assert(
+      gh.posted[0].includes("<!-- nwf:pr-linked:#101 https://github.com/owner/repo/pull/101 -->"),
+      "the comment carries the URL-keyed dedupe marker",
+    );
     assertEquals(rows[0].pr_link_want_pr_key, "owner/repo#101", "the owed link was recorded");
     assertEquals(rows[0].pr_linked_pr_key, "owner/repo#101", "the durable link was confirmed");
   } finally {

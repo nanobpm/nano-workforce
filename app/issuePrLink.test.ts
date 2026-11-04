@@ -13,8 +13,11 @@
 //     match — a pending lease is NEVER mistaken for a confirmed link), and
 //   • `pr_link_lease_at`    — an EXPIRING in-flight lease, CAS-claimed before any GitHub I/O so two
 //     racing passes never both post; a failure leaves it to expire (the retry backoff),
-// plus the hidden `<!-- nwf:pr-linked:#n -->` marker scan over ALL pages of the issue's comments,
-// which heals a crash between a successful POST and the confirm write.
+// plus the hidden `<!-- nwf:pr-linked:#n <canonical-pr-url> -->` marker scan over ALL pages of the
+// issue's comments, which heals a crash between a successful POST and the confirm write. The marker
+// carries the canonical PR URL (not just the number): PR numbers are repository-local, so a
+// number-only marker would let a same-number PR in a DIFFERENT repo satisfy the scan and confirm a
+// link that was never announced (issue #907 review).
 //
 // The GitHub reads/writes are hermetically stubbed via the pinned `token` transport + a fetch
 // double (mirrors workers/reconcile-implement/worker.test.ts) — no `gh` subprocess, no network.
@@ -47,6 +50,9 @@ function stubGithub(
     throwPost?: boolean;
     pages?: Record<number, { body: string }[]>;
     prTitles?: Record<string, string>;
+    /** Fired once during the FIRST comment-list GET — simulates a concurrent pass acting while the
+     *  worker is stalled on the scan (e.g. the poller re-claiming an expired lease and posting). */
+    onFirstList?: () => void;
   } = {},
 ): { posted: PostedComment[]; calls: string[]; restore: () => void } {
   const prevTransport = process.env.NANO_PR_GITHUB_TRANSPORT;
@@ -56,11 +62,16 @@ function stubGithub(
   process.env.GITHUB_TOKEN = "t";
   const posted: PostedComment[] = [];
   const calls: string[] = [];
+  let listed = false;
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     const method = (init?.method ?? "GET").toUpperCase();
     const u = new URL(String(url));
     calls.push(`${method} ${u.pathname}${u.search}`);
     if (method === "GET" && /\/issues\/\d+\/comments$/.test(u.pathname)) {
+      if (!listed) {
+        listed = true;
+        opts.onFirstList?.();
+      }
       if (opts.failList) return new Response("boom", { status: 500 });
       const page = Number(u.searchParams.get("page") ?? "1");
       const bodies = opts.pages ? (opts.pages[page] ?? []) : page === 1 ? existing : [];
@@ -130,6 +141,19 @@ function fakeData(
           const row = rows.find((r) => r.feature_key === params[1]);
           if (!row) return { changed: 0 };
           row.pr_link_want_pr_key = String(params[0]);
+          return { changed: 1 };
+        }
+        // The pre-post lease re-validation: SET pr_link_lease_at = ? (a FRESH ts) WHERE
+        // feature_key = ? AND pr_link_lease_at = ? (the ts this pass claimed). Only the CURRENT
+        // lease holder flips — a stale holder whose lease was re-claimed by the poller (changed=0)
+        // is rejected BEFORE it can post a duplicate. This MUST be matched BEFORE the initial-claim
+        // pattern below: both start `SET "pr_link_lease_at" = ?`, so the more-specific self-guard
+        // (`AND "pr_link_lease_at" = ?`) is tested first.
+        if (/UPDATE "feature_runs" SET "pr_link_lease_at" = \? WHERE "feature_key" = \? AND "pr_link_lease_at" = \?/.test(sql)) {
+          const [freshTs, featureKey, claimedTs] = params.map(String);
+          const row = rows.find((r) => r.feature_key === featureKey && r.pr_link_lease_at === claimedTs);
+          if (!row) return { changed: 0 };
+          row.pr_link_lease_at = freshTs;
           return { changed: 1 };
         }
         // The lease CAS: SET pr_link_lease_at = ? WHERE feature_key = ? AND want = ? AND
@@ -220,8 +244,8 @@ test("the comment body carries the PR number, title, URL and the hidden dedupe m
   assert(body.includes("Add the thing"), "names the PR title");
   assert(body.includes(PR_URL), "links the PR URL");
   assert(
-    body.includes(`${ISSUE_PR_LINK_MARKER_PREFIX}101 -->`),
-    "carries the hidden per-PR dedupe marker",
+    body.includes(`${ISSUE_PR_LINK_MARKER_PREFIX}101 ${PR_URL} -->`),
+    "carries the hidden per-PR dedupe marker keyed on the canonical PR URL",
   );
 });
 
@@ -323,7 +347,7 @@ test("a repeated pass with the SAME pr already confirmed is a no-op (no GitHub r
 test("a lost confirm (comment posted, confirm never persisted) is healed by the marker scan — no double post", async () => {
   // The marker for THIS PR is already on the issue (a previous pass posted it and then crashed
   // before its confirm landed): the scan sees it and confirms WITHOUT re-posting.
-  const gh = stubGithub([{ body: `🤖 Pull request opened: #101\n\n${ISSUE_PR_LINK_MARKER_PREFIX}101 -->` }]);
+  const gh = stubGithub([{ body: `🤖 Pull request opened: #101\n\n${ISSUE_PR_LINK_MARKER_PREFIX}101 ${PR_URL} -->` }]);
   const { data, rows } = fakeData([owedRow()]);
   try {
     const out = await attemptIssuePrLink(KEY, data);
@@ -336,11 +360,45 @@ test("a lost confirm (comment posted, confirm never persisted) is healed by the 
   }
 });
 
+test("a same-number marker from a DIFFERENT repo does NOT confirm the link — the comment is posted", async () => {
+  // PR numbers are repository-local: `owner/code#101` and `owner/repo#101` share the number 101 but
+  // are different PRs. A number-only marker would let the foreign `owner/code#101` comment satisfy
+  // the scan for the owed `owner/repo#101` and confirm a link that was never announced. The marker
+  // keys on the canonical PR URL, so the foreign marker does NOT match and the real PR is posted.
+  const foreign = `🤖 Pull request opened: #101\n\n${ISSUE_PR_LINK_MARKER_PREFIX}101 https://github.com/owner/code/pull/101 -->`;
+  const gh = stubGithub([{ body: foreign }]);
+  const { data, rows } = fakeData([owedRow()]);
+  try {
+    const out = await attemptIssuePrLink(KEY, data);
+    assertEquals(out, "posted", "the foreign same-number marker did NOT confirm the link");
+    assertEquals(gh.posted.length, 1, "the owed PR was announced (the foreign marker was ignored)");
+    assert(gh.posted[0].body.includes(PR_URL), "the posted comment names THIS repo's PR URL");
+    assertEquals(rows[0].pr_linked_pr_key, PR, "the link was confirmed only after the real POST");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("a bare number-only marker (legacy/foreign) does NOT confirm the link without the canonical URL", async () => {
+  // A marker that names the number but carries no canonical URL (or a different one) must not
+  // satisfy the scan: only the exact `<!-- nwf:pr-linked:#<n> <url> -->` for THIS PR confirms.
+  const gh = stubGithub([{ body: `🤖 Pull request opened: #101\n\n${ISSUE_PR_LINK_MARKER_PREFIX}101 -->` }]);
+  const { data, rows } = fakeData([owedRow()]);
+  try {
+    const out = await attemptIssuePrLink(KEY, data);
+    assertEquals(out, "posted", "the URL-less marker did NOT confirm the link");
+    assertEquals(gh.posted.length, 1, "the owed PR was announced");
+    assertEquals(rows[0].pr_linked_pr_key, PR);
+  } finally {
+    gh.restore();
+  }
+});
+
 test("the marker scan paginates through EVERY page before deciding the marker is absent", async () => {
   // 100 bodies on page 1 (a full page) with the marker only on page 2: a first-page-only scan
   // would double-post; the paginated scan finds it and confirms without posting.
   const page1 = Array.from({ length: 100 }, (_, i) => ({ body: `comment ${i}` }));
-  const page2 = [{ body: `🤖 Pull request opened: #101\n\n${ISSUE_PR_LINK_MARKER_PREFIX}101 -->` }];
+  const page2 = [{ body: `🤖 Pull request opened: #101\n\n${ISSUE_PR_LINK_MARKER_PREFIX}101 ${PR_URL} -->` }];
   const gh = stubGithub([], { pages: { 1: page1, 2: page2 } });
   const { data, rows } = fakeData([owedRow()]);
   try {
@@ -376,6 +434,49 @@ test("a live (unexpired) lease blocks a second attempt — the CAS guard rejects
     assertEquals(out, "claim-lost");
     assertEquals(rows[0].pr_link_lease_at, leaseAt, "the live lease was untouched (the CAS guard rejected the claim)");
     assertEquals(gh.calls.length, 0, "no GitHub I/O while another pass holds the lease");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("a stale lease holder that resumes after the poller re-claimed does NOT post a duplicate", async () => {
+  // The worker claims the lease, then stalls on the marker scan PAST the lease expiry. While it is
+  // stalled the poller re-claims the (now-expired) lease and posts. The worker then resumes with its
+  // earlier empty scan and would post a duplicate — the pre-post lease re-validation rejects it
+  // (its claimed ts no longer matches) so it backs off as claim-lost WITHOUT posting.
+  const now = new Date("2026-01-01T01:00:00.000Z");
+  const { data, rows } = fakeData([owedRow()]);
+  // During the worker's FIRST list, simulate the poller winning: re-claim the lease under a
+  // DIFFERENT (later) timestamp, so the worker's claimed ts is stale.
+  let pollerTs: string;
+  const gh = stubGithub([], {
+    onFirstList: () => {
+      pollerTs = new Date(now.getTime() + 1000).toISOString();
+      rows[0].pr_link_lease_at = pollerTs; // the poller's claim overwrote the worker's lease
+    },
+  });
+  try {
+    const out = await attemptIssuePrLink(KEY, data, "t", () => now);
+    assertEquals(out, "claim-lost", "the stale holder was rejected before posting");
+    assertEquals(gh.posted.length, 0, "NO duplicate comment was posted by the resuming worker");
+    assertEquals(rows[0].pr_link_lease_at, pollerTs!, "the poller's lease still stands (the worker did not clobber it)");
+    assertEquals(rows[0].pr_linked_pr_key, null, "the worker did not confirm (the poller owns the attempt)");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("a pass that still holds its lease through the write re-validates and posts (the happy path is unaffected)", async () => {
+  // No concurrent steal: the pre-post re-validation succeeds (the worker still holds its claimed
+  // lease), so the comment posts and confirms normally.
+  const gh = stubGithub([]);
+  const { data, rows } = fakeData([owedRow()]);
+  try {
+    const out = await attemptIssuePrLink(KEY, data);
+    assertEquals(out, "posted");
+    assertEquals(gh.posted.length, 1, "the comment was posted");
+    assertEquals(rows[0].pr_linked_pr_key, PR, "the link was confirmed");
+    assertEquals(rows[0].pr_link_lease_at, null, "the lease was released by the confirm");
   } finally {
     gh.restore();
   }

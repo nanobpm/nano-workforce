@@ -170,7 +170,10 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
         const comments = (githubState.issueComments.get(7) ?? []).filter((c) => c.body.includes("nwf:pr-linked:#101"));
         assert.equal(comments.length, 1, "exactly one comment was posted on the claimed issue for PR #101");
         assert.ok(comments[0].body.includes("Pull request opened: #101"), "the comment names the PR");
-        assert.ok(comments[0].body.includes("<!-- nwf:pr-linked:#101 -->"), "the comment carries the dedupe marker");
+        assert.ok(
+          comments[0].body.includes("<!-- nwf:pr-linked:#101 https://github.com/owner/repo/pull/101 -->"),
+          "the comment carries the URL-keyed dedupe marker",
+        );
         assert.equal(
           (run as unknown as { pr_linked_pr_key: string | null }).pr_linked_pr_key,
           "owner/repo#101",

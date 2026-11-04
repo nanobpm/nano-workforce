@@ -25,8 +25,16 @@
 //     `pollIssuePrLinks` pass (app/service.ts → `retryOutstandingIssuePrLinks`) re-attempts every
 //     outstanding link through this same `attemptIssuePrLink`, so a transient failure never leaves
 //     the delivered PR unannounced and never fails or restarts the run.
-// Each comment also carries a hidden `<!-- nwf:pr-linked:#n -->` marker; the issue's comments are
-// scanned (ALL pages) before posting, which heals a crash between a successful POST and the confirm.
+// Each comment also carries a hidden `<!-- nwf:pr-linked:#n <canonical-pr-url> -->` marker; the
+// issue's comments are scanned (ALL pages) before posting, which heals a crash between a successful
+// POST and the confirm. The marker keys on the canonical PR URL, not just the number, because PR
+// numbers are repository-local — a same-number PR in another repo must NOT satisfy the scan.
+//
+// Stale-lease safety: the lease is re-validated with a guarded CAS (re-claiming a FRESH timestamp)
+// IMMEDIATELY before the POST. A worker that stalls on the marker scan / title lookup past the lease
+// expiry can have its lease re-claimed by the poller (which then posts); when the worker resumes it
+// must NOT post a duplicate. The pre-post CAS rejects that stale holder (its claimed ts no longer
+// matches) BEFORE the write — the after-the-fact confirm guard would be too late.
 //
 // Targeting: the comment goes to the CLAIMED ISSUE (the run row's `repo` + `issue_number`), never
 // to the PR's repository — a cross-repo PR is looked up (title) in its own repo only.
@@ -38,9 +46,18 @@ import { fetchPrMeta, runGh, useGh } from "./github.ts";
 import { parsePr } from "./prParse.ts";
 
 /** The hidden per-PR dedupe marker prefix carried by every PR-opened comment. The full marker is
- *  `<!-- nwf:pr-linked:#<number> -->`; scanning for it makes a repeated pass idempotent even when
- *  the durable claim was lost (crash between the POST and the record write). */
+ *  `<!-- nwf:pr-linked:#<number> <canonical-pr-url> -->`; scanning for it makes a repeated pass
+ *  idempotent even when the durable claim was lost (crash between the POST and the record write).
+ *  The canonical PR URL is part of the marker because PR numbers are repository-local: a number-only
+ *  marker would let a same-number PR in a DIFFERENT repo satisfy the scan and confirm a link that
+ *  was never announced (issue #907 review). */
 export const ISSUE_PR_LINK_MARKER_PREFIX = "<!-- nwf:pr-linked:#";
+
+/** Build the full dedupe marker for one PR: `<!-- nwf:pr-linked:#<number> <canonical-pr-url> -->`.
+ *  The URL disambiguates a same-number PR in another repository. */
+export function issuePrLinkMarker(pr: { number: number; url: string }): string {
+  return `${ISSUE_PR_LINK_MARKER_PREFIX}${pr.number} ${pr.url} -->`;
+}
 
 /** The discriminated outcome of a link attempt — logged by the caller so a skipped/failed link is
  *  observable without ever failing the run. */
@@ -56,7 +73,7 @@ export type IssuePrLinkOutcome =
 /** The comment body: one line naming the PR (number, optional title, URL) plus the hidden marker. */
 export function prOpenedCommentBody(pr: { number: number; title?: string | null; url: string }): string {
   const title = typeof pr.title === "string" && pr.title.trim() !== "" ? ` — ${pr.title.trim()}` : "";
-  return `🤖 Pull request opened: #${pr.number}${title}  (${pr.url})\n\n${ISSUE_PR_LINK_MARKER_PREFIX}${pr.number} -->`;
+  return `🤖 Pull request opened: #${pr.number}${title}  (${pr.url})\n\n${issuePrLinkMarker(pr)}`;
 }
 
 /** How long an in-flight lease blocks other passes. A crash or failure leaves it to expire, after
@@ -187,12 +204,14 @@ export async function attemptIssuePrLink(
         [ts, featureKey, want, want, expired],
       );
     if (claim.changed === 0) return "claim-lost";
-    const confirm = async () => {
+    // Confirm the link, releasing the lease. Guards on the CURRENT lease ts (the one this pass last
+    // (re-)claimed), so only the live holder confirms.
+    const confirm = async (leaseTs: string) => {
       await data
         .open()
         .exec(
           `UPDATE "feature_runs" SET "pr_linked_pr_key" = ?, "pr_link_lease_at" = NULL WHERE "feature_key" = ? AND "pr_link_lease_at" = ?`,
-          [want, featureKey, ts],
+          [want, featureKey, leaseTs],
         );
     };
     // The marker scan (every page) heals a crash between a successful POST and the confirm.
@@ -203,9 +222,9 @@ export async function attemptIssuePrLink(
       // UNREADABLE — posting blind could double-post. Leave the lease to expire; the poller retries.
       return "list-failed";
     }
-    const marker = `${ISSUE_PR_LINK_MARKER_PREFIX}${pr.number} -->`;
+    const marker = issuePrLinkMarker(pr);
     if (bodies?.some((b) => b.includes(marker))) {
-      await confirm();
+      await confirm(ts);
       return "already-marked";
     }
     // The title is best-effort, read from the PR's OWN repository.
@@ -215,6 +234,21 @@ export async function attemptIssuePrLink(
     } catch {
       title = null;
     }
+    // Re-validate lease ownership IMMEDIATELY before the write. The scan + title lookup above are
+    // unbounded I/O: if this pass stalled past the lease expiry, the poller may have re-claimed the
+    // lease and posted — and the after-the-fact confirm guard runs too late to stop a duplicate.
+    // Re-claim a FRESH timestamp guarded on the one this pass holds: only the CURRENT holder flips
+    // (changed=1), extending its lease through the write; a stale holder whose ts was overwritten
+    // gets changed=0 and backs off WITHOUT posting.
+    const ts2 = now().toISOString();
+    const stillHolder = await data
+      .open()
+      .exec(`UPDATE "feature_runs" SET "pr_link_lease_at" = ? WHERE "feature_key" = ? AND "pr_link_lease_at" = ?`, [
+        ts2,
+        featureKey,
+        ts,
+      ]);
+    if (stillHolder.changed === 0) return "claim-lost";
     const posted = await postIssueComment(
       issueRepo,
       issueNumber,
@@ -223,7 +257,7 @@ export async function attemptIssuePrLink(
     );
     // A failure leaves the lease to expire (never confirmed) — the poller's retry pass re-attempts.
     if (!posted) return "post-failed";
-    await confirm();
+    await confirm(ts2);
     return "posted";
   } catch {
     return "skipped";
