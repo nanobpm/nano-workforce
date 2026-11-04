@@ -80,7 +80,7 @@ test("with humanApproval a converged PR parks for a human, and approve finalizes
 });
 
 test("request changes sends the guidance to the review agent on the same PR, then asks again", async () => {
-  const { engine, answers } = await boot({ humanApproval: true });
+  const { engine, answers, processInstanceKey } = await boot({ humanApproval: true });
   const first = await openApproval(engine);
   assert(first !== undefined, "the approval task is open");
   await engine.completeUserTask(first, { mergeDecision: "revise", answer: "Rename foo to bar." });
@@ -92,6 +92,10 @@ test("request changes sends the guidance to the review agent on the same PR, the
   assertEquals(completions(engine, "persist-converged"), 0);
   const second = await openApproval(engine);
   assert(second !== undefined && second !== first, "approval is asked again after the revision");
+  // A revise is NOT an approval: the gate must stay set, so /status keeps reporting
+  // `blockedBy: "human-approval"` while the re-asked approval is outstanding (PR #917 review).
+  const [row] = await engine.searchVariables({ processInstanceKey: String(processInstanceKey), name: "humanApproval" });
+  assertEquals(row ? JSON.parse(row.value) : undefined, true, "a revise keeps the human-approval gate set");
 });
 
 test("a live ungated loop narrowed to humanApproval (a gated submitPr adopting it) parks for approval", async () => {
@@ -111,6 +115,21 @@ test("fail-closed: a completion without an explicit approve never merges", async
   await engine.completeUserTask(key, {});
   loop(engine).isActive().hasActiveElement(PR_MERGE_APPROVAL_ELEMENT).hasNoIncident();
   assertEquals(completions(engine, "persist-converged"), 0);
+});
+
+test("an approve clears the humanApproval gate while finalization is still pending (PR #917 review)", async () => {
+  // The /status merge projection derives `blockedBy: "human-approval"` from the loop's
+  // `humanApproval` variable alone, so an approved PR whose `pr.finalize` handoff is still queued
+  // (or incidented) would otherwise keep reporting a human-approval blocker even though the
+  // approval is complete. Hold `pr.finalize` so the loop stays ACTIVE after the approve, then read
+  // the variable: it must be cleared by the approval itself, not by some later task.
+  const { engine, processInstanceKey } = await boot({ humanApproval: true }, ["pr.finalize"]);
+  const key = await openApproval(engine);
+  assert(key !== undefined, "the approval task is open");
+  await engine.completeUserTask(key, { mergeDecision: "approve" });
+  loop(engine).isActive().hasNoIncident();
+  const [row] = await engine.searchVariables({ processInstanceKey: String(processInstanceKey), name: "humanApproval" });
+  assertEquals(row ? JSON.parse(row.value) : undefined, false, "approval complete — the blocker must clear");
 });
 
 test("merge-approval is human-only, and its form requires guidance only for request changes", () => {

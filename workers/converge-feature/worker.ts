@@ -3,8 +3,8 @@
 // Reached only via the `converge?` gateway's true branch (converge requested AND the agent opened a
 // keyed PR). Reuses `submitPr` — the SAME enrollment the epic waves and the standalone
 // `startConvergenceLoop` action use — so a feature run's PR gets identical review-round + merge
-// behaviour with no duplicated machinery. `autoMerge` maps to `submitPr`'s `convergeOnly`
-// (inverted): auto-merge → drive the merge-loop; otherwise stop at `converged`.
+// behaviour with no duplicated machinery. The run's positive `autoMerge` is threaded to `submitPr`
+// as-is (issue #916): auto-merge → drive the merge-loop; otherwise stop at `converged`.
 //
 // The feature-run's OWN process ends here; the PR's live convergence/merge state lives on the
 // `pull_requests` row keyed by `pr_key`, which the feature page links to. We therefore leave the
@@ -40,8 +40,10 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   // (edge 1) heals by re-enrolling when the PR row is still missing (idempotent, mirroring the
   // promotion-PR re-enroll in `pollPromotion`). The reorder is safe: `submitPr` is idempotent on the PR
   // key (it early-returns `alreadyRunning` for a non-terminal PR), and a `converging` row is owned by
-  // edge (1), never by the handoff edge. `convergeOnly` is the inverse of auto-merge: converge-only
-  // stops at `converged`; auto-merge lets the merge-loop drive the merge.
+  // edge (1), never by the handoff edge.
+  //
+  // `autoMerge` is the canonical positive merge intent (issue #916): converge-only stops at
+  // `converged`; auto-merge lets the merge-loop drive the merge.
   await featureRuns(app.data).update(featureKey, {
     status: "converging",
     pr_key: parsed.prKey,
@@ -51,11 +53,11 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   // read the durable flag off the `feature_runs` row (the source of truth) and hand it to `submitPr`.
   const featureRow = await featureRuns(app.data).get(featureKey);
   const autoResolve = featureRow?.auto_resolve_escalations === 1;
-  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, !autoMerge, featureKey, humanApproval, autoResolve);
+  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, false, featureKey, humanApproval, autoResolve, autoMerge);
   app.log.info("converge-feature: enrolled PR into convergence loop", {
     featureKey,
     prKey: parsed.prKey,
-    convergeOnly: !autoMerge,
+    autoMerge,
     humanApproval,
     autoResolveEscalations: autoResolve,
   });

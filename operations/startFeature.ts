@@ -113,6 +113,12 @@ export default defineOperation("startFeature", async ({ body }, app) => {
     throw err;
   }
   const converge = "converge" in body && body.converge === true;
+  // A PRESENT-but-non-boolean `autoMerge` (e.g. the string "true") is a 400 (issue #916): it used to
+  // read as silently false (`=== true`), so a mistyped merge request ran review-only with no signal.
+  if ("autoMerge" in body && typeof body.autoMerge !== "boolean") {
+    app.log.warn("start-feature rejected: autoMerge must be a boolean", { autoMerge: body.autoMerge });
+    return { status: 400, body: { error: "autoMerge must be a boolean (true or false)" } };
+  }
   // Auto-merge is only meaningful as a follow-on to convergence; pin it off when converge is off so
   // the persisted row and the process variable can't disagree.
   const autoMerge = converge && "autoMerge" in body && body.autoMerge === true;

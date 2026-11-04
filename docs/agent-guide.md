@@ -31,6 +31,24 @@ Each `/status` entry carries `prKey` (`owner/repo#123`), `status`, `round`, `pro
 `activeWorker`/`leaseUntil` (an agent holds the round, or the job is just queued), and
 `updatedAt`.
 
+It also carries the run's **merge intent** as a structured `merge` block (so "will this PR
+merge?" is a read, not a guess):
+
+```json
+"merge": { "requested": true, "enabled": true, "effective": false, "blockedBy": "human-approval" }
+```
+
+| field | meaning |
+|---|---|
+| `requested` | the run's merge intent — the `autoMerge` process variable on its convergence loop (a loop seeded before that variable existed derives it from the inverse of the legacy flag). |
+| `enabled` | the deployment's global `NANO_PR_AUTO_MERGE` switch. |
+| `effective` | `requested && enabled && !humanApproval` — the run merges with no further gate. |
+| `blockedBy` | why a *requested* merge will not proceed: `"env"` (the global switch is off) or `"human-approval"` (parked at the merge-approval task). `null` when the merge is effective — and when the run is converge-only (`requested: false`), which is a *choice*, not a block. |
+
+The same intent is on the engine variables of the loop itself: query the instance
+(`processKey`) for `autoMerge` — it is always seeded, so a missing `autoMerge` means a loop
+started before this version (read `convergeOnly` and invert it there).
+
 ---
 
 ## 1. Submit a PR for review convergence
@@ -56,6 +74,16 @@ curl -sS -X POST __BASE__/actions/start/convergence-loop \
 
 Idempotent on the PR key: re-POSTing refreshes the record instead of starting a second
 loop. The 202 response echoes `prKey` and `processKey`.
+
+`autoMerge` must be a JSON **boolean** — a string (`"true"`) is a `400` at every start door
+(`startConvergenceLoop`, `startFeature`), never a silent review-only run. To *read* the intent
+back, use the `merge` block in `/status` (§0). There is **no supported way to flip merge
+intent on a running loop**. Direct variable writes onto a live instance (e.g. `autoMerge=true`)
+are **unsupported and timing-dependent, not reliable no-ops**: the agent tasks guard-restore the
+seeded value, so a write is usually overwritten — but a write that lands while the loop awaits
+merge approval is never restored and reaches `pr.finalize`, where it can change whether merging
+starts. To change the intent, cancel the run (`cancelInstance`, §7) and re-submit with the
+intent you want.
 
 ---
 
@@ -173,6 +201,11 @@ pending count). Read with `listAutoResolutions` (`GET __BASE__/auto-resolutions`
 PR `status` values: `converging` (round live), `waiting_review`, `escalated`, `converged`,
 `waiting_deps` / `waiting_merge` / `queued` / `merging`, `merged`, `abandoned`. An
 **incident** (§5) can overlay any live status when the engine parks the token on a fault.
+
+The merge-stage statuses only ever appear when the run's merge policy is effective — read the
+`merge` block in `/status` (§0) to distinguish "merge requested but disabled by env"
+(`blockedBy: "env"`) and "waiting for human approval" (`blockedBy: "human-approval"`) from
+"converge-only" (`requested: false`).
 
 ---
 

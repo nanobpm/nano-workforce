@@ -103,6 +103,7 @@
           <nano:extend name="prUrl" type="string" />
           <nano:extend name="round" type="integer" />
           <nano:extend name="summary" type="string" optional="true" />
+          <nano:extend name="autoMerge" type="boolean" optional="true" />
           <nano:extend name="convergeOnly" type="boolean" optional="true" />
           <nano:extend name="abandonUrl" type="string" optional="true" />
         </nano:shape>
@@ -161,6 +162,7 @@
           <zeebe:input source="=reviewWaitTimeout" target="guardReviewWaitTimeout" />
           <zeebe:input source="=humanApproval" target="guardHumanApproval" />
           <zeebe:input source="=convergeOnly" target="guardConvergeOnly" />
+          <zeebe:input source="=autoMerge" target="guardAutoMerge" />
           <zeebe:input source="=reviewStale" target="guardReviewStale" />
           <zeebe:input source="=roundEntryHead" target="guardRoundEntryHead" />
           <zeebe:input source="=abandonUrl" target="guardAbandonUrl" />
@@ -182,6 +184,7 @@
           <zeebe:output source="=guardReviewWaitTimeout" target="reviewWaitTimeout" />
           <zeebe:output source="=(guardHumanApproval = true) or (humanApproval = true)" target="humanApproval" />
           <zeebe:output source="=guardConvergeOnly" target="convergeOnly" />
+          <zeebe:output source="=guardAutoMerge" target="autoMerge" />
           <zeebe:output source="=guardReviewStale" target="reviewStale" />
           <zeebe:output source="=guardRoundEntryHead" target="roundEntryHead" />
           <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
@@ -255,6 +258,7 @@
           <zeebe:input source="=reviewWaitTimeout" target="guardReviewWaitTimeout" />
           <zeebe:input source="=humanApproval" target="guardHumanApproval" />
           <zeebe:input source="=convergeOnly" target="guardConvergeOnly" />
+          <zeebe:input source="=autoMerge" target="guardAutoMerge" />
           <zeebe:input source="=reviewStale" target="guardReviewStale" />
           <zeebe:input source="=roundEntryHead" target="guardRoundEntryHead" />
           <zeebe:input source="=abandonUrl" target="guardAbandonUrl" />
@@ -277,6 +281,7 @@
           <zeebe:output source="=guardReviewWaitTimeout" target="reviewWaitTimeout" />
           <zeebe:output source="=(guardHumanApproval = true) or (humanApproval = true)" target="humanApproval" />
           <zeebe:output source="=guardConvergeOnly" target="convergeOnly" />
+          <zeebe:output source="=guardAutoMerge" target="autoMerge" />
           <zeebe:output source="=guardReviewStale" target="reviewStale" />
           <zeebe:output source="=guardRoundEntryHead" target="roundEntryHead" />
           <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
@@ -474,6 +479,7 @@
         <zeebe:ioMapping>
           <zeebe:input source="=prKey" target="prKey" />
           <zeebe:output source="=0" target="huskRetries" />
+          <zeebe:output source="=if mergeDecision = &#34;approve&#34; then false else humanApproval" target="humanApproval" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_needApproval</bpmn:incoming>
@@ -563,6 +569,7 @@
           <zeebe:input source="=reviewWaitTimeout" target="guardReviewWaitTimeout" />
           <zeebe:input source="=humanApproval" target="guardHumanApproval" />
           <zeebe:input source="=convergeOnly" target="guardConvergeOnly" />
+          <zeebe:input source="=autoMerge" target="guardAutoMerge" />
           <zeebe:input source="=reviewStale" target="guardReviewStale" />
           <zeebe:input source="=roundEntryHead" target="guardRoundEntryHead" />
           <zeebe:input source="=abandonUrl" target="guardAbandonUrl" />
@@ -582,6 +589,7 @@
           <zeebe:output source="=guardReviewWaitTimeout" target="reviewWaitTimeout" />
           <zeebe:output source="=(guardHumanApproval = true) or (humanApproval = true)" target="humanApproval" />
           <zeebe:output source="=guardConvergeOnly" target="convergeOnly" />
+          <zeebe:output source="=guardAutoMerge" target="autoMerge" />
           <zeebe:output source="=guardReviewStale" target="reviewStale" />
           <zeebe:output source="=guardRoundEntryHead" target="roundEntryHead" />
           <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />

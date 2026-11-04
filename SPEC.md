@@ -454,13 +454,16 @@ Notes:
   three because the unfiltered merge lets an input-echo replace the identity that
   `progress-check`, `converge-gate`, and `finalize` go on to read (a wrong
   `prNumber` would make `finalize` start the merge loop for the wrong PR) — **and**
-  the gate controls `humanApproval` and `convergeOnly`. These last two are
-  decision flags the loop acts on after the agent returns: `humanApproval = true`
-  routes a converged PR through the `gw-approval` human gate instead of
-  auto-merging, and `convergeOnly = true` ends a review-only run without ever
-  handing the PR to the merge loop. Left unguarded, a converged completion that
-  echoed `humanApproval: false` would **bypass** the approval gate, and one that
-  echoed `convergeOnly: false` would hand a review-only PR to the merge loop.
+  the gate controls `humanApproval` and the merge-intent pair `autoMerge` /
+  `convergeOnly`. These are decision flags the loop acts on after the agent
+  returns: `humanApproval = true` routes a converged PR through the
+  `gw-approval` human gate instead of auto-merging, and the merge intent —
+  `autoMerge` (the canonical positive variable, issue #916), with the legacy
+  inverted `convergeOnly` as its in-flight fallback — decides whether a
+  converged PR is handed to the merge loop at all. Left unguarded, a converged
+  completion that echoed `humanApproval: false` would **bypass** the approval
+  gate, and one that echoed `convergeOnly: false` would hand a review-only PR
+  to the merge loop.
   `convergeOnly` is a plain seeded constant, so the usual `=guardConvergeOnly`
   restore applies. `humanApproval` is the one engine-owned flag that is **also
   legitimately mutated mid-flight** — a gated caller that adopts a live loop

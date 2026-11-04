@@ -217,7 +217,7 @@ const handler: AppJobHandler<In, ConnectorDispatchResult> = async (job, app) => 
           // completion can clobber that variable, so the durable row is the only trustworthy source
           // (issue #889 review). Fails closed (false) when no run row matches.
           const autoResolve = await resolveAutoResolveEscalations(app.data, job.processInstanceKey != null ? String(job.processInstanceKey) : null);
-          await submitPr(app.data, app.engine, converge.parsed, converge.dependsOn, MAX_ROUNDS, converge.convergeOnly, dedupeKey, false, autoResolve);
+          await submitPr(app.data, app.engine, converge.parsed, converge.dependsOn, MAX_ROUNDS, converge.convergeOnly, dedupeKey, false, autoResolve, !converge.convergeOnly);
           app.log.info("delivery-connector: enrolled PR into convergence loop", {
             target,
             dedupeKey,

@@ -207,3 +207,18 @@ test("humanApproval reaches the run only together with autoMerge", async () => {
     }
   });
 });
+
+// ── issue #916: a present-but-non-boolean `autoMerge` is a 400 at the door, never a silent false ──
+
+test("non-boolean autoMerge → 400 at the edge (never silently review-only)", async () => {
+  await withGithub(REPO, async () => {
+    const { app, started } = makeApp();
+    const res = (await startFeature(
+      input({ issue: `${REPO}#577`, ...GATED_BASE, converge: true, autoMerge: "true" }),
+      app,
+    )) as any;
+    assertEquals(res.status, 400);
+    assertEquals(typeof res.body.error, "string");
+    assertEquals(started.length, 0, "a rejected door never starts a run");
+  });
+});

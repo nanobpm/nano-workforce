@@ -215,6 +215,8 @@ test("pollFeatureDelivery: the re-enroll keeps the run's human approval gate (is
   await pollFeatureDelivery(data, engine);
 
   assertEquals(vars?.convergeOnly, false);
+  // Issue #916: the healed enrollment also carries the canonical positive merge-intent variable.
+  assertEquals(vars?.autoMerge, true);
   assertEquals(vars?.humanApproval, true, "a healed enrollment must not silently drop the approval gate");
 });
 
