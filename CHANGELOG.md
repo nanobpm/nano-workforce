@@ -1,3 +1,9 @@
+## [0.205.0](https://github.com/nanobpm/nano-workforce/compare/v0.204.1...v0.205.0) (2026-11-04)
+
+### Features
+
+* **convergence:** make PR merge intent explicit — carry autoMerge end to end and show the effective merge policy in /status ([#917](https://github.com/nanobpm/nano-workforce/issues/917)) ([31e5b26](https://github.com/nanobpm/nano-workforce/commit/31e5b26f745f58920a9528bb448fe650af9631e3)), closes [#916](https://github.com/nanobpm/nano-workforce/issues/916) [#916](https://github.com/nanobpm/nano-workforce/issues/916)
+
 ## [0.204.1](https://github.com/nanobpm/nano-workforce/compare/v0.204.0...v0.204.1) (2026-11-04)
 
 ### Bug Fixes
