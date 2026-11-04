@@ -315,7 +315,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
           calls += 1;
           return calls === 1
             ? { status: "escalated", question: "Which API should I use?", summary: "parked for a human" }
-            : { status: "opened", pr: "owner/repo#103", summary: "resumed and opened" };
+            : { status: "opened", pr: "owner/repo#104", summary: "resumed and opened" };
         },
       },
       { baseBranch: "epic/e2e" },
@@ -344,10 +344,10 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
 
         // Issue #907: the RETRY opened the PR — the host still posted exactly one "PR opened"
         // comment on the claimed issue (the first, escalated pass delivered no PR, so nothing was
-        // posted before the answer). (Filtered to THIS PR's marker — the github state is shared.)
-        const comments = (githubState.issueComments.get(7) ?? []).filter((c) => c.body.includes("nwf:pr-linked:#103"));
+        // posted before the answer). Uses a PR number (#104) no earlier scenario links, so a pre-existing marker in the shared github state cannot satisfy this.
+        const comments = (githubState.issueComments.get(7) ?? []).filter((c) => c.body.includes("nwf:pr-linked:#104"));
         assert.equal(comments.length, 1, "exactly one comment was posted across the escalate+resume");
-        assert.ok(comments[0].body.includes("Pull request opened: #103"), "the comment names the retry-opened PR");
+        assert.ok(comments[0].body.includes("Pull request opened: #104"), "the comment names the retry-opened PR");
       },
     );
   });

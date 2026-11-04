@@ -25,6 +25,7 @@ import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import {
   attemptIssuePrLink,
+  ISSUE_PR_LINK_IO_TIMEOUT_MS,
   ISSUE_PR_LINK_LEASE_MS,
   ISSUE_PR_LINK_MARKER_PREFIX,
   prOpenedCommentBody,
@@ -48,6 +49,8 @@ function stubGithub(
     failList?: boolean;
     failPost?: boolean;
     throwPost?: boolean;
+    /** Hang every comment POST until its abort signal fires (a POST stalled past its deadline). */
+    stallPost?: boolean;
     pages?: Record<number, { body: string }[]>;
     prTitles?: Record<string, string>;
     /** Fired once during the FIRST comment-list GET — simulates a concurrent pass acting while the
@@ -83,6 +86,13 @@ function stubGithub(
     }
     if (method === "POST" && /\/issues\/\d+\/comments$/.test(u.pathname)) {
       if (opts.throwPost) throw new TypeError("fetch failed: connection reset");
+      if (opts.stallPost) {
+        const signal = init?.signal;
+        await new Promise<never>((_, reject) => {
+          if (!signal) return; // unbounded caller: hangs forever (the test then times out — RED)
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
       if (opts.failPost) return new Response("boom", { status: 500 });
       // biome-ignore lint/plugin: runtime contract boundary for parsed JSON in a test double
       const body = JSON.parse(String(init?.body ?? "{}")) as { body?: string };
@@ -477,6 +487,20 @@ test("a pass that still holds its lease through the write re-validates and posts
     assertEquals(gh.posted.length, 1, "the comment was posted");
     assertEquals(rows[0].pr_linked_pr_key, PR, "the link was confirmed");
     assertEquals(rows[0].pr_link_lease_at, null, "the lease was released by the confirm");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("a comment POST stalled past its deadline is aborted as post-failed — the write never outlives the lease", { timeout: 5000 }, async () => {
+  assert(ISSUE_PR_LINK_IO_TIMEOUT_MS < ISSUE_PR_LINK_LEASE_MS, "the I/O deadline is strictly inside the lease");
+  const gh = stubGithub([], { stallPost: true });
+  const { data, rows } = fakeData([owedRow()]);
+  try {
+    const out = await attemptIssuePrLink(KEY, data, "t", () => new Date(), 20);
+    assertEquals(out, "post-failed", "the hung POST was cut off at the deadline");
+    assertEquals(rows[0].pr_linked_pr_key, null, "an aborted POST is never confirmed");
+    assert(rows[0].pr_link_lease_at != null, "the lease stands as the retry backoff");
   } finally {
     gh.restore();
   }

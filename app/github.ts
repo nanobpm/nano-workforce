@@ -42,13 +42,14 @@ export function githubTransport(): GithubTransport {
  * `repo`/`number` from the datastore cannot inject a command). Resolves stdout, rejects on a
  * non-zero exit with stderr as the message. Exported so sibling host-glue modules (e.g.
  * app/issuePrLink.ts) ride the ONE gh transport instead of re-deriving it. */
-export async function runGh(args: string[]): Promise<string> {
+export async function runGh(args: string[], opts: { timeoutMs?: number } = {}): Promise<string> {
   const { execFile } = await import("node:child_process");
   return await new Promise<string>((resolve, reject) => {
     execFile(
       "gh",
       args,
-      { maxBuffer: 16 * 1024 * 1024 },
+      // `timeout` (0 = none) kills a hung `gh` so a bounded caller's deadline is actually enforced.
+      { maxBuffer: 16 * 1024 * 1024, timeout: opts.timeoutMs ?? 0 },
       (err, stdout, stderr) => {
         if (err) reject(new Error(String(stderr || "").trim() || err.message));
         else resolve(String(stdout));

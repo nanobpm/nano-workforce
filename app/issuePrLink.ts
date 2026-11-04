@@ -80,6 +80,13 @@ export function prOpenedCommentBody(pr: { number: number; title?: string | null;
  *  which the poller retries — so this is also the retry backoff. */
 export const ISSUE_PR_LINK_LEASE_MS = 5 * 60 * 1000;
 
+/** Hard deadline on EVERY GitHub read/write this module makes (both transports). Kept well below the
+ *  lease so a pass that re-validated its lease immediately before the POST still owns it for the
+ *  whole pending write: a POST can never outlive the lease and race a poller re-claim into a
+ *  duplicate. A timed-out POST is `post-failed` (never confirmed); the lease then expires and the
+ *  retry's marker scan heals the case where GitHub committed it anyway. */
+export const ISSUE_PR_LINK_IO_TIMEOUT_MS = 60 * 1000;
+
 const PAGE_SIZE = 100;
 /** Hard bound on pages scanned (10k comments) so a pathological issue can't loop forever. Hitting it
  *  is treated as UNREADABLE (fail closed: never post blind). */
@@ -88,7 +95,12 @@ const MAX_PAGES = 100;
 /** List the bodies of EVERY comment on an issue, across all pages. `null` when no transport is
  *  usable; THROWS on a transport failure (or an over-long thread) so the caller can distinguish
  *  "unreadable" (post nothing) from "empty". */
-async function listIssueCommentBodies(repo: string, issueNumber: number, token: string): Promise<string[] | null> {
+async function listIssueCommentBodies(
+  repo: string,
+  issueNumber: number,
+  token: string,
+  timeoutMs: number,
+): Promise<string[] | null> {
   const ghMode = await useGh();
   if (!ghMode && !token) return null;
   const bodies: string[] = [];
@@ -96,10 +108,11 @@ async function listIssueCommentBodies(repo: string, issueNumber: number, token: 
     const path = `repos/${repo}/issues/${issueNumber}/comments?per_page=${PAGE_SIZE}&page=${page}`;
     let arr: unknown;
     if (ghMode) {
-      arr = JSON.parse(await runGh(["api", path]));
+      arr = JSON.parse(await runGh(["api", path], { timeoutMs }));
     } else {
       const r = await fetch(`https://api.github.com/${path}`, {
         headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
       arr = await r.json();
@@ -116,10 +129,16 @@ async function listIssueCommentBodies(repo: string, issueNumber: number, token: 
 
 /** Post one comment on an issue. Returns whether GitHub accepted it; `false` when no transport is
  *  usable or EITHER transport rejected or threw (a connection failure is normalised, never thrown). */
-async function postIssueComment(repo: string, issueNumber: number, body: string, token: string): Promise<boolean> {
+async function postIssueComment(
+  repo: string,
+  issueNumber: number,
+  body: string,
+  token: string,
+  timeoutMs: number,
+): Promise<boolean> {
   try {
     if (await useGh()) {
-      await runGh(["issue", "comment", String(issueNumber), "--repo", repo, "--body", body]);
+      await runGh(["issue", "comment", String(issueNumber), "--repo", repo, "--body", body], { timeoutMs });
       return true;
     }
     if (!token) return false;
@@ -131,6 +150,7 @@ async function postIssueComment(repo: string, issueNumber: number, body: string,
         "content-type": "application/json",
       },
       body: JSON.stringify({ body }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     return r.ok;
   } catch {
@@ -180,6 +200,7 @@ export async function attemptIssuePrLink(
   data: DataLayer,
   token: string = process.env.GITHUB_TOKEN ?? "",
   now: () => Date = () => new Date(),
+  ioTimeoutMs: number = ISSUE_PR_LINK_IO_TIMEOUT_MS,
 ): Promise<IssuePrLinkOutcome> {
   try {
     const row = await featureRuns(data).get(featureKey);
@@ -217,7 +238,7 @@ export async function attemptIssuePrLink(
     // The marker scan (every page) heals a crash between a successful POST and the confirm.
     let bodies: string[] | null;
     try {
-      bodies = await listIssueCommentBodies(issueRepo, issueNumber, token);
+      bodies = await listIssueCommentBodies(issueRepo, issueNumber, token, ioTimeoutMs);
     } catch {
       // UNREADABLE — posting blind could double-post. Leave the lease to expire; the poller retries.
       return "list-failed";
@@ -254,6 +275,7 @@ export async function attemptIssuePrLink(
       issueNumber,
       prOpenedCommentBody({ number: pr.number, title, url: pr.url }),
       token,
+      ioTimeoutMs,
     );
     // A failure leaves the lease to expire (never confirmed) — the poller's retry pass re-attempts.
     if (!posted) return "post-failed";
