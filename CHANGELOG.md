@@ -1,3 +1,9 @@
+## [0.204.0](https://github.com/nanobpm/nano-workforce/compare/v0.203.1...v0.204.0) (2026-11-04)
+
+### Features
+
+* **feature-run:** post one idempotent "PR opened" comment on the claimed issue ([#912](https://github.com/nanobpm/nano-workforce/issues/912)) ([6c9219a](https://github.com/nanobpm/nano-workforce/commit/6c9219a8e2ca8ba3c495e07c20ee4ae9c3bf60be)), closes [camunda/camunda#19090](https://github.com/camunda/camunda/issues/19090) [#n](https://github.com/nanobpm/nano-workforce/issues/n) [#907](https://github.com/nanobpm/nano-workforce/issues/907) [#907](https://github.com/nanobpm/nano-workforce/issues/907)
+
 ## [0.203.1](https://github.com/nanobpm/nano-workforce/compare/v0.203.0...v0.203.1) (2026-11-03)
 
 ### Documentation
