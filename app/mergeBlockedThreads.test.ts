@@ -83,14 +83,18 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
   return { data, stores };
 }
 
-function recordingEngine(): { engine: EngineClient; messages: any[] } {
+function recordingEngine(): { engine: EngineClient; messages: any[]; cancelled: string[] } {
   const messages: any[] = [];
+  const cancelled: string[] = [];
   const engine = {
     async publishMessage(msg: any) {
       messages.push(msg);
     },
+    async cancelInstance(args: { processInstanceKey: string }) {
+      cancelled.push(String(args.processInstanceKey));
+    },
   } as any as EngineClient;
-  return { engine, messages };
+  return { engine, messages, cancelled };
 }
 
 // A token-transport GitHub stub serving the REST PR view (`mergeable_state: "blocked"`, the
@@ -225,14 +229,31 @@ test("#921/PR#922 poller: a 'review-threads' verdict hands the PR back into conv
   // leaves the PR in `waiting_merge`, which `pollReviews` never scans — no review-fix agent would
   // ever activate); it re-enters the PR into the canonical convergence loop: the row flips to
   // `waiting_review` and a FRESH convergence instance is created.
+  //
+  // The row's `process_key` names the LIVE merge instance (the realistic merge-stage shape). The
+  // handoff must RETIRE it first (PR #922 review, thread 3): left running, `submitPr`'s idempotency
+  // gate would classify the PR `alreadyRunning` and start NOTHING — no convergence instance would
+  // ever launch and the old merge timer would keep running. Cancelling it flips the derived
+  // tracking status terminal, so the gate falls through and the fresh convergence run takes over.
   const { data, stores } = memData();
   const instances: any[] = [];
-  const { engine } = recordingEngine();
+  const { engine, cancelled } = recordingEngine();
   (engine as any).createInstance = async (args: any) => {
     instances.push(args);
     return { processInstanceKey: "conv-1" };
   };
-  stores["pull_requests"] = [waitingMergeRow("o/r#100", 100)];
+  const mergeRow = { ...waitingMergeRow("o/r#100", 100), process_key: "merge-1" };
+  stores["pull_requests"] = [mergeRow];
+  // The derived tracking VIEW the idempotency gate reads: the merge instance is LIVE (non-terminal)
+  // until the handoff's `cancelInstance` retires it. The stub folds the row to a terminal edge
+  // (`abandoned`) once its `process_key` is cancelled, mirroring the ADR-0065 reconciler.
+  stores["pull_requests__tracking"] = [{ ...mergeRow, derived_status: "waiting_merge" }];
+  (engine as any).cancelInstance = async (args: { processInstanceKey: string }) => {
+    cancelled.push(String(args.processInstanceKey));
+    for (const t of stores["pull_requests__tracking"]) {
+      if (t.process_key === String(args.processInstanceKey)) t.derived_status = "abandoned";
+    }
+  };
   // A stale adjudication from the prior convergence run must be wiped by the re-open, so the fresh
   // run never replays a prior decision (issue #806 reset, exercised through the handoff path).
   stores["pr_adjudications"] = [{ pr_key: "o/r#100", question: "q", answer: "a" }];
@@ -273,6 +294,7 @@ fi
     await rm(bin, { recursive: true, force: true });
   }
   const row = stores["pull_requests"][0];
+  assertEquals(cancelled, ["merge-1"], "the live merge instance is retired before the re-open");
   assertEquals(row.status, "converging", "the re-opened PR row presents the fresh convergence run");
   assertEquals(row.process_key, "conv-1", "the row is re-pointed at the fresh convergence instance");
   assertEquals(instances.length, 1, "exactly one fresh convergence instance is started");

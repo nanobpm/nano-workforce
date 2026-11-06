@@ -862,10 +862,16 @@ export interface PrState {
    *     perpetually-null entry on such a repo must NOT read as an eviction, so the classifier stays
    *     conservative and leaves the `landedWaitTimeout` human backstop to cover a never-lands wedge. */
   mergeQueueEntry: boolean | null;
-  /** Count of UNRESOLVED review threads on the PR (GraphQL `reviewThreads{isResolved}`), populated
-   * only when `fetchPrState` is called with `{ withReviewThreads: true }` (the merge-stage
-   * `waiting_merge` poll + the `merge-stall-probe` worker) — otherwise `-1` ("not probed"), the
-   * conservative value that keeps {@link classifyMergeability} on exactly its pre-#921 behaviour.
+  /** Count of UNRESOLVED review threads on the PR (GraphQL `reviewThreads{isResolved}`). Tri-state
+   * (PR #922 review):
+   *   • `>= 0` — the probe was opted into (`withReviewThreads: true`, the merge-stage
+   *     `waiting_merge` poll + the `merge-stall-probe` worker) and succeeded: the real count.
+   *   • `-1`   — NOT probed: the caller did not opt in, so threads are not part of its verdict.
+   *     This keeps {@link classifyMergeability} on exactly its pre-#921 behaviour for every
+   *     non-merge-stage caller (e.g. the readiness `pr` probe).
+   *   • `-2` ({@link THREAD_PROBE_FAILED}) — the probe WAS opted into but the read failed, so the
+   *     count is UNKNOWN. A failed read must never be conflated with `-1` (unprobed): an opted-in
+   *     merge-stage read that couldn't verify threads is not merge-ready.
    * This is the signal that classifies a `BLOCKED` merge state whose checks are all green: branch
    * protection's `required_conversation_resolution` blocks the merge while any review thread is
    * open, and those threads are REVIEW FINDINGS the convergence loop can act on — not a human
@@ -1211,20 +1217,36 @@ export async function fetchPrState(
   };
 }
 
+/** Sentinel for an OPTED-IN review-threads probe that FAILED (PR #922 review). Distinct from the
+ * `-1` "not probed" sentinel: `-1` means the caller never asked (threads are not part of its
+ * verdict — the pre-#921 default); `THREAD_PROBE_FAILED` means the caller asked and the read
+ * errored, so the unresolved-thread count is UNKNOWN. Both are not-merge-ready, but a failed
+ * opted-in read must never be conflated with an unprobed one — a CLEAN PR whose probe errored
+ * must NOT classify `ready` and merge over threads that were never verified resolved. */
+export const THREAD_PROBE_FAILED = -2;
+
 /** Count a PR's unresolved review threads for the BLOCKED-cause classification (issue #921), but
  * ONLY when the caller opted in (`withReviewThreads: true`) — it is an extra GraphQL round-trip, so
  * every other caller keeps `-1` ("not probed"), the conservative value that leaves
- * {@link classifyMergeability} on its pre-#921 behaviour. An unreadable/errored thread read also
- * degrades to `-1` (never fabricates a "no threads" verdict off a failed read). */
+ * {@link classifyMergeability} on its pre-#921 behaviour.
+ *
+ * Failure semantics (PR #922 review): the two `-1`-producing cases are NOT interchangeable, so an
+ * OPTED-IN read that fails does NOT collapse to the unprobed `-1` sentinel — it returns
+ * {@link THREAD_PROBE_FAILED} (`-2`) instead. `-1` means "this caller never asked, so threads are
+ * not part of its verdict" (the pre-#921 default); `-2` means "this caller asked and the read
+ * failed, so the thread count is UNKNOWN". The classifier treats both as not-merge-ready, but a
+ * failed opted-in read must never be mistaken for an unprobed one — otherwise a CLEAN PR whose
+ * thread probe errored would classify `ready` and merge over threads that were never verified
+ * resolved. */
 async function countUnresolvedThreads(
   repo: string,
   number: number | string,
   token: string,
   opts?: { withReviewThreads?: boolean },
 ): Promise<number> {
-  if (!opts?.withReviewThreads) return -1;
+  if (!opts?.withReviewThreads) return -1; // not probed — threads are not part of this caller's verdict
   const threads = await fetchReviewThreads(repo, number, token).catch(() => null);
-  if (threads === null) return -1;
+  if (threads === null) return THREAD_PROBE_FAILED; // opted in but the read failed → UNKNOWN, not unprobed
   return threads.filter((t) => !t.isResolved).length;
 }
 
@@ -1476,9 +1498,10 @@ export type Mergeability = "ready" | "waiting" | "conflict" | "blocked" | "draft
 export type BlockedCause = "checks" | "review-threads" | "reviews" | "unknown";
 
 /** Classify why a `BLOCKED` PR is blocked. Pure; unit-tested. Only meaningful for a state read
- * that opted into the review-threads probe (`unresolvedThreads >= 0`); an unprobed read (`-1`)
- * can never distinguish "no threads" from "couldn't read threads", so it reports `"unknown"` and
- * the caller keeps waiting — a failed read must never fabricate a "reviews"-caused escalation. */
+ * that opted into the review-threads probe (`unresolvedThreads >= 0`); an unprobed read (`-1`) or a
+ * FAILED probe (`THREAD_PROBE_FAILED`, `-2`) can never distinguish "no threads" from "couldn't read
+ * threads", so it reports `"unknown"` and the caller keeps waiting — a failed read must never
+ * fabricate a "reviews"-caused escalation. */
 export function classifyBlockedCause(s: PrState): BlockedCause {
   if (s.failingChecks > 0) return "checks";
   // Checks unenumerable (token mode, `failingChecks === -1`): "green checks" can't be confirmed, so
@@ -1556,25 +1579,41 @@ export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Merg
   // ready. The poller self-heals this (mark-ready) when the repo's protocol wants a fresh head run,
   // else escalates with an actionable message.
   if (s.isDraft) return "draft";
-  // Protocol-aware backstop FIRST (issue #392): honour the repo's declared `requiredChecks`
-  // against the actual head rollup, so an `UNSTABLE` PR with a red DECLARED-required
-  // check is no longer blindly `ready`. This never weakens GitHub branch protection (the switch
-  // below still gates) — it only tightens merges on repos that under-specify their required checks.
-  const gate = requiredChecksVerdict(s, protocol);
-  if (gate === "blocked") return "blocked";
-  if (gate === "waiting") return "waiting";
   // The merge-stage thread gate (issue #921, PR #922 review): a read that opted into the
-  // review-threads probe (`unresolvedThreads >= 0`) and found ≥1 open thread is NEVER merge-ready,
+  // review-threads probe and found ≥1 open thread (`unresolvedThreads > 0`) is NEVER merge-ready,
   // whatever `mergeStateStatus` says. A repo without branch-protection
   // `required_conversation_resolution` reports such a PR CLEAN/UNSTABLE — mergeable by GitHub's
   // rules — but issue #921's merge contract is zero unresolved threads: those threads are review
   // findings the loop converges with, so the PR routes back into convergence instead of landing
   // over them. An UNPROBED read (`-1`) keeps exactly its pre-#921 behaviour — every non-merge-stage
   // caller (e.g. the readiness `pr` probe, readiness.ts `matchPr`) never opted in and is untouched.
-  // The gate only fires once checks are KNOWN settled (none failing, none pending, checks
-  // enumerable): a failing/pending check owns the verdict (fix-ci / wait), so a red-or-in-flight
-  // rollup never routes to a review round on top of the CI problem.
-  if (s.unresolvedThreads > 0 && s.failingChecks === 0 && s.pendingCheckNames.length === 0) return "review-threads";
+  // A FAILED opted-in probe (`THREAD_PROBE_FAILED`, `-2`) is likewise never merge-ready: the thread
+  // count is UNKNOWN, so the read holds `waiting` rather than merging over threads it could not
+  // verify (PR #922 review, thread 1).
+  //
+  // This gate runs BEFORE the required-checks backstop and the `mergeStateStatus` switch so a known
+  // open thread can never fall through to a `ready` (PR #922 review, thread 2). The verdict splits
+  // on whether the checks are KNOWN settled:
+  //   • a failing check (`failingChecks > 0`) owns remediation → `blocked` (fix-ci), never a review
+  //     round on top of the CI problem;
+  //   • checks settled green (none failing, none pending, enumerable) → the threads OWN the
+  //     verdict: `review-threads` routes the PR back into a convergence round;
+  //   • otherwise (a pending check, or checks unenumerable in token mode, `failingChecks === -1`) →
+  //     the threads still block the merge but the check state owns the verdict, so hold `waiting`
+  //     and re-fire the gate on the next pass once the rollup settles.
+  if (s.unresolvedThreads === THREAD_PROBE_FAILED) return "waiting";
+  if (s.unresolvedThreads > 0) {
+    if (s.failingChecks > 0) return "blocked";
+    if (s.failingChecks === 0 && s.pendingCheckNames.length === 0) return "review-threads";
+    return "waiting";
+  }
+  // Protocol-aware backstop (issue #392): honour the repo's declared `requiredChecks`
+  // against the actual head rollup, so an `UNSTABLE` PR with a red DECLARED-required
+  // check is no longer blindly `ready`. This never weakens GitHub branch protection (the switch
+  // below still gates) — it only tightens merges on repos that under-specify their required checks.
+  const gate = requiredChecksVerdict(s, protocol);
+  if (gate === "blocked") return "blocked";
+  if (gate === "waiting") return "waiting";
   switch (s.mergeStateStatus) {
     case "CLEAN":
     case "HAS_HOOKS":

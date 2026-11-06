@@ -1806,10 +1806,11 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
         // (round 1). The review-round agent's backlog IS the open threads: it fixes or pushes back,
         // replies, and resolves them; on `converged` the converge-gate re-verifies zero unresolved
         // threads and `pr.finalize` re-enters the merge stage — merging resumes automatically.
-        // `submitPr`'s idempotency gate does not short-circuit here: the row is non-terminal
-        // (`waiting_merge`) but its `process_key` names the MERGE instance, so the gate's
-        // human-approval narrow targets the merge-loop (inert — nothing there reads it) and the
-        // re-open proceeds. Once the fresh convergence instance exists, `pr.progress-check` parks
+        // The handoff first RETIRES the live merge instance (see the cancel below): while the row's
+        // `process_key` names a non-terminal merge instance, `submitPr`'s idempotency gate would
+        // classify the PR `alreadyRunning` and start nothing, so the cancel flips the derived
+        // tracking status terminal and lets the fresh convergence run take over. Once the fresh
+        // convergence instance exists, `pr.progress-check` parks
         // the row back in `waiting_merge` after the round, where this block's verdict has by then
         // flipped off `review-threads` (the gate guarantees it) — so this fires at most once per
         // thread-blocked episode. A failed start leaves the row in `waiting_review`, whose
@@ -1821,6 +1822,23 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
           // never satisfy the new run's wait.
           const handoffTs = now();
           await prs(data).update(prKey, { status: "waiting_review", waiting_since: handoffTs, updated_at: handoffTs });
+          // Retire the LIVE merge instance BEFORE re-opening (PR #922 review): while the row's
+          // `process_key` still names a non-terminal merge instance, `submitPr`'s idempotency gate
+          // classifies the PR `alreadyRunning` and starts NOTHING — no convergence instance ever
+          // launches and the old merge timer keeps running (it can still escalate the unresolved
+          // threads). Cancelling it first flips the derived tracking status to a terminal edge
+          // (`abandoned`), so the gate falls through and the fresh convergence run is created and
+          // takes over as the row's owner. The cancel is best-effort and stage-aware: it only
+          // fires on this merge-stage handoff, and a cancel failure is caught below (the row is
+          // left in `waiting_review`, whose review-wait machinery still covers it).
+          const mergeKey = pr.process_key;
+          if (mergeKey != null) {
+            try {
+              await engine.cancelInstance({ processInstanceKey: String(mergeKey) });
+            } catch (cancelErr) {
+              console.error(`[poller] review-threads handoff ${prKey}: retire merge instance ${mergeKey}: ${cancelErr}`);
+            }
+          }
           await submitPr(data, engine, { repo, number, url: pr.url, prKey });
           console.log(
             `[poller] blocked by ${st.unresolvedThreads} unresolved review thread(s) -> handed back into convergence -> ${prKey}`,
