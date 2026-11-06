@@ -33,6 +33,14 @@ interface Out extends Record<string, unknown> {
   mergeState: string;
   failingChecks: number;
   failingChecksList: string;
+  // The unresolved-review-thread count behind a `review-threads` verdict (issue #921), mirrored
+  // into the escalation question so a human sees exactly what blocks the merge. `-1` = unprobed.
+  reviewThreads: number;
+  // The pending-check count (PR #922 review): zero failing checks does not mean checks are green —
+  // a queued/running check leaves the BLOCKED cause undetermined, so the stall-escalation question
+  // gates its "required review approval" wording on this being 0 too (never claims a verified
+  // blocker off a half-settled rollup).
+  pendingChecks: number;
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
@@ -44,10 +52,14 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // GitHub reports UNSTABLE. Any transport hiccup is treated as "still waiting" — never a spurious
   // ready/conflict verdict — so a bad read is surfaced as `waiting`, which `gw-mergeable` routes to
   // a bounded re-poll (#774) rather than misrouting the token to a wrong remediation arm; a
-  // genuinely stuck verdict still escalates once the `mergeStallMax` budget is exhausted.
-  const st = await fetchPrState(repo, prNumber, token).catch(() => null);
+  // genuinely stuck verdict still escalates once the `mergeStallMax` budget is exhausted. The read
+  // opts into the review-threads probe (`withReviewThreads`) so a `BLOCKED` merge state is
+  // classified by its real cause (issue #921) — unresolved review threads surface as the
+  // `review-threads` verdict and route to their own arm instead of re-polling until the budget
+  // exhausts into the misleading "mergeability never settled" escalation.
+  const st = await fetchPrState(repo, prNumber, token, { withReviewThreads: true }).catch(() => null);
   if (st === null) {
-    return { mergeState: "waiting", failingChecks: 0, failingChecksList: "" };
+    return { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1, pendingChecks: 0 };
   }
   const protocol = await loadMergeProtocol(repo, token).catch(() => null);
   const mergeState = classifyMergeability(st, protocol ?? undefined);
@@ -64,6 +76,8 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     // poller's `merge-ready` payload so fix-ci knows which gates to green.
     failingChecks: st.failingChecks,
     failingChecksList: st.failingCheckNames.join("\n"),
+    reviewThreads: st.unresolvedThreads,
+    pendingChecks: st.pendingCheckNames.length,
   };
 };
 

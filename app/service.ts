@@ -1698,6 +1698,77 @@ export async function maybeEnsureFreshHeadRun(
  * EVERY branch first runs {@link advanceIfTerminalOutOfBand} — one shared "is this PR already
  * terminal (merged/closed) out-of-band?" pre-check — so no merge stage can silently strand when a PR
  * is landed/closed outside the loop (the `waiting_deps` self-merged wedge, #368). */
+/** Durably hand a `waiting_merge` PR back into the canonical convergence loop (issue #921, PR #922
+ * review): flip the row to `waiting_review` FIRST (so a review landing in the start window is still
+ * collected by `pollReviews` — it scans on `waiting_review`, not on instance liveness), RETIRE the
+ * live merge instance (while the row's `process_key` names a non-terminal merge instance, `submitPr`'s
+ * idempotency gate classifies the PR `alreadyRunning` and starts NOTHING — the cancel flips the derived
+ * tracking status terminal so the gate falls through), then `submitPr` re-opens the PR into a fresh
+ * convergence instance (round 1). The review-round agent's backlog IS the open threads: it fixes or
+ * pushes back, replies, and resolves them; on `converged` the converge-gate re-verifies zero
+ * unresolved threads and `pr.finalize` re-enters the merge stage — merging resumes automatically.
+ *
+ * The escalation-steward opt-in is carried through the resubmission (PR #922 review): `submitPr`
+ * defaults `autoResolveEscalations` to false and overwrites the row's flag on reopen, so an opted-in PR
+ * would silently lose automated escalation resolution merely because late review threads appeared.
+ *
+ * RETRYABLE on failure (PR #922 review, thread 3): if the cancel succeeds but `submitPr` throws, the
+ * row is restored to `waiting_merge` so the next pass re-attempts the handoff against the
+ * already-retired (terminal) merge key — rather than stranding in `waiting_review`, which `pollMerges`
+ * no longer scans and whose `readiness-ready` resume correlates to nothing once the merge instance is
+ * cancelled. The restored row's `process_key` still names the now-terminal merge instance, so the
+ * unfinished handoff is re-detected next pass by the dead-owner guard in `pollMerges` (which keys off
+ * the terminal `derived_status`, independently of the GitHub verdict). Best-effort throughout: a failed
+ * cancel or restore only logs, leaving the row for the next pass. */
+async function handoffWaitingMergeToConvergence(
+  data: DataLayer,
+  engine: EngineClient,
+  pr: PullRequest,
+  logContext: string,
+) {
+  const prKey = pr.pr_key;
+  try {
+    // `waiting_since` bounds the review the fresh loop collects: only a review submitted at or after
+    // the handoff counts, so a pre-merge review (submitted before this flip) can never satisfy the new
+    // run's wait.
+    const handoffTs = now();
+    await prs(data).update(prKey, { status: "waiting_review", waiting_since: handoffTs, updated_at: handoffTs });
+    const mergeKey = pr.process_key;
+    if (mergeKey != null) {
+      try {
+        await engine.cancelInstance({ processInstanceKey: String(mergeKey) });
+      } catch (cancelErr) {
+        console.error(`[poller] ${logContext} handoff ${prKey}: retire merge instance ${mergeKey}: ${cancelErr}`);
+      }
+    }
+    await submitPr(
+      data,
+      engine,
+      { repo: pr.repo, number: pr.number, url: pr.url, prKey },
+      [],
+      MAX_ROUNDS,
+      false,
+      null,
+      false,
+      pr.auto_resolve_escalations === 1,
+    );
+    console.log(`[poller] ${logContext} -> handed back into convergence -> ${prKey}`);
+  } catch (err) {
+    console.error(`[poller] ${logContext} handoff ${prKey}: ${err}`);
+    // Restore the row to `waiting_merge` so the next pass re-attempts the handoff, and NULL the
+    // `process_key`: the merge instance was retired above (or never lived), so the row genuinely has
+    // NO live owner. The null key is the durable "unfinished handoff" marker the dead-owner guard in
+    // `pollMerges` keys on — and it is what distinguishes this retryable shape from a HUMAN cancel of a
+    // parked merge wait (which leaves `process_key` naming the terminated instance and must NOT be
+    // resurrected). Best-effort: a failed restore still leaves the original error logged.
+    try {
+      await prs(data).update(prKey, { status: "waiting_merge", process_key: null, updated_at: now() });
+    } catch (restoreErr) {
+      console.error(`[poller] ${logContext} handoff ${prKey}: restore waiting_merge: ${restoreErr}`);
+    }
+  }
+}
+
 export async function pollMerges(data: DataLayer, engine: EngineClient, token: string) {
   // 1) Dependencies merged?
   for (const pr of await prs(data).find({ status: "waiting_deps" })) {
@@ -1731,7 +1802,12 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
   for (const pr of await prs(data).find({ status: "waiting_merge" })) {
     const { repo, number, pr_key: prKey } = pr;
     try {
-      const st = await fetchPrState(repo, number, token);
+      // Opt into the review-threads probe so a `BLOCKED` merge state is classified by its real
+      // cause (issue #921): unresolved review threads (branch protection
+      // `required_conversation_resolution`) surface as the `review-threads` verdict below instead
+      // of polling as "waiting" until the mergeable-wait timer escalates the misleading
+      // "mergeability never settled". One extra GraphQL read per pass per waiting PR.
+      const st = await fetchPrState(repo, number, token, { withReviewThreads: true });
       if (st === null) continue; // no transport → skip this PR (others may still advance)
       // Out-of-band terminal (merged/closed) → the shared pre-check publishes `merge-ready {ready}`,
       // routing through `gw-mergeable → attempt-merge` whose idempotent already-merged check completes
@@ -1739,6 +1815,39 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
       // (#342/#350). Reuse the `st` we just read so we don't double-fetch. This is the proven terminal
       // path the whole class (#368) now shares.
       if (await advanceIfTerminalOutOfBand(data, engine, pr, token, st)) continue;
+      // DEAD-OWNER guard (PR #922 review, round 5): a `waiting_merge` row with `process_key === null`
+      // has NO live owner — the unfinished-handoff shape {@link handoffWaitingMergeToConvergence}
+      // leaves when its `submitPr` failed after the merge instance was retired (the restore nulls the
+      // key to mark exactly this). The verdict switch below must NOT run against it: every arm ends in
+      // `flipToMergingThenPublish`, which would publish `merge-ready`/`merge-evicted`/remediation
+      // correlated to a merge instance that no longer exists — the message is dropped and the row wedges
+      // at the transient `merging` with no live owner (a fresh `ready`/`conflict`/`blocked` verdict after
+      // the threads cleared is exactly the case the retry-restore leaves behind). Persist the handoff
+      // INDEPENDENTLY of the current GitHub verdict: re-establish a live convergence owner FIRST,
+      // publishing nothing. Keying on the NULL key — not on the terminal `derived_status` — is what
+      // keeps a HUMAN cancel of a parked merge wait (which leaves `process_key` naming the terminated
+      // instance) OUT of this path: a cancelled run must stay cancelled, never auto-resurrected. A
+      // normal merge wait always carries a live `process_key`, so this fires only on the
+      // ownerless-handoff shape. Placed after the out-of-band terminal pre-check so a merged/closed PR
+      // still takes the proven terminal path first.
+      if (pr.process_key == null) {
+        await handoffWaitingMergeToConvergence(data, engine, pr, "dead merge owner (unfinished handoff)");
+        continue;
+      }
+      // HUMAN-CANCEL guard (PR #922 review, round 5): a `waiting_merge` row whose `process_key` names a
+      // TERMINAL merge instance (`derived_status` folded to `abandoned`) was cancelled out-of-band. The
+      // verdict switch must NOT run against it either — publishing `merge-ready`/`merge-evicted`/
+      // remediation to the dead instance is dropped and wedges the row at `merging` (the reviewer's "a
+      // new conflict or check failure likewise sends remediation to the dead owner"). Unlike the
+      // unfinished-handoff shape above, a cancelled run must NOT be resurrected into convergence — the
+      // abandon protocol exists to stop exactly that orphaned side effect — so it is simply SKIPPED
+      // (left cancelled) with nothing published. A LIVE parked merge wait reads a non-terminal
+      // `derived_status` (`waiting_merge` ∈ activeStatuses), so this fires only on the cancelled shape.
+      const trackedMerge = await prsTracking(data).get(prKey);
+      if (trackedMerge && TERMINAL_STATUSES.includes(trackedMerge.derived_status)) {
+        console.log(`[poller] merge owner terminal (cancelled) — leaving ${prKey} abandoned, no merge message published`);
+        continue;
+      }
       // Load the repo's merge protocol ONCE per PR iteration and pass it into the classifier so the
       // protocol-aware backstop (#392) can gate a red DECLARED-required check even when GitHub reports
       // the PR as UNSTABLE. The same handle is reused by the frugal-CI fresh-head-run branch below.
@@ -1788,6 +1897,25 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
         }
         continue; // GitHub still computing / checks pending
       }
+      if (verdict === "review-threads") {
+        // BLOCKED by unresolved review threads with every check green (issue #921): the threads are
+        // findings from the reviewer this loop converges with, so route them back into convergence
+        // rather than escalating to a human. Requesting another Copilot review alone does NOT
+        // remediate them: `pollReviews` only scans `waiting_review` rows, so a review landing while
+        // the PR sits in `waiting_merge` is never picked up and no review-fix agent ever activates
+        // (PR #922 review). The handoff is a DURABLE re-entry into the canonical convergence loop
+        // (see {@link handoffWaitingMergeToConvergence}). Once the fresh convergence instance exists,
+        // `pr.progress-check` parks the row back in `waiting_merge` after the round, where this
+        // block's verdict has by then flipped off `review-threads` (the gate guarantees it) — so this
+        // fires at most once per thread-blocked episode.
+        await handoffWaitingMergeToConvergence(
+          data,
+          engine,
+          pr,
+          `blocked by ${st.unresolvedThreads} unresolved review thread(s)`,
+        );
+        continue;
+      }
       if (verdict === "ready") {
         const lane = await mergeLaneDecisionForPr(data, prKey);
         if (lane?.isHeld) {
@@ -1807,6 +1935,16 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
           // fix-ci task appends it to the agent prompt so the agent knows which gates to green.
           failingChecks: st.failingChecks,
           failingChecksList: st.failingCheckNames.join("\n"),
+          // The probed unresolved-thread count (issue #921) — carried so a later stall-budget
+          // escalation can name the real BLOCKED cause (and so the `review-threads` arm's question
+          // can quote it). `-1` when the probe was unreadable.
+          reviewThreads: st.unresolvedThreads,
+          // The pending-check count (PR #922 review): zero failing checks does not mean checks are
+          // green — a queued/running check leaves the BLOCKED cause undetermined, so the
+          // stall-escalation question gates its "required review approval" wording on this being 0
+          // too. 0 in token mode (checks unenumerable — the conservative `waiting` verdict already
+          // keeps the approval wording from firing there).
+          pendingChecks: st.pendingCheckNames.length,
         },
       });
       console.log(`[poller] mergeable=${verdict} (${st.mergeStateStatus}) -> ${prKey}`);

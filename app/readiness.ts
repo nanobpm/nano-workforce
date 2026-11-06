@@ -768,6 +768,7 @@ export function parsePrView(payload: unknown): PrObservation {
     isDraft: j.isDraft === true,
     headRefOid: str(j.headRefOid).trim() || null,
     mergeQueueEntry: null, // readiness probe doesn't read native-queue membership (merge-loop-only signal)
+    unresolvedThreads: -1, // …nor the review-threads probe (merge-stage-only signal, #921) → unprobed
     mergedSha,
     pendingChecks: pending.length,
   };

@@ -96,6 +96,8 @@ const DEFAULT_VARS: Record<string, unknown> = {
   mergeStatus: null,
   ciBlockedReconciled: null,
   failingChecks: 0,
+  reviewThreads: null,
+  pendingChecks: null,
   round: 2,
   abandonUrl: "http://host/app/api/hooks/abandon?token=tok-seeded",
 };
@@ -519,6 +521,133 @@ test("an unclassified verdict routes to auto-rebase (DEFAULT), not to a human (#
     .hasVariable("rebaseRound", 1);
   const openTasks = await engine.searchUserTasks({});
   assert(!openTasks.some((t) => t.elementId === "wait-merge-answer"), "the default arm must not page a human");
+});
+
+// ---------------------------------------------------------------------------
+// BLOCKED by unresolved review threads (issue #921)
+// ---------------------------------------------------------------------------
+// A PR at MERGEABLE/BLOCKED with all checks green and ≥1 unresolved review thread (branch
+// protection `required_conversation_resolution`) used to classify as "waiting": the poller never
+// published, the mergeable-wait timer fired, the stall probe re-derived the same "waiting", and
+// after the stall budget the escalation read "GitHub never settled this PR's mergeability" — when
+// GitHub HAD settled. The `review-threads` verdict now routes to a dedicated escalation that names
+// the real cause (and parks the shared `wait-merge-answer` task, whose answer re-arms the poller),
+// never to the CI-fix or rebase agents.
+
+test("a 'review-threads' verdict escalates naming the unresolved threads — never 'never settled', never an agent (#921)", async () => {
+  const engine = await boot();
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({
+    name: "merge-ready",
+    correlationKey: "pr-1",
+    variables: { mergeState: "review-threads", reviewThreads: 2, failingChecks: 0, failingChecksList: "" },
+  });
+  // The threads arm parks the shared answer task with the thread-specific question…
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasCompletedElements("merge-esc-threads");
+  const q = String(escalation(engine).question ?? "");
+  assertStringIncludes(q, "2 unresolved review thread(s)", "the escalation must name the actual blocker and count");
+  assert(!q.includes("never settled"), "a settled BLOCKED must never read as 'mergeability never settled'");
+  // …and never misroutes to the remediation agents or the generic conflict escalation.
+  assert(!completedElementIds(engine).has("fix-ci"), "green checks must not dispatch fix-ci");
+  assert(!completedElementIds(engine).has("rebase"), "a threads block must not dispatch rebase");
+  assert(!completedElementIds(engine).has("merge-esc-conflict"), "the threads arm has its own escalation");
+});
+
+test("answering the review-threads escalation re-arms the merge poller (#921)", async () => {
+  // The human resolves the threads on GitHub and replies; the answer re-arms `arm-merge` so the
+  // next poll re-derives mergeability — once the threads are gone the verdict flips to `ready` and
+  // the merge proceeds (the merge step is thereby gated on zero unresolved threads).
+  const engine = await boot({ responses: { "pr.merge": { mergeStatus: "merged" } } });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({
+    name: "merge-ready",
+    correlationKey: "pr-1",
+    variables: { mergeState: "review-threads", reviewThreads: 1, failingChecks: 0 },
+  });
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  await engine.completeUserTask(await mergeAnswerTaskKey(engine), { answer: "resolved the threads" });
+  // Re-armed at the poller wait — not merged yet (the poller must re-derive)…
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-mergeable");
+  // …then the re-derived ready verdict lands the merge with no human in the loop.
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready", reviewThreads: 0 } });
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompleted().hasNoIncident().hasCompletedElements("attempt-merge", "mark-merged");
+});
+
+test("a stalled probe that re-derives 'review-threads' routes to the threads arm, not the re-poll loop (#921)", async () => {
+  // The poller-dead path: the mergeable-wait timer fires, the stall probe re-derives ground truth,
+  // and a `review-threads` verdict takes the same dedicated arm a live poller message would.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "review-threads", failingChecks: 0, failingChecksList: "", reviewThreads: 3 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-stall-probe", "merge-esc-threads");
+  const q = String(escalation(engine).question ?? "");
+  assertStringIncludes(q, "3 unresolved review thread(s)", "the probe path must carry the thread count into the question");
+  assert(!completedElementIds(engine).has("wait-mergeable-repoll"), "a settled review-threads verdict must not re-poll");
+});
+
+test("a stall-budget exhaustion on a settled BLOCKED with zero threads names the review requirement, not 'never settled' (#921)", async () => {
+  // GitHub settled: MERGEABLE/BLOCKED, checks green (none failing, none pending), every thread
+  // resolved — the block is a required human review approval. The probe reports `waiting` (the
+  // conservative verdict) with the probed counts, and the exhausted-budget escalation must name
+  // THAT cause.
+  const engine = await boot({
+    vars: { mergeStallMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: 0, pendingChecks: 0 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-stall-probe", "merge-esc-conflict");
+  const q = String(escalation(engine).question ?? "");
+  assertStringIncludes(q, "required review approval", "a settled BLOCKED with clear threads must name the review requirement");
+  assert(!q.includes("never settled"), "a settled BLOCKED must never read as 'mergeability never settled'");
+});
+
+test("a stall-budget exhaustion with checks still pending must NOT claim a verified review-approval blocker (PR #922 review)", async () => {
+  // Zero failing checks + zero unresolved threads, but a check is still queued/running: the BLOCKED
+  // cause is undetermined (the pending run may come back red), so the escalation must NOT assert
+  // "all checks green … required review approval" — it keeps the conservative unsettled wording.
+  const engine = await boot({
+    vars: { mergeStallMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: 0, pendingChecks: 1 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-stall-probe", "merge-esc-conflict");
+  const q = String(escalation(engine).question ?? "");
+  assert(!q.includes("required review approval"), "a pending check must never read as a verified review-approval block");
+  assertStringIncludes(q, "never settled", "an undetermined BLOCKED keeps the conservative unsettled wording");
+});
+
+test("the 'never settled' question is reserved for a genuinely unreadable/unsettled mergeability (#921)", async () => {
+  // mergeStallMax: 0 + a probe that still reads `waiting` with NOTHING probed (reviewThreads -1,
+  // checks unenumerable) — GitHub genuinely never settled (or the state could not be read). Only
+  // this case keeps the original message.
+  const engine = await boot({
+    vars: { mergeStallMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertStringIncludes(
+    String(escalation(engine).question ?? ""),
+    "never settled",
+    "a genuinely unsettled/unreadable mergeability keeps the original message",
+  );
 });
 
 test("an evicted queued merge re-arms the poller rather than completing", async () => {
