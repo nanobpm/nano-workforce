@@ -1,3 +1,9 @@
+## [0.205.1](https://github.com/nanobpm/nano-workforce/compare/v0.205.0...v0.205.1) (2026-11-06)
+
+### Bug Fixes
+
+* **merge:** classify BLOCKED merge state and route unresolved review threads back into convergence ([#922](https://github.com/nanobpm/nano-workforce/issues/922)) ([5265f66](https://github.com/nanobpm/nano-workforce/commit/5265f66f7a0aca05fbb205c15b2ee0ef45c2aead)), closes [nano-bpm#1427](https://github.com/nanobpm/nano-bpm/issues/1427) [#921](https://github.com/nanobpm/nano-workforce/issues/921) [#921](https://github.com/nanobpm/nano-workforce/issues/921) [pre-#921](https://github.com/nanobpm/pre-/issues/921) [#921](https://github.com/nanobpm/nano-workforce/issues/921) [pre-#921](https://github.com/nanobpm/pre-/issues/921) [#921](https://github.com/nanobpm/nano-workforce/issues/921)
+
 ## [0.205.0](https://github.com/nanobpm/nano-workforce/compare/v0.204.1...v0.205.0) (2026-11-04)
 
 ### Features
