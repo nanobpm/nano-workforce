@@ -175,7 +175,10 @@ function waitingMergeRow(prKey: string, number: number) {
     title: "t",
     status: "waiting_merge",
     current_round: 0,
-    process_key: null,
+    // A real parked merge wait ALWAYS carries a live `process_key` (startMerge/arm-merge set it after
+    // the merge instance is created). `null` is the UNFINISHED-handoff marker the dead-owner guard keys
+    // on, so the realistic default here is a live key — the ownerless-handoff test overrides it to null.
+    process_key: "merge-live-1",
     waiting_since: null,
     last_review_id: null,
     outcome: null,
@@ -397,4 +400,152 @@ fi
   assertEquals(instances[0].processDefinitionId, "convergence-loop", "the canonical convergence loop is re-entered on retry");
   assertEquals(row.status, "converging", "the retried handoff completes — the row presents the fresh convergence run");
   assertEquals(row.process_key, "conv-retry-1", "the row is re-pointed at the fresh convergence instance");
+});
+
+test("#921/PR#922 poller: an UNFINISHED handoff (dead merge instance) never publishes merge-ready to the cancelled owner — it re-establishes a live convergence owner first (PR #922 review, round 5)", async () => {
+  // The round-4 retry-restore leaves a failed handoff's row back in `waiting_merge` — but its
+  // `process_key` still names the CANCELLED merge instance (derived_status `abandoned`). If the next
+  // pass's GitHub verdict has moved off `review-threads` (the threads were resolved out-of-band, so the
+  // PR now reads `ready`), the verdict switch would fall through to `flipToMergingThenPublish` and
+  // publish `merge-ready {ready}` correlated to the DEAD merge instance — the message is dropped and the
+  // row wedges at `merging` with no live owner. The handoff must instead be persisted INDEPENDENTLY of
+  // the current verdict: a `waiting_merge` row whose merge instance is already terminal has no live
+  // merge-loop to signal, so the poller must re-establish a live convergence owner (re-open via
+  // `submitPr`) BEFORE any merge message is contemplated.
+  const { data, stores } = memData();
+  const { engine, messages, cancelled } = recordingEngine();
+  const instances: any[] = [];
+  (engine as any).createInstance = async (args: any) => {
+    instances.push(args);
+    return { processInstanceKey: "conv-fresh-1" };
+  };
+  // The unfinished-handoff shape: a prior pass's handoff retired the merge instance and its `submitPr`
+  // failed, so the restore left the row in `waiting_merge` with `process_key` NULL — no live owner.
+  const mergeRow = { ...waitingMergeRow("o/r#100", 100), process_key: null };
+  stores["pull_requests"] = [mergeRow];
+  stores["pull_requests__tracking"] = [{ ...mergeRow, derived_status: "waiting_merge" }];
+  const calls = { reviewPosts: 0 };
+  const bin = await mkdtemp(join(tmpdir(), "gh-stub-"));
+  // A clean READY verdict: MERGEABLE, all checks green, ZERO unresolved threads — the threads that
+  // triggered the original handoff were resolved out-of-band. This is the verdict that would send the
+  // PR through the normal `ready` branch and publish to the dead owner.
+  const script = `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"pr view"* ]]; then
+  echo '{"state":"OPEN","mergedAt":null,"mergeStateStatus":"CLEAN","statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],"isDraft":false,"headRefOid":"deadbeef","baseRefName":"main"}'
+elif [[ "$*" == *"graphql"* ]]; then
+  echo '${graphqlThreads(0)}'
+elif [[ "$*" == *"requested_reviewers"* ]]; then
+  exit 0
+else
+  echo "unexpected gh args: $*" >&2
+  exit 1
+fi
+`;
+  await writeFile(join(bin, "gh"), script, { mode: 0o755 });
+  const prevPath = process.env.PATH;
+  const prevFetch = globalThis.fetch;
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  process.env.PATH = `${bin}:${prevPath ?? ""}`;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "gh";
+  globalThis.fetch = (() => Promise.resolve(new Response("no fetch in gh mode", { status: 500 }))) as typeof fetch;
+  try {
+    await pollMerges(data, engine, "tok");
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevPath === undefined) delete process.env.PATH;
+    else process.env.PATH = prevPath;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    await rm(bin, { recursive: true, force: true });
+  }
+  const row = stores["pull_requests"][0];
+  assertEquals(
+    messages.filter((m) => m.name === "merge-ready").length,
+    0,
+    "an unfinished handoff must NOT publish merge-ready to the cancelled merge instance — the message would be dropped and the row wedged at merging",
+  );
+  assertEquals(
+    instances.length,
+    1,
+    "the poller re-establishes a live convergence owner before any merge message, independently of the ready verdict",
+  );
+  assertEquals(instances[0].processDefinitionId, "convergence-loop", "the canonical convergence loop is re-entered");
+  assertEquals(row.process_key, "conv-fresh-1", "the row is re-pointed at the fresh live convergence instance");
+  assertEquals(row.status, "converging", "the row presents the fresh convergence run, not a wedged merging");
+});
+
+test("#921/PR#922 poller: a HUMAN-CANCELLED merge-stage PR is NOT resurrected — the dead-owner guard keys on the NULL process_key, not the terminal derived_status", async () => {
+  // Anti-regression for the round-5 guard: a human cancel of a parked merge wait terminates the merge
+  // instance, so the row keeps base `status: "waiting_merge"` (the reconciler no longer writes the
+  // terminal edge onto the base row) and `process_key` STILL naming the terminated instance, while the
+  // derived VIEW folds to `abandoned`. That shape must NOT be re-opened into convergence — a cancelled
+  // run stays cancelled (the abandon protocol exists precisely to stop orphaned side effects). The guard
+  // therefore keys on `process_key === null` (the unfinished-handoff marker the restore writes), NOT on
+  // the terminal `derived_status` — which a human cancel shares. This row keeps `process_key` set, so the
+  // guard must not fire and no convergence instance may be created.
+  const { data, stores } = memData();
+  const { engine, messages } = recordingEngine();
+  const instances: any[] = [];
+  (engine as any).createInstance = async (args: any) => {
+    instances.push(args);
+    return { processInstanceKey: "conv-should-not-start" };
+  };
+  // Human-cancelled shape: base waiting_merge, process_key STILL set (names the terminated instance),
+  // derived_status folded terminal. Distinct from the unfinished handoff (which NULLs process_key).
+  const mergeRow = { ...waitingMergeRow("o/r#100", 100), process_key: "merge-cancelled-by-human" };
+  stores["pull_requests"] = [mergeRow];
+  stores["pull_requests__tracking"] = [{ ...mergeRow, derived_status: "abandoned" }];
+  const calls = { reviewPosts: 0 };
+  const bin = await mkdtemp(join(tmpdir(), "gh-stub-"));
+  const script = `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"pr view"* ]]; then
+  echo '{"state":"OPEN","mergedAt":null,"mergeStateStatus":"CLEAN","statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],"isDraft":false,"headRefOid":"deadbeef","baseRefName":"main"}'
+elif [[ "$*" == *"graphql"* ]]; then
+  echo '${graphqlThreads(0)}'
+elif [[ "$*" == *"requested_reviewers"* ]]; then
+  exit 0
+else
+  echo "unexpected gh args: $*" >&2
+  exit 1
+fi
+`;
+  await writeFile(join(bin, "gh"), script, { mode: 0o755 });
+  const prevPath = process.env.PATH;
+  const prevFetch = globalThis.fetch;
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  process.env.PATH = `${bin}:${prevPath ?? ""}`;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "gh";
+  globalThis.fetch = (() => Promise.resolve(new Response("no fetch in gh mode", { status: 500 }))) as typeof fetch;
+  try {
+    await pollMerges(data, engine, "tok");
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevPath === undefined) delete process.env.PATH;
+    else process.env.PATH = prevPath;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    await rm(bin, { recursive: true, force: true });
+  }
+  assertEquals(
+    instances.length,
+    0,
+    "a human-cancelled merge-stage PR must NOT be resurrected into convergence — its process_key still names the terminated instance, so the dead-owner guard does not fire",
+  );
+  assertEquals(
+    messages.filter((m) => m.name === "merge-ready").length,
+    0,
+    "no merge-ready is published to the cancelled (dead) merge instance — publishing it would be dropped and wedge the row at merging",
+  );
+  assertEquals(
+    stores["pull_requests"][0].process_key,
+    "merge-cancelled-by-human",
+    "the cancelled row's process_key is left untouched (not nulled, not re-pointed)",
+  );
+  assertEquals(
+    stores["pull_requests"][0].status,
+    "waiting_merge",
+    "the cancelled row is left in place (not flipped to the transient merging) — the abandon terminal edge is derived, not poller-written",
+  );
 });
