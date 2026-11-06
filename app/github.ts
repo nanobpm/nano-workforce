@@ -1579,6 +1579,27 @@ export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Merg
   // ready. The poller self-heals this (mark-ready) when the repo's protocol wants a fresh head run,
   // else escalates with an actionable message.
   if (s.isDraft) return "draft";
+  // Protocol-aware backstop (issue #392): honour the repo's declared `requiredChecks`
+  // against the actual head rollup, so an `UNSTABLE` PR with a red DECLARED-required
+  // check is no longer blindly `ready`. This never weakens GitHub branch protection (the switch
+  // below still gates) — it only tightens merges on repos that under-specify their required checks.
+  // It ALSO outranks the thread gate (PR #922 review, thread 2): a declared-required check that is
+  // red (`blocked`) or not-yet-satisfied (`waiting` — e.g. a NEUTRAL build a success-only protocol
+  // rejects, or an absent required check) owns remediation/waiting, so a convergence round must not
+  // start on top of it. Consulting the verdict here keeps the protocol's decisions ahead of the
+  // settled-thread routing below.
+  const gate = requiredChecksVerdict(s, protocol);
+  if (gate === "blocked") return "blocked";
+  if (gate === "waiting") return "waiting";
+  // A GitHub-identified merge conflict (`mergeStateStatus: "DIRTY"`) is ground truth whose remedy is
+  // a rebase, dispatched off the `conflict` verdict. It outranks the thread gate below (PR #922
+  // review, thread 1): a FAILED thread probe (`THREAD_PROBE_FAILED`) returning `waiting` here would
+  // park a KNOWN conflict forever (neither the poller nor the stall probe dispatches the rebase), and
+  // an OPEN thread count returning `review-threads`/`waiting` would route a conflict into a review
+  // round that cannot clear it. Surface the conflict first; the threads are re-triaged once the
+  // rebased head is re-read. (A red declared-required check still outranks even this — see the
+  // backstop above — so a conflicting PR with failing CI routes to fix-ci, not a doomed rebase.)
+  if (s.mergeStateStatus === "DIRTY") return "conflict";
   // The merge-stage thread gate (issue #921, PR #922 review): a read that opted into the
   // review-threads probe and found ≥1 open thread (`unresolvedThreads > 0`) is NEVER merge-ready,
   // whatever `mergeStateStatus` says. A repo without branch-protection
@@ -1591,9 +1612,11 @@ export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Merg
   // count is UNKNOWN, so the read holds `waiting` rather than merging over threads it could not
   // verify (PR #922 review, thread 1).
   //
-  // This gate runs BEFORE the required-checks backstop and the `mergeStateStatus` switch so a known
-  // open thread can never fall through to a `ready` (PR #922 review, thread 2). The verdict splits
-  // on whether the checks are KNOWN settled:
+  // This gate runs BEFORE the `mergeStateStatus` switch's `ready` arms so a known open thread can
+  // never fall through to a `ready` (PR #922 review, thread 2) — but AFTER the conflict and
+  // required-check verdicts above, so it can only ever decide between `ready` and a thread verdict,
+  // never suppress a known conflict or a declared-required-check remediation. The verdict splits on
+  // whether the checks are KNOWN settled:
   //   • a failing check (`failingChecks > 0`) owns remediation → `blocked` (fix-ci), never a review
   //     round on top of the CI problem;
   //   • checks settled green (none failing, none pending, enumerable) → the threads OWN the
@@ -1607,13 +1630,6 @@ export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Merg
     if (s.failingChecks === 0 && s.pendingCheckNames.length === 0) return "review-threads";
     return "waiting";
   }
-  // Protocol-aware backstop (issue #392): honour the repo's declared `requiredChecks`
-  // against the actual head rollup, so an `UNSTABLE` PR with a red DECLARED-required
-  // check is no longer blindly `ready`. This never weakens GitHub branch protection (the switch
-  // below still gates) — it only tightens merges on repos that under-specify their required checks.
-  const gate = requiredChecksVerdict(s, protocol);
-  if (gate === "blocked") return "blocked";
-  if (gate === "waiting") return "waiting";
   switch (s.mergeStateStatus) {
     case "CLEAN":
     case "HAS_HOOKS":

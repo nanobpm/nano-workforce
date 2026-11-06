@@ -242,7 +242,7 @@ test("#921/PR#922 poller: a 'review-threads' verdict hands the PR back into conv
     instances.push(args);
     return { processInstanceKey: "conv-1" };
   };
-  const mergeRow = { ...waitingMergeRow("o/r#100", 100), process_key: "merge-1" };
+  const mergeRow = { ...waitingMergeRow("o/r#100", 100), process_key: "merge-1", auto_resolve_escalations: 1 };
   stores["pull_requests"] = [mergeRow];
   // The derived tracking VIEW the idempotency gate reads: the merge instance is LIVE (non-terminal)
   // until the handoff's `cancelInstance` retires it. The stub folds the row to a terminal edge
@@ -303,4 +303,98 @@ fi
   assertEquals(instances[0].variables.round, 1, "the fresh run restarts at round 1");
   assertEquals(calls.reviewPosts, 0, "no bare re-review request — the handoff, not a nudge, drives remediation");
   assertEquals(stores["pr_adjudications"].length, 0, "the re-open wipes the prior run's adjudication memory (#806)");
+  // PR #922 review (the "previously missed" advisory): the handoff is an INTERNAL resubmission, so it
+  // must carry the row's existing escalation-steward opt-in through — a PR enrolled with automated
+  // escalation resolution must not silently lose that behaviour merely because late review threads
+  // appeared. `submitPr` defaults `autoResolveEscalations` to false and would overwrite the row to 0;
+  // the handoff passes the row's existing opt-in (as the feature/plan enrollment paths already do).
+  assertEquals(row.auto_resolve_escalations, 1, "the handoff preserves the escalation-steward opt-in on the row");
+  assertEquals(
+    instances[0].variables.autoResolveEscalations,
+    true,
+    "the fresh convergence instance carries the escalation-steward opt-in",
+  );
+});
+
+test("#921/PR#922 poller: a FAILED convergence handoff stays retryable — the row returns to waiting_merge, not a stranded waiting_review (PR #922 review, thread 3)", async () => {
+  // If the merge-instance cancel SUCCEEDS but `submitPr` then fails to create the replacement
+  // convergence instance, the row must NOT be left in `waiting_review` carrying the cancelled merge
+  // key: `pollMerges` no longer scans a `waiting_review` row, and `pollReviews` can only RESUME a
+  // live instance (its `readiness-ready` message correlates to nothing once the merge instance is
+  // cancelled and no fresh one exists), so the row would wedge with no handoff retry and no live
+  // review-timeout timer. The handoff must instead leave the row RETRYABLE — back in `waiting_merge`
+  // — so the next pass re-attempts the handoff against the already-retired (terminal) merge key.
+  const { data, stores } = memData();
+  const { engine, cancelled } = recordingEngine();
+  const instances: any[] = [];
+  // `submitPr` fails on the FIRST pass: the convergence instance cannot be created. A second pass
+  // (below) succeeds once the engine recovers.
+  let failCreate = true;
+  (engine as any).createInstance = async (args: any) => {
+    if (failCreate) throw new Error("engine unavailable");
+    instances.push(args);
+    return { processInstanceKey: "conv-retry-1" };
+  };
+  const mergeRow = { ...waitingMergeRow("o/r#100", 100), process_key: "merge-1" };
+  stores["pull_requests"] = [mergeRow];
+  // The derived tracking VIEW: the merge instance folds to a terminal edge once cancelled.
+  stores["pull_requests__tracking"] = [{ ...mergeRow, derived_status: "waiting_merge" }];
+  (engine as any).cancelInstance = async (args: { processInstanceKey: string }) => {
+    cancelled.push(String(args.processInstanceKey));
+    for (const t of stores["pull_requests__tracking"]) {
+      if (t.process_key === String(args.processInstanceKey)) t.derived_status = "abandoned";
+    }
+  };
+  const calls = { reviewPosts: 0 };
+  const bin = await mkdtemp(join(tmpdir(), "gh-stub-"));
+  const script = `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"pr view"* ]]; then
+  echo '{"state":"OPEN","mergedAt":null,"mergeStateStatus":"BLOCKED","statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],"isDraft":false,"headRefOid":"deadbeef","baseRefName":"main"}'
+elif [[ "$*" == *"graphql"* ]]; then
+  echo '${graphqlThreads(2)}'
+elif [[ "$*" == *"requested_reviewers"* ]]; then
+  exit 0
+else
+  echo "unexpected gh args: $*" >&2
+  exit 1
+fi
+`;
+  await writeFile(join(bin, "gh"), script, { mode: 0o755 });
+  const prevPath = process.env.PATH;
+  const prevFetch = globalThis.fetch;
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  process.env.PATH = `${bin}:${prevPath ?? ""}`;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "gh";
+  globalThis.fetch = (() => Promise.resolve(new Response("no fetch in gh mode", { status: 500 }))) as typeof fetch;
+  try {
+    // Pass 1: the handoff fails (createInstance throws) AFTER the merge instance is retired.
+    await pollMerges(data, engine, "tok");
+    const rowAfterFail = stores["pull_requests"][0];
+    assertEquals(cancelled, ["merge-1"], "the live merge instance is still retired");
+    assertEquals(
+      rowAfterFail.status,
+      "waiting_merge",
+      "a failed handoff leaves the row retryable in waiting_merge (re-scanned next pass), not stranded in waiting_review",
+    );
+    assertEquals(instances.length, 0, "no convergence instance was created on the failed pass");
+
+    // Pass 2: the engine recovers. The retry re-derives the `review-threads` verdict and re-attempts
+    // the handoff; the merge key is already terminal, so the idempotency gate falls through and the
+    // fresh convergence instance starts — the PR is NOT wedged.
+    failCreate = false;
+    await pollMerges(data, engine, "tok");
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevPath === undefined) delete process.env.PATH;
+    else process.env.PATH = prevPath;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    await rm(bin, { recursive: true, force: true });
+  }
+  const row = stores["pull_requests"][0];
+  assertEquals(instances.length, 1, "the retry starts the fresh convergence instance");
+  assertEquals(instances[0].processDefinitionId, "convergence-loop", "the canonical convergence loop is re-entered on retry");
+  assertEquals(row.status, "converging", "the retried handoff completes — the row presents the fresh convergence run");
+  assertEquals(row.process_key, "conv-retry-1", "the row is re-pointed at the fresh convergence instance");
 });

@@ -1002,6 +1002,96 @@ test("classifyMergeability: a FAILED opted-in thread probe is never merge-ready 
   assertEquals(classifyBlockedCause(prState({ failingChecks: 0, unresolvedThreads: THREAD_PROBE_FAILED })), "unknown");
 });
 
+test("classifyMergeability: a known merge conflict is never suppressed by the thread gate (PR #922 review, thread 1)", () => {
+  // `mergeStateStatus: "DIRTY"` is GitHub's ground-truth "the head conflicts with the base" signal —
+  // its remedy is a rebase, dispatched off the `conflict` verdict. A thread-probe read must never
+  // mask it: a FAILED probe (`THREAD_PROBE_FAILED`, `-2`) returning `waiting` before the switch would
+  // park a KNOWN conflict forever (neither the poller nor the stall probe dispatches the rebase), and
+  // an OPEN thread count returning `review-threads`/`waiting` would route a conflict into a review
+  // round that cannot clear it. The conflict outranks the thread gate either way.
+  assertEquals(
+    classifyMergeability(prState({ mergeStateStatus: "DIRTY", failingChecks: 0, unresolvedThreads: THREAD_PROBE_FAILED })),
+    "conflict",
+    "DIRTY + a failed thread probe still surfaces the known conflict (rebase), not a blind wait",
+  );
+  assertEquals(
+    classifyMergeability(prState({ mergeStateStatus: "DIRTY", failingChecks: 0, unresolvedThreads: 3 })),
+    "conflict",
+    "DIRTY + open threads still surfaces the known conflict (rebase), not a review round",
+  );
+  // …and an UNPROBED read keeps the pre-#921 conflict verdict (unchanged).
+  assertEquals(
+    classifyMergeability(prState({ mergeStateStatus: "DIRTY", failingChecks: 0, unresolvedThreads: -1 })),
+    "conflict",
+  );
+  // A red DECLARED-required check still outranks even the conflict: a conflicting PR whose CI is
+  // also red routes to fix-ci (the check owns remediation), not a doomed rebase. This preserves the
+  // required-checks backstop's priority over the `mergeStateStatus` switch.
+  assertEquals(
+    classifyMergeability(
+      prState({
+        mergeStateStatus: "DIRTY",
+        failingChecks: 1,
+        presentCheckNames: ["build"],
+        checkConclusions: { build: "FAILURE" },
+        unresolvedThreads: 2,
+      }),
+      { requiredChecks: [{ name: "build", acceptedConclusions: ["SUCCESS"] }] },
+    ),
+    "blocked",
+    "a red declared-required check owns remediation even over a known conflict",
+  );
+});
+
+test("classifyMergeability: the declared required-check verdict outranks the settled-thread verdict (PR #922 review, thread 2)", () => {
+  // The `unresolvedThreads > 0` arm must consult `requiredChecksVerdict` before assigning
+  // `review-threads`: a repo whose protocol declares a success-only required check reads a NEUTRAL
+  // build as `blocked` (fix-ci), and an absent declared-required check reads as `waiting` — starting
+  // a convergence round on top of either begins remediation before the check requirements are met.
+  const successOnly = { requiredChecks: [{ name: "build", acceptedConclusions: ["SUCCESS"] }] };
+  // NEUTRAL build rejected by the success-only protocol + open threads → the required check owns
+  // remediation (`blocked` → fix-ci), NOT `review-threads`.
+  assertEquals(
+    classifyMergeability(
+      prState({
+        mergeStateStatus: "CLEAN",
+        failingChecks: 0,
+        presentCheckNames: ["build"],
+        checkConclusions: { build: "NEUTRAL" },
+        unresolvedThreads: 2,
+      }),
+      successOnly,
+    ),
+    "blocked",
+    "a NEUTRAL required check rejected by a success-only protocol keeps fix-ci priority over threads",
+  );
+  // An absent declared-required check + open threads → `waiting` (the not-yet-run required check
+  // owns the verdict), NOT `review-threads`.
+  assertEquals(
+    classifyMergeability(
+      prState({ mergeStateStatus: "CLEAN", failingChecks: 0, presentCheckNames: [], unresolvedThreads: 2 }),
+      successOnly,
+    ),
+    "waiting",
+    "an absent declared-required check holds waiting before the threads route to convergence",
+  );
+  // …and when every declared-required check IS satisfied, the open threads still own the verdict.
+  assertEquals(
+    classifyMergeability(
+      prState({
+        mergeStateStatus: "CLEAN",
+        failingChecks: 0,
+        presentCheckNames: ["build"],
+        checkConclusions: { build: "SUCCESS" },
+        unresolvedThreads: 2,
+      }),
+      successOnly,
+    ),
+    "review-threads",
+    "satisfied required checks leave the open threads owning the verdict",
+  );
+});
+
 // `checkConclusions` must report a terminal conclusion per check but normalise a STILL-IN-FLIGHT run
 // to "" for BOTH rollup shapes — a CheckRun whose `status` is not COMPLETED, and a legacy
 // StatusContext whose `state` is PENDING/EXPECTED — so a caller never mistakes a pending

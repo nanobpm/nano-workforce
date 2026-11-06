@@ -1839,12 +1839,33 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
               console.error(`[poller] review-threads handoff ${prKey}: retire merge instance ${mergeKey}: ${cancelErr}`);
             }
           }
-          await submitPr(data, engine, { repo, number, url: pr.url, prKey });
+          // Carry the row's existing escalation-steward opt-in through the resubmission (PR #922
+          // review): `submitPr` defaults `autoResolveEscalations` to false and overwrites
+          // `pull_requests.auto_resolve_escalations` with 0 on reopen, so an opted-in PR would
+          // silently lose automated escalation resolution merely because late review threads
+          // appeared. Pass the durable row's flag, as the feature/plan enrollment paths already do.
+          await submitPr(data, engine, { repo, number, url: pr.url, prKey }, [], MAX_ROUNDS, false, null, false, pr.auto_resolve_escalations === 1);
           console.log(
             `[poller] blocked by ${st.unresolvedThreads} unresolved review thread(s) -> handed back into convergence -> ${prKey}`,
           );
         } catch (err) {
           console.error(`[poller] review-threads handoff ${prKey}: ${err}`);
+          // Keep the handoff RETRYABLE (PR #922 review, thread 3): the merge-instance cancel above
+          // may have already succeeded, so the row's `process_key` can now name a TERMINAL merge
+          // instance while the row sits in `waiting_review`. That shape wedges the PR — `pollMerges`
+          // no longer scans a `waiting_review` row, and `pollReviews` can only RESUME a live
+          // instance (its `readiness-ready` message correlates to nothing once the merge instance is
+          // cancelled and no fresh convergence instance exists), so neither a handoff retry nor a
+          // live review-timeout timer would ever cover it. Restore the row to `waiting_merge` so the
+          // next pass re-derives the `review-threads` verdict and re-attempts the handoff — against
+          // the already-retired (terminal) merge key, whose idempotency gate now falls through. This
+          // persists the handoff until a fresh convergence owner is established, rather than only
+          // logging the failure. Best-effort: a failed restore still leaves the original error logged.
+          try {
+            await prs(data).update(prKey, { status: "waiting_merge", updated_at: now() });
+          } catch (restoreErr) {
+            console.error(`[poller] review-threads handoff ${prKey}: restore waiting_merge: ${restoreErr}`);
+          }
         }
         continue;
       }
