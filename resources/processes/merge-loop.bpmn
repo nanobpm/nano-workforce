@@ -53,11 +53,13 @@
           <nano:extend name="mergeState" type="string" />
           <nano:extend name="failingChecks" type="integer" optional="true" />
           <nano:extend name="failingChecksList" type="string" optional="true" />
+          <nano:extend name="reviewThreads" type="integer" optional="true" />
         </nano:shape>
         <nano:shape id="MergeReady" name="merge-ready message payload">
           <nano:extend name="mergeState" type="string" />
           <nano:extend name="failingChecks" type="integer" optional="true" />
           <nano:extend name="failingChecksList" type="string" optional="true" />
+          <nano:extend name="reviewThreads" type="integer" optional="true" />
         </nano:shape>
         <nano:shape id="FixCiIn" name="CI fix — input">
           <nano:extend name="prKey" type="string" />
@@ -179,6 +181,7 @@
       <bpmn:outgoing>f_m_mRebase</bpmn:outgoing>
       <bpmn:outgoing>f_m_mWaiting</bpmn:outgoing>
       <bpmn:outgoing>f_m_mDraft</bpmn:outgoing>
+      <bpmn:outgoing>f_m_mThreads</bpmn:outgoing>
       <bpmn:outgoing>f_m_mBlocked</bpmn:outgoing>
     </bpmn:exclusiveGateway>
     <bpmn:serviceTask id="attempt-merge" name="Merge PR">
@@ -258,7 +261,7 @@
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
-          <zeebe:input source="=if mergeState = &#34;draft&#34; then &#34;This PR is in draft and can&#39;t be merged. Mark it ready (gh pr ready), then reply to retry.&#34; else if mergeState = &#34;waiting&#34; then &#34;GitHub never settled this PR&#39;s mergeability (still computing after repeated re-polls, or the state could not be read). Check the PR on GitHub — resolve any conflict or failing required check if present — then reply to retry.&#34; else &#34;This PR is not mergeable (state: &#34; + mergeState + &#34;). Resolve the conflict or failing required check on the branch, then reply to retry.&#34;" target="question" />
+          <zeebe:input source="=if mergeState = &#34;draft&#34; then &#34;This PR is in draft and can&#39;t be merged. Mark it ready (gh pr ready), then reply to retry.&#34; else if mergeState = &#34;waiting&#34; and reviewThreads = 0 and failingChecks = 0 then &#34;This PR is merge-blocked with all checks green and every review thread resolved. GitHub still reports BLOCKED, which means a required review approval (or code-owner review) is outstanding — nothing the automated loop can produce. Approve the PR (or adjust the branch-protection review requirement), then reply to retry.&#34; else if mergeState = &#34;waiting&#34; then &#34;GitHub never settled this PR&#39;s mergeability (still computing after repeated re-polls, or the state could not be read). Check the PR on GitHub — resolve any conflict or failing required check if present — then reply to retry.&#34; else &#34;This PR is not mergeable (state: &#34; + mergeState + &#34;). Resolve the conflict or failing required check on the branch, then reply to retry.&#34;" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_mDraft</bpmn:incoming>
@@ -287,9 +290,26 @@
       <bpmn:incoming>f_mr_giveup</bpmn:incoming>
       <bpmn:outgoing>f_m_escA</bpmn:outgoing>
     </bpmn:serviceTask>
+    <bpmn:serviceTask id="merge-esc-threads" name="Escalate: unresolved review threads">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.persist-escalation" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="EscalationIn" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
+        </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;blocked&#34;" target="status" />
+          <zeebe:input source="=&#34;This PR is merge-blocked by &#34; + string(reviewThreads) + &#34; unresolved review thread(s) (branch protection requires every conversation resolved; all checks are green and there is no conflict). These are review findings the loop already converged, so a fresh review round cannot clear them without a reply. Resolve the threads on the PR (or reply with guidance — e.g. which threads to push back on), then reply to retry.&#34;" target="question" />
+          <zeebe:input source="=null" target="agentSlaJobType" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_m_mThreads</bpmn:incoming>
+      <bpmn:outgoing>f_m_escT</bpmn:outgoing>
+    </bpmn:serviceTask>
     <bpmn:exclusiveGateway id="gw-merge-escalated" name="escalation opened?" default="f_m_escReenter">
       <bpmn:incoming>f_m_escA</bpmn:incoming>
       <bpmn:incoming>f_m_escLanded</bpmn:incoming>
+      <bpmn:incoming>f_m_escT</bpmn:incoming>
       <bpmn:outgoing>f_m_escWait</bpmn:outgoing>
       <bpmn:outgoing>f_m_escReenter</bpmn:outgoing>
     </bpmn:exclusiveGateway>
@@ -732,6 +752,9 @@
     <bpmn:sequenceFlow id="f_m_mDraft" name="draft — mark ready (human)" sourceRef="gw-mergeable" targetRef="merge-esc-conflict">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=mergeState = "draft"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_m_mThreads" name="blocked (unresolved review threads)" sourceRef="gw-mergeable" targetRef="merge-esc-threads">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=mergeState = "review-threads"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_mrp_probe" sourceRef="wait-mergeable-repoll" targetRef="merge-stall-probe" />
     <bpmn:sequenceFlow id="f_m_mBlocked" name="unclassified — auto-rebase" sourceRef="gw-mergeable" targetRef="gw-rebase" />
     <bpmn:sequenceFlow id="f_ci_go" name="within budget" sourceRef="gw-ci-fix" targetRef="SP_cifix">
@@ -773,6 +796,7 @@
     <bpmn:sequenceFlow id="f_m_done" sourceRef="mark-merged" targetRef="MergeEnd" />
     <bpmn:sequenceFlow id="f_m_escC" sourceRef="merge-esc-conflict" targetRef="wait-merge-answer" />
     <bpmn:sequenceFlow id="f_m_escA" sourceRef="merge-esc-attempt" targetRef="gw-merge-escalated" />
+    <bpmn:sequenceFlow id="f_m_escT" sourceRef="merge-esc-threads" targetRef="gw-merge-escalated" />
     <bpmn:sequenceFlow id="f_m_escWait" sourceRef="gw-merge-escalated" targetRef="wait-merge-answer">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=escalated = true</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
@@ -833,7 +857,7 @@
       <bpmndi:BPMNShape id="BPMNShape_gw-merge-stall" bpmnElement="gw-merge-stall" isMarkerVisible="true">
         <dc:Bounds x="1538" y="1535" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1521" y="1650" width="85" height="42" />
+          <dc:Bounds x="1521" y="1630" width="85" height="42" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-mergeable" bpmnElement="gw-mergeable" isMarkerVisible="true">
@@ -901,6 +925,9 @@
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_merge-esc-attempt" bpmnElement="merge-esc-attempt">
         <dc:Bounds x="1688" y="720" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_merge-esc-threads" bpmnElement="merge-esc-threads">
+        <dc:Bounds x="1138" y="1680" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-merge-escalated" bpmnElement="gw-merge-escalated" isMarkerVisible="true">
         <dc:Bounds x="2088" y="95" width="50" height="50" />
@@ -1002,7 +1029,7 @@
         <di:waypoint x="402" y="1300" />
         <di:waypoint x="402" y="320" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="446" y="1239" width="88" height="56" />
+          <dc:Bounds x="919" y="1239" width="88" height="56" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_reb_rearm" bpmnElement="f_reb_rearm">
@@ -1179,6 +1206,14 @@
           <dc:Bounds x="1057" y="483" width="85" height="42" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_m_mThreads" bpmnElement="f_m_mThreads">
+        <di:waypoint x="1013" y="305" />
+        <di:waypoint x="1013" y="1720" />
+        <di:waypoint x="1138" y="1720" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1018" y="1642" width="81" height="56" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_mBlocked" bpmnElement="f_m_mBlocked">
         <di:waypoint x="1013" y="305" />
         <di:waypoint x="1013" y="440" />
@@ -1255,7 +1290,7 @@
         <di:waypoint x="1668" y="740" />
         <di:waypoint x="1688" y="740" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1952" y="616" width="53" height="14" />
+          <dc:Bounds x="1932" y="616" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_gAbandoned" bpmnElement="f_m_gAbandoned">
@@ -1281,8 +1316,9 @@
         <di:waypoint x="870" y="618" />
         <di:waypoint x="870" y="638" />
         <di:waypoint x="888" y="638" />
-        <di:waypoint x="888" y="1598" />
-        <di:waypoint x="1338" y="1598" />
+        <di:waypoint x="888" y="1780" />
+        <di:waypoint x="1388" y="1780" />
+        <di:waypoint x="1388" y="1600" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_msp_gate" bpmnElement="f_msp_gate">
         <di:waypoint x="1438" y="1560" />
@@ -1308,6 +1344,14 @@
         <di:waypoint x="1988" y="120" />
         <di:waypoint x="2088" y="120" />
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_m_escT" bpmnElement="f_m_escT">
+        <di:waypoint x="1238" y="1720" />
+        <di:waypoint x="2008" y="1720" />
+        <di:waypoint x="2008" y="145" />
+        <di:waypoint x="2068" y="145" />
+        <di:waypoint x="2068" y="120" />
+        <di:waypoint x="2088" y="120" />
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_escWait" bpmnElement="f_m_escWait">
         <di:waypoint x="2138" y="120" />
         <di:waypoint x="2238" y="120" />
@@ -1327,13 +1371,13 @@
         <di:waypoint x="1013" y="1620" />
         <di:waypoint x="1013" y="305" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1446" y="1587" width="85" height="28" />
+          <dc:Bounds x="1246" y="1587" width="85" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_dep_rewait" bpmnElement="f_dep_rewait">
         <di:waypoint x="1738" y="1280" />
-        <di:waypoint x="1738" y="1640" />
-        <di:waypoint x="234" y="1640" />
+        <di:waypoint x="1738" y="1300" />
+        <di:waypoint x="234" y="1300" />
         <di:waypoint x="234" y="298" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_mr_go" bpmnElement="f_mr_go">

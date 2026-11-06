@@ -862,6 +862,15 @@ export interface PrState {
    *     perpetually-null entry on such a repo must NOT read as an eviction, so the classifier stays
    *     conservative and leaves the `landedWaitTimeout` human backstop to cover a never-lands wedge. */
   mergeQueueEntry: boolean | null;
+  /** Count of UNRESOLVED review threads on the PR (GraphQL `reviewThreads{isResolved}`), populated
+   * only when `fetchPrState` is called with `{ withReviewThreads: true }` (the merge-stage
+   * `waiting_merge` poll + the `merge-stall-probe` worker) — otherwise `-1` ("not probed"), the
+   * conservative value that keeps {@link classifyMergeability} on exactly its pre-#921 behaviour.
+   * This is the signal that classifies a `BLOCKED` merge state whose checks are all green: branch
+   * protection's `required_conversation_resolution` blocks the merge while any review thread is
+   * open, and those threads are REVIEW FINDINGS the convergence loop can act on — not a human
+   * problem (issue #921). */
+  unresolvedThreads: number;
 }
 
 /** Map GitHub's REST `mergeable_state` (lower-case) onto the GraphQL `mergeStateStatus`
@@ -1115,7 +1124,7 @@ export async function fetchPrState(
   repo: string,
   number: number | string,
   token: string,
-  opts?: { withMergeQueue?: boolean },
+  opts?: { withMergeQueue?: boolean; withReviewThreads?: boolean },
 ): Promise<PrState | null> {
   if (await useGh()) {
     const out = await runGh([
@@ -1145,6 +1154,7 @@ export async function fetchPrState(
     const mergeQueueEntry = opts?.withMergeQueue
       ? await fetchMergeQueueMembership(repo, number, j.baseRefName ?? "", token)
       : null;
+    const unresolvedThreads = await countUnresolvedThreads(repo, number, token, opts);
     return {
       merged,
       state: merged ? "merged" : (j.state ?? "").toUpperCase() === "CLOSED" ? "closed" : "open",
@@ -1158,6 +1168,7 @@ export async function fetchPrState(
       isDraft: !!j.isDraft,
       headRefOid: j.headRefOid ?? null,
       mergeQueueEntry,
+      unresolvedThreads,
     };
   }
   if (!token) return null;
@@ -1196,7 +1207,25 @@ export async function fetchPrState(
     isDraft: !!j.draft,
     headRefOid: j.head?.sha ?? null,
     mergeQueueEntry, // native-queue membership (GraphQL), probed only for block-4 reconciliation
+    unresolvedThreads: await countUnresolvedThreads(repo, number, token, opts),
   };
+}
+
+/** Count a PR's unresolved review threads for the BLOCKED-cause classification (issue #921), but
+ * ONLY when the caller opted in (`withReviewThreads: true`) — it is an extra GraphQL round-trip, so
+ * every other caller keeps `-1` ("not probed"), the conservative value that leaves
+ * {@link classifyMergeability} on its pre-#921 behaviour. An unreadable/errored thread read also
+ * degrades to `-1` (never fabricates a "no threads" verdict off a failed read). */
+async function countUnresolvedThreads(
+  repo: string,
+  number: number | string,
+  token: string,
+  opts?: { withReviewThreads?: boolean },
+): Promise<number> {
+  if (!opts?.withReviewThreads) return -1;
+  const threads = await fetchReviewThreads(repo, number, token).catch(() => null);
+  if (threads === null) return -1;
+  return threads.filter((t) => !t.isResolved).length;
 }
 
 /** Map a PR's live GitHub state to one **liveness** verdict shared by both durable loops (merge +
@@ -1423,9 +1452,44 @@ export async function baseBranchLanded(
 /** A settled landability verdict, or `waiting` when GitHub hasn't determined it yet (or is
  * still running checks / awaiting review). `draft` is a settled *not-landable* verdict: a draft PR
  * can never be merged (GitHub refuses it outright), regardless of its checks — so it outranks every
- * other signal and carries its own actionable remedy (mark it ready). The poller only advances the
- * process on a settled verdict; `waiting` means re-poll later. */
-export type Mergeability = "ready" | "waiting" | "conflict" | "blocked" | "draft";
+ * other signal and carries its own actionable remedy (mark it ready). `review-threads` (issue #921)
+ * is likewise a settled *not-landable* verdict: the merge is `BLOCKED` with every check green, but
+ * ≥1 review thread is still unresolved (branch protection `required_conversation_resolution`) —
+ * those threads are review findings the loop acts on, not a "mergeability never settled" stall.
+ * The poller only advances the process on a settled verdict; `waiting` means re-poll later. */
+export type Mergeability = "ready" | "waiting" | "conflict" | "blocked" | "draft" | "review-threads";
+
+/** WHY a `mergeStateStatus = BLOCKED` PR is blocked (issue #921). GitHub reports one flat `BLOCKED`
+ * for several distinct causes, each with a different remedy — so the merge loop must classify the
+ * cause instead of escalating the misleading "mergeability never settled":
+ *   • `"checks"`         — a required check failed (the existing `blocked` verdict → fix-ci).
+ *   • `"review-threads"` — checks are green but ≥1 review thread is unresolved (branch protection
+ *                          `required_conversation_resolution`); the threads are review findings the
+ *                          loop sends back into convergence, not a human escalation.
+ *   • `"reviews"`        — checks green, threads probed and ALL resolved, yet still BLOCKED: the
+ *                          remaining causes are a required human review approval (or a code-owner
+ *                          review) — nothing an automated loop can produce → escalate with THAT
+ *                          reason named.
+ *   • `"unknown"`        — the cause could not be determined (checks unenumerable in token mode,
+ *                          or the thread read was unverifiable) → stays on the conservative
+ *                          `waiting` re-poll, exactly as before #921. */
+export type BlockedCause = "checks" | "review-threads" | "reviews" | "unknown";
+
+/** Classify why a `BLOCKED` PR is blocked. Pure; unit-tested. Only meaningful for a state read
+ * that opted into the review-threads probe (`unresolvedThreads >= 0`); an unprobed read (`-1`)
+ * can never distinguish "no threads" from "couldn't read threads", so it reports `"unknown"` and
+ * the caller keeps waiting — a failed read must never fabricate a "reviews"-caused escalation. */
+export function classifyBlockedCause(s: PrState): BlockedCause {
+  if (s.failingChecks > 0) return "checks";
+  // Checks unenumerable (token mode, `failingChecks === -1`): "green checks" can't be confirmed, so
+  // no thread count can settle the cause — stay `unknown` (the caller keeps waiting), exactly as
+  // before #921. This guard must precede the thread read or a token-mode BLOCKED with open threads
+  // would fabricate a `review-threads` verdict off an unverifiable "checks green" premise.
+  if (s.failingChecks < 0) return "unknown";
+  if (s.unresolvedThreads > 0) return "review-threads";
+  if (s.unresolvedThreads === 0) return "reviews";
+  return "unknown";
+}
 
 /** Intersect a repo's declared `requiredChecks` against the head's actual per-check conclusions —
  * an INDEPENDENT backstop that runs BEFORE the `mergeStateStatus` switch, so nwf never merges a red
@@ -1501,9 +1565,23 @@ export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Merg
     case "DIRTY":
       return "conflict";
     case "BLOCKED":
-      // A required check failed -> a human must act. Pending checks / awaiting review -> wait.
-      // When we can't enumerate checks (failingChecks < 0, token mode) stay conservative: wait.
-      return s.failingChecks > 0 ? "blocked" : "waiting";
+      // Classify WHY GitHub blocks the merge (issue #921): a failed required check routes to
+      // fix-ci; unresolved review threads (checks green, branch protection
+      // `required_conversation_resolution`) are a settled not-landable verdict of their own —
+      // `review-threads` — so the loop routes them back into a review round instead of waiting
+      // out the stall budget and escalating the misleading "mergeability never settled". A BLOCKED
+      // whose cause can't be read (checks unenumerable in token mode, or the threads probe
+      // unreadable) stays conservative: wait. A BLOCKED with green checks and zero unresolved
+      // threads (a required human review) also keeps waiting here — the merge-stall escalation
+      // names that specific cause once the re-poll budget is exhausted.
+      switch (classifyBlockedCause(s)) {
+        case "checks":
+          return "blocked";
+        case "review-threads":
+          return "review-threads";
+        default:
+          return "waiting";
+      }
     default: // UNKNOWN / "" — GitHub is still computing mergeability
       return "waiting";
   }

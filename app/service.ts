@@ -1731,7 +1731,12 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
   for (const pr of await prs(data).find({ status: "waiting_merge" })) {
     const { repo, number, pr_key: prKey } = pr;
     try {
-      const st = await fetchPrState(repo, number, token);
+      // Opt into the review-threads probe so a `BLOCKED` merge state is classified by its real
+      // cause (issue #921): unresolved review threads (branch protection
+      // `required_conversation_resolution`) surface as the `review-threads` verdict below instead
+      // of polling as "waiting" until the mergeable-wait timer escalates the misleading
+      // "mergeability never settled". One extra GraphQL read per pass per waiting PR.
+      const st = await fetchPrState(repo, number, token, { withReviewThreads: true });
       if (st === null) continue; // no transport → skip this PR (others may still advance)
       // Out-of-band terminal (merged/closed) → the shared pre-check publishes `merge-ready {ready}`,
       // routing through `gw-mergeable → attempt-merge` whose idempotent already-merged check completes
@@ -1788,6 +1793,27 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
         }
         continue; // GitHub still computing / checks pending
       }
+      if (verdict === "review-threads") {
+        // BLOCKED by unresolved review threads with every check green (issue #921): the threads are
+        // findings from the reviewer this loop converges with, so route them back into convergence
+        // rather than escalating to a human. The convergence loop already ran its final review round
+        // (it converged), so the actionable step is a FRESH Copilot review of the current head —
+        // the review-round agent then replies to / resolves the open threads on its next pass. Nudge
+        // once per head (the shared fresh_head_run_head record bounds it), then park: the poller
+        // re-reads next pass, and once the threads resolve the verdict flips to `ready` and the
+        // merge proceeds with zero unresolved threads — the merge step is thereby GATED on
+        // conversation resolution. If the threads never clear, the mergeable-wait timer fires and
+        // the stall probe escalates with the thread count named (never "mergeability never
+        // settled"), so the PR can never wedge silently.
+        if (st.headRefOid && pr.fresh_head_run_head !== st.headRefOid) {
+          const nudged = await requestCopilotReview(repo, number, token).catch(() => null);
+          if (nudged === "requested") {
+            await prs(data).update(prKey, { fresh_head_run_head: st.headRefOid, updated_at: now() });
+          }
+          console.log(`[poller] blocked by ${st.unresolvedThreads} unresolved review thread(s) -> re-review ${nudged ?? "failed"} -> ${prKey}`);
+        }
+        continue;
+      }
       if (verdict === "ready") {
         const lane = await mergeLaneDecisionForPr(data, prKey);
         if (lane?.isHeld) {
@@ -1807,6 +1833,10 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
           // fix-ci task appends it to the agent prompt so the agent knows which gates to green.
           failingChecks: st.failingChecks,
           failingChecksList: st.failingCheckNames.join("\n"),
+          // The probed unresolved-thread count (issue #921) — carried so a later stall-budget
+          // escalation can name the real BLOCKED cause (and so the `review-threads` arm's question
+          // can quote it). `-1` when the probe was unreadable.
+          reviewThreads: st.unresolvedThreads,
         },
       });
       console.log(`[poller] mergeable=${verdict} (${st.mergeStateStatus}) -> ${prKey}`);

@@ -90,6 +90,7 @@ export const PR_ESCALATION_PRODUCER_ELEMENTS: readonly string[] = [
   "merge-esc-conflict",
   "merge-esc-attempt",
   "merge-esc-landed",
+  "merge-esc-threads",
 ];
 
 /** The ACP permission-prompt escalation (issue #559, ADR 0056) — the Tasks-inbox kind a bridged
