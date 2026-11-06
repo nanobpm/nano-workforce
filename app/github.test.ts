@@ -846,6 +846,20 @@ test("classifyBlockedCause: an unprobed or unenumerable read is 'unknown' (never
   assertEquals(classifyBlockedCause(prState({ failingChecks: -1, unresolvedThreads: 2 })), "unknown");
 });
 
+test("classifyBlockedCause: a pending check keeps the cause 'unknown' — zero failing ≠ green (PR #922 review)", () => {
+  // Queued/running checks are tracked in `pendingCheckNames`, not `failingChecks`. While any check
+  // is still in flight the BLOCKED cause is undetermined (the pending run may come back red), so no
+  // thread/approval cause may be assigned — the caller keeps waiting.
+  assertEquals(
+    classifyBlockedCause(prState({ failingChecks: 0, pendingCheckNames: ["build"], unresolvedThreads: 2 })),
+    "unknown",
+  );
+  assertEquals(
+    classifyBlockedCause(prState({ failingChecks: 0, pendingCheckNames: ["build"], unresolvedThreads: 0 })),
+    "unknown",
+  );
+});
+
 test("classifyMergeability: BLOCKED + green checks + unresolved threads is a settled 'review-threads' verdict (#921)", () => {
   // The incident shape (nano-bpm#1427): MERGEABLE/BLOCKED, all required checks green, ≥1 unresolved
   // Copilot thread. Before the fix this read as "waiting" and escalated as "never settled".
@@ -886,16 +900,53 @@ test("classifyMergeability: BLOCKED + green checks + zero unresolved threads kee
   );
 });
 
-test("classifyMergeability: the review-threads verdict never fires outside BLOCKED (#921)", () => {
-  // Threads open on a CLEAN/UNSTABLE PR don't block the merge (no conversation-resolution
-  // requirement) — the mergeStateStatus switch governs, exactly as before.
+test("classifyMergeability: an opted-in read with unresolved threads is never merge-ready — the merge-stage thread gate (#921, PR #922 review)", () => {
+  // Issue #921's merge contract is ZERO unresolved threads — independent of `mergeStateStatus`. A
+  // repo WITHOUT branch-protection `required_conversation_resolution` reports a thread-blocked PR
+  // CLEAN/UNSTABLE (mergeable by GitHub's rules), but the threads are review findings the loop
+  // converges with, so an opted-in (`withReviewThreads`) merge-stage read routes the PR back into
+  // convergence instead of landing over them.
   assertEquals(
     classifyMergeability(prState({ mergeStateStatus: "CLEAN", failingChecks: 0, unresolvedThreads: 3 })),
-    "ready",
+    "review-threads",
   );
   assertEquals(
     classifyMergeability(prState({ mergeStateStatus: "UNSTABLE", failingChecks: 0, unresolvedThreads: 3 })),
+    "review-threads",
+  );
+  assertEquals(
+    classifyMergeability(prState({ mergeStateStatus: "HAS_HOOKS", failingChecks: 0, unresolvedThreads: 1 })),
+    "review-threads",
+  );
+  assertEquals(
+    classifyMergeability(prState({ mergeStateStatus: "BEHIND", failingChecks: 0, unresolvedThreads: 1 })),
+    "review-threads",
+  );
+});
+
+test("classifyMergeability: an UNPROBED read keeps the pre-#921 verdicts — non-merge-stage callers are untouched (#921)", () => {
+  // `unresolvedThreads: -1` (the probe not opted into — e.g. the readiness `pr` probe's
+  // `matchPr`) must never fabricate the review-threads verdict: the mergeStateStatus switch
+  // governs, exactly as before #921.
+  assertEquals(
+    classifyMergeability(prState({ mergeStateStatus: "CLEAN", failingChecks: 0, unresolvedThreads: -1 })),
     "ready",
+  );
+  assertEquals(
+    classifyMergeability(prState({ mergeStateStatus: "UNSTABLE", failingChecks: 0, unresolvedThreads: -1 })),
+    "ready",
+  );
+});
+
+test("classifyMergeability: BLOCKED with pending checks keeps waiting — no cause off a half-settled rollup (PR #922 review)", () => {
+  // Zero failing checks with a check still queued/running is not "checks green": the BLOCKED cause
+  // is undetermined until the pending run concludes, so the verdict stays a conservative wait even
+  // with open threads.
+  assertEquals(
+    classifyMergeability(
+      prState({ mergeStateStatus: "BLOCKED", failingChecks: 0, pendingCheckNames: ["build"], unresolvedThreads: 2 }),
+    ),
+    "waiting",
   );
 });
 

@@ -1486,6 +1486,13 @@ export function classifyBlockedCause(s: PrState): BlockedCause {
   // before #921. This guard must precede the thread read or a token-mode BLOCKED with open threads
   // would fabricate a `review-threads` verdict off an unverifiable "checks green" premise.
   if (s.failingChecks < 0) return "unknown";
+  // Zero FAILING checks does not mean checks are green: queued/running checks are tracked
+  // separately in `pendingCheckNames`. While any check is still in flight the BLOCKED cause is
+  // undetermined — the pending run may come back red (→ `checks`) — so stay `unknown` and let the
+  // caller keep waiting rather than assign a thread/approval cause off a half-settled rollup
+  // (PR #922 review). This guard must precede the thread read for the same reason the
+  // unenumerable-checks guard does: "checks green" is the premise every later cause stands on.
+  if (s.pendingCheckNames.length > 0) return "unknown";
   if (s.unresolvedThreads > 0) return "review-threads";
   if (s.unresolvedThreads === 0) return "reviews";
   return "unknown";
@@ -1556,6 +1563,18 @@ export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Merg
   const gate = requiredChecksVerdict(s, protocol);
   if (gate === "blocked") return "blocked";
   if (gate === "waiting") return "waiting";
+  // The merge-stage thread gate (issue #921, PR #922 review): a read that opted into the
+  // review-threads probe (`unresolvedThreads >= 0`) and found ≥1 open thread is NEVER merge-ready,
+  // whatever `mergeStateStatus` says. A repo without branch-protection
+  // `required_conversation_resolution` reports such a PR CLEAN/UNSTABLE — mergeable by GitHub's
+  // rules — but issue #921's merge contract is zero unresolved threads: those threads are review
+  // findings the loop converges with, so the PR routes back into convergence instead of landing
+  // over them. An UNPROBED read (`-1`) keeps exactly its pre-#921 behaviour — every non-merge-stage
+  // caller (e.g. the readiness `pr` probe, readiness.ts `matchPr`) never opted in and is untouched.
+  // The gate only fires once checks are KNOWN settled (none failing, none pending, checks
+  // enumerable): a failing/pending check owns the verdict (fix-ci / wait), so a red-or-in-flight
+  // rollup never routes to a review round on top of the CI problem.
+  if (s.unresolvedThreads > 0 && s.failingChecks === 0 && s.pendingCheckNames.length === 0) return "review-threads";
   switch (s.mergeStateStatus) {
     case "CLEAN":
     case "HAS_HOOKS":

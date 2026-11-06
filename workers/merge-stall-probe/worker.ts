@@ -36,6 +36,11 @@ interface Out extends Record<string, unknown> {
   // The unresolved-review-thread count behind a `review-threads` verdict (issue #921), mirrored
   // into the escalation question so a human sees exactly what blocks the merge. `-1` = unprobed.
   reviewThreads: number;
+  // The pending-check count (PR #922 review): zero failing checks does not mean checks are green —
+  // a queued/running check leaves the BLOCKED cause undetermined, so the stall-escalation question
+  // gates its "required review approval" wording on this being 0 too (never claims a verified
+  // blocker off a half-settled rollup).
+  pendingChecks: number;
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
@@ -54,7 +59,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // exhausts into the misleading "mergeability never settled" escalation.
   const st = await fetchPrState(repo, prNumber, token, { withReviewThreads: true }).catch(() => null);
   if (st === null) {
-    return { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1 };
+    return { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1, pendingChecks: 0 };
   }
   const protocol = await loadMergeProtocol(repo, token).catch(() => null);
   const mergeState = classifyMergeability(st, protocol ?? undefined);
@@ -72,6 +77,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     failingChecks: st.failingChecks,
     failingChecksList: st.failingCheckNames.join("\n"),
     reviewThreads: st.unresolvedThreads,
+    pendingChecks: st.pendingCheckNames.length,
   };
 };
 

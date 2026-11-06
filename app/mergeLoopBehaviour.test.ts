@@ -97,6 +97,7 @@ const DEFAULT_VARS: Record<string, unknown> = {
   ciBlockedReconciled: null,
   failingChecks: 0,
   reviewThreads: null,
+  pendingChecks: null,
   round: 2,
   abandonUrl: "http://host/app/api/hooks/abandon?token=tok-seeded",
 };
@@ -591,13 +592,14 @@ test("a stalled probe that re-derives 'review-threads' routes to the threads arm
 });
 
 test("a stall-budget exhaustion on a settled BLOCKED with zero threads names the review requirement, not 'never settled' (#921)", async () => {
-  // GitHub settled: MERGEABLE/BLOCKED, checks green, every thread resolved — the block is a required
-  // human review approval. The probe reports `waiting` (the conservative verdict) with the probed
-  // counts, and the exhausted-budget escalation must name THAT cause.
+  // GitHub settled: MERGEABLE/BLOCKED, checks green (none failing, none pending), every thread
+  // resolved — the block is a required human review approval. The probe reports `waiting` (the
+  // conservative verdict) with the probed counts, and the exhausted-budget escalation must name
+  // THAT cause.
   const engine = await boot({
     vars: { mergeStallMax: 0 },
     responses: {
-      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: 0 },
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: 0, pendingChecks: 0 },
     },
   });
   await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
@@ -607,6 +609,25 @@ test("a stall-budget exhaustion on a settled BLOCKED with zero threads names the
   const q = String(escalation(engine).question ?? "");
   assertStringIncludes(q, "required review approval", "a settled BLOCKED with clear threads must name the review requirement");
   assert(!q.includes("never settled"), "a settled BLOCKED must never read as 'mergeability never settled'");
+});
+
+test("a stall-budget exhaustion with checks still pending must NOT claim a verified review-approval blocker (PR #922 review)", async () => {
+  // Zero failing checks + zero unresolved threads, but a check is still queued/running: the BLOCKED
+  // cause is undetermined (the pending run may come back red), so the escalation must NOT assert
+  // "all checks green … required review approval" — it keeps the conservative unsettled wording.
+  const engine = await boot({
+    vars: { mergeStallMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: 0, pendingChecks: 1 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-stall-probe", "merge-esc-conflict");
+  const q = String(escalation(engine).question ?? "");
+  assert(!q.includes("required review approval"), "a pending check must never read as a verified review-approval block");
+  assertStringIncludes(q, "never settled", "an undetermined BLOCKED keeps the conservative unsettled wording");
 });
 
 test("the 'never settled' question is reserved for a genuinely unreadable/unsettled mergeability (#921)", async () => {

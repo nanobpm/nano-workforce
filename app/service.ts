@@ -1796,21 +1796,37 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
       if (verdict === "review-threads") {
         // BLOCKED by unresolved review threads with every check green (issue #921): the threads are
         // findings from the reviewer this loop converges with, so route them back into convergence
-        // rather than escalating to a human. The convergence loop already ran its final review round
-        // (it converged), so the actionable step is a FRESH Copilot review of the current head —
-        // the review-round agent then replies to / resolves the open threads on its next pass. Nudge
-        // once per head (the shared fresh_head_run_head record bounds it), then park: the poller
-        // re-reads next pass, and once the threads resolve the verdict flips to `ready` and the
-        // merge proceeds with zero unresolved threads — the merge step is thereby GATED on
-        // conversation resolution. If the threads never clear, the mergeable-wait timer fires and
-        // the stall probe escalates with the thread count named (never "mergeability never
-        // settled"), so the PR can never wedge silently.
-        if (st.headRefOid && pr.fresh_head_run_head !== st.headRefOid) {
-          const nudged = await requestCopilotReview(repo, number, token).catch(() => null);
-          if (nudged === "requested") {
-            await prs(data).update(prKey, { fresh_head_run_head: st.headRefOid, updated_at: now() });
-          }
-          console.log(`[poller] blocked by ${st.unresolvedThreads} unresolved review thread(s) -> re-review ${nudged ?? "failed"} -> ${prKey}`);
+        // rather than escalating to a human. Requesting another Copilot review alone does NOT
+        // remediate them: `pollReviews` only scans `waiting_review` rows, so a review landing while
+        // the PR sits in `waiting_merge` is never picked up and no review-fix agent ever activates
+        // (PR #922 review). The handoff is therefore a DURABLE re-entry into the canonical
+        // convergence loop: flip the row to `waiting_review` FIRST (so a review that lands in the
+        // start window is still collected by `pollReviews` — it scans on `waiting_review`, not on
+        // instance liveness), then `submitPr` re-opens the PR into a fresh convergence instance
+        // (round 1). The review-round agent's backlog IS the open threads: it fixes or pushes back,
+        // replies, and resolves them; on `converged` the converge-gate re-verifies zero unresolved
+        // threads and `pr.finalize` re-enters the merge stage — merging resumes automatically.
+        // `submitPr`'s idempotency gate does not short-circuit here: the row is non-terminal
+        // (`waiting_merge`) but its `process_key` names the MERGE instance, so the gate's
+        // human-approval narrow targets the merge-loop (inert — nothing there reads it) and the
+        // re-open proceeds. Once the fresh convergence instance exists, `pr.progress-check` parks
+        // the row back in `waiting_merge` after the round, where this block's verdict has by then
+        // flipped off `review-threads` (the gate guarantees it) — so this fires at most once per
+        // thread-blocked episode. A failed start leaves the row in `waiting_review`, whose
+        // review-wait machinery (nudges + timeout escalation) covers it — the PR never wedges
+        // silently either way.
+        try {
+          // `waiting_since` bounds the review the fresh loop collects: only a review submitted at
+          // or after the handoff counts, so a pre-merge review (submitted before this flip) can
+          // never satisfy the new run's wait.
+          const handoffTs = now();
+          await prs(data).update(prKey, { status: "waiting_review", waiting_since: handoffTs, updated_at: handoffTs });
+          await submitPr(data, engine, { repo, number, url: pr.url, prKey });
+          console.log(
+            `[poller] blocked by ${st.unresolvedThreads} unresolved review thread(s) -> handed back into convergence -> ${prKey}`,
+          );
+        } catch (err) {
+          console.error(`[poller] review-threads handoff ${prKey}: ${err}`);
         }
         continue;
       }
@@ -1837,6 +1853,12 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
           // escalation can name the real BLOCKED cause (and so the `review-threads` arm's question
           // can quote it). `-1` when the probe was unreadable.
           reviewThreads: st.unresolvedThreads,
+          // The pending-check count (PR #922 review): zero failing checks does not mean checks are
+          // green — a queued/running check leaves the BLOCKED cause undetermined, so the
+          // stall-escalation question gates its "required review approval" wording on this being 0
+          // too. 0 in token mode (checks unenumerable — the conservative `waiting` verdict already
+          // keeps the approval wording from firing there).
+          pendingChecks: st.pendingCheckNames.length,
         },
       });
       console.log(`[poller] mergeable=${verdict} (${st.mergeStateStatus}) -> ${prKey}`);
