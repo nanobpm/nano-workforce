@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertThrows } from "#test-assert";
 import { buildInfoProblems, composeBuildInfo } from "./write-build-info.ts";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -25,6 +25,22 @@ test("composeBuildInfo records the checkout HEAD (40-hex), the v<version> tag, a
   assertEquals(info.gitTag, "v1.2.3");
   assertEquals(info.builtAt, "2026-01-02T03:04:05.000Z");
   assertEquals(buildInfoProblems(info), []);
+});
+
+test("composeBuildInfo honours an explicit source SHA instead of the checkout HEAD", () => {
+  // The manual OIDC-recovery path checks out the release TAG, whose HEAD is the metadata-only
+  // release commit — so it passes the source HEAD explicitly. The explicit SHA must win over
+  // `git rev-parse HEAD` and must be validated against the 40-hex contract.
+  const sourceHead = "b".repeat(40);
+  const info = composeBuildInfo("2.0.0", new Date("2026-01-02T03:04:05.000Z"), sourceHead);
+  assertEquals(info.gitSha, sourceHead);
+  assertEquals(info.gitTag, "v2.0.0");
+  assertEquals(buildInfoProblems(info), []);
+});
+
+test("composeBuildInfo rejects a malformed explicit source SHA (fail closed)", () => {
+  assertThrows(() => composeBuildInfo("2.0.0", new Date(), "not-a-sha"), Error, "non-SHA");
+  assertThrows(() => composeBuildInfo("2.0.0", new Date(), "abc123"), Error, "non-SHA");
 });
 
 test("buildInfoProblems rejects malformed payloads", () => {

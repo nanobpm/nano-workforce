@@ -18,8 +18,14 @@
 // day-to-day question "which source code is running".
 //
 // USAGE:
-//   node --experimental-strip-types scripts/write-build-info.ts <version>   # release pipeline
-//   node --experimental-strip-types scripts/write-build-info.ts --check     # test: validate on disk
+//   node --experimental-strip-types scripts/write-build-info.ts <version> [--sha <40-hex>]   # release pipeline
+//   node --experimental-strip-types scripts/write-build-info.ts --check                      # test: validate on disk
+//
+// `<version>` alone records the current checkout HEAD — correct at semantic-release `prepare` time.
+// The manual OIDC-recovery path runs from a fresh checkout of the release TAG, whose HEAD is the
+// metadata-only `chore(release)` commit, NOT the source HEAD; it passes `--sha "$(git rev-parse
+// v<version>^")"` so the recorded gitSha still names the source code (see release.yml's recovery
+// instructions).
 //
 // `--check` validates the committed/generated `build-info.json` (present, well-formed, 40-hex
 // gitSha) — used by the pack test to assert the release artifact contract without cutting a
@@ -55,9 +61,19 @@ export function buildInfoProblems(info: unknown): string[] {
   return problems;
 }
 
-/** Compose the build-info payload for a release of `version` cut from the current checkout HEAD. */
-export function composeBuildInfo(version: string, now: Date = new Date()): BuildInfo {
-  const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+/**
+ * Compose the build-info payload for a release of `version`. `gitSha` is the SOURCE HEAD the
+ * release was cut from. By default it is read from the current checkout HEAD (`git rev-parse HEAD`)
+ * — correct at semantic-release `prepare` time, when HEAD is still the source commit. Callers that
+ * run LATER (the manual OIDC-recovery path, which checks out the release TAG) must pass `sha`
+ * explicitly as the source HEAD (`git rev-parse v<version>^`): by then HEAD is the metadata-only
+ * `chore(release)` commit, and recording it would mislabel the package with a commit whose only
+ * change is the version bump. An explicit `sha` is validated against the 40-hex contract.
+ */
+export function composeBuildInfo(version: string, now: Date = new Date(), sha?: string): BuildInfo {
+  const gitSha = (
+    sha ?? execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" })
+  ).trim();
   if (!SHA_RE.test(gitSha)) throw new Error(`git rev-parse HEAD returned a non-SHA: ${JSON.stringify(gitSha)}`);
   return {
     version,
@@ -92,10 +108,22 @@ function main(argv: string[]): void {
   }
   const version = arg?.trim();
   if (!version) {
-    console.error("usage: write-build-info.ts <version> | --check");
+    console.error("usage: write-build-info.ts <version> [--sha <40-hex>] | --check");
     process.exit(1);
   }
-  const info = composeBuildInfo(version);
+  // Optional explicit source SHA (see composeBuildInfo). The manual OIDC-recovery path checks out
+  // the release TAG, whose HEAD is the release commit — so it passes the source HEAD
+  // (`git rev-parse v<version>^`) explicitly to keep gitSha pointing at the source code.
+  let sha: string | undefined;
+  const shaIdx = argv.indexOf("--sha");
+  if (shaIdx !== -1) {
+    sha = argv[shaIdx + 1]?.trim();
+    if (!sha || !SHA_RE.test(sha)) {
+      console.error(`--sha must be a 40-hex commit SHA, got ${JSON.stringify(argv[shaIdx + 1])}`);
+      process.exit(1);
+    }
+  }
+  const info = composeBuildInfo(version, new Date(), sha);
   writeFileSync(BUILD_INFO_PATH, `${JSON.stringify(info, null, 2)}\n`);
   console.log(`wrote build-info.json: version=${info.version} gitSha=${info.gitSha} gitTag=${info.gitTag}`);
 }

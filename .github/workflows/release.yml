@@ -197,8 +197,11 @@ jobs:
       # token, still OIDC + provenance via the job's id-token. This step is a NO-OP
       # when the release step succeeded or when the version is already on npm, so it
       # can never double-publish. If OIDC stays down through every retry, fail loudly:
-      # a human must `npm publish` the pushed tag locally (npm login with 2FA, then
-      # `git checkout vX.Y.Z && npm ci && npm publish --provenance --access public`).
+      # a human must `npm publish` the pushed tag locally — restoring the build identity first,
+      # because a fresh tag checkout has no build-info.json and plain `npm publish` skips the
+      # prepare hook (npm login with 2FA, then `git checkout vX.Y.Z && npm ci &&
+      # node --experimental-strip-types scripts/write-build-info.ts X.Y.Z --sha "$(git rev-parse
+      # vX.Y.Z^)" && npm publish --provenance --access public`; see the ::error:: message below).
       - name: Retry OIDC publish if the release publish failed
         if: steps.release.outcome == 'failure'
         env:
@@ -213,15 +216,18 @@ jobs:
             exit 0
           fi
           echo "semantic-release prepared + tagged ${PKG}@${VERSION} but the OIDC publish failed; retrying."
-          # Re-bake build-info.json from the just-prepared package.json version before re-packing.
-          # semantic-release's prepare step already wrote it (prepareCmd in .releaserc.json), so it
-          # is present in this checkout — but this step re-packs via plain `npm publish`, which runs
-          # OUTSIDE semantic-release, so re-assert the artifact here to guarantee the retried
-          # tarball can never ship without its build identity (issue #925). The version comes from
-          # package.json (already bumped by @semantic-release/npm in prepare), NOT from
-          # `${nextRelease.version}` — that variable only exists inside semantic-release's own
-          # plugin steps, and verifyConditions runs before it is computed.
-          node --experimental-strip-types scripts/write-build-info.ts "${VERSION}"
+          # Reuse the build-info.json that semantic-release's prepare step already wrote (prepareCmd
+          # in .releaserc.json) — do NOT regenerate it here. By the time this retry runs,
+          # @semantic-release/git has already created the release commit, so HEAD is that
+          # metadata-only `chore(release)` commit, NOT the source HEAD the release was cut from.
+          # Re-running write-build-info.ts would call `git rev-parse HEAD` and overwrite the recorded
+          # source SHA with the release commit's SHA (and replace builtAt), making the documented
+          # identity depend on whether OIDC publishing failed. The prepared file is already present
+          # in this checkout with the correct source HEAD; this step re-packs via plain `npm publish`
+          # (which runs OUTSIDE semantic-release, so the prepare hook does not re-run), so the baked
+          # file is packed as-is. Validate it is present and well-formed (fail loudly if a future
+          # change ever drops it) rather than regenerate it from the changed HEAD (issue #925).
+          node --experimental-strip-types scripts/write-build-info.ts --check
           published=false
           for attempt in 1 2 3; do
             echo "OIDC publish attempt ${attempt}/3 for ${PKG}@${VERSION}"
@@ -233,7 +239,7 @@ jobs:
             sleep $((attempt * 30))
           done
           if [ "$published" != true ]; then
-            echo "::error::OIDC publish of ${PKG}@${VERSION} still failing after retries. The git tag v${VERSION} is pushed but npm has no tarball. Publish it locally: 'git fetch --tags && git checkout v${VERSION} && npm ci && npm publish --provenance --access public' (npm login with 2FA first)."
+            echo "::error::OIDC publish of ${PKG}@${VERSION} still failing after retries. The git tag v${VERSION} is pushed but npm has no tarball. Publish it locally (npm login with 2FA first): 'git fetch --tags && git checkout v${VERSION} && npm ci && node --experimental-strip-types scripts/write-build-info.ts ${VERSION} --sha \"\$(git rev-parse v${VERSION}^)\" && node --experimental-strip-types scripts/write-build-info.ts --check && npm publish --provenance --access public'. The write-build-info step is REQUIRED: a fresh tag checkout has no build-info.json (it is an uncommitted build artifact) and plain npm publish does not run the semantic-release prepare hook, so without it the package ships with gitSha: null. Passing --sha \"\$(git rev-parse v${VERSION}^)\" records the SOURCE HEAD (the tag's parent), not the metadata-only release commit the tag points at."
             exit 1
           fi
           # semantic-release aborts before @semantic-release/github when the npm
