@@ -283,6 +283,64 @@ test("progress-check: a non-addressed round records the baseline and consumes th
   );
 });
 
+test("progress-check: a review-stale re-entry parks with waiting_since at the gate's reviewWaitCutoff, not the park time", async () => {
+  // Issue #923 review ("previously missed"): the converge-gate decides stale/missing from ITS review
+  // read, but the loop parks several tasks later — and the old park stamped `waiting_since` at the
+  // (later) park time. A head-current review landing in that read→park window was then REJECTED by
+  // `pollReviews` (`submitted_at >= waiting_since`), so the loop re-solicited and could time out
+  // despite a valid verdict already sitting unconsumed on the PR. The gate emits `reviewWaitCutoff`
+  // (its read time); the park must stamp `waiting_since` at THAT cutoff so the in-window review
+  // satisfies the wait.
+  const CUTOFF = "2026-11-08T01:00:00.000Z"; // the gate's review-read time (earlier than "now")
+  const handler = await makeUnderTest(
+    async () => "sha-2",
+    async () => ({ work: true, consumedKey: "9" }),
+  );
+  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler(
+    {
+      processInstanceKey: "pik",
+      variables: {
+        prKey: "o/r#1",
+        status: "waiting",
+        repo: "o/r",
+        prNumber: 1,
+        reviewWaitCutoff: CUTOFF,
+      },
+    } as any,
+    app as any,
+  );
+  assertEquals(out, { progressed: true, huskRetries: 0 });
+  assertEquals(updates.length, 1, "one atomic park write");
+  assertEquals(updates[0]!.patch.status, "waiting_review", "the round parks for review");
+  assertEquals(
+    updates[0]!.patch.waiting_since,
+    CUTOFF,
+    "waiting_since is stamped at the gate's review-read cutoff, so a review landing in the read→park window satisfies the wait",
+  );
+});
+
+test("progress-check: a normal round (no reviewWaitCutoff) still stamps waiting_since at the park time", async () => {
+  // The cutoff is only emitted on a review-stale re-entry. A normal round carries no
+  // `reviewWaitCutoff`, so the park falls back to "now" — the pre-fix behaviour every existing test
+  // relies on.
+  const handler = await makeUnderTest(
+    async () => "sha-2",
+    async () => ({ work: true, consumedKey: "9" }),
+  );
+  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+  await handler(
+    { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "waiting", repo: "o/r", prNumber: 1 } } as any,
+    app as any,
+  );
+  assertEquals(updates[0]!.patch.status, "waiting_review");
+  const stamped = updates[0]!.patch.waiting_since;
+  assertEquals(typeof stamped, "string", "a park time is stamped");
+  // Not the (absent) cutoff — a fresh "now" timestamp, i.e. close to the wall clock.
+  const driftMs = Math.abs(Date.now() - Date.parse(stamped as string));
+  assertEquals(driftMs < 60_000, true, "waiting_since falls back to the park time when no cutoff is carried");
+});
+
 test("progress-check: a blank/unknown status is treated as addressed — reads the head and can report no progress", async () => {
   let called = false;
   const handler = await makeUnderTest(async () => {

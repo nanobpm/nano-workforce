@@ -1712,9 +1712,21 @@ export interface MergeResult {
  * must re-attempt on the settled base, NOT page a human. Matches GitHub's stable message across
  * both the GraphQL `mergePullRequest` error and its HTTP 405 REST variant. Kept narrow — the exact
  * "<Base|Head> branch was modified" phrase — so a genuine block (conflict, failing required check,
- * 403 perms, 422 not-mergeable) is never swallowed as transient. */
+ * 403 perms, 422 not-mergeable) is never swallowed as transient.
+ *
+ * The same class covers the `--match-head-commit` / REST `sha` pin refusal (issue #923 review): the
+ * PR head advanced past the verified head between the review backstop and the merge mutation, so
+ * GitHub refused the pinned merge. That is a check-then-act race the loop is designed to absorb —
+ * the bounded merge retry re-runs the review backstop on the new head — not a human-actionable
+ * block. gh words it "Head commit of pull request #… does not match '--match-head-commit'"; the
+ * REST `sha` mismatch surfaces as a 409 whose body carries the same "Head branch was modified"
+ * phrase (matched by the first alternative) or a "SHA does not match" wording. */
 export function isTransientMergeRace(detail: string): boolean {
-  return /\b(?:base|head) branch was modified\b/i.test(detail);
+  return (
+    /\b(?:base|head) branch was modified\b/i.test(detail) ||
+    /does not match ['"]--match-head-commit['"]/i.test(detail) ||
+    /\bsha does not match\b/i.test(detail)
+  );
 }
 
 /** Attempt to land the PR. Returns `merged` (landed now), `queued` (added to the repo's merge

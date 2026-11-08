@@ -43,6 +43,33 @@ test("isTransientMergeRace: genuine blocks are NOT transient (never swallowed)",
   assertEquals(isTransientMergeRace("Merge conflict; base branch has conflicts"), false); // a base conflict is a real block
 });
 
+// #923 review (Copilot "previously missed"): the `--match-head-commit` / REST `sha` pin refuses the
+// merge when the PR head advanced past the verified head between the review backstop and the merge
+// mutation. That refusal is the SAME class as the base/head-moved race — a transient check-then-act
+// race GitHub resolves by re-attempting — so it must classify as `retry` (the merge loop's bounded
+// retry re-runs the review backstop on the new head), never `blocked` (which pages a human for a
+// race the loop is designed to absorb).
+test("isTransientMergeRace: the pinned-head mismatch refusal is transient", () => {
+  // gh CLI `--match-head-commit` refusal (gh's own wording).
+  assertEquals(
+    isTransientMergeRace(
+      "Head commit of pull request #924 does not match '--match-head-commit' expected f5a6f20",
+    ),
+    true,
+  );
+  // gh wording variant (no "expected" tail).
+  assertEquals(
+    isTransientMergeRace("Head commit of pull request #924 does not match '--match-head-commit'"),
+    true,
+  );
+  // REST PUT /pulls/{n}/merge `sha` mismatch — GitHub returns 409 Conflict.
+  assertEquals(
+    isTransientMergeRace("github 409 Conflict: Head branch was modified. Review and try the merge again."),
+    true,
+  );
+  assertEquals(isTransientMergeRace("github 409 Conflict: SHA does not match expected head"), true);
+});
+
 // Drive `mergePr`'s REST (token) transport: the 405 base-moved race must surface as `retry`, while
 // a genuine 405 refusal stays `blocked`.
 async function withMergePut(
@@ -85,6 +112,28 @@ test("mergePr: a 405 base-moved race → outcome 'retry'", async () => {
 test("mergePr: a genuine 405 refusal → outcome 'blocked' (not swallowed as transient)", async () => {
   await withMergePut(405, "Method Not Allowed", "Pull Request is not mergeable", async () => {
     const res = await mergePr("acme/widgets", 42, "test-token", { method: "squash", admin: false });
+    assertEquals(res?.outcome, "blocked");
+  });
+});
+
+test("mergePr: a REST 409 sha-mismatch refusal → outcome 'retry' (not blocked)", async () => {
+  await withMergePut(409, "Conflict", "Head branch was modified. Review and try the merge again.", async () => {
+    const res = await mergePr("acme/widgets", 42, "test-token", {
+      method: "squash",
+      admin: false,
+      expectedHeadSha: "f5a6f20",
+    });
+    assertEquals(res?.outcome, "retry");
+  });
+});
+
+test("mergePr: a genuine 409 refusal → outcome 'blocked' (not swallowed as transient)", async () => {
+  await withMergePut(409, "Conflict", "Pull Request is not mergeable", async () => {
+    const res = await mergePr("acme/widgets", 42, "test-token", {
+      method: "squash",
+      admin: false,
+      expectedHeadSha: "f5a6f20",
+    });
     assertEquals(res?.outcome, "blocked");
   });
 });

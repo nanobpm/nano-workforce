@@ -821,7 +821,11 @@ test("converge-gate #799: a STALE review (commit_id predates HEAD) does not bloc
     headSha: "newsha2222222222222222222222222222222222",
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: true });
+  assertEquals(out.convergeBlocked, false);
+  assertEquals(out.reviewStale, true);
+  // The gate stamps the review-wait cutoff (the time of ITS review read) so a head-current review
+  // landing in the read→park window still satisfies the wait (issue #923 review).
+  assertEquals(typeof out.reviewWaitCutoff, "string");
 });
 
 test("converge-gate #799: a HEAD-CURRENT review still blocks on an unacked advisory (control)", async () => {
@@ -854,7 +858,11 @@ test("converge-gate #799/#923: a review commit_id GitHub did not carry is treate
     headSha: "newsha2222222222222222222222222222222222",
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: true });
+  assertEquals(out.convergeBlocked, false);
+  assertEquals(out.reviewStale, true);
+  // The gate stamps the review-wait cutoff (the time of ITS review read) so a head-current review
+  // landing in the read→park window still satisfies the wait (issue #923 review).
+  assertEquals(typeof out.reviewWaitCutoff, "string");
 });
 
 // ── Fail closed on "no review exists" (issue #923 §1) ────────────────────────
@@ -874,7 +882,11 @@ test("converge-gate #923: NO Copilot review at all signals reviewStale (never co
     headSha: "headsha4444444444444444444444444444444444",
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: true });
+  assertEquals(out.convergeBlocked, false);
+  assertEquals(out.reviewStale, true);
+  // The gate stamps the review-wait cutoff (the time of ITS review read) so a head-current review
+  // landing in the read→park window still satisfies the wait (issue #923 review).
+  assertEquals(typeof out.reviewWaitCutoff, "string");
 });
 
 test("converge-gate #923: a review GitHub carried no commit_id for is ALSO treated as missing (fail closed)", async () => {

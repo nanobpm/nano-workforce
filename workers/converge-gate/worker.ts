@@ -143,9 +143,25 @@ export function makeHandler(deps: {
       // The head read still fails OPEN (null → not stale): without the head we can prove nothing,
       // so a transport hiccup can never fabricate a stale/missing verdict that would loop the loop
       // re-soliciting forever — the review-wait timeout remains the backstop.
+      //
+      // ARRIVAL-WINDOW CUTOFF (issue #923 review, "previously missed"): the stale/missing verdict
+      // is decided from the review read ABOVE — but the loop only PARKS for the next review several
+      // tasks later (persist-round → check-progress), and check-progress stamps `waiting_since` at
+      // THAT (later) park time. A head-current review that lands in the window BETWEEN this read
+      // and the park would then be REJECTED by `pollReviews` (it filters
+      // `submitted_at >= waiting_since`), so the loop re-solicits and can time out despite a valid
+      // verdict already sitting unconsumed on the PR. Emit the time of THIS read as
+      // `reviewWaitCutoff` so check-progress can park with `waiting_since` at the cutoff — any
+      // review that arrived in the window then satisfies the wait instead of being discarded.
       const headSha = await readHeadSha(ghRepo, ghNumber).catch(() => null);
       if (isReviewMissingOrStale(review.commitId, headSha)) {
-        return { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: true };
+        return {
+          convergeBlocked: false,
+          convergeBlockReason: "",
+          convergeAckOnly: false,
+          reviewStale: true,
+          reviewWaitCutoff: new Date().toISOString(),
+        };
       }
       // VERDICT GATE (issue #923 §2): a head-current review whose OWN summary reports open,
       // actionable findings (Copilot's "Changes recommended" / "N open issue(s)" / a v2 "Open (N)"

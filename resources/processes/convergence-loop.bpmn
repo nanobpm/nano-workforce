@@ -42,6 +42,7 @@
           <nano:extend name="round" type="integer" optional="true" />
           <nano:extend name="huskRetries" type="integer" optional="true" />
           <nano:extend name="roundEntryHead" type="string" optional="true" />
+          <nano:extend name="reviewWaitCutoff" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="PrCaptureHeadIn" name="Capture round-entry head — input">
           <nano:extend name="prKey" type="string" />
@@ -68,6 +69,7 @@
           <nano:extend name="convergeBlockReason" type="string" optional="true" />
           <nano:extend name="convergeAckOnly" type="boolean" optional="true" />
           <nano:extend name="reviewStale" type="boolean" optional="true" />
+          <nano:extend name="reviewWaitCutoff" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="EscalationIn" name="Record escalation — input">
           <nano:extend name="prKey" type="string" />
