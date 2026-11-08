@@ -26,6 +26,11 @@ curl -sS __BASE__/version | jq   # tool: getVersion: app/urban version, git sha,
 curl -sS __BASE__/status  | jq   # tool: listActivePrs: every PR in flight
 ```
 
+`/status` also carries the running app's build identity as a top-level `version` object
+(`{ version, gitSha }`, the same source as `/version` — env override, then the live `.git`
+checkout, then the release-baked `build-info.json` an npm install ships), so the endpoint
+everyone polls answers "is the fix live?" in one call.
+
 Each `/status` entry carries `prKey` (`owner/repo#123`), `status`, `round`, `processKey`
 (the **engine process-instance key**, the bridge to §5), `openEscalation`,
 `activeWorker`/`leaseUntil` (an agent holds the round, or the job is just queued), and

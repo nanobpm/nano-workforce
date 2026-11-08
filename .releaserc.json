@@ -41,6 +41,14 @@
     "@semantic-release/npm",
     "@semantic-release/github",
     [
+      "@semantic-release/exec",
+      {
+        "//": "Bake the build identity into the package (issue #925). prepareCmd runs in semantic-release's prepare step — AFTER @semantic-release/npm bumps package.json to ${nextRelease.version} and BEFORE it packs/publishes the tarball — so the published package ships build-info.json and an npm-installed instance (no .git, no env override) can still report its gitSha. The recorded gitSha is the SOURCE HEAD the release is cut from; the tag commit is created afterwards by @semantic-release/git (see scripts/write-build-info.ts). verifyConditionsCmd also regenerates it because the release workflow's OIDC-retry step re-runs plain `npm publish` (which re-packs) after a failed publish, and semantic-release re-runs verifyConditions on that path — without it the retry would publish a tarball with no build-info.json.",
+        "verifyConditionsCmd": "node --experimental-strip-types scripts/write-build-info.ts ${nextRelease.version}",
+        "prepareCmd": "node --experimental-strip-types scripts/write-build-info.ts ${nextRelease.version}"
+      }
+    ],
+    [
       "@semantic-release/git",
       {
         "assets": ["CHANGELOG.md", "package.json", "package-lock.json"],

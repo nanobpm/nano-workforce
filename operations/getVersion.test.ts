@@ -34,6 +34,9 @@ test("returns 200 with the app identity", async () => {
   assert("urbanVersion" in r.body);
   assert("gitSha" in r.body);
   assert("gitBranch" in r.body);
+  // Release-baked identity fields (issue #925): always present, null on a dev checkout.
+  assert("gitTag" in r.body);
+  assert("builtAt" in r.body);
   assert(typeof r.body.runtime === "string" && r.body.runtime.length > 0);
   assert(typeof r.body.startedAt === "string");
   assert(typeof r.body.uptimeSeconds === "number");
