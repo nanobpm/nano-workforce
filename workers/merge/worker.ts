@@ -161,7 +161,12 @@ export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: 
   // A head-current review whose OWN summary still reports open findings (the same canonical
   // verdict parser the converge-gate uses) must block too: a summary-only "Changes recommended"
   // review that landed after convergence has no unresolved thread for mergeability polling to see.
-  const openFindings = backstopReview === null ? [] : parseReviewOpenFindings(backstopReview.body);
+  // Only evaluate the verdict once head-currentness is VERIFIED (review read AND head read succeeded
+  // and match) — an unreadable head fails open here like the stale check above, never blocking on a
+  // possibly-stale review's body.
+  const reviewIsHeadCurrent =
+    backstopReview !== null && backstopHead !== null && backstopHead !== "" && backstopReview.commitId === backstopHead;
+  const openFindings = reviewIsHeadCurrent ? parseReviewOpenFindings(backstopReview.body) : [];
   if (openFindings.length > 0) {
     const detail = `the head-current Copilot review reports open findings (${openFindings.join(", ")})`;
     await app.data.table("merges", "id").insert({

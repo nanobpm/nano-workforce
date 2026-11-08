@@ -427,6 +427,23 @@ test("pr.merge #923: a head-current review whose summary reports OPEN findings b
   });
 });
 
+for (const [label, readHeadSha] of [
+  ["returns null", async () => null],
+  ["throws", async () => { throw new Error("transient"); }],
+] as const) {
+  test(`pr.merge #923: an unverifiable head (read ${label}) never blocks on a possibly-stale review's open findings`, async () => {
+    await withGithub(backstopRoutes, async () => {
+      const { app, stores } = fakeApp();
+      const backstop = makeHandler({
+        readReview: async () => ({ body: "### 🟡 Changes recommended\n<summary>2 open issues</summary>", commitId: "old" }),
+        readHeadSha,
+      });
+      await backstop({ variables: { prKey: "acme/widgets#29", repo: "acme/widgets", prNumber: 29 } } as any, app);
+      assertEquals(stores.merges.some((m) => m.method === "review-backstop"), false);
+    });
+  });
+}
+
 test("pr.merge #923: the direct merge pins the verified head SHA (no check-then-merge race)", async () => {
   let putBody = "";
   await withGithub(

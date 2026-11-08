@@ -307,13 +307,16 @@ export function parseReviewOpenFindings(reviewBody: string | null | undefined): 
   const body = reviewBody ?? "";
   if (body.trim() === "") return [];
   const out: string[] = [];
-  if (/changes recommended/i.test(body)) out.push("changes recommended");
-  const issues = /(\d+)\s+open\s+issues?/i.exec(body);
-  if (issues && Number(issues[1]) > 0) out.push(`${issues[1]} open issue${issues[1] === "1" ? "" : "s"}`);
-  // The v2 overview carries an explicit "Open (N)" collapsible section when findings remain.
-  const v2Open = /<summary>[\s\S]*?Open\s*\((\d+)\)/i.exec(body);
-  if (v2Open && v2Open[1] !== "0") {
-    out.push(`${v2Open[1]} open finding${v2Open[1] === "1" ? "" : "s"}`);
+  // Only VERDICT lines and dedicated finding-count <summary> sections count — never descriptive
+  // prose (a clean review's file table may legitimately say `Recognizes "Changes recommended"`).
+  // A verdict line STARTS with the verdict (`### 🟡 Changes recommended`, `🟡 Changes recommended`).
+  if (/^[ \t]*(?:#{1,6}[ \t]*)?(?:🟡[ \t]*)?changes recommended\b/imu.test(body)) out.push("changes recommended");
+  // Each <summary> match is bounded by its own closing tag ([^<]* cannot cross `</summary>`).
+  for (const m of body.matchAll(/<summary>(?:<strong>)?\s*(\d+)\s+open\s+issues?\s*(?:<\/strong>)?\s*<\/summary>/gi)) {
+    if (Number(m[1]) > 0) out.push(`${m[1]} open issue${m[1] === "1" ? "" : "s"}`);
+  }
+  for (const m of body.matchAll(/<summary>(?:<strong>)?\s*Open\s*\((\d+)\)\s*(?:<\/strong>)?\s*<\/summary>/gi)) {
+    if (Number(m[1]) > 0) out.push(`${m[1]} open finding${m[1] === "1" ? "" : "s"}`);
   }
   return out;
 }

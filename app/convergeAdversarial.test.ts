@@ -292,3 +292,27 @@ test("the pass budget resets when the next review lands (new round)", async () =
   // Round 2 gets its own full budget of 1 pass.
   assert(completions(engine, "adversarial-review") === 2, `round 2 must get a fresh pass: ${runs(engine)}`);
 });
+
+// Issue #923 §4 (behavioural, not substring): a `converged` agent verdict with NO head-current review
+// makes the converge-gate report `reviewStale`; the loop must record the round as `review-stale`
+// (not the agent's self-reported `converged`) and park for a fresh review — never reaching
+// `persist-converged`.
+test("#923: a stale converge-gate verdict persists the round as review-stale and parks without converging", async () => {
+  const { engine, seen } = await boot({
+    responses: {
+      "senior:pr-review": [{ status: "converged", summary: "done" }, { status: "waiting", summary: "awaiting" }],
+      "pr.converge-gate": {
+        convergeBlocked: false,
+        convergeBlockReason: "",
+        convergeAckOnly: false,
+        reviewStale: true,
+      },
+    },
+    vars: { advMax: 0 },
+  });
+  assertThatInstance(engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+  assert(completions(engine, "persist-converged") === 0, `must not converge on a stale review: ${runs(engine)}`);
+  const recorded = seen["pr.persist-round"][0];
+  assert(recorded?.status === "review-stale", `persist-round status: ${JSON.stringify(recorded?.status)}`);
+  assert(completions(engine, "wait-review") === 0, "must be parked waiting for a fresh review");
+});

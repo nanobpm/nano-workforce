@@ -1279,8 +1279,11 @@ test("parseReviewOpenFindings: a 'Changes recommended' review reports open findi
 });
 
 test("parseReviewOpenFindings: an 'N open issue(s)' summary reports N", () => {
-  assertEquals(parseReviewOpenFindings("Review complete.\n\n3 open issues remain."), ["3 open issues"]);
-  assertEquals(parseReviewOpenFindings("1 open issue."), ["1 open issue"]);
+  assertEquals(
+    parseReviewOpenFindings("<details open>\n<summary><strong>3 open issues</strong></summary>\n</details>"),
+    ["3 open issues"],
+  );
+  assertEquals(parseReviewOpenFindings("<summary>1 open issue</summary>"), ["1 open issue"]);
 });
 
 test("parseReviewOpenFindings: '0 open issues' is a clean verdict, not a finding", () => {
@@ -1297,6 +1300,24 @@ test("parseReviewOpenFindings: a clean review (no open-issues signal) reports no
   assertEquals(parseReviewOpenFindings(""), []);
   assertEquals(parseReviewOpenFindings(null), []);
   assertEquals(parseReviewOpenFindings(undefined), []);
+});
+
+test("parseReviewOpenFindings: verdict phrases in descriptive prose / table rows are NOT findings", () => {
+  const clean = [
+    "<!-- ccr-overview-v2 -->",
+    "",
+    "### ✅ Looks good",
+    "",
+    "<details>",
+    "<summary><strong>What changed in this PR</strong></summary>",
+    "",
+    "| File | Summary and final review notes |",
+    "|---|---|",
+    '| `a.ts` | Recognizes "Changes recommended" and counts 3 open issues; parses Open (2) sections. |',
+    "</details>",
+    "<summary>Notes</summary> then later Open (4) outside any summary",
+  ].join("\n");
+  assertEquals(parseReviewOpenFindings(clean), []);
 });
 
 test("parseReviewOpenFindings: a v2 overview with NO Open section reports none", () => {
