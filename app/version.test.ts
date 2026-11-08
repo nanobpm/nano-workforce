@@ -184,3 +184,21 @@ test("gitTag/builtAt are always present in the payload (null on a plain checkout
   const info = buildVersionInfo();
   assert("gitTag" in info && "builtAt" in info, "the fields are always present in the payload");
 });
+
+test("a build-info.json with a valid SHA but an unparseable builtAt is rejected (shared validator)", async () => {
+  // Regression: the reader once validated only gitSha, so `builtAt: "not-a-date"` reached /version
+  // even though the writer's buildInfoProblems() rejects it. Reader + writer now share one validator.
+  const dir = mkdtempSync(join(tmpdir(), "nwf-version-baddate-"));
+  try {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@nanobpm/nano-workforce", version: "1.0.0", type: "module" }));
+    writeFileSync(join(dir, "build-info.json"), JSON.stringify({ ...BAKED, builtAt: "not-a-date" }));
+    await withEnv("NANO_WORKFORCE_GIT_SHA", undefined, async () => {
+      const mod = await importFrom(dir);
+      const info = mod.buildVersionInfo();
+      assertEquals(info.gitSha, null, "the whole baked payload is dropped when builtAt is invalid");
+      assertEquals(info.builtAt, null);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

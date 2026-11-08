@@ -45,21 +45,11 @@ export interface BuildInfo {
   builtAt: string;
 }
 
-const SHA_RE = /^[0-9a-f]{40}$/;
+// The ONE payload validator is shared with the reader (app/version.ts) so writer and reader can
+// never disagree on what a valid build-info.json is.
+export { buildInfoProblems } from "../app/version.ts";
 
-/** Validate a parsed build-info payload; returns a list of problems (empty = valid). */
-export function buildInfoProblems(info: unknown): string[] {
-  const problems: string[] = [];
-  if (typeof info !== "object" || info == null) return ["build-info.json is not a JSON object"];
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape (parsed JSON)
-  const bi = info as Record<string, unknown>;
-  if (typeof bi.version !== "string" || !bi.version.trim()) problems.push("version must be a non-blank string");
-  if (typeof bi.gitSha !== "string" || !SHA_RE.test(bi.gitSha)) problems.push("gitSha must be a 40-hex string");
-  if (typeof bi.gitTag !== "string" || !bi.gitTag.trim()) problems.push("gitTag must be a non-blank string");
-  if (typeof bi.builtAt !== "string" || Number.isNaN(Date.parse(bi.builtAt)))
-    problems.push("builtAt must be an ISO-8601 timestamp");
-  return problems;
-}
+import { buildInfoProblems, SHA_RE } from "../app/version.ts";
 
 /**
  * Compose the build-info payload for a release of `version`. `gitSha` is the SOURCE HEAD the

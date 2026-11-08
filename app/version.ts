@@ -108,22 +108,36 @@ function urbanVersion(): string | null {
  * its `gitTag` names the tag placed on the release commit, whose tree matches that source HEAD
  * except for the version-bump metadata. Returns null on a dev checkout, which has no such file.
  */
-const SHA_RE = /^[0-9a-f]{40}$/;
+export const SHA_RE = /^[0-9a-f]{40}$/;
+
+/** Validate a parsed build-info payload; returns a list of problems (empty = valid). The single
+ * validator shared by the writer (scripts/write-build-info.ts) and the reader below. */
+export function buildInfoProblems(info: unknown): string[] {
+  const problems: string[] = [];
+  if (typeof info !== "object" || info == null) return ["build-info.json is not a JSON object"];
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape (parsed JSON)
+  const bi = info as Record<string, unknown>;
+  if (typeof bi.version !== "string" || !bi.version.trim()) problems.push("version must be a non-blank string");
+  if (typeof bi.gitSha !== "string" || !SHA_RE.test(bi.gitSha)) problems.push("gitSha must be a 40-hex string");
+  if (typeof bi.gitTag !== "string" || !bi.gitTag.trim()) problems.push("gitTag must be a non-blank string");
+  if (typeof bi.builtAt !== "string" || Number.isNaN(Date.parse(bi.builtAt)))
+    problems.push("builtAt must be an ISO-8601 timestamp");
+  return problems;
+}
+
 
 function buildInfo(): { version: string; gitSha: string; gitTag: string; builtAt: string } | null {
   const raw = readJson(join(REPO_ROOT, "build-info.json"));
   if (raw == null) return null;
-  // Fail closed on a malformed baked SHA: a non-blank but non-40-hex value (e.g. "not-a-sha") must
-  // be IGNORED, not reported — otherwise both identity endpoints surface an invalid commit from a
-  // corrupt/tampered build-info.json. Validate against the writer's 40-hex contract
-  // (scripts/write-build-info.ts SHA_RE) before accepting the fallback.
-  const gitSha = typeof raw.gitSha === "string" && SHA_RE.test(raw.gitSha.trim()) ? raw.gitSha.trim() : null;
-  if (gitSha == null) return null;
+  // Fail closed on ANY malformed field (bad SHA, unparseable builtAt, blank tag/version): a corrupt
+  // or tampered build-info.json is ignored wholesale rather than partially surfaced. Uses the SAME
+  // validator the writer's --check uses, so reader and writer can never drift.
+  if (buildInfoProblems(raw).length > 0) return null;
   return {
-    version: typeof raw.version === "string" ? raw.version : "",
-    gitSha,
-    gitTag: typeof raw.gitTag === "string" ? raw.gitTag : "",
-    builtAt: typeof raw.builtAt === "string" ? raw.builtAt : "",
+    version: String(raw.version),
+    gitSha: String(raw.gitSha),
+    gitTag: String(raw.gitTag),
+    builtAt: String(raw.builtAt),
   };
 }
 
