@@ -100,6 +100,7 @@ import { ENGINE_TERMINAL_STATES } from "./reconcile.ts";
 // (submitPr/startMerge) and re-exported below so the long-standing `import { repoEnvelopeVars } from
 // "./service.ts"` call sites (and its tests) keep resolving.
 import { repoEnvelopeVars } from "./repoEnvelope.ts";
+import { maybeStartRetro } from "./retro.ts";
 import { clampNudgeMinutes, isoDurationToMs, isReviewStale, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
@@ -1283,6 +1284,13 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
     const { repo, number, pr_key: prKey } = pr;
     const lastId = pr.last_review_id ?? 0;
     try {
+      // #927: a PR that already landed/closed must never resume or re-solicit a review — whatever
+      // the review freshness (no review, stale review, OR a head-current one landing after the
+      // merge). Check terminal state FIRST — before even fetching reviews, so a failing
+      // reviews endpoint (e.g. 502) can't strand a merged PR in `waiting_review` with a live timer — so no branch below can route a merged PR back into a
+      // review round. `null` → handled-but-not-finalized (cancel failed): skip this pass, stay pollable.
+      const retired = await retireTerminalReviewWait(data, engine, pr, token);
+      if (retired !== false) continue;
       const reviews = await fetchPrReviews(repo, number, token);
       if (reviews === null) return; // no usable transport (no gh, no token) → idle
       const fresh = reviews
@@ -1340,6 +1348,60 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
       console.error(`[poller] ${prKey}: ${err}`);
     }
   }
+}
+
+/** Review-wait out-of-band terminal check (issue #927). nano-bpm#1467 landed while its convergence
+ * loop was parked at `wait-review`; the poller then kept re-requesting Copilot reviews on the MERGED
+ * PR for six rounds and finally escalated a review timeout no human could act on. Before any
+ * re-solicitation, read the PR's live state: if it is terminal (merged or closed) the review wait is
+ * moot, so RETIRE the parked convergence instance (`process_key`) and close the row out — `merged`
+ * (with `merged_at`) for a landed PR, the canonical `abandonClosedPr` for a closed-unmerged one.
+ * Conservative: an unreadable/open state returns `false` and the caller re-solicits as before.
+ * Exported for tests. */
+export async function retireTerminalReviewWait(
+  data: DataLayer,
+  engine: EngineClient,
+  pr: PullRequest,
+  token: string,
+): Promise<boolean | null> {
+  const st = await fetchPrState(pr.repo, pr.number, token).catch(() => null);
+  const liveness = classifyPrLiveness(st);
+  if (liveness !== "merged" && liveness !== "closed") return false;
+  if (pr.process_key != null) {
+    const key = String(pr.process_key);
+    try {
+      await engine.cancelInstance({ processInstanceKey: key });
+    } catch (err) {
+      // Only finalize the row once the instance is confirmed gone/terminal: a transiently-failed
+      // cancel would otherwise drop the row from `waiting_review` scans while the live instance's
+      // review-timeout timer still escalates a human. Unconfirmed → stay pollable, retry next pass.
+      let confirmedTerminal = false;
+      try {
+        const match = (await engine.searchProcessInstances({ processInstanceKeys: [key] })).find(
+          (s) => String(s.processInstanceKey) === key,
+        );
+        confirmedTerminal = !match || ENGINE_TERMINAL_STATES.has(String(match.state ?? "").trim().toUpperCase());
+      } catch {
+        confirmedTerminal = false;
+      }
+      if (!confirmedTerminal) {
+        console.error(`[poller] ${pr.pr_key}: retire review-wait instance ${key} failed, retrying next pass: ${err}`);
+        return null;
+      }
+    }
+  }
+  if (liveness === "merged") {
+    const ts = now();
+    await prs(data).update(pr.pr_key, { status: "merged", merged_at: ts, updated_at: ts });
+    // Reuse the merged-completion side effect `pr.mark-merged`/`pr.finalize` run: an externally
+    // merged PR may be its plan's last to settle, so its automatic retrospective must still start.
+    // `maybeStartRetro` is best-effort and never throws.
+    await maybeStartRetro(data, engine, pr.pr_key);
+  } else {
+    await abandonClosedPr(data, pr.pr_key, "PR was closed on GitHub while awaiting review — retiring the convergence loop");
+  }
+  console.log(`[poller] ${liveness} while waiting for review -> retired loop ${pr.pr_key}`);
+  return true;
 }
 
 /** Ensure a Copilot review is in flight for a PR still waiting, throttled to one attempt per

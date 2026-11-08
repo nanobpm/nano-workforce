@@ -112,6 +112,13 @@ test("pr.merge short-circuits an already-merged PR without re-running the land p
 // would stay green if the verb regressed.
 type GithubCall = { url: string; method: string };
 
+// A handler whose review backstop sees a VERIFIED head-current review, so land-protocol tests
+// exercise the protocol dispatch (the backstop now fails CLOSED on an unreadable read, #927).
+const reviewedHandler = makeHandler({
+  readReview: async () => ({ body: "lgtm", commitId: "reviewedhead" }),
+  readHeadSha: async () => "reviewedhead",
+});
+
 function withGithub(
   routes: (url: string, init: RequestInit | undefined) => Response | null,
   run: (calls: GithubCall[]) => Promise<void>,
@@ -153,7 +160,7 @@ test("pr.merge routes a mergify-queue repo through the queued branch (enqueue co
     },
     async (calls) => {
       const { app, stores } = fakeApp();
-      const out = (await handler(
+      const out = (await reviewedHandler(
         { variables: { prKey: "acme/widgets#7", repo: "acme/widgets", prNumber: 7 } } as any,
         app,
       )) as Record<string, unknown>;
@@ -189,7 +196,7 @@ test("pr.merge routes a refused merge through the blocked branch (escalation pay
     },
     async (calls) => {
       const { app, stores } = fakeApp();
-      const out = (await handler(
+      const out = (await reviewedHandler(
         { variables: { prKey: "acme/widgets#9", repo: "acme/widgets", prNumber: 9 } } as any,
         app,
       )) as Record<string, unknown>;
@@ -229,7 +236,7 @@ test("pr.merge routes a transient base-moved race through the retry branch (no e
     },
     async (calls) => {
       const { app, stores } = fakeApp();
-      const out = (await handler(
+      const out = (await reviewedHandler(
         { variables: { prKey: "acme/widgets#11", repo: "acme/widgets", prNumber: 11 } } as any,
         app,
       )) as Record<string, unknown>;
@@ -383,33 +390,63 @@ test("pr.merge #923: a HEAD-CURRENT review lands normally (backstop control)", a
   );
 });
 
-test("pr.merge #923: an UNREADABLE review/head fails OPEN (a transport hiccup never wedges a merge)", async () => {
-  await withGithub(
-    (url) => {
-      if (/\/pulls\/\d+\/merge$/.test(url)) return new Response(JSON.stringify({ merged: true }), { status: 200 });
-      return backstopRoutes(url);
-    },
-    async (calls) => {
-      const { app, stores } = fakeApp();
-      const backstop = makeHandler({
-        readReview: async () => null, // no usable transport → unverifiable, NOT "no review"
-        readHeadSha: async () => {
-          throw new Error("boom");
-        },
-      });
-      const out = (await backstop(
-        { variables: { prKey: "acme/widgets#27", repo: "acme/widgets", prNumber: 27 } } as any,
-        app,
-      )) as Record<string, unknown>;
+for (const [label, readReview, readHeadSha] of [
+  ["review read null", async () => null, async () => "h9"],
+  ["review read throws", async () => { throw new Error("boom"); }, async () => "h9"],
+  ["head read null", async () => ({ body: "lgtm", commitId: "h9" }), async () => null],
+  ["head read throws", async () => ({ body: "lgtm", commitId: "h9" }), async () => { throw new Error("boom"); }],
+  ["head read empty", async () => ({ body: "lgtm", commitId: "h9" }), async () => "  "],
+] as const) {
+  test(`pr.merge #927: an UNVERIFIABLE backstop read (${label}) fails CLOSED — no land, audited refusal`, async () => {
+    await withGithub(
+      (url) => {
+        if (/\/pulls\/\d+\/merge$/.test(url)) return new Response(JSON.stringify({ merged: true }), { status: 200 });
+        return backstopRoutes(url);
+      },
+      async (calls) => {
+        const { app, stores } = fakeApp();
+        const backstop = makeHandler({ readReview, readHeadSha } as any);
+        const out = (await backstop(
+          { variables: { prKey: "acme/widgets#27", repo: "acme/widgets", prNumber: 27 } } as any,
+          app,
+        )) as Record<string, unknown>;
+        assertEquals(out.mergeStatus, "blocked");
+        assertEquals(out.status, "blocked");
+        assertEquals((out.question as string).includes("could not be read"), true);
+        assertEquals(stores.merges.length, 1);
+        assertEquals(stores.merges[0].outcome, "blocked");
+        assertEquals(stores.merges[0].method, "review-backstop");
+        assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+        assertEquals(calls.some((c) => /\/comments$/.test(c.url)), false);
+      },
+    );
+  });
+}
 
-      assertEquals(out, { mergeStatus: "merged" });
-      assertEquals(
-        calls.some((c) => /\/pulls\/\d+\/merge$/.test(c.url) && c.method === "PUT"),
-        true,
-      );
-      assertEquals(stores.merges.some((m) => m.method === "review-backstop"), false);
-    },
-  );
+test("pr.merge #927: reproduces nano-bpm#1467 — review REQUESTED but not yet arrived on a mergify-queue repo → no `@mergifyio queue`", async () => {
+  const protocol =
+    "# repo\n\n```merge-protocol\n{ \"land\": { \"method\": \"mergify-queue\", \"comment\": \"@mergifyio queue\" } }\n```\n";
+  for (const readReview of [async () => ({ body: "", commitId: null }), async () => null]) {
+    await withGithub(
+      (url) => {
+        if (/\/contents\/AGENTS\.md$/.test(url)) return new Response(protocol);
+        if (/\/issues\/\d+\/comments$/.test(url)) return new Response(JSON.stringify({ id: 1 }), { status: 201 });
+        return backstopRoutes(url);
+      },
+      async (calls) => {
+        const { app, stores } = fakeApp();
+        const backstop = makeHandler({ readReview, readHeadSha: async () => "e597b399" } as any);
+        const out = (await backstop(
+          { variables: { prKey: "acme/widgets#1467", repo: "acme/widgets", prNumber: 1467 } } as any,
+          app,
+        )) as Record<string, unknown>;
+        assertEquals(out.mergeStatus, "blocked");
+        assertEquals(stores.merges[0].method, "review-backstop");
+        assertEquals(calls.some((c) => /\/comments$/.test(c.url)), false);
+        assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+      },
+    );
+  }
 });
 
 test("pr.merge #923: a head-current review whose summary reports OPEN findings blocks landing", async () => {
@@ -426,23 +463,6 @@ test("pr.merge #923: a head-current review whose summary reports OPEN findings b
     assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
   });
 });
-
-for (const [label, readHeadSha] of [
-  ["returns null", async () => null],
-  ["throws", async () => { throw new Error("transient"); }],
-] as const) {
-  test(`pr.merge #923: an unverifiable head (read ${label}) never blocks on a possibly-stale review's open findings`, async () => {
-    await withGithub(backstopRoutes, async () => {
-      const { app, stores } = fakeApp();
-      const backstop = makeHandler({
-        readReview: async () => ({ body: "### 🟡 Changes recommended\n<summary>2 open issues</summary>", commitId: "old" }),
-        readHeadSha,
-      });
-      await backstop({ variables: { prKey: "acme/widgets#29", repo: "acme/widgets", prNumber: 29 } } as any, app);
-      assertEquals(stores.merges.some((m) => m.method === "review-backstop"), false);
-    });
-  });
-}
 
 test("pr.merge #923: the direct merge pins the verified head SHA (no check-then-merge race)", async () => {
   let putBody = "";
@@ -485,3 +505,36 @@ test("pr.merge #923: a queue-comment repo whose head moved after the backstop re
     },
   );
 });
+
+for (const [label, finalRead] of [
+  ["null", async () => null],
+  ["throwing", async () => {
+    throw new Error("502");
+  }],
+  ["blank", async () => "  "],
+] as const) {
+  test(`pr.merge #927: a queue-comment repo whose FINAL head re-read is ${label} retries instead of enqueueing`, async () => {
+    const protocol =
+      "# repo\n\n```merge-protocol\n{ \"land\": { \"method\": \"mergify-queue\", \"comment\": \"@mergifyio queue\" } }\n```\n";
+    await withGithub(
+      (url) => {
+        if (/\/contents\/AGENTS\.md$/.test(url)) return new Response(protocol);
+        if (/\/issues\/\d+\/comments$/.test(url)) return new Response(JSON.stringify({ id: 1 }), { status: 201 });
+        return backstopRoutes(url);
+      },
+      async (calls) => {
+        const { app, stores } = fakeApp();
+        let n = 0;
+        const backstop = makeHandler({
+          readReview: async () => ({ body: "lgtm", commitId: "h3" }),
+          readHeadSha: async () => (n++ === 0 ? "h3" : finalRead()),
+        } as any);
+        const out = (await backstop({ variables: { prKey: "acme/widgets#34", repo: "acme/widgets", prNumber: 34 } } as any, app)) as Record<string, unknown>;
+        assertEquals(out.mergeStatus, "retry");
+        assertEquals(stores.merges.some((m) => m.outcome === "retry"), true, "retry audit row");
+        assertEquals(calls.some((c) => /\/issues\/\d+\/comments$/.test(c.url) && c.method === "POST"), false);
+        assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false, "no merge call");
+      },
+    );
+  });
+}
