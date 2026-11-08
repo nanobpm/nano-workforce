@@ -1,3 +1,9 @@
+## [0.206.1](https://github.com/nanobpm/nano-workforce/compare/v0.206.0...v0.206.1) (2026-11-08)
+
+### Bug Fixes
+
+* **merge:** fail the review backstop closed and retire review waits on merged PRs ([#928](https://github.com/nanobpm/nano-workforce/issues/928)) ([973c161](https://github.com/nanobpm/nano-workforce/commit/973c161d8b279db21915601647c5e8c43f3cac2f)), closes [nano-bpm#1467](https://github.com/nanobpm/nano-bpm/issues/1467) [#927](https://github.com/nanobpm/nano-workforce/issues/927)
+
 ## [0.206.0](https://github.com/nanobpm/nano-workforce/compare/v0.205.2...v0.206.0) (2026-11-08)
 
 ### Features
