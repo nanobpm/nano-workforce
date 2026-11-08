@@ -66,6 +66,21 @@ test("returns 200 with a count + projected active PRs", async () => {
   assertEquals(r.body.prs[0].processKey, "9");
 });
 
+test("carries the running app's identity as a top-level version object (issue #925)", async () => {
+  // `/status` is the endpoint everyone polls, so it must answer "is the fix live?" on its own:
+  // version.version + version.gitSha, derived from the SAME app/version.ts getter /version uses.
+  const app = memApp([]);
+  const res = (await handler(input(), app)) as any;
+  assertEquals(res.status, 200);
+  assert("version" in res.body, "the status payload carries a top-level version object");
+  assert("version" in res.body.version, "version.version is present (string|null)");
+  assert("gitSha" in res.body.version, "version.gitSha is present (string|null)");
+  const { buildVersionInfo } = await import("../app/version.ts");
+  const identity = buildVersionInfo();
+  assertEquals(res.body.version.version, identity.version, "derived from the app/version.ts getter, not re-read");
+  assertEquals(res.body.version.gitSha, identity.gitSha, "derived from the app/version.ts getter, not re-read");
+});
+
 test("surfaces the structured openEscalation from the user_tasks read model (both loops)", async () => {
   // Issue #666: openEscalation is derived from the ONE `user_tasks` read model (the same surface
   // `listEscalations` and the Convergence page consume), so `/status` carries the completable

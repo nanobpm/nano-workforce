@@ -301,7 +301,7 @@ export const ENV_CONTRACTS = {
     name: "NANO_WORKFORCE_GIT_SHA",
     owner: "app/version.ts",
     semantics:
-      "Explicit git SHA override for version reporting on deploys shipped without a .git directory; version derivation reads .git when unset.",
+      "Explicit git SHA override for version reporting on deploys shipped without a .git directory; version derivation reads .git when unset, then falls back to the release-baked build-info.json (issue #925).",
   },
   NANO_AUTO_RETRO: {
     category: "env",

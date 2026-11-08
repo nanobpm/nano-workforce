@@ -5,8 +5,10 @@
 // inspecting the working tree at runtime. This module gathers that identity — the app's package
 // version, the resolved `@nanobpm/urban` version, the git commit (read from `.git`, handling both
 // an ordinary `.git` directory and the `gitdir:` file pointer used by worktrees/submodules, with
-// an env override for detached deploys), plus the Node runtime, pid and start time — so an operator
-// debugging a stuck instance can confirm the process is on the code they think it is.
+// an env override for detached deploys AND a `build-info.json` fallback baked into the release
+// package — an npm install has neither `.git` nor the env var, issue #925), plus the Node runtime,
+// pid and start time — so an operator debugging a stuck instance can confirm the process is on the
+// code they think it is.
 //
 // Every probe is best-effort: a missing file or unavailable `.git` yields `null` for that field
 // rather than throwing, so `/app/api/version` never fails just because one source is absent.
@@ -99,16 +101,67 @@ function urbanVersion(): string | null {
 }
 
 /**
+ * The build identity baked into the release package (`build-info.json` at the package root) by
+ * `scripts/write-build-info.ts` during semantic-release's `prepare` step (issue #925). An npm
+ * install ships this file but no `.git`, so it is the ONLY source of `gitSha` there. Its `gitSha`
+ * is the SOURCE HEAD the release was cut from (the tag commit does not exist yet at prepare time);
+ * its `gitTag` names the tag placed on the release commit, whose tree matches that source HEAD
+ * except for the version-bump metadata. Returns null on a dev checkout, which has no such file.
+ */
+export const SHA_RE = /^[0-9a-f]{40}$/;
+
+/** Validate a parsed build-info payload; returns a list of problems (empty = valid). The single
+ * validator shared by the writer (scripts/write-build-info.ts) and the reader below. */
+export function buildInfoProblems(info: unknown): string[] {
+  const problems: string[] = [];
+  if (typeof info !== "object" || info == null) return ["build-info.json is not a JSON object"];
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape (parsed JSON)
+  const bi = info as Record<string, unknown>;
+  if (typeof bi.version !== "string" || !bi.version.trim()) problems.push("version must be a non-blank string");
+  if (typeof bi.gitSha !== "string" || !SHA_RE.test(bi.gitSha)) problems.push("gitSha must be a 40-hex string");
+  if (typeof bi.gitTag !== "string" || !bi.gitTag.trim()) problems.push("gitTag must be a non-blank string");
+  if (typeof bi.builtAt !== "string" || Number.isNaN(Date.parse(bi.builtAt)))
+    problems.push("builtAt must be an ISO-8601 timestamp");
+  return problems;
+}
+
+
+function buildInfo(): { version: string; gitSha: string; gitTag: string; builtAt: string } | null {
+  const raw = readJson(join(REPO_ROOT, "build-info.json"));
+  if (raw == null) return null;
+  // Fail closed on ANY malformed field (bad SHA, unparseable builtAt, blank tag/version): a corrupt
+  // or tampered build-info.json is ignored wholesale rather than partially surfaced. Uses the SAME
+  // validator the writer's --check uses, so reader and writer can never drift.
+  if (buildInfoProblems(raw).length > 0) return null;
+  return {
+    version: String(raw.version),
+    gitSha: String(raw.gitSha),
+    gitTag: String(raw.gitTag),
+    builtAt: String(raw.builtAt),
+  };
+}
+
+/**
  * The git commit the working tree is on, read straight from `.git` so it reflects the ACTUAL
  * checked-out code — not a value baked at some earlier build. Resolves a symbolic `HEAD`
  * (`ref: refs/heads/…`) via the loose ref file (checking both the per-worktree and common dirs),
- * falling back to `packed-refs`. An explicit `NANO_WORKFORCE_GIT_SHA` env var wins (for deploys
- * that ship without a `.git` directory).
+ * falling back to `packed-refs`. Resolution order (issue #925): an explicit
+ * `NANO_WORKFORCE_GIT_SHA` env var wins (for deploys that ship without a `.git` directory), then
+ * the live `.git` checkout, then the release-baked `build-info.json` (the only source available to
+ * an npm-installed instance).
  */
 function gitSha(): string | null {
   const env = envVar("NANO_WORKFORCE_GIT_SHA");
   if (env) return env;
 
+  const fromCheckout = gitShaFromCheckout();
+  if (fromCheckout != null) return fromCheckout;
+
+  return buildInfo()?.gitSha ?? null;
+}
+
+/** The commit SHA read from the live `.git` checkout, or null when there is none (npm install). */
+function gitShaFromCheckout(): string | null {
   const dirs = resolveGitDirs();
   if (dirs == null) return null;
   const head = readText(join(dirs.gitDir, "HEAD"));
@@ -160,6 +213,10 @@ export interface VersionInfo {
   urbanVersion: string | null;
   gitSha: string | null;
   gitBranch: string | null;
+  /** The release tag (e.g. "v0.206.0") from the baked `build-info.json`; null on a dev checkout. */
+  gitTag: string | null;
+  /** ISO-8601 time the release package was built (from `build-info.json`); null on a dev checkout. */
+  builtAt: string | null;
   runtime: string;
   pid: number | null;
   startedAt: string;
@@ -172,12 +229,15 @@ export interface VersionInfo {
  */
 const STATIC: Omit<VersionInfo, "uptimeSeconds"> = (() => {
   const pkg = appPackage();
+  const build = buildInfo();
   return Object.freeze({
     name: appName(pkg),
     version: appVersion(pkg),
     urbanVersion: urbanVersion(),
     gitSha: gitSha(),
     gitBranch: gitBranch(),
+    gitTag: build?.gitTag || null,
+    builtAt: build?.builtAt || null,
     runtime: runtime(),
     pid: typeof process.pid === "number" ? process.pid : null,
     startedAt: STARTED_AT.toISOString(),

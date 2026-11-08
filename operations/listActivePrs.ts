@@ -8,7 +8,7 @@
 // callers must present it via the x-hook-secret header. Unset → open (unchanged default).
 
 import { activeDeliveries, activePrs } from "../app/service.ts";
-import { envVar } from "../app/version.ts";
+import { buildVersionInfo, envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 // The optional shared-secret guard: when NANO_PR_WEBHOOK_SECRET is set, callers must present it via
@@ -21,5 +21,8 @@ export default defineOperation("listActivePrs", async ({ req }, app) => {
     return { status: 401, body: { error: "unauthorized" } };
   }
   const [prs, deliveries] = await Promise.all([activePrs(app.data, app.engine), activeDeliveries(app.data)]);
-  return { status: 200, body: { count: prs.length, prs, deliveries } };
+  // The running app's identity, derived from the SAME app/version.ts getter /version uses (never
+  // re-read), so the endpoint everyone polls answers "is the fix live?" in one call (issue #925).
+  const { version, gitSha } = buildVersionInfo();
+  return { status: 200, body: { count: prs.length, prs, deliveries, version: { version, gitSha } } };
 });

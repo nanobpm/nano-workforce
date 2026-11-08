@@ -195,6 +195,7 @@ components:
         - count
         - prs
         - deliveries
+        - version
       properties:
         count:
           type: integer
@@ -209,6 +210,26 @@ components:
             first (issue #889 §1 — the opt-in is shown for each PR AND each delivery).
           items:
             $ref: "#/components/schemas/ActiveDelivery"
+        version:
+          type: object
+          additionalProperties: false
+          required:
+            - version
+            - gitSha
+          description: >-
+            The running app's build identity (issue #925), derived from the same app/version.ts
+            getter as GET /version — so the endpoint everyone polls answers "is the fix live?" in
+            one call. gitSha resolves from NANO_WORKFORCE_GIT_SHA, then the .git checkout, then the
+            release-baked build-info.json (the only source an npm install has).
+          properties:
+            version:
+              type: string
+              nullable: true
+              description: The app's package version.
+            gitSha:
+              type: string
+              nullable: true
+              description: The commit the instance runs; null only when no source (env, .git, build-info.json) knows it.
     ActiveDelivery:
       type: object
       description: A delivery-graph run currently in flight, as reported by the status endpoint.
@@ -1561,6 +1582,8 @@ components:
         - urbanVersion
         - gitSha
         - gitBranch
+        - gitTag
+        - builtAt
         - runtime
         - pid
         - startedAt
@@ -1577,9 +1600,24 @@ components:
         gitSha:
           type: string
           nullable: true
+          description: >-
+            The commit the instance runs. Resolution order (issue #925): NANO_WORKFORCE_GIT_SHA env,
+            then the live .git checkout, then the release-baked build-info.json (the only source an
+            npm install has — this is the source HEAD the release was cut from).
         gitBranch:
           type: string
           nullable: true
+        gitTag:
+          type: string
+          nullable: true
+          description: >-
+            The release tag (e.g. "v0.206.0") naming the release commit, from the baked
+            build-info.json; null on a dev checkout. The tag commit's tree matches gitSha's tree
+            except for the version-bump metadata.
+        builtAt:
+          type: string
+          nullable: true
+          description: ISO-8601 time the release package was built (from build-info.json); null on a dev checkout.
         runtime:
           type: string
         pid:
