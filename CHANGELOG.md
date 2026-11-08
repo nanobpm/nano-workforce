@@ -1,3 +1,9 @@
+## [0.205.2](https://github.com/nanobpm/nano-workforce/compare/v0.205.1...v0.205.2) (2026-11-08)
+
+### Bug Fixes
+
+* **convergence:** fail closed when no head-current Copilot review exists ([#924](https://github.com/nanobpm/nano-workforce/issues/924)) ([e0ded57](https://github.com/nanobpm/nano-workforce/commit/e0ded57e0888755fa6fd77495f3361e8dafc0980)), closes [#923](https://github.com/nanobpm/nano-workforce/issues/923) [nano-bpm#1443](https://github.com/nanobpm/nano-bpm/issues/1443) [#923](https://github.com/nanobpm/nano-workforce/issues/923) [#923](https://github.com/nanobpm/nano-workforce/issues/923) [#923](https://github.com/nanobpm/nano-workforce/issues/923) [#923](https://github.com/nanobpm/nano-workforce/issues/923)
+
 ## [0.205.1](https://github.com/nanobpm/nano-workforce/compare/v0.205.0...v0.205.1) (2026-11-06)
 
 ### Bug Fixes
