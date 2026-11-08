@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { _clearMergeProtocolCache } from "../../app/mergeProtocol.ts";
 import { noopLog } from "../../test/log.ts";
-import handler from "./worker.ts";
+import handler, { makeHandler } from "./worker.ts";
 
 function fakeApp() {
   const stores: Record<string, Record<string, unknown>[]> = {
@@ -291,6 +291,123 @@ test("pr.merge abandons a closed-not-merged PR without escalating (terminal aban
       // Never attempts a merge PUT or posts an enqueue comment on the dead PR (only the read GET).
       assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
       assertEquals(calls.some((c) => /\/comments$/.test(c.url)), false);
+    },
+  );
+});
+
+// ── Merge-loop backstop (issue #923 §3) ──────────────────────────────────────
+// Just before landing, the worker re-checks that a HEAD-CURRENT Copilot review exists. A head that
+// moved between convergence and landing — or a review that never existed (the nano-bpm#1443
+// fail-open: merged with ZERO reviews) — must block the landing, not slip through. These tests
+// drive the backstop through `makeHandler`'s injected readers; the fetch stub only needs the
+// single-PR GET (liveness) since the injected readers replace the review/head fetches.
+
+function backstopRoutes(url: string): Response | null {
+  if (/\/pulls\/\d+$/.test(url)) {
+    return new Response(JSON.stringify({ merged: false, mergeable_state: "clean" }));
+  }
+  return null; // no AGENTS.md / merge-protocol.json → DEFAULT gh-merge protocol
+}
+
+test("pr.merge #923: refuses to land when NO Copilot review exists (the #1443 fail-open)", async () => {
+  await withGithub(backstopRoutes, async (calls) => {
+    const { app, stores } = fakeApp();
+    const backstop = makeHandler({
+      // Verified "no Copilot review on this PR" + a readable head → missing → BLOCK.
+      readReview: async () => ({ body: "", commitId: null }),
+      readHeadSha: async () => "headsha4444444444444444444444444444444444",
+    });
+    const out = (await backstop(
+      { variables: { prKey: "acme/widgets#21", repo: "acme/widgets", prNumber: 21 } } as any,
+      app,
+    )) as Record<string, unknown>;
+
+    assertEquals(out.mergeStatus, "blocked");
+    assertEquals(out.status, "blocked");
+    assertEquals(typeof out.question, "string");
+    assertEquals((out.question as string).includes("no head-current Copilot review"), true);
+
+    // The refusal is audited, and NO land was attempted (no merge PUT, no enqueue comment).
+    assertEquals(stores.merges.length, 1);
+    assertEquals(stores.merges[0].outcome, "blocked");
+    assertEquals(stores.merges[0].method, "review-backstop");
+    assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+    assertEquals(calls.some((c) => /\/comments$/.test(c.url)), false);
+  });
+});
+
+test("pr.merge #923: refuses to land when the head MOVED past the latest review (stale at land time)", async () => {
+  await withGithub(backstopRoutes, async (calls) => {
+    const { app, stores } = fakeApp();
+    const backstop = makeHandler({
+      // The review was submitted against the OLD head; the branch has since advanced.
+      readReview: async () => ({ body: "lgtm", commitId: "oldsha1111111111111111111111111111111111" }),
+      readHeadSha: async () => "newsha2222222222222222222222222222222222",
+    });
+    const out = (await backstop(
+      { variables: { prKey: "acme/widgets#23", repo: "acme/widgets", prNumber: 23 } } as any,
+      app,
+    )) as Record<string, unknown>;
+
+    assertEquals(out.mergeStatus, "blocked");
+    assertEquals(stores.merges[0].method, "review-backstop");
+    assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+  });
+});
+
+test("pr.merge #923: a HEAD-CURRENT review lands normally (backstop control)", async () => {
+  await withGithub(
+    (url) => {
+      if (/\/pulls\/\d+\/merge$/.test(url)) return new Response(JSON.stringify({ merged: true }), { status: 200 });
+      return backstopRoutes(url);
+    },
+    async (calls) => {
+      const { app, stores } = fakeApp();
+      const backstop = makeHandler({
+        readReview: async () => ({ body: "lgtm", commitId: "samesha33333333333333333333333333333333" }),
+        readHeadSha: async () => "samesha33333333333333333333333333333333",
+      });
+      const out = (await backstop(
+        { variables: { prKey: "acme/widgets#25", repo: "acme/widgets", prNumber: 25 } } as any,
+        app,
+      )) as Record<string, unknown>;
+
+      // The backstop passes and the ordinary land protocol runs (direct merge).
+      assertEquals(out, { mergeStatus: "merged" });
+      assertEquals(
+        calls.some((c) => /\/pulls\/\d+\/merge$/.test(c.url) && c.method === "PUT"),
+        true,
+      );
+      assertEquals(stores.merges.some((m) => m.method === "review-backstop"), false);
+    },
+  );
+});
+
+test("pr.merge #923: an UNREADABLE review/head fails OPEN (a transport hiccup never wedges a merge)", async () => {
+  await withGithub(
+    (url) => {
+      if (/\/pulls\/\d+\/merge$/.test(url)) return new Response(JSON.stringify({ merged: true }), { status: 200 });
+      return backstopRoutes(url);
+    },
+    async (calls) => {
+      const { app, stores } = fakeApp();
+      const backstop = makeHandler({
+        readReview: async () => null, // no usable transport → unverifiable, NOT "no review"
+        readHeadSha: async () => {
+          throw new Error("boom");
+        },
+      });
+      const out = (await backstop(
+        { variables: { prKey: "acme/widgets#27", repo: "acme/widgets", prNumber: 27 } } as any,
+        app,
+      )) as Record<string, unknown>;
+
+      assertEquals(out, { mergeStatus: "merged" });
+      assertEquals(
+        calls.some((c) => /\/pulls\/\d+\/merge$/.test(c.url) && c.method === "PUT"),
+        true,
+      );
+      assertEquals(stores.merges.some((m) => m.method === "review-backstop"), false);
     },
   );
 });

@@ -290,6 +290,34 @@ export function parseSuppressedAdvisories(reviewBody: string | null | undefined)
   return out;
 }
 
+/** Read the reviewer VERDICT out of a Copilot review body (issue #923 §2): does the review's own
+ * summary report OPEN, actionable findings? Convergence requires a head-current verdict that is
+ * CLEAN — a review whose body says findings are still open must block the same way an unresolved
+ * thread does, even when every inline thread happens to be resolved (a review can carry findings
+ * with no unresolved threads at all: the nano-bpm#1443 review raised 7 findings as a summary-only
+ * "Changes recommended").
+ *
+ * Recognised open-finding signals (each returns a short human label for the block reason):
+ *   • "Changes recommended" — Copilot's 🟡 verdict line (vs. the ✅ clean verdict);
+ *   • "N open issue(s)"    — the summary count Copilot emits when findings remain;
+ *   • a ccr-overview-v2 `<summary>…Open (N)…</summary>` section (issue #835's format) with N ≥ 1.
+ * A body carrying NONE of these reports no open findings (empty array) — including the empty body
+ * of a comment-only review. Pure; unit-tested. */
+export function parseReviewOpenFindings(reviewBody: string | null | undefined): string[] {
+  const body = reviewBody ?? "";
+  if (body.trim() === "") return [];
+  const out: string[] = [];
+  if (/changes recommended/i.test(body)) out.push("changes recommended");
+  const issues = /(\d+)\s+open\s+issues?/i.exec(body);
+  if (issues) out.push(`${issues[1]} open issue${issues[1] === "1" ? "" : "s"}`);
+  // The v2 overview carries an explicit "Open (N)" collapsible section when findings remain.
+  const v2Open = /<summary>[\s\S]*?Open\s*\((\d+)\)/i.exec(body);
+  if (v2Open && v2Open[1] !== "0") {
+    out.push(`${v2Open[1]} open finding${v2Open[1] === "1" ? "" : "s"}`);
+  }
+  return out;
+}
+
 /** A finding clause's trailing `(<severity>, N vote[s])` tag in the ccr-overview-v2 file table. */
 const V2_FINDING_TAG = /\s*\(\s*[a-z]+\s*,\s*\d+\s+votes?\s*\)/gi;
 

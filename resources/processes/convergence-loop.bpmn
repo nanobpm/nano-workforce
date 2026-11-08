@@ -307,6 +307,9 @@
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PrPersistRoundIn" />
         </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:input source="=if reviewStale = true then &#34;review-stale&#34; else status" target="status" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_advSkip</bpmn:incoming>
       <bpmn:incoming>f_advClean</bpmn:incoming>

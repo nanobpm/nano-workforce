@@ -10,12 +10,31 @@
 // waiting for the queue, NOT a direct `gh pr merge` — which that repo refuses. The actual gh/API
 // calls live in app/github.ts; this worker records the attempt in the `merges` audit table and
 // shapes the escalation payload on a block.
+//
+// MERGE-LOOP BACKSTOP (issue #923 §3): the convergence gate's verdict is only as fresh as the head
+// it reviewed — a head that MOVED between convergence and landing, or a review that never existed
+// (the #1443 fail-open), must not slip through at land time. Before running ANY land protocol this
+// worker re-checks that a HEAD-CURRENT Copilot review exists; a missing/stale review blocks the
+// landing (escalating to a human) instead of enqueueing/merging unreviewed code. The check fails
+// OPEN only when the GitHub state is UNREADABLE (no transport / a hiccup) — the merge-stage
+// mergeability polling is the independent backstop there, and a hard block on a transient read
+// would wedge every merge on a network blip.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { matchTags, tag } from "@nanobpm/urban/effect";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { checkBaseTarget, classifyBaseGuard } from "../../app/baseGuard.ts";
-import { classifyPrLiveness, enqueueViaComment, fetchPrState, mergePr } from "../../app/github.ts";
+import { type HeadReader, makeDefaultReadHead } from "../../app/currentHead.ts";
+import {
+  classifyPrLiveness,
+  enqueueViaComment,
+  fetchBranchHead,
+  fetchLatestCopilotReview,
+  fetchPrHead,
+  fetchPrState,
+  mergePr,
+} from "../../app/github.ts";
 import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
+import { isReviewMissingOrStale } from "../../app/reviewWait.ts";
 import { abandonClosedPr, ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -28,7 +47,25 @@ interface Out extends Record<string, unknown> {
   question?: string;
 }
 
-const handler: AppJobHandler<In, Out> = async (job, app) => {
+// The backstop's review reader — the SAME shape the converge-gate binds (`{ body, commitId }`,
+// `null` = unverifiable). Injectable so tests drive the missing/stale/head-current matrix without
+// a transport.
+export type MergeReviewReader = (repo: string, prNumber: number) => Promise<{ body: string; commitId: string | null } | null>;
+
+const defaultReadReview: MergeReviewReader = (repo, prNumber) =>
+  fetchLatestCopilotReview(repo, prNumber, process.env.GITHUB_TOKEN ?? "");
+// The SAME branch-ref-over-stale-`head.sha` reader the converge-gate / progress-check / poller
+// bind (#786/#799), so the backstop's staleness comparison sees the exact head the gate did.
+const defaultReadHead: HeadReader = makeDefaultReadHead({ fetchPrHead, fetchBranchHead });
+
+const BLOCK_NO_HEAD_CURRENT_REVIEW =
+  "no head-current Copilot review exists for the PR's current HEAD (the head moved after the last review, or no review was ever submitted). A head-current reviewer verdict is required before landing";
+
+/** Build the handler with injectable GitHub readers. The default export binds the real readers;
+ * tests inject stubs for the backstop matrix. */
+export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: HeadReader }): AppJobHandler<In, Out> {
+  const { readReview, readHeadSha } = deps;
+  const handler: AppJobHandler<In, Out> = async (job, app) => {
   const { prKey, repo, prNumber, round, abandonUrl } = job.variables;
   const token = process.env.GITHUB_TOKEN ?? "";
   const now = new Date().toISOString();
@@ -86,6 +123,38 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       "PR was closed on GitHub without merging (e.g. superseded) — abandoning the merge loop",
     );
     return { mergeStatus: "abandoned" };
+  }
+
+  // MERGE-LOOP BACKSTOP (issue #923 §3): refuse to land without a HEAD-CURRENT Copilot review. The
+  // convergence gate's verdict is only as fresh as the head it reviewed — a head that MOVED between
+  // convergence and landing (a fix-ci / rebase push, an out-of-band commit), or a review that never
+  // existed at all (the nano-bpm#1443 fail-open: merged with ZERO reviews), must not slip through
+  // at land time. Runs AFTER the merged/closed short-circuits (an already-terminal PR needs no
+  // verdict) and BEFORE any land protocol (the `@mergifyio queue` comment is itself the landing
+  // for a queue repo). Fails OPEN only when the GitHub state is UNREADABLE (no transport / a
+  // hiccup → `null` review or head): a transient read failure must not wedge every merge — the
+  // merge-stage mergeability polling is the independent backstop there.
+  const [backstopReview, backstopHead] = await Promise.all([
+    readReview(repo, prNumber).catch(() => null),
+    readHeadSha(repo, prNumber).catch(() => null),
+  ]);
+  if (backstopReview !== null && isReviewMissingOrStale(backstopReview.commitId, backstopHead)) {
+    await app.data.table("merges", "id").insert({
+      pr_key: prKey,
+      outcome: "blocked",
+      method: "review-backstop",
+      detail: BLOCK_NO_HEAD_CURRENT_REVIEW,
+      at: now,
+    });
+    return {
+      mergeStatus: "blocked",
+      status: "blocked",
+      question:
+        `Merge refused: ${BLOCK_NO_HEAD_CURRENT_REVIEW}. ` +
+        `Push no further commits, wait for the Copilot review of the current HEAD to land (or request one: ` +
+        `gh api repos/${repo}/pulls/${prNumber}/requested_reviewers -X POST -f "reviewers[]=copilot-pull-request-reviewer[bot]"), ` +
+        `let the convergence loop gate on it, then reply to retry.`,
+    };
   }
 
   // Dead-end-base guard (#60): never land a PR into a base branch that has itself already merged
@@ -180,6 +249,9 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
         `Resolve it on GitHub (rebase / fix a required check / grant merge rights), then reply to retry.${docHint}`,
     }),
   });
-};
+  };
+  return handler;
+}
 
+const handler = makeHandler({ readReview: defaultReadReview, readHeadSha: defaultReadHead });
 export default handler;

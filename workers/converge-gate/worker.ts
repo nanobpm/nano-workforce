@@ -29,6 +29,15 @@
 // re-enters the review wait for a fresh review of the current HEAD. The head read fails OPEN, so a
 // transport hiccup can never fabricate a stale verdict.
 //
+// MISSING-REVIEW GUARD (issue #923): the same `reviewStale` signal fires when NO Copilot review
+// exists at all — the gate's single most important precondition. The old code treated
+// `{ body: "", commitId: null }` as "a verified clean review" and converged, merging
+// nano-bpm#1443 with ZERO reviews. A missing review now fails CLOSED into the re-solicit path.
+//
+// VERDICT GATE (issue #923 §2): even a head-current review BLOCKS when its own summary reports
+// open, actionable findings ("Changes recommended" / "N open issue(s)" / a v2 "Open (N)" section)
+// — zero unresolved threads is not a clean verdict.
+//
 // Scope integrity is NO LONGER judged here. A deterministic regex over the PR description could not
 // read the closed issue's acceptance criteria, so it false-positived on any body that merely
 // *mentioned* deferral (an ADR non-goal, a PR whose subject is scope tooling) and forced needless
@@ -49,10 +58,11 @@ import {
   fetchReviewThreads,
   isAckThread,
   parseAckedAdvisories,
+  parseReviewOpenFindings,
   parseSuppressedAdvisories,
   type ReviewThread,
 } from "../../app/github.ts";
-import { isReviewStale } from "../../app/reviewWait.ts";
+import { isReviewMissingOrStale } from "../../app/reviewWait.ts";
 import { parsePr } from "../../app/service.ts";
 import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io.d.ts";
 import { type HeadReader, makeDefaultReadHead } from "../progress-check/worker.ts";
@@ -118,17 +128,41 @@ export function makeHandler(deps: {
       if (review === null) {
         return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false, reviewStale: false };
       }
-      // STALE-REVIEW GUARD (issue #799). When the PR HEAD has advanced PAST the commit the latest
-      // Copilot review was submitted against, that review's suppressed advisories describe code the
-      // head has moved past — e.g. an advisory the agent already FIXED IN CODE (but did not ack) is
-      // still re-listed in the obsolete body. Blocking/escalating on it re-escalates a human
-      // indefinitely (PR #789). Instead of gating on the stale body, signal `reviewStale` so the
-      // process re-enters the review wait and the poller re-solicits a fresh review of the current
-      // HEAD to gate on. The head read fails OPEN (null → not stale), so a transport hiccup can never
-      // fabricate a stale verdict; the ordinary gate below still runs on a HEAD-current review.
+      // STALE-OR-MISSING-REVIEW GUARD (issues #799 / #923). Convergence requires a HEAD-CURRENT
+      // reviewer verdict. Two states fail that precondition and must route to the review wait (the
+      // poller (re-)solicits a review of the current HEAD) rather than be gated on:
+      //   • STALE (#799): the PR HEAD has advanced PAST the commit the latest Copilot review was
+      //     submitted against — its suppressed advisories describe code the head has moved past
+      //     (e.g. an advisory the agent already FIXED IN CODE but did not ack), so blocking on the
+      //     obsolete body re-escalates a human indefinitely (PR #789).
+      //   • MISSING (#923): NO Copilot review exists at all (`commitId: null` with a readable
+      //     head). The old gate treated that as "a verified clean review" — zero threads, zero
+      //     advisories → not blocked — and merged nano-bpm#1443 with ZERO reviews. A missing
+      //     review is the gate's single most important precondition, so it fails CLOSED into the
+      //     same re-solicit path (`isReviewMissingOrStale`), never through to finalize.
+      // The head read still fails OPEN (null → not stale): without the head we can prove nothing,
+      // so a transport hiccup can never fabricate a stale/missing verdict that would loop the loop
+      // re-soliciting forever — the review-wait timeout remains the backstop.
       const headSha = await readHeadSha(ghRepo, ghNumber).catch(() => null);
-      if (isReviewStale(review.commitId, headSha)) {
+      if (isReviewMissingOrStale(review.commitId, headSha)) {
         return { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: true };
+      }
+      // VERDICT GATE (issue #923 §2): a head-current review whose OWN summary reports open,
+      // actionable findings (Copilot's "Changes recommended" / "N open issue(s)" / a v2 "Open (N)"
+      // section) blocks the same way an unresolved thread does — even with zero unresolved threads
+      // (a review can carry findings as summary-only, as #1443's 7-finding review did). This block
+      // is NOT ack-only: the findings need the round agent's code/reply work, so it escalates to a
+      // human rather than entering the bounded auto-ack path.
+      const openFindings = parseReviewOpenFindings(review.body);
+      if (openFindings.length > 0) {
+        return {
+          convergeBlocked: true,
+          convergeBlockReason:
+            `Convergence blocked: the latest head-current Copilot review reports ${openFindings.join("; ")}. ` +
+            `Address every finding the review raised (or reply-and-resolve why each is a false positive) before converging.`,
+          convergeAckOnly: false,
+          reviewStale: false,
+        };
       }
       // Split the unresolved threads into SUBSTANTIVE reviewer findings vs partially-completed
       // `nano-ack:` ACK threads (root carries a canonical `nano-ack: <path> :: <text>` marker — see

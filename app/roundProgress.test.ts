@@ -24,8 +24,11 @@ test("routeProgress: an addressed round whose head advanced continues", () => {
 
 test("routeProgress: an explicit non-addressed round always continues (no push is expected)", () => {
   // These are the statuses gw-status routes AWAY from the addressed/default arm — a legit no-push
-  // round. They always continue regardless of the head.
-  for (const status of ["waiting", "converged", "needs_input", "blocked"]) {
+  // round. They always continue regardless of the head. `review-stale` (#923 §4) joins them: the
+  // round re-entered via the converge gate's stale/missing-review path, so no reviewer verdict was
+  // obtained and no push was claimed — it must continue to the review wait, never escalate as
+  // no-progress.
+  for (const status of ["waiting", "converged", "needs_input", "blocked", "review-stale"]) {
     assertEquals(
       routeProgress(status, "sha-1", "sha-1"),
       "continue",

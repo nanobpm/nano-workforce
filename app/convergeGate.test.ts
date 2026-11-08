@@ -17,6 +17,7 @@ import {
   advisoryStableKey,
   isAckThread,
   parseAckedAdvisories,
+  parseReviewOpenFindings,
   parseReviewThreadsPage,
   parseSuppressedAdvisories,
   pickLatestCopilotReview,
@@ -838,9 +839,14 @@ test("converge-gate #799: a HEAD-CURRENT review still blocks on an unacked advis
   assertStringIncludes(out.convergeBlockReason ?? "", "spec-app/nano-app.schema.json:613");
 });
 
-test("converge-gate #799: an unknown review commit_id or unreadable HEAD is NOT stale (evaluates normally)", async () => {
-  // Fail-safe: without both SHAs we cannot prove staleness, so the gate must fall through to the
-  // ordinary evaluation (here: block on the unacked advisory), never fabricate a re-solicit loop.
+test("converge-gate #799/#923: a review commit_id GitHub did not carry is treated as MISSING — re-solicits (no fail-open)", async () => {
+  // #799's fail-safe ("a null review commit_id is not stale") was written for a gate that only
+  // handled a review that EXISTS. #923 closes the class: a null commit_id is ambiguous between "no
+  // review at all" and "a review GitHub carried no commit_id for", and the gate cannot distinguish
+  // them — converging on either is converging without a verifiable head-current verdict (the
+  // #1443 fail-open). With a readable head the gate now signals reviewStale for BOTH, so the
+  // poller re-solicits a review whose commit_id IS carried, un-wedging the loop. The head-side
+  // fail-safe is unchanged: an unreadable head still evaluates normally (see the #923 test below).
   const handler = await makeUnderTest({
     readThreads: async () => [],
     readReviewBody: async () => SAMPLE_REVIEW_BODY,
@@ -848,8 +854,58 @@ test("converge-gate #799: an unknown review commit_id or unreadable HEAD is NOT 
     headSha: "newsha2222222222222222222222222222222222",
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out.convergeBlocked, true);
-  assertEquals(out.reviewStale, false);
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: true });
+});
+
+// ── Fail closed on "no review exists" (issue #923 §1) ────────────────────────
+// The gate used to treat `{ body: "", commitId: null }` — a VERIFIED "no Copilot review on this
+// PR" — as "a verified clean review": zero threads + zero advisories → not blocked → merged with
+// ZERO reviews (nano-bpm#1443). Convergence requires a HEAD-CURRENT reviewer verdict, so a missing
+// review must signal `reviewStale` and route to the review wait (the poller solicits a review of
+// the head), exactly like a stale one.
+
+test("converge-gate #923: NO Copilot review at all signals reviewStale (never converges unreviewed)", async () => {
+  // `readReview` returns `{ body: "", commitId: null }` (verified: no Copilot review) and the head
+  // read succeeds. The old gate fell through as the most permissive case and converged.
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => "",
+    reviewCommitId: null,
+    headSha: "headsha4444444444444444444444444444444444",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: true });
+});
+
+test("converge-gate #923: a review GitHub carried no commit_id for is ALSO treated as missing (fail closed)", async () => {
+  // A null commit_id is ambiguous — "no review" vs "a review with no commit_id" — and the gate
+  // cannot distinguish them, so BOTH must take the re-solicit path. Converging on an unverifiable
+  // verdict is the fail-open this issue closes; the re-solicit produces a review whose commit_id
+  // IS carried, un-wedging the loop.
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => "## Overview\nNo suppressed block.",
+    reviewCommitId: null,
+    headSha: "headsha4444444444444444444444444444444444",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.reviewStale, true);
+  assertEquals(out.convergeBlocked, false);
+});
+
+test("converge-gate #923: a missing review with an UNREADABLE head still fails safe (no fabricated re-solicit)", async () => {
+  // Without the head we cannot prove anything — the gate keeps `isReviewStale`'s fail-safe and
+  // falls through to the ordinary evaluation (here: a clean empty review converges). A transport
+  // hiccup must never strand the loop re-soliciting forever; the review-wait timeout is the
+  // backstop.
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => "",
+    reviewCommitId: null,
+    headSha: null,
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: false });
 });
 
 // ── Structural guard over the committed BPMN (no engine) ─────────────────────
@@ -969,6 +1025,20 @@ test("the round cap does NOT escalate a stale-retry round — f_guardMax is gate
   const f = flowElement("f_guardMax");
   assert(f, "f_guardMax flow missing");
   assertStringIncludes(f, "maxRounds and reviewStale != true");
+});
+
+test("persist-round records a stale re-entry as 'review-stale', not the agent's self-report (#923 §4)", () => {
+  // Round accounting must reflect whether a reviewer verdict was obtained: a round that re-enters
+  // persist-round via f_convergeStale (no head-current review existed, or it predated the head)
+  // never received a verdict, so recording the agent's self-reported status ("converged") would
+  // tell the operator a review round happened that never did (/status showed nano-bpm#1443 as
+  // "round 2" with zero reviews). The stale re-entry maps `status` from `reviewStale` so the
+  // durable round history reads `review-stale`.
+  const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="persist-round"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(task, "persist-round task missing");
+  assertStringIncludes(task[0], 'target="status"');
+  assertStringIncludes(task[0], "reviewStale");
+  assertStringIncludes(task[0], "review-stale");
 });
 
 test("wait-review clears reviewStale when a fresh review lands, so the marker can't leak into a later round (#799)", () => {
@@ -1195,4 +1265,76 @@ test("parseSuppressedAdvisories: v2 table rows without findings yield nothing; n
     [],
   );
   assertEquals(parseSuppressedAdvisories("| `a.ts` | Broken thing (moderate, 1 vote). |"), []);
+});
+
+// ── The reviewer-verdict gate (issue #923 §2) ────────────────────────────────
+// Convergence requires a head-current reviewer VERDICT, not just zero unresolved threads: a
+// head-current review whose own summary reports open findings must block the same way an
+// unresolved thread does. `parseReviewOpenFindings` reads that verdict out of the review body
+// (Copilot's "Changes recommended" / "N open issue(s)" / ccr-overview-v2 "Open (N)" section).
+
+test("parseReviewOpenFindings: a 'Changes recommended' review reports open findings", () => {
+  const body = "## Pull Request Overview\n🟡 Changes recommended — 7 findings (6 high).";
+  assertEquals(parseReviewOpenFindings(body), ["changes recommended"]);
+});
+
+test("parseReviewOpenFindings: an 'N open issue(s)' summary reports N", () => {
+  assertEquals(parseReviewOpenFindings("Review complete.\n\n3 open issues remain."), ["3 open issues"]);
+  assertEquals(parseReviewOpenFindings("1 open issue."), ["1 open issue"]);
+});
+
+test("parseReviewOpenFindings: a ccr-overview-v2 'Open (N)' section reports N", () => {
+  assertEquals(parseReviewOpenFindings(V2_REVIEW_BODY), ["1 open finding"]);
+});
+
+test("parseReviewOpenFindings: a clean review (no open-issues signal) reports none", () => {
+  assertEquals(parseReviewOpenFindings("## Pull Request Overview\n✅ Looks good — no issues found."), []);
+  assertEquals(parseReviewOpenFindings(""), []);
+  assertEquals(parseReviewOpenFindings(null), []);
+  assertEquals(parseReviewOpenFindings(undefined), []);
+});
+
+test("parseReviewOpenFindings: a v2 overview with NO Open section reports none", () => {
+  const clean = [
+    "<!-- ccr-overview-v2 -->",
+    "",
+    "## Copilot review overview",
+    "",
+    "<details>",
+    "<summary><strong>What changed in this PR</strong></summary>",
+    "",
+    "| File | Summary and final review notes |",
+    "|---|---|",
+    "| `a.ts` | Adds a thing. |",
+    "</details>",
+  ].join("\n");
+  assertEquals(parseReviewOpenFindings(clean), []);
+});
+
+test("converge-gate #923: a head-current review whose body reports OPEN ISSUES blocks (verdict gate, no threads)", async () => {
+  // The verdict gate: zero unresolved threads and no suppressed advisories, but the head-current
+  // review's own summary says findings are open. This must block EXACTLY like an unresolved
+  // thread — NOT ack-only (the round agent's code/reply work is needed, not a nano-ack repost).
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => "## Pull Request Overview\n🟡 Changes recommended — 7 findings (6 high).",
+    reviewCommitId: "headsha4444444444444444444444444444444444",
+    headSha: "headsha4444444444444444444444444444444444",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertEquals(out.reviewStale, false);
+  assertEquals(out.convergeAckOnly, false);
+  assertStringIncludes(out.convergeBlockReason ?? "", "changes recommended");
+});
+
+test("converge-gate #923: a head-current CLEAN review with no findings still converges (verdict-gate control)", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => "## Pull Request Overview\n✅ Looks good — no issues found.",
+    reviewCommitId: "headsha4444444444444444444444444444444444",
+    headSha: "headsha4444444444444444444444444444444444",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: false });
 });
