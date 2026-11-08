@@ -505,3 +505,36 @@ test("pr.merge #923: a queue-comment repo whose head moved after the backstop re
     },
   );
 });
+
+for (const [label, finalRead] of [
+  ["null", async () => null],
+  ["throwing", async () => {
+    throw new Error("502");
+  }],
+  ["blank", async () => "  "],
+] as const) {
+  test(`pr.merge #927: a queue-comment repo whose FINAL head re-read is ${label} retries instead of enqueueing`, async () => {
+    const protocol =
+      "# repo\n\n```merge-protocol\n{ \"land\": { \"method\": \"mergify-queue\", \"comment\": \"@mergifyio queue\" } }\n```\n";
+    await withGithub(
+      (url) => {
+        if (/\/contents\/AGENTS\.md$/.test(url)) return new Response(protocol);
+        if (/\/issues\/\d+\/comments$/.test(url)) return new Response(JSON.stringify({ id: 1 }), { status: 201 });
+        return backstopRoutes(url);
+      },
+      async (calls) => {
+        const { app, stores } = fakeApp();
+        let n = 0;
+        const backstop = makeHandler({
+          readReview: async () => ({ body: "lgtm", commitId: "h3" }),
+          readHeadSha: async () => (n++ === 0 ? "h3" : finalRead()),
+        } as any);
+        const out = (await backstop({ variables: { prKey: "acme/widgets#34", repo: "acme/widgets", prNumber: 34 } } as any, app)) as Record<string, unknown>;
+        assertEquals(out.mergeStatus, "retry");
+        assertEquals(stores.merges.some((m) => m.outcome === "retry"), true, "retry audit row");
+        assertEquals(calls.some((c) => /\/issues\/\d+\/comments$/.test(c.url) && c.method === "POST"), false);
+        assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false, "no merge call");
+      },
+    );
+  });
+}

@@ -1284,6 +1284,13 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
     const { repo, number, pr_key: prKey } = pr;
     const lastId = pr.last_review_id ?? 0;
     try {
+      // #927: a PR that already landed/closed must never resume or re-solicit a review — whatever
+      // the review freshness (no review, stale review, OR a head-current one landing after the
+      // merge). Check terminal state FIRST — before even fetching reviews, so a failing
+      // reviews endpoint (e.g. 502) can't strand a merged PR in `waiting_review` with a live timer — so no branch below can route a merged PR back into a
+      // review round. `null` → handled-but-not-finalized (cancel failed): skip this pass, stay pollable.
+      const retired = await retireTerminalReviewWait(data, engine, pr, token);
+      if (retired !== false) continue;
       const reviews = await fetchPrReviews(repo, number, token);
       if (reviews === null) return; // no usable transport (no gh, no token) → idle
       const fresh = reviews
@@ -1292,12 +1299,6 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
         )
         .sort((a, b) => a.id - b.id)
         .pop();
-      // #927: a PR that already landed/closed must never resume or re-solicit a review — whatever
-      // the review freshness (no review, stale review, OR a head-current one landing after the
-      // merge). Check terminal state FIRST so no branch below can route a merged PR back into a
-      // review round. `null` → handled-but-not-finalized (cancel failed): skip this pass, stay pollable.
-      const retired = await retireTerminalReviewWait(data, engine, pr, token);
-      if (retired !== false) continue;
       if (!fresh) {
         // No fresh review yet. Copilot won't re-review a round with no new commit and dismisses
         // re-requests, so actively (re-)solicit the next review — throttled to one attempt per

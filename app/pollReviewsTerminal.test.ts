@@ -32,7 +32,7 @@ function memTable(rows: any[], key: string, lookups: unknown[] = []) {
   };
 }
 
-type Opts = { reviews?: unknown[]; cancelFails?: boolean; searchState?: string | null };
+type Opts = { reviewsFail?: boolean; reviews?: unknown[]; cancelFails?: boolean; searchState?: string | null };
 
 async function run(prState: { merged: boolean; state: string }, opts: Opts = {}) {
   const row: any = {
@@ -87,6 +87,7 @@ async function run(prState: { merged: boolean; state: string }, opts: Opts = {})
     const json = (b: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(b), { status }));
     if (method !== "GET") posts.push(`${method} ${u}`);
     if (u.includes(`/pulls/${NUMBER}/requested_reviewers`)) return method === "GET" ? json({ users: [] }) : json({}, 201);
+    if (u.includes(`/pulls/${NUMBER}/reviews`) && opts.reviewsFail) return json({ message: "bad gateway" }, 502);
     if (u.includes(`/pulls/${NUMBER}/reviews`)) return json(opts.reviews ?? []); // default: review requested, none arrived
     if (u.includes("/git/ref")) return json({ object: { sha: "e597b399" } });
     if (u.endsWith(`/pulls/${NUMBER}`)) return json({ ...prState, mergeable_state: "clean", head: { sha: "e597b399" } });
@@ -163,4 +164,12 @@ test("pollReviews #927: a PR merged externally while awaiting review runs the re
   // maybeStartRetro resolves the PR's plan via `plan_tasks`; the lookup proves the hook ran.
   const { planLookups } = await run({ merged: true, state: "closed" });
   assertEquals(planLookups, [{ pr_key: `${REPO}#${NUMBER}` }]);
+});
+
+test("pollReviews #927: a MERGED PR whose review fetch FAILS is still retired (terminal check precedes fetch)", async () => {
+  const { row, posts, cancelled, published } = await run({ merged: true, state: "closed" }, { reviewsFail: true });
+  assertEquals(cancelled, ["589000"]);
+  assertEquals(published.length, 0);
+  assertEquals(posts.length, 0);
+  assertEquals(row.status, "merged");
 });
