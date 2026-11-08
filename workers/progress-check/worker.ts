@@ -296,7 +296,7 @@ export function makeHandler(deps: {
   readRounds?: RoundsReader;
 }): AppJobHandler<In, Out> {
   return async (job, app) => {
-    const { prKey, status, repo, prNumber, round, huskRetries, roundEntryHead } = job.variables;
+    const { prKey, status, repo, prNumber, round, huskRetries, roundEntryHead, reviewWaitCutoff } = job.variables;
     const jobKey = job.jobKey;
 
     const prs = app.data.table<{
@@ -356,6 +356,13 @@ export function makeHandler(deps: {
         status?: "waiting_review" | "converging";
         agentWatermark?: string | null;
         churnEscalatedRound?: number;
+        /** The review-wait start to stamp instead of "now" (issue #923 review): the converge-gate
+         * emits `reviewWaitCutoff` (the time of ITS review read) when it signals `reviewStale`, so
+         * a head-current review that lands in the window between that read and this park still
+         * satisfies `pollReviews`' `submitted_at >= waiting_since` filter instead of being
+         * discarded — closing the arrival-window race that otherwise re-solicits and times out
+         * despite a valid verdict already sitting unconsumed on the PR. */
+        waitingSince?: string;
       },
     ): Promise<Out> => {
       const ts = new Date().toISOString();
@@ -368,7 +375,9 @@ export function makeHandler(deps: {
         // Only overwrite the baseline when we actually read a head, so a null (unreadable) head
         // never clobbers a good `last_round_head`.
         ...(opts.head ? { last_round_head: opts.head } : {}),
-        ...(opts.status === "waiting_review" ? { status: "waiting_review", waiting_since: ts } : {}),
+        ...(opts.status === "waiting_review"
+          ? { status: "waiting_review", waiting_since: opts.waitingSince ?? ts }
+          : {}),
         ...(opts.status === "converging" ? { status: "converging" } : {}),
         // Advance the attempt watermark ONLY when an agent-work read consumed a `review-round`
         // instance (Copilot #789); `undefined` leaves the persisted watermark untouched (an
@@ -392,8 +401,18 @@ export function makeHandler(deps: {
     const parsed = parsePr(prKey);
     const ghRepo = repo ?? parsed?.repo;
     const ghNumber = typeof prNumber === "number" ? prNumber : parsed?.number;
+    // The review-wait start to stamp on a park. When the converge-gate signalled `reviewStale` it
+    // emitted `reviewWaitCutoff` (the time of ITS review read); parking with `waiting_since` at that
+    // cutoff — rather than "now" — lets a head-current review that landed in the read→park window
+    // satisfy the wait (issue #923 review). Only a non-empty string is honoured; anything else
+    // (absent on a normal round, or a malformed value) falls back to the park time.
+    const waitCutoff =
+      typeof reviewWaitCutoff === "string" && reviewWaitCutoff !== "" ? reviewWaitCutoff : undefined;
     if (!ghRepo || typeof ghNumber !== "number") {
-      return commit({ progressed: true, huskRetries: 0 }, { status: "waiting_review" });
+      return commit(
+        { progressed: true, huskRetries: 0 },
+        { status: "waiting_review", ...(waitCutoff ? { waitingSince: waitCutoff } : {}) },
+      );
     }
 
     // Read the head and record the baseline on EVERY round — including a non-addressed `waiting`
@@ -457,7 +476,12 @@ export function makeHandler(deps: {
     if (!isAddressedStatus(status)) {
       return commit(
         { progressed: true, huskRetries: 0 },
-        { head: currentHead, status: "waiting_review", agentWatermark },
+        {
+          head: currentHead,
+          status: "waiting_review",
+          agentWatermark,
+          ...(waitCutoff ? { waitingSince: waitCutoff } : {}),
+        },
       );
     }
 
@@ -528,7 +552,12 @@ export function makeHandler(deps: {
       }
       // Genuine progress → the loop parks at wait-review. THIS is the review-wait park, written only
       // once the husk retry has been ruled out, so a husk-retry round never transits `waiting_review`.
-      return commit(out, { head: currentHead, status: "waiting_review", agentWatermark });
+      return commit(out, {
+        head: currentHead,
+        status: "waiting_review",
+        agentWatermark,
+        ...(waitCutoff ? { waitingSince: waitCutoff } : {}),
+      });
     }
 
     // NO-ADVANCE SELF-HEAL (#818, Layer 2). Before escalating to a human, reconcile the round's work
@@ -576,7 +605,12 @@ export function makeHandler(deps: {
           // (husk counter reset), so the poller solicits the next Copilot review against the healed head.
           return commit(
             { progressed: true, huskRetries: 0 },
-            { head: heal.sha, status: "waiting_review", agentWatermark },
+            {
+              head: heal.sha,
+              status: "waiting_review",
+              agentWatermark,
+              ...(waitCutoff ? { waitingSince: waitCutoff } : {}),
+            },
           );
         }
       }

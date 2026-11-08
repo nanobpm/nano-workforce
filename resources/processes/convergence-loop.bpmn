@@ -42,6 +42,7 @@
           <nano:extend name="round" type="integer" optional="true" />
           <nano:extend name="huskRetries" type="integer" optional="true" />
           <nano:extend name="roundEntryHead" type="string" optional="true" />
+          <nano:extend name="reviewWaitCutoff" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="PrCaptureHeadIn" name="Capture round-entry head — input">
           <nano:extend name="prKey" type="string" />
@@ -68,6 +69,7 @@
           <nano:extend name="convergeBlockReason" type="string" optional="true" />
           <nano:extend name="convergeAckOnly" type="boolean" optional="true" />
           <nano:extend name="reviewStale" type="boolean" optional="true" />
+          <nano:extend name="reviewWaitCutoff" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="EscalationIn" name="Record escalation — input">
           <nano:extend name="prKey" type="string" />
@@ -307,6 +309,9 @@
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PrPersistRoundIn" />
         </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:input source="=if reviewStale = true then &#34;review-stale&#34; else status" target="status" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_advSkip</bpmn:incoming>
       <bpmn:incoming>f_advClean</bpmn:incoming>

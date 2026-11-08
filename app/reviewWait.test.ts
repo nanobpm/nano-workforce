@@ -9,6 +9,7 @@ import {
   DEFAULT_REVIEW_NUDGE_MINUTES,
   DEFAULT_REVIEW_WAIT_TIMEOUT,
   isoDurationToMs,
+  isReviewMissingOrStale,
   isReviewStale,
   MAX_REVIEW_NUDGE_MINUTES,
   reviewWaitTimeout,
@@ -127,4 +128,40 @@ test("isReviewStale: a missing HEAD sha fails safe to NOT stale", () => {
 
 test("isReviewStale: both missing is NOT stale", () => {
   assertEquals(isReviewStale(null, null), false);
+});
+
+// ── isReviewMissingOrStale (issue #923) ──────────────────────────────────────
+// The CONVERGENCE-GATE variant of the staleness predicate. `isReviewStale` intentionally fails
+// safe to "not stale" on a missing review commit_id (a review GitHub carried no `commit_id` for
+// must not fabricate a re-solicit loop) — but that same fail-safe is a fail-OPEN when the null
+// means "no Copilot review exists AT ALL" (nano-bpm#1443 merged with ZERO reviews). The gate's
+// precondition is a HEAD-CURRENT reviewer verdict, so a missing review must route to the review
+// wait exactly like a stale one.
+
+test("isReviewMissingOrStale: NO review (null commit_id) with a readable HEAD is stale/missing — fail CLOSED", () => {
+  // The #923 case: `readReview` verified "no Copilot review" (`commitId: null`) and the head read
+  // succeeded — the gate must NOT treat "no review" as "a verified clean review".
+  assertEquals(isReviewMissingOrStale(null, "bbb2222"), true);
+  assertEquals(isReviewMissingOrStale(undefined, "bbb2222"), true);
+  assertEquals(isReviewMissingOrStale("", "bbb2222"), true);
+  assertEquals(isReviewMissingOrStale("   ", "bbb2222"), true);
+});
+
+test("isReviewMissingOrStale: a differing review commit_id and HEAD sha is stale (same as isReviewStale)", () => {
+  assertEquals(isReviewMissingOrStale("aaa1111", "bbb2222"), true);
+});
+
+test("isReviewMissingOrStale: a head-current review is NOT stale/missing", () => {
+  assertEquals(isReviewMissingOrStale("aaa1111", "aaa1111"), false);
+  assertEquals(isReviewMissingOrStale("  aaa1111 ", "aaa1111"), false);
+});
+
+test("isReviewMissingOrStale: an UNREADABLE head fails safe to NOT stale (never fabricates a re-solicit loop)", () => {
+  // Without the head we cannot prove the review predates it NOR that a missing review should
+  // re-solicit — a transport hiccup must not strand the loop re-requesting forever (the same
+  // fail-safe `isReviewStale` keeps; the review-wait timeout remains the backstop).
+  assertEquals(isReviewMissingOrStale(null, null), false);
+  assertEquals(isReviewMissingOrStale("aaa1111", null), false);
+  assertEquals(isReviewMissingOrStale("aaa1111", ""), false);
+  assertEquals(isReviewMissingOrStale(null, ""), false);
 });

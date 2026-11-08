@@ -39,6 +39,12 @@ const NON_ADDRESSED_STATUSES: ReadonlySet<string> = new Set([
   "converged",
   "needs_input",
   "blocked",
+  // `review-stale` (issue #923 §4): the round re-entered persist-round via the converge gate's
+  // stale/missing-review path (f_convergeStale) — no head-current reviewer verdict was ever
+  // obtained, so the round claims no push and must always continue to the review wait (the poller
+  // re-solicits a fresh review of the current head). Treating it as `addressed` would fabricate a
+  // no-progress escalation on a round that never claimed progress.
+  "review-stale",
 ]);
 
 /** True when a round's status is `addressed` for no-progress purposes — i.e. NOT one of the

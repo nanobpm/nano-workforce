@@ -290,6 +290,37 @@ export function parseSuppressedAdvisories(reviewBody: string | null | undefined)
   return out;
 }
 
+/** Read the reviewer VERDICT out of a Copilot review body (issue #923 §2): does the review's own
+ * summary report OPEN, actionable findings? Convergence requires a head-current verdict that is
+ * CLEAN — a review whose body says findings are still open must block the same way an unresolved
+ * thread does, even when every inline thread happens to be resolved (a review can carry findings
+ * with no unresolved threads at all: the nano-bpm#1443 review raised 7 findings as a summary-only
+ * "Changes recommended").
+ *
+ * Recognised open-finding signals (each returns a short human label for the block reason):
+ *   • "Changes recommended" — Copilot's 🟡 verdict line (vs. the ✅ clean verdict);
+ *   • "N open issue(s)"    — the summary count Copilot emits when findings remain;
+ *   • a ccr-overview-v2 `<summary>…Open (N)…</summary>` section (issue #835's format) with N ≥ 1.
+ * A body carrying NONE of these reports no open findings (empty array) — including the empty body
+ * of a comment-only review. Pure; unit-tested. */
+export function parseReviewOpenFindings(reviewBody: string | null | undefined): string[] {
+  const body = reviewBody ?? "";
+  if (body.trim() === "") return [];
+  const out: string[] = [];
+  // Only VERDICT lines and dedicated finding-count <summary> sections count — never descriptive
+  // prose (a clean review's file table may legitimately say `Recognizes "Changes recommended"`).
+  // A verdict line STARTS with the verdict (`### 🟡 Changes recommended`, `🟡 Changes recommended`).
+  if (/^[ \t]*(?:#{1,6}[ \t]*)?(?:🟡[ \t]*)?changes recommended\b/imu.test(body)) out.push("changes recommended");
+  // Each <summary> match is bounded by its own closing tag ([^<]* cannot cross `</summary>`).
+  for (const m of body.matchAll(/<summary>(?:<strong>)?\s*(\d+)\s+open\s+issues?\s*(?:<\/strong>)?\s*<\/summary>/gi)) {
+    if (Number(m[1]) > 0) out.push(`${m[1]} open issue${m[1] === "1" ? "" : "s"}`);
+  }
+  for (const m of body.matchAll(/<summary>(?:<strong>)?\s*Open\s*\((\d+)\)\s*(?:<\/strong>)?\s*<\/summary>/gi)) {
+    if (Number(m[1]) > 0) out.push(`${m[1]} open finding${m[1] === "1" ? "" : "s"}`);
+  }
+  return out;
+}
+
 /** A finding clause's trailing `(<severity>, N vote[s])` tag in the ccr-overview-v2 file table. */
 const V2_FINDING_TAG = /\s*\(\s*[a-z]+\s*,\s*\d+\s+votes?\s*\)/gi;
 
@@ -1665,6 +1696,10 @@ export type MergeMethod = "squash" | "merge" | "rebase";
 export interface MergeOptions {
   method: MergeMethod;
   admin: boolean;
+  /** The head SHA the caller verified (issue #923 backstop). When set, GitHub refuses the merge if
+   * the PR head moved since — gh `--match-head-commit`, REST `sha` — so a later, unreviewed head
+   * can never be landed by a check-then-merge race. The refusal surfaces as a transient `retry`. */
+  expectedHeadSha?: string;
 }
 export interface MergeResult {
   outcome: "merged" | "queued" | "blocked" | "retry";
@@ -1677,9 +1712,21 @@ export interface MergeResult {
  * must re-attempt on the settled base, NOT page a human. Matches GitHub's stable message across
  * both the GraphQL `mergePullRequest` error and its HTTP 405 REST variant. Kept narrow — the exact
  * "<Base|Head> branch was modified" phrase — so a genuine block (conflict, failing required check,
- * 403 perms, 422 not-mergeable) is never swallowed as transient. */
+ * 403 perms, 422 not-mergeable) is never swallowed as transient.
+ *
+ * The same class covers the `--match-head-commit` / REST `sha` pin refusal (issue #923 review): the
+ * PR head advanced past the verified head between the review backstop and the merge mutation, so
+ * GitHub refused the pinned merge. That is a check-then-act race the loop is designed to absorb —
+ * the bounded merge retry re-runs the review backstop on the new head — not a human-actionable
+ * block. gh words it "Head commit of pull request #… does not match '--match-head-commit'"; the
+ * REST `sha` mismatch surfaces as a 409 whose body carries the same "Head branch was modified"
+ * phrase (matched by the first alternative) or a "SHA does not match" wording. */
 export function isTransientMergeRace(detail: string): boolean {
-  return /\b(?:base|head) branch was modified\b/i.test(detail);
+  return (
+    /\b(?:base|head) branch was modified\b/i.test(detail) ||
+    /does not match ['"]--match-head-commit['"]/i.test(detail) ||
+    /\bsha does not match\b/i.test(detail)
+  );
 }
 
 /** Attempt to land the PR. Returns `merged` (landed now), `queued` (added to the repo's merge
@@ -1697,6 +1744,7 @@ export async function mergePr(
   if (await useGh()) {
     const args = ["pr", "merge", String(number), "--repo", repo, methodFlag];
     if (opts.admin) args.push("--admin");
+    if (opts.expectedHeadSha) args.push("--match-head-commit", opts.expectedHeadSha);
     try {
       const out = await runGh(args);
       // gh prints "… will be added to the merge queue" when the branch requires one.
@@ -1721,7 +1769,9 @@ export async function mergePr(
       accept: "application/vnd.github+json",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ merge_method: opts.method }),
+    body: JSON.stringify(
+      opts.expectedHeadSha ? { merge_method: opts.method, sha: opts.expectedHeadSha } : { merge_method: opts.method },
+    ),
   });
   if (r.ok) {
     // A 2xx from the REST merge endpoint does not guarantee the PR has *landed*: the body's

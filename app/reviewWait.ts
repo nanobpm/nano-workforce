@@ -114,3 +114,29 @@ export function isReviewStale(
   if (rev === "" || head === "") return false;
   return rev !== head;
 }
+
+/** Is there NO head-current Copilot review to gate on? (issue #923) — the CONVERGENCE-GATE /
+ * merge-backstop variant of {@link isReviewStale}.
+ *
+ * `isReviewStale` intentionally fails safe to "not stale" on a missing review `commit_id` — for
+ * the POLLER, a review GitHub carried no `commit_id` for must not fabricate a re-solicit loop. But
+ * the gate's consumer is different: `fetchLatestCopilotReview` returns `commitId: null` both when
+ * no Copilot review exists AT ALL and when the newest one lacks a `commit_id`, and the gate's
+ * precondition is a HEAD-CURRENT reviewer verdict. Treating "no review" as "a verified clean
+ * review" is the fail-open that merged nano-bpm#1443 with ZERO reviews — so for the GATE, a
+ * missing review commit is stale/missing, not current.
+ *
+ * The head-side fail-safe is kept: with an UNREADABLE head we can prove nothing, so we must not
+ * fabricate a re-solicit loop on a transport hiccup (the review-wait timeout remains the
+ * backstop). Only a READABLE head + a missing/mismatched review commit routes to the review wait. */
+export function isReviewMissingOrStale(
+  reviewCommitId: string | null | undefined,
+  headSha: string | null | undefined,
+): boolean {
+  const head = (headSha ?? "").trim();
+  if (head === "") return false; // unverifiable head → fail safe, exactly as isReviewStale
+  const rev = (reviewCommitId ?? "").trim();
+  // A missing review commit with a readable head = NO head-current verdict → stale/missing.
+  if (rev === "") return true;
+  return rev !== head;
+}
