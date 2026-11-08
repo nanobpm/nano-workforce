@@ -1292,6 +1292,8 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
         .sort((a, b) => a.id - b.id)
         .pop();
       if (!fresh) {
+        // #927: never re-solicit a review on a PR that already landed/closed — retire the loop.
+        if (await retireTerminalReviewWait(data, engine, pr, token)) continue;
         // No fresh review yet. Copilot won't re-review a round with no new commit and dismisses
         // re-requests, so actively (re-)solicit the next review — throttled to one attempt per
         // REVIEW_NUDGE_MS window. The process's timer arm is the backstop if this never lands.
@@ -1322,6 +1324,7 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
       // credential so the stale guard sees the real head.
       const headSha = await readCurrentHead(repo, number, token).catch(() => null);
       if (isReviewStale(fresh.commit_id, headSha)) {
+        if (await retireTerminalReviewWait(data, engine, pr, token)) continue;
         console.log(`[poller] review ${fresh.id} is stale (predates HEAD) -> re-soliciting ${prKey}`);
         await maybeRerequestReview(data, pr, token);
         continue;
@@ -1340,6 +1343,40 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
       console.error(`[poller] ${prKey}: ${err}`);
     }
   }
+}
+
+/** Review-wait out-of-band terminal check (issue #927). nano-bpm#1467 landed while its convergence
+ * loop was parked at `wait-review`; the poller then kept re-requesting Copilot reviews on the MERGED
+ * PR for six rounds and finally escalated a review timeout no human could act on. Before any
+ * re-solicitation, read the PR's live state: if it is terminal (merged or closed) the review wait is
+ * moot, so RETIRE the parked convergence instance (`process_key`) and close the row out — `merged`
+ * (with `merged_at`) for a landed PR, the canonical `abandonClosedPr` for a closed-unmerged one.
+ * Conservative: an unreadable/open state returns `false` and the caller re-solicits as before.
+ * Exported for tests. */
+export async function retireTerminalReviewWait(
+  data: DataLayer,
+  engine: Pick<EngineClient, "cancelInstance">,
+  pr: PullRequest,
+  token: string,
+): Promise<boolean> {
+  const st = await fetchPrState(pr.repo, pr.number, token).catch(() => null);
+  const liveness = classifyPrLiveness(st);
+  if (liveness !== "merged" && liveness !== "closed") return false;
+  if (pr.process_key != null) {
+    try {
+      await engine.cancelInstance({ processInstanceKey: String(pr.process_key) });
+    } catch (err) {
+      console.error(`[poller] ${pr.pr_key}: retire review-wait instance ${pr.process_key}: ${err}`);
+    }
+  }
+  if (liveness === "merged") {
+    const ts = now();
+    await prs(data).update(pr.pr_key, { status: "merged", merged_at: ts, updated_at: ts });
+  } else {
+    await abandonClosedPr(data, pr.pr_key, "PR was closed on GitHub while awaiting review — retiring the convergence loop");
+  }
+  console.log(`[poller] ${liveness} while waiting for review -> retired loop ${pr.pr_key}`);
+  return true;
 }
 
 /** Ensure a Copilot review is in flight for a PR still waiting, throttled to one attempt per

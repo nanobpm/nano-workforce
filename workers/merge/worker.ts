@@ -15,10 +15,9 @@
 // it reviewed — a head that MOVED between convergence and landing, or a review that never existed
 // (the #1443 fail-open), must not slip through at land time. Before running ANY land protocol this
 // worker re-checks that a HEAD-CURRENT Copilot review exists; a missing/stale review blocks the
-// landing (escalating to a human) instead of enqueueing/merging unreviewed code. The check fails
-// OPEN only when the GitHub state is UNREADABLE (no transport / a hiccup) — the merge-stage
-// mergeability polling is the independent backstop there, and a hard block on a transient read
-// would wedge every merge on a network blip.
+// landing (escalating to a human) instead of enqueueing/merging unreviewed code. An UNREADABLE
+// review/head ALSO blocks (fails CLOSED, issue #927) — the old fail-open let nano-bpm#1467 land
+// 49 s before its first review.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { matchTags, tag } from "@nanobpm/urban/effect";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
@@ -58,6 +57,9 @@ const defaultReadReview: MergeReviewReader = (repo, prNumber) =>
 // The SAME branch-ref-over-stale-`head.sha` reader the converge-gate / progress-check / poller
 // bind (#786/#799), so the backstop's staleness comparison sees the exact head the gate did.
 const defaultReadHead: HeadReader = makeDefaultReadHead({ fetchPrHead, fetchBranchHead });
+
+const BLOCK_UNVERIFIABLE_REVIEW =
+  "the PR's Copilot review state or current HEAD could not be read, so a head-current reviewer verdict cannot be verified (the backstop fails CLOSED on an unverifiable read)";
 
 const BLOCK_NO_HEAD_CURRENT_REVIEW =
   "no head-current Copilot review exists for the PR's current HEAD (the head moved after the last review, or no review was ever submitted). A head-current reviewer verdict is required before landing";
@@ -132,26 +134,31 @@ export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: 
   // existed at all (the nano-bpm#1443 fail-open: merged with ZERO reviews), must not slip through
   // at land time. Runs AFTER the merged/closed short-circuits (an already-terminal PR needs no
   // verdict) and BEFORE any land protocol (the `@mergifyio queue` comment is itself the landing
-  // for a queue repo). Fails OPEN only when the GitHub state is UNREADABLE (no transport / a
-  // hiccup → `null` review or head): a transient read failure must not wedge every merge — the
-  // merge-stage mergeability polling is the independent backstop there.
+  // for a queue repo). Fails CLOSED on an UNREADABLE review/head too (issue #927).
   const [backstopReview, backstopHead] = await Promise.all([
     readReview(repo, prNumber).catch(() => null),
     readHeadSha(repo, prNumber).catch(() => null),
   ]);
-  if (backstopReview !== null && isReviewMissingOrStale(backstopReview.commitId, backstopHead)) {
+  // FAIL CLOSED (issue #927): a gate whose job is "never land unreviewed" must not land on an
+  // UNVERIFIABLE read. nano-bpm#1467 merged 49 s before its first Copilot review because a `null`
+  // review/head read (or an empty head) skipped this check entirely. An unreadable review or head now
+  // blocks (escalating to a human, who replies to retry) exactly like a missing/stale review.
+  const headTrimmed = (backstopHead ?? "").trim();
+  const unverifiable = backstopReview === null || headTrimmed === "";
+  if (unverifiable || isReviewMissingOrStale(backstopReview.commitId, headTrimmed)) {
+    const detail = unverifiable ? BLOCK_UNVERIFIABLE_REVIEW : BLOCK_NO_HEAD_CURRENT_REVIEW;
     await app.data.table("merges", "id").insert({
       pr_key: prKey,
       outcome: "blocked",
       method: "review-backstop",
-      detail: BLOCK_NO_HEAD_CURRENT_REVIEW,
+      detail,
       at: now,
     });
     return {
       mergeStatus: "blocked",
       status: "blocked",
       question:
-        `Merge refused: ${BLOCK_NO_HEAD_CURRENT_REVIEW}. ` +
+        `Merge refused: ${detail}. ` +
         `Push no further commits, wait for the Copilot review of the current HEAD to land (or request one: ` +
         `gh api repos/${repo}/pulls/${prNumber}/requested_reviewers -X POST -f "reviewers[]=copilot-pull-request-reviewer[bot]"), ` +
         `let the convergence loop gate on it, then reply to retry.`,
@@ -161,12 +168,8 @@ export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: 
   // A head-current review whose OWN summary still reports open findings (the same canonical
   // verdict parser the converge-gate uses) must block too: a summary-only "Changes recommended"
   // review that landed after convergence has no unresolved thread for mergeability polling to see.
-  // Only evaluate the verdict once head-currentness is VERIFIED (review read AND head read succeeded
-  // and match) — an unreadable head fails open here like the stale check above, never blocking on a
-  // possibly-stale review's body.
-  const reviewIsHeadCurrent =
-    backstopReview !== null && backstopHead !== null && backstopHead !== "" && backstopReview.commitId === backstopHead;
-  const openFindings = reviewIsHeadCurrent ? parseReviewOpenFindings(backstopReview.body) : [];
+  // Head-currentness is VERIFIED at this point (the fail-closed check above returned otherwise).
+  const openFindings = parseReviewOpenFindings(backstopReview.body);
   if (openFindings.length > 0) {
     const detail = `the head-current Copilot review reports open findings (${openFindings.join(", ")})`;
     await app.data.table("merges", "id").insert({
@@ -186,7 +189,7 @@ export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: 
   }
   // The head the backstop verified — pinned through the land call so a push between this check
   // and the merge can never land a later, unreviewed head.
-  const verifiedHead = backstopReview !== null && backstopHead ? backstopHead : undefined;
+  const verifiedHead: string | undefined = headTrimmed;
 
   // Dead-end-base guard (#60): never land a PR into a base branch that has itself already merged
   // to the default branch — the merge would land into a dead branch and never reach `main`.
@@ -227,10 +230,14 @@ export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: 
     const comment = protocol?.land.comment ?? "@mergifyio queue";
     // A comment can't pin a SHA, so re-read the head right before enqueueing: if it moved past the
     // verified head, re-enter via the bounded retry (which re-runs the backstop on the new head).
-    const headNow = verifiedHead ? await readHeadSha(repo, prNumber).catch(() => null) : null;
-    if (verifiedHead && headNow !== null && headNow !== verifiedHead) {
+    // Fail CLOSED (#927): an unreadable re-read retries rather than enqueueing an unverified head.
+    const headNow = await readHeadSha(repo, prNumber).catch(() => null);
+    if (headNow === null || headNow.trim() !== verifiedHead) {
       outcome = "retry";
-      detail = `head moved from ${verifiedHead} to ${headNow} after the review backstop; re-verifying before enqueue`;
+      detail =
+        headNow === null
+          ? `head could not be re-read after the review backstop; re-verifying before enqueue`
+          : `head moved from ${verifiedHead} to ${headNow} after the review backstop; re-verifying before enqueue`;
     } else {
       const ok = await enqueueViaComment(repo, prNumber, token, comment);
       outcome = ok ? "queued" : "blocked";
