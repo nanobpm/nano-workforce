@@ -1,3 +1,9 @@
+## [0.206.0](https://github.com/nanobpm/nano-workforce/compare/v0.205.2...v0.206.0) (2026-11-08)
+
+### Features
+
+* **version:** bake the git SHA into release packages and report identity on /status ([#926](https://github.com/nanobpm/nano-workforce/issues/926)) ([e5eedca](https://github.com/nanobpm/nano-workforce/commit/e5eedca0ee28db1f54167b4bb962ce4c06776e9f)), closes [#925](https://github.com/nanobpm/nano-workforce/issues/925) [#925](https://github.com/nanobpm/nano-workforce/issues/925) [#925](https://github.com/nanobpm/nano-workforce/issues/925) [#925](https://github.com/nanobpm/nano-workforce/issues/925)
+
 ## [0.205.2](https://github.com/nanobpm/nano-workforce/compare/v0.205.1...v0.205.2) (2026-11-08)
 
 ### Bug Fixes
