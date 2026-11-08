@@ -32,6 +32,7 @@ import {
   fetchPrHead,
   fetchPrState,
   mergePr,
+  parseReviewOpenFindings,
 } from "../../app/github.ts";
 import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { isReviewMissingOrStale } from "../../app/reviewWait.ts";
@@ -157,6 +158,31 @@ export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: 
     };
   }
 
+  // A head-current review whose OWN summary still reports open findings (the same canonical
+  // verdict parser the converge-gate uses) must block too: a summary-only "Changes recommended"
+  // review that landed after convergence has no unresolved thread for mergeability polling to see.
+  const openFindings = backstopReview === null ? [] : parseReviewOpenFindings(backstopReview.body);
+  if (openFindings.length > 0) {
+    const detail = `the head-current Copilot review reports open findings (${openFindings.join(", ")})`;
+    await app.data.table("merges", "id").insert({
+      pr_key: prKey,
+      outcome: "blocked",
+      method: "review-backstop",
+      detail,
+      at: now,
+    });
+    return {
+      mergeStatus: "blocked",
+      status: "blocked",
+      question:
+        `Merge refused: ${detail}. Address the review's findings on the branch (or reply with ` +
+        `guidance on which to push back on), let the convergence loop gate on a clean review, then reply to retry.`,
+    };
+  }
+  // The head the backstop verified — pinned through the land call so a push between this check
+  // and the merge can never land a later, unreviewed head.
+  const verifiedHead = backstopReview !== null && backstopHead ? backstopHead : undefined;
+
   // Dead-end-base guard (#60): never land a PR into a base branch that has itself already merged
   // to the default branch — the merge would land into a dead branch and never reach `main`.
   // GitHub only auto-retargets a PR when its base is *deleted* on merge; a merged-but-undeleted
@@ -194,9 +220,17 @@ export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: 
     // Land via the repo's on-demand queue: post the enqueue comment; the poller's queued→landed
     // watch (service.ts block 3) then advances the process when the queue merges it.
     const comment = protocol?.land.comment ?? "@mergifyio queue";
-    const ok = await enqueueViaComment(repo, prNumber, token, comment);
-    outcome = ok ? "queued" : "blocked";
-    detail = ok ? `enqueued via "${comment}"` : `failed to post enqueue comment "${comment}"`;
+    // A comment can't pin a SHA, so re-read the head right before enqueueing: if it moved past the
+    // verified head, re-enter via the bounded retry (which re-runs the backstop on the new head).
+    const headNow = verifiedHead ? await readHeadSha(repo, prNumber).catch(() => null) : null;
+    if (verifiedHead && headNow !== null && headNow !== verifiedHead) {
+      outcome = "retry";
+      detail = `head moved from ${verifiedHead} to ${headNow} after the review backstop; re-verifying before enqueue`;
+    } else {
+      const ok = await enqueueViaComment(repo, prNumber, token, comment);
+      outcome = ok ? "queued" : "blocked";
+      detail = ok ? `enqueued via "${comment}"` : `failed to post enqueue comment "${comment}"`;
+    }
     auditMethod = "queue-comment";
   } else if (classifyMergeLanding(protocol ?? DEFAULT_MERGE_PROTOCOL) === "decision-required") {
     // The repo requires a human to click Merge (`land.method=ui`); Merlin can't. This is the
@@ -206,7 +240,7 @@ export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: 
     auditMethod = "ui";
   } else {
     const admin = method === "admin" || MERGE_ADMIN;
-    const res = await mergePr(repo, prNumber, token, { method: MERGE_METHOD, admin });
+    const res = await mergePr(repo, prNumber, token, { method: MERGE_METHOD, admin, expectedHeadSha: verifiedHead });
     // No usable transport → treat as a block so a human is asked to configure/merge, rather than
     // silently completing the process without landing the PR.
     outcome = res?.outcome ?? "blocked";

@@ -309,7 +309,7 @@ export function parseReviewOpenFindings(reviewBody: string | null | undefined): 
   const out: string[] = [];
   if (/changes recommended/i.test(body)) out.push("changes recommended");
   const issues = /(\d+)\s+open\s+issues?/i.exec(body);
-  if (issues) out.push(`${issues[1]} open issue${issues[1] === "1" ? "" : "s"}`);
+  if (issues && Number(issues[1]) > 0) out.push(`${issues[1]} open issue${issues[1] === "1" ? "" : "s"}`);
   // The v2 overview carries an explicit "Open (N)" collapsible section when findings remain.
   const v2Open = /<summary>[\s\S]*?Open\s*\((\d+)\)/i.exec(body);
   if (v2Open && v2Open[1] !== "0") {
@@ -1693,6 +1693,10 @@ export type MergeMethod = "squash" | "merge" | "rebase";
 export interface MergeOptions {
   method: MergeMethod;
   admin: boolean;
+  /** The head SHA the caller verified (issue #923 backstop). When set, GitHub refuses the merge if
+   * the PR head moved since — gh `--match-head-commit`, REST `sha` — so a later, unreviewed head
+   * can never be landed by a check-then-merge race. The refusal surfaces as a transient `retry`. */
+  expectedHeadSha?: string;
 }
 export interface MergeResult {
   outcome: "merged" | "queued" | "blocked" | "retry";
@@ -1725,6 +1729,7 @@ export async function mergePr(
   if (await useGh()) {
     const args = ["pr", "merge", String(number), "--repo", repo, methodFlag];
     if (opts.admin) args.push("--admin");
+    if (opts.expectedHeadSha) args.push("--match-head-commit", opts.expectedHeadSha);
     try {
       const out = await runGh(args);
       // gh prints "… will be added to the merge queue" when the branch requires one.
@@ -1749,7 +1754,9 @@ export async function mergePr(
       accept: "application/vnd.github+json",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ merge_method: opts.method }),
+    body: JSON.stringify(
+      opts.expectedHeadSha ? { merge_method: opts.method, sha: opts.expectedHeadSha } : { merge_method: opts.method },
+    ),
   });
   if (r.ok) {
     // A 2xx from the REST merge endpoint does not guarantee the PR has *landed*: the body's

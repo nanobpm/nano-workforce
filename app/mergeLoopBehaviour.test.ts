@@ -688,6 +688,18 @@ test("a retry that exhausts the budget escalates as a repeated race, not a gener
   assertStringIncludes(String(escalation(engine).question ?? ""), "retry budget", "the retry escalation must read as a repeated race");
 });
 
+test("a worker-supplied block question (review backstop #923) reaches the human escalation verbatim", async () => {
+  const engine = await boot({
+    responses: { "pr.merge": { mergeStatus: "blocked", status: "blocked", question: "Merge refused: no head-current Copilot review exists." } },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  const q = String(escalation(engine).question ?? "");
+  assertStringIncludes(q, "no head-current Copilot review", "the backstop's recovery instructions must reach the human");
+  assert(!q.includes("Investigate why GitHub refused"), "must not be overwritten by the generic refusal text");
+});
+
 // ---------------------------------------------------------------------------
 // CI-fix sub-process (SP_cifix) — mergeCiReattempt (#134), #329
 // ---------------------------------------------------------------------------

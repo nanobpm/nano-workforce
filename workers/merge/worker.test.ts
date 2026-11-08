@@ -411,3 +411,60 @@ test("pr.merge #923: an UNREADABLE review/head fails OPEN (a transport hiccup ne
     },
   );
 });
+
+test("pr.merge #923: a head-current review whose summary reports OPEN findings blocks landing", async () => {
+  await withGithub(backstopRoutes, async (calls) => {
+    const { app, stores } = fakeApp();
+    const backstop = makeHandler({
+      readReview: async () => ({ body: "### 🟡 Changes recommended\n<summary>2 open issues</summary>", commitId: "h1" }),
+      readHeadSha: async () => "h1",
+    });
+    const out = (await backstop({ variables: { prKey: "acme/widgets#29", repo: "acme/widgets", prNumber: 29 } } as any, app)) as Record<string, unknown>;
+    assertEquals(out.mergeStatus, "blocked");
+    assertEquals((out.question as string).includes("open findings"), true);
+    assertEquals(stores.merges[0].method, "review-backstop");
+    assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+  });
+});
+
+test("pr.merge #923: the direct merge pins the verified head SHA (no check-then-merge race)", async () => {
+  let putBody = "";
+  await withGithub(
+    (url, init) => {
+      if (/\/pulls\/\d+\/merge$/.test(url)) {
+        putBody = String(init?.body ?? "");
+        return new Response(JSON.stringify({ merged: true }), { status: 200 });
+      }
+      return backstopRoutes(url);
+    },
+    async () => {
+      const { app } = fakeApp();
+      const backstop = makeHandler({ readReview: async () => ({ body: "lgtm", commitId: "h2" }), readHeadSha: async () => "h2" });
+      await backstop({ variables: { prKey: "acme/widgets#31", repo: "acme/widgets", prNumber: 31 } } as any, app);
+      assertEquals(JSON.parse(putBody).sha, "h2");
+    },
+  );
+});
+
+test("pr.merge #923: a queue-comment repo whose head moved after the backstop retries instead of enqueueing", async () => {
+  const protocol =
+    "# repo\n\n```merge-protocol\n{ \"land\": { \"method\": \"mergify-queue\", \"comment\": \"@mergifyio queue\" } }\n```\n";
+  await withGithub(
+    (url) => {
+      if (/\/contents\/AGENTS\.md$/.test(url)) return new Response(protocol);
+      if (/\/issues\/\d+\/comments$/.test(url)) return new Response(JSON.stringify({ id: 1 }), { status: 201 });
+      return backstopRoutes(url);
+    },
+    async (calls) => {
+      const { app } = fakeApp();
+      const heads = ["h3", "h4"];
+      const backstop = makeHandler({
+        readReview: async () => ({ body: "lgtm", commitId: "h3" }),
+        readHeadSha: async () => heads.shift() ?? "h4",
+      });
+      const out = (await backstop({ variables: { prKey: "acme/widgets#33", repo: "acme/widgets", prNumber: 33 } } as any, app)) as Record<string, unknown>;
+      assertEquals(out.mergeStatus, "retry");
+      assertEquals(calls.some((c) => /\/issues\/\d+\/comments$/.test(c.url) && c.method === "POST"), false);
+    },
+  );
+});

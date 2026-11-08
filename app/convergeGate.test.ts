@@ -1283,6 +1283,11 @@ test("parseReviewOpenFindings: an 'N open issue(s)' summary reports N", () => {
   assertEquals(parseReviewOpenFindings("1 open issue."), ["1 open issue"]);
 });
 
+test("parseReviewOpenFindings: '0 open issues' is a clean verdict, not a finding", () => {
+  assertEquals(parseReviewOpenFindings("Review complete. 0 open issues."), []);
+  assertEquals(parseReviewOpenFindings("<details><summary><strong>0 open issues</strong></summary></details>"), []);
+});
+
 test("parseReviewOpenFindings: a ccr-overview-v2 'Open (N)' section reports N", () => {
   assertEquals(parseReviewOpenFindings(V2_REVIEW_BODY), ["1 open finding"]);
 });
