@@ -100,6 +100,7 @@ import { ENGINE_TERMINAL_STATES } from "./reconcile.ts";
 // (submitPr/startMerge) and re-exported below so the long-standing `import { repoEnvelopeVars } from
 // "./service.ts"` call sites (and its tests) keep resolving.
 import { repoEnvelopeVars } from "./repoEnvelope.ts";
+import { maybeStartRetro } from "./retro.ts";
 import { clampNudgeMinutes, isoDurationToMs, isReviewStale, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
@@ -1291,9 +1292,13 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
         )
         .sort((a, b) => a.id - b.id)
         .pop();
+      // #927: a PR that already landed/closed must never resume or re-solicit a review — whatever
+      // the review freshness (no review, stale review, OR a head-current one landing after the
+      // merge). Check terminal state FIRST so no branch below can route a merged PR back into a
+      // review round. `null` → handled-but-not-finalized (cancel failed): skip this pass, stay pollable.
+      const retired = await retireTerminalReviewWait(data, engine, pr, token);
+      if (retired !== false) continue;
       if (!fresh) {
-        // #927: never re-solicit a review on a PR that already landed/closed — retire the loop.
-        if (await retireTerminalReviewWait(data, engine, pr, token)) continue;
         // No fresh review yet. Copilot won't re-review a round with no new commit and dismisses
         // re-requests, so actively (re-)solicit the next review — throttled to one attempt per
         // REVIEW_NUDGE_MS window. The process's timer arm is the backstop if this never lands.
@@ -1324,7 +1329,6 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
       // credential so the stale guard sees the real head.
       const headSha = await readCurrentHead(repo, number, token).catch(() => null);
       if (isReviewStale(fresh.commit_id, headSha)) {
-        if (await retireTerminalReviewWait(data, engine, pr, token)) continue;
         console.log(`[poller] review ${fresh.id} is stale (predates HEAD) -> re-soliciting ${prKey}`);
         await maybeRerequestReview(data, pr, token);
         continue;
@@ -1355,23 +1359,43 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
  * Exported for tests. */
 export async function retireTerminalReviewWait(
   data: DataLayer,
-  engine: Pick<EngineClient, "cancelInstance">,
+  engine: EngineClient,
   pr: PullRequest,
   token: string,
-): Promise<boolean> {
+): Promise<boolean | null> {
   const st = await fetchPrState(pr.repo, pr.number, token).catch(() => null);
   const liveness = classifyPrLiveness(st);
   if (liveness !== "merged" && liveness !== "closed") return false;
   if (pr.process_key != null) {
+    const key = String(pr.process_key);
     try {
-      await engine.cancelInstance({ processInstanceKey: String(pr.process_key) });
+      await engine.cancelInstance({ processInstanceKey: key });
     } catch (err) {
-      console.error(`[poller] ${pr.pr_key}: retire review-wait instance ${pr.process_key}: ${err}`);
+      // Only finalize the row once the instance is confirmed gone/terminal: a transiently-failed
+      // cancel would otherwise drop the row from `waiting_review` scans while the live instance's
+      // review-timeout timer still escalates a human. Unconfirmed → stay pollable, retry next pass.
+      let confirmedTerminal = false;
+      try {
+        const match = (await engine.searchProcessInstances({ processInstanceKeys: [key] })).find(
+          (s) => String(s.processInstanceKey) === key,
+        );
+        confirmedTerminal = !match || ENGINE_TERMINAL_STATES.has(String(match.state ?? "").trim().toUpperCase());
+      } catch {
+        confirmedTerminal = false;
+      }
+      if (!confirmedTerminal) {
+        console.error(`[poller] ${pr.pr_key}: retire review-wait instance ${key} failed, retrying next pass: ${err}`);
+        return null;
+      }
     }
   }
   if (liveness === "merged") {
     const ts = now();
     await prs(data).update(pr.pr_key, { status: "merged", merged_at: ts, updated_at: ts });
+    // Reuse the merged-completion side effect `pr.mark-merged`/`pr.finalize` run: an externally
+    // merged PR may be its plan's last to settle, so its automatic retrospective must still start.
+    // `maybeStartRetro` is best-effort and never throws.
+    await maybeStartRetro(data, engine, pr.pr_key);
   } else {
     await abandonClosedPr(data, pr.pr_key, "PR was closed on GitHub while awaiting review — retiring the convergence loop");
   }

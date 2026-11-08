@@ -10,13 +10,15 @@ import { pollReviews } from "./service.ts";
 const REPO = "owner/repo";
 const NUMBER = 9;
 
-function memTable(rows: any[], key: string) {
+function memTable(rows: any[], key: string, lookups: unknown[] = []) {
   return {
     get: (k: any) => Promise.resolve(rows.find((r) => r[key] === k) ?? null),
     all: () => Promise.resolve([...rows]),
     find: (q: any) => Promise.resolve(rows.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v))),
-    findOne: (q: any) =>
-      Promise.resolve(rows.find((r) => Object.entries(q).every(([f, v]) => r[f] === v)) ?? null),
+    findOne: (q: any) => {
+      lookups.push(q);
+      return Promise.resolve(rows.find((r) => Object.entries(q).every(([f, v]) => r[f] === v)) ?? null);
+    },
     insert: (r: any) => {
       rows.push(r);
       return Promise.resolve(r);
@@ -30,7 +32,9 @@ function memTable(rows: any[], key: string) {
   };
 }
 
-async function run(prState: { merged: boolean; state: string }) {
+type Opts = { reviews?: unknown[]; cancelFails?: boolean; searchState?: string | null };
+
+async function run(prState: { merged: boolean; state: string }, opts: Opts = {}) {
   const row: any = {
     pr_key: `${REPO}#${NUMBER}`,
     repo: REPO,
@@ -42,6 +46,7 @@ async function run(prState: { merged: boolean; state: string }) {
     process_key: "589000",
     updated_at: "t0",
   };
+  const planLookups: unknown[] = [];
   const stores: Record<string, { rows: unknown[]; key: string }> = {
     pull_requests: { rows: [row], key: "pr_key" },
     merges: { rows: [], key: "id" },
@@ -50,7 +55,7 @@ async function run(prState: { merged: boolean; state: string }) {
   const data = {
     table: withTrackingViews((name: string, key: string) => {
       stores[name] ??= { rows: [], key };
-      return memTable(stores[name].rows, stores[name].key);
+      return memTable(stores[name].rows, stores[name].key, name === "plan_tasks" ? planLookups : []);
     }),
   } as any;
   const cancelled: string[] = [];
@@ -61,9 +66,14 @@ async function run(prState: { merged: boolean; state: string }) {
       return Promise.resolve();
     },
     cancelInstance: (a: { processInstanceKey: string }) => {
+      if (opts.cancelFails) return Promise.reject(new Error("transient engine error"));
       cancelled.push(a.processInstanceKey);
       return Promise.resolve();
     },
+    searchProcessInstances: () =>
+      Promise.resolve(
+        opts.searchState === null ? [] : [{ processInstanceKey: "589000", state: opts.searchState ?? "ACTIVE" }],
+      ),
   } as any;
   const posts: string[] = [];
   const prevFetch = globalThis.fetch;
@@ -77,7 +87,8 @@ async function run(prState: { merged: boolean; state: string }) {
     const json = (b: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(b), { status }));
     if (method !== "GET") posts.push(`${method} ${u}`);
     if (u.includes(`/pulls/${NUMBER}/requested_reviewers`)) return method === "GET" ? json({ users: [] }) : json({}, 201);
-    if (u.includes(`/pulls/${NUMBER}/reviews`)) return json([]); // review requested, none arrived
+    if (u.includes(`/pulls/${NUMBER}/reviews`)) return json(opts.reviews ?? []); // default: review requested, none arrived
+    if (u.includes("/git/ref")) return json({ object: { sha: "e597b399" } });
     if (u.endsWith(`/pulls/${NUMBER}`)) return json({ ...prState, mergeable_state: "clean", head: { sha: "e597b399" } });
     return json({}, 404);
   }) as typeof fetch;
@@ -90,7 +101,7 @@ async function run(prState: { merged: boolean; state: string }) {
     if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
     else delete process.env["GITHUB_TOKEN"];
   }
-  return { row, posts, cancelled, published, stores };
+  return { row, posts, cancelled, published, stores, planLookups };
 }
 
 test("pollReviews #927: a PR MERGED while awaiting review retires the loop — no review re-request", async () => {
@@ -115,4 +126,41 @@ test("pollReviews #927: an OPEN PR awaiting review is still re-solicited (contro
   assertEquals(cancelled.length, 0);
   assertEquals(row.status, "waiting_review");
   assertEquals(posts.length, 1, "the review nudge still fires for a live PR");
+});
+
+const HEAD_CURRENT_REVIEW = [
+  { id: 77, state: "COMMENTED", submitted_at: "2026-11-08T16:00:00Z", commit_id: "e597b399", user: { login: "copilot-pull-request-reviewer[bot]" } },
+];
+
+for (const [label, prState] of [
+  ["MERGED", { merged: true, state: "closed" }],
+  ["CLOSED", { merged: false, state: "closed" }],
+] as const) {
+  test(`pollReviews #927: a HEAD-CURRENT review on a ${label} PR retires the loop — never resumes a round`, async () => {
+    const { row, posts, cancelled, published } = await run(prState, { reviews: HEAD_CURRENT_REVIEW });
+    assertEquals(published.length, 0, "no readiness-ready published for a terminal PR");
+    assertEquals(posts.length, 0);
+    assertEquals(cancelled, ["589000"]);
+    assertEquals(row.status === "waiting_review" || row.status === "converging", false);
+  });
+}
+
+test("pollReviews #927: a failed cancel of a still-LIVE instance leaves the row pollable", async () => {
+  const { row, posts, published } = await run({ merged: true, state: "closed" }, { cancelFails: true, searchState: "ACTIVE" });
+  assertEquals(row.status, "waiting_review", "not finalized while the instance (and its timer) lives");
+  assertEquals(posts.length, 0, "no re-solicit this pass");
+  assertEquals(published.length, 0);
+});
+
+for (const searchState of ["COMPLETED", null] as const) {
+  test(`pollReviews #927: a failed cancel of an already-${searchState ?? "gone"} instance still finalizes`, async () => {
+    const { row } = await run({ merged: true, state: "closed" }, { cancelFails: true, searchState });
+    assertEquals(row.status, "merged");
+  });
+}
+
+test("pollReviews #927: a PR merged externally while awaiting review runs the retro hook", async () => {
+  // maybeStartRetro resolves the PR's plan via `plan_tasks`; the lookup proves the hook ran.
+  const { planLookups } = await run({ merged: true, state: "closed" });
+  assertEquals(planLookups, [{ pr_key: `${REPO}#${NUMBER}` }]);
 });
