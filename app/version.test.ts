@@ -12,7 +12,7 @@
 // temp dir WITHOUT a .git directory and load a thin re-export fixture from there — the fixture's
 // own location is what `version.ts` derives REPO_ROOT from, so loading it via the temp path
 // reproduces an npm-installed layout faithfully.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -72,6 +72,33 @@ test("a live .git checkout resolves gitSha from HEAD (the dev-clone case)", () =
   assert(info.gitSha == null || SHA_RE.test(info.gitSha), `gitSha is null or 40-hex, got ${info.gitSha}`);
 });
 
+test("a live .git checkout WINS over a competing baked build-info.json (checkout > baked)", async () => {
+  // Precedence guard (issue #925): env > .git checkout > build-info.json. Lay out BOTH a live
+  // (detached) .git whose HEAD SHA differs from the baked one AND a build-info.json, with no env
+  // override, and assert HEAD wins. Without a competing baked file this could not catch the baked
+  // fallback incorrectly taking precedence over the checkout.
+  const dir = mkdtempSync(join(tmpdir(), "nwf-version-precedence-"));
+  try {
+    const checkoutSha = "cccccccccccccccccccccccccccccccccccccccc";
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "@nanobpm/nano-workforce", version: BAKED.version, type: "module" }),
+    );
+    // A live checkout: .git is a directory whose HEAD is a detached commit SHA distinct from the baked one.
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    writeFileSync(join(dir, ".git", "HEAD"), `${checkoutSha}\n`);
+    // A competing baked file whose gitSha must LOSE to the checkout above.
+    writeFileSync(join(dir, "build-info.json"), JSON.stringify(BAKED));
+    await withEnv("NANO_WORKFORCE_GIT_SHA", undefined, async () => {
+      const mod = await importFrom(dir);
+      const info = mod.buildVersionInfo();
+      assertEquals(info.gitSha, checkoutSha, "the live .git checkout beats the baked build-info.json");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("env override NANO_WORKFORCE_GIT_SHA wins over .git and build-info.json", async () => {
   const envSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   await withEnv("NANO_WORKFORCE_GIT_SHA", envSha, async () => {
@@ -110,7 +137,7 @@ test("with no env and no .git, gitSha falls back to the baked build-info.json (t
   }
 });
 
-test("a malformed build-info.json (no usable gitSha) is ignored, not fatal", async () => {
+test("a malformed build-info.json (non-string gitSha) is ignored, not fatal", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nwf-version-bad-"));
   try {
     writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@nanobpm/nano-workforce", version: "1.0.0", type: "module" }));
@@ -120,6 +147,29 @@ test("a malformed build-info.json (no usable gitSha) is ignored, not fatal", asy
       const info = mod.buildVersionInfo();
       assertEquals(info.gitSha, null);
       assertEquals(info.gitTag, null);
+      assertEquals(info.builtAt, null);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a build-info.json whose gitSha is a non-blank but non-40-hex string is rejected (fail closed)", async () => {
+  // Regression for the malformed-baked-SHA finding: a payload like `gitSha: "not-a-sha"` must NOT
+  // be reported as the commit — the getter fails closed and reports null rather than surfacing an
+  // invalid commit on the identity endpoints.
+  const dir = mkdtempSync(join(tmpdir(), "nwf-version-badsha-"));
+  try {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@nanobpm/nano-workforce", version: "1.0.0", type: "module" }));
+    writeFileSync(
+      join(dir, "build-info.json"),
+      JSON.stringify({ version: "1.0.0", gitSha: "not-a-sha", gitTag: "v1.0.0", builtAt: "2026-01-02T03:04:05.000Z" }),
+    );
+    await withEnv("NANO_WORKFORCE_GIT_SHA", undefined, async () => {
+      const mod = await importFrom(dir);
+      const info = mod.buildVersionInfo();
+      assertEquals(info.gitSha, null, "a malformed baked SHA is ignored, not reported");
+      assertEquals(info.gitTag, null, "the whole baked payload is dropped when its gitSha is invalid");
       assertEquals(info.builtAt, null);
     });
   } finally {

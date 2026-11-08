@@ -213,6 +213,15 @@ jobs:
             exit 0
           fi
           echo "semantic-release prepared + tagged ${PKG}@${VERSION} but the OIDC publish failed; retrying."
+          # Re-bake build-info.json from the just-prepared package.json version before re-packing.
+          # semantic-release's prepare step already wrote it (prepareCmd in .releaserc.json), so it
+          # is present in this checkout — but this step re-packs via plain `npm publish`, which runs
+          # OUTSIDE semantic-release, so re-assert the artifact here to guarantee the retried
+          # tarball can never ship without its build identity (issue #925). The version comes from
+          # package.json (already bumped by @semantic-release/npm in prepare), NOT from
+          # `${nextRelease.version}` — that variable only exists inside semantic-release's own
+          # plugin steps, and verifyConditions runs before it is computed.
+          node --experimental-strip-types scripts/write-build-info.ts "${VERSION}"
           published=false
           for attempt in 1 2 3; do
             echo "OIDC publish attempt ${attempt}/3 for ${PKG}@${VERSION}"

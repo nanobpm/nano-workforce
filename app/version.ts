@@ -108,10 +108,16 @@ function urbanVersion(): string | null {
  * its `gitTag` names the tag placed on the release commit, whose tree matches that source HEAD
  * except for the version-bump metadata. Returns null on a dev checkout, which has no such file.
  */
+const SHA_RE = /^[0-9a-f]{40}$/;
+
 function buildInfo(): { version: string; gitSha: string; gitTag: string; builtAt: string } | null {
   const raw = readJson(join(REPO_ROOT, "build-info.json"));
   if (raw == null) return null;
-  const gitSha = typeof raw.gitSha === "string" && raw.gitSha.trim() ? raw.gitSha.trim() : null;
+  // Fail closed on a malformed baked SHA: a non-blank but non-40-hex value (e.g. "not-a-sha") must
+  // be IGNORED, not reported — otherwise both identity endpoints surface an invalid commit from a
+  // corrupt/tampered build-info.json. Validate against the writer's 40-hex contract
+  // (scripts/write-build-info.ts SHA_RE) before accepting the fallback.
+  const gitSha = typeof raw.gitSha === "string" && SHA_RE.test(raw.gitSha.trim()) ? raw.gitSha.trim() : null;
   if (gitSha == null) return null;
   return {
     version: typeof raw.version === "string" ? raw.version : "",
