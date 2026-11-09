@@ -1,3 +1,9 @@
+## [0.206.2](https://github.com/nanobpm/nano-workforce/compare/v0.206.1...v0.206.2) (2026-11-09)
+
+### Bug Fixes
+
+* **merge:** let a DIRTY state outrank absent required checks so a conflicting PR reaches the rebase arm ([#930](https://github.com/nanobpm/nano-workforce/issues/930)) ([71984d5](https://github.com/nanobpm/nano-workforce/commit/71984d5d607151b2c3690a12d6b05537b24c3ece)), closes [#392](https://github.com/nanobpm/nano-workforce/issues/392) [nanobpm/nano-bpm#1444](https://github.com/nanobpm/nano-bpm/issues/1444) [#929](https://github.com/nanobpm/nano-workforce/issues/929)
+
 ## [0.206.1](https://github.com/nanobpm/nano-workforce/compare/v0.206.0...v0.206.1) (2026-11-08)
 
 ### Bug Fixes
