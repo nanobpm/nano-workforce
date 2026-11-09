@@ -52,6 +52,7 @@ const ALL_JOB_TYPES = [
   "pr.arm-merge",
   "pr.merge",
   "pr.merge-stall-probe",
+  "pr.landed-probe",
   "pr.mark-merged",
   "senior:fix-ci",
   "senior:rebase",
@@ -66,6 +67,7 @@ const DEFAULT_RESPONSES: Record<string, Responder> = {
   "pr.record-dependency": {},
   "pr.answer-escalation": {},
   "pr.persist-escalation": { escalated: true },
+  "pr.landed-probe": { landedVerdict: "waiting" },
 };
 
 // Every FEEL expression in the model references these; start them defined (null,
@@ -237,6 +239,30 @@ test("a queued merge that never lands escalates when the landing timeout fires (
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-landed");
   assert(!completedElementIds(engine).has("mark-merged"), "a never-landed queued merge must not mark-merged");
   assertStringIncludes(String(escalation(engine).question ?? ""), "did not land within the merge-queue landing timeout", "the escalation must name the landing-timeout trigger");
+});
+
+test("a landing timeout firing on a PR that already MERGED completes merged with no escalation (#933)", async () => {
+  // The queue landed the PR, but the timer won the `eg-landed` race before the poller published
+  // `merge-landed`. The timeout arm must re-read ground truth and finalize — never escalate a landed PR.
+  const engine = await boot({
+    responses: { "pr.merge": { mergeStatus: "queued" }, "pr.landed-probe": { landedVerdict: "landed" } },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
+  await engine.advanceTime(LANDED_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompleted().hasNoIncident().hasCompletedElements("landed-probe", "mark-merged");
+  assert(!completedElementIds(engine).has("merge-esc-landed"), "a landed PR must never be escalated");
+});
+
+test("a landing timeout on a PR evicted from the queue re-arms the merge poller (#933)", async () => {
+  const engine = await boot({
+    responses: { "pr.merge": { mergeStatus: "queued" }, "pr.landed-probe": { landedVerdict: "evicted" } },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
+  await engine.advanceTime(LANDED_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-mergeable");
+  assert(!completedElementIds(engine).has("merge-esc-landed"), "an evicted PR re-arms rather than escalating");
 });
 
 test("answering the landing-timeout escalation re-arms the merge poller (#556)", async () => {

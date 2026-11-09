@@ -13,6 +13,7 @@
 // message THAT wait correlates to; this test asserts the class over every (status × merged/closed).
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
+import { memStatusCas } from "../test/memStatusCas.ts";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { pollMerges } from "./service.ts";
 
@@ -45,7 +46,16 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
       },
     };
   }
-  const data = { table: (n: string, pk?: string) => tbl(n, pk) } as any as DataLayer;
+  const data = {
+    table: (n: string, pk?: string) => tbl(n, pk),
+    open: () => ({
+      exec: async (sql: string, params: any[] = []) => {
+        const res = memStatusCas(stores, sql, params);
+        if (!res) throw new Error(`memData.open().exec: unsupported statement: ${sql}`);
+        return res;
+      },
+    }),
+  } as any as DataLayer;
   return { data, stores };
 }
 
@@ -174,5 +184,51 @@ test("still-open waiting_deps PR with an unmerged dep publishes nothing and stay
   );
 
   assertEquals(messages.length, 0);
+  assertEquals(stores["pull_requests"][0].status, "waiting_deps");
+});
+
+// PR #935 review: a poll pass reads `queued`, then stalls on GitHub while the process's own landing
+// timeout path completes `mark-merged` (status → `merged`). When the delayed pass resumes, its flip
+// must NOT clobber the terminal `merged` with `merging` (no pass scans `merging`, so it would stick)
+// nor publish a `merge-landed` whose subscription is gone. The flip is a compare-and-set on the
+// status the pass read; a lost race skips the publish entirely.
+// Asserted on `waiting_deps` (the flip is the one shared helper every merge-stage wait uses).
+test("a delayed merge-stage poll never overwrites a concurrently-written terminal status", async () => {
+  const { data, stores } = memData();
+  const { engine, messages } = recordingEngine();
+  stores["pull_requests"] = [prRow("o/r#100", 100, "waiting_deps")];
+  stores["pr_dependencies"] = [{ pr_key: "o/r#100", depends_on_key: "o/r#200", created_at: "t" }];
+  const inner = githubFetch(new Map<number, Live>([[100, "merged"]]));
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  // While the poll awaits GitHub, the timeout path's `mark-merged` lands the terminal status.
+  globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
+    // Replace (not mutate) the row: a real DB read hands the pass a snapshot, not a live reference.
+    stores["pull_requests"][0] = { ...stores["pull_requests"][0], status: "merged" };
+    return inner(url, init);
+  }) as typeof fetch;
+  try {
+    await pollMerges(data, engine, "tok");
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+  assertEquals(messages.length, 0, "a lost race must not publish to a vanished subscription");
+  assertEquals(stores["pull_requests"][0].status, "merged");
+});
+
+// The publish-failure revert is conditional too: it only undoes its OWN `merging`.
+test("a failed publish reverts merging back to the read status", async () => {
+  const { data, stores } = memData();
+  const engine = {
+    async publishMessage() {
+      throw new Error("boom");
+    },
+  } as any as EngineClient;
+  stores["pull_requests"] = [prRow("o/r#100", 100, "waiting_deps")];
+  stores["pr_dependencies"] = [{ pr_key: "o/r#100", depends_on_key: "o/r#200", created_at: "t" }];
+  await withGithub(new Map<number, Live>([[100, "merged"]]), () => pollMerges(data, engine, "tok").catch(() => {}));
   assertEquals(stores["pull_requests"][0].status, "waiting_deps");
 });

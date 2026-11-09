@@ -17,6 +17,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assert, assertEquals } from "#test-assert";
+import { memStatusCas } from "../test/memStatusCas.ts";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { pollMerges } from "./service.ts";
 
@@ -73,6 +74,8 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
     table: (n: string, pk?: string) => tbl(n, pk),
     open: () => ({
       exec: async (sql: string, params: any[] = []) => {
+        const cas = memStatusCas(stores, sql, params);
+        if (cas) return cas;
         const m = sql.match(/^\s*DELETE\s+FROM\s+"?(\w+)"?\s+WHERE\s+"?(\w+)"?\s*=\s*\?\s*$/i);
         if (!m) throw new Error(`memData.open().exec: unsupported statement: ${sql}`);
         const rows = (stores[m[1]] ??= [] as any[]);
