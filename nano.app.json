@@ -149,6 +149,10 @@
       "handler": "workers/mark-merged/worker.ts"
     },
     {
+      "taskType": "pr.landed-probe",
+      "handler": "workers/landed-probe/worker.ts"
+    },
+    {
       "taskType": "pr.merge-stall-probe",
       "handler": "workers/merge-stall-probe/worker.ts"
     },
