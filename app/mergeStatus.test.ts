@@ -58,13 +58,14 @@ function memData(stores: Stores) {
  *  instances, each row carrying its owning `processInstanceKey`, exactly as the real engine does. */
 function fakeEngine(varsByInstance: Record<string, Record<string, unknown>>) {
   return {
-    searchVariables: (q: { processInstanceKey?: string; name?: string }) => {
-      const rows: { name: string; value: string; processInstanceKey: string }[] = [];
+    searchVariables: (q: { processInstanceKey?: string; scopeKey?: string; name?: string }) => {
+      const rows: { name: string; value: string; processInstanceKey: string; scopeKey: string }[] = [];
       for (const [piKey, vars] of Object.entries(varsByInstance)) {
         if (q.processInstanceKey != null && piKey !== String(q.processInstanceKey)) continue;
+        if (q.scopeKey != null && piKey !== String(q.scopeKey)) continue;
         for (const [name, v] of Object.entries(vars)) {
           if (q.name != null && name !== q.name) continue;
-          rows.push({ name, value: JSON.stringify(v), processInstanceKey: piKey });
+          rows.push({ name, value: JSON.stringify(v), processInstanceKey: piKey, scopeKey: piKey });
         }
       }
       return Promise.resolve(rows);

@@ -1168,17 +1168,14 @@ export async function activePrs(
   // Merge intent (issue #916): read the loop's `autoMerge` / `convergeOnly` / `humanApproval`
   // variables per PR so the effective merge policy is visible without opening the engine.
   //
-  // ONE batched engine read per /status call (issue #936) — NEVER a per-row fan-out. The pre-#936
-  // shape issued 3 `searchVariables` round-trips PER active PR (12 calls at 4 rows ≈ 13 s, and
-  // concurrent callers stacked to ~50 s until the console proxy 502'd). A name-less
-  // `searchVariables({})` returns every variable in one eventually-consistent read (supported by
-  // both the nano-sdk gateway and the WASM testkit engine — the testkit applies the
-  // processInstanceKey/scopeKey/name selectors client-side), so the hot path pays ONE upstream
-  // call no matter how many rows are active, then buckets the rows in memory. Best-effort: a
-  // failure (engine unreachable) degrades every PR to the historical default (merge requested)
-  // rather than failing the whole status read — the same degradation the per-row reads applied.
+  // A CONSTANT number of batched engine reads per /status call (issue #936) — never a per-row
+  // fan-out. The pre-#936 shape issued 3 `searchVariables` round-trips PER active PR (12 calls at 4
+  // rows ≈ 13 s; concurrent callers stacked until the console proxy 502'd). See
+  // `readMergePolicyVars` for the completeness contract (single-page seam, root scope only).
+  // Best-effort: a failure degrades every PR to the historical default (merge requested).
   const mergeByPr = new Map<string, MergePolicy>();
-  const varsByInstance = await readMergePolicyVars(engine);
+  const activeKeys = active.map((p) => p.process_key).filter((k): k is string => k != null && k !== "");
+  const varsByInstance = await readMergePolicyVars(engine, activeKeys);
   for (const p of active) {
     mergeByPr.set(p.pr_key, mergePolicyFromVars(varsByInstance?.get(p.process_key ?? "")));
   }
@@ -1249,25 +1246,55 @@ function parseBoolValue(value: string): boolean | undefined {
   }
 }
 
-/** ONE batched read of every process variable (issue #936), bucketed by owning instance and
- *  reduced to the merge-policy triple per instance. Returns `undefined` when no engine was handed
- *  in or the read fails — the caller degrades every row to the historical default, exactly as a
- *  failed per-row read did before. Only the three merge-policy names are extracted; every other
- *  variable in the engine-wide read is discarded. */
+const MERGE_POLICY_NAMES = ["autoMerge", "convergeOnly", "humanApproval"] as const;
+type MergePolicyName = (typeof MERGE_POLICY_NAMES)[number];
+
+/** Batched merge-policy read (issue #936): ONE name-filtered engine-wide read per policy variable
+ *  (3 concurrent calls, independent of row count), bucketed by owning instance.
+ *
+ *  Completeness: the engine seam returns a single page with no cursor, so an engine-wide read can
+ *  silently omit rows. Any active instance missing from a batched name read therefore gets a
+ *  targeted root-scope read for that name (`processInstanceKey` + `scopeKey` + `name` — a result set
+ *  of at most one row, so it cannot be truncated). Absence is thus never inferred from a page cut.
+ *
+ *  Scope: only the PROCESS-ROOT variable (`scopeKey === processInstanceKey`) is the loop's policy; a
+ *  same-named child-scope variable is ignored so it can never overwrite the root value.
+ *
+ *  Skips the engine entirely when no active row carries a process key. Returns `undefined` when no
+ *  engine was handed in or a read fails — the caller degrades every row to the default. */
 async function readMergePolicyVars(
   engine: Pick<EngineClient, "searchVariables"> | undefined,
+  activeKeys: readonly string[],
 ): Promise<Map<string, MergePolicyVars> | undefined> {
-  if (!engine) return undefined;
+  if (!engine || activeKeys.length === 0) return undefined;
+  const wanted = new Set(activeKeys);
   try {
-    const rows = await engine.searchVariables({});
     const byInstance = new Map<string, MergePolicyVars>();
-    for (const row of rows) {
-      if (row.name === "autoMerge" || row.name === "convergeOnly" || row.name === "humanApproval") {
-        const vars = byInstance.get(row.processInstanceKey) ?? emptyMergePolicyVars();
-        vars[row.name] = parseBoolValue(row.value);
-        byInstance.set(row.processInstanceKey, vars);
-      }
+    const seen = new Map<MergePolicyName, Set<string>>();
+    const record = (name: MergePolicyName, row: { processInstanceKey: string; scopeKey: string; value: string }) => {
+      const pk = String(row.processInstanceKey);
+      if (!wanted.has(pk) || String(row.scopeKey) !== pk) return;
+      const vars = byInstance.get(pk) ?? emptyMergePolicyVars();
+      vars[name] = parseBoolValue(row.value);
+      byInstance.set(pk, vars);
+      seen.get(name)?.add(pk);
+    };
+    await Promise.all(
+      MERGE_POLICY_NAMES.map(async (name) => {
+        seen.set(name, new Set());
+        for (const row of await engine.searchVariables({ name })) if (row.name === name) record(name, row);
+      }),
+    );
+    const missing: [MergePolicyName, string][] = [];
+    for (const name of MERGE_POLICY_NAMES) {
+      for (const pk of wanted) if (!seen.get(name)?.has(pk)) missing.push([name, pk]);
     }
+    await Promise.all(
+      missing.map(async ([name, pk]) => {
+        const rows = await engine.searchVariables({ processInstanceKey: pk, scopeKey: pk, name });
+        for (const row of rows) if (row.name === name) record(name, row);
+      }),
+    );
     return byInstance;
   } catch {
     return undefined;

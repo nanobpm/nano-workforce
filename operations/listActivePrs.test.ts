@@ -208,18 +208,19 @@ function slowEngine(varsByInstance: Record<string, Record<string, unknown>>, del
   return {
     calls: () => calls,
     maxInFlight: () => maxInFlight,
-    searchVariables: async (q: { processInstanceKey?: string; name?: string }) => {
+    searchVariables: async (q: { processInstanceKey?: string; scopeKey?: string; name?: string }) => {
       calls += 1;
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       inFlight -= 1;
-      const rows: { name: string; value: string; processInstanceKey: string }[] = [];
+      const rows: { name: string; value: string; processInstanceKey: string; scopeKey: string }[] = [];
       for (const [piKey, vars] of Object.entries(varsByInstance)) {
         if (q.processInstanceKey != null && piKey !== String(q.processInstanceKey)) continue;
+        if (q.scopeKey != null && piKey !== String(q.scopeKey)) continue;
         for (const [name, v] of Object.entries(vars)) {
           if (q.name != null && name !== q.name) continue;
-          rows.push({ name, value: JSON.stringify(v), processInstanceKey: piKey });
+          rows.push({ name, value: JSON.stringify(v), processInstanceKey: piKey, scopeKey: piKey });
         }
       }
       return rows;
@@ -241,11 +242,11 @@ function prRow936(n: number) {
   };
 }
 
-test("issue #936: N active rows cost ONE engine variable read, not 3N (the 13 s fan-out)", async () => {
+test("issue #936: N active rows cost a constant 3 engine variable reads, not 3N (the 13 s fan-out)", async () => {
   const N = 8;
   const rows = Array.from({ length: N }, (_, i) => prRow936(i + 1));
   const vars: Record<string, Record<string, unknown>> = {};
-  for (let i = 1; i <= N; i++) vars[`PI-${i}`] = { autoMerge: true, humanApproval: false };
+  for (let i = 1; i <= N; i++) vars[`PI-${i}`] = { autoMerge: true, convergeOnly: false, humanApproval: false };
   const engine = slowEngine(vars, 25);
   const app = { ...memApp(rows), engine } as AppApi;
   const started = Date.now();
@@ -255,8 +256,8 @@ test("issue #936: N active rows cost ONE engine variable read, not 3N (the 13 s 
   assertEquals(res.body.count, N);
   assertEquals(
     engine.calls(),
-    1,
-    "the merge-policy projection batches to ONE engine read per serve — a per-row fan-out would show 3N calls",
+    3,
+    "the merge-policy projection batches to ONE read per policy name (3) per serve — a per-row fan-out would show 3N calls",
   );
   assert(
     elapsed < 25 * N,
@@ -272,8 +273,8 @@ test("issue #936: K concurrent /status callers overlap instead of queueing behin
   const K = 4;
   const rows = [prRow936(1), prRow936(2)];
   const vars = {
-    "PI-1": { autoMerge: true, humanApproval: false },
-    "PI-2": { autoMerge: false, convergeOnly: true },
+    "PI-1": { autoMerge: true, convergeOnly: false, humanApproval: false },
+    "PI-2": { autoMerge: false, convergeOnly: true, humanApproval: false },
   };
   // A realistic slow upstream: each engine read takes 100 ms. Serialized callers would stack to
   // K × 100 ms (the measured 35–50 s at production scale); overlapped callers finish in ~100 ms.
@@ -286,10 +287,10 @@ test("issue #936: K concurrent /status callers overlap instead of queueing behin
     assertEquals((res as any).status, 200);
     assertEquals((res as any).body.count, 2);
   }
-  assertEquals(engine.calls(), K, "each serve issues its own single batched read (no cross-request cache serving stale policy)");
+  assertEquals(engine.calls(), 3 * K, "each serve issues its own batched reads (no cross-request cache serving stale policy)");
   assertEquals(
     engine.maxInFlight(),
-    K,
+    3 * K,
     "all K engine reads were in flight at once — the serves overlap rather than serialise",
   );
   assert(
@@ -300,4 +301,76 @@ test("issue #936: K concurrent /status callers overlap instead of queueing behin
   const body = (results[0] as any).body;
   assertEquals(body.prs.find((p: any) => p.prKey === "o/r#1").merge.requested, true);
   assertEquals(body.prs.find((p: any) => p.prKey === "o/r#2").merge.requested, false);
+});
+
+// ── PR #937 review: completeness, root scope, idle skip ──────────────────────────────────────
+
+/** A fake engine with explicit rows (incl. child scopes) whose engine-wide reads are cut to one
+ *  `pageSize` page — the production seam returns a single page with no cursor. */
+function pagedEngine(
+  rows: { name: string; value: string; processInstanceKey: string; scopeKey: string }[],
+  pageSize: number,
+) {
+  const queries: { processInstanceKey?: string; scopeKey?: string; name?: string }[] = [];
+  return {
+    queries,
+    searchVariables: async (q: { processInstanceKey?: string; scopeKey?: string; name?: string }) => {
+      queries.push(q);
+      return rows
+        .filter(
+          (r) =>
+            (q.processInstanceKey == null || r.processInstanceKey === q.processInstanceKey) &&
+            (q.scopeKey == null || r.scopeKey === q.scopeKey) &&
+            (q.name == null || r.name === q.name),
+        )
+        .slice(0, pageSize);
+    },
+  } as any;
+}
+
+function v(pk: string, name: string, value: unknown, scopeKey = pk) {
+  return { name, value: JSON.stringify(value), processInstanceKey: pk, scopeKey };
+}
+
+test("PR #937: an active PR's policy cut off the first engine page is still read (targeted fallback)", async () => {
+  const rows = [];
+  // 50 unrelated (completed/other) instances fill the single page ahead of the active PR.
+  for (let i = 0; i < 50; i++) {
+    for (const n of ["autoMerge", "convergeOnly", "humanApproval"]) rows.push(v(`OTHER-${i}`, n, true));
+  }
+  rows.push(v("PI-1", "autoMerge", false), v("PI-1", "convergeOnly", true), v("PI-1", "humanApproval", true));
+  const engine = pagedEngine(rows, 10);
+  const res = (await handler(input(), { ...memApp([prRow936(1)]), engine } as AppApi)) as any;
+  assertEquals(res.body.prs[0].merge.requested, false, "autoMerge:false beyond page 1 must not degrade to requested");
+  const withApproval = pagedEngine(
+    [...rows.filter((r) => r.processInstanceKey !== "PI-1"), v("PI-1", "autoMerge", true), v("PI-1", "humanApproval", true)],
+    10,
+  );
+  const res2 = (await handler(input(), { ...memApp([prRow936(1)]), engine: withApproval } as AppApi)) as any;
+  assertEquals(res2.body.prs[0].merge.blockedBy != null, true, "the human-approval blocker beyond page 1 is not dropped");
+});
+
+for (const order of ["root-first", "child-first"] as const) {
+  test(`PR #937: child-scoped policy vars never override the root policy (${order})`, async () => {
+    const root = [v("PI-1", "autoMerge", false), v("PI-1", "humanApproval", true)];
+    const child = [v("PI-1", "autoMerge", true, "EI-9"), v("PI-1", "humanApproval", false, "EI-9")];
+    const engine = pagedEngine(order === "root-first" ? [...root, ...child] : [...child, ...root], 100);
+    const res = (await handler(input(), { ...memApp([prRow936(1)]), engine } as AppApi)) as any;
+    assertEquals(res.body.prs[0].merge.requested, false);
+    const engine2 = pagedEngine(
+      order === "root-first"
+        ? [v("PI-1", "autoMerge", true), v("PI-1", "humanApproval", true), ...child]
+        : [...child, v("PI-1", "autoMerge", true), v("PI-1", "humanApproval", true)],
+      100,
+    );
+    const res2 = (await handler(input(), { ...memApp([prRow936(1)]), engine: engine2 } as AppApi)) as any;
+    assertEquals(res2.body.prs[0].merge.blockedBy != null, true, "a child humanApproval:false cannot hide the root gate");
+  });
+}
+
+test("PR #937: no engine read when no active row has a process key", async () => {
+  const engine = pagedEngine([], 100);
+  await handler(input(), { ...memApp([]), engine } as AppApi);
+  await handler(input(), { ...memApp([{ ...prRow936(1), process_key: null }]), engine } as AppApi);
+  assertEquals(engine.queries.length, 0);
 });
