@@ -377,42 +377,53 @@ test("PR #937: no engine read when no active row has a process key", async () =>
 
 // ── PR #937 round-3 review: bounded fallback fan-out, per-instance failure isolation ─────────
 
-test("PR #937 r3: absent policy variables cost ONE targeted read per instance, never one per (name × instance)", async () => {
-  // The merge loop (`startMerge`) seeds NONE of the three policy variables yet repoints the PR's
-  // process_key at that instance, so every name read misses it. The round-2 shape issued one
-  // targeted read per (name, instance) pair — 3N calls at N such PRs (15 at N=4), restoring the
-  // per-PR fan-out this PR removed. The fallback must be ONE root-scope, name-less read per
-  // instance absent from the batch: a loop seeds `autoMerge`/`convergeOnly` together, so a root
-  // scope carrying neither is absent from the page (or gone) and no per-name retry can find more.
+test("PR #937 r4: populated merge-loop roots cost a constant 3 reads (startMerge seeds the policy)", async () => {
+  // Round-3 defect: merge-loop roots carry non-policy vars, so the name-less fallback was non-empty
+  // and each merging PR paid 1 + 3 probes (19 calls at N=4). startMerge now seeds the policy triple,
+  // so populated merge-loop roots are fully represented in the batch and need no probes.
   const N = 4;
   const rows = Array.from({ length: N }, (_, i) => prRow936(i + 1));
-  // Every instance carries NO policy variables (the startMerge shape) — the batch finds nothing.
-  const engine = pagedEngine([], 100);
+  const vars = [];
+  for (let i = 1; i <= N; i++) {
+    const pk = `PI-${i}`;
+    vars.push(v(pk, "repo", "o/r"), v(pk, "prNumber", i), v(pk, "ciFixRound", 0));
+    vars.push(v(pk, "autoMerge", true), v(pk, "convergeOnly", false), v(pk, "humanApproval", false));
+  }
+  const engine = pagedEngine(vars, 100);
   const res = (await handler(input(), { ...memApp(rows), engine } as AppApi)) as any;
-  assertEquals(res.status, 200);
   assertEquals(res.body.count, N);
-  assertEquals(
-    engine.queries.length,
-    3 + N,
-    `3 batched name reads + ONE targeted read per genuinely-absent instance (not 3 + 3N = ${3 + 3 * N})`,
-  );
-  const targeted = engine.queries.filter((q) => q.processInstanceKey != null);
-  assertEquals(targeted.length, N, "one targeted read per absent instance");
-  for (const q of targeted) {
-    assertEquals(q.name, undefined, "the targeted read is name-less — it fetches every policy name the root scope carries in one call");
-    assertEquals(q.scopeKey, q.processInstanceKey, "the targeted read is confined to the process-root scope");
-  }
-  // No policy variables anywhere → every row degrades to the historical default (merge requested).
-  for (const pr of res.body.prs) {
-    assertEquals(pr.merge, { requested: true, enabled: true, effective: true, blockedBy: null });
-  }
+  assertEquals(engine.queries.length, 3, "populated merge-loop roots need no per-instance probes");
 });
 
-test("PR #937 r3: a truncated page still costs only one targeted read per cut-off instance", async () => {
-  // PI-2's variables sit beyond the single engine page; PI-1's are on it. The fallback for PI-2
-  // must be a single name-less root read (which then finds all three), not three per-name reads.
-  // PI-2 requests the merge (autoMerge:true) AND carries an outstanding approval gate, so its
-  // projected blocker proves the fallback recovered `humanApproval` from beyond the page.
+test("PR #937 r4: a name cut from ONE page is re-probed even when the instance appears in another", async () => {
+  // Round-3 defect: an instance present in the autoMerge page was treated as complete, so a
+  // humanApproval:true cut from its own page was dropped and /status reported an unblocked merge.
+  const rows = [v("PI-1", "autoMerge", true), v("PI-1", "convergeOnly", false)];
+  for (let i = 0; i < 20; i++) rows.push(v(`OTHER-${i}`, "humanApproval", false));
+  rows.push(v("PI-1", "humanApproval", true));
+  const engine = pagedEngine(rows, 10);
+  const res = (await handler(input(), { ...memApp([prRow936(1)]), engine } as AppApi)) as any;
+  assertEquals(res.body.prs[0].merge.blockedBy, "human-approval", "the cut humanApproval gate is recovered");
+  const targeted = engine.queries.filter((q: any) => q.processInstanceKey === "PI-1");
+  assertEquals(targeted.length, 1, "only the missing name is probed");
+  assertEquals(targeted[0].name, "humanApproval");
+  assertEquals(targeted[0].scopeKey, "PI-1", "the probe is confined to the process-root scope");
+});
+
+test("PR #937 r4: a failed probe after a partial batch drops the partial entry (default, not half-read)", async () => {
+  const failing = {
+    searchVariables: async (q: { processInstanceKey?: string; name?: string }) => {
+      if (q.processInstanceKey === "PI-1") throw new Error("engine read timed out");
+      if (q.name === "humanApproval") return [v("PI-1", "humanApproval", true)];
+      return [];
+    },
+  } as any;
+  const res = (await handler(input(), { ...memApp([prRow936(1)]), engine: failing } as AppApi)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+});
+
+test("PR #937 r4: a cut-off instance is recovered with name-filtered (untruncatable) root probes", async () => {
   const rows = [];
   for (let i = 0; i < 50; i++) {
     for (const n of ["autoMerge", "convergeOnly", "humanApproval"]) rows.push(v(`OTHER-${i}`, n, true));
@@ -422,11 +433,12 @@ test("PR #937 r3: a truncated page still costs only one targeted read per cut-of
   const engine = pagedEngine(rows, 10);
   const res = (await handler(input(), { ...memApp([prRow936(1), prRow936(2)]), engine } as AppApi)) as any;
   const pr2 = res.body.prs.find((p: any) => p.prKey === "o/r#2");
-  assertEquals(pr2.merge.requested, true, "PI-2's autoMerge:true beyond the page is still read");
-  assertEquals(pr2.merge.blockedBy, "human-approval", "PI-2's human-approval blocker beyond the page is not dropped");
-  const targeted = engine.queries.filter((q) => q.processInstanceKey === "PI-2");
-  assertEquals(targeted.length, 1, "3 batched reads + ONE targeted read for the cut-off instance");
-  assertEquals(targeted[0].name, undefined, "the targeted read is name-less — it recovers every cut-off policy name in one call");
+  assertEquals(pr2.merge.requested, true);
+  assertEquals(pr2.merge.blockedBy, "human-approval");
+  for (const q of engine.queries.filter((q: any) => q.processInstanceKey != null)) {
+    assert(q.name != null, "every fallback read is name-filtered (<=1 row, cannot be truncated)");
+    assertEquals(q.scopeKey, q.processInstanceKey);
+  }
 });
 
 test("PR #937 r3: one failed targeted read degrades only its own instance, not every other PR's policy", async () => {

@@ -1358,13 +1358,15 @@ function captureRoot() {
     open: () => memOpen(stores),
   } as any;
   let captured: unknown;
+  let vars: Record<string, unknown> | undefined;
   const engine = {
     createInstance: (req: { variables?: Record<string, unknown> }) => {
       captured = req.variables?.rootRequestKey;
+      vars = req.variables;
       return Promise.resolve({ processInstanceKey: "PI-1" });
     },
   } as any;
-  return { data, engine, stores, get: () => captured };
+  return { data, engine, stores, get: () => captured, vars: () => vars };
 }
 
 test("submitPr persists root_request_key and threads it onto the convergence instance", async () => {
@@ -1444,6 +1446,21 @@ test("startMerge reads root_request_key off the PR row onto the merge instance",
       round: 2,
     });
     assertEquals(get(), "owner/repo#1");
+  });
+});
+
+test("startMerge seeds the merge-policy triple so /status needs no per-instance probes (PR #937)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, vars } = captureRoot();
+    await startMerge(data, engine, {
+      repo: "owner/repo",
+      number: 9,
+      url: "https://github.com/owner/repo/pull/9",
+      prKey: "owner/repo#9",
+      round: 1,
+    });
+    const seeded = vars() ?? {};
+    assertEquals([seeded.autoMerge, seeded.convergeOnly, seeded.humanApproval], [true, false, false]);
   });
 });
 

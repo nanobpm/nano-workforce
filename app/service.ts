@@ -1027,6 +1027,12 @@ export async function startMerge(
       mergeStallMax: MAX_MERGE_STALL_ROUNDS,
       // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).
       rootRequestKey,
+      // Merge policy (issue #936): a merge loop only starts for a requested, approved merge. Seeding
+      // the policy triple keeps it in /status's batched reads (no per-instance probes). Inert here —
+      // the merge-loop process reads none of them.
+      autoMerge: true,
+      convergeOnly: false,
+      humanApproval: false,
       abandonUrl: abUrl,
       abandonBrief: renderAbandonBrief(abUrl),
       // Host-git provisioning (c8ctl): same repository envelope as the convergence loop, so the
@@ -1172,7 +1178,7 @@ export async function activePrs(
   // fan-out. The pre-#936 shape issued 3 `searchVariables` round-trips PER active PR (12 calls at 4
   // rows ≈ 13 s; concurrent callers stacked until the console proxy 502'd). See
   // `readMergePolicyVars` for the completeness contract (single-page seam, root scope only, one
-  // targeted read per absent instance at most). Best-effort: a failed batched read degrades every
+  // per-name root probe only for a page cut or legacy instance). Best-effort: a failed batched read degrades every
   // PR to the historical default (merge requested); a failed per-instance fallback degrades only
   // that PR.
   const mergeByPr = new Map<string, MergePolicy>();
@@ -1259,23 +1265,19 @@ function isMergePolicyName(name: string): name is MergePolicyName {
  *  (3 concurrent calls, independent of row count), bucketed by owning instance.
  *
  *  Completeness: the engine seam returns a single page with no cursor, so an engine-wide read can
- *  silently omit rows. Any active instance absent from the batch therefore gets targeted
- *  root-scope reads: ONE name-less read (`processInstanceKey` + `scopeKey`) fetching every policy
- *  variable the root carries, plus — only for a name STILL missing after it — one name-filtered
- *  root read whose ≤1-row result cannot be truncated (the name-less read can itself arrive
- *  truncated, so it alone cannot prove absence). The common cases stay at ONE call per absent
- *  instance: a loop seeds `autoMerge` and `convergeOnly` together (submitPr), so a live instance's
- *  root read returns both and only `humanApproval` — seeded only when gated, cleared on approval —
- *  is re-probed; a merge-loop or gone instance's root is empty, which is complete because
- *  `autoMerge`/`convergeOnly` are never scope-cleared. The worst case is thus 3 + N calls (one per
- *  genuinely-absent instance), never 3 + 3N.
+ *  silently omit rows, and the three name pages truncate independently. Completeness is therefore
+ *  tracked per (instance, name): every name an active instance is missing from is re-probed with a
+ *  name-filtered root read (<=1 row, cannot be truncated). Every loop seeds all three names at
+ *  creation (submitPr for the review loop, startMerge for the merge loop), so the steady state is a
+ *  constant 3 calls; probes are paid only for genuine page cuts or legacy instances.
  *
  *  Scope: only the PROCESS-ROOT variable (`scopeKey === processInstanceKey`) is the loop's policy; a
  *  same-named child-scope variable is ignored so it can never overwrite the root value.
  *
  *  Failure isolation: a failed BATCH read rejects the whole projection (its page is partial, so
  *  absence can no longer be distinguished from a page cut) and the caller degrades every row to
- *  the default. A failed TARGETED read degrades only its own instance — the policies already
+ *  the default. A failed TARGETED read degrades only its own instance (its partial entry is dropped,
+ *  so it projects the default, never a half-read policy) — the policies already
  *  fetched for every other PR are preserved (a rejected fallback must not discard a sibling's
  *  `autoMerge:false` or `humanApproval:true` and silently un-block its merge).
  *
@@ -1289,6 +1291,7 @@ async function readMergePolicyVars(
   const wanted = new Set(activeKeys);
   try {
     const byInstance = new Map<string, MergePolicyVars>();
+    const seen = new Map<string, Set<MergePolicyName>>();
     const record = (row: { name: string; processInstanceKey: string; scopeKey: string; value: string }) => {
       const pk = String(row.processInstanceKey);
       if (!wanted.has(pk) || String(row.scopeKey) !== pk) return;
@@ -1296,39 +1299,41 @@ async function readMergePolicyVars(
       const vars = byInstance.get(pk) ?? emptyMergePolicyVars();
       vars[row.name] = parseBoolValue(row.value);
       byInstance.set(pk, vars);
+      const names = seen.get(pk) ?? new Set<MergePolicyName>();
+      names.add(row.name);
+      seen.set(pk, names);
     };
     await Promise.all(
       MERGE_POLICY_NAMES.map(async (name) => {
         for (const row of await engine.searchVariables({ name })) if (row.name === name) record(row);
       }),
     );
-    const missing = [...wanted].filter((pk) => !byInstance.has(pk));
+    // Completeness is tracked per (instance, NAME), not per instance: the three name pages truncate
+    // independently, so an instance present in one page (e.g. `autoMerge`) may still have been cut
+    // from another (e.g. `humanApproval`). Each name an instance is missing from is re-probed with a
+    // name-filtered ROOT read — a <=1-row result that cannot be truncated, so it proves absence.
+    // `convergeOnly` is skipped once `autoMerge` is known (the canonical intent wins). Every loop
+    // seeds all three names at creation (submitPr; startMerge seeds the merge loop's policy too), so
+    // the steady state is exactly 3 calls; probes are only paid for page cuts and legacy instances.
     await Promise.all(
-      missing.map(async (pk) => {
+      [...wanted].map(async (pk) => {
+        const got = seen.get(pk);
+        const probe = MERGE_POLICY_NAMES.filter(
+          (name) => !got?.has(name) && !(name === "convergeOnly" && got?.has("autoMerge")),
+        );
+        if (probe.length === 0) return;
         try {
-          // The targeted read can itself arrive truncated (single page, no cursor — the row
-          // ordering is unspecified). A NON-EMPTY root that still lacks a policy name is therefore
-          // re-probed with one name-filtered root read (a ≤1-row result that cannot be truncated)
-          // before absence is concluded. An EMPTY root needs no re-probe: a loop seeds `autoMerge`
-          // and `convergeOnly` at creation and neither is ever scope-cleared (only `humanApproval`
-          // is, via setVariables), so an empty root is a merge-loop/gone instance whose page is
-          // trivially complete. This keeps the genuinely-absent case at ONE read per instance:
-          // the worst case is 3 + N calls, never 3 + 3N. A live loop's root returns both intent
-          // vars, so only `humanApproval` (seeded only when gated, cleared on approval) is
-          // re-probed there.
-          const rows = await engine.searchVariables({ processInstanceKey: pk, scopeKey: pk });
-          for (const row of rows) record(row);
-          if (rows.length === 0) return;
-          const fetched = byInstance.get(pk) ?? emptyMergePolicyVars();
-          for (const name of MERGE_POLICY_NAMES) {
-            if (fetched[name] !== undefined) continue;
-            for (const row of await engine.searchVariables({ processInstanceKey: pk, scopeKey: pk, name })) {
-              if (row.name === name) record(row);
-            }
-          }
+          await Promise.all(
+            probe.map(async (name) => {
+              for (const row of await engine.searchVariables({ processInstanceKey: pk, scopeKey: pk, name })) {
+                if (row.name === name) record(row);
+              }
+            }),
+          );
         } catch {
-          // Degrade ONLY this instance: leave it out of the map so the caller projects the
-          // default for it, and keep every other instance's fetched policy.
+          // Degrade ONLY this instance — and fully: drop any partial entry the batch recorded so
+          // the caller projects the default for it, never a half-read policy.
+          byInstance.delete(pk);
         }
       }),
     );
