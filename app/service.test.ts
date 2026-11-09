@@ -675,6 +675,123 @@ test("pollIncidents picks the oldest incident by creationTime, sorting a missing
   assertEquals(row.incident_message, "the first fault");
 });
 
+// Issue #931: the mirror must carry the incident's `errorType` and `creationTime` (not just key +
+// message) so `/status` can show WHAT broke and SINCE WHEN, and it must cover a delivery-graph
+// run's instance too — a delivery parked on an engine incident was just as invisible as a PR.
+test("pollIncidents mirrors errorType + creationTime alongside the key/message, and clears them with the incident", async () => {
+  const row = {
+    pr_key: "owner/repo#12",
+    status: "converging",
+    process_key: "PI-12",
+    incident_key: null as string | null,
+    incident_type: null as string | null,
+    incident_message: null as string | null,
+    incident_since: null as string | null,
+    updated_at: "t0",
+  };
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: { rows: [row], key: "pr_key" },
+  };
+  const data = {
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
+  } as any;
+  const headers = { "content-type": "application/json" };
+
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = incidentFetch({
+    "PI-12": [{
+      incidentKey: "598235",
+      errorType: "JOB_NO_RETRIES",
+      errorMessage: 'agent "nano-coder" failed: no output and no subtree progress for >= 300000ms (idle)',
+      state: "ACTIVE",
+      creationTime: "2026-11-09T01:00:00.000Z",
+    }],
+  }) as typeof fetch;
+  try {
+    await pollIncidentsImpl(data, "http://engine/v2", headers);
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(row.incident_key, "598235");
+  assertEquals(row.incident_type, "JOB_NO_RETRIES");
+  assertEquals(row.incident_message, 'agent "nano-coder" failed: no output and no subtree progress for >= 300000ms (idle)');
+  assertEquals(row.incident_since, "2026-11-09T01:00:00.000Z");
+  assertEquals(row.status, "converging"); // orthogonal: the workflow transient is never touched
+
+  // Once resolved, ALL FOUR columns clear idempotently — a stale `incident_since` must not linger.
+  globalThis.fetch = incidentFetch({ "PI-12": [] }) as typeof fetch;
+  try {
+    await pollIncidentsImpl(data, "http://engine/v2", headers);
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(row.incident_key, null);
+  assertEquals(row.incident_type, null);
+  assertEquals(row.incident_message, null);
+  assertEquals(row.incident_since, null);
+});
+
+test("pollIncidents mirrors an ACTIVE incident onto a delivery-graph run row, and skips a terminal run", async () => {
+  const running = {
+    run_key: "dg-1",
+    status: "running",
+    process_key: "PI-DG-1",
+    incident_key: null as string | null,
+    incident_type: null as string | null,
+    incident_message: null as string | null,
+    incident_since: null as string | null,
+    updated_at: "t0",
+  };
+  const done = {
+    run_key: "dg-2",
+    status: "done",
+    process_key: "PI-DG-2",
+    incident_key: "STALE-DG",
+    incident_type: "JOB_NO_RETRIES",
+    incident_message: "left over",
+    incident_since: "2026-11-08T00:00:00.000Z",
+    updated_at: "t0",
+  };
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    delivery_graph_runs: { rows: [running, done], key: "run_key" },
+  };
+  const data = {
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
+  } as any;
+  const headers = { "content-type": "application/json" };
+
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = incidentFetch({
+    "PI-DG-1": [{
+      incidentKey: "INC-DG-1",
+      errorType: "JOB_NO_RETRIES",
+      errorMessage: "delivery node job exhausted retries",
+      state: "ACTIVE",
+      creationTime: "2026-11-09T03:00:00.000Z",
+    }],
+    // A terminal run's instance is gone — the pass must never query it (the stub would serve an
+    // incident, so a query would wrongly overwrite the clearing below).
+    "PI-DG-2": [{ incidentKey: "INC-DG-2", errorMessage: "ghost", state: "ACTIVE", creationTime: "2026-11-09T04:00:00.000Z" }],
+  }) as typeof fetch;
+  try {
+    await pollIncidentsImpl(data, "http://engine/v2", headers);
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(running.incident_key, "INC-DG-1");
+  assertEquals(running.incident_type, "JOB_NO_RETRIES");
+  assertEquals(running.incident_message, "delivery node job exhausted retries");
+  assertEquals(running.incident_since, "2026-11-09T03:00:00.000Z");
+  assertEquals(running.status, "running"); // orthogonal: status untouched
+  // Terminal run: the stale incident is cleared without ever consulting the engine.
+  assertEquals(done.incident_key, null);
+  assertEquals(done.incident_type, null);
+  assertEquals(done.incident_message, null);
+  assertEquals(done.incident_since, null);
+});
+
 
 // Red/green regression (nano-workforce#845 Copilot review): the convergence loop runs TWO external
 // agent task types while the PR reads `converging` — `review-round` (`senior:pr-review`) and, since

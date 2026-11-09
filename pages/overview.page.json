@@ -136,6 +136,15 @@
         ],
         "rowActions": [
           {
+            "label": "Retry incident",
+            "confirm": "Retry the engine incident parking this PR's run? This gives the failed job a retry and resolves the incident.",
+            "showWhenField": "incident_key",
+            "action": {
+              "path": "/app/api/actions/incident/retry",
+              "body": { "processInstanceKey": "{{row.process_key}}" }
+            }
+          },
+          {
             "label": "Dismiss",
             "confirm": "Dismiss this finished PR? It acknowledges the terminal pull request and files it under History.",
             "showWhenField": "ack_open",

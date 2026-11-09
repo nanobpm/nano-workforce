@@ -232,6 +232,17 @@
         ],
         "rowActions": [
           {
+            "label": "Retry incident",
+            "confirm": "Retry the engine incident parking this PR's run? This gives the failed job a retry and resolves the incident.",
+            "showWhenField": "incident_key",
+            "action": {
+              "path": "/app/api/actions/incident/retry",
+              "body": {
+                "processInstanceKey": "{{row.process_key}}"
+              }
+            }
+          },
+          {
             "label": "Cancel",
             "confirm": "Cancel this PR's review run?",
             "showWhenField": "process_key",
@@ -280,6 +291,14 @@
             {
               "field": "incident_key",
               "label": "Incident key"
+            },
+            {
+              "field": "incident_type",
+              "label": "Incident type"
+            },
+            {
+              "field": "incident_since",
+              "label": "Incident since"
             },
             {
               "field": "merged_at",

@@ -174,6 +174,7 @@
           { "field": "node_count", "header": "Nodes", "width": "5%" },
           { "field": "human_node_count", "header": "Human", "width": "5%" },
           { "field": "side_effect_count", "header": "Effects", "width": "6%" },
+          { "field": "incident_message", "header": "Incident", "truncate": true, "badge": { "tone": "danger", "label": "1" } },
           { "field": "created_at", "header": "Dispatched", "width": "7%", "truncate": true, "format": "datetime" },
           { "field": "updated_at", "header": "Updated", "width": "6%", "truncate": true, "format": "datetime" }
         ],
@@ -181,10 +182,22 @@
           "fields": [
             { "field": "process_definition_id", "label": "Definition" },
             { "field": "digest", "label": "Digest" },
-            { "field": "phase_node_id", "label": "Parked node" }
+            { "field": "phase_node_id", "label": "Parked node" },
+            { "field": "incident_message", "label": "Incident" },
+            { "field": "incident_type", "label": "Incident type" },
+            { "field": "incident_since", "label": "Incident since" }
           ]
         },
         "rowActions": [
+          {
+            "label": "Retry incident",
+            "confirm": "Retry the engine incident parking this delivery run? This gives the failed job a retry and resolves the incident.",
+            "showWhenField": "incident_key",
+            "action": {
+              "path": "/app/api/actions/incident/retry",
+              "body": { "processInstanceKey": "{{row.process_key}}" }
+            }
+          },
           {
             "label": "Save to library",
             "confirm": "Save this dispatched delivery graph to the reusable library? Its stored graph is copied into the Library (source: from-dispatched) so it can be reused later.",
