@@ -1572,24 +1572,44 @@ async function classifyWaveTarget(
  * otherwise wedge the PR there forever — the next pass would never pick it back up. Reverting on
  * failure keeps the PR on a pollable status so the next pass retries. Single source of truth for
  * the flip-then-publish handoff shared by all merge-stage waits below. */
-async function flipToMergingThenPublish(
+export async function flipToMergingThenPublish(
   data: DataLayer,
   engine: EngineClient,
   prKey: string,
   prevStatus: string,
   message: Parameters<EngineClient["publishMessage"]>[0],
-) {
-  await prs(data).update(prKey, { status: "merging", updated_at: now() });
+): Promise<boolean> {
+  // Compare-and-set (#935 review): the flip only wins if the row is STILL on the status this pass
+  // read. A pass that read `queued`, then stalled on GitHub while the process's own timeout path
+  // completed `mark-merged`, must not clobber the terminal `merged` with `merging` (no pass scans
+  // `merging`, and the completed loop has no worker left to restore it) nor publish a message whose
+  // subscription is gone. A lost race skips the publish entirely.
+  const db = data.open();
+  const flipped = await db.exec(
+    "UPDATE pull_requests SET status = ?, updated_at = ? WHERE pr_key = ? AND status = ?",
+    ["merging", now(), prKey, prevStatus],
+  );
+  if (flipped.changed === 0) {
+    console.log(`[poller] ${prKey} left ${prevStatus} concurrently — skipping ${message.name}`);
+    return false;
+  }
   try {
     await engine.publishMessage(message);
   } catch (err) {
     try {
-      await prs(data).update(prKey, { status: prevStatus, updated_at: now() });
+      // Conditional revert too: only undo OUR `merging`, never a status another actor wrote since.
+      await db.exec("UPDATE pull_requests SET status = ?, updated_at = ? WHERE pr_key = ? AND status = ?", [
+        prevStatus,
+        now(),
+        prKey,
+        "merging",
+      ]);
     } catch (revertErr) {
       console.error(`[poller] revert ${prKey} -> ${prevStatus} failed: ${revertErr}`);
     }
     throw err;
   }
+  return true;
 }
 
 export async function mergeLaneDecisionForPr(data: DataLayer, prKey: string): Promise<PrLaneDecision | null> {

@@ -10,6 +10,7 @@
 // token-transport GitHub stub that serves BOTH the REST PR view and the GraphQL merge-queue probe.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
+import { memStatusCas } from "../test/memStatusCas.ts";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { fetchMergeQueueMembership } from "./github.ts";
 import { pollMerges } from "./service.ts";
@@ -42,7 +43,16 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
       },
     };
   }
-  const data = { table: (n: string, pk?: string) => tbl(n, pk) } as any as DataLayer;
+  const data = {
+    table: (n: string, pk?: string) => tbl(n, pk),
+    open: () => ({
+      exec: async (sql: string, params: any[] = []) => {
+        const res = memStatusCas(stores, sql, params);
+        if (!res) throw new Error(`memData.open().exec: unsupported statement: ${sql}`);
+        return res;
+      },
+    }),
+  } as any as DataLayer;
   return { data, stores };
 }
 
