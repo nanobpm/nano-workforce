@@ -1,3 +1,9 @@
+## [0.207.0](https://github.com/nanobpm/nano-workforce/compare/v0.206.4...v0.207.0) (2026-11-09)
+
+### Features
+
+* **status:** surface engine incidents on loop and delivery rows with a retry action ([#938](https://github.com/nanobpm/nano-workforce/issues/938)) ([e3955c8](https://github.com/nanobpm/nano-workforce/commit/e3955c8145a966a29806400872b7a9c362d1d992)), closes [#931](https://github.com/nanobpm/nano-workforce/issues/931) [#931](https://github.com/nanobpm/nano-workforce/issues/931)
+
 ## [0.206.4](https://github.com/nanobpm/nano-workforce/compare/v0.206.3...v0.206.4) (2026-11-09)
 
 ### Bug Fixes
