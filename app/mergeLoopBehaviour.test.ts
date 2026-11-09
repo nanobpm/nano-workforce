@@ -509,6 +509,90 @@ test("the 'waiting' re-poll is bounded — exhausting mergeStallMax escalates to
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("wait-mergeable-repoll", "merge-stall-probe", "merge-esc-conflict");
 });
 
+// ---------------------------------------------------------------------------
+// #929 — a DIRTY PR whose required checks are ABSENT (GitHub skips pull_request
+// workflows on a conflicting head) must route to the rebase arm, never to the
+// misleading "all checks green … needs approval" escalation.
+// ---------------------------------------------------------------------------
+
+test("a DIRTY PR with absent required checks reaches SP_rebase via the stall probe (#929)", async () => {
+  // The incident (nanobpm/nano-bpm#1444): REST reported mergeable=false/dirty and every
+  // declared-required check was ABSENT (GitHub skips CI on a conflicting head), yet the loop
+  // escalated "needs approval" twice and never dispatched the rebase. With the classifier fix,
+  // the stall probe re-derives `conflict` and the token reaches the rebase agent.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "", reviewThreads: 0, pendingChecks: 0 },
+      "senior:rebase": { status: "rebased" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  // The poller's pre-fix verdict was `waiting` (absent required checks outranked DIRTY), so the
+  // instance is parked on the mergeable wait when the stall timer fires.
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElement("wait-mergeable")
+    .hasCompletedElements("merge-stall-probe", "rebase") // the rebase agent ran — SP_rebase was reached
+    .hasVariable("rebaseRound", 1);
+  assert(!completedElementIds(engine).has("merge-esc-conflict"), "a DIRTY PR must rebase, not escalate 'needs approval'");
+  const openTasks = await engine.searchUserTasks({});
+  assert(!openTasks.some((t) => t.elementId === "wait-merge-answer"), "no human escalation on the rebase path");
+});
+
+test("a stall escalation on a DIRTY PR never claims 'all checks green' — it names the conflict (#929)", async () => {
+  // The pre-fix escalation built "all checks green (none failing, none pending)" from
+  // `failingChecks = 0 and pendingChecks = 0` — but on a DIRTY head those zeros mean GitHub
+  // SKIPPED the required checks, not that they passed. The approval wording must stay gated on a
+  // PROBED-and-clear thread count; a DIRTY PR (whose `conflict` verdict is only reachable via the
+  // rebase arm) that still lands here keeps the conservative wording instead of the false claim.
+  const engine = await boot({
+    vars: { mergeStallMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1, pendingChecks: 0 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  const q = String(escalation(engine).question ?? "");
+  assert(!q.includes("all checks green"), "absent/unprobed checks must never read as 'all checks green'");
+  assert(!q.includes("required review approval"), "an unprobed read must never assert a review-approval blocker");
+  assertStringIncludes(q, "ABSENT", "the escalation must name the absent required checks");
+  assertStringIncludes(
+    q,
+    "GitHub reports the branch as CONFLICTING",
+    "a DIRTY-head escalation must name the conflict, not read as an approval wait",
+  );
+});
+
+test("answering 'retry' on a DIRTY PR's escalation re-arms the poller, which re-derives conflict and rebases (#929)", async () => {
+  // The incident's second half: a human answered "retry" and the loop re-classified the same way
+  // and escalated again — the rebase was never reached. Post-fix the retry re-arms the poller; the
+  // next verdict for the still-DIRTY PR is `conflict`, which dispatches the rebase agent.
+  const engine = await boot({
+    vars: { mergeStallMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1, pendingChecks: 0 },
+      "senior:rebase": { status: "rebased" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  // The human replies "retry" — the answer reconciles then re-arms the poller.
+  await engine.completeUserTask(await mergeAnswerTaskKey(engine), { answer: "retry" });
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-mergeable");
+  // The re-armed poller now classifies the DIRTY PR as `conflict` (absent required checks no
+  // longer outrank DIRTY) and the rebase agent is dispatched.
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "conflict" } });
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElement("wait-mergeable")
+    .hasCompletedElements("record-merge-answer", "rebase")
+    .hasVariable("rebaseRound", 1);
+});
+
 test("an unclassified verdict routes to auto-rebase (DEFAULT), not to a human (#774)", async () => {
   // The DEFAULT arm is a last-resort self-heal, not a page: an unexpected/garbage `mergeState` routes
   // to the bounded rebase agent (which reconciles from ground truth), never straight to a human.
