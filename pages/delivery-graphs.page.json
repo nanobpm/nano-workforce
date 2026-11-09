@@ -149,7 +149,7 @@
           { "label": "All", "filter": [] }
         ],
         "columns": [
-          { "field": "title", "template": "{{title}}", "header": "Graph", "subtitleField": "run_key", "truncate": true, "width": "16%", "link": { "kind": "page", "page": "delivery-graph-detail", "keyField": "run_key" } },
+          { "field": "title", "template": "{{title}}", "header": "Graph", "subtitleField": "run_key", "truncate": true, "width": "13%", "link": { "kind": "page", "page": "delivery-graph-detail", "keyField": "run_key" } },
           { "field": "status", "header": "Status", "truncate": true, "width": "10%", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "process_key", "header": "Agent", "template": "Transcript", "truncate": true, "width": "5%", "link": { "kind": "page", "page": "cockpit", "keyField": "process_key" } },
           { "field": "process_key", "header": "Instance", "width": "8%", "truncate": true, "link": { "kind": "processExplorer", "keyField": "process_key" } },
@@ -170,11 +170,11 @@
             "stateField": "stage_state",
             "locus": { "field": "process_key", "link": { "kind": "processExplorer", "keyField": "process_key" } }
           },
-          { "field": "park_label", "header": "Parked", "truncate": true, "width": "12%" },
+          { "field": "park_label", "header": "Parked", "truncate": true, "width": "9%" },
           { "field": "node_count", "header": "Nodes", "width": "5%" },
           { "field": "human_node_count", "header": "Human", "width": "5%" },
           { "field": "side_effect_count", "header": "Effects", "width": "6%" },
-          { "field": "incident_message", "header": "Incident", "truncate": true, "badge": { "tone": "danger", "label": "1" } },
+          { "field": "incident_message", "header": "Incident", "truncate": true, "width": "6%", "badge": { "tone": "danger", "label": "1" } },
           { "field": "created_at", "header": "Dispatched", "width": "7%", "truncate": true, "format": "datetime" },
           { "field": "updated_at", "header": "Updated", "width": "6%", "truncate": true, "format": "datetime" }
         ],
