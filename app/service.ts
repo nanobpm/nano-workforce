@@ -388,13 +388,16 @@ export interface PullRequest {
   // running agent curls (GET /app/api/hooks/abandon?token=…) to learn whether this run was cancelled before
   // it performs a side effect. Minted at submit, reused across the convergence + merge instances.
   abandon_token: string | null;
-  // Technical-incident surfacing (017_pr_incident.sql, issue #94), written by the poller's
-  // `pollIncidents` pass. `incident_key` is the engine incidentKey of the ACTIVE incident parking
-  // this PR's instance and `incident_message` its errorMessage; both NULL when the instance has no
-  // active incident. Orthogonal to `status` — an incident is a cross-cutting liveness fault, not a
-  // workflow stage.
+  // Technical-incident surfacing (017_pr_incident.sql, issue #94; enriched 126, issue #931), written
+  // by the poller's `pollIncidents` pass. `incident_key` is the engine incidentKey of the ACTIVE
+  // incident parking this PR's instance, `incident_type` its errorType, `incident_message` its
+  // errorMessage and `incident_since` its creationTime; all NULL when the instance has no active
+  // incident. Orthogonal to `status` — an incident is a cross-cutting liveness fault, not a
+  // workflow stage. `/status` derives the `incident` overlay from these columns (see `activePrs`).
   incident_key: string | null;
+  incident_type: string | null;
   incident_message: string | null;
+  incident_since: string | null;
   // Lineage projection (037_lineage.sql, issue #245): the stable ORIGIN identity (the issue =
   // feature_key / plan_key) threaded onto this PR by `submitPr`, and passed as a `createInstance`
   // variable onto the convergence + merge instances so every descendant carries the root. For a
@@ -1057,6 +1060,40 @@ export interface MergePolicy {
   blockedBy: "env" | "human-approval" | null;
 }
 
+/** The status `/status` reports for a run whose instance is parked on an ACTIVE engine incident
+ * (issue #931). Derived at READ time from the mirrored `incident_*` columns — the base `status`
+ * workflow transient is never overwritten, so the overlay can never wedge the status machine and
+ * lifts the moment the incident clears. */
+export const INCIDENT_STATUS = "incident";
+
+/** The incident block every `/status` row carries (issue #931): the ACTIVE engine incident the
+ * poller mirrored onto the record, else null. `key` is the engine incidentKey (the handle the
+ * `retryIncident` action resolves), `type` the errorType (e.g. `JOB_NO_RETRIES`), `message` the
+ * errorMessage, `since` the incident's creationTime. */
+export interface StatusIncident {
+  key: string;
+  type: string | null;
+  message: string | null;
+  since: string | null;
+}
+
+/** Derive the `/status` incident block from a row's mirrored incident columns (issue #931). Null
+ * when the row carries no active incident. */
+function statusIncidentFor(row: {
+  incident_key: string | null;
+  incident_type: string | null;
+  incident_message: string | null;
+  incident_since: string | null;
+}): StatusIncident | null {
+  if (!row.incident_key) return null;
+  return {
+    key: row.incident_key,
+    type: row.incident_type ?? null,
+    message: row.incident_message ?? null,
+    since: row.incident_since ?? null,
+  };
+}
+
 /** A PR currently in flight, as reported by the status endpoint. */
 export interface ActivePr {
   prKey: string;
@@ -1081,6 +1118,9 @@ export interface ActivePr {
   /** The effective merge policy (issue #916): what the run intends (`requested`), what the
    * deployment allows (`enabled`), and what will actually happen (`effective`/`blockedBy`). */
   merge: MergePolicy;
+  /** The ACTIVE engine incident parking this PR's instance (issue #931), mirrored by the poller's
+   * `pollIncidents` pass; null when none. While set, `status` reads `incident`. */
+  incident: StatusIncident | null;
 }
 
 /** Every tracked PR not in a terminal state (converged/abandoned), newest-updated first. Backs
@@ -1135,23 +1175,30 @@ export async function activePrs(
       mergeByPr.set(p.pr_key, await mergePolicyFor(p.process_key ?? null, engine));
     }),
   );
-  return active.map((p) => ({
-    prKey: p.pr_key,
-    repo: p.repo,
-    number: p.number,
-    url: p.url,
-    title: p.title ?? null,
-    status: p.status,
-    round: p.current_round,
-    processKey: p.process_key ?? null,
-    waitingSince: p.waiting_since ?? null,
-    openEscalation: openEscByPr.get(p.pr_key) ?? null,
-    updatedAt: p.updated_at,
-    activeWorker: p.active_worker ?? null,
-    leaseUntil: p.lease_until ?? null,
-    autoResolveEscalations: p.auto_resolve_escalations === 1,
-    merge: mergeByPr.get(p.pr_key) ?? mergePolicyDefault(),
-  }));
+  return active.map((p) => {
+    // Issue #931: an ACTIVE engine incident parked on the loop's instance must be VISIBLE — the row
+    // kept reading `converging` for hours while nothing ran. Overlay the derived `incident` status
+    // (the base `status` column is never touched) and carry the mirrored incident block.
+    const incident = statusIncidentFor(p);
+    return {
+      prKey: p.pr_key,
+      repo: p.repo,
+      number: p.number,
+      url: p.url,
+      title: p.title ?? null,
+      status: incident ? INCIDENT_STATUS : p.status,
+      round: p.current_round,
+      processKey: p.process_key ?? null,
+      waitingSince: p.waiting_since ?? null,
+      openEscalation: openEscByPr.get(p.pr_key) ?? null,
+      updatedAt: p.updated_at,
+      activeWorker: p.active_worker ?? null,
+      leaseUntil: p.lease_until ?? null,
+      autoResolveEscalations: p.auto_resolve_escalations === 1,
+      merge: mergeByPr.get(p.pr_key) ?? mergePolicyDefault(),
+      incident,
+    };
+  });
 }
 
 /** The default merge policy when no instance variables are readable (mid-handoff row, engine
@@ -1225,6 +1272,9 @@ export interface ActiveDelivery {
    * eligible for steward auto-resolution. Derived from the durable `auto_resolve_escalations` flag,
    * never a clobbered process variable. Shown in `/status` per delivery. */
   autoResolveEscalations: boolean;
+  /** The ACTIVE engine incident parking this run's instance (issue #931), mirrored by the poller's
+   * `pollIncidents` pass; null when none. While set, `status` reads `incident`. */
+  incident: StatusIncident | null;
 }
 
 /** Every delivery-graph run not in a terminal state (done/failed/abandoned), newest-updated first.
@@ -1248,16 +1298,22 @@ export async function activeDeliveries(data: DataLayer): Promise<ActiveDelivery[
     if (openEscByRun.has(t.subject_key)) continue;
     openEscByRun.set(t.subject_key, toOpenEscalation(t));
   }
-  return active.map((r) => ({
-    runKey: r.run_key,
-    title: r.title ?? null,
-    status: r.status,
-    phase: r.phase ?? null,
-    processKey: r.process_key ?? null,
-    openEscalation: openEscByRun.get(r.run_key) ?? null,
-    updatedAt: r.updated_at,
-    autoResolveEscalations: r.auto_resolve_escalations === 1,
-  }));
+  return active.map((r) => {
+    // Issue #931: same incident overlay as the PR rows — a delivery run parked on an engine
+    // incident must not keep reading `running`.
+    const incident = statusIncidentFor(r);
+    return {
+      runKey: r.run_key,
+      title: r.title ?? null,
+      status: incident ? INCIDENT_STATUS : r.status,
+      phase: r.phase ?? null,
+      processKey: r.process_key ?? null,
+      openEscalation: openEscByRun.get(r.run_key) ?? null,
+      updatedAt: r.updated_at,
+      autoResolveEscalations: r.auto_resolve_escalations === 1,
+      incident,
+    };
+  });
 }
 
 /** One review-ready poll pass (SPEC §10): for every PR waiting on a review, fetch its GitHub
@@ -2351,30 +2407,88 @@ export async function pollJobActivationImpl(
 }
 
 /** The subset of a Camunda-8 `/v2/incidents/search` result item this app reads. `incidentKey` is
- * the unique incident id; `errorMessage` is the human-readable fault; `state` is the incident
- * lifecycle (`ACTIVE` while it parks the token, `RESOLVED` once cleared); `creationTime` orders
- * concurrent incidents. */
-interface IncidentSearchItem {
+ * the unique incident id; `errorType` the machine fault class (e.g. `JOB_NO_RETRIES`);
+ * `errorMessage` is the human-readable fault; `state` is the incident lifecycle (`ACTIVE` while it
+ * parks the token, `RESOLVED` once cleared); `creationTime` orders concurrent incidents and is
+ * surfaced as the incident's `since`. */
+export interface IncidentSearchItem {
   incidentKey?: string;
+  errorType?: string | null;
   errorMessage?: string | null;
   state?: string;
   creationTime?: string | null;
+  /** The job the incident sits on (a `JOB_NO_RETRIES` incident parks until that job carries
+   * retries again) — the handle the `retryIncident` action bumps. */
+  jobKey?: string;
 }
 
-/** Incident-surfacing poll pass (issue #94). A convergence or merge process instance can hit a
- * *technical* incident — an unhandled engine error that parks the token — and nothing on the PR
- * row reflected it: the grid kept showing the last workflow status (`converging`, `merging`, …)
- * while the run was actually dead in the water (a PR sat "converging" all day on an incident).
+/** The four mirrored incident columns every incident-watched aggregate carries (PRs since #94/#931,
+ * delivery-graph runs since #931). All-or-nothing: a row with no ACTIVE incident reads NULL on all
+ * four. */
+interface IncidentMirror {
+  incident_key: string | null;
+  incident_type: string | null;
+  incident_message: string | null;
+  incident_since: string | null;
+}
+
+/** Pick the ACTIVE incident to mirror for one instance: the OLDEST active one (the first thing that
+ * broke — a stable choice if the instance somehow parks more than one). Re-filters on state
+ * defensively in case the wire filter is ignored. An incident with no `creationTime` sorts *last*,
+ * so a missing timestamp can never masquerade as the oldest. Returns null when none is active. */
+export function oldestActiveIncident(items: IncidentSearchItem[] | undefined): IncidentSearchItem | null {
+  return (
+    (items ?? [])
+      .filter((i) => (i.state ?? "ACTIVE") === "ACTIVE")
+      .sort((a, b) => (a.creationTime ?? "\uffff").localeCompare(b.creationTime ?? "\uffff"))[0] ?? null
+  );
+}
+
+/** Query the engine for the OLDEST ACTIVE incident on one process instance. Returns the incident,
+ * `null` when the instance has no active incident, or `undefined` when the transport failed (the
+ * caller keeps the last-known mirror and retries next pass — a failed query must never clear a real
+ * incident nor invent one). */
+export async function fetchActiveIncident(
+  base: string,
+  headers: Record<string, string>,
+  processInstanceKey: string,
+): Promise<IncidentSearchItem | null | undefined> {
+  try {
+    const res = await fetch(`${base}/incidents/search`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        filter: { processInstanceKey, state: "ACTIVE" },
+        page: { limit: 20 },
+      }),
+    });
+    if (!res.ok) return undefined; // engine unhappy → unknown, retry next pass
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const body = (await res.json()) as { items?: IncidentSearchItem[] };
+    return oldestActiveIncident(body.items);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Incident-surfacing poll pass (issue #94; enriched and extended to delivery-graph runs in issue
+ * #931). A convergence, merge, or delivery-graph process instance can hit a *technical* incident —
+ * an unhandled engine error that parks the token — and nothing on the record row reflected it: the
+ * grid kept showing the last workflow status (`converging`, `merging`, `running`, …) while the run
+ * was actually dead in the water (a PR sat "converging" all day on an incident; on merlin two loops
+ * sat dead for 1.3h/5h before anyone found them via a hand-run engine query).
  *
- * This pass reads the engine's Camunda-8 `/v2/incidents/search` for each PR that still has a live
- * instance (has a `process_key`, non-terminal status) and mirrors an ACTIVE incident onto two
- * orthogonal columns — `incident_key` + `incident_message` — leaving `status` untouched. An
- * incident is a cross-cutting liveness fault, not a workflow stage, so it must not overload the
- * status machine. Clearing is idempotent: when the instance has no active incident (resolved, or
- * never had one) the columns are nulled, so an incident raised or resolved out-of-band converges
- * to the truth on the next pass. Best-effort transport: a failed query leaves the last-known
- * values untouched and the next pass retries. Updates (and bumps `updated_at`) only on an actual
- * change so a steady state doesn't churn the grid. */
+ * This pass reads the engine's Camunda-8 `/v2/incidents/search` for each tracked record that still
+ * has a live instance (has a `process_key`, non-terminal derived status) and mirrors an ACTIVE
+ * incident onto four orthogonal columns — `incident_key`, `incident_type`, `incident_message`,
+ * `incident_since` — leaving `status` untouched. An incident is a cross-cutting liveness fault, not
+ * a workflow stage, so it must not overload the status machine (`/status` derives the `incident`
+ * overlay at READ time — see `activePrs`/`activeDeliveries`). Clearing is idempotent: when the
+ * instance has no active incident (resolved, or never had one) the columns are nulled, so an
+ * incident raised or resolved out-of-band converges to the truth on the next pass. Best-effort
+ * transport: a failed query leaves the last-known values untouched and the next pass retries.
+ * Updates (and bumps `updated_at`) only on an actual change so a steady state doesn't churn the
+ * grid. */
 async function pollIncidents(
   data: DataLayer,
   restAddress: string,
@@ -2387,9 +2501,21 @@ async function pollIncidents(
 }
 
 /** Testable core of {@link pollIncidents}: given the normalised `base` URL and prepared auth
- * `headers`, reconcile every PR row against the engine's active incidents. Split out so tests can
- * exercise the reconciliation with a stubbed `fetch` without re-deriving transport wiring. */
+ * `headers`, reconcile every incident-watched record row (PRs and delivery-graph runs) against the
+ * engine's active incidents. Split out so tests can exercise the reconciliation with a stubbed
+ * `fetch` without re-deriving transport wiring. */
 export async function pollIncidentsImpl(
+  data: DataLayer,
+  base: string,
+  headers: Record<string, string>,
+) {
+  await reconcilePrIncidents(data, base, headers);
+  await reconcileDeliveryIncidents(data, base, headers);
+}
+
+/** The PR half of {@link pollIncidentsImpl}: mirror the oldest ACTIVE incident of each live PR
+ * instance onto the PR row's four incident columns. */
+async function reconcilePrIncidents(
   data: DataLayer,
   base: string,
   headers: Record<string, string>,
@@ -2404,58 +2530,83 @@ export async function pollIncidentsImpl(
     // instance. Reuses the canonical `TERMINAL_STATUSES` so incident logic can't drift from the rest
     // of the status machine. Writes stay on the base `prs`.
     if (!pr.process_key || TERMINAL_STATUSES.includes(pr.derived_status)) {
-      if (pr.incident_key || pr.incident_message) {
-        await prs(data).update(pr.pr_key, {
-          incident_key: null,
-          incident_message: null,
-          updated_at: now(),
-        });
-      }
+      await clearIncidentMirror(pr, (patch) => prs(data).update(pr.pr_key, patch));
       continue;
     }
 
-    let incidentKey: string | null = null;
-    let incidentMessage: string | null = null;
+    let active: IncidentSearchItem | null | undefined;
     try {
-      const res = await fetch(`${base}/incidents/search`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          filter: { processInstanceKey: pr.process_key, state: "ACTIVE" },
-          page: { limit: 20 },
-        }),
-      });
-      if (!res.ok) continue; // engine unhappy → keep last-known, retry next pass
-      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-      const body = (await res.json()) as { items?: IncidentSearchItem[] };
-      // Surface the oldest ACTIVE incident (the first thing that broke — a stable choice if the
-      // instance somehow parks more than one). Re-filter on state defensively in case the wire
-      // filter is ignored. An incident with no `creationTime` sorts *last*, so a missing timestamp
-      // can never masquerade as the oldest.
-      const active = (body.items ?? [])
-        .filter((i) => (i.state ?? "ACTIVE") === "ACTIVE")
-        .sort((a, b) =>
-          (a.creationTime ?? "\uffff").localeCompare(b.creationTime ?? "\uffff")
-        )[0];
-      if (active) {
-        incidentKey = active.incidentKey ?? null;
-        incidentMessage = active.errorMessage ?? null;
-      }
+      active = await fetchActiveIncident(base, headers, pr.process_key);
     } catch (err) {
       console.error(`[poller] incidents ${pr.pr_key}: ${err}`);
       continue;
     }
+    if (active === undefined) continue; // transport unhappy → keep last-known, retry next pass
 
-    if (
-      incidentKey !== (pr.incident_key ?? null) ||
-      incidentMessage !== (pr.incident_message ?? null)
-    ) {
-      await prs(data).update(pr.pr_key, {
-        incident_key: incidentKey,
-        incident_message: incidentMessage,
-        updated_at: now(),
-      });
+    await writeIncidentMirror(pr, active, (patch) => prs(data).update(pr.pr_key, patch));
+  }
+}
+
+/** The delivery-graph half of {@link pollIncidentsImpl} (issue #931): a delivery RUN's instance
+ * parks on an incident exactly as a convergence loop does, and was just as invisible — `/status`
+ * kept reporting `running`. Mirror onto the run row's four incident columns. */
+async function reconcileDeliveryIncidents(
+  data: DataLayer,
+  base: string,
+  headers: Record<string, string>,
+) {
+  const terminal: readonly string[] = DELIVERY_GRAPH_TERMINAL_STATUSES;
+  const all = await deliveryGraphRunsTracking(data).all();
+  for (const run of all) {
+    if (!run.process_key || terminal.includes(run.derived_status)) {
+      await clearIncidentMirror(run, (patch) => deliveryGraphRuns(data).update(run.run_key, patch));
+      continue;
     }
+
+    let active: IncidentSearchItem | null | undefined;
+    try {
+      active = await fetchActiveIncident(base, headers, run.process_key);
+    } catch (err) {
+      console.error(`[poller] incidents ${run.run_key}: ${err}`);
+      continue;
+    }
+    if (active === undefined) continue;
+
+    await writeIncidentMirror(run, active, (patch) => deliveryGraphRuns(data).update(run.run_key, patch));
+  }
+}
+
+/** Null all four incident columns when any is set (a terminal / instance-less record must not keep
+ * a stale mirror). Shared by both reconcile halves so the clearing shape can never drift. */
+async function clearIncidentMirror(
+  row: IncidentMirror,
+  update: (patch: IncidentMirror & { updated_at: string }) => Promise<unknown>,
+) {
+  if (row.incident_key || row.incident_type || row.incident_message || row.incident_since) {
+    await update({ incident_key: null, incident_type: null, incident_message: null, incident_since: null, updated_at: now() });
+  }
+}
+
+/** Write the mirrored incident onto the row — or clear it when `active` is null — updating (and
+ * bumping `updated_at`) only on an actual change so a steady state doesn't churn the grid. */
+async function writeIncidentMirror(
+  row: IncidentMirror,
+  active: IncidentSearchItem | null,
+  update: (patch: IncidentMirror & { updated_at: string }) => Promise<unknown>,
+) {
+  const next: IncidentMirror = {
+    incident_key: active?.incidentKey ?? null,
+    incident_type: active?.errorType ?? null,
+    incident_message: active?.errorMessage ?? null,
+    incident_since: active?.creationTime ?? null,
+  };
+  if (
+    next.incident_key !== (row.incident_key ?? null) ||
+    next.incident_type !== (row.incident_type ?? null) ||
+    next.incident_message !== (row.incident_message ?? null) ||
+    next.incident_since !== (row.incident_since ?? null)
+  ) {
+    await update({ ...next, updated_at: now() });
   }
 }
 

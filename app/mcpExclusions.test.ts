@@ -31,9 +31,10 @@ function projectedOperations() {
 }
 
 // The operator-only cockpit doors: the staged delivery-graph lifecycle (stage -> dispatch ->
-// dismiss) whose approval is a human click in the cockpit (ADR 0005 Decision 7). These — and ONLY
-// these — must be excluded from the projected MCP tool surface.
-const EXPECTED_EXCLUDED = ["stageDeliveryGraph", "dispatchDeliveryGraph", "dismissProposal"];
+// dismiss) whose approval is a human click in the cockpit (ADR 0005 Decision 7), plus the
+// incident-retry remediation door (issue #931) — the human unstick action on an incident-parked
+// run. These — and ONLY these — must be excluded from the projected MCP tool surface.
+const EXPECTED_EXCLUDED = ["stageDeliveryGraph", "dispatchDeliveryGraph", "dismissProposal", "retryIncident"];
 
 // A representative set of agent-facing operations that MUST stay exposed as tools — the drive doors
 // (submit PR / epic / delivery-graph set), the pure compile/preview doors, and the read/orientation

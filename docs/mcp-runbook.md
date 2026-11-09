@@ -214,8 +214,8 @@ acceptable. When it **is set**, the guard is not mutation-only: it also covers
 reads, so read endpoints like `GET /app/api/agent` and `GET /app/api/version`
 return `401` without the `x-hook-secret` header, just as guarded mutations do. It
 is not blanket, though — a few doors stay intentionally unguarded even when the
-secret is set (e.g. the declarative Save-to-library page action, which
-structurally cannot attach the header). Put it in the server entry's
+secret is set (e.g. the declarative Save-to-library and Retry-incident page actions,
+which structurally cannot attach the header). Put it in the server entry's
 `headers`, never in chat. For a remote fleet,
 `NANO_WORKFORCE_BASE_URL` reachability rules apply unchanged. The rest of the app's
 HTTP surface follows the `network.bind` manifest setting, but the runtime-served

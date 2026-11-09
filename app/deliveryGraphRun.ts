@@ -56,6 +56,14 @@ export interface DeliveryGraphRun {
   /** Opt-in escalation steward (120_escalation_auto_resolutions.sql, issue #889): 1 ⇒ this run's
    * escalations are eligible for steward auto-resolution. Default 0. */
   auto_resolve_escalations: number;
+  /** Technical-incident mirror (127_delivery_graph_run_incidents.sql, issue #931), written by the
+   *  poller's `pollIncidents` pass — the delivery-side twin of the PR incident columns (017/126).
+   *  All NULL when the run's instance has no active incident; `/status` derives the `incident`
+   *  overlay from these columns (see `activeDeliveries` in app/service.ts). */
+  incident_key: string | null;
+  incident_type: string | null;
+  incident_message: string | null;
+  incident_since: string | null;
 }
 
 /** The run lifecycle. `awaiting-approval` is RESERVED but no longer produced (issue #460 moved dispatch
@@ -530,5 +538,9 @@ export function buildDeliveryGraphRunRow(input: {
     created_at: input.createdAt ?? at,
     updated_at: at,
     acknowledged_at: null,
+    incident_key: null,
+    incident_type: null,
+    incident_message: null,
+    incident_since: null,
   };
 }
