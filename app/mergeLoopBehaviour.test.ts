@@ -610,6 +610,25 @@ test("a stalled 'waiting' with clear threads and zero checks never asserts the r
   assertStringIncludes(q, "may never have run", "the escalation must allow that the required checks never ran");
 });
 
+test("a stalled 'waiting' with unresolved threads reports their count and asks to resolve them (#930 review)", async () => {
+  // Absent required checks can yield `waiting` before the thread gate runs; the verified unresolved
+  // threads must be surfaced, since resolving a conflict or approving does not clear them.
+  const engine = await boot({
+    vars: { mergeStallMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: 2, pendingChecks: 0 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  const q = String(escalation(engine).question ?? "");
+  assertStringIncludes(q, "2 unresolved review thread(s)", "the verified thread count must be reported");
+  assertStringIncludes(q, "Resolve those conversations", "the operator must be asked to resolve the threads");
+  assertStringIncludes(q, "may never have run", "the check state stays unverified");
+  assert(!q.includes("all checks green"), "never claim green checks");
+});
+
 test("a stall escalation after a FAILED GitHub read says the state could not be read — never a confirmed conflict (#930 review)", async () => {
   // The stall probe's catch maps a failed read to `waiting`, reviewThreads -1, zero checks — the
   // exact payload the pre-fix wording read as a confirmed conflict. The escalation must report an
