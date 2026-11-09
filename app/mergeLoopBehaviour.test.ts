@@ -498,7 +498,9 @@ test("the 'waiting' re-poll is bounded — exhausting mergeStallMax escalates to
   const engine = await boot({
     vars: { mergeStallMax: 0 },
     responses: {
-      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "" },
+      // The probe always emits the full tri-state (a failed read reports reviewThreads: -1) — the
+      // escalation wording reads it, so the test payload must carry it.
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1, pendingChecks: 0 },
     },
   });
   await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
@@ -547,6 +549,70 @@ test("a stall escalation on a DIRTY PR never claims 'all checks green' — it na
   // PROBED-and-clear thread count; a DIRTY PR (whose `conflict` verdict is only reachable via the
   // rebase arm) that still lands here keeps the conservative wording instead of the false claim.
   const engine = await boot({
+    vars: { mergeStallMax: 0, rebaseMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "", reviewThreads: -1, pendingChecks: 0 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-stall-probe", "merge-esc-conflict");
+  const q = String(escalation(engine).question ?? "");
+  assert(!q.includes("all checks green"), "absent/unprobed checks must never read as 'all checks green'");
+  assert(!q.includes("required review approval"), "a conflict must never read as a review-approval wait");
+  assertStringIncludes(q, "merge conflict", "the conflict escalation must name the conflict");
+  // PR #930 review: the verdict alone does not establish that the required checks are ABSENT —
+  // a conflicting head can carry successful required checks, and a failed read reports the same
+  // zeros — so the escalation may only note that GitHub MAY not have run them, never assert it.
+  assert(!q.includes("absent, NOT green"), "the verdict alone never establishes that the required checks are absent");
+  assertStringIncludes(q, "may not have run", "the escalation notes the check-skip caveat without asserting it");
+});
+
+test("a conflict-verdict escalation with GREEN required checks still names only the conflict (#930 review)", async () => {
+  // The mirror case the review called out: `conflict` with every required check successful. The
+  // escalation must not claim the checks are absent or not-green — only the conflict is known.
+  const engine = await boot({
+    vars: { mergeStallMax: 0, rebaseMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "", reviewThreads: 0, pendingChecks: 0 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  const q = String(escalation(engine).question ?? "");
+  assertStringIncludes(q, "merge conflict", "the conflict escalation must name the conflict");
+  assert(!q.includes("NOT green"), "green required checks must never be described as not-green");
+  assert(!q.includes("all checks green"), "the escalation asserts the conflict, not the check state either way");
+});
+
+test("a stalled 'waiting' with clear threads and zero checks never asserts the required checks ran (#930 review)", async () => {
+  // `waiting` + reviewThreads>0 + failing=0/pending=0 is ambiguous: the required checks may be
+  // absent (never ran on a conflicting head) rather than green. The escalation must float both
+  // candidates — a conflict whose checks never ran, or a review-approval requirement — and send
+  // the human to the PR, never assert "no failing or pending checks" as if the rollup were green.
+  const engine = await boot({
+    vars: { mergeStallMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: 2, pendingChecks: 0 },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-stall-probe", "merge-esc-conflict");
+  const q = String(escalation(engine).question ?? "");
+  assert(!q.includes("NO failing or pending checks"), "zero counts do not establish that the required checks ran");
+  assert(!q.includes("required review approval is outstanding"), "an ambiguous read must never assert a verified review-approval blocker");
+  assertStringIncludes(q, "may never have run", "the escalation must allow that the required checks never ran");
+});
+
+test("a stall escalation after a FAILED GitHub read says the state could not be read — never a confirmed conflict (#930 review)", async () => {
+  // The stall probe's catch maps a failed read to `waiting`, reviewThreads -1, zero checks — the
+  // exact payload the pre-fix wording read as a confirmed conflict. The escalation must report an
+  // unreadable state and nothing more specific.
+  const engine = await boot({
     vars: { mergeStallMax: 0 },
     responses: {
       "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1, pendingChecks: 0 },
@@ -556,14 +622,9 @@ test("a stall escalation on a DIRTY PR never claims 'all checks green' — it na
   await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   const q = String(escalation(engine).question ?? "");
-  assert(!q.includes("all checks green"), "absent/unprobed checks must never read as 'all checks green'");
-  assert(!q.includes("required review approval"), "an unprobed read must never assert a review-approval blocker");
-  assertStringIncludes(q, "ABSENT", "the escalation must name the absent required checks");
-  assertStringIncludes(
-    q,
-    "GitHub reports the branch as CONFLICTING",
-    "a DIRTY-head escalation must name the conflict, not read as an approval wait",
-  );
+  assertStringIncludes(q, "could not be fully read", "a failed read must be named as such");
+  assert(!q.includes("CONFLICTING"), "a failed read must never assert a confirmed conflict");
+  assert(!q.includes("required review approval"), "a failed read must never assert a review-approval blocker");
 });
 
 test("answering 'retry' on a DIRTY PR's escalation re-arms the poller, which re-derives conflict and rebases (#929)", async () => {
@@ -721,7 +782,7 @@ test("the 'never settled' question is reserved for a genuinely unreadable/unsett
   const engine = await boot({
     vars: { mergeStallMax: 0 },
     responses: {
-      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1 },
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1, pendingChecks: 0 },
     },
   });
   await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
@@ -729,8 +790,8 @@ test("the 'never settled' question is reserved for a genuinely unreadable/unsett
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   assertStringIncludes(
     String(escalation(engine).question ?? ""),
-    "never settled",
-    "a genuinely unsettled/unreadable mergeability keeps the original message",
+    "could not be fully read",
+    "a genuinely unsettled/unreadable mergeability names the unreadable state",
   );
 });
 
@@ -955,6 +1016,31 @@ test("a conflict runs the bounded rebase agent and a rebased result re-arms the 
     .hasVariable("rebaseRound", 1); // the rebase counter advanced across the sub-process boundary
 });
 
+test("a rebase agent cannot spoof the escalation verdict by returning mergeState (#930 self-review)", async () => {
+  // The agent's result keys are hoisted into process scope, and `mergeState` now selects the
+  // shared merge-esc-conflict wording. A rebase agent that returns a bogus `mergeState:"ready"`
+  // must NOT be able to rewrite a "could not resolve the conflict" escalation into a
+  // green-checks/approval message: the trusted `end_reb_blocked` end event re-stamps the verdict.
+  const engine = await boot({ responses: { "senior:rebase": { status: "blocked", mergeState: "ready" } } });
+  await driveToRebase(engine);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-attempt");
+  assertStringIncludes(String(escalation(engine).question ?? ""), "rebase agent could not resolve", "the question must name the conflict trigger, not the spoofed verdict");
+  assertThatInstance(engine, byProcessId("merge-loop")).hasVariable("mergeState", "conflict");
+});
+
+test("a fix-ci agent cannot spoof the escalation verdict by returning mergeState (#930 self-review)", async () => {
+  // Same guard on the CI-fix side: a fix-ci agent that exhausts its budget after returning a bogus
+  // `mergeState` must still escalate with the CI-fix wording — `end_ci_esc` re-stamps the verdict.
+  const engine = await boot({ responses: { "senior:fix-ci": { status: "blocked", pushed: true, mergeState: "ready" } } });
+  await driveToCiFix(engine);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-attempt");
+  const q = String(escalation(engine).question ?? "");
+  assertStringIncludes(q, "could not make the required checks green", "the question must name the CI-fix failure, not the spoofed verdict");
+  assertThatInstance(engine, byProcessId("merge-loop")).hasVariable("mergeState", "blocked");
+});
+
 test("a rebase that cannot resolve escalates with a conflict question", async () => {
   const engine = await boot({ responses: { "senior:rebase": { status: "blocked" } } });
   await driveToRebase(engine);
@@ -1051,6 +1137,10 @@ test("the rebase agent SLA interrupts the sub-process and escalates as not-merge
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-conflict");
   // #879 regression: the trusted rebase SLA arm must deliver its job-type marker to the shared sink.
   assertEquals(escalation(engine).agentSlaJobType, "senior:rebase", "the rebase SLA arm must reach the recorder with its job-type marker");
+  // The SLA escalation must never surface the stale `conflict` verdict's wording — the recorder's
+  // SLA builder (keyed on the trusted marker) owns the question, not the verdict FEEL.
+  const q = String(escalation(engine).question ?? "");
+  assert(!q.includes("CONFLICTING") && !q.includes("merge conflict with the base branch"), "an SLA escalation must not read as a verdict escalation");
 });
 
 test("a non-SLA escalation carrying a spoofed agentSlaJobType is scrubbed before the recorder (#879 fail-closed)", async () => {

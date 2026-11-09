@@ -115,6 +115,9 @@
           <zeebe:output source="=null" target="status" />
           <zeebe:output source="=null" target="ciBlockedReconciled" />
           <zeebe:output source="=null" target="agentSlaJobType" />
+          <zeebe:output source="=null" target="reviewThreads" />
+          <zeebe:output source="=null" target="failingChecks" />
+          <zeebe:output source="=null" target="pendingChecks" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_deps</bpmn:incoming>
@@ -263,7 +266,7 @@
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
-          <zeebe:input source="=if mergeState = &#34;draft&#34; then &#34;This PR is in draft and can&#39;t be merged. Mark it ready (gh pr ready), then reply to retry.&#34; else if mergeState = &#34;conflict&#34; then &#34;This PR has a merge conflict with the base branch (GitHub reports the branch as CONFLICTING / mergeable_state=dirty), and GitHub skips the pull_request checks on a conflicting head — so the declared-required checks are absent, NOT green. The automated rebase budget is exhausted (or auto-rebase is disabled). Resolve the conflict on the branch (git rebase / merge the base branch and push) — the rebase re-triggers CI — then reply to retry.&#34; else if mergeState = &#34;waiting&#34; and reviewThreads = 0 and failingChecks = 0 and pendingChecks = 0 then &#34;This PR is merge-blocked with all checks green (none failing, none pending) and every review thread resolved. GitHub still reports BLOCKED, which means a required review approval (or code-owner review) is outstanding — nothing the automated loop can produce. Approve the PR (or adjust the branch-protection review requirement), then reply to retry.&#34; else if mergeState = &#34;waiting&#34; and reviewThreads != 0 and failingChecks = 0 and pendingChecks = 0 then &#34;This PR is merge-blocked and GitHub reports NO failing or pending checks — but the declared-required checks are ABSENT from the head (GitHub skips pull_request workflows on a conflicting branch, so absence here means the checks never ran, NOT that they are green). GitHub reports the branch as CONFLICTING (mergeable_state=dirty). Resolve the conflict on the branch (git rebase / merge the base branch and push) — the rebase re-triggers CI — then reply to retry.&#34; else if mergeState = &#34;waiting&#34; then &#34;GitHub never settled this PR&#39;s mergeability (still computing or checks still pending after repeated re-polls, or the state could not be read). Check the PR on GitHub — resolve any conflict or failing required check if present — then reply to retry.&#34; else &#34;This PR is not mergeable (state: &#34; + mergeState + &#34;). Resolve the conflict or failing required check on the branch, then reply to retry.&#34;" target="question" />
+          <zeebe:input source="=if agentSlaJobType != null then &#34;An automated merge-stage agent exceeded its time budget (SLA) before this PR could be merged. Check its progress or intervene, then reply to retry.&#34; else if mergeState = &#34;draft&#34; then &#34;This PR is in draft and can&#39;t be merged. Mark it ready (gh pr ready), then reply to retry.&#34; else if mergeState = &#34;conflict&#34; then &#34;This PR has a merge conflict with the base branch (GitHub reports the branch as CONFLICTING / mergeable_state=dirty). GitHub may not have run the pull_request checks on the conflicting head, so their state is unknown from this signal — the conflict alone is what is established. The automated rebase budget is exhausted (or auto-rebase is disabled). Resolve the conflict on the branch (git rebase / merge the base branch and push) — the rebase re-triggers CI — then reply to retry.&#34; else if mergeState = &#34;blocked&#34; then &#34;The automated CI-fix agent exhausted its budget without making the required checks green. Fix the failing checks on the branch (or reply with guidance), then reply to retry.&#34; else if mergeState = &#34;waiting&#34; and reviewThreads = 0 and failingChecks = 0 and pendingChecks = 0 then &#34;This PR is merge-blocked with all checks green (none failing, none pending) and every review thread resolved. GitHub still reports BLOCKED, which means a required review approval (or code-owner review) is outstanding — nothing the automated loop can produce. Approve the PR (or adjust the branch-protection review requirement), then reply to retry.&#34; else if mergeState = &#34;waiting&#34; and reviewThreads != null and reviewThreads &#62; 0 and failingChecks = 0 and pendingChecks = 0 then &#34;This PR is merge-blocked: no failing or pending checks were reported, but the declared-required checks may never have run on this head (GitHub skips pull_request workflows on a conflicting branch), so their state is not established — the block may be a merge conflict whose checks never ran, or a required review approval. Check the PR on GitHub — resolve any conflict (a rebase re-triggers CI) or approve — then reply to retry.&#34; else if mergeState = &#34;waiting&#34; and (reviewThreads = null or reviewThreads &#60; 0) and failingChecks = 0 and pendingChecks = 0 then &#34;This PR is merge-blocked and its GitHub state could not be fully read (the review-thread probe was unreadable or failed), so neither a conflict nor the check/approval state is established. Check the PR on GitHub — resolve any conflict or failing required check if present — then reply to retry.&#34; else if mergeState = &#34;waiting&#34; then &#34;GitHub never settled this PR&#39;s mergeability (still computing or checks still pending after repeated re-polls, or the state could not be read). Check the PR on GitHub — resolve any conflict or failing required check if present — then reply to retry.&#34; else &#34;This PR is not mergeable (state: &#34; + mergeState + &#34;). Resolve the conflict or failing required check on the branch, then reply to retry.&#34;" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_mDraft</bpmn:incoming>
@@ -528,6 +531,7 @@
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;escalate&#34;" target="ciOutcome" />
             <zeebe:output source="=null" target="agentSlaJobType" />
+            <zeebe:output source="=&#34;blocked&#34;" target="mergeState" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_cib_esc</bpmn:incoming>
@@ -684,6 +688,7 @@
           <zeebe:ioMapping>
             <zeebe:output source="=&#34;escalate-attempt&#34;" target="rebaseOutcome" />
             <zeebe:output source="=null" target="agentSlaJobType" />
+            <zeebe:output source="=&#34;conflict&#34;" target="mergeState" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_blocked</bpmn:incoming>
