@@ -1,3 +1,9 @@
+## [0.206.4](https://github.com/nanobpm/nano-workforce/compare/v0.206.3...v0.206.4) (2026-11-09)
+
+### Bug Fixes
+
+* **delivery:** accept affirmative-completion aliases as producer terminal-success statuses ([#934](https://github.com/nanobpm/nano-workforce/issues/934)) ([b8c5e4e](https://github.com/nanobpm/nano-workforce/commit/b8c5e4e5cb59ce42bb2d6573e107d1865393fa27)), closes [731/#760](https://github.com/731/nano-workforce/issues/760) [nano-bpm#1337](https://github.com/nanobpm/nano-bpm/issues/1337) [#1464](https://github.com/nanobpm/nano-workforce/issues/1464) [nano-bpm#1463](https://github.com/nanobpm/nano-bpm/issues/1463) [#1476](https://github.com/nanobpm/nano-workforce/issues/1476) [#731](https://github.com/nanobpm/nano-workforce/issues/731) [#760](https://github.com/nanobpm/nano-workforce/issues/760) [#761](https://github.com/nanobpm/nano-workforce/issues/761)
+
 ## [0.206.3](https://github.com/nanobpm/nano-workforce/compare/v0.206.2...v0.206.3) (2026-11-09)
 
 ### Bug Fixes
