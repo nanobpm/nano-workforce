@@ -719,6 +719,49 @@ const MERGE_CASES: MergeCase[] = [
     protocol: protocolWith({ requiredChecks: reqChecks("build"), waitForChecks: true }),
     want: "waiting",
   },
+  // ── DIRTY outranks an ABSENT/PENDING required check (issue #929) ─────────────────────────────
+  // GitHub does not run `pull_request` workflows on a PR with merge conflicts, so a DIRTY head
+  // reports its declared-required checks as ABSENT (or skipped). Mapping that absence to `waiting`
+  // deadlocks the merge loop: the checks can never arrive until the conflict is resolved, and the
+  // conflict is never routed to the rebase arm because the checks read as "not yet run". The
+  // conflict is ground truth whose remedy (a rebase) is also exactly what re-triggers CI, so DIRTY
+  // outranks absence — but NOT a red declared-required check, which still routes to fix-ci.
+  {
+    name: "DIRTY + declared-required check ABSENT -> conflict, not waiting (the #929 deadlock)",
+    state: { mergeStateStatus: "DIRTY", rollup: [{ name: "summary", conclusion: "SKIPPED" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("typecheck + test (Node)", "whole-repo invariants") }),
+    want: "conflict",
+  },
+  {
+    name: "DIRTY + no check runs at all -> conflict (absence is a consequence of the conflict)",
+    state: { mergeStateStatus: "DIRTY" },
+    protocol: protocolWith({ requiredChecks: reqChecks("build"), waitForChecks: true }),
+    want: "conflict",
+  },
+  {
+    name: "DIRTY + declared-required check PENDING -> conflict (rebase, then CI re-runs on the new head)",
+    state: { mergeStateStatus: "DIRTY", rollup: [{ name: "build", conclusion: "QUEUED" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("build") }),
+    want: "conflict",
+  },
+  {
+    name: "DIRTY + declared-required check present-but-unconcluded -> conflict",
+    state: { mergeStateStatus: "DIRTY", rollup: [{ name: "build", conclusion: "IN_PROGRESS" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("build") }),
+    want: "conflict",
+  },
+  {
+    name: "DIRTY + RED declared-required check -> blocked (a red check still outranks the conflict)",
+    state: { mergeStateStatus: "DIRTY", rollup: [{ name: "build", conclusion: "FAILURE" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("build") }),
+    want: "blocked",
+  },
+  {
+    name: "DIRTY + green declared-required checks -> conflict (unchanged pre-#929 behaviour)",
+    state: { mergeStateStatus: "DIRTY", rollup: [{ name: "build", conclusion: "SUCCESS" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("build") }),
+    want: "conflict",
+  },
 ];
 
 for (const c of MERGE_CASES) {

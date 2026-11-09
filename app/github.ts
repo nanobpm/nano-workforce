@@ -1621,7 +1621,6 @@ export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Merg
   // settled-thread routing below.
   const gate = requiredChecksVerdict(s, protocol);
   if (gate === "blocked") return "blocked";
-  if (gate === "waiting") return "waiting";
   // A GitHub-identified merge conflict (`mergeStateStatus: "DIRTY"`) is ground truth whose remedy is
   // a rebase, dispatched off the `conflict` verdict. It outranks the thread gate below (PR #922
   // review, thread 1): a FAILED thread probe (`THREAD_PROBE_FAILED`) returning `waiting` here would
@@ -1630,7 +1629,18 @@ export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Merg
   // round that cannot clear it. Surface the conflict first; the threads are re-triaged once the
   // rebased head is re-read. (A red declared-required check still outranks even this — see the
   // backstop above — so a conflicting PR with failing CI routes to fix-ci, not a doomed rebase.)
+  //
+  // DIRTY also outranks a `waiting` required-checks verdict (issue #929): GitHub does NOT run
+  // `pull_request` workflows on a PR with merge conflicts, so a conflicting head reports its
+  // declared-required checks as ABSENT (or skipped) — and `requiredChecksVerdict` maps absence to
+  // `waiting`. Evaluated in the old order that deadlocked the merge loop: the checks can never
+  // arrive until the conflict is resolved, and the conflict was never routed to the rebase arm
+  // because the absent checks read as "not yet run". The absence is a CONSEQUENCE of the conflict,
+  // and the conflict's remedy (a rebase) is exactly what re-triggers CI on the new head — so the
+  // conflict owns the verdict. Only a RED declared-required check (`blocked`, handled above) may
+  // still outrank DIRTY.
   if (s.mergeStateStatus === "DIRTY") return "conflict";
+  if (gate === "waiting") return "waiting";
   // The merge-stage thread gate (issue #921, PR #922 review): a read that opted into the
   // review-threads probe and found ≥1 open thread (`unresolvedThreads > 0`) is NEVER merge-ready,
   // whatever `mergeStateStatus` says. A repo without branch-protection
