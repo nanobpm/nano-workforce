@@ -773,3 +773,15 @@ test("the canonical `agent → converge-merge → wait[pr merged]` graph DISPATC
   assert(r.ok, `expected the canonical fact-bound wait[pr] graph to launch, got ${JSON.stringify(r)}`);
   assertEquals(r.handle.processInstanceKey, "555");
 });
+test("PR #934 producer contract prompt: no accepted status is ever cited as a forbidden example", () => {
+  // Class: the rejection sentence named `success` as invalid after it became an accepted alias, so every
+  // agent got contradictory instructions. Every accepted status must be absent from that sentence.
+  const rendered = renderProducerContract([]);
+  const rejectLine = rendered.split("\n").find((l) => l.includes("including a free-form"));
+  assert(rejectLine !== undefined, `the fail-closed warning carries rejection examples, got: ${rendered}`);
+  const examples = rejectLine.split("including a free-form")[1] ?? "";
+  for (const s of AGENT_TERMINAL_SUCCESS_STATUSES) {
+    assert(!examples.includes(`\`${s}\``), `accepted status "${s}" must not be cited as a rejected example: ${rejectLine}`);
+  }
+  assert(examples.includes("`in_progress`"), `a genuine out-of-vocabulary example remains: ${rejectLine}`);
+});
