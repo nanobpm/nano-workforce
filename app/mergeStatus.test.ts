@@ -53,16 +53,21 @@ function memData(stores: Stores) {
   } as any;
 }
 
-/** A fake engine whose `searchVariables` serves the given per-instance variables. */
+/** A fake engine whose `searchVariables` serves the given per-instance variables. A name-less,
+ *  key-less query (`{}` — the batched /status read, issue #936) returns EVERY variable across all
+ *  instances, each row carrying its owning `processInstanceKey`, exactly as the real engine does. */
 function fakeEngine(varsByInstance: Record<string, Record<string, unknown>>) {
   return {
     searchVariables: (q: { processInstanceKey?: string; name?: string }) => {
-      const vars = varsByInstance[String(q.processInstanceKey)] ?? {};
-      return Promise.resolve(
-        Object.entries(vars)
-          .filter(([name]) => q.name == null || name === q.name)
-          .map(([name, v]) => ({ name, value: JSON.stringify(v) })),
-      );
+      const rows: { name: string; value: string; processInstanceKey: string }[] = [];
+      for (const [piKey, vars] of Object.entries(varsByInstance)) {
+        if (q.processInstanceKey != null && piKey !== String(q.processInstanceKey)) continue;
+        for (const [name, v] of Object.entries(vars)) {
+          if (q.name != null && name !== q.name) continue;
+          rows.push({ name, value: JSON.stringify(v), processInstanceKey: piKey });
+        }
+      }
+      return Promise.resolve(rows);
     },
   } as any;
 }

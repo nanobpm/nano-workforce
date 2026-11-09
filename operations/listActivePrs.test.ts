@@ -189,3 +189,115 @@ test("a delivery run with no opt-in row flag surfaces autoResolveEscalations fal
   assertEquals(res.body.deliveries[0].openEscalation, null);
   assertEquals(res.body.deliveries[0].processKey, null, "a launch-in-flight run has no stamped process_key yet");
 });
+
+// ── Issue #936: /status latency + concurrency regression guard ────────────────────────────────
+// The defect: `activePrs` fanned the merge-policy read out per row — 3 `searchVariables` engine
+// round-trips PER active PR — so 4 rows cost 12 sequential-ish upstream calls (~13 s) and K
+// concurrent callers stacked (~50 s → the console proxy 502'd). The fix batches the engine read:
+// ONE name-less `searchVariables({})` per /status serve, bucketed in memory. These tests pin the
+// contract against a fake engine with a REALISTIC per-call delay: the engine-call count must stay
+// at one per serve regardless of row count, and K concurrent serves must overlap (wall time ≈ one
+// upstream round-trip, not K ×).
+
+/** A fake engine that serves the batched variable read after a realistic upstream delay, counting
+ *  calls and tracking peak in-flight concurrency. */
+function slowEngine(varsByInstance: Record<string, Record<string, unknown>>, delayMs: number) {
+  let calls = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  return {
+    calls: () => calls,
+    maxInFlight: () => maxInFlight,
+    searchVariables: async (q: { processInstanceKey?: string; name?: string }) => {
+      calls += 1;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      inFlight -= 1;
+      const rows: { name: string; value: string; processInstanceKey: string }[] = [];
+      for (const [piKey, vars] of Object.entries(varsByInstance)) {
+        if (q.processInstanceKey != null && piKey !== String(q.processInstanceKey)) continue;
+        for (const [name, v] of Object.entries(vars)) {
+          if (q.name != null && name !== q.name) continue;
+          rows.push({ name, value: JSON.stringify(v), processInstanceKey: piKey });
+        }
+      }
+      return rows;
+    },
+  } as any;
+}
+
+function prRow936(n: number) {
+  return {
+    pr_key: `o/r#${n}`,
+    repo: "o/r",
+    number: n,
+    url: `https://github.com/o/r/pull/${n}`,
+    title: `PR ${n}`,
+    status: "converging",
+    current_round: 1,
+    process_key: `PI-${n}`,
+    updated_at: `2026-01-${String(n).padStart(2, "0")}`,
+  };
+}
+
+test("issue #936: N active rows cost ONE engine variable read, not 3N (the 13 s fan-out)", async () => {
+  const N = 8;
+  const rows = Array.from({ length: N }, (_, i) => prRow936(i + 1));
+  const vars: Record<string, Record<string, unknown>> = {};
+  for (let i = 1; i <= N; i++) vars[`PI-${i}`] = { autoMerge: true, humanApproval: false };
+  const engine = slowEngine(vars, 25);
+  const app = { ...memApp(rows), engine } as AppApi;
+  const started = Date.now();
+  const res = (await handler(input(), app)) as any;
+  const elapsed = Date.now() - started;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.count, N);
+  assertEquals(
+    engine.calls(),
+    1,
+    "the merge-policy projection batches to ONE engine read per serve — a per-row fan-out would show 3N calls",
+  );
+  assert(
+    elapsed < 25 * N,
+    `one batched ~25 ms upstream read serves ${N} rows (took ${elapsed} ms); the per-row fan-out this regresses to would take ≥ ${25 * N} ms`,
+  );
+  // The batch still projects the per-row policy correctly.
+  for (const pr of res.body.prs) {
+    assertEquals(pr.merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+  }
+});
+
+test("issue #936: K concurrent /status callers overlap instead of queueing behind each other", async () => {
+  const K = 4;
+  const rows = [prRow936(1), prRow936(2)];
+  const vars = {
+    "PI-1": { autoMerge: true, humanApproval: false },
+    "PI-2": { autoMerge: false, convergeOnly: true },
+  };
+  // A realistic slow upstream: each engine read takes 100 ms. Serialized callers would stack to
+  // K × 100 ms (the measured 35–50 s at production scale); overlapped callers finish in ~100 ms.
+  const engine = slowEngine(vars, 100);
+  const app = { ...memApp(rows), engine } as AppApi;
+  const started = Date.now();
+  const results = await Promise.all(Array.from({ length: K }, () => handler(input(), app)));
+  const elapsed = Date.now() - started;
+  for (const res of results) {
+    assertEquals((res as any).status, 200);
+    assertEquals((res as any).body.count, 2);
+  }
+  assertEquals(engine.calls(), K, "each serve issues its own single batched read (no cross-request cache serving stale policy)");
+  assertEquals(
+    engine.maxInFlight(),
+    K,
+    "all K engine reads were in flight at once — the serves overlap rather than serialise",
+  );
+  assert(
+    elapsed < K * 100,
+    `${K} concurrent serves over a 100 ms upstream finished in ${elapsed} ms (< ${K * 100} ms) — no caller queued behind another`,
+  );
+  // Mixed intents still project per row under the batched read.
+  const body = (results[0] as any).body;
+  assertEquals(body.prs.find((p: any) => p.prKey === "o/r#1").merge.requested, true);
+  assertEquals(body.prs.find((p: any) => p.prKey === "o/r#2").merge.requested, false);
+});

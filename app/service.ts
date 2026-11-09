@@ -1166,15 +1166,22 @@ export async function activePrs(
     openEscByPr.set(t.subject_key, toOpenEscalation(t));
   }
   // Merge intent (issue #916): read the loop's `autoMerge` / `convergeOnly` / `humanApproval`
-  // variables per PR so the effective merge policy is visible without opening the engine. One
-  // best-effort read per PR; a failure (engine unreachable, instance gone) degrades to the
-  // historical default (merge requested) rather than failing the whole status read.
+  // variables per PR so the effective merge policy is visible without opening the engine.
+  //
+  // ONE batched engine read per /status call (issue #936) — NEVER a per-row fan-out. The pre-#936
+  // shape issued 3 `searchVariables` round-trips PER active PR (12 calls at 4 rows ≈ 13 s, and
+  // concurrent callers stacked to ~50 s until the console proxy 502'd). A name-less
+  // `searchVariables({})` returns every variable in one eventually-consistent read (supported by
+  // both the nano-sdk gateway and the WASM testkit engine — the testkit applies the
+  // processInstanceKey/scopeKey/name selectors client-side), so the hot path pays ONE upstream
+  // call no matter how many rows are active, then buckets the rows in memory. Best-effort: a
+  // failure (engine unreachable) degrades every PR to the historical default (merge requested)
+  // rather than failing the whole status read — the same degradation the per-row reads applied.
   const mergeByPr = new Map<string, MergePolicy>();
-  await Promise.all(
-    active.map(async (p) => {
-      mergeByPr.set(p.pr_key, await mergePolicyFor(p.process_key ?? null, engine));
-    }),
-  );
+  const varsByInstance = await readMergePolicyVars(engine);
+  for (const p of active) {
+    mergeByPr.set(p.pr_key, mergePolicyFromVars(varsByInstance?.get(p.process_key ?? "")));
+  }
   return active.map((p) => {
     // Issue #931: an ACTIVE engine incident parked on the loop's instance must be VISIBLE — the row
     // kept reading `converging` for hours while nothing ran. Overlay the derived `incident` status
@@ -1220,42 +1227,62 @@ function mergePolicyFrom(requested: boolean, humanApproval: boolean): MergePolic
   return { requested, enabled, effective, blockedBy };
 }
 
-/** Read one boolean process variable off a live instance; undefined when absent/unreadable. */
-async function readBoolVar(
-  engine: Pick<EngineClient, "searchVariables">,
-  processKey: string,
-  name: string,
-): Promise<boolean | undefined> {
-  const [row] = await engine.searchVariables({ processInstanceKey: processKey, name });
-  if (!row) return undefined;
+/** The merge-policy variable triple for one instance: the values of `autoMerge`, `convergeOnly`,
+ *  and `humanApproval`, each `undefined` when the instance does not carry it (or it is not a
+ *  boolean). */
+type MergePolicyVars = {
+  autoMerge: boolean | undefined;
+  convergeOnly: boolean | undefined;
+  humanApproval: boolean | undefined;
+};
+
+function emptyMergePolicyVars(): MergePolicyVars {
+  return { autoMerge: undefined, convergeOnly: undefined, humanApproval: undefined };
+}
+
+function parseBoolValue(value: string): boolean | undefined {
   try {
-    const v: unknown = JSON.parse(row.value);
+    const v: unknown = JSON.parse(value);
     return typeof v === "boolean" ? v : undefined;
   } catch {
     return undefined;
   }
 }
 
-/** Derive a PR's effective merge policy from its loop's process variables (issue #916). The
- * canonical positive `autoMerge` wins; the legacy inverted `convergeOnly` is the fallback for
- * in-flight loops seeded before `autoMerge` existed. Best-effort: any read failure degrades to the
- * historical default (merge requested) rather than failing the status read. */
-async function mergePolicyFor(
-  processKey: string | null,
+/** ONE batched read of every process variable (issue #936), bucketed by owning instance and
+ *  reduced to the merge-policy triple per instance. Returns `undefined` when no engine was handed
+ *  in or the read fails — the caller degrades every row to the historical default, exactly as a
+ *  failed per-row read did before. Only the three merge-policy names are extracted; every other
+ *  variable in the engine-wide read is discarded. */
+async function readMergePolicyVars(
   engine: Pick<EngineClient, "searchVariables"> | undefined,
-): Promise<MergePolicy> {
-  if (processKey == null || !engine) return mergePolicyDefault();
+): Promise<Map<string, MergePolicyVars> | undefined> {
+  if (!engine) return undefined;
   try {
-    const [autoMerge, convergeOnly, humanApproval] = await Promise.all([
-      readBoolVar(engine, processKey, "autoMerge"),
-      readBoolVar(engine, processKey, "convergeOnly"),
-      readBoolVar(engine, processKey, "humanApproval"),
-    ]);
-    const requested = autoMerge ?? (convergeOnly === undefined ? true : !convergeOnly);
-    return mergePolicyFrom(requested, humanApproval === true);
+    const rows = await engine.searchVariables({});
+    const byInstance = new Map<string, MergePolicyVars>();
+    for (const row of rows) {
+      if (row.name === "autoMerge" || row.name === "convergeOnly" || row.name === "humanApproval") {
+        const vars = byInstance.get(row.processInstanceKey) ?? emptyMergePolicyVars();
+        vars[row.name] = parseBoolValue(row.value);
+        byInstance.set(row.processInstanceKey, vars);
+      }
+    }
+    return byInstance;
   } catch {
-    return mergePolicyDefault();
+    return undefined;
   }
+}
+
+/** Derive a PR's effective merge policy from an already-read variable triple (issue #916). The
+ * canonical positive `autoMerge` wins; the legacy inverted `convergeOnly` is the fallback for
+ * in-flight loops seeded before `autoMerge` existed; an instance carrying neither (or absent from
+ * the batch — mid-handoff row, instance gone) degrades to the historical default (merge
+ * requested) rather than failing the status read. */
+function mergePolicyFromVars(vars: MergePolicyVars | undefined): MergePolicy {
+  if (!vars) return mergePolicyDefault();
+  const requested = vars.autoMerge ?? (vars.convergeOnly === undefined ? true : !vars.convergeOnly);
+  return mergePolicyFrom(requested, vars.humanApproval === true);
 }
 
 /** A delivery-graph run currently in flight, as reported by the status endpoint (issue #889 §1 —
