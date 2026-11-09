@@ -87,8 +87,12 @@ export const FRAMEWORK_TOOL_PREFIX = "urban_debug_";
  * regression guard, not the reduction itself: the reduction an agent actually experiences comes from
  * importing {@link CURATED_MCP_TOOLS} rather than `["*"]`, and the transport-level shrink of the
  * framework tool family is tracked upstream (nano-ide#488).
+ *
+ * RAISE PROVENANCE — 60 → 61 (#931): the read-only `listIncidents` door (sibling of
+ * `listEscalations`) stays on the surface per the `x-mcp` convention that read/orient doors are
+ * exposed; its operator-only remedy `retryIncident` is excluded. Deliberate, documented growth.
  */
-export const MCP_TOOL_COUNT_BUDGET = 60;
+export const MCP_TOOL_COUNT_BUDGET = 61;
 
 /**
  * Hard CEILING on the serialized byte size of the full `tools/list` payload (the schema bytes a
@@ -138,8 +142,13 @@ export const MCP_TOOL_COUNT_BUDGET = 60;
  * intended description text (a correctness fix, not new surface). Measured 90,420 bytes serialized
  * (over the old ceiling's 920-byte headroom). Deliberate, documented growth of restored description
  * text — not schema fat.
+ *
+ * RAISE PROVENANCE — 91_000 → 92_000 (#931): the read-only `listIncidents` tool (engine-incident
+ * liveness sibling of `listEscalations`) plus the `incident` field on the status row schemas.
+ * Measured 91,069 bytes serialized (over the old ceiling's headroom). Deliberate, documented growth
+ * of a real new read surface — not schema fat.
  */
-export const MCP_SURFACE_BYTES_BUDGET = 91_000;
+export const MCP_SURFACE_BYTES_BUDGET = 92_000;
 
 /**
  * The eagerly-loaded curated subset MUST stay materially smaller than the full surface — otherwise it
