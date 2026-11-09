@@ -15,7 +15,7 @@ import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { missingExternalMarkerAgentTaskTypes } from "./agentic/vocab/job-types.ts";
-import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText, resumeValidVar } from "./deliveryGraphCompiler.ts";
+import { AGENT_TERMINAL_SUCCESS_STATUSES, compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText, resumeValidVar } from "./deliveryGraphCompiler.ts";
 import { isDeliveryEscalationTwin } from "./deliveryHuman.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
@@ -2131,12 +2131,59 @@ test("#731 producer status gate: an agent node inserts a post-completion contrac
   assert(g0, "the contract-met success flow exists");
   assert(g0![1].includes(`=${el}_contractMet = true`), "the success flow reads the node-unique contract decision");
   const cond = contractMetExpr(r.bpmn, el);
-  assert(cond.includes('list contains(["done", "opened", "skipped"], status)'), "the success flow gates on the terminal-success status allowlist");
+  // The gate's FEEL allowlist is DERIVED from the single source of truth (AGENT_TERMINAL_SUCCESS_STATUSES)
+  // — assert against the derived rendering, not a hand-copied literal, so this test can never drift from
+  // the vocabulary it guards (issue #932).
+  const derivedList = `[${AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => `"${s}"`).join(", ")}]`;
+  assert(cond.includes(`list contains(${derivedList}, status)`), `the success flow gates on the derived terminal-success status allowlist, got: ${cond}`);
   assert(cond.includes("not(is defined(status)) or status = null"), "an absent/null status is not itself the failure mode — it still proceeds");
   // The contract escalation's read-only context names the node and its reported status (#731).
   const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
   assert(esc.includes("did not satisfy its producer contract"), "the contract escalation explains WHY it parked");
   assert(esc.includes("Reported status="), "the context surfaces the actual reported status");
+});
+
+test("#932 producer status gate: the affirmative-completion synonyms agents actually report are allowlisted terminal-success statuses, derived from one source", () => {
+  // Issue #932: agents keep self-reporting `status: "completed"` (and other unambiguous success
+  // synonyms) after FULLY delivering — every required emit present — yet the #731 gate accepted only
+  // `done`/`opened`/`skipped`, so a fully-delivered node parked on a human "Continue" escalation as a
+  // contract violation (nano-bpm#1337 → PR #1464 escalation 584376; nano-bpm#1463 → PR #1476
+  // escalation 599960). The fix is the CLASS fix: the affirmative-completion aliases are
+  // terminal-success statuses in the ONE canonical vocabulary (AGENT_TERMINAL_SUCCESS_STATUSES), which
+  // the gate's FEEL AND the #760 prompt contract both derive from. Pin the vocabulary content so a
+  // future "tidy-up" cannot silently re-narrow it (a removed synonym re-introduces the escalation).
+  for (const synonym of ["completed", "success", "succeeded"]) {
+    assert(
+      AGENT_TERMINAL_SUCCESS_STATUSES.includes(synonym),
+      `"${synonym}" — an unambiguous affirmative-completion alias agents report — must be a terminal-success status (issue #932)`,
+    );
+  }
+  // The canonical statuses stay.
+  for (const canonical of ["done", "opened", "skipped"]) {
+    assert(AGENT_TERMINAL_SUCCESS_STATUSES.includes(canonical), `the canonical "${canonical}" status stays allowlisted`);
+  }
+  // And the vocabulary remains CLOSED to ambiguous non-success reports: a failure/give-up/in-progress
+  // self-report must NEVER be normalised to success (the gate stays fail-closed for those).
+  for (const nonSuccess of ["in_progress", "blocked", "failed", "escalated", "needs_input"]) {
+    assert(
+      !AGENT_TERMINAL_SUCCESS_STATUSES.includes(nonSuccess),
+      `"${nonSuccess}" is not a success claim — it must stay OFF the terminal-success allowlist`,
+    );
+  }
+});
+
+test("#932 producer status gate: the compiled contract gate accepts a `completed` report (the observed failure) as terminal-success", async () => {
+  // The compile-level half of the #932 regression guard: the gate's FEEL allowlist (derived from
+  // AGENT_TERMINAL_SUCCESS_STATUSES) must literally contain `completed`, so a fully-delivered node
+  // reporting it passes the producer gate instead of escalating (the e2e half, in
+  // e2e/delivery-graph.e2e.ts, proves the routing end-to-end).
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const cond = contractMetExpr(r.bpmn, el);
+  assert(cond.includes('"completed"'), `the gate's status allowlist contains "completed", got: ${cond}`);
+  // The escalation context line names the SAME derived vocabulary (never a stale hand-typed list).
+  const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  assert(esc.includes("completed"), "the escalation context names the widened vocabulary");
 });
 
 test("#731 required-emit gate: a producer's declared emit consumed as a required data dependency adds a non-null gate clause and a resumable escalation NAMING the fact", async () => {

@@ -254,11 +254,22 @@ export function resumeValidVar(esc: string): string {
  * and escalates AT the node instead of threading an incomplete result into a downstream consumer. An
  * ABSENT/null status passes the gate (a status-less completion — an older fleet worker or a bare test
  * stub — is not itself the failure mode; the required-emit gate still catches a missing data fact).
+ *
+ * The list deliberately includes the unambiguous AFFIRMATIVE-COMPLETION aliases agents actually report
+ * — `completed`/`success`/`succeeded` (issue #932: agents kept reporting `status: "completed"` after
+ * FULLY delivering — every required emit present — and the narrow list parked that good work on a
+ * human "Continue" escalation as a contract violation; nano-bpm#1337 → PR #1464 escalation 584376,
+ * nano-bpm#1463 → PR #1476 escalation 599960). An affirmative alias is normalised to terminal-success
+ * AT THE GATE: it routes onward exactly like `done` — the required-emit clauses still gate it, so a
+ * `completed` WITHOUT its required emits still escalates. Only UNAMBIGUOUS success claims belong here:
+ * a failure / input-required / in-progress report (`failed`, `needs_input`, `in_progress`, …) is NOT a
+ * completion claim and must NEVER be added — the gate stays fail-closed for those.
+ *
  * Sorted for the compiler's byte-identical-output determinism. Exported as the SINGLE SOURCE OF TRUTH:
  * the compiler's contract gate reads it here, and the runner's `renderProducerContract` (#760) derives
  * the agent-facing status vocabulary from the SAME list — changing it changes both the gate and the
  * prompt at once, so the two representations of the producer contract can never drift. */
-export const AGENT_TERMINAL_SUCCESS_STATUSES: readonly string[] = ["done", "opened", "skipped"];
+export const AGENT_TERMINAL_SUCCESS_STATUSES: readonly string[] = ["completed", "done", "opened", "skipped", "succeeded", "success"];
 
 /** A never-reached exhaustiveness guard: `compileNode`'s `switch` covers every allowlisted kind, so
  * the closed union narrows to `never` here. If a future kind is added to the vocabulary without a

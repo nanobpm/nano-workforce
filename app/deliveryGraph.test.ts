@@ -538,7 +538,7 @@ test("invalid-fact-name: an AGENT emit named `status` is reserved — the produc
   // Regression guard (PR #863 Copilot Medium "Previously missed", deliveryGraph.ts:418): the result-set
   // exemption was too broad for an agent emit named `status`. The producer status gate
   // (`agentContractProceedCondition`) interprets that same node-local field as the completion status and
-  // accepts only `done`/`opened`/`skipped`, while the emit contract may require a different routing
+  // accepts only the terminal-success vocabulary (`AGENT_TERMINAL_SUCCESS_STATUSES`), while the emit contract may require a different routing
   // value — `status="approved"` always escalates, and `status="done"` can never take an `approved`
   // branch. Unlike an aligned result fact such as `pr` (whose emit value and result field agree),
   // `status` is CONSTRAINED by the gate, so the two uses conflict. Reserve the agent completion-control

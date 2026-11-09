@@ -495,6 +495,13 @@ const PRODUCER_STATUS_SEMANTICS: Readonly<Record<string, string>> = {
   opened: "you opened OR adopted a PR (return it in your `pr` emit if this node declares one)",
   done: "the work completed with no PR to open",
   skipped: "there was genuinely nothing to do",
+  // Issue #932: the unambiguous AFFIRMATIVE-COMPLETION aliases agents actually self-report. They are
+  // full terminal-success statuses (normalised at the gate), documented here so the prompt and the
+  // gate accept the SAME vocabulary — an agent told only `done`/`opened`/`skipped` keeps inventing
+  // `completed` and parking good work on a human escalation.
+  completed: "an alias of `done`/`opened` — the work fully completed (with its required emits populated)",
+  succeeded: "an alias of `done`/`opened` — the work fully succeeded (with its required emits populated)",
+  success: "an alias of `done`/`opened` — the work fully succeeded (with its required emits populated)",
 };
 
 /** Render the producer-completion contract auto-injected into EVERY `agent` node's `appendPrompt`

@@ -279,6 +279,25 @@ test("producer contract semantics coverage (#761 follow-up): renderProducerContr
 });
 
 
+test("#932 producer contract prompt: the affirmative-completion synonyms agents actually report are listed AND documented, so the prompt and the gate accept the same vocabulary", () => {
+  // Issue #932: agents kept reporting `status: "completed"` (and synonyms) after fully delivering and
+  // were parked on a human escalation, because the #731 gate accepted only `done`/`opened`/`skipped`
+  // and the #760 prompt told agents the same narrow list. The class fix puts the synonyms in the ONE
+  // canonical vocabulary (AGENT_TERMINAL_SUCCESS_STATUSES); the prompt contract is DERIVED from it, so
+  // the agent is now TOLD these are valid — pin that the observed aliases surface with semantics.
+  const rendered = renderProducerContract([]);
+  for (const synonym of ["completed", "success", "succeeded"]) {
+    assert(
+      rendered.includes(`- \`${synonym}\` — `),
+      `the prompt documents the "${synonym}" alias with its semantics (issue #932), got: ${rendered}`,
+    );
+  }
+  // The "do not invent a status" warning must name the widened list too (derived, never hand-typed).
+  const list = AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => `\`${s}\``).join(", ");
+  assert(rendered.includes(`Any \`status\` OUTSIDE ${list}`), `the fail-closed warning names the derived allowlist, got: ${rendered}`);
+});
+
+
 test("agent node idempotency preflight (#551): every agent prompt leads with adopt-and-report guidance; non-agent nodes are untouched", async () => {
   // #551: a delivery agent node dispatches a raw retry-carrying `senior:feature` job with no
   // PR-existence guard, so a re-dispatch opened a DUPLICATE PR (instance 43077 n0 → #979/#980). The
