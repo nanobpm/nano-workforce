@@ -1,3 +1,9 @@
+## [0.206.3](https://github.com/nanobpm/nano-workforce/compare/v0.206.2...v0.206.3) (2026-11-09)
+
+### Bug Fixes
+
+* **merge:** never escalate a PR that already landed when the queue landing timeout fires ([#935](https://github.com/nanobpm/nano-workforce/issues/935)) ([f731dc6](https://github.com/nanobpm/nano-workforce/commit/f731dc60dc0cb7480b425e88d1d216b95d63a5c1)), closes [#933](https://github.com/nanobpm/nano-workforce/issues/933)
+
 ## [0.206.2](https://github.com/nanobpm/nano-workforce/compare/v0.206.1...v0.206.2) (2026-11-09)
 
 ### Bug Fixes
