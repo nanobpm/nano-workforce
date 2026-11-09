@@ -4367,9 +4367,8 @@ paths:
       x-mcp:
         exclude: true
       summary: "Retry an incident-parked run the app-owned way (issue #931): bump the failed job's retries AND resolve the ACTIVE engine incident on the run's instance, then clear the incident mirror off the record row. This is the operator remedy for a loop that shows `status: \"incident\"` — previously a hand-run engine-REST sequence (`PATCH /v2/jobs/<k> {changeset:{retries:1}}` + `POST /v2/incidents/<k>/resolution`)."
-      security:
-        - hookSecret: []
-        - {}
+      # Intentionally NO hookSecret security: the declarative "Retry incident" page action cannot
+      # attach x-hook-secret (see operations/retryIncident.ts).
       requestBody:
         required: true
         content:

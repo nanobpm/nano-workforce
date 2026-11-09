@@ -22,11 +22,19 @@
 //      `pollIncidents` pass re-mirrors if the engine still reports an active incident — the row
 //      can never lie for more than a tick).
 //
-// The runtime validates the body against openapi.yaml (`processInstanceKey` required); the optional
-// shared-secret guard stays HERE (the runtime does not enforce OpenAPI `security`): as a MUTATING
-// door, when NANO_PR_WEBHOOK_SECRET is set callers must present it via the x-hook-secret header —
-// mirroring `cancelInstance`. The door is operator-only: it is excluded from the projected MCP tool
-// surface (`x-mcp`, see app/mcpExclusions.test.ts).
+// The runtime validates the body against openapi.yaml (`processInstanceKey` required).
+//
+// This door is INTENTIONALLY UNGUARDED by the optional NANO_PR_WEBHOOK_SECRET / x-hook-secret
+// header (PR #938 review). Its primary caller is the declarative per-row "Retry incident" page
+// action (home / overview / delivery-graphs), and the `@nanobpm/urban` page runtime structurally
+// cannot attach a custom header — a guard here would 401 every button press on a secured
+// deployment, making the one-click remedy dead exactly where it is needed (the same reasoning as
+// `saveToLibrary`). The posture matches the runtime's built-in `/app/actions/cancel` page action the
+// same rows already expose, which is a strictly MORE destructive, equally unguarded UI mutation.
+// The blast radius is bounded by construction: only an instance a tracked record owns (404
+// otherwise) with an ACTIVE engine incident (409 otherwise) is touched, and the only effect is the
+// retry the incident is already waiting for. The door remains operator-only: it is excluded from
+// the projected MCP tool surface (`x-mcp`, see app/mcpExclusions.test.ts).
 
 import type { DataLayer } from "@nanobpm/urban";
 import { resolveEngineAddress } from "../app/enginePreflight.ts";
@@ -34,8 +42,6 @@ import { resolveTrackedInstance } from "../app/instanceTracking.ts";
 import { fetchActiveIncident, type IncidentSearchItem } from "../app/service.ts";
 import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
-
-const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
 // The engine REST base + auth the remedy calls run against, resolved ONCE at module load exactly as
 // main.ts wires the poller (`resolveEngineAddress` — CAMUNDA_REST_ADDRESS wins, else
@@ -56,11 +62,7 @@ const INCIDENT_CLEARED = {
   incident_since: null,
 } as const;
 
-export default defineOperation("retryIncident", async ({ req, body }, app) => {
-  if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
-    app.log.warn("retryIncident rejected: missing/invalid shared secret");
-    return { status: 401, body: { error: "unauthorized" } };
-  }
+export default defineOperation("retryIncident", async ({ body }, app) => {
   if (!app.data) {
     app.log.warn("retryIncident: no data source configured — cannot resolve the record");
     return { status: 503, body: { error: "no data source configured" } };

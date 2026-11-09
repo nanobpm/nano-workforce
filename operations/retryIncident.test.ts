@@ -22,6 +22,10 @@ import { withTrackingViews } from "../test/trackingViews.ts";
  *  since the engine REST address is resolved at module load. */
 const ENGINE = "http://engine.test/v2";
 process.env["CAMUNDA_REST_ADDRESS"] = ENGINE;
+/** A shared secret IS configured for every test here: the door is reached by the declarative
+ *  "Retry incident" page action, which cannot attach `x-hook-secret`, so the door must stay
+ *  reachable without it (PR #938 review) — every header-less call below proves it does. */
+process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cret";
 
 const { default: handler } = await import("./retryIncident.ts");
 
