@@ -595,7 +595,7 @@ test("a stalled 'waiting' with clear threads and zero checks never asserts the r
   const engine = await boot({
     vars: { mergeStallMax: 0 },
     responses: {
-      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: 2, pendingChecks: 0 },
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: 0, pendingChecks: 0 },
     },
   });
   await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
@@ -603,8 +603,10 @@ test("a stalled 'waiting' with clear threads and zero checks never asserts the r
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-stall-probe", "merge-esc-conflict");
   const q = String(escalation(engine).question ?? "");
+  assert(!q.includes("all checks green"), "zero counts with clear threads must never claim green checks");
   assert(!q.includes("NO failing or pending checks"), "zero counts do not establish that the required checks ran");
   assert(!q.includes("required review approval is outstanding"), "an ambiguous read must never assert a verified review-approval blocker");
+  assertStringIncludes(q, "not verified", "the approval blocker must be floated, not asserted");
   assertStringIncludes(q, "may never have run", "the escalation must allow that the required checks never ran");
 });
 
@@ -625,6 +627,22 @@ test("a stall escalation after a FAILED GitHub read says the state could not be 
   assertStringIncludes(q, "could not be fully read", "a failed read must be named as such");
   assert(!q.includes("CONFLICTING"), "a failed read must never assert a confirmed conflict");
   assert(!q.includes("required review approval"), "a failed read must never assert a review-approval blocker");
+});
+
+test("a stall give-up with no remediation attempted never claims a remediation budget was exhausted (#930 review)", async () => {
+  for (const mergeState of ["conflict", "blocked"]) {
+    const engine = await boot({
+      vars: { mergeStallMax: 0 },
+      responses: {
+        "pr.merge-stall-probe": { mergeState, failingChecks: mergeState === "blocked" ? 1 : 0, failingChecksList: mergeState === "blocked" ? "ci" : "", reviewThreads: 0, pendingChecks: 0 },
+      },
+    });
+    await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+    await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+    const q = String(escalation(engine).question ?? "");
+    if (q === "") continue; // routed to a remediation agent rather than the direct give-up
+    assert(!/budget|exhausted/.test(q), `${mergeState}: the escalation must not claim an exhausted budget: ${q}`);
+  }
 });
 
 test("answering 'retry' on a DIRTY PR's escalation re-arms the poller, which re-derives conflict and rebases (#929)", async () => {
