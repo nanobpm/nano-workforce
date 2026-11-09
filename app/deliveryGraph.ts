@@ -458,7 +458,9 @@ export const DELIVERY_SCAFFOLDING_VARS = ["boundFacts", "nodeInputs", "nodeInput
  * correctly clears both. Reserving the whole set would forbid the flagship
  * `agent → connector[converge] → wait[pr]` pattern. The exception is the agent completion-control
  * `status`: the producer status gate reads that SAME node-local field as the node's completion status
- * and accepts only `done`/`opened`/`skipped`, so an agent emit named `status` whose routing value is
+ * and accepts only the terminal-success vocabulary (`AGENT_TERMINAL_SUCCESS_STATUSES` — the canonical
+ * `done`/`opened`/`skipped` plus the #932 affirmative-completion aliases), so an agent emit named
+ * `status` whose routing value is
  * anything else (`approved`, …) ALWAYS escalates, and `status="done"` can never take an `approved`
  * branch — the emit contract and the gate conflict. `status` is therefore reserved for an `agent`
  * (a connector has no producer status gate, so its `status` emit collides with nothing and stays

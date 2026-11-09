@@ -359,7 +359,10 @@ instruction to the agent's prompt automatically when the node declares `emits`. 
 omits the fact, the `default` branch is taken.
 
 **Result statuses are added automatically. Don't write them into your prompt.** Every agent
-node's prompt gets the allowed terminal statuses (`done` / `opened` / `skipped`). A completion
+node's prompt gets the allowed terminal statuses (`done` / `opened` / `skipped`, plus the
+unambiguous affirmative-completion aliases `completed` / `succeeded` / `success` — issue #932:
+a fully-delivered node reporting one of those is a terminal success, never a contract
+violation). A completion
 moves on only with one of those statuses and every required emit present. Anything else parks
 the run on a human `__contract` escalation — **except** an absent/null `status`, which a legacy
 worker that populates its required emits may still advance with (the status contract binds only

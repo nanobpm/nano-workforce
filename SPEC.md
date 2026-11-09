@@ -1289,7 +1289,9 @@ reserved — with **one exception**: an agent emitting `pr` (the canonical
 result field holds, and the retry reset correctly clears both — reserving them would
 forbid that flagship pattern. The exception is the agent completion-control **`status`**:
 the producer status gate reads that same node-local field as the node's completion status
-and accepts only `done`/`opened`/`skipped`, so an agent emit named `status` carrying any
+and accepts only the terminal-success vocabulary (`AGENT_TERMINAL_SUCCESS_STATUSES` — the
+canonical `done`/`opened`/`skipped` plus the issue-#932 affirmative-completion aliases
+`completed`/`succeeded`/`success`), so an agent emit named `status` carrying any
 other routing value (`approved`, …) always escalates, and `status="done"` can never take an
 `approved` branch — the emit contract and the gate conflict. `status` is therefore reserved
 for an **`agent`** (a connector has no producer status gate, so a connector `status` emit

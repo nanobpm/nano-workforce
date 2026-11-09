@@ -495,6 +495,13 @@ const PRODUCER_STATUS_SEMANTICS: Readonly<Record<string, string>> = {
   opened: "you opened OR adopted a PR (return it in your `pr` emit if this node declares one)",
   done: "the work completed with no PR to open",
   skipped: "there was genuinely nothing to do",
+  // Issue #932: the unambiguous AFFIRMATIVE-COMPLETION aliases agents actually self-report. They are
+  // full terminal-success statuses (normalised at the gate), documented here so the prompt and the
+  // gate accept the SAME vocabulary — an agent told only `done`/`opened`/`skipped` keeps inventing
+  // `completed` and parking good work on a human escalation.
+  completed: "an alias of `done`/`opened` — the work fully completed (with its required emits populated)",
+  succeeded: "an alias of `done`/`opened` — the work fully succeeded (with its required emits populated)",
+  success: "an alias of `done`/`opened` — the work fully succeeded (with its required emits populated)",
 };
 
 /** Render the producer-completion contract auto-injected into EVERY `agent` node's `appendPrompt`
@@ -518,6 +525,11 @@ const PRODUCER_STATUS_SEMANTICS: Readonly<Record<string, string>> = {
  * contract already tells the agent to omit an undecidable routing fact. Listing every DECLARED emit
  * here instead would contradict that guidance and push agents to guess values that should stay
  * optional (#761). */
+/** Illustrative out-of-vocabulary statuses named in the producer contract's rejection sentence. Always
+ * filtered against `AGENT_TERMINAL_SUCCESS_STATUSES` at render time, so an example that later becomes an
+ * accepted alias silently drops out instead of contradicting the accepted list. */
+const PRODUCER_REJECTED_STATUS_EXAMPLES: readonly string[] = ["in_progress", "failed", "partial", "success"];
+
 export function renderProducerContract(requiredEmits: readonly DeliveryFact[]): string {
   const list = AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => `\`${s}\``).join(", ");
   const semantics = AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => {
@@ -530,6 +542,11 @@ export function renderProducerContract(requiredEmits: readonly DeliveryFact[]): 
     }
     return `- \`${s}\` — ${doc}.`;
   });
+  // Rejection examples are FILTERED against the allowlist so the prompt can never present one status as
+  // both accepted and forbidden (PR #934 review: `success` became an alias but stayed an example).
+  const rejected = PRODUCER_REJECTED_STATUS_EXAMPLES.filter((s) => !AGENT_TERMINAL_SUCCESS_STATUSES.includes(s))
+    .map((s) => `\`${s}\``)
+    .join("/");
   const lines = [
     "",
     "",
@@ -543,7 +560,7 @@ export function renderProducerContract(requiredEmits: readonly DeliveryFact[]): 
     "",
     ...semantics,
     "",
-    `Any \`status\` OUTSIDE ${list} — including a free-form \`success\`/\`in_progress\`/\`failed\` — parks the`,
+    `Any \`status\` OUTSIDE ${list} — including a free-form ${rejected} — parks the`,
     "run on a human escalation (the gate is fail-closed), EVEN when your underlying work was correct. So",
     "do not invent a status: report exactly one of the allowlisted values above.",
   ];

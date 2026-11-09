@@ -373,6 +373,66 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the satisfied producer's result reaches End");
   });
 
+  test("#932 producer contract: an agent reporting status=completed with all required emits routes onward and NEVER reaches a human escalation", async () => {
+    const app = track(await boot(freshDir()));
+
+    // Issue #932's observed failure (nano-bpm#1337 → PR #1464 escalation 584376; nano-bpm#1463 →
+    // PR #1476 escalation 599960): the agent FULLY delivered — required `pr` emit present, work done,
+    // PR later merged — but self-reported the affirmative-completion alias `status: "completed"`,
+    // which the #731 gate (accepting only `done`/`opened`/`skipped`) treated as a contract violation
+    // and parked on a human "Continue" escalation. With the synonym allowlisted in the ONE canonical
+    // vocabulary, the same result must sail through the gate: no __contract task, the downstream
+    // connector fires, the graph reaches End.
+    let agentFired = 0;
+    await app.engine.registerWorker("senior:demo", async () => {
+      agentFired++;
+      return { status: "completed", pr: "owner/repo#100", summary: "Fully delivered; PR opened and green." };
+    });
+    let connectorFired = 0;
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => {
+        connectorFired++;
+        const vars = job.variables as Record<string, unknown>;
+        const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key (author-supplied or graph-derived) available");
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
+      },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+    );
+
+    const graph: DeliveryGraph = {
+      name: "e2e producer gate completed synonym",
+      nodes: [
+        { id: "open", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "land", kind: "connector", connector: { target: "slack", payload: { pr: "open.pr" }, dedupeKey: "land-932" } },
+      ],
+      edges: [{ from: "open.pr", to: "land" }],
+    };
+
+    const run = await runDeliveryGraph(app.engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+
+    // The `completed` report + all required emits is a terminal success: it routes ONWARD — no
+    // producer-contract escalation (and no escalation of any kind), the connector fired once on the
+    // real PR, and the graph reached End. A human is never in the loop.
+    assert.equal(agentFired, 1, "the agent node's job fired and completed");
+    const createdTasks = await app.engine.searchUserTasks({ state: "CREATED" });
+    assert.deepEqual(
+      createdTasks.map((t) => t.elementId),
+      [],
+      `a fully-delivered "completed" result must NEVER park a human task, got ${JSON.stringify(createdTasks.map((t) => t.elementId))}`,
+    );
+    assert.equal(connectorFired, 1, "the satisfied producer threads its result to the downstream connector");
+    assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the completed producer's result reaches End");
+  });
+
   test("resume never double-fires: an at-least-once redelivery of the connector dedupes", async () => {
     const app = track(await boot(freshDir()));
     // The connector fired once above's-style; here prove the idempotency directly against the ledger a
