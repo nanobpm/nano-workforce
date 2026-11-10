@@ -13,7 +13,14 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
-import { activePrs, isOrphanedPr, ORPHANED_PR_STATUS, terminatePrLoop } from "./service.ts";
+import {
+  activePrs,
+  isOrphanedPr,
+  ORPHANED_PR_STATUS,
+  recordOperatorCancelProvenance,
+  retireHandedOffMergeLoop,
+  terminatePrLoop,
+} from "./service.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 
@@ -86,7 +93,7 @@ function memData(rows: any[], tracking: any[]) {
 }
 
 test("#943 terminatePrLoop records the reason BEFORE the engine cancel", async () => {
-  const { data, stores } = memData([{ pr_key: "o/r#1", termination_reason: null }], []);
+  const { data, stores } = memData([{ pr_key: "o/r#1", process_key: "k1", termination_reason: null }], []);
   const seen: (string | null)[] = [];
   const engine = {
     cancelInstance: async () => {
@@ -95,6 +102,64 @@ test("#943 terminatePrLoop records the reason BEFORE the engine cancel", async (
   };
   await terminatePrLoop(data, engine as never, "o/r#1", "k1", "handed back -> successor k2", false);
   assertEquals(seen, ["handed back -> successor k2"]);
+  assertEquals(stores.pull_requests[0].termination_process_key, "k1", "the reason is bound to the cancelled instance");
+});
+
+test("#943/PR#944 terminatePrLoop never stamps a predecessor's reason onto a successor-owned row", async () => {
+  const { data, stores } = memData([{ pr_key: "o/r#1", process_key: "succ", termination_reason: null }], []);
+  const cancelled: string[] = [];
+  const engine = { cancelInstance: async (a: { processInstanceKey: string }) => void cancelled.push(a.processInstanceKey) };
+  await terminatePrLoop(data, engine as never, "o/r#1", "pred", "handed back -> successor succ", true);
+  assertEquals(cancelled, ["pred"], "the predecessor is still retired");
+  assertEquals(stores.pull_requests[0].termination_reason, null, "the successor's row carries no predecessor provenance");
+});
+
+test("#943/PR#944 terminatePrLoop still cancels when the provenance write fails", async () => {
+  const data = {
+    table: () => ({
+      get: async () => ({ pr_key: "o/r#1", process_key: "k1" }),
+      update: async () => {
+        throw new Error("db down");
+      },
+    }),
+  } as unknown as DataLayer;
+  const cancelled: string[] = [];
+  const engine = { cancelInstance: async (a: { processInstanceKey: string }) => void cancelled.push(a.processInstanceKey) };
+  await terminatePrLoop(data, engine as never, "o/r#1", "k1", "r", true);
+  assertEquals(cancelled, ["k1"]);
+});
+
+test("#943/PR#944 retireHandedOffMergeLoop retries the CAPTURED merge key and never touches the successor row's stage", async () => {
+  const { data, stores } = memData([{ pr_key: "o/r#1", process_key: "succ", status: "waiting_review" }], []);
+  let calls = 0;
+  const engine = {
+    cancelInstance: async (a: { processInstanceKey: string }) => {
+      calls++;
+      assertEquals(a.processInstanceKey, "merge-1");
+      if (calls === 1) throw new Error("transient");
+    },
+  };
+  assert(await retireHandedOffMergeLoop(data, engine as never, "o/r#1", "merge-1", "succ", "test"));
+  assertEquals(calls, 2);
+  assertEquals(stores.pull_requests[0].status, "waiting_review");
+  assertEquals(stores.pull_requests[0].process_key, "succ");
+  const failing = { cancelInstance: async () => Promise.reject(new Error("down")) };
+  assert(!(await retireHandedOffMergeLoop(data, failing as never, "o/r#1", "merge-1", "succ", "test")));
+  assertEquals(stores.pull_requests[0].status, "waiting_review", "a persistent retire failure never demotes the successor");
+});
+
+test("#943/PR#944 recordOperatorCancelProvenance binds an operator cancel to the owning instance", async () => {
+  const { data, stores } = memData([{ pr_key: "o/r#1", process_key: "k1" }, { pr_key: "o/r#2", process_key: "k2" }], []);
+  await recordOperatorCancelProvenance(data, "k1", "/actions/cancel-pr");
+  assertEquals(stores.pull_requests[0].termination_reason, "operator cancel (/actions/cancel-pr)");
+  assertEquals(stores.pull_requests[0].termination_process_key, "k1");
+  assertEquals(stores.pull_requests[1].termination_reason, undefined);
+});
+
+test("#943/PR#944 the page Cancel button routes through the provenance-recording door, not the built-in route", async () => {
+  const page = await readFile(join(ROOT, "pages/home.page.json"), "utf8");
+  assert(!page.includes('"/app/actions/cancel"'), "the built-in /app/actions/cancel bypasses termination provenance");
+  assert(page.includes('"/app/api/actions/cancel-pr"'));
 });
 
 test("#943 terminatePrLoop: strict rethrows a failed cancel; lenient only logs", async () => {
@@ -138,7 +203,18 @@ const base = {
 
 test("#943 isOrphanedPr: loop ended in-app with the row still in flight and no reason → orphaned", () => {
   assert(isOrphanedPr({ status: "waiting_review", derived_status: "abandoned", termination_reason: null, merged_at: null }));
-  assert(!isOrphanedPr({ status: "waiting_review", derived_status: "abandoned", termination_reason: "handed back", merged_at: null }), "a recorded reason is not an orphan");
+  assert(
+    !isOrphanedPr({ status: "waiting_review", derived_status: "abandoned", process_key: "k", termination_reason: "handed back", termination_process_key: "k", merged_at: null }),
+    "a reason recorded for the current owner is not an orphan",
+  );
+  assert(
+    isOrphanedPr({ status: "waiting_review", derived_status: "abandoned", process_key: "succ", termination_reason: "handed back", termination_process_key: "pred", merged_at: null }),
+    "a predecessor's reason never masks an orphaned successor (PR #944 review)",
+  );
+  assert(
+    isOrphanedPr({ status: "waiting_review", derived_status: "abandoned", process_key: "k", termination_reason: "legacy", merged_at: null }),
+    "an unbound reason explains nothing",
+  );
   assert(!isOrphanedPr({ status: "abandoned", derived_status: "abandoned", termination_reason: null, merged_at: null }), "a settled row (human cancel/close) is not an orphan");
   assert(!isOrphanedPr({ status: "waiting_merge", derived_status: "waiting_merge", termination_reason: null, merged_at: null }), "a live loop is not an orphan");
   assert(!isOrphanedPr({ status: "merging", derived_status: "abandoned", termination_reason: null, merged_at: "t" }), "a merged PR is not an orphan");

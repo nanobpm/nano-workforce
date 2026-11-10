@@ -460,10 +460,9 @@ fi
   assertEquals(instances.length, 1, "a successor convergence instance is started");
   assertEquals(row.process_key, "conv-943", "the row is owned by the successor");
   assertEquals(cancelled, ["merge-607414"], "the merge loop is retired only after the successor exists");
-  assert(
-    typeof row.termination_reason === "string" && row.termination_reason.includes("conv-943"),
-    `the termination reason names the successor, got ${row.termination_reason}`,
-  );
+  // PR #944 review: the predecessor's cancel reason is bound to the predecessor, never stamped onto
+  // the successor-owned row (it would mask a later orphaning of the successor).
+  assert(row.termination_reason == null, `the successor's row carries no predecessor provenance, got ${row.termination_reason}`);
 });
 
 test("#921/PR#922 poller: an UNFINISHED handoff (dead merge instance) never publishes merge-ready to the cancelled owner — it re-establishes a live convergence owner first (PR #922 review, round 5)", async () => {

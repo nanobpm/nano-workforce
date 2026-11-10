@@ -247,7 +247,7 @@
             "confirm": "Cancel this PR's review run?",
             "showWhenField": "process_key",
             "action": {
-              "path": "/app/actions/cancel",
+              "path": "/app/api/actions/cancel-pr",
               "body": {
                 "processInstanceKey": "{{row.process_key}}"
               }

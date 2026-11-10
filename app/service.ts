@@ -420,6 +420,13 @@ export interface PullRequest {
   // app last cancelled this PR's convergence/merge loop, stamped by {@link terminatePrLoop}. NULL when
   // the app never cancelled the current run.
   termination_reason: string | null;
+  // The engine instance `termination_reason` describes (issue #943, PR #944 review): provenance is
+  // bound to the CANCELLED instance, so a predecessor's reason can never explain away the orphaning of
+  // a successor that later owns the row. Honoured only while it equals `process_key`.
+  termination_process_key: string | null;
+  // Operator Dismiss stamp (app/acknowledge.ts). Run-scoped: cleared on reopen so a dismissal of a
+  // PRIOR run never hides an orphaning of the current one.
+  acknowledged_at?: string | null;
 }
 
 interface PrDependency {
@@ -970,6 +977,10 @@ async function submitPrCritical(
         // Run-scoped termination provenance (issue #943): a prior run's cancel reason must not mask a
         // later orphaning of THIS run in `/status`.
         termination_reason: null,
+        termination_process_key: null,
+        // The operator Dismiss is run-scoped too (PR #944 review): a dismissal of the PRIOR run must not
+        // count as acknowledging a later unexplained termination of THIS run.
+        acknowledged_at: null,
         outcome: null,
         converged_at: null,
         merged_at: null,
@@ -1289,7 +1300,9 @@ export const ORPHANED_PR_STATUS = "orphaned";
 export function isOrphanedPr(p: {
   status: string;
   derived_status: string;
+  process_key?: string | null;
   termination_reason?: string | null;
+  termination_process_key?: string | null;
   merged_at: string | null;
   acknowledged_at?: string | null;
 }): boolean {
@@ -1300,8 +1313,24 @@ export function isOrphanedPr(p: {
     // The BASE row is still at an in-flight stage of the loop (the manifest's active set): nothing
     // settled it. This base-vs-derived divergence IS the orphan signal.
     activeStatusesFor("pull_requests").includes(p.status) &&
-    !p.termination_reason &&
+    // Provenance only explains the CURRENT owner's termination: a reason bound to a different
+    // (predecessor) instance never masks an orphaned successor.
+    !hasOwnTerminationReason(p) &&
     p.merged_at == null
+  );
+}
+
+/** Whether the row carries a termination reason recorded for the instance that currently owns it. */
+function hasOwnTerminationReason(p: {
+  process_key?: string | null;
+  termination_reason?: string | null;
+  termination_process_key?: string | null;
+}): boolean {
+  return (
+    !!p.termination_reason &&
+    p.termination_process_key != null &&
+    p.process_key != null &&
+    String(p.termination_process_key) === String(p.process_key)
   );
 }
 
@@ -1954,14 +1983,10 @@ export async function maybeEnsureFreshHeadRun(
  * defaults `autoResolveEscalations` to false and overwrites the row's flag on reopen, so an opted-in PR
  * would silently lose automated escalation resolution merely because late review threads appeared.
  *
- * RETRYABLE on failure (PR #922 review, thread 3): if the cancel succeeds but `submitPr` throws, the
- * row is restored to `waiting_merge` so the next pass re-attempts the handoff against the
- * already-retired (terminal) merge key — rather than stranding in `waiting_review`, which `pollMerges`
- * no longer scans and whose `readiness-ready` resume correlates to nothing once the merge instance is
- * cancelled. The restored row's `process_key` still names the now-terminal merge instance, so the
- * unfinished handoff is re-detected next pass by the dead-owner guard in `pollMerges` (which keys off
- * the terminal `derived_status`, independently of the GitHub verdict). Best-effort throughout: a failed
- * cancel or restore only logs, leaving the row for the next pass. */
+ * RETRYABLE on failure, with creation and retirement recovered SEPARATELY (PR #944 review): if no
+ * successor is created, the row is restored to `waiting_merge` naming the still-LIVE merge owner, so
+ * the next pass simply retries. Once a successor is published the row is never demoted; retiring the
+ * captured merge key is retried by {@link retireHandedOffMergeLoop}. */
 async function handoffWaitingMergeToConvergence(
   data: DataLayer,
   engine: EngineClient,
@@ -2000,25 +2025,81 @@ async function handoffWaitingMergeToConvergence(
       // No successor was started — never retire the merge loop into nothing.
       throw new Error("convergence hand-off started no successor instance");
     }
-    if (mergeKey != null) {
-      await terminatePrLoop(data, engine, prKey, mergeKey, `merge loop handed back to convergence (${logContext}) -> successor ${successor}`, false);
-    }
+    // The successor is PUBLISHED: from here on the row is convergence-owned and must never be demoted
+    // back to `waiting_merge` (PR #944 review) — a retirement failure is recovered separately, against
+    // the CAPTURED merge key, without touching the successor's row.
+    if (mergeKey != null) await retireHandedOffMergeLoop(data, engine, prKey, mergeKey, successor, logContext);
     console.log(`[poller] ${logContext} -> handed back into convergence (${successor}) -> ${prKey}`);
   } catch (err) {
+    // CREATION failed (submitPr threw or started nothing): roll back to the prior owner. The merge
+    // instance was NOT retired, so it stays LIVE and keeps owning the PR — restore BOTH the stage and
+    // its `process_key` (a null-successor reopen may already have overwritten the key with NULL), so
+    // the next pass re-attempts the handoff against the right instance. A row that had no owner key
+    // (an earlier unfinished handoff) stays keyless: the NULL key is the durable "unfinished handoff"
+    // marker the dead-owner guard in `pollMerges` keys on. Best-effort: a failed restore is only logged.
     console.error(`[poller] ${logContext} handoff ${prKey}: ${err}`);
-    // Restore the row to `waiting_merge` so the next pass re-attempts the handoff. The merge instance
-    // was NOT retired (no successor started), so it stays LIVE and keeps owning the PR — the next pass
-    // simply retries. A row that had no owner key (an earlier unfinished handoff) stays keyless: the
-    // NULL key is the durable "unfinished handoff" marker the dead-owner guard in
-    // `pollMerges` keys on (distinct from a HUMAN cancel, which leaves `process_key` naming the
-    // terminated instance and must NOT be resurrected). Best-effort: a failed restore is only logged.
     try {
-      // `process_key` is left as-is: `submitPr` rolls back its own half-committed reopen, so the row
-      // still names the live merge owner (or stays NULL for an unfinished handoff).
-      await prs(data).update(prKey, { status: "waiting_merge", updated_at: now() });
+      await prs(data).update(prKey, {
+        status: "waiting_merge",
+        ...(mergeKey != null ? { process_key: mergeKey } : {}),
+        updated_at: now(),
+      });
     } catch (restoreErr) {
       console.error(`[poller] ${logContext} handoff ${prKey}: restore waiting_merge: ${restoreErr}`);
     }
+  }
+}
+
+/** Retire the predecessor merge loop after its convergence successor is published (issue #943, PR #944
+ * review). Bounded retry against the CAPTURED merge key; a persistent failure is logged loudly but never
+ * rolls the successor-owned row back. Exported for tests. */
+export async function retireHandedOffMergeLoop(
+  data: DataLayer,
+  engine: Pick<EngineClient, "cancelInstance">,
+  prKey: string,
+  mergeKey: string,
+  successor: string,
+  logContext: string,
+  attempts = 2,
+): Promise<boolean> {
+  const reason = `merge loop handed back to convergence (${logContext}) -> successor ${successor}`;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await terminatePrLoop(data, engine, prKey, mergeKey, reason, true);
+      return true;
+    } catch (err) {
+      console.error(`[poller] ${logContext} handoff ${prKey}: retire merge ${mergeKey} attempt ${i}/${attempts}: ${err}`);
+    }
+  }
+  return false;
+}
+
+/** Record WHY a PR loop instance was terminated (issue #943), bound to THAT instance. The ONE writer of
+ * termination provenance, shared by {@link terminatePrLoop} (app-initiated) and every operator cancel
+ * door (`/actions/cancel`, `/actions/cancel-pr`). The reason is stamped only when `processKey` is the
+ * row's CURRENT owner: once a successor owns the row (the convergence hand-off publishes it before
+ * retiring the predecessor), the predecessor's reason has nothing to explain on that row and must not
+ * mask a later orphaning of the successor (PR #944 review). Exported for the cancel doors + tests. */
+export async function recordTerminationProvenance(
+  data: DataLayer,
+  prKey: string,
+  processKey: string,
+  reason: string,
+): Promise<boolean> {
+  const row = await prs(data).get(prKey);
+  if (!row || row.process_key == null || String(row.process_key) !== String(processKey)) return false;
+  await prs(data).update(prKey, {
+    termination_reason: reason,
+    termination_process_key: String(processKey),
+    updated_at: now(),
+  });
+  return true;
+}
+
+/** Record operator-cancel provenance on every PR row a cancelled instance owns (issue #943). */
+export async function recordOperatorCancelProvenance(data: DataLayer, processKey: string, door: string): Promise<void> {
+  for (const row of await prs(data).find({ process_key: processKey })) {
+    await recordTerminationProvenance(data, row.pr_key, processKey, `operator cancel (${door})`);
   }
 }
 
@@ -2037,7 +2118,12 @@ export async function terminatePrLoop(
   reason: string,
   strict: boolean,
 ): Promise<void> {
-  await prs(data).update(prKey, { termination_reason: reason, updated_at: now() });
+  try {
+    await recordTerminationProvenance(data, prKey, processKey, reason);
+  } catch (err) {
+    // Provenance is diagnostic: a failed write must never keep a loop alive that must be retired.
+    console.error(`[loop] ${prKey}: record termination reason for ${processKey} failed: ${err}`);
+  }
   try {
     await engine.cancelInstance({ processInstanceKey: processKey });
   } catch (err) {

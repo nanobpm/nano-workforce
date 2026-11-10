@@ -7,3 +7,7 @@
 -- whose loop ended with NO recorded reason, no successor and no escalation.
 ALTER TABLE pull_requests ADD COLUMN termination_reason TEXT;
 
+-- The instance the reason describes (PR #944 review): provenance is bound to the CANCELLED instance and
+-- only explains a termination while it equals the row's `process_key`, so a predecessor's reason can
+-- never mask the later orphaning of a successor.
+ALTER TABLE pull_requests ADD COLUMN termination_process_key TEXT;
