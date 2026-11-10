@@ -2652,3 +2652,63 @@ test("submitPr handoffFrom: a stale hand-off against a settled row is fenced, a 
     assertEquals(b.stores.pull_requests.rows[0].process_key, "PI-CONV-1");
   });
 });
+
+// Issue #941 review: if the adjudication reset fails AFTER the atomic reopen advanced `process_key`
+// to the new convergence instance, the rollback cancels that instance — but leaving its key on the
+// row would make the cancelled run the row's "owner". Once tracking derives `abandoned`, the stale
+// hand-off fence would treat the reconverge retry as settled and end the merge loop with no live
+// convergence owner. The rollback must RESTORE the prior row (owner key + status), so the retry is
+// still the owning hand-off and re-enters convergence.
+test("submitPr handoffFrom: a failed reset restores the prior owner so the hand-off retry re-enters (#941)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#79";
+    const stores: Record<string, { rows: any[]; key: string }> = {
+      pull_requests: {
+        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 79, url: "https://github.com/owner/repo/pull/79", title: "t", status: "waiting_merge", current_round: 4, process_key: "PI-MERGE" }],
+        key: "pr_key",
+      },
+      escalations: { rows: [], key: "id" },
+      pr_adjudications: { rows: [], key: "id" },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    let failReset = true;
+    const open = () => {
+      const real = memOpen(stores);
+      return {
+        ...real,
+        exec: async (sql: string, ...rest: unknown[]) => {
+          if (failReset && /DELETE FROM "pr_adjudications"/.test(sql)) throw new Error("boom: reset failed");
+          return (real as any).exec(sql, ...rest);
+        },
+      };
+    };
+    const data = { table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)), open } as any;
+    let calls = 0;
+    const cancelled: string[] = [];
+    const engine = {
+      createInstance: async () => ({ processInstanceKey: `PI-CONV-${++calls}` }),
+      cancelInstance: async (i: { processInstanceKey: string }) => {
+        cancelled.push(i.processInstanceKey);
+      },
+    } as any;
+    const parsed = { repo: "owner/repo", number: 79, url: "https://github.com/owner/repo/pull/79", prKey: PR_KEY };
+
+    let threw = false;
+    try {
+      await submitPr(data, engine, parsed, [], undefined, false, null, false, false, true, "PI-MERGE");
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true);
+    assertEquals(cancelled, ["PI-CONV-1"]);
+    const row = stores.pull_requests.rows[0];
+    assertEquals(row.process_key, "PI-MERGE", "rollback restores the prior owner, never leaves the cancelled key");
+    assertEquals(row.status, "waiting_merge", "rollback restores the prior status");
+    assertEquals(row.current_round, 4);
+
+    failReset = false;
+    const retry = await submitPr(data, engine, parsed, [], undefined, false, null, false, false, true, "PI-MERGE");
+    assertEquals((retry as any).alreadyRunning, undefined, "the retried hand-off re-enters convergence");
+    assertEquals(stores.pull_requests.rows[0].process_key, "PI-CONV-2");
+  });
+});

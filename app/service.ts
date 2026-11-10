@@ -908,6 +908,11 @@ async function submitPrCritical(
   // run auto-applies stale decisions, and (crucially) the row stays in its OLD terminal shape until
   // the atomic reopen write lands, so no straggler ever sees a fresh-run row still owned by the old
   // instance.
+  let reopened = false;
+  // Snapshot BEFORE the reopen write — the row object may be a live reference the update mutates.
+  const prior = existing
+    ? { status: existing.status, current_round: existing.current_round, process_key: existing.process_key }
+    : null;
   try {
     if (existing) {
       // ATOMIC REOPEN (Copilot review of #819): reset the row to the fresh run's shape AND publish the
@@ -962,6 +967,7 @@ async function submitPrCritical(
         process_key: processKey,
         updated_at: ts,
       });
+      reopened = true;
     } else if (processKey != null) {
       // First submit: the row was INSERTED keyless before `createInstance` (the phantom-row pattern,
       // #704/#497); publish its `process_key` now that the instance exists.
@@ -980,6 +986,19 @@ async function submitPrCritical(
       await resetAdjudications(data, parsed.prKey);
     }
   } catch (err) {
+    // Restore the prior row (#941 review): the atomic reopen already advanced `process_key` to the
+    // instance we are about to cancel. Leaving that cancelled key on the row would make a dead run its
+    // "owner" — once tracking derives `abandoned`, a retried merge-loop hand-off would be fenced as
+    // stale (settled row) and the merge loop would end with no live convergence owner. Restoring the
+    // pre-reopen shape (owner key + status) keeps the retry the owning hand-off, and a public retry
+    // still sees the old terminal row as resubmittable.
+    if (reopened && prior) {
+      try {
+        await table.update(parsed.prKey, { ...prior, updated_at: now() });
+      } catch (restoreErr) {
+        console.warn(`[submit] ${parsed.prKey} rollback-restore failed: ${restoreErr}`);
+      }
+    }
     if (processInstanceKey != null) {
       try {
         await engine.cancelInstance({ processInstanceKey: String(processInstanceKey) });
