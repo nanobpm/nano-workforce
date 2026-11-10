@@ -1,3 +1,9 @@
+## [0.208.0](https://github.com/nanobpm/nano-workforce/compare/v0.207.0...v0.208.0) (2026-11-10)
+
+### Features
+
+* **merge:** request the head-current Copilot review after a loop-authored head move ([#941](https://github.com/nanobpm/nano-workforce/issues/941)) ([0e2d50e](https://github.com/nanobpm/nano-workforce/commit/0e2d50e8610beb5e939cd3a143d28e62d690f272)), closes [#939](https://github.com/nanobpm/nano-workforce/issues/939)
+
 ## [0.207.0](https://github.com/nanobpm/nano-workforce/compare/v0.206.4...v0.207.0) (2026-11-09)
 
 ### Features
