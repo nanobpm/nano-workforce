@@ -189,3 +189,292 @@ test("a delivery run with no opt-in row flag surfaces autoResolveEscalations fal
   assertEquals(res.body.deliveries[0].openEscalation, null);
   assertEquals(res.body.deliveries[0].processKey, null, "a launch-in-flight run has no stamped process_key yet");
 });
+
+// ── Issue #936: /status latency + concurrency regression guard ────────────────────────────────
+// The defect: `activePrs` fanned the merge-policy read out per row — 3 `searchVariables` engine
+// round-trips PER active PR — so 4 rows cost 12 sequential-ish upstream calls (~13 s) and K
+// concurrent callers stacked (~50 s → the console proxy 502'd). The fix batches the engine read:
+// ONE name-less `searchVariables({})` per /status serve, bucketed in memory. These tests pin the
+// contract against a fake engine with a REALISTIC per-call delay: the engine-call count must stay
+// at one per serve regardless of row count, and K concurrent serves must overlap (wall time ≈ one
+// upstream round-trip, not K ×).
+
+/** A fake engine that serves the batched variable read after a realistic upstream delay, counting
+ *  calls and tracking peak in-flight concurrency. */
+function slowEngine(varsByInstance: Record<string, Record<string, unknown>>, delayMs: number) {
+  let calls = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  return {
+    calls: () => calls,
+    maxInFlight: () => maxInFlight,
+    searchVariables: async (q: { processInstanceKey?: string; scopeKey?: string; name?: string }) => {
+      calls += 1;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      inFlight -= 1;
+      const rows: { name: string; value: string; processInstanceKey: string; scopeKey: string }[] = [];
+      for (const [piKey, vars] of Object.entries(varsByInstance)) {
+        if (q.processInstanceKey != null && piKey !== String(q.processInstanceKey)) continue;
+        if (q.scopeKey != null && piKey !== String(q.scopeKey)) continue;
+        for (const [name, v] of Object.entries(vars)) {
+          if (q.name != null && name !== q.name) continue;
+          rows.push({ name, value: JSON.stringify(v), processInstanceKey: piKey, scopeKey: piKey });
+        }
+      }
+      return rows;
+    },
+  } as any;
+}
+
+function prRow936(n: number) {
+  return {
+    pr_key: `o/r#${n}`,
+    repo: "o/r",
+    number: n,
+    url: `https://github.com/o/r/pull/${n}`,
+    title: `PR ${n}`,
+    status: "converging",
+    current_round: 1,
+    process_key: `PI-${n}`,
+    updated_at: `2026-01-${String(n).padStart(2, "0")}`,
+  };
+}
+
+test("issue #936: N active rows cost a constant 3 engine variable reads, not 3N (the 13 s fan-out)", async () => {
+  const N = 8;
+  const rows = Array.from({ length: N }, (_, i) => prRow936(i + 1));
+  const vars: Record<string, Record<string, unknown>> = {};
+  for (let i = 1; i <= N; i++) vars[`PI-${i}`] = { autoMerge: true, convergeOnly: false, humanApproval: false };
+  const engine = slowEngine(vars, 25);
+  const app = { ...memApp(rows), engine } as AppApi;
+  const started = Date.now();
+  const res = (await handler(input(), app)) as any;
+  const elapsed = Date.now() - started;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.count, N);
+  assertEquals(
+    engine.calls(),
+    3,
+    "the merge-policy projection batches to ONE read per policy name (3) per serve — a per-row fan-out would show 3N calls",
+  );
+  assert(
+    elapsed < 25 * N,
+    `one batched ~25 ms upstream read serves ${N} rows (took ${elapsed} ms); the per-row fan-out this regresses to would take ≥ ${25 * N} ms`,
+  );
+  // The batch still projects the per-row policy correctly.
+  for (const pr of res.body.prs) {
+    assertEquals(pr.merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+  }
+});
+
+test("issue #936: K concurrent /status callers overlap instead of queueing behind each other", async () => {
+  const K = 4;
+  const rows = [prRow936(1), prRow936(2)];
+  const vars = {
+    "PI-1": { autoMerge: true, convergeOnly: false, humanApproval: false },
+    "PI-2": { autoMerge: false, convergeOnly: true, humanApproval: false },
+  };
+  // A realistic slow upstream: each engine read takes 100 ms. Serialized callers would stack to
+  // K × 100 ms (the measured 35–50 s at production scale); overlapped callers finish in ~100 ms.
+  const engine = slowEngine(vars, 100);
+  const app = { ...memApp(rows), engine } as AppApi;
+  const started = Date.now();
+  const results = await Promise.all(Array.from({ length: K }, () => handler(input(), app)));
+  const elapsed = Date.now() - started;
+  for (const res of results) {
+    assertEquals((res as any).status, 200);
+    assertEquals((res as any).body.count, 2);
+  }
+  assertEquals(engine.calls(), 3 * K, "each serve issues its own batched reads (no cross-request cache serving stale policy)");
+  assertEquals(
+    engine.maxInFlight(),
+    3 * K,
+    "all K engine reads were in flight at once — the serves overlap rather than serialise",
+  );
+  assert(
+    elapsed < K * 100,
+    `${K} concurrent serves over a 100 ms upstream finished in ${elapsed} ms (< ${K * 100} ms) — no caller queued behind another`,
+  );
+  // Mixed intents still project per row under the batched read.
+  const body = (results[0] as any).body;
+  assertEquals(body.prs.find((p: any) => p.prKey === "o/r#1").merge.requested, true);
+  assertEquals(body.prs.find((p: any) => p.prKey === "o/r#2").merge.requested, false);
+});
+
+// ── PR #937 review: completeness, root scope, idle skip ──────────────────────────────────────
+
+/** A fake engine with explicit rows (incl. child scopes) whose engine-wide reads are cut to one
+ *  `pageSize` page — the production seam returns a single page with no cursor. */
+function pagedEngine(
+  rows: { name: string; value: string; processInstanceKey: string; scopeKey: string }[],
+  pageSize: number,
+) {
+  const queries: { processInstanceKey?: string; scopeKey?: string; name?: string }[] = [];
+  return {
+    queries,
+    searchVariables: async (q: { processInstanceKey?: string; scopeKey?: string; name?: string }) => {
+      queries.push(q);
+      return rows
+        .filter(
+          (r) =>
+            (q.processInstanceKey == null || r.processInstanceKey === q.processInstanceKey) &&
+            (q.scopeKey == null || r.scopeKey === q.scopeKey) &&
+            (q.name == null || r.name === q.name),
+        )
+        .slice(0, pageSize);
+    },
+  } as any;
+}
+
+function v(pk: string, name: string, value: unknown, scopeKey = pk) {
+  return { name, value: JSON.stringify(value), processInstanceKey: pk, scopeKey };
+}
+
+test("PR #937: an active PR's policy cut off the first engine page is still read (targeted fallback)", async () => {
+  const rows = [];
+  // 50 unrelated (completed/other) instances fill the single page ahead of the active PR.
+  for (let i = 0; i < 50; i++) {
+    for (const n of ["autoMerge", "convergeOnly", "humanApproval"]) rows.push(v(`OTHER-${i}`, n, true));
+  }
+  rows.push(v("PI-1", "autoMerge", false), v("PI-1", "convergeOnly", true), v("PI-1", "humanApproval", true));
+  const engine = pagedEngine(rows, 10);
+  const res = (await handler(input(), { ...memApp([prRow936(1)]), engine } as AppApi)) as any;
+  assertEquals(res.body.prs[0].merge.requested, false, "autoMerge:false beyond page 1 must not degrade to requested");
+  const withApproval = pagedEngine(
+    [...rows.filter((r) => r.processInstanceKey !== "PI-1"), v("PI-1", "autoMerge", true), v("PI-1", "humanApproval", true)],
+    10,
+  );
+  const res2 = (await handler(input(), { ...memApp([prRow936(1)]), engine: withApproval } as AppApi)) as any;
+  assertEquals(res2.body.prs[0].merge.blockedBy != null, true, "the human-approval blocker beyond page 1 is not dropped");
+});
+
+for (const order of ["root-first", "child-first"] as const) {
+  test(`PR #937: child-scoped policy vars never override the root policy (${order})`, async () => {
+    const root = [v("PI-1", "autoMerge", false), v("PI-1", "humanApproval", true)];
+    const child = [v("PI-1", "autoMerge", true, "EI-9"), v("PI-1", "humanApproval", false, "EI-9")];
+    const engine = pagedEngine(order === "root-first" ? [...root, ...child] : [...child, ...root], 100);
+    const res = (await handler(input(), { ...memApp([prRow936(1)]), engine } as AppApi)) as any;
+    assertEquals(res.body.prs[0].merge.requested, false);
+    const engine2 = pagedEngine(
+      order === "root-first"
+        ? [v("PI-1", "autoMerge", true), v("PI-1", "humanApproval", true), ...child]
+        : [...child, v("PI-1", "autoMerge", true), v("PI-1", "humanApproval", true)],
+      100,
+    );
+    const res2 = (await handler(input(), { ...memApp([prRow936(1)]), engine: engine2 } as AppApi)) as any;
+    assertEquals(res2.body.prs[0].merge.blockedBy != null, true, "a child humanApproval:false cannot hide the root gate");
+  });
+}
+
+test("PR #937: no engine read when no active row has a process key", async () => {
+  const engine = pagedEngine([], 100);
+  await handler(input(), { ...memApp([]), engine } as AppApi);
+  await handler(input(), { ...memApp([{ ...prRow936(1), process_key: null }]), engine } as AppApi);
+  assertEquals(engine.queries.length, 0);
+});
+
+// ── PR #937 round-3 review: bounded fallback fan-out, per-instance failure isolation ─────────
+
+test("PR #937 r4: populated merge-loop roots cost a constant 3 reads (startMerge seeds the policy)", async () => {
+  // Round-3 defect: merge-loop roots carry non-policy vars, so the name-less fallback was non-empty
+  // and each merging PR paid 1 + 3 probes (19 calls at N=4). startMerge now seeds the policy triple,
+  // so populated merge-loop roots are fully represented in the batch and need no probes.
+  const N = 4;
+  const rows = Array.from({ length: N }, (_, i) => prRow936(i + 1));
+  const vars = [];
+  for (let i = 1; i <= N; i++) {
+    const pk = `PI-${i}`;
+    vars.push(v(pk, "repo", "o/r"), v(pk, "prNumber", i), v(pk, "ciFixRound", 0));
+    vars.push(v(pk, "autoMerge", true), v(pk, "convergeOnly", false), v(pk, "humanApproval", false));
+  }
+  const engine = pagedEngine(vars, 100);
+  const res = (await handler(input(), { ...memApp(rows), engine } as AppApi)) as any;
+  assertEquals(res.body.count, N);
+  assertEquals(engine.queries.length, 3, "populated merge-loop roots need no per-instance probes");
+});
+
+test("PR #937 r4: a name cut from ONE page is re-probed even when the instance appears in another", async () => {
+  // Round-3 defect: an instance present in the autoMerge page was treated as complete, so a
+  // humanApproval:true cut from its own page was dropped and /status reported an unblocked merge.
+  const rows = [v("PI-1", "autoMerge", true), v("PI-1", "convergeOnly", false)];
+  for (let i = 0; i < 20; i++) rows.push(v(`OTHER-${i}`, "humanApproval", false));
+  rows.push(v("PI-1", "humanApproval", true));
+  const engine = pagedEngine(rows, 10);
+  const res = (await handler(input(), { ...memApp([prRow936(1)]), engine } as AppApi)) as any;
+  assertEquals(res.body.prs[0].merge.blockedBy, "human-approval", "the cut humanApproval gate is recovered");
+  const targeted = engine.queries.filter((q: any) => q.processInstanceKey === "PI-1");
+  assertEquals(targeted.length, 1, "only the missing name is probed");
+  assertEquals(targeted[0].name, "humanApproval");
+  assertEquals(targeted[0].scopeKey, "PI-1", "the probe is confined to the process-root scope");
+});
+
+test("PR #937 r4: a failed probe after a partial batch drops the partial entry (default, not half-read)", async () => {
+  const failing = {
+    searchVariables: async (q: { processInstanceKey?: string; name?: string }) => {
+      if (q.processInstanceKey === "PI-1") throw new Error("engine read timed out");
+      if (q.name === "humanApproval") return [v("PI-1", "humanApproval", true)];
+      return [];
+    },
+  } as any;
+  const res = (await handler(input(), { ...memApp([prRow936(1)]), engine: failing } as AppApi)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+});
+
+test("PR #937 r4: a cut-off instance is recovered with name-filtered (untruncatable) root probes", async () => {
+  const rows = [];
+  for (let i = 0; i < 50; i++) {
+    for (const n of ["autoMerge", "convergeOnly", "humanApproval"]) rows.push(v(`OTHER-${i}`, n, true));
+  }
+  rows.push(v("PI-1", "autoMerge", true), v("PI-1", "convergeOnly", false));
+  rows.push(v("PI-2", "autoMerge", true), v("PI-2", "convergeOnly", false), v("PI-2", "humanApproval", true));
+  const engine = pagedEngine(rows, 10);
+  const res = (await handler(input(), { ...memApp([prRow936(1), prRow936(2)]), engine } as AppApi)) as any;
+  const pr2 = res.body.prs.find((p: any) => p.prKey === "o/r#2");
+  assertEquals(pr2.merge.requested, true);
+  assertEquals(pr2.merge.blockedBy, "human-approval");
+  for (const q of engine.queries.filter((q: any) => q.processInstanceKey != null)) {
+    assert(q.name != null, "every fallback read is name-filtered (<=1 row, cannot be truncated)");
+    assertEquals(q.scopeKey, q.processInstanceKey);
+  }
+});
+
+test("PR #937 r3: one failed targeted read degrades only its own instance, not every other PR's policy", async () => {
+  // Round-2 defect: a rejected targeted read propagated to the OUTER catch, so the whole batch
+  // read was discarded and PI-1's already-fetched policy silently degraded to "merge requested,
+  // no approval blocker". Each instance's fallback must fail independently. PI-1 requests the
+  // merge AND carries an outstanding approval gate; PI-2's fallback rejects.
+  const failing = {
+    searchVariables: async (q: { processInstanceKey?: string; scopeKey?: string; name?: string }) => {
+      if (q.processInstanceKey === "PI-2") throw new Error("engine read timed out");
+      if (q.name === "autoMerge") return [v("PI-1", "autoMerge", true)];
+      if (q.name === "humanApproval") return [v("PI-1", "humanApproval", true)];
+      return [];
+    },
+  } as any;
+  const res = (await handler(input(), { ...memApp([prRow936(1), prRow936(2)]), engine: failing } as AppApi)) as any;
+  assertEquals(res.status, 200);
+  const pr1 = res.body.prs.find((p: any) => p.prKey === "o/r#1");
+  assertEquals(pr1.merge.requested, true, "PI-1's fetched merge intent survives PI-2's failed fallback");
+  assertEquals(pr1.merge.blockedBy, "human-approval", "PI-1's fetched approval blocker survives PI-2's failed fallback");
+  const pr2 = res.body.prs.find((p: any) => p.prKey === "o/r#2");
+  assertEquals(pr2.merge.requested, true, "the failed instance degrades to the historical default (merge requested)");
+  assertEquals(pr2.merge.blockedBy, null, "the failed instance shows no approval blocker it could not verify");
+});
+
+test("PR #937 r3: a failed BATCH read still degrades every row to the default (no partial page)", async () => {
+  // The batched name reads are the completeness backbone — if one rejects, its page is partial
+  // and absence can no longer be distinguished from a page cut, so the whole projection degrades.
+  const failing = {
+    searchVariables: async (q: { name?: string }) => {
+      if (q.name === "humanApproval") throw new Error("engine read timed out");
+      if (q.name === "autoMerge") return [v("PI-1", "autoMerge", false)];
+      return [];
+    },
+  } as any;
+  const res = (await handler(input(), { ...memApp([prRow936(1)]), engine: failing } as AppApi)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+});

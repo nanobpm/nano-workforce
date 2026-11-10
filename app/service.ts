@@ -1091,6 +1091,12 @@ export async function startMerge(
       reviewRequest: null,
       // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).
       rootRequestKey,
+      // Merge policy (issue #936): a merge loop only starts for a requested, approved merge. Seeding
+      // the policy triple keeps it in /status's batched reads (no per-instance probes). Inert here —
+      // the merge-loop process reads none of them.
+      autoMerge: true,
+      convergeOnly: false,
+      humanApproval: false,
       abandonUrl: abUrl,
       abandonBrief: renderAbandonBrief(abUrl),
       // Host-git provisioning (c8ctl): same repository envelope as the convergence loop, so the
@@ -1230,15 +1236,21 @@ export async function activePrs(
     openEscByPr.set(t.subject_key, toOpenEscalation(t));
   }
   // Merge intent (issue #916): read the loop's `autoMerge` / `convergeOnly` / `humanApproval`
-  // variables per PR so the effective merge policy is visible without opening the engine. One
-  // best-effort read per PR; a failure (engine unreachable, instance gone) degrades to the
-  // historical default (merge requested) rather than failing the whole status read.
+  // variables per PR so the effective merge policy is visible without opening the engine.
+  //
+  // A CONSTANT number of batched engine reads per /status call (issue #936) — never a per-row
+  // fan-out. The pre-#936 shape issued 3 `searchVariables` round-trips PER active PR (12 calls at 4
+  // rows ≈ 13 s; concurrent callers stacked until the console proxy 502'd). See
+  // `readMergePolicyVars` for the completeness contract (single-page seam, root scope only, one
+  // per-name root probe only for a page cut or legacy instance). Best-effort: a failed batched read degrades every
+  // PR to the historical default (merge requested); a failed per-instance fallback degrades only
+  // that PR.
   const mergeByPr = new Map<string, MergePolicy>();
-  await Promise.all(
-    active.map(async (p) => {
-      mergeByPr.set(p.pr_key, await mergePolicyFor(p.process_key ?? null, engine));
-    }),
-  );
+  const activeKeys = active.map((p) => p.process_key).filter((k): k is string => k != null && k !== "");
+  const varsByInstance = await readMergePolicyVars(engine, activeKeys);
+  for (const p of active) {
+    mergeByPr.set(p.pr_key, mergePolicyFromVars(varsByInstance?.get(p.process_key ?? "")));
+  }
   return active.map((p) => {
     // Issue #931: an ACTIVE engine incident parked on the loop's instance must be VISIBLE — the row
     // kept reading `converging` for hours while nothing ran. Overlay the derived `incident` status
@@ -1284,42 +1296,132 @@ function mergePolicyFrom(requested: boolean, humanApproval: boolean): MergePolic
   return { requested, enabled, effective, blockedBy };
 }
 
-/** Read one boolean process variable off a live instance; undefined when absent/unreadable. */
-async function readBoolVar(
-  engine: Pick<EngineClient, "searchVariables">,
-  processKey: string,
-  name: string,
-): Promise<boolean | undefined> {
-  const [row] = await engine.searchVariables({ processInstanceKey: processKey, name });
-  if (!row) return undefined;
+/** The merge-policy variable triple for one instance: the values of `autoMerge`, `convergeOnly`,
+ *  and `humanApproval`, each `undefined` when the instance does not carry it (or it is not a
+ *  boolean). */
+type MergePolicyVars = {
+  autoMerge: boolean | undefined;
+  convergeOnly: boolean | undefined;
+  humanApproval: boolean | undefined;
+};
+
+function emptyMergePolicyVars(): MergePolicyVars {
+  return { autoMerge: undefined, convergeOnly: undefined, humanApproval: undefined };
+}
+
+function parseBoolValue(value: string): boolean | undefined {
   try {
-    const v: unknown = JSON.parse(row.value);
+    const v: unknown = JSON.parse(value);
     return typeof v === "boolean" ? v : undefined;
   } catch {
     return undefined;
   }
 }
 
-/** Derive a PR's effective merge policy from its loop's process variables (issue #916). The
- * canonical positive `autoMerge` wins; the legacy inverted `convergeOnly` is the fallback for
- * in-flight loops seeded before `autoMerge` existed. Best-effort: any read failure degrades to the
- * historical default (merge requested) rather than failing the status read. */
-async function mergePolicyFor(
-  processKey: string | null,
+const MERGE_POLICY_NAMES = ["autoMerge", "convergeOnly", "humanApproval"] as const;
+type MergePolicyName = (typeof MERGE_POLICY_NAMES)[number];
+
+function isMergePolicyName(name: string): name is MergePolicyName {
+  return MERGE_POLICY_NAMES.some((n) => n === name);
+}
+
+/** Batched merge-policy read (issue #936): ONE name-filtered engine-wide read per policy variable
+ *  (3 concurrent calls, independent of row count), bucketed by owning instance.
+ *
+ *  Completeness: the engine seam returns a single page with no cursor, so an engine-wide read can
+ *  silently omit rows, and the three name pages truncate independently. Completeness is therefore
+ *  tracked per (instance, name): every name an active instance is missing from is re-probed with a
+ *  name-filtered root read (<=1 row, cannot be truncated). Every loop seeds all three names at
+ *  creation (submitPr for the review loop, startMerge for the merge loop), so the steady state is a
+ *  constant 3 calls; probes are paid only for genuine page cuts or legacy instances.
+ *
+ *  Scope: only the PROCESS-ROOT variable (`scopeKey === processInstanceKey`) is the loop's policy; a
+ *  same-named child-scope variable is ignored so it can never overwrite the root value.
+ *
+ *  Failure isolation: a failed BATCH read rejects the whole projection (its page is partial, so
+ *  absence can no longer be distinguished from a page cut) and the caller degrades every row to
+ *  the default. A failed TARGETED read degrades only its own instance (its partial entry is dropped,
+ *  so it projects the default, never a half-read policy) — the policies already
+ *  fetched for every other PR are preserved (a rejected fallback must not discard a sibling's
+ *  `autoMerge:false` or `humanApproval:true` and silently un-block its merge).
+ *
+ *  Skips the engine entirely when no active row carries a process key. Returns `undefined` when no
+ *  engine was handed in or a batched read fails — the caller degrades every row to the default. */
+async function readMergePolicyVars(
   engine: Pick<EngineClient, "searchVariables"> | undefined,
-): Promise<MergePolicy> {
-  if (processKey == null || !engine) return mergePolicyDefault();
+  activeKeys: readonly string[],
+): Promise<Map<string, MergePolicyVars> | undefined> {
+  if (!engine || activeKeys.length === 0) return undefined;
+  const wanted = new Set(activeKeys);
   try {
-    const [autoMerge, convergeOnly, humanApproval] = await Promise.all([
-      readBoolVar(engine, processKey, "autoMerge"),
-      readBoolVar(engine, processKey, "convergeOnly"),
-      readBoolVar(engine, processKey, "humanApproval"),
-    ]);
-    const requested = autoMerge ?? (convergeOnly === undefined ? true : !convergeOnly);
-    return mergePolicyFrom(requested, humanApproval === true);
+    const byInstance = new Map<string, MergePolicyVars>();
+    const seen = new Map<string, Set<MergePolicyName>>();
+    const record = (row: { name: string; processInstanceKey: string; scopeKey: string; value: string }) => {
+      const pk = String(row.processInstanceKey);
+      if (!wanted.has(pk) || String(row.scopeKey) !== pk) return;
+      if (!isMergePolicyName(row.name)) return;
+      const vars = byInstance.get(pk) ?? emptyMergePolicyVars();
+      vars[row.name] = parseBoolValue(row.value);
+      byInstance.set(pk, vars);
+      const names = seen.get(pk) ?? new Set<MergePolicyName>();
+      names.add(row.name);
+      seen.set(pk, names);
+    };
+    await Promise.all(
+      MERGE_POLICY_NAMES.map(async (name) => {
+        for (const row of await engine.searchVariables({ name })) if (row.name === name) record(row);
+      }),
+    );
+    // Completeness is tracked per (instance, NAME), not per instance: the three name pages truncate
+    // independently, so an instance present in one page (e.g. `autoMerge`) may still have been cut
+    // from another (e.g. `humanApproval`). Each name an instance is missing from is re-probed with a
+    // name-filtered ROOT read — a <=1-row result that cannot be truncated, so it proves absence.
+    // `convergeOnly` is skipped once a usable boolean `autoMerge` is known (the canonical intent wins). Every loop
+    // seeds all three names at creation (submitPr; startMerge seeds the merge loop's policy too), so
+    // the steady state is exactly 3 calls; probes are only paid for page cuts and legacy instances.
+    await Promise.all(
+      [...wanted].map(async (pk) => {
+        const got = seen.get(pk);
+        const probe = MERGE_POLICY_NAMES.filter(
+          (name) =>
+            !got?.has(name) &&
+            !(name === "convergeOnly" && byInstance.get(pk)?.autoMerge !== undefined),
+        );
+        if (probe.length === 0) return;
+        try {
+          // Collect ALL probe results first and record only once every probe succeeded: recording
+          // inside each probe would let a slower successful sibling re-create the entry the catch
+          // below deleted after an earlier rejection, exposing a half-read policy.
+          const results = await Promise.all(
+            probe.map(async (name) =>
+              (await engine.searchVariables({ processInstanceKey: pk, scopeKey: pk, name })).filter(
+                (row) => row.name === name,
+              ),
+            ),
+          );
+          for (const rows of results) for (const row of rows) record(row);
+        } catch {
+          // Degrade ONLY this instance — and fully: drop any partial entry the batch recorded so
+          // the caller projects the default for it, never a half-read policy.
+          byInstance.delete(pk);
+        }
+      }),
+    );
+    return byInstance;
   } catch {
-    return mergePolicyDefault();
+    return undefined;
   }
+}
+
+/** Derive a PR's effective merge policy from an already-read variable triple (issue #916). The
+ * canonical positive `autoMerge` wins; the legacy inverted `convergeOnly` is the fallback for
+ * in-flight loops seeded before `autoMerge` existed; an instance carrying neither (or absent from
+ * the batch — mid-handoff row, instance gone) degrades to the historical default (merge
+ * requested) rather than failing the status read. */
+function mergePolicyFromVars(vars: MergePolicyVars | undefined): MergePolicy {
+  if (!vars) return mergePolicyDefault();
+  const requested = vars.autoMerge ?? (vars.convergeOnly === undefined ? true : !vars.convergeOnly);
+  return mergePolicyFrom(requested, vars.humanApproval === true);
 }
 
 /** A delivery-graph run currently in flight, as reported by the status endpoint (issue #889 §1 —

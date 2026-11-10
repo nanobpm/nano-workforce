@@ -20,9 +20,29 @@ export default defineOperation("listActivePrs", async ({ req }, app) => {
     app.log.warn("listActivePrs rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
   }
+  // Per-phase timing (issue #936): /status regressed to ~13 s (and serialised concurrent callers
+  // into proxy 502s) on an unprofiled per-row engine fan-out. The merge-policy engine read is now
+  // ONE batched call inside `activePrs`, and these phase timings make any future regression
+  // attributable from the logs instead of rediscovered by hand. Debug level: /status is a hot
+  // polling endpoint, so this must not spam info.
+  const t0 = Date.now();
   const [prs, deliveries] = await Promise.all([activePrs(app.data, app.engine), activeDeliveries(app.data)]);
+  const readMs = Date.now() - t0;
   // The running app's identity, derived from the SAME app/version.ts getter /version uses (never
   // re-read), so the endpoint everyone polls answers "is the fix live?" in one call (issue #925).
   const { version, gitSha } = buildVersionInfo();
+  app.log.debug("listActivePrs served", {
+    ms: readMs,
+    prRows: prs.length,
+    deliveryRows: deliveries.length,
+  });
+  if (readMs > STATUS_SLOW_MS) {
+    app.log.warn("listActivePrs slow", { ms: readMs, prRows: prs.length, deliveryRows: deliveries.length });
+  }
   return { status: 200, body: { count: prs.length, prs, deliveries, version: { version, gitSha } } };
 });
+
+/** The wall-clock budget over which a /status serve is logged as slow (issue #936). The endpoint
+ *  targets well under 1 s for a handful of rows; anything past this is a regression signal an
+ *  operator can grep for. */
+const STATUS_SLOW_MS = 1_000;
