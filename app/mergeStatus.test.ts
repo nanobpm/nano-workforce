@@ -173,3 +173,52 @@ test("merge policy: NANO_PR_AUTO_MERGE=0 blocks a requested merge as env, never 
     else process.env["NANO_PR_AUTO_MERGE"] = prev;
   }
 });
+
+function activeStores() {
+  return {
+    pull_requests: { rows: [prRow({})], key: "pr_key" },
+    user_tasks: { rows: [], key: "id" },
+  } satisfies Stores;
+}
+
+type Row = { name: string; value: string; processInstanceKey: string; scopeKey: string };
+const row = (name: string, v: unknown): Row => ({ name, value: JSON.stringify(v), processInstanceKey: "PI-1", scopeKey: "PI-1" });
+
+test("merge policy: an unusable autoMerge row still probes a page-cut convergeOnly (PR #937 review)", async () => {
+  // Batch: autoMerge present but null (unusable), convergeOnly cut from its page; the root probe finds it.
+  const engine = {
+    searchVariables: (q: { processInstanceKey?: string; name?: string }) => {
+      if (q.processInstanceKey == null) {
+        if (q.name === "autoMerge") return Promise.resolve([row("autoMerge", null)]);
+        if (q.name === "humanApproval") return Promise.resolve([row("humanApproval", false)]);
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(q.name === "convergeOnly" ? [row("convergeOnly", true)] : []);
+    },
+  } as any;
+  const [pr] = await activePrs(memData(activeStores()), engine);
+  assertEquals(pr.merge.requested, false, "the legacy convergeOnly:true must be honoured when autoMerge is unusable");
+});
+
+test("merge policy: a delayed successful probe cannot resurrect a policy after a sibling probe failed (PR #937 review)", async () => {
+  // Batch cuts every name. PI-1: autoMerge probe rejects early, humanApproval:true resolves late.
+  // PI-2 (another PR) has a slower probe, so the projection is still pending when PI-1's late probe lands.
+  const stores = {
+    pull_requests: {
+      rows: [prRow({}), prRow({ pr_key: "owner/repo#2", number: 2, process_key: "PI-2" })],
+      key: "pr_key",
+    },
+    user_tasks: { rows: [], key: "id" },
+  } satisfies Stores;
+  const engine = {
+    searchVariables: (q: { processInstanceKey?: string; name?: string }) => {
+      if (q.processInstanceKey == null) return Promise.resolve([]);
+      if (q.processInstanceKey === "PI-2") return new Promise<Row[]>((r) => setTimeout(() => r([]), 60));
+      if (q.name === "autoMerge") return Promise.reject(new Error("boom"));
+      return new Promise<Row[]>((r) => setTimeout(() => r([row(q.name ?? "", true)]), 20));
+    },
+  } as any;
+  const prs = await activePrs(memData(stores), engine);
+  const pr = prs.find((p: { prKey?: string; pr_key?: string; number?: number }) => p.number === 1);
+  assertEquals(pr?.merge, { requested: true, enabled: true, effective: true, blockedBy: null }, "failed probe → default, not a half-read policy");
+});

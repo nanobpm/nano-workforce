@@ -1312,24 +1312,30 @@ async function readMergePolicyVars(
     // independently, so an instance present in one page (e.g. `autoMerge`) may still have been cut
     // from another (e.g. `humanApproval`). Each name an instance is missing from is re-probed with a
     // name-filtered ROOT read — a <=1-row result that cannot be truncated, so it proves absence.
-    // `convergeOnly` is skipped once `autoMerge` is known (the canonical intent wins). Every loop
+    // `convergeOnly` is skipped once a usable boolean `autoMerge` is known (the canonical intent wins). Every loop
     // seeds all three names at creation (submitPr; startMerge seeds the merge loop's policy too), so
     // the steady state is exactly 3 calls; probes are only paid for page cuts and legacy instances.
     await Promise.all(
       [...wanted].map(async (pk) => {
         const got = seen.get(pk);
         const probe = MERGE_POLICY_NAMES.filter(
-          (name) => !got?.has(name) && !(name === "convergeOnly" && got?.has("autoMerge")),
+          (name) =>
+            !got?.has(name) &&
+            !(name === "convergeOnly" && byInstance.get(pk)?.autoMerge !== undefined),
         );
         if (probe.length === 0) return;
         try {
-          await Promise.all(
-            probe.map(async (name) => {
-              for (const row of await engine.searchVariables({ processInstanceKey: pk, scopeKey: pk, name })) {
-                if (row.name === name) record(row);
-              }
-            }),
+          // Collect ALL probe results first and record only once every probe succeeded: recording
+          // inside each probe would let a slower successful sibling re-create the entry the catch
+          // below deleted after an earlier rejection, exposing a half-read policy.
+          const results = await Promise.all(
+            probe.map(async (name) =>
+              (await engine.searchVariables({ processInstanceKey: pk, scopeKey: pk, name })).filter(
+                (row) => row.name === name,
+              ),
+            ),
           );
+          for (const rows of results) for (const row of rows) record(row);
         } catch {
           // Degrade ONLY this instance — and fully: drop any partial entry the batch recorded so
           // the caller projects the default for it, never a half-read policy.
