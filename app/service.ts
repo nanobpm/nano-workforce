@@ -288,6 +288,14 @@ export const MERGEABLE_REPOLL_INTERVAL = mergeableRepollInterval(
  * to one attempt per window. Set via `NANO_PR_REVIEW_NUDGE_MINUTES` (minutes). */
 export const REVIEW_NUDGE_MS = clampNudgeMinutes(process.env.NANO_PR_REVIEW_NUDGE_MINUTES) * 60_000;
 
+/** Merge-loop head-current review request (issue #939). When the merge backstop finds no
+ * head-current Copilot review (the loop's own rebase/fix push moved the head), the merge loop
+ * requests the review itself and waits `REVIEW_REQUEST_WAIT` before re-checking — derived from the
+ * SAME nudge window the convergence poller uses, so there is one knob for "how long to give Copilot".
+ * It re-requests up to `MAX_REVIEW_REQUESTS` times before escalating (stating what was tried). */
+export const REVIEW_REQUEST_WAIT = `PT${Math.round(REVIEW_NUDGE_MS / 60_000)}M`;
+export const MAX_REVIEW_REQUESTS = 3;
+
 /** Grace window (ms) before the `escalated`→`running` self-heal (below) may act on a row. The sole
  * writer of `status="escalated"` — `record-feature-escalation` — runs on the `escalated` arm and stamps
  * `updated_at` IMMEDIATELY BEFORE the engine creates the `feature-escalation` user task. A poll landing
@@ -632,9 +640,11 @@ export async function submitPr(
   humanApproval = false,
   autoResolveEscalations = false,
   autoMerge?: boolean,
+  handoffFrom: string | null = null,
+  headShaOverride: string | null = null,
 ) {
   return withPrSubmitLock(parsed.prKey, () =>
-    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge),
+    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom, headShaOverride),
   );
 }
 
@@ -649,6 +659,8 @@ async function submitPrCritical(
   humanApproval = false,
   autoResolveEscalations = false,
   autoMerge?: boolean,
+  handoffFrom: string | null = null,
+  headShaOverride: string | null = null,
 ) {
   // Merge intent (issue #916): `autoMerge` is the CANONICAL positive form end to end — the same name
   // the feature/convergence-loop/plan-fanout doors accept. The legacy inverted `convergeOnly`
@@ -680,7 +692,28 @@ async function submitPrCritical(
   // would skip it as non-terminal, never re-enrolling). Treat a keyless non-terminal row as
   // RESUBMITTABLE — fall through and re-enroll, exactly as `startFeature`'s intake guard (feature.ts)
   // treats a keyless `running` feature row. A terminal row (any `process_key`) already falls through.
-  if (trackedExisting && existing?.process_key != null && !TERMINAL_STATUSES.includes(trackedExisting.derived_status)) {
+  // Merge-loop → convergence hand-back (issue #939): the merge-loop instance that currently OWNS the
+  // row (`process_key`) re-enters convergence when a head-current review reports findings. That
+  // instance is live (it is the caller, and ends right after this submit), so it must not read as
+  // "already running" — only the exact owning instance may hand back; any other key still dedupes.
+  // The bypass additionally requires the row to be LIVE (non-terminal, #941 review): a redelivered
+  // `pr.reconverge` can arrive after its successor has already settled the PR (merged/abandoned),
+  // and the settled row's `process_key` still names that stale job's instance — an owner match alone
+  // would let the dead hand-off restart convergence and clear the settled state. So an internal
+  // hand-off against a TERMINAL row is fenced off entirely (below): it dedupes as `alreadyRunning`
+  // instead of resubmitting. Only a DELIBERATE PUBLIC submission (no `handoffFrom`) may re-open a
+  // settled PR — the internal hand-off channel never may. A partially-failed hand-off's retry
+  // against a keyless NON-terminal row still works (that row is not terminal, so it falls through
+  // and re-enrolls via the phantom-row path).
+  const trackedTerminal = trackedExisting != null && TERMINAL_STATUSES.includes(trackedExisting.derived_status);
+  const handingBack =
+    handoffFrom != null && existing?.process_key != null && existing.process_key === handoffFrom && !trackedTerminal;
+  if (handoffFrom != null && trackedTerminal) {
+    // Stale internal hand-off against a settled row: report the existing (terminal) owner without
+    // minting a fresh run or touching the settled state. The redelivered job completes idempotently.
+    return { prKey: parsed.prKey, alreadyRunning: true };
+  }
+  if (!handingBack && trackedExisting && existing?.process_key != null && !trackedTerminal) {
     // Human approval is monotonic (issue #826): a gated caller adopting a live loop — possibly an
     // ungated one another run started — narrows it to gated instead of inheriting its auto-merge.
     // Idempotent, so a retry against our own gated loop is a no-op. A loop the engine no longer reports
@@ -801,7 +834,14 @@ async function submitPrCritical(
   // fleet advertising `durable-resume`: with no participant it stays null, so the round redrives from
   // scratch (graceful degradation). Absent (null) on a first submit, which leaves the envelope
   // unchanged.
-  const worldSha = await worldRestoreSha(data, parsed.prKey);
+  //
+  // `headShaOverride` (#941 round-4 review) WINS over the checkpoint: the checkpoint is written only
+  // by the convergence loop's `pr.persist-round`, so a merge-stage rebase/fix-ci push advances the PR
+  // head WITHOUT updating it. A merge→convergence hand-off (`pr.reconverge`) that restored the
+  // checkpoint would provision the fresh run at the PRE-MERGE tree, not the head whose review raised
+  // the findings — so the hand-off passes the live head SHA it read, and a fresh hand-off restores
+  // the CURRENT head. `null` (every other caller) keeps the checkpoint resume.
+  const worldSha = headShaOverride ?? (await worldRestoreSha(data, parsed.prKey));
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId: PROCESS_ID,
     variables: {
@@ -877,6 +917,11 @@ async function submitPrCritical(
   // run auto-applies stale decisions, and (crucially) the row stays in its OLD terminal shape until
   // the atomic reopen write lands, so no straggler ever sees a fresh-run row still owned by the old
   // instance.
+  let reopened = false;
+  // Snapshot BEFORE the reopen write — the row object may be a live reference the update mutates.
+  const prior = existing
+    ? { status: existing.status, current_round: existing.current_round, process_key: existing.process_key }
+    : null;
   try {
     if (existing) {
       // ATOMIC REOPEN (Copilot review of #819): reset the row to the fresh run's shape AND publish the
@@ -931,6 +976,7 @@ async function submitPrCritical(
         process_key: processKey,
         updated_at: ts,
       });
+      reopened = true;
     } else if (processKey != null) {
       // First submit: the row was INSERTED keyless before `createInstance` (the phantom-row pattern,
       // #704/#497); publish its `process_key` now that the instance exists.
@@ -949,6 +995,19 @@ async function submitPrCritical(
       await resetAdjudications(data, parsed.prKey);
     }
   } catch (err) {
+    // Restore the prior row (#941 review): the atomic reopen already advanced `process_key` to the
+    // instance we are about to cancel. Leaving that cancelled key on the row would make a dead run its
+    // "owner" — once tracking derives `abandoned`, a retried merge-loop hand-off would be fenced as
+    // stale (settled row) and the merge loop would end with no live convergence owner. Restoring the
+    // pre-reopen shape (owner key + status) keeps the retry the owning hand-off, and a public retry
+    // still sees the old terminal row as resubmittable.
+    if (reopened && prior) {
+      try {
+        await table.update(parsed.prKey, { ...prior, updated_at: now() });
+      } catch (restoreErr) {
+        console.warn(`[submit] ${parsed.prKey} rollback-restore failed: ${restoreErr}`);
+      }
+    }
     if (processInstanceKey != null) {
       try {
         await engine.cancelInstance({ processInstanceKey: String(processInstanceKey) });
@@ -1025,6 +1084,11 @@ export async function startMerge(
       mergeableRepollInterval: MERGEABLE_REPOLL_INTERVAL,
       mergeStallRounds: 0,
       mergeStallMax: MAX_MERGE_STALL_ROUNDS,
+      // Head-current review request budget (issue #939): see REVIEW_REQUEST_WAIT.
+      reviewRequestRound: 0,
+      reviewRequestMax: MAX_REVIEW_REQUESTS,
+      reviewRequestWait: REVIEW_REQUEST_WAIT,
+      reviewRequest: null,
       // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).
       rootRequestKey,
       abandonUrl: abUrl,

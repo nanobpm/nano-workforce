@@ -855,6 +855,24 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
     sets `ciBlockedReconciled`), and escalates only if the PR is **still** blocked on the
     re-derived state.
 
+- **Head-current review after a loop-authored head move — request it, don't escalate**
+  (issue #939) — `pr.merge` refuses to land without a Copilot review of the PR's
+  current HEAD (#923 backstop). When the loop's own rebase / merge-from-base / fix push
+  moved the head, the only remedy is mechanical, so instead of escalating the worker
+  returns `mergeStatus: "review-pending"` and the model **requests the review itself**
+  (`pr.request-review` — REST `requested_reviewers` POST of
+  `copilot-pull-request-reviewer[bot]`; on a re-request whose prior ask is still pending,
+  i.e. silently ignored, it withdraws then re-adds the reviewer), waits on a timer
+  (`reviewRequestWait`, derived from the review-nudge window) and re-arms the poller so
+  the backstop re-checks the new head. It repeats up to `reviewRequestMax` (3) requests;
+  only when no review arrives in that budget — or Copilot is not an assignable reviewer —
+  does it escalate, with a question stating what was tried. A head-current review whose
+  summary reports open findings returns `mergeStatus: "review-findings"`: `pr.reconverge`
+  hands the PR back to the convergence loop through the canonical `submitPr` (declaring
+  the owning merge-loop instance as `handoffFrom`) and the merge loop ends — the fresh
+  convergence run fixes, pushes, re-reviews and starts a new merge loop on convergence.
+  An *unreadable* review/head still fails closed to a human (#927).
+
 - **Discovered dependency** — a `senior:fix-ci` or `senior:rebase` agent may find that
   the PR cannot land because **another PR must merge first** (a required linked-issue
   gate a sibling PR will close, a stacked base PR, or a `Depends-on:` the agent read

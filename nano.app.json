@@ -145,6 +145,14 @@
       "handler": "workers/merge/worker.ts"
     },
     {
+      "taskType": "pr.request-review",
+      "handler": "workers/request-review/worker.ts"
+    },
+    {
+      "taskType": "pr.reconverge",
+      "handler": "workers/reconverge/worker.ts"
+    },
+    {
       "taskType": "pr.mark-merged",
       "handler": "workers/mark-merged/worker.ts"
     },

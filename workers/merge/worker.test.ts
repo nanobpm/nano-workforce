@@ -329,14 +329,13 @@ test("pr.merge #923: refuses to land when NO Copilot review exists (the #1443 fa
       app,
     )) as Record<string, unknown>;
 
-    assertEquals(out.mergeStatus, "blocked");
-    assertEquals(out.status, "blocked");
-    assertEquals(typeof out.question, "string");
-    assertEquals((out.question as string).includes("no head-current Copilot review"), true);
+    // Issue #939: an automatable remedy → `review-pending` (the model requests + waits), NEVER a
+    // human escalation payload on the first occurrence.
+    assertEquals(out, { mergeStatus: "review-pending" });
 
     // The refusal is audited, and NO land was attempted (no merge PUT, no enqueue comment).
     assertEquals(stores.merges.length, 1);
-    assertEquals(stores.merges[0].outcome, "blocked");
+    assertEquals(stores.merges[0].outcome, "review-pending");
     assertEquals(stores.merges[0].method, "review-backstop");
     assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
     assertEquals(calls.some((c) => /\/comments$/.test(c.url)), false);
@@ -356,7 +355,7 @@ test("pr.merge #923: refuses to land when the head MOVED past the latest review 
       app,
     )) as Record<string, unknown>;
 
-    assertEquals(out.mergeStatus, "blocked");
+    assertEquals(out, { mergeStatus: "review-pending" });
     assertEquals(stores.merges[0].method, "review-backstop");
     assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
   });
@@ -440,7 +439,7 @@ test("pr.merge #927: reproduces nano-bpm#1467 — review REQUESTED but not yet a
           { variables: { prKey: "acme/widgets#1467", repo: "acme/widgets", prNumber: 1467 } } as any,
           app,
         )) as Record<string, unknown>;
-        assertEquals(out.mergeStatus, "blocked");
+        assertEquals(["blocked", "review-pending"].includes(String(out.mergeStatus)), true);
         assertEquals(stores.merges[0].method, "review-backstop");
         assertEquals(calls.some((c) => /\/comments$/.test(c.url)), false);
         assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
@@ -457,8 +456,9 @@ test("pr.merge #923: a head-current review whose summary reports OPEN findings b
       readHeadSha: async () => "h1",
     });
     const out = (await backstop({ variables: { prKey: "acme/widgets#29", repo: "acme/widgets", prNumber: 29 } } as any, app)) as Record<string, unknown>;
-    assertEquals(out.mergeStatus, "blocked");
-    assertEquals((out.question as string).includes("open findings"), true);
+    // Issue #939: findings on a head-current review re-enter convergence, never a human.
+    assertEquals(out, { mergeStatus: "review-findings" });
+    assertEquals(stores.merges[0].outcome, "review-findings");
     assertEquals(stores.merges[0].method, "review-backstop");
     assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
   });
@@ -536,5 +536,26 @@ for (const [label, finalRead] of [
         assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false, "no merge call");
       },
     );
+  });
+}
+
+// ── Defect-class guard (issue #939) ──────────────────────────────────────────
+// No merge-gate refusal whose remedy is fully automatable (missing head-current review, a review
+// made stale by a loop push, findings on a head-current review) may produce a human escalation
+// payload (`status`/`question`) on its first occurrence.
+for (const [label, review, head] of [
+  ["no review ever submitted", { body: "", commitId: null }, "h10"],
+  ["review stale after a loop push", { body: "lgtm", commitId: "old" }, "h10"],
+  ["head-current review with findings", { body: "### 🟡 Changes recommended\n<summary>1 open issue</summary>", commitId: "h10" }, "h10"],
+] as const) {
+  test(`pr.merge #939: an automatable refusal (${label}) never yields a human escalation payload`, async () => {
+    await withGithub(backstopRoutes, async () => {
+      const { app } = fakeApp();
+      const backstop = makeHandler({ readReview: async () => review, readHeadSha: async () => head });
+      const out = (await backstop({ variables: { prKey: "acme/widgets#40", repo: "acme/widgets", prNumber: 40 } } as any, app)) as Record<string, unknown>;
+      assertEquals(out.status, undefined);
+      assertEquals(out.question, undefined);
+      assertEquals(out.mergeStatus === "blocked", false);
+    });
   });
 }
