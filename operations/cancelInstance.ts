@@ -157,6 +157,19 @@ export default defineOperation("cancelInstance", async ({ req, body }, app) => {
     };
   }
 
+  // Termination provenance (issue #943): a deliberate operator cancel of a PR loop is NOT an orphan —
+  // stamp the reason on the owning PR row so `/status` does not flag it `orphaned`. Best-effort.
+  if (canResolveRecord) {
+    try {
+      const prs = app.data.table<{ pr_key: string; process_key: string | null; termination_reason: string | null }>("pull_requests", "pr_key");
+      for (const row of await prs.find({ process_key: processInstanceKey })) {
+        await prs.update(row.pr_key, { termination_reason: "operator cancel (/actions/cancel)" });
+      }
+    } catch (err) {
+      app.log.warn("cancelInstance: could not record termination reason", { processInstanceKey, error: String(err) });
+    }
+  }
+
   app.log.info("cancelInstance: instance terminated", {
     processInstanceKey,
     state: result.state,

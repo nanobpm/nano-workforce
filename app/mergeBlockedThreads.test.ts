@@ -374,10 +374,13 @@ fi
   process.env["NANO_PR_GITHUB_TRANSPORT"] = "gh";
   globalThis.fetch = (() => Promise.resolve(new Response("no fetch in gh mode", { status: 500 }))) as typeof fetch;
   try {
-    // Pass 1: the handoff fails (createInstance throws) AFTER the merge instance is retired.
+    // Pass 1: the handoff fails (createInstance throws). Issue #943: the successor is started BEFORE
+    // the merge instance is retired, so a failed start leaves the merge instance LIVE (never retired
+    // into nothing).
     await pollMerges(data, engine, "tok");
     const rowAfterFail = stores["pull_requests"][0];
-    assertEquals(cancelled, ["merge-1"], "the live merge instance is still retired");
+    assertEquals(cancelled, [], "no successor -> the live merge instance is NOT retired");
+    assertEquals(rowAfterFail.process_key, "merge-1", "the live merge instance still owns the row");
     assertEquals(
       rowAfterFail.status,
       "waiting_merge",
@@ -403,6 +406,64 @@ fi
   assertEquals(instances[0].processDefinitionId, "convergence-loop", "the canonical convergence loop is re-entered on retry");
   assertEquals(row.status, "converging", "the retried handoff completes — the row presents the fresh convergence run");
   assertEquals(row.process_key, "conv-retry-1", "the row is re-pointed at the fresh convergence instance");
+  assertEquals(cancelled, ["merge-1"], "the merge instance is retired only once the successor exists");
+});
+
+test("#943 poller: the convergence handoff never retires the merge loop into NOTHING — the derived tracking edge folds the cancel ASYNCHRONOUSLY (nanobpm/nano-bpm#1452)", async () => {
+  // Production shape: `pull_requests__tracking.derived_status` folds an engine cancel in LATER (the
+  // reconciler edge), not synchronously inside `cancelInstance`. The old cancel-then-submit order
+  // therefore had `submitPr` read the just-cancelled merge key as a LIVE owner, return
+  // `alreadyRunning`, and start nothing — merge loop terminated, no successor, no escalation.
+  const { data, stores } = memData();
+  const { engine, cancelled } = recordingEngine();
+  const instances: any[] = [];
+  (engine as any).createInstance = async (args: any) => {
+    instances.push(args);
+    return { processInstanceKey: "conv-943" };
+  };
+  const mergeRow = { ...waitingMergeRow("o/r#1452", 1452), process_key: "merge-607414" };
+  stores["pull_requests"] = [mergeRow];
+  // The tracking view stays `waiting_merge` across the cancel (async fold), exactly as on merlin.
+  stores["pull_requests__tracking"] = [{ ...mergeRow, derived_status: "waiting_merge" }];
+  const bin = await mkdtemp(join(tmpdir(), "gh-stub-"));
+  const script = `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"pr view"* ]]; then
+  echo '{"state":"OPEN","mergedAt":null,"mergeStateStatus":"BLOCKED","statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}],"isDraft":false,"headRefOid":"deadbeef","baseRefName":"main"}'
+elif [[ "$*" == *"graphql"* ]]; then
+  echo '${graphqlThreads(1)}'
+elif [[ "$*" == *"requested_reviewers"* ]]; then
+  exit 0
+else
+  echo "unexpected gh args: $*" >&2
+  exit 1
+fi
+`;
+  await writeFile(join(bin, "gh"), script, { mode: 0o755 });
+  const prevPath = process.env.PATH;
+  const prevFetch = globalThis.fetch;
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  process.env.PATH = `${bin}:${prevPath ?? ""}`;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "gh";
+  globalThis.fetch = (() => Promise.resolve(new Response("no fetch in gh mode", { status: 500 }))) as typeof fetch;
+  try {
+    await pollMerges(data, engine, "tok");
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevPath === undefined) delete process.env.PATH;
+    else process.env.PATH = prevPath;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    await rm(bin, { recursive: true, force: true });
+  }
+  const row = stores["pull_requests"][0];
+  assertEquals(instances.length, 1, "a successor convergence instance is started");
+  assertEquals(row.process_key, "conv-943", "the row is owned by the successor");
+  assertEquals(cancelled, ["merge-607414"], "the merge loop is retired only after the successor exists");
+  assert(
+    typeof row.termination_reason === "string" && row.termination_reason.includes("conv-943"),
+    `the termination reason names the successor, got ${row.termination_reason}`,
+  );
 });
 
 test("#921/PR#922 poller: an UNFINISHED handoff (dead merge instance) never publishes merge-ready to the cancelled owner — it re-establishes a live convergence owner first (PR #922 review, round 5)", async () => {

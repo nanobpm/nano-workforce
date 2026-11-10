@@ -416,6 +416,10 @@ export interface PullRequest {
   // Opt-in escalation steward (120_escalation_auto_resolutions.sql, issue #889): 1 ⇒ this PR's open
   // escalations are eligible for the steward to auto-resolve (recorded reviewably). Default 0.
   auto_resolve_escalations: number;
+  // Loop-termination provenance (130_pull_requests_termination_reason.sql, issue #943): the reason the
+  // app last cancelled this PR's convergence/merge loop, stamped by {@link terminatePrLoop}. NULL when
+  // the app never cancelled the current run.
+  termination_reason: string | null;
 }
 
 interface PrDependency {
@@ -963,6 +967,9 @@ async function submitPrCritical(
         // watermark could drop the new run's early rounds from the churn window (or, after the new
         // run passes that number, silently expire). Reset it so the new run's churn clock starts clean.
         churn_escalated_round: null,
+        // Run-scoped termination provenance (issue #943): a prior run's cancel reason must not mask a
+        // later orphaning of THIS run in `/status`.
+        termination_reason: null,
         outcome: null,
         converged_at: null,
         merged_at: null,
@@ -1185,6 +1192,9 @@ export interface ActivePr {
   /** The ACTIVE engine incident parking this PR's instance (issue #931), mirrored by the poller's
    * `pollIncidents` pass; null when none. While set, `status` reads `incident`. */
   incident: StatusIncident | null;
+  /** Why the app last cancelled this PR's loop (issue #943), naming the successor/outcome; null when
+   * never. An `orphaned` status means the loop ended with no reason, successor, or escalation. */
+  terminationReason: string | null;
 }
 
 /** Every tracked PR not in a terminal state (converged/abandoned), newest-updated first. Backs
@@ -1212,7 +1222,7 @@ export async function activePrs(
     // `status`/worker-owned transient columns are still surfaced on each row below (the view re-exports
     // `base.*`), and `pull_requests` has no `onWaitingHuman` edge, so for a still-active PR
     // `derived_status === status`.
-    .filter((p) => !TERMINAL_STATUSES.includes(p.derived_status))
+    .filter((p) => !TERMINAL_STATUSES.includes(p.derived_status) || isOrphanedPr(p))
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
   // Derive the STRUCTURED open-escalation pointer from the ONE `user_tasks` read model (issue #666) —
   // the same user-task surface `listEscalations` and the Convergence/Tasks page consume — so `/status`
@@ -1244,13 +1254,14 @@ export async function activePrs(
     // kept reading `converging` for hours while nothing ran. Overlay the derived `incident` status
     // (the base `status` column is never touched) and carry the mirrored incident block.
     const incident = statusIncidentFor(p);
+    const orphaned = isOrphanedPr(p);
     return {
       prKey: p.pr_key,
       repo: p.repo,
       number: p.number,
       url: p.url,
       title: p.title ?? null,
-      status: incident ? INCIDENT_STATUS : p.status,
+      status: orphaned ? ORPHANED_PR_STATUS : incident ? INCIDENT_STATUS : p.status,
       round: p.current_round,
       processKey: p.process_key ?? null,
       waitingSince: p.waiting_since ?? null,
@@ -1261,8 +1272,37 @@ export async function activePrs(
       autoResolveEscalations: p.auto_resolve_escalations === 1,
       merge: mergeByPr.get(p.pr_key) ?? mergePolicyDefault(),
       incident,
+      terminationReason: p.termination_reason ?? null,
     };
   });
+}
+
+/** `/status` overlay for an ORPHANED PR (issue #943): its loop instance ended (derived tracking edge
+ * folded to `abandoned`) while the base row still sits at an in-flight stage — no worker or human
+ * settled it — and no termination reason was recorded (every app-initiated cancel records one via
+ * {@link terminatePrLoop}, and the operator cancel door records one too), no merge landed, and no
+ * successor took over. Cleared by an operator Dismiss (`acknowledged_at`). That is exactly the
+ * silently-dropped nanobpm/nano-bpm#1452 shape; it must be visible, not filtered out. */
+export const ORPHANED_PR_STATUS = "orphaned";
+
+/** Whether a tracked PR row is orphaned (see {@link ORPHANED_PR_STATUS}). Exported for tests. */
+export function isOrphanedPr(p: {
+  status: string;
+  derived_status: string;
+  termination_reason?: string | null;
+  merged_at: string | null;
+  acknowledged_at?: string | null;
+}): boolean {
+  return (
+    TERMINAL_STATUSES.includes(p.derived_status) &&
+    // An operator Dismiss (`acknowledged_at`) clears the overlay once a human has seen it.
+    !p.acknowledged_at &&
+    // The BASE row is still at an in-flight stage of the loop (the manifest's active set): nothing
+    // settled it. This base-vs-derived divergence IS the orphan signal.
+    activeStatusesFor("pull_requests").includes(p.status) &&
+    !p.termination_reason &&
+    p.merged_at == null
+  );
 }
 
 /** The default merge policy when no instance variables are readable (mid-handoff row, engine
@@ -1490,7 +1530,7 @@ export async function retireTerminalReviewWait(
   if (pr.process_key != null) {
     const key = String(pr.process_key);
     try {
-      await engine.cancelInstance({ processInstanceKey: key });
+      await terminatePrLoop(data, engine, pr.pr_key, key, `review wait retired: PR ${liveness} out-of-band`, true);
     } catch (err) {
       // Only finalize the row once the instance is confirmed gone/terminal: a transiently-failed
       // cancel would otherwise drop the row from `waiting_review` scans while the live instance's
@@ -1929,21 +1969,20 @@ async function handoffWaitingMergeToConvergence(
   logContext: string,
 ) {
   const prKey = pr.pr_key;
+  const mergeKey = pr.process_key != null ? String(pr.process_key) : null;
   try {
     // `waiting_since` bounds the review the fresh loop collects: only a review submitted at or after
     // the handoff counts, so a pre-merge review (submitted before this flip) can never satisfy the new
     // run's wait.
     const handoffTs = now();
     await prs(data).update(prKey, { status: "waiting_review", waiting_since: handoffTs, updated_at: handoffTs });
-    const mergeKey = pr.process_key;
-    if (mergeKey != null) {
-      try {
-        await engine.cancelInstance({ processInstanceKey: String(mergeKey) });
-      } catch (cancelErr) {
-        console.error(`[poller] ${logContext} handoff ${prKey}: retire merge instance ${mergeKey}: ${cancelErr}`);
-      }
-    }
-    await submitPr(
+    // SUCCESSOR FIRST, then retire (issue #943). The old order — cancel the merge instance, THEN
+    // `submitPr` — orphaned nanobpm/nano-bpm#1452: the derived tracking status folds the cancel in
+    // asynchronously, so `submitPr` still read the row's `process_key` as a LIVE owner, returned
+    // `alreadyRunning`, and started NOTHING — the merge loop was gone, no convergence loop took over,
+    // no human was told. Now the live merge instance hands back as the exact owner (`handoffFrom`, the
+    // #939 channel), so the successor exists before the predecessor is retired.
+    const res = await submitPr(
       data,
       engine,
       { repo: pr.repo, number: pr.number, url: pr.url, prKey },
@@ -1953,21 +1992,57 @@ async function handoffWaitingMergeToConvergence(
       null,
       false,
       pr.auto_resolve_escalations === 1,
+      undefined,
+      mergeKey,
     );
-    console.log(`[poller] ${logContext} -> handed back into convergence -> ${prKey}`);
+    const successor = "processKey" in res ? res.processKey : null;
+    if (successor == null) {
+      // No successor was started — never retire the merge loop into nothing.
+      throw new Error("convergence hand-off started no successor instance");
+    }
+    if (mergeKey != null) {
+      await terminatePrLoop(data, engine, prKey, mergeKey, `merge loop handed back to convergence (${logContext}) -> successor ${successor}`, false);
+    }
+    console.log(`[poller] ${logContext} -> handed back into convergence (${successor}) -> ${prKey}`);
   } catch (err) {
     console.error(`[poller] ${logContext} handoff ${prKey}: ${err}`);
-    // Restore the row to `waiting_merge` so the next pass re-attempts the handoff, and NULL the
-    // `process_key`: the merge instance was retired above (or never lived), so the row genuinely has
-    // NO live owner. The null key is the durable "unfinished handoff" marker the dead-owner guard in
-    // `pollMerges` keys on — and it is what distinguishes this retryable shape from a HUMAN cancel of a
-    // parked merge wait (which leaves `process_key` naming the terminated instance and must NOT be
-    // resurrected). Best-effort: a failed restore still leaves the original error logged.
+    // Restore the row to `waiting_merge` so the next pass re-attempts the handoff. The merge instance
+    // was NOT retired (no successor started), so it stays LIVE and keeps owning the PR — the next pass
+    // simply retries. A row that had no owner key (an earlier unfinished handoff) stays keyless: the
+    // NULL key is the durable "unfinished handoff" marker the dead-owner guard in
+    // `pollMerges` keys on (distinct from a HUMAN cancel, which leaves `process_key` naming the
+    // terminated instance and must NOT be resurrected). Best-effort: a failed restore is only logged.
     try {
-      await prs(data).update(prKey, { status: "waiting_merge", process_key: null, updated_at: now() });
+      // `process_key` is left as-is: `submitPr` rolls back its own half-committed reopen, so the row
+      // still names the live merge owner (or stays NULL for an unfinished handoff).
+      await prs(data).update(prKey, { status: "waiting_merge", updated_at: now() });
     } catch (restoreErr) {
       console.error(`[poller] ${logContext} handoff ${prKey}: restore waiting_merge: ${restoreErr}`);
     }
+  }
+}
+
+/** THE canonical door for an app-initiated cancel of a PR's convergence/merge loop (issue #943).
+ * Every in-app termination must say WHY and what took over: the reason (which names the successor
+ * instance or the terminal GitHub outcome) is stamped on the row's `termination_reason` BEFORE the
+ * engine cancel, so even a crash between the two leaves provenance. `strict` rethrows a failed cancel
+ * (callers that must confirm the instance is gone); otherwise a failed cancel is logged. The
+ * `cancel-sites` guard test (app/loopTermination.test.ts) fails if any new `cancelInstance` call site
+ * targeting a PR loop bypasses this door. Exported for tests. */
+export async function terminatePrLoop(
+  data: DataLayer,
+  engine: Pick<EngineClient, "cancelInstance">,
+  prKey: string,
+  processKey: string,
+  reason: string,
+  strict: boolean,
+): Promise<void> {
+  await prs(data).update(prKey, { termination_reason: reason, updated_at: now() });
+  try {
+    await engine.cancelInstance({ processInstanceKey: processKey });
+  } catch (err) {
+    if (strict) throw err;
+    console.error(`[loop] ${prKey}: cancel ${processKey} (${reason}) failed: ${err}`);
   }
 }
 
