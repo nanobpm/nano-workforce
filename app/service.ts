@@ -694,8 +694,24 @@ async function submitPrCritical(
   // row (`process_key`) re-enters convergence when a head-current review reports findings. That
   // instance is live (it is the caller, and ends right after this submit), so it must not read as
   // "already running" — only the exact owning instance may hand back; any other key still dedupes.
-  const handingBack = handoffFrom != null && existing?.process_key != null && existing.process_key === handoffFrom;
-  if (!handingBack && trackedExisting && existing?.process_key != null && !TERMINAL_STATUSES.includes(trackedExisting.derived_status)) {
+  // The bypass additionally requires the row to be LIVE (non-terminal, #941 review): a redelivered
+  // `pr.reconverge` can arrive after its successor has already settled the PR (merged/abandoned),
+  // and the settled row's `process_key` still names that stale job's instance — an owner match alone
+  // would let the dead hand-off restart convergence and clear the settled state. So an internal
+  // hand-off against a TERMINAL row is fenced off entirely (below): it dedupes as `alreadyRunning`
+  // instead of resubmitting. Only a DELIBERATE PUBLIC submission (no `handoffFrom`) may re-open a
+  // settled PR — the internal hand-off channel never may. A partially-failed hand-off's retry
+  // against a keyless NON-terminal row still works (that row is not terminal, so it falls through
+  // and re-enrolls via the phantom-row path).
+  const trackedTerminal = trackedExisting != null && TERMINAL_STATUSES.includes(trackedExisting.derived_status);
+  const handingBack =
+    handoffFrom != null && existing?.process_key != null && existing.process_key === handoffFrom && !trackedTerminal;
+  if (handoffFrom != null && trackedTerminal) {
+    // Stale internal hand-off against a settled row: report the existing (terminal) owner without
+    // minting a fresh run or touching the settled state. The redelivered job completes idempotently.
+    return { prKey: parsed.prKey, alreadyRunning: true };
+  }
+  if (!handingBack && trackedExisting && existing?.process_key != null && !trackedTerminal) {
     // Human approval is monotonic (issue #826): a gated caller adopting a live loop — possibly an
     // ungated one another run started — narrows it to gated instead of inheriting its auto-merge.
     // Idempotent, so a retry against our own gated loop is a no-op. A loop the engine no longer reports

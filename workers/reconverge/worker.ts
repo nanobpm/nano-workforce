@@ -34,7 +34,7 @@ export function makeHandler(submit: Submit): AppJobHandler<In> {
     });
     // The PR was already merging (merge intent on, any human approval already given), so the fresh
     // run keeps auto-merge and does not re-gate on approval.
-    await submit(
+    const result = await submit(
       app.data,
       app.engine,
       parsed,
@@ -47,6 +47,15 @@ export function makeHandler(submit: Submit): AppJobHandler<In> {
       true,
       job.processInstanceKey != null ? String(job.processInstanceKey) : null,
     );
+    // `submitPr` can return `processKey: null` after rewriting the row to `converging` with no owner
+    // (the create-instance failure window). Completing HERE would end the merge loop at
+    // `MergeReconverged` with the PR left on a keyless `converging` row — no live convergence or
+    // merge instance to advance it. Throw instead so the job fails and stays RETRYABLE: the retry
+    // re-enters `submitPr`, which treats the keyless non-terminal row as resubmittable and re-enrolls
+    // it (the #704/#497 phantom-row recovery path).
+    if (result != null && typeof result === "object" && "processKey" in result && result.processKey == null) {
+      throw new Error(`reconverge: submitPr returned a null processKey for ${prKey} — no convergence instance was started; failing so the hand-off is retried`);
+    }
     return {};
   };
 }

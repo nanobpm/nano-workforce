@@ -2603,3 +2603,52 @@ test("submitPr handoffFrom: only the owning merge-loop instance may re-enter con
     assertEquals(row.process_key, "PI-CONV-1");
   });
 });
+
+// Issue #941 review: a redelivered `pr.reconverge` can arrive AFTER its successor has already
+// settled the PR (merged/abandoned). The stale job still carries the OLD merge-loop instance key as
+// `handoffFrom`, and the settled row's `process_key` still names that same instance, so an owner
+// match ALONE would let the bypass treat the dead job as the row's live owner and restart
+// convergence, clearing the settled state. The internal hand-off channel is fenced against a
+// TERMINAL row outright: it dedupes idempotently and never resubmits. Only a DELIBERATE PUBLIC
+// submission (no `handoffFrom`) may re-open a settled PR.
+test("submitPr handoffFrom: a stale hand-off against a settled row is fenced, a public resubmit still re-opens (#941)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#78";
+    const mk = () => {
+      const stores: Record<string, { rows: any[]; key: string }> = {
+        pull_requests: {
+          // The successor convergence run MERGED the PR; the row is terminal (`merged`) but its
+          // `process_key` still names the OLD merge-loop instance the redelivered job belongs to.
+          rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 78, url: "https://github.com/owner/repo/pull/78", title: "t", status: "merged", current_round: 5, process_key: "PI-MERGE" }],
+          key: "pr_key",
+        },
+        escalations: { rows: [], key: "id" },
+        pr_adjudications: { rows: [], key: "id" },
+        pr_dependencies: { rows: [], key: "pr_key" },
+      };
+      const data = { table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)), open: () => memOpen(stores) } as any;
+      return { stores, data };
+    };
+    const parsed = { repo: "owner/repo", number: 78, url: "https://github.com/owner/repo/pull/78", prKey: PR_KEY };
+
+    // The stale hand-off (owner key matches, but the row is terminal) is FENCED: it dedupes
+    // idempotently, mints no instance, and leaves the settled row byte-for-byte untouched.
+    const a = mk();
+    let calls = 0;
+    const engine = { createInstance: async () => ({ processInstanceKey: `PI-CONV-${++calls}` }) } as any;
+    const stale = await submitPr(a.data, engine, parsed, [], undefined, false, null, false, false, true, "PI-MERGE");
+    assertEquals((stale as any).alreadyRunning, true, "a stale hand-off against a terminal row dedupes instead of re-entering convergence");
+    assertEquals(calls, 0, "no fresh instance is minted for the stale hand-off");
+    assertEquals(a.stores.pull_requests.rows[0].status, "merged", "the settled row's state is untouched");
+    assertEquals(a.stores.pull_requests.rows[0].process_key, "PI-MERGE", "the settled row's owner is untouched");
+
+    // A deliberate PUBLIC resubmission of the same settled PR (no handoffFrom) still re-opens it —
+    // the fence only closes the internal hand-off channel, never the terminal→resubmittable path.
+    const b = mk();
+    const resubmit = await submitPr(b.data, engine, parsed);
+    assertEquals((resubmit as any).alreadyRunning, undefined);
+    assertEquals(calls, 1);
+    assertEquals(b.stores.pull_requests.rows[0].status, "converging");
+    assertEquals(b.stores.pull_requests.rows[0].process_key, "PI-CONV-1");
+  });
+});
