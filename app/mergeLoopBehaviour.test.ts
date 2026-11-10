@@ -43,7 +43,8 @@ const MODEL = readFileSync("resources/processes/merge-loop.bpmn", "utf8");
 const AGENT_SLA_MS = 30 * 60 * 1000; // matches the PT30M we start instances with
 const LANDED_WAIT_MS = 30 * 60 * 1000; // matches the PT30M landedWaitTimeout we start instances with
 const MERGEABLE_WAIT_MS = 30 * 60 * 1000; // matches the PT30M mergeableWaitTimeout we start instances with
-const MERGEABLE_REPOLL_MS = 2 * 60 * 1000; // matches the PT2M mergeableRepollInterval we start instances with
+const MERGEABLE_REPOLL_MS = 2 * 60 * 1000;
+const REVIEW_REQUEST_WAIT_MS = 10 * 60 * 1000; // matches the PT10M reviewRequestWait we start instances with // matches the PT2M mergeableRepollInterval we start instances with
 
 type Output = Record<string, unknown>;
 type Responder = Output | Output[] | ((job: { variables: Record<string, unknown> }) => Output);
@@ -59,6 +60,8 @@ const ALL_JOB_TYPES = [
   "pr.persist-escalation",
   "pr.answer-escalation",
   "pr.record-dependency",
+  "pr.request-review",
+  "pr.reconverge",
 ] as const;
 
 const DEFAULT_RESPONSES: Record<string, Responder> = {
@@ -68,6 +71,8 @@ const DEFAULT_RESPONSES: Record<string, Responder> = {
   "pr.answer-escalation": {},
   "pr.persist-escalation": { escalated: true },
   "pr.landed-probe": { landedVerdict: "waiting" },
+  "pr.request-review": { reviewRequest: "requested" },
+  "pr.reconverge": {},
 };
 
 // Every FEEL expression in the model references these; start them defined (null,
@@ -91,6 +96,10 @@ const DEFAULT_VARS: Record<string, unknown> = {
   mergeableRepollInterval: "PT2M",
   mergeStallRounds: 0,
   mergeStallMax: 3,
+  reviewRequestRound: 0,
+  reviewRequestMax: 3,
+  reviewRequestWait: "PT10M",
+  reviewRequest: null,
   abandonBrief: "\n\n---\nAbort if cancelled: curl …",
   failingChecksList: null,
   status: null,
@@ -906,6 +915,79 @@ test("a worker-supplied block question (review backstop #923) reaches the human 
   const q = String(escalation(engine).question ?? "");
   assertStringIncludes(q, "no head-current Copilot review", "the backstop's recovery instructions must reach the human");
   assert(!q.includes("Investigate why GitHub refused"), "must not be overwritten by the generic refusal text");
+});
+
+// ---------------------------------------------------------------------------
+// Head-current review after a loop-authored head move (issue #939)
+// ---------------------------------------------------------------------------
+
+async function driveToAttempt(engine: WasmEngineClient): Promise<void> {
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
+}
+
+test("#939: a missing head-current review requests one itself, waits, and merges on the re-check — no human", async () => {
+  const engine = await boot({ responses: { "pr.merge": [{ mergeStatus: "review-pending" }, { mergeStatus: "merged" }] } });
+  await driveToAttempt(engine);
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-review-requested");
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("request-review");
+  assertEquals(instanceVars(engine).reviewRequestRound, 1);
+  await engine.advanceTime(REVIEW_REQUEST_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-mergeable");
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompleted().hasCompletedElements("mark-merged");
+  assert(!completedElementIds(engine).has("merge-esc-attempt"), "an automatable review gap must never escalate");
+});
+
+test("#939 defect-class guard: no automatable merge-gate refusal escalates to a human on its first occurrence", async () => {
+  for (const mergeStatus of ["review-pending", "review-findings"]) {
+    const engine = await boot({ responses: { "pr.merge": { mergeStatus } } });
+    await driveToAttempt(engine);
+    const done = completedElementIds(engine);
+    assert(!done.has("merge-esc-attempt") && !done.has("merge-esc-conflict"), `${mergeStatus}: must not escalate`);
+    const open = await engine.searchUserTasks({});
+    assertEquals(open.length, 0, `${mergeStatus}: no human task on the first occurrence`);
+  }
+});
+
+test("#939: a head-current review with findings re-enters convergence and ends the merge loop", async () => {
+  const engine = await boot({ responses: { "pr.merge": { mergeStatus: "review-findings" } } });
+  await driveToAttempt(engine);
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompleted().hasCompletedElements("reconverge", "MergeReconverged");
+  assert(!completedElementIds(engine).has("mark-merged"), "findings must not merge");
+});
+
+test("#939: a review that never arrives escalates after the bounded request budget, stating what was tried", async () => {
+  const engine = await boot({
+    responses: { "pr.merge": { mergeStatus: "review-pending" } },
+    vars: { reviewRequestMax: 1 },
+  });
+  await driveToAttempt(engine);
+  await engine.advanceTime(REVIEW_REQUEST_WAIT_MS + 1);
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  const q = String(escalation(engine).question ?? "");
+  assertStringIncludes(q, "requested a Copilot review of the current HEAD 1 time(s)");
+  assertStringIncludes(q, "PT10M");
+});
+
+test("#939: a clean re-check resets the request budget so a later head move gets a fresh budget", async () => {
+  const engine = await boot({
+    responses: { "pr.merge": [{ mergeStatus: "review-pending" }, { mergeStatus: "retry" }, { mergeStatus: "merged" }] },
+  });
+  await driveToAttempt(engine);
+  await engine.advanceTime(REVIEW_REQUEST_WAIT_MS + 1);
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
+  assertEquals(instanceVars(engine).reviewRequestRound, 0);
+});
+
+test("#939: Copilot not assignable escalates immediately, naming the cause", async () => {
+  const engine = await boot({
+    responses: { "pr.merge": { mergeStatus: "review-pending" }, "pr.request-review": { reviewRequest: "unavailable" } },
+  });
+  await driveToAttempt(engine);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertStringIncludes(String(escalation(engine).question ?? ""), "not an assignable reviewer");
 });
 
 // ---------------------------------------------------------------------------

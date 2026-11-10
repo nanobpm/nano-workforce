@@ -288,6 +288,14 @@ export const MERGEABLE_REPOLL_INTERVAL = mergeableRepollInterval(
  * to one attempt per window. Set via `NANO_PR_REVIEW_NUDGE_MINUTES` (minutes). */
 export const REVIEW_NUDGE_MS = clampNudgeMinutes(process.env.NANO_PR_REVIEW_NUDGE_MINUTES) * 60_000;
 
+/** Merge-loop head-current review request (issue #939). When the merge backstop finds no
+ * head-current Copilot review (the loop's own rebase/fix push moved the head), the merge loop
+ * requests the review itself and waits `REVIEW_REQUEST_WAIT` before re-checking — derived from the
+ * SAME nudge window the convergence poller uses, so there is one knob for "how long to give Copilot".
+ * It re-requests up to `MAX_REVIEW_REQUESTS` times before escalating (stating what was tried). */
+export const REVIEW_REQUEST_WAIT = `PT${Math.round(REVIEW_NUDGE_MS / 60_000)}M`;
+export const MAX_REVIEW_REQUESTS = 3;
+
 /** Grace window (ms) before the `escalated`→`running` self-heal (below) may act on a row. The sole
  * writer of `status="escalated"` — `record-feature-escalation` — runs on the `escalated` arm and stamps
  * `updated_at` IMMEDIATELY BEFORE the engine creates the `feature-escalation` user task. A poll landing
@@ -632,9 +640,10 @@ export async function submitPr(
   humanApproval = false,
   autoResolveEscalations = false,
   autoMerge?: boolean,
+  handoffFrom: string | null = null,
 ) {
   return withPrSubmitLock(parsed.prKey, () =>
-    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge),
+    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom),
   );
 }
 
@@ -649,6 +658,7 @@ async function submitPrCritical(
   humanApproval = false,
   autoResolveEscalations = false,
   autoMerge?: boolean,
+  handoffFrom: string | null = null,
 ) {
   // Merge intent (issue #916): `autoMerge` is the CANONICAL positive form end to end — the same name
   // the feature/convergence-loop/plan-fanout doors accept. The legacy inverted `convergeOnly`
@@ -680,7 +690,12 @@ async function submitPrCritical(
   // would skip it as non-terminal, never re-enrolling). Treat a keyless non-terminal row as
   // RESUBMITTABLE — fall through and re-enroll, exactly as `startFeature`'s intake guard (feature.ts)
   // treats a keyless `running` feature row. A terminal row (any `process_key`) already falls through.
-  if (trackedExisting && existing?.process_key != null && !TERMINAL_STATUSES.includes(trackedExisting.derived_status)) {
+  // Merge-loop → convergence hand-back (issue #939): the merge-loop instance that currently OWNS the
+  // row (`process_key`) re-enters convergence when a head-current review reports findings. That
+  // instance is live (it is the caller, and ends right after this submit), so it must not read as
+  // "already running" — only the exact owning instance may hand back; any other key still dedupes.
+  const handingBack = handoffFrom != null && existing?.process_key != null && existing.process_key === handoffFrom;
+  if (!handingBack && trackedExisting && existing?.process_key != null && !TERMINAL_STATUSES.includes(trackedExisting.derived_status)) {
     // Human approval is monotonic (issue #826): a gated caller adopting a live loop — possibly an
     // ungated one another run started — narrows it to gated instead of inheriting its auto-merge.
     // Idempotent, so a retry against our own gated loop is a no-op. A loop the engine no longer reports
@@ -1025,6 +1040,11 @@ export async function startMerge(
       mergeableRepollInterval: MERGEABLE_REPOLL_INTERVAL,
       mergeStallRounds: 0,
       mergeStallMax: MAX_MERGE_STALL_ROUNDS,
+      // Head-current review request budget (issue #939): see REVIEW_REQUEST_WAIT.
+      reviewRequestRound: 0,
+      reviewRequestMax: MAX_REVIEW_REQUESTS,
+      reviewRequestWait: REVIEW_REQUEST_WAIT,
+      reviewRequest: null,
       // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).
       rootRequestKey,
       abandonUrl: abUrl,

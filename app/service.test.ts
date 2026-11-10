@@ -2563,3 +2563,43 @@ test("pollCapabilityGatesImpl: scopes the barrier subscription search server-sid
   assertEquals(published.length, 1, "the scoped search still finds THIS task's subscription and releases it");
   assertEquals(published[0]?.correlationKey, barrierKey);
 });
+
+// Issue #939: the merge loop hands a PR with head-current review findings back to convergence via
+// `submitPr`. The OWNING merge-loop instance (the row's `process_key`) is live while it calls, so the
+// hand-off must bypass the alreadyRunning gate — but ONLY for that exact owner; any other caller still
+// dedupes against the live merge loop.
+test("submitPr handoffFrom: only the owning merge-loop instance may re-enter convergence (#939)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#77";
+    const mk = () => {
+      const stores: Record<string, { rows: any[]; key: string }> = {
+        pull_requests: {
+          rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 77, url: "https://github.com/owner/repo/pull/77", title: "t", status: "waiting_merge", current_round: 4, process_key: "PI-MERGE" }],
+          key: "pr_key",
+        },
+        escalations: { rows: [], key: "id" },
+        pr_adjudications: { rows: [], key: "id" },
+        pr_dependencies: { rows: [], key: "pr_key" },
+      };
+      const data = { table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)), open: () => memOpen(stores) } as any;
+      return { stores, data };
+    };
+    let calls = 0;
+    const engine = { createInstance: async () => ({ processInstanceKey: `PI-CONV-${++calls}` }) } as any;
+    const parsed = { repo: "owner/repo", number: 77, url: "https://github.com/owner/repo/pull/77", prKey: PR_KEY };
+
+    const a = mk();
+    const plain = await submitPr(a.data, engine, parsed);
+    assertEquals((plain as any).alreadyRunning, true, "a plain submit dedupes against the live merge loop");
+    const foreign = await submitPr(a.data, engine, parsed, [], undefined, false, null, false, false, true, "PI-OTHER");
+    assertEquals((foreign as any).alreadyRunning, true, "a non-owner hand-off still dedupes");
+    assertEquals(calls, 0);
+
+    const owned = await submitPr(a.data, engine, parsed, [], undefined, false, null, false, false, true, "PI-MERGE");
+    assertEquals((owned as any).alreadyRunning, undefined);
+    assertEquals(calls, 1);
+    const row = a.stores.pull_requests.rows[0];
+    assertEquals(row.status, "converging");
+    assertEquals(row.process_key, "PI-CONV-1");
+  });
+});

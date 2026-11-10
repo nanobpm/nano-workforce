@@ -42,7 +42,7 @@ import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 type In = WorkerInputs["pr.merge"];
 
 interface Out extends Record<string, unknown> {
-  mergeStatus: "merged" | "queued" | "blocked" | "retry" | "abandoned";
+  mergeStatus: "merged" | "queued" | "blocked" | "retry" | "abandoned" | "review-pending" | "review-findings";
   status?: string;
   question?: string;
 }
@@ -142,11 +142,26 @@ export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: 
   // FAIL CLOSED (issue #927): a gate whose job is "never land unreviewed" must not land on an
   // UNVERIFIABLE read. nano-bpm#1467 merged 49 s before its first Copilot review because a `null`
   // review/head read (or an empty head) skipped this check entirely. An unreadable review or head now
-  // blocks (escalating to a human, who replies to retry) exactly like a missing/stale review.
+  // blocks (escalating to a human, who replies to retry); a VERIFIED missing/stale review instead
+  // takes the automated request-and-wait path below (issue #939).
   const headTrimmed = (backstopHead ?? "").trim();
   const unverifiable = backstopReview === null || headTrimmed === "";
-  if (unverifiable || isReviewMissingOrStale(backstopReview.commitId, headTrimmed)) {
-    const detail = unverifiable ? BLOCK_UNVERIFIABLE_REVIEW : BLOCK_NO_HEAD_CURRENT_REVIEW;
+  // AUTOMATABLE REMEDY (issue #939): a VERIFIED read showing no head-current review (the loop's own
+  // rebase/fix push moved the head, or no review exists yet) is not a human decision — the only
+  // remedy is "request a Copilot review and wait for it". Return `review-pending` so the model
+  // requests the review itself and waits on a bounded timer, escalating only when it never arrives.
+  if (!unverifiable && isReviewMissingOrStale(backstopReview.commitId, headTrimmed)) {
+    await app.data.table("merges", "id").insert({
+      pr_key: prKey,
+      outcome: "review-pending",
+      method: "review-backstop",
+      detail: BLOCK_NO_HEAD_CURRENT_REVIEW,
+      at: now,
+    });
+    return { mergeStatus: "review-pending" };
+  }
+  if (unverifiable) {
+    const detail = BLOCK_UNVERIFIABLE_REVIEW;
     await app.data.table("merges", "id").insert({
       pr_key: prKey,
       outcome: "blocked",
@@ -174,18 +189,14 @@ export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: 
     const detail = `the head-current Copilot review reports open findings (${openFindings.join(", ")})`;
     await app.data.table("merges", "id").insert({
       pr_key: prKey,
-      outcome: "blocked",
+      outcome: "review-findings",
       method: "review-backstop",
       detail,
       at: now,
     });
-    return {
-      mergeStatus: "blocked",
-      status: "blocked",
-      question:
-        `Merge refused: ${detail}. Address the review's findings on the branch (or reply with ` +
-        `guidance on which to push back on), let the convergence loop gate on a clean review, then reply to retry.`,
-    };
+    // Findings on a head-current review belong to the convergence path (fix → push → review), not
+    // to a human (issue #939): the model hands the PR back to the convergence loop.
+    return { mergeStatus: "review-findings" };
   }
   // The head the backstop verified — pinned through the land call so a push between this check
   // and the merge can never land a later, unreviewed head.

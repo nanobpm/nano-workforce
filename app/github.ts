@@ -743,6 +743,35 @@ export async function requestCopilotReview(
   throw new Error(`github ${r.status} ${r.statusText}: ${(await r.text()).slice(0, 300)}`.trim());
 }
 
+/** Withdraw a pending Copilot review request (REST reviewers DELETE). Used by the merge loop's
+ * head-current review request (issue #939) when a prior request was silently ignored: Copilot stays
+ * listed as pending but never reviews, and a second POST is a no-op — removing and re-adding it is
+ * the equivalent that re-triggers the review. `null` when no transport is usable; throws on a
+ * genuine transport failure. */
+export async function removeCopilotReviewer(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<"removed" | null> {
+  const path = `repos/${repo}/pulls/${number}/requested_reviewers`;
+  if (await useGh()) {
+    await runGh(["api", path, "-X", "DELETE", "-f", `reviewers[]=${COPILOT_REVIEWER}`]);
+    return "removed";
+  }
+  if (!token) return null;
+  const r = await fetch(`https://api.github.com/${path}`, {
+    method: "DELETE",
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ reviewers: [COPILOT_REVIEWER] }),
+  });
+  if (r.ok) return "removed";
+  throw new Error(`github ${r.status} ${r.statusText}: ${(await r.text()).slice(0, 300)}`.trim());
+}
+
 // ── Merge stage (SPEC §11) ──────────────────────────────────────────────────
 // The same two-transport model (gh | token) backs the merge stage: read a PR's merge state to
 // decide when it is landable, and perform the merge (directly or via the repo's merge queue).
