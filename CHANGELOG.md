@@ -1,3 +1,9 @@
+## [0.208.2](https://github.com/nanobpm/nano-workforce/compare/v0.208.1...v0.208.2) (2026-11-10)
+
+### Bug Fixes
+
+* **status:** batch the /status merge-policy engine read into one call ([#937](https://github.com/nanobpm/nano-workforce/issues/937)) ([a9778e1](https://github.com/nanobpm/nano-workforce/commit/a9778e1c7db7205fe0b3b5dfebc597468c4e66f4)), closes [issue-#916](https://github.com/nanobpm/issue-/issues/916) [#916](https://github.com/nanobpm/nano-workforce/issues/916) [#936](https://github.com/nanobpm/nano-workforce/issues/936)
+
 ## [0.208.1](https://github.com/nanobpm/nano-workforce/compare/v0.208.0...v0.208.1) (2026-11-10)
 
 ### Bug Fixes
