@@ -641,9 +641,10 @@ export async function submitPr(
   autoResolveEscalations = false,
   autoMerge?: boolean,
   handoffFrom: string | null = null,
+  headShaOverride: string | null = null,
 ) {
   return withPrSubmitLock(parsed.prKey, () =>
-    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom),
+    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom, headShaOverride),
   );
 }
 
@@ -659,6 +660,7 @@ async function submitPrCritical(
   autoResolveEscalations = false,
   autoMerge?: boolean,
   handoffFrom: string | null = null,
+  headShaOverride: string | null = null,
 ) {
   // Merge intent (issue #916): `autoMerge` is the CANONICAL positive form end to end — the same name
   // the feature/convergence-loop/plan-fanout doors accept. The legacy inverted `convergeOnly`
@@ -832,7 +834,14 @@ async function submitPrCritical(
   // fleet advertising `durable-resume`: with no participant it stays null, so the round redrives from
   // scratch (graceful degradation). Absent (null) on a first submit, which leaves the envelope
   // unchanged.
-  const worldSha = await worldRestoreSha(data, parsed.prKey);
+  //
+  // `headShaOverride` (#941 round-4 review) WINS over the checkpoint: the checkpoint is written only
+  // by the convergence loop's `pr.persist-round`, so a merge-stage rebase/fix-ci push advances the PR
+  // head WITHOUT updating it. A merge→convergence hand-off (`pr.reconverge`) that restored the
+  // checkpoint would provision the fresh run at the PRE-MERGE tree, not the head whose review raised
+  // the findings — so the hand-off passes the live head SHA it read, and a fresh hand-off restores
+  // the CURRENT head. `null` (every other caller) keeps the checkpoint resume.
+  const worldSha = headShaOverride ?? (await worldRestoreSha(data, parsed.prKey));
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId: PROCESS_ID,
     variables: {

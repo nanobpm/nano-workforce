@@ -497,6 +497,10 @@
             <zeebe:input source="=round" target="guardRound" />
             <zeebe:input source="=abandonUrl" target="guardAbandonUrl" />
             <zeebe:input source="=abandonBrief" target="guardAbandonBrief" />
+            <zeebe:input source="=reviewRequestRound" target="guardReviewRequestRound" />
+            <zeebe:input source="=reviewRequestMax" target="guardReviewRequestMax" />
+            <zeebe:input source="=reviewRequestWait" target="guardReviewRequestWait" />
+            <zeebe:input source="=reviewRequest" target="guardReviewRequest" />
             <zeebe:output source="=guardCiFixRound + 1" target="ciFixRound" />
             <zeebe:output source="=guardCiFixMax" target="ciFixMax" />
             <zeebe:output source="=guardRebaseRound" target="rebaseRound" />
@@ -517,6 +521,10 @@
             <zeebe:output source="=guardRound" target="round" />
             <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
             <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
+            <zeebe:output source="=guardReviewRequestRound" target="reviewRequestRound" />
+            <zeebe:output source="=guardReviewRequestMax" target="reviewRequestMax" />
+            <zeebe:output source="=guardReviewRequestWait" target="reviewRequestWait" />
+            <zeebe:output source="=guardReviewRequest" target="reviewRequest" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_s0</bpmn:incoming>
@@ -699,6 +707,10 @@
             <zeebe:input source="=round" target="guardRound" />
             <zeebe:input source="=abandonUrl" target="guardAbandonUrl" />
             <zeebe:input source="=abandonBrief" target="guardAbandonBrief" />
+            <zeebe:input source="=reviewRequestRound" target="guardReviewRequestRound" />
+            <zeebe:input source="=reviewRequestMax" target="guardReviewRequestMax" />
+            <zeebe:input source="=reviewRequestWait" target="guardReviewRequestWait" />
+            <zeebe:input source="=reviewRequest" target="guardReviewRequest" />
             <zeebe:output source="=guardRebaseRound + 1" target="rebaseRound" />
             <zeebe:output source="=guardCiFixRound" target="ciFixRound" />
             <zeebe:output source="=guardCiFixMax" target="ciFixMax" />
@@ -719,6 +731,10 @@
             <zeebe:output source="=guardRound" target="round" />
             <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
             <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
+            <zeebe:output source="=guardReviewRequestRound" target="reviewRequestRound" />
+            <zeebe:output source="=guardReviewRequestMax" target="reviewRequestMax" />
+            <zeebe:output source="=guardReviewRequestWait" target="reviewRequestWait" />
+            <zeebe:output source="=guardReviewRequest" target="reviewRequest" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_s0</bpmn:incoming>

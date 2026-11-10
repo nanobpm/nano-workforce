@@ -422,6 +422,59 @@ test("a fix-ci agent echoing abandonBrief cannot corrupt the seeded abort brief 
     .hasVariable("abandonBrief", "\n\n---\nAbort if cancelled: curl …");
 });
 
+test("a fix-ci agent echoing review-request state cannot clobber the seeded budget or timer (#941 round 4)", async () => {
+  // Same guard class as the #887 echoes: `reviewRequestRound`/`reviewRequestMax` bound the
+  // head-current review re-request loop (`reviewRequestRound < reviewRequestMax` gates a retry) and
+  // `reviewRequestWait` arms its timer. An agent completion echoing `reviewRequestMax: 0` would send
+  // the FIRST missing-review verdict straight to a human escalation, and a clobbered
+  // `reviewRequestWait` would reshape the wait. The snapshot/restore guard must pin all four.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "blocked", failingChecks: 1, failingChecksList: "build" },
+      "senior:fix-ci": {
+        status: "fixed",
+        reviewRequestRound: 99,
+        reviewRequestMax: 0,
+        reviewRequestWait: "PT1S",
+        reviewRequest: "unavailable",
+      },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("merge-stall-probe", "fix-ci")
+    .hasVariable("reviewRequestRound", 0)
+    .hasVariable("reviewRequestMax", 3)
+    .hasVariable("reviewRequestWait", "PT10M");
+  assert(instanceVars(engine).reviewRequest !== "unavailable", "a fix-ci agent must not forge reviewRequest:unavailable");
+});
+
+test("a rebase agent echoing review-request state cannot clobber the seeded budget or timer (#941 round 4)", async () => {
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "" },
+      "senior:rebase": {
+        status: "rebased",
+        reviewRequestRound: 99,
+        reviewRequestMax: 0,
+        reviewRequestWait: "PT1S",
+        reviewRequest: "unavailable",
+      },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("reviewRequestRound", 0)
+    .hasVariable("reviewRequestMax", 3)
+    .hasVariable("reviewRequestWait", "PT10M");
+  assert(instanceVars(engine).reviewRequest !== "unavailable", "a rebase agent must not forge reviewRequest:unavailable");
+});
+
 test("a blocked PR probed on timeout reaches the CI-fix arm via the timeout path (#636)", async () => {
   const engine = await boot({
     responses: {

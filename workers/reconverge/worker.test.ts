@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import { assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
-import { makeHandler, type Submit } from "./worker.ts";
+import { makeHandler, type FetchPrHead, type Submit } from "./worker.ts";
 
 test("re-submits through submitPr with auto-merge on and handoffFrom = this merge-loop instance", async () => {
   const merges: Record<string, unknown>[] = [];
@@ -54,4 +54,57 @@ test("throws on a null processKey so the hand-off stays retryable (#941)", async
     "null processKey",
   );
   assertStringIncludes(err.message, "acme/w#7");
+});
+
+// Issue #941 round-4 review (Copilot "previously missed", high): the world checkpoint is written
+// ONLY by the convergence loop's `pr.persist-round` — a merge-stage rebase/fix-ci push advances the
+// PR head WITHOUT updating the checkpoint. On a durable-resume fleet a reconverge hand-off that
+// re-enters `submitPr` on the checkpoint therefore provisions the fresh convergence agent at the
+// PRE-MERGE tree, not the head whose review raised the findings. The hand-off must carry the
+// CURRENT PR head SHA as `submitPr`'s restore override.
+test("hands off at the CURRENT PR head, not the stale convergence checkpoint (#941 round 4)", async () => {
+  const app = {
+    data: {
+      table: (name: string) => ({
+        get: async () => (name === "pull_requests" ? { auto_resolve_escalations: 0 } : undefined),
+        insert: async () => 1,
+      }),
+    },
+    engine: {},
+    log: noopLog(),
+  } as any;
+  let args: unknown[] = [];
+  const submit = (async (...a: unknown[]) => {
+    args = a;
+    return { prKey: "acme/w#7", processKey: "999" };
+  }) as unknown as Submit;
+  const head = (async () => ({
+    headRef: "feat/x",
+    headSha: "b".repeat(40),
+    baseRef: "main",
+    headRepo: "acme/w",
+  })) as unknown as FetchPrHead;
+  await makeHandler(submit, head)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  assertEquals(args[11], "b".repeat(40), "the restore override is the live PR head SHA");
+});
+
+test("a head read that resolves no SHA degrades to the checkpoint restore (no override)", async () => {
+  const app = {
+    data: {
+      table: (name: string) => ({
+        get: async () => (name === "pull_requests" ? { auto_resolve_escalations: 0 } : undefined),
+        insert: async () => 1,
+      }),
+    },
+    engine: {},
+    log: noopLog(),
+  } as any;
+  let args: unknown[] = [];
+  const submit = (async (...a: unknown[]) => {
+    args = a;
+    return { prKey: "acme/w#7", processKey: "999" };
+  }) as unknown as Submit;
+  const head = (async () => null) as unknown as FetchPrHead;
+  await makeHandler(submit, head)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  assertEquals(args[11], null, "no live head SHA → no override (checkpoint restore, the pre-fix behaviour)");
 });
