@@ -627,7 +627,7 @@ test("PR #950 review: a legacy row whose policy the engine proved is hydrated on
     v("PI-1", "autoMerge", false),
     v("PI-1", "convergeOnly", true),
     v("PI-1", "humanApproval", false),
-    v("PI-2", "autoMerge", true), // humanApproval unknown — never persisted as a guess
+    v("PI-2", "autoMerge", true), // humanApproval PROVEN absent by its root probe (pre-humanApproval loop)
     v("PI-2", "convergeOnly", false),
   ]);
   const app: any = memApp(rows);
@@ -641,5 +641,44 @@ test("PR #950 review: a legacy row whose policy the engine proved is hydrated on
   });
   const res = (await handler(input(), { ...app, engine } as AppApi)) as any;
   assertEquals(res.status, 200);
-  assertEquals(writes, [[0, 0, "o/r#1", "PI-1"]], "only the COMPLETE read is written back");
+  assertEquals(
+    [...writes].sort((a, b) => String(a[2]).localeCompare(String(b[2]))),
+    [
+      [0, 0, "o/r#1", "PI-1"],
+      [1, 0, "o/r#2", "PI-2"],
+    ],
+    "complete reads (incl. proven-absent humanApproval) are written back",
+  );
+});
+
+test("PR #950 review: hydration never overwrites a concurrently stamped approval decision", async () => {
+  const rows: any[] = [prRow936(1)];
+  const engine = countingEngine([v("PI-1", "autoMerge", true), v("PI-1", "humanApproval", true)]);
+  const app: any = memApp(rows);
+  const sqls: string[] = [];
+  app.data.open = () => ({
+    exec: async (sql: string) => {
+      sqls.push(sql);
+      return { changed: 1 };
+    },
+  });
+  await handler(input(), { ...app, engine } as AppApi);
+  assertEquals(sqls.length, 1);
+  assert(/"merge_human_approval" = COALESCE\("merge_human_approval", \?\)/.test(sqls[0]), "approval stamp preserved");
+});
+
+test("PR #950 review: the bounded probe window rotates so unhydratable leading rows cannot starve later rows", async () => {
+  const { MAX_PROBED_LEGACY_INSTANCES } = await import("../app/service.ts");
+  const N = MAX_PROBED_LEGACY_INSTANCES * 3;
+  const rows = Array.from({ length: N }, (_, i) => prRow936(i + 1));
+  const probed = new Set<string>();
+  const engine = {
+    searchVariables: async (q: any) => {
+      if (q.processInstanceKey == null) return [];
+      probed.add(q.processInstanceKey);
+      return []; // nothing provable -> never hydrated, stays in the queue
+    },
+  } as any;
+  for (let i = 0; i < 3; i++) await handler(input(), { ...memApp(rows), engine } as AppApi);
+  assertEquals(probed.size, N, "every legacy row is eventually probed");
 });

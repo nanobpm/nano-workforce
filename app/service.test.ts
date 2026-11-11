@@ -62,6 +62,16 @@ function memOpen(stores: Record<string, { rows: any[]; key: string }>, ops?: str
         }
         return { changed };
       }
+      if (/^UPDATE "pull_requests" SET "merge_human_approval" = 1 WHERE "pr_key" = \? AND "process_key" = \? AND "converged_at" IS NULL$/.test(sql)) {
+        let changed = 0;
+        for (const r of stores.pull_requests?.rows ?? []) {
+          if (r.pr_key === params[0] && r.process_key === params[1] && r.converged_at == null) {
+            r.merge_human_approval = 1;
+            changed++;
+          }
+        }
+        return { changed };
+      }
       throw new Error(`unexpected exec sql: ${sql}`);
     },
   };
@@ -1563,6 +1573,30 @@ test("a gated submitPr adopting a live loop stamps merge_human_approval on the r
       merge_human_approval?: number | null;
     } | null;
     assertEquals(ungatedRow?.merge_human_approval ?? null, null, "an ungated adopter leaves the projection undecided");
+  });
+});
+
+test("a gated adopter never gates a merge-loop or a row re-pointed mid-handoff (PR #950 review)", async () => {
+  await withGithubOff(async () => {
+    const pr = { repo: "owner/repo", number: 14, url: "https://github.com/owner/repo/pull/14", prKey: "owner/repo#14" };
+    // Variant 1: the key already resolves to the merge-loop (startMerge re-pointed it, converged_at unset).
+    const merge = adoptLoop("converging", "ACTIVE");
+    merge.engine.searchProcessInstances = () =>
+      Promise.resolve([{ processInstanceKey: "PI-LOOP", state: "ACTIVE", processDefinitionId: "merge-loop" }]);
+    await submitPr(merge.data, merge.engine, pr, [], 20, false, null, true);
+    const mergeRow = (await merge.data.table("pull_requests", "pr_key").get(pr.prKey)) as any;
+    assertEquals(mergeRow?.merge_human_approval ?? null, null, "merge-loop policy untouched");
+    assertEquals(merge.narrowed.length, 0, "no humanApproval set on the merge-loop");
+    // Variant 2: the handoff re-points the row between the engine read and the stamp.
+    const race = adoptLoop("converging", "ACTIVE");
+    race.engine.setVariables = async () => {
+      const row = (await race.data.table("pull_requests", "pr_key").get(pr.prKey)) as any;
+      row.process_key = "PI-MERGE";
+      row.merge_human_approval = 0;
+    };
+    await submitPr(race.data, race.engine, pr, [], 20, false, null, true);
+    const raceRow = (await race.data.table("pull_requests", "pr_key").get(pr.prKey)) as any;
+    assertEquals(raceRow?.merge_human_approval, 0, "the handoff's merge-stage policy survives");
   });
 });
 

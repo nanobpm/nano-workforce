@@ -752,13 +752,23 @@ async function submitPrCritical(
         (s) => String(s.processInstanceKey) === loopKey,
       );
       const state = match ? String(match.state ?? "").trim().toUpperCase() : null;
-      if (state !== null && !ENGINE_TERMINAL_STATES.has(state)) {
+      // Only the CONVERGENCE loop reads `humanApproval` (PR #950 review): mid-handoff `startMerge`
+      // has already re-pointed `process_key` at the merge-loop (and stamped its approval policy), so a
+      // key that resolves to any other definition must never be gated.
+      const isConvergenceLoop = match?.processDefinitionId == null || match.processDefinitionId === PROCESS_ID;
+      if (state !== null && !ENGINE_TERMINAL_STATES.has(state) && isConvergenceLoop) {
         await engine.setVariables({ scopeKey: loopKey, variables: { humanApproval: true } });
         // Mirror the gate onto the durable /status projection (issue #947): the loop variable is
         // the process's own copy; the row column is what `/status` reads without an engine
         // round-trip. NULL would read as "outstanding" too, but stamping 1 keeps the projection
         // explicit (decided-and-gated) rather than undecided.
-        await table.update(parsed.prKey, { merge_human_approval: 1 });
+        // Atomic compare-and-set on the SAME owner we gated, still pre-finalization: a concurrent
+        // merge handoff (re-pointed key) or reopen between the read and this write leaves its own
+        // policy intact instead of being overwritten with a stale gate.
+        await data.open().exec(
+          `UPDATE "pull_requests" SET "merge_human_approval" = 1 WHERE "pr_key" = ? AND "process_key" = ? AND "converged_at" IS NULL`,
+          [parsed.prKey, loopKey],
+        );
       }
     }
     // Steward opt-in is monotonic too (issue #889 review): an opted-in caller adopting a live loop —
@@ -1456,6 +1466,9 @@ type MergePolicyVars = {
   autoMerge: boolean | undefined;
   convergeOnly: boolean | undefined;
   humanApproval: boolean | undefined;
+  /** True once every policy name for this instance was either seen or proven absent by an
+   *  untruncatable root probe — absence of a name is then real, not a page cut. */
+  proven?: boolean;
 };
 
 function emptyMergePolicyVars(): MergePolicyVars {
@@ -1488,13 +1501,21 @@ async function hydrateLegacyMergePolicy(
   row: { pr_key: string; process_key?: string | null },
   vars: MergePolicyVars | undefined,
 ): Promise<void> {
-  if (!vars || !row.process_key || vars.humanApproval === undefined) return;
+  if (!vars || !row.process_key) return;
+  // A legacy loop that predates `humanApproval` legitimately lacks it; once a COMPLETE read proved
+  // that absence it reads as "no outstanding approval", so the row can leave the probe queue
+  // instead of starving later legacy rows (PR #950 review).
+  const humanApproval = vars.humanApproval ?? (vars.proven ? false : undefined);
+  if (humanApproval === undefined) return;
   const requested = vars.autoMerge ?? (vars.convergeOnly === undefined ? undefined : !vars.convergeOnly);
   if (requested === undefined) return;
   try {
+    // `COALESCE` preserves an approval stamp written concurrently (approval / gated adoption leave
+    // `merge_requested` NULL), so a hydration that read the engine BEFORE that decision can never
+    // overwrite it with the older value (PR #950 review).
     await data.open().exec(
-      `UPDATE "pull_requests" SET "merge_requested" = ?, "merge_human_approval" = ? WHERE "pr_key" = ? AND "process_key" = ? AND "merge_requested" IS NULL`,
-      [requested ? 1 : 0, vars.humanApproval ? 1 : 0, row.pr_key, row.process_key],
+      `UPDATE "pull_requests" SET "merge_requested" = ?, "merge_human_approval" = COALESCE("merge_human_approval", ?) WHERE "pr_key" = ? AND "process_key" = ? AND "merge_requested" IS NULL`,
+      [requested ? 1 : 0, humanApproval ? 1 : 0, row.pr_key, row.process_key],
     );
   } catch {
     // swallow — hydration is an optimisation; the row simply stays on the legacy read
@@ -1506,6 +1527,9 @@ async function hydrateLegacyMergePolicy(
  *  for this serve (and is hydrated on a later one), so request-time engine calls stay bounded at
  *  `3 + 3 * MAX_PROBED_LEGACY_INSTANCES` regardless of how many legacy PRs exist. */
 export const MAX_PROBED_LEGACY_INSTANCES = 4;
+
+/** Rotating start offset into the legacy probe queue (see {@link readMergePolicyVars}). */
+let legacyProbeCursor = 0;
 
 /** Batched merge-policy read (issue #936): ONE name-filtered engine-wide read per policy variable
  *  (3 concurrent calls, independent of row count), bucketed by owning instance.
@@ -1568,10 +1592,19 @@ async function readMergePolicyVars(
     // Bound the request-time fallback (PR #950 review): only the first MAX_PROBED_LEGACY_INSTANCES
     // instances (callers pass them most-recently-updated first) are probed; the rest degrade fully to
     // the stale default for this serve — never a half-read policy.
+    for (const pk of wanted) {
+      const vars = byInstance.get(pk);
+      if (vars && needsProbe(pk).length === 0) vars.proven = true;
+    }
     const probing = [...wanted].filter((pk) => needsProbe(pk).length > 0);
-    for (const pk of probing.slice(MAX_PROBED_LEGACY_INSTANCES)) byInstance.delete(pk);
+    // Rotate the probe window across serves (PR #950 review) so a leading row that can never be
+    // hydrated cannot permanently starve the rows behind it.
+    const offset = probing.length > 0 ? legacyProbeCursor % probing.length : 0;
+    const rotated = [...probing.slice(offset), ...probing.slice(0, offset)];
+    legacyProbeCursor += MAX_PROBED_LEGACY_INSTANCES;
+    for (const pk of rotated.slice(MAX_PROBED_LEGACY_INSTANCES)) byInstance.delete(pk);
     await Promise.all(
-      probing.slice(0, MAX_PROBED_LEGACY_INSTANCES).map(async (pk) => {
+      rotated.slice(0, MAX_PROBED_LEGACY_INSTANCES).map(async (pk) => {
         const probe = needsProbe(pk);
         try {
           // Collect ALL probe results first and record only once every probe succeeded: recording
@@ -1585,6 +1618,9 @@ async function readMergePolicyVars(
             ),
           );
           for (const rows of results) for (const row of rows) record(row);
+          const vars = byInstance.get(pk) ?? emptyMergePolicyVars();
+          vars.proven = true;
+          byInstance.set(pk, vars);
         } catch {
           // Degrade ONLY this instance — and fully: drop any partial entry the batch recorded so
           // the caller projects the default for it, never a half-read policy.
@@ -1605,6 +1641,9 @@ async function readMergePolicyVars(
  * requested, flagged `stale`) rather than failing the status read. */
 function mergePolicyFromVars(vars: MergePolicyVars | undefined): MergePolicy {
   if (!vars) return mergePolicyDefault();
+  if (vars.autoMerge === undefined && vars.convergeOnly === undefined && vars.humanApproval === undefined) {
+    return mergePolicyDefault();
+  }
   const requested = vars.autoMerge ?? (vars.convergeOnly === undefined ? true : !vars.convergeOnly);
   return { ...mergePolicyFrom(requested, vars.humanApproval === true), stale: false };
 }
