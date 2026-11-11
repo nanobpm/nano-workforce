@@ -2003,8 +2003,34 @@ async function handoffWaitingMergeToConvergence(
     // `waiting_since` bounds the review the fresh loop collects: only a review submitted at or after
     // the handoff counts, so a pre-merge review (submitted before this flip) can never satisfy the new
     // run's wait.
+    // FENCE the staging write on the captured owner (PR #944 review): if a cancel/resubmit replaced the
+    // owner while this pass awaited GitHub, the replacement owns the row (possibly parked on a stage such
+    // as `waiting_deps`) — re-staging it to `waiting_review` would strand it outside its stage's scan.
+    const fresh = await prs(data).get(prKey);
+    const freshOwner = fresh?.process_key != null ? String(fresh.process_key) : null;
+    if (!fresh || freshOwner !== mergeKey || fresh.status !== pr.status) {
+      console.log(`[poller] ${logContext} handoff ${prKey}: owner/stage changed (${freshOwner}/${fresh?.status}); skipping`);
+      return;
+    }
+    // ONE pending predecessor retirement at a time (PR #944 review): while an earlier predecessor's
+    // retirement is unconfirmed, never start another handoff — a second key would overwrite the first
+    // and leave that live loop untracked. `retryPendingRetirements` clears it first.
+    const pendingKey = fresh.retire_pending_key != null ? String(fresh.retire_pending_key) : "";
+    if (pendingKey !== "" && pendingKey !== mergeKey) {
+      console.log(`[poller] ${logContext} handoff ${prKey}: predecessor ${pendingKey} retirement pending; deferring`);
+      return;
+    }
     const handoffTs = now();
-    await prs(data).update(prKey, { status: "waiting_review", waiting_since: handoffTs, updated_at: handoffTs });
+    // Persist the retirement INTENT in the same write that stages the handoff (PR #944 review), so a
+    // restart after successor publication can never lose the predecessor's key. The retry pass only
+    // acts once the row's owner is no longer this key (i.e. the successor is published); a rollback
+    // clears it.
+    await prs(data).update(prKey, {
+      status: "waiting_review",
+      waiting_since: handoffTs,
+      updated_at: handoffTs,
+      ...(mergeKey != null ? { retire_pending_key: mergeKey } : {}),
+    });
     // SUCCESSOR FIRST, then retire (issue #943). The old order — cancel the merge instance, THEN
     // `submitPr` — orphaned nanobpm/nano-bpm#1452: the derived tracking status folds the cancel in
     // asynchronously, so `submitPr` still read the row's `process_key` as a LIVE owner, returned
@@ -2059,7 +2085,7 @@ async function handoffWaitingMergeToConvergence(
       }
       await prs(data).update(prKey, {
         status: "waiting_merge",
-        ...(mergeKey != null ? { process_key: mergeKey } : {}),
+        ...(mergeKey != null ? { process_key: mergeKey, retire_pending_key: null } : {}),
         updated_at: now(),
       });
     } catch (restoreErr) {
@@ -2116,6 +2142,9 @@ export async function retryPendingRetirements(data: DataLayer, engine: Pick<Engi
   for (const pr of await prs(data).all()) {
     const key = pr.retire_pending_key;
     if (key == null || key === "") continue;
+    // A pending key that is still the row's OWNER means the handoff never published a successor (e.g. a
+    // restart mid-handoff): the merge loop is live and owning — never retire it into nothing.
+    if (pr.process_key != null && String(pr.process_key) === String(key)) continue;
     const owner = pr.process_key != null ? String(pr.process_key) : "none";
     await retireHandedOffMergeLoop(data, engine, pr.pr_key, String(key), owner, "retire-retry", 1);
   }

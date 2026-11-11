@@ -254,3 +254,12 @@ test("#943/PR#944 a persistently failed retirement is persisted and retried by l
   assertEquals(stores.pull_requests[0].process_key, "succ");
   assertEquals(stores.pull_requests[0].status, "waiting_review");
 });
+
+test("PR#944 a pending retirement whose key still OWNS the row (unpublished successor) is never retired", async () => {
+  const { data, stores } = memData([{ pr_key: "o/r#1", process_key: "merge-1", status: "waiting_review", retire_pending_key: "merge-1" }], []);
+  const cancelled: string[] = [];
+  const ok = { cancelInstance: async (a: { processInstanceKey: string }) => void cancelled.push(a.processInstanceKey) };
+  await retryPendingRetirements(data, ok as never);
+  assertEquals(cancelled, [], "a live owning merge loop is never retired into nothing");
+  assertEquals(stores.pull_requests[0].retire_pending_key, "merge-1");
+});
