@@ -60,3 +60,27 @@ test("caps-prepare: a malformed need is dropped — only a valid remainder gates
   );
   assertEquals(mixed.hasNeeds, true, "a valid need still gates even alongside a malformed one");
 });
+
+// Issue #945: the worker also stamps the implement-cell's repository envelope with the slice's
+// deterministic `branch.create` (`feat/<task.id>`), emitted as the FLAT dotted process variable the
+// c8ctl harness reads (`io.nanobpm.agentTask.branch.create`). Derived via the ONE canonical
+// `sliceBranchCreate`, so the envelope, the prompt's branch instruction, and the reconcile lookup share
+// a single source. A retry re-derives the SAME branch (it is a pure function of `task.id`), so the
+// durable WIP checkpoint restore matches.
+test("caps-prepare: stamps the deterministic per-slice branch.create as a flat dotted variable (#945)", async () => {
+  const out = await handler(
+    { variables: { planKey: "owner/repo#7", taskId: "tool-metadata-engine", needs: [] } } as any,
+    {} as any,
+  );
+  assertEquals(out["io.nanobpm.agentTask.branch.create"], "feat/tool-metadata-engine");
+});
+
+test("caps-prepare: an implausible task id omits branch.create (never an unusable ref) (#945)", async () => {
+  const out = await handler(
+    { variables: { planKey: "owner/repo#7", taskId: "bad..id", needs: [] } } as any,
+    {} as any,
+  );
+  assertEquals("io.nanobpm.agentTask.branch.create" in out, false, "an ill-formed branch degrades to omission");
+  // …while the barrier key + gate flag are still emitted (the fan-out is not wedged by a bad id).
+  assertEquals(out.capsGateKey, "owner/repo#7:bad..id");
+});

@@ -12,82 +12,18 @@
 // consumer together so they cannot drift again.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, repoEnvelopeVars } from "./repoEnvelope.ts";
+import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, recoverBranchCreate, repoEnvelopeVars } from "./repoEnvelope.ts";
 
-// ─── A faithful mirror of the harness's consumer shape ───────────────────────────────
-// These mirror the EXACT semantics of c8ctl-plugin-nano `normalizeTaskEnvelope`
-// (c8ctl-plugin.js): `collectEnvelopeFrom` reassembles the reserved
-// `io.nanobpm.agentTask` namespace out of BOTH a whole-object/JSON value AND flattened
-// dotpath keys, `deepMerge`s the two sources, and `normalizeTaskEnvelope` then reads
-// `branch` from the TOP LEVEL of the merged envelope (`isPlainObject(raw.branch)`),
-// NOT from `raw.repository.branch`. Keeping this mirror in lock-step with the harness
-// is the point of the test: if the producer emits a shape the consumer doesn't read,
-// the round-trip below drops `branch.create` and fails.
-const AGENT_TASK_NS = "io.nanobpm.agentTask";
-
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return v != null && typeof v === "object" && !Array.isArray(v);
-}
-
-function deepMerge(base: unknown, over: unknown): unknown {
-  if (!isPlainObject(base)) return isPlainObject(over) ? deepMerge({}, over) : over;
-  const out: Record<string, unknown> = { ...base };
-  if (!isPlainObject(over)) return out;
-  for (const [k, v] of Object.entries(over)) {
-    if (v === undefined) continue;
-    out[k] = isPlainObject(v) && isPlainObject(out[k]) ? deepMerge(out[k], v) : v;
-  }
-  return out;
-}
-
-function setPath(obj: Record<string, unknown>, path: string[], value: unknown): void {
-  let cur = obj;
-  for (let i = 0; i < path.length - 1; i++) {
-    const k = path[i];
-    if (!isPlainObject(cur[k])) cur[k] = {};
-    cur = cur[k] as Record<string, unknown>;
-  }
-  cur[path[path.length - 1]] = value;
-}
-
-/** Mirror of the harness's `collectEnvelopeFrom`: reassemble the reserved namespace from a
- * whole-object/JSON value AND flattened dotpath keys (element templates / task headers emit the
- * latter). */
-function collectEnvelopeFrom(source: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  if (!isPlainObject(source)) return out;
-  const whole = source[AGENT_TASK_NS];
-  if (whole != null) {
-    let val: unknown = whole;
-    if (typeof whole === "string") {
-      try {
-        val = JSON.parse(whole);
-      } catch {
-        val = undefined;
-      }
-    }
-    if (isPlainObject(val)) Object.assign(out, deepMerge(out, val));
-  }
-  const prefix = `${AGENT_TASK_NS}.`;
-  for (const [key, value] of Object.entries(source)) {
-    if (!key.startsWith(prefix)) continue;
-    const rest = key.slice(prefix.length);
-    if (!rest) continue;
-    setPath(out, rest.split("."), value);
-  }
-  return out;
-}
-
-/** Mirror of the harness's `normalizeTaskEnvelope` branch slice: it reads `branch` from the TOP
- * LEVEL of the merged envelope — `isPlainObject(raw.branch) ? raw.branch : {}` — never from
- * `raw.repository.branch`. Returns the consumer's recovered `branch.create` (undefined when the
- * producer put it somewhere the consumer doesn't look). */
-function harnessReadsBranchCreate(customHeaders: Record<string, unknown>, variables: Record<string, unknown>): string | undefined {
-  const raw = deepMerge(collectEnvelopeFrom(customHeaders), collectEnvelopeFrom(variables)) as Record<string, unknown>;
-  const branch = isPlainObject(raw.branch) ? raw.branch : {};
-  const create = branch.create;
-  return create == null ? undefined : String(create);
-}
+// ─── The consumer mirror ─────────────────────────────────────────────────────────────
+// `recoverBranchCreate` (app/repoEnvelope.ts) is the ONE canonical mirror of the c8ctl harness's
+// consumer shape (`collectEnvelopeFrom` + `normalizeTaskEnvelope`): it reassembles the reserved
+// `io.nanobpm.agentTask` namespace out of BOTH a whole-object/JSON value AND flattened dotpath keys,
+// `deepMerge`s the two sources (variables over headers), and reads `branch` from the TOP LEVEL of the
+// merged envelope (`isPlainObject(raw.branch)`), NOT from `raw.repository.branch`. Keeping that mirror
+// in lock-step with the harness is the point of this test: if the producer emits a shape the consumer
+// doesn't read, the round-trip below drops `branch.create` and fails. Aliased here under the
+// harness-centric name the assertions read naturally with.
+const harnessReadsBranchCreate = recoverBranchCreate;
 
 // ─── The round-trip contract ──────────────────────────────────────────────────────────
 

@@ -8,6 +8,7 @@
 // rebase) and the PRE-PR implementation dispatch (`feature.ts`: `startFeature`; `plan.ts`:
 // `startPlan` → the epic's `implement-cell`) derive from this single implementation without a
 // `plan.ts ↔ service.ts` import cycle (AGENTS.md "derivation over duplication — no drift surfaces").
+import { isPlausibleBranchName } from "./baseBranch.ts";
 import { readEnvOr } from "./contracts.ts";
 import { isCommitSha } from "./world/index.ts";
 
@@ -32,6 +33,43 @@ function isPlainOwnerRepo(repo: string): boolean {
  * identical rule the seed helper throws on, never a second divergent check. */
 export function isResolvableRepo(repo: unknown): repo is string {
   return typeof repo === "string" && isPlainOwnerRepo(repo.trim());
+}
+
+/** The FLAT, dotted process-variable NAME a per-slice worker emits to attach the deterministic
+ * `branch.create` to the implement-cell's agent-job envelope (issue #945). The c8ctl harness's
+ * `collectEnvelopeFrom` reassembles the reserved namespace from BOTH the whole-object
+ * `io.nanobpm.agentTask` variable (the whole-epic seed, which carries `repository` + `task` but no
+ * per-slice `branch`) AND any dotted `io.nanobpm.agentTask.*` variables in scope, deep-merging them —
+ * so a dotted-name variable set in the MI-child scope lands on the SAME envelope the seed started,
+ * and `normalizeTaskEnvelope` then reads `branch.create` from the merged top level. A
+ * `<zeebe:ioMapping>` target with dots canNOT produce this: it builds a NESTED
+ * `{io:{nanobpm:{agentTask:…}}}` object the flat-key harness never reads (see {@link
+ * flattenAgentTaskEnvelope}). Only a worker result key literally NAMED with this dotted string (the
+ * engine propagates worker result variables verbatim, mapped or not) materialises the dotted
+ * variable. */
+export const AGENT_TASK_BRANCH_CREATE_VAR = `${AGENT_TASK_NS}.branch.create`;
+
+/** The ONE canonical derivation of an implementation slice's deterministic pre-PR branch —
+ * `feat/<taskId>` (the agent-guide's `feat/*` convention, resources/prompts/feature.md). This is the
+ * single source of truth for BOTH the whole-run feature seed (`feature.ts` `startFeature`, where the
+ * branch is known at seed time and rides the envelope's `branch.create` directly) AND the epic
+ * plan-fanout's per-MI-child emission (`workers/caps-prepare`, which stamps it onto the implement-cell
+ * envelope via {@link AGENT_TASK_BRANCH_CREATE_VAR} because each slice's `task.id` differs per child
+ * and can't be named at the whole-epic seed). Issue #945: the plan-fanout implement-cell previously
+ * carried NO `branch.create`, so every c8ctl retry cut a random `nano/agent-work/*` fallback branch
+ * and the durable WIP checkpoint (keyed on `feat/<task.id>`) was never restored — each retry discarded
+ * the prior session's work. Deriving it here once keeps the envelope and the prompt's branch
+ * instruction (which tells the agent to use `feat/<task.id>`) from drifting into two sources.
+ *
+ * Returns `null` for a `taskId` whose derived branch is not a plausible git ref (mirrors the
+ * delivery-runner's `feat/<node.id>` guard, #776): an ill-formed `branch.create` would turn the
+ * isolation guarantee into a launch/checkout failure, so a blank/implausible id degrades to omission
+ * (the pre-#945 agent-cuts-its-own-branch behaviour) rather than emit an unusable value. */
+export function sliceBranchCreate(taskId: string | null | undefined): string | null {
+  const id = typeof taskId === "string" ? taskId.trim() : "";
+  if (id === "") return null;
+  const branch = `feat/${id}`;
+  return isPlausibleBranchName(branch) ? branch : null;
 }
 
 /** Flatten a repository-isolation envelope object (as built by {@link repoEnvelopeVars} —
@@ -64,6 +102,90 @@ export function flattenAgentTaskEnvelope(envelope: Record<string, unknown>): Rec
   };
   walk("", envelope);
   return out;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v != null && typeof v === "object" && !Array.isArray(v);
+}
+
+function deepMerge(base: unknown, over: unknown): unknown {
+  if (!isPlainObject(base)) return isPlainObject(over) ? deepMerge({}, over) : over;
+  const out: Record<string, unknown> = { ...base };
+  if (!isPlainObject(over)) return out;
+  for (const [k, v] of Object.entries(over)) {
+    if (v === undefined) continue;
+    out[k] = isPlainObject(v) && isPlainObject(out[k]) ? deepMerge(out[k], v) : v;
+  }
+  return out;
+}
+
+function setPath(obj: Record<string, unknown>, path: string[], value: unknown): void {
+  let cur = obj;
+  for (let i = 0; i < path.length - 1; i++) {
+    const k = path[i];
+    const next = cur[k];
+    // After the ensure-object step the slot is always a plain object; narrow via the type guard
+    // (no `as` — the ban-`as` gate) so the descent stays type-safe.
+    if (!isPlainObject(next)) {
+      const fresh: Record<string, unknown> = {};
+      cur[k] = fresh;
+      cur = fresh;
+    } else {
+      cur = next;
+    }
+  }
+  cur[path[path.length - 1]] = value;
+}
+
+/** Mirror of the c8ctl harness's `collectEnvelopeFrom`: reassemble the reserved namespace out of BOTH
+ * a whole-object/JSON `io.nanobpm.agentTask` value AND flattened dotted `io.nanobpm.agentTask.*` keys
+ * (the channel a per-slice worker's dotted-name result variable uses, issue #945), deep-merging the
+ * two. This is the ONE consumer-side mirror shared by the round-trip contract tests
+ * (`app/repoEnvelope.test.ts`) and the e2e fan-out proof (`e2e/plan-fanout.e2e.ts`) so producer and
+ * consumer can never drift into two readings of where `branch.create` lives. */
+function collectEnvelopeFrom(source: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!isPlainObject(source)) return out;
+  const whole = source[AGENT_TASK_NS];
+  if (whole != null) {
+    let val: unknown = whole;
+    if (typeof whole === "string") {
+      try {
+        val = JSON.parse(whole);
+      } catch {
+        val = undefined;
+      }
+    }
+    if (isPlainObject(val)) Object.assign(out, deepMerge(out, val));
+  }
+  const prefix = `${AGENT_TASK_NS}.`;
+  for (const [key, value] of Object.entries(source)) {
+    if (!key.startsWith(prefix)) continue;
+    const rest = key.slice(prefix.length);
+    if (!rest) continue;
+    setPath(out, rest.split("."), value);
+  }
+  return out;
+}
+
+/** Mirror of the c8ctl harness's `normalizeTaskEnvelope` branch slice: deep-merge the envelope
+ * recovered from `customHeaders` under that recovered from `variables` (variables win), then read
+ * `branch` from the TOP LEVEL of the merged envelope (`isPlainObject(raw.branch)`), NEVER from
+ * `raw.repository.branch`. Returns the consumer's recovered `branch.create` (`undefined` when the
+ * producer put it somewhere the consumer doesn't look, or omitted it). This is the ONE place tests
+ * assert "the harness sees this branch" — keeping producer (`repoEnvelopeVars` / the per-slice dotted
+ * variable) and consumer pinned together (issues #882/#945). */
+export function recoverBranchCreate(
+  customHeaders: Record<string, unknown>,
+  variables: Record<string, unknown>,
+): string | undefined {
+  const merged = deepMerge(collectEnvelopeFrom(customHeaders), collectEnvelopeFrom(variables));
+  // deepMerge of two plain-object envelope slices is always a plain object; narrow via the type guard
+  // (no `as` — the ban-`as` gate). A non-object merge (impossible here) reads as "no branch".
+  const raw = isPlainObject(merged) ? merged : {};
+  const branch = isPlainObject(raw.branch) ? raw.branch : {};
+  const create = branch.create;
+  return create == null ? undefined : String(create);
 }
 
 /** Raised by `requireRepoEnvelopeVars` when the repository-isolation envelope is REQUIRED on a fan-out

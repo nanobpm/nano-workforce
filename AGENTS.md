@@ -253,6 +253,23 @@ Two different `nano:dataEnvelope` uses have different rules — don't conflate t
   it as a process variable: besides being unnecessary, seeding a var an
   in-subprocess gateway reads re-introduces the multi-instance `=null`-shadow
   gotcha above.
+- **A per-MI-child value reaches an agent job's reserved `io.nanobpm.agentTask`
+  envelope via a worker result key literally NAMED with the dotted path — never a
+  dotted `ioMapping` target.** The whole-run seed can only set the
+  `io.nanobpm.agentTask` object ONCE at the root (uniform for every cell), so a
+  per-slice field (e.g. the implement-cell's deterministic `branch.create =
+  feat/<task.id>`, issue #945) can't ride it. A `<zeebe:output
+  target="io.nanobpm.agentTask.branch.create">` does NOT work — a dotted ioMapping
+  target builds a NESTED `{io:{nanobpm:{agentTask:…}}}` object the flat-key harness
+  never reads. The working channel: a worker running in the MI-child scope (e.g.
+  `pr.caps-prepare`) returns a result key literally named
+  `"io.nanobpm.agentTask.branch.create"`; the engine propagates worker result
+  variables verbatim (mapped or not), materialising a FLAT dotted process variable
+  that the harness's `collectEnvelopeFrom` deep-merges with the whole-object seed.
+  Derive the value from the ONE canonical `sliceBranchCreate` (app/repoEnvelope.ts)
+  so the envelope, the prompt's branch instruction, and the reconcile lookup share a
+  single source. `recoverBranchCreate(headers, variables)` (same module) is the ONE
+  consumer-side mirror tests use to assert "the harness sees this branch".
 
 ## Urban page runtime: rendering primitives are not JS-truthy
 
