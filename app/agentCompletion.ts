@@ -27,15 +27,6 @@ import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, isDeliveryEscalationTwin, isDeliveryHumanElement, isDeliveryWaitEscalationTwin } from "./deliveryHuman.ts";
 import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, PR_MERGE_APPROVAL_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT } from "./userTasks.ts";
 
-/** The minimal shape of the `pull_requests` row this module's merge-approval projection stamp
- *  touches — declared locally (never imported from app/service.ts, which imports this module and
- *  would cycle) and structurally checked against the real table at the DataLayer seam. */
-interface MergeApprovalProjectionRow {
-  pr_key: string;
-  process_key: string | null;
-  merge_human_approval?: number | null;
-}
-
 const now = () => new Date().toISOString();
 
 /** Who completed an escalation user task. `agent` completions are reversible (a human may override);
@@ -494,10 +485,10 @@ async function stampMergeApprovalProjection(data: DataLayer, processInstanceKey:
   const key = processInstanceKey?.trim();
   if (!key) return;
   try {
-    const table = data.table<MergeApprovalProjectionRow>("pull_requests", "pr_key");
-    const row = await table.findOne({ process_key: key });
-    if (!row) return;
-    await table.update(row.pr_key, { merge_human_approval: 0 });
+    // ONE guarded UPDATE (PR #950 review): the ownership check and the stamp are a single atomic
+    // statement, so a reopen that re-points `process_key` between a lookup and a write can never let
+    // the PREVIOUS run's approval clear its successor's gate (no read-then-write window).
+    await data.open().exec(`UPDATE "pull_requests" SET "merge_human_approval" = 0 WHERE "process_key" = ?`, [key]);
   } catch {
     // swallow — a projection miss never masks a completion the engine has already resumed
   }

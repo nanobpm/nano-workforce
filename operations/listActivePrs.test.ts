@@ -595,3 +595,51 @@ test("issue #947: a legacy row whose engine read fails degrades to the default, 
   assertEquals(res.status, 200);
   assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
 });
+
+// ── PR #950 review: the legacy fallback is BOUNDED and SELF-HEALING ───────────────────────────────
+test("PR #950 review: truncated pages bound legacy per-instance probes, regardless of legacy row count", async () => {
+  const { MAX_PROBED_LEGACY_INSTANCES } = await import("../app/service.ts");
+  const N = 20; // an upgraded install: every row unstamped
+  const rows = Array.from({ length: N }, (_, i) => prRow936(i + 1));
+  // Every engine-wide page is truncated to nothing, so every legacy instance would need probes.
+  const queries: any[] = [];
+  const engine = {
+    searchVariables: async (q: any) => {
+      queries.push(q);
+      if (q.processInstanceKey == null) return [];
+      return [v(q.processInstanceKey, q.name, q.name === "autoMerge")];
+    },
+  } as any;
+  const res = (await handler(input(), { ...memApp(rows), engine } as AppApi)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.count, N);
+  assert(
+    queries.length <= 3 + 3 * MAX_PROBED_LEGACY_INSTANCES,
+    `engine calls stay bounded (got ${queries.length} for ${N} legacy rows)`,
+  );
+  const stale = res.body.prs.filter((p: any) => p.merge.stale).length;
+  assertEquals(stale, N - MAX_PROBED_LEGACY_INSTANCES, "unprobed rows degrade to the stale default for this serve");
+});
+
+test("PR #950 review: a legacy row whose policy the engine proved is hydrated onto the projection", async () => {
+  const rows: any[] = [prRow936(1), prRow936(2)];
+  const engine = countingEngine([
+    v("PI-1", "autoMerge", false),
+    v("PI-1", "convergeOnly", true),
+    v("PI-1", "humanApproval", false),
+    v("PI-2", "autoMerge", true), // humanApproval unknown — never persisted as a guess
+    v("PI-2", "convergeOnly", false),
+  ]);
+  const app: any = memApp(rows);
+  const writes: unknown[][] = [];
+  app.data.open = () => ({
+    exec: async (sql: string, params: unknown[]) => {
+      assert(/WHERE "pr_key" = \? AND "process_key" = \? AND "merge_requested" IS NULL$/.test(sql), "guarded write-back");
+      writes.push(params);
+      return { changed: 1 };
+    },
+  });
+  const res = (await handler(input(), { ...app, engine } as AppApi)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(writes, [[0, 0, "o/r#1", "PI-1"]], "only the COMPLETE read is written back");
+});

@@ -854,11 +854,11 @@ async function submitPrCritical(
       root_request_key: effectiveRoot,
       auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
       // Merge-policy projection (issue #947): stamp the run's intent so `/status` serves it from
-      // the row with no engine read. `merge_human_approval` starts NULL (undecided): the
-      // `merge-approval` gate only exists when `gated`, and the loop's `humanApproval` variable
-      // write on approve maps to 0 — NULL and 1 both read as "outstanding" in `mergePolicyFromRow`.
+      // the row with no engine read. The approve at the `merge-approval` gate later maps to 0.
       merge_requested: mergeIntent ? 1 : 0,
-      merge_human_approval: null,
+      // Mirror the engine seed EXACTLY (PR #950 review): an ungated loop is seeded
+      // `humanApproval: false` (decided — no gate), a gated one `true` (outstanding).
+      merge_human_approval: gated ? 1 : 0,
       created_at: ts,
       updated_at: ts,
     });
@@ -956,7 +956,16 @@ async function submitPrCritical(
   let reopened = false;
   // Snapshot BEFORE the reopen write — the row object may be a live reference the update mutates.
   const prior = existing
-    ? { status: existing.status, current_round: existing.current_round, process_key: existing.process_key }
+    ? {
+        status: existing.status,
+        current_round: existing.current_round,
+        process_key: existing.process_key,
+        // Restore the merge-policy projection WITH ownership (PR #950 review): a rollback that put the
+        // old `process_key` back but kept the failed run's policy would serve a mismatched policy as
+        // authoritative (`stale: false`) in `/status`.
+        merge_requested: existing.merge_requested ?? null,
+        merge_human_approval: existing.merge_human_approval ?? null,
+      }
     : null;
   try {
     if (existing) {
@@ -1015,9 +1024,9 @@ async function submitPrCritical(
         // fresh run's flag is authoritative even across a reopen (issue #889).
         auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
         // Merge-policy projection (issue #947): run-scoped like every other field in this reset —
-        // the fresh run's intent wins, and the approval state restarts undecided (NULL).
+        // the fresh run's intent wins, and the approval state mirrors the fresh loop's `humanApproval` seed.
         merge_requested: mergeIntent ? 1 : 0,
-        merge_human_approval: null,
+        merge_human_approval: gated ? 1 : 0,
         // Publish the fresh run's identity in the SAME write as the status flip (may be null if the
         // instance could not be created — a phantom row a retry re-enrolls, as on first submit).
         process_key: processKey,
@@ -1324,7 +1333,12 @@ export async function activePrs(
   const varsByInstance = await readMergePolicyVars(engine, legacyKeys);
   for (const p of active) {
     if (mergeByPr.has(p.pr_key)) continue;
-    mergeByPr.set(p.pr_key, mergePolicyFromVars(varsByInstance?.get(p.process_key ?? "")));
+    const vars = varsByInstance?.get(p.process_key ?? "");
+    mergeByPr.set(p.pr_key, mergePolicyFromVars(vars));
+    // Self-healing hydration (PR #950 review): a legacy row whose policy the engine just proved is
+    // written back onto the projection, so it pays the engine read at most ONCE — the legacy set
+    // drains on the first serves after upgrade instead of keeping every /status on the slow path.
+    await hydrateLegacyMergePolicy(data, p, vars);
   }
   return active.map((p) => {
     // Issue #931: an ACTIVE engine incident parked on the loop's instance must be VISIBLE — the row
@@ -1464,6 +1478,35 @@ function isMergePolicyName(name: string): name is MergePolicyName {
   return MERGE_POLICY_NAMES.some((n) => n === name);
 }
 
+/** Write a legacy row's engine-proven merge policy back onto its `pull_requests` projection (PR #950
+ *  review). Only a COMPLETE read is persisted — a known intent (`autoMerge`, or the legacy inverted
+ *  `convergeOnly`) AND a known `humanApproval` — so a guess is never made authoritative. The UPDATE is
+ *  guarded on the row still being unstamped AND still owned by the instance read, so a concurrent
+ *  submit/reopen stamp always wins. Best-effort: a failed write just leaves the row legacy. */
+async function hydrateLegacyMergePolicy(
+  data: DataLayer,
+  row: { pr_key: string; process_key?: string | null },
+  vars: MergePolicyVars | undefined,
+): Promise<void> {
+  if (!vars || !row.process_key || vars.humanApproval === undefined) return;
+  const requested = vars.autoMerge ?? (vars.convergeOnly === undefined ? undefined : !vars.convergeOnly);
+  if (requested === undefined) return;
+  try {
+    await data.open().exec(
+      `UPDATE "pull_requests" SET "merge_requested" = ?, "merge_human_approval" = ? WHERE "pr_key" = ? AND "process_key" = ? AND "merge_requested" IS NULL`,
+      [requested ? 1 : 0, vars.humanApproval ? 1 : 0, row.pr_key, row.process_key],
+    );
+  } catch {
+    // swallow — hydration is an optimisation; the row simply stays on the legacy read
+  }
+}
+
+/** Upper bound on legacy instances that may pay per-instance root probes in ONE /status serve (PR
+ *  #950 review). Beyond it, an instance missing from the batched pages degrades to the stale default
+ *  for this serve (and is hydrated on a later one), so request-time engine calls stay bounded at
+ *  `3 + 3 * MAX_PROBED_LEGACY_INSTANCES` regardless of how many legacy PRs exist. */
+export const MAX_PROBED_LEGACY_INSTANCES = 4;
+
 /** Batched merge-policy read (issue #936): ONE name-filtered engine-wide read per policy variable
  *  (3 concurrent calls, independent of row count), bucketed by owning instance.
  *
@@ -1518,15 +1561,18 @@ async function readMergePolicyVars(
     // `convergeOnly` is skipped once a usable boolean `autoMerge` is known (the canonical intent wins). Every loop
     // seeds all three names at creation (submitPr; startMerge seeds the merge loop's policy too), so
     // the steady state is exactly 3 calls; probes are only paid for page cuts and legacy instances.
+    const needsProbe = (pk: string) =>
+      MERGE_POLICY_NAMES.filter(
+        (name) => !seen.get(pk)?.has(name) && !(name === "convergeOnly" && byInstance.get(pk)?.autoMerge !== undefined),
+      );
+    // Bound the request-time fallback (PR #950 review): only the first MAX_PROBED_LEGACY_INSTANCES
+    // instances (callers pass them most-recently-updated first) are probed; the rest degrade fully to
+    // the stale default for this serve — never a half-read policy.
+    const probing = [...wanted].filter((pk) => needsProbe(pk).length > 0);
+    for (const pk of probing.slice(MAX_PROBED_LEGACY_INSTANCES)) byInstance.delete(pk);
     await Promise.all(
-      [...wanted].map(async (pk) => {
-        const got = seen.get(pk);
-        const probe = MERGE_POLICY_NAMES.filter(
-          (name) =>
-            !got?.has(name) &&
-            !(name === "convergeOnly" && byInstance.get(pk)?.autoMerge !== undefined),
-        );
-        if (probe.length === 0) return;
+      probing.slice(0, MAX_PROBED_LEGACY_INSTANCES).map(async (pk) => {
+        const probe = needsProbe(pk);
         try {
           // Collect ALL probe results first and record only once every probe succeeded: recording
           // inside each probe would let a slower successful sibling re-create the entry the catch

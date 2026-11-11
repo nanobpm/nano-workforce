@@ -85,6 +85,21 @@ function memData(
       }
       return { changed: 0 };
     }
+    // The guarded merge-approval projection stamp (issue #947, PR #950 review): ownership is checked
+    // IN the UPDATE predicate, so only a row still owned by the approving instance is stamped.
+    const mp = /^UPDATE "pull_requests" SET "merge_human_approval" = 0 WHERE "process_key" = \?$/.exec(sql);
+    if (mp) {
+      const store = stores.pull_requests;
+      if (!store) throw new Error("no such table: pull_requests");
+      let changed = 0;
+      for (const r of store.rows) {
+        if (r.process_key === params[0]) {
+          r.merge_human_approval = 0;
+          changed++;
+        }
+      }
+      return { changed };
+    }
     // The FIRST-HAND agent-revert tombstone keyed on `source_completion_id` (Copilot review of #806) —
     // `invalidateAdjudicationByCompletion`. Tombstones EVERY live row this completion produced (a
     // completion settles one question, so at most one) so reverting a first-hand agent answer (which has
@@ -1066,6 +1081,55 @@ test("a merge-approval approve against a SUPERSEDED instance never clears the fr
 
   assertEquals(r.ok, true, "the engine completion itself still lands");
   assertEquals(stores.pull_requests.rows[0].merge_human_approval, 1, "the fresh run's gate is not cleared by a stale instance");
+});
+
+test("a reopen racing the approval stamp can never let the PREVIOUS run clear the successor's gate (PR #950 review)", async () => {
+  // A reopen re-points `process_key` the moment the stamp looks the row up (simulated in the
+  // table's `findOne`). A read-then-write stamp would then clear the FRESH run's gate; the guarded
+  // single-statement UPDATE checks ownership atomically, so the successor's gate survives.
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pull_requests: {
+      rows: [{ pr_key: "owner/repo#10", process_key: "PI-OLD", merge_requested: 1, merge_human_approval: 1 }],
+      key: "pr_key",
+    },
+  };
+  const base = memData(stores);
+  const reopen = () => {
+    const live = stores.pull_requests.rows[0];
+    live.process_key = "PI-NEW";
+    live.merge_human_approval = 1; // the fresh gated run restarts outstanding
+  };
+  const data: any = Object.create(base);
+  data.table = (name: string, key: string) => {
+    const t: any = base.table(name, key);
+    if (name !== "pull_requests") return t;
+    return {
+      ...t,
+      findOne: async (q: any) => {
+        const row = await t.findOne(q);
+        reopen(); // the reopen lands between a lookup and its write
+        return row;
+      },
+    };
+  };
+  // An atomic statement leaves no window: the reopen can only land after it (and resets the gate).
+  data.open = () => {
+    const db: any = base.open();
+    return { ...db, exec: async (sql: string, params?: unknown[]) => {
+      const res = await db.exec(sql, params);
+      reopen();
+      return res;
+    } };
+  };
+  const { engine } = fakeEngine([{ userTaskKey: "ut-race", elementId: "merge-approval", processInstanceKey: "PI-OLD" }]);
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-race",
+    operatorId: "alice",
+    variables: { mergeDecision: "approve" },
+  });
+  assertEquals(r.ok, true);
+  assertEquals(stores.pull_requests.rows[0].merge_human_approval, 1, "the successor's gate stays outstanding");
 });
 
 test("a merge-approval projection-stamp failure never masks the engine completion (issue #947)", async () => {

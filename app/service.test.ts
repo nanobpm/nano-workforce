@@ -1259,6 +1259,25 @@ function adoptLoop(status: string, loopState: string, convergedAt: string | null
   return { data, engine, narrowed };
 }
 
+test("a gated submitPr stamps an OUTSTANDING approval matching the engine seed (PR #950 review)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, vars } = captureRoot();
+    await submitPr(
+      data,
+      engine,
+      { repo: "owner/repo", number: 25, url: "https://github.com/owner/repo/pull/25", prKey: "owner/repo#25" },
+      [],
+      20,
+      false,
+      null,
+      true, // humanApproval
+    );
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.merge_human_approval, vars()?.humanApproval === true ? 1 : 0, "projection agrees with the engine seed");
+    assertEquals(pr.merge_human_approval, 1, "a gated run projects the outstanding gate");
+  });
+});
+
 test("a gated submitPr adopting a live loop narrows it to humanApproval (issue #826)", async () => {
   await withGithubOff(async () => {
     const pr = { repo: "owner/repo", number: 14, url: "https://github.com/owner/repo/pull/14", prKey: "owner/repo#14" };
@@ -1479,7 +1498,7 @@ test("submitPr stamps the merge-policy projection on the row (insert path)", asy
     });
     const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
     assertEquals(pr.merge_requested, 1, "the default submit requests the merge");
-    assertEquals(pr.merge_human_approval, null, "approval starts undecided (NULL), not a stored false");
+    assertEquals(pr.merge_human_approval, 0, "an ungated run mirrors the engine seed humanApproval:false (PR #950 review)");
   });
 });
 
@@ -1496,7 +1515,7 @@ test("submitPr stamps a review-only intent as merge_requested 0 (convergeOnly)",
     );
     const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
     assertEquals(pr.merge_requested, 0, "a review-only run projects requested=false with no engine read");
-    assertEquals(pr.merge_human_approval, null);
+    assertEquals(pr.merge_human_approval, 0, "no gate on a review-only run");
   });
 });
 
@@ -1524,7 +1543,7 @@ test("submitPr reopen restamps the projection to the FRESH run's intent (run-sco
     });
     const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
     assertEquals(pr.merge_requested, 1, "the fresh run's intent wins");
-    assertEquals(pr.merge_human_approval, null, "the approval state restarts undecided");
+    assertEquals(pr.merge_human_approval, 0, "the approval state mirrors the fresh ungated seed");
   });
 });
 
@@ -2791,7 +2810,7 @@ test("submitPr handoffFrom: a failed reset restores the prior owner so the hand-
     const PR_KEY = "owner/repo#79";
     const stores: Record<string, { rows: any[]; key: string }> = {
       pull_requests: {
-        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 79, url: "https://github.com/owner/repo/pull/79", title: "t", status: "waiting_merge", current_round: 4, process_key: "PI-MERGE" }],
+        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 79, url: "https://github.com/owner/repo/pull/79", title: "t", status: "waiting_merge", current_round: 4, process_key: "PI-MERGE", merge_requested: 0, merge_human_approval: 1 }],
         key: "pr_key",
       },
       escalations: { rows: [], key: "id" },
@@ -2832,6 +2851,10 @@ test("submitPr handoffFrom: a failed reset restores the prior owner so the hand-
     assertEquals(row.process_key, "PI-MERGE", "rollback restores the prior owner, never leaves the cancelled key");
     assertEquals(row.status, "waiting_merge", "rollback restores the prior status");
     assertEquals(row.current_round, 4);
+    // PR #950 review: the merge-policy projection is restored WITH ownership, never left as the
+    // failed run's policy under the old owner (which /status would serve as authoritative).
+    assertEquals(row.merge_requested, 0, "rollback restores the prior merge intent");
+    assertEquals(row.merge_human_approval, 1, "rollback restores the prior approval state");
 
     failReset = false;
     const retry = await submitPr(data, engine, parsed, [], undefined, false, null, false, false, true, "PI-MERGE");
