@@ -64,6 +64,7 @@ import { pollLineage } from "./lineage.ts";
 import { mergeableRepollInterval, mergeableWaitTimeout } from "./mergeableWait.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { mergeLandedWaitTimeout } from "./mergeLandedWait.ts";
+import { withMergePolicyLock } from "./mergePolicyLock.ts";
 import {
   freshHeadRunAction,
   headRunPresenceCount,
@@ -757,6 +758,9 @@ async function submitPrCritical(
       // key that resolves to any other definition must never be gated.
       const isConvergenceLoop = match?.processDefinitionId == null || match.processDefinitionId === PROCESS_ID;
       if (state !== null && !ENGINE_TERMINAL_STATES.has(state) && isConvergenceLoop) {
+        // Serialized with merge-approval completion on this loop (PR #950 review): the engine write
+        // and projection stamp form one pair, so an approval can never interleave between them.
+        await withMergePolicyLock(loopKey, async () => {
         await engine.setVariables({ scopeKey: loopKey, variables: { humanApproval: true } });
         // Mirror the gate onto the durable /status projection (issue #947): the loop variable is
         // the process's own copy; the row column is what `/status` reads without an engine
@@ -769,6 +773,7 @@ async function submitPrCritical(
           `UPDATE "pull_requests" SET "merge_human_approval" = 1 WHERE "pr_key" = ? AND "process_key" = ? AND "converged_at" IS NULL`,
           [parsed.prKey, loopKey],
         );
+        });
       }
     }
     // Steward opt-in is monotonic too (issue #889 review): an opted-in caller adopting a live loop —

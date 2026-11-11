@@ -25,6 +25,7 @@ import type { DataLayer, EngineClient, GatewayDataSource } from "@nanobpm/urban"
 import { invalidateAdjudication, invalidateAdjudicationByCompletion } from "./adjudications.ts";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, isDeliveryEscalationTwin, isDeliveryHumanElement, isDeliveryWaitEscalationTwin } from "./deliveryHuman.ts";
+import { withMergePolicyLock } from "./mergePolicyLock.ts";
 import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, PR_MERGE_APPROVAL_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT } from "./userTasks.ts";
 
 const now = () => new Date().toISOString();
@@ -432,6 +433,11 @@ export async function completeUserTaskAttributed(
     created_at: now(),
   });
   const completionId = Number(id);
+  // Merge-approval approve: serialize the engine completion + projection stamp against gated adoption
+  // on the same loop (PR #950 review) so a concurrent adopter's stale `1` can never land after our `0`.
+  const approvingMerge = target.elementId === PR_MERGE_APPROVAL_ELEMENT && target.variables.mergeDecision === "approve";
+  const lockKey = approvingMerge ? target.processInstanceKey?.trim() : undefined;
+  const resume = async (): Promise<void> => {
   try {
     // Carry the completed user-task's identity forward on the resumed token (Copilot review of #806).
     // `pr.answer-escalation` (record-answer) reconciles the durable adjudication AFTER this completion
@@ -469,9 +475,12 @@ export async function completeUserTaskAttributed(
   // miss only leaves the row reading blocked until the merge hand-off, never blocks the merge) and
   // ownership-guarded on the instance the task parked on, so a completion replayed against a stale
   // instance can never clear a SUCCESSOR run's gate after a reopen re-pointed `process_key`.
-  if (target.elementId === PR_MERGE_APPROVAL_ELEMENT && target.variables.mergeDecision === "approve") {
+  if (approvingMerge) {
     await stampMergeApprovalProjection(data, target.processInstanceKey);
   }
+  };
+  if (lockKey) await withMergePolicyLock(lockKey, resume);
+  else await resume();
   return { completionId };
 }
 
