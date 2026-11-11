@@ -62,6 +62,16 @@ function memOpen(stores: Record<string, { rows: any[]; key: string }>, ops?: str
         }
         return { changed };
       }
+      if (/^UPDATE "pull_requests" SET "merge_human_approval" = 1 WHERE "pr_key" = \? AND "process_key" = \? AND "converged_at" IS NULL$/.test(sql)) {
+        let changed = 0;
+        for (const r of stores.pull_requests?.rows ?? []) {
+          if (r.pr_key === params[0] && r.process_key === params[1] && r.converged_at == null) {
+            r.merge_human_approval = 1;
+            changed++;
+          }
+        }
+        return { changed };
+      }
       throw new Error(`unexpected exec sql: ${sql}`);
     },
   };
@@ -1259,6 +1269,25 @@ function adoptLoop(status: string, loopState: string, convergedAt: string | null
   return { data, engine, narrowed };
 }
 
+test("a gated submitPr stamps an OUTSTANDING approval matching the engine seed (PR #950 review)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, vars } = captureRoot();
+    await submitPr(
+      data,
+      engine,
+      { repo: "owner/repo", number: 25, url: "https://github.com/owner/repo/pull/25", prKey: "owner/repo#25" },
+      [],
+      20,
+      false,
+      null,
+      true, // humanApproval
+    );
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.merge_human_approval, vars()?.humanApproval === true ? 1 : 0, "projection agrees with the engine seed");
+    assertEquals(pr.merge_human_approval, 1, "a gated run projects the outstanding gate");
+  });
+});
+
 test("a gated submitPr adopting a live loop narrows it to humanApproval (issue #826)", async () => {
   await withGithubOff(async () => {
     const pr = { repo: "owner/repo", number: 14, url: "https://github.com/owner/repo/pull/14", prKey: "owner/repo#14" };
@@ -1461,6 +1490,140 @@ test("startMerge seeds the merge-policy triple so /status needs no per-instance 
     });
     const seeded = vars() ?? {};
     assertEquals([seeded.autoMerge, seeded.convergeOnly, seeded.humanApproval], [true, false, false]);
+  });
+});
+
+// ── Issue #947: the durable merge-policy projection the writers stamp ────────────────────────────
+// `/status` serves the merge policy off the `pull_requests` row (zero engine reads) — these pin the
+// writer side of that contract: every path that KNOWS the policy must stamp it.
+
+test("submitPr stamps the merge-policy projection on the row (insert path)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores } = captureRoot();
+    await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 21,
+      url: "https://github.com/owner/repo/pull/21",
+      prKey: "owner/repo#21",
+    });
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.merge_requested, 1, "the default submit requests the merge");
+    assertEquals(pr.merge_human_approval, 0, "an ungated run mirrors the engine seed humanApproval:false (PR #950 review)");
+  });
+});
+
+test("submitPr stamps a review-only intent as merge_requested 0 (convergeOnly)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores } = captureRoot();
+    await submitPr(
+      data,
+      engine,
+      { repo: "owner/repo", number: 22, url: "https://github.com/owner/repo/pull/22", prKey: "owner/repo#22" },
+      [],
+      20,
+      true, // convergeOnly
+    );
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.merge_requested, 0, "a review-only run projects requested=false with no engine read");
+    assertEquals(pr.merge_human_approval, 0, "no gate on a review-only run");
+  });
+});
+
+test("submitPr reopen restamps the projection to the FRESH run's intent (run-scoped reset)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores } = captureRoot();
+    (stores.pull_requests.rows as unknown[]).push({
+      pr_key: "owner/repo#23",
+      repo: "owner/repo",
+      number: 23,
+      url: "https://github.com/owner/repo/pull/23",
+      status: "converged", // terminal -> reopen path
+      current_round: 2,
+      process_key: "PI-OLD",
+      // The PRIOR run's projection: review-only, approval decided. A fresh default submit must
+      // overwrite both — a carried-over stamp would misreport the new run's policy.
+      merge_requested: 0,
+      merge_human_approval: 0,
+    });
+    await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 23,
+      url: "https://github.com/owner/repo/pull/23",
+      prKey: "owner/repo#23",
+    });
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.merge_requested, 1, "the fresh run's intent wins");
+    assertEquals(pr.merge_human_approval, 0, "the approval state mirrors the fresh ungated seed");
+  });
+});
+
+test("a gated submitPr adopting a live loop stamps merge_human_approval on the row (issue #947)", async () => {
+  await withGithubOff(async () => {
+    const pr = { repo: "owner/repo", number: 14, url: "https://github.com/owner/repo/pull/14", prKey: "owner/repo#14" };
+    const live = adoptLoop("converging", "ACTIVE");
+    await submitPr(live.data, live.engine, pr, [], 20, false, null, true);
+    const row = (await live.data.table("pull_requests", "pr_key").get(pr.prKey)) as {
+      merge_human_approval?: number | null;
+    } | null;
+    assertEquals(row?.merge_human_approval, 1, "the gate is mirrored onto the /status projection");
+
+    const ungated = adoptLoop("converging", "ACTIVE");
+    await submitPr(ungated.data, ungated.engine, pr);
+    const ungatedRow = (await ungated.data.table("pull_requests", "pr_key").get(pr.prKey)) as {
+      merge_human_approval?: number | null;
+    } | null;
+    assertEquals(ungatedRow?.merge_human_approval ?? null, null, "an ungated adopter leaves the projection undecided");
+  });
+});
+
+test("a gated adopter never gates a merge-loop or a row re-pointed mid-handoff (PR #950 review)", async () => {
+  await withGithubOff(async () => {
+    const pr = { repo: "owner/repo", number: 14, url: "https://github.com/owner/repo/pull/14", prKey: "owner/repo#14" };
+    // Variant 1: the key already resolves to the merge-loop (startMerge re-pointed it, converged_at unset).
+    const merge = adoptLoop("converging", "ACTIVE");
+    merge.engine.searchProcessInstances = () =>
+      Promise.resolve([{ processInstanceKey: "PI-LOOP", state: "ACTIVE", processDefinitionId: "merge-loop" }]);
+    await submitPr(merge.data, merge.engine, pr, [], 20, false, null, true);
+    const mergeRow = (await merge.data.table("pull_requests", "pr_key").get(pr.prKey)) as any;
+    assertEquals(mergeRow?.merge_human_approval ?? null, null, "merge-loop policy untouched");
+    assertEquals(merge.narrowed.length, 0, "no humanApproval set on the merge-loop");
+    // Variant 2: the handoff re-points the row between the engine read and the stamp.
+    const race = adoptLoop("converging", "ACTIVE");
+    race.engine.setVariables = async () => {
+      const row = (await race.data.table("pull_requests", "pr_key").get(pr.prKey)) as any;
+      row.process_key = "PI-MERGE";
+      row.merge_human_approval = 0;
+    };
+    await submitPr(race.data, race.engine, pr, [], 20, false, null, true);
+    const raceRow = (await race.data.table("pull_requests", "pr_key").get(pr.prKey)) as any;
+    assertEquals(raceRow?.merge_human_approval, 0, "the handoff's merge-stage policy survives");
+  });
+});
+
+test("startMerge stamps the merge-stage policy on the row (issue #947)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores } = captureRoot();
+    (stores.pull_requests.rows as unknown[]).push({
+      pr_key: "owner/repo#24",
+      repo: "owner/repo",
+      number: 24,
+      url: "https://github.com/owner/repo/pull/24",
+      status: "converged",
+      current_round: 1,
+      process_key: "PI-CONV",
+      merge_requested: 1,
+      merge_human_approval: 1, // the convergence-stage gate — decided by the merge hand-off
+    });
+    await startMerge(data, engine, {
+      repo: "owner/repo",
+      number: 24,
+      url: "https://github.com/owner/repo/pull/24",
+      prKey: "owner/repo#24",
+      round: 1,
+    });
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.merge_requested, 1, "a merge loop only starts for a requested merge");
+    assertEquals(pr.merge_human_approval, 0, "…and an approved one — the gate is behind it");
   });
 });
 
@@ -2681,7 +2844,7 @@ test("submitPr handoffFrom: a failed reset restores the prior owner so the hand-
     const PR_KEY = "owner/repo#79";
     const stores: Record<string, { rows: any[]; key: string }> = {
       pull_requests: {
-        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 79, url: "https://github.com/owner/repo/pull/79", title: "t", status: "waiting_merge", current_round: 4, process_key: "PI-MERGE" }],
+        rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 79, url: "https://github.com/owner/repo/pull/79", title: "t", status: "waiting_merge", current_round: 4, process_key: "PI-MERGE", merge_requested: 0, merge_human_approval: 1 }],
         key: "pr_key",
       },
       escalations: { rows: [], key: "id" },
@@ -2722,6 +2885,10 @@ test("submitPr handoffFrom: a failed reset restores the prior owner so the hand-
     assertEquals(row.process_key, "PI-MERGE", "rollback restores the prior owner, never leaves the cancelled key");
     assertEquals(row.status, "waiting_merge", "rollback restores the prior status");
     assertEquals(row.current_round, 4);
+    // PR #950 review: the merge-policy projection is restored WITH ownership, never left as the
+    // failed run's policy under the old owner (which /status would serve as authoritative).
+    assertEquals(row.merge_requested, 0, "rollback restores the prior merge intent");
+    assertEquals(row.merge_human_approval, 1, "rollback restores the prior approval state");
 
     failReset = false;
     const retry = await submitPr(data, engine, parsed, [], undefined, false, null, false, false, true, "PI-MERGE");

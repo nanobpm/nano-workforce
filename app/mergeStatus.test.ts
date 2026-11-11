@@ -55,7 +55,9 @@ function memData(stores: Stores) {
 
 /** A fake engine whose `searchVariables` serves the given per-instance variables. A name-less,
  *  key-less query (`{}` — the batched /status read, issue #936) returns EVERY variable across all
- *  instances, each row carrying its owning `processInstanceKey`, exactly as the real engine does. */
+ *  instances, each row carrying its owning `processInstanceKey`, exactly as the real engine does.
+ *  These tests exercise the LEGACY fallback path (issue #947): the row carries no
+ *  `merge_requested` projection, so the policy is read back off the engine. */
 function fakeEngine(varsByInstance: Record<string, Record<string, unknown>>) {
   return {
     searchVariables: (q: { processInstanceKey?: string; scopeKey?: string; name?: string }) => {
@@ -112,20 +114,20 @@ async function mergeOfWith(
 
 test("merge policy: a loop seeded autoMerge=true reads requested+effective (the #916 phantom)", async () => {
   const merge = await mergeOf({ autoMerge: true, convergeOnly: false, humanApproval: false });
-  assertEquals(merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+  assertEquals(merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: false });
 });
 
 test("merge policy: a legacy in-flight loop (convergeOnly only) derives requested from its inverse", async () => {
   // Seeded BEFORE `autoMerge` existed: only the legacy inverted variable is present.
   const review = await mergeOf({ convergeOnly: true });
-  assertEquals(review, { requested: false, enabled: true, effective: false, blockedBy: null });
+  assertEquals(review, { requested: false, enabled: true, effective: false, blockedBy: null, stale: false });
   const merging = await mergeOf({ convergeOnly: false });
-  assertEquals(merging, { requested: true, enabled: true, effective: true, blockedBy: null });
+  assertEquals(merging, { requested: true, enabled: true, effective: true, blockedBy: null, stale: false });
 });
 
 test("merge policy: humanApproval gates the effective merge and is named as the blocker", async () => {
   const merge = await mergeOf({ autoMerge: true, humanApproval: true });
-  assertEquals(merge, { requested: true, enabled: true, effective: false, blockedBy: "human-approval" });
+  assertEquals(merge, { requested: true, enabled: true, effective: false, blockedBy: "human-approval", stale: false });
 });
 
 test("merge policy: an approved PR with finalization still pending reports no blocker (PR #917 review)", async () => {
@@ -135,12 +137,12 @@ test("merge policy: an approved PR with finalization still pending reports no bl
   // an approval that is already complete. (`status` stays non-terminal: `converged_at` is only
   // stamped once `pr.finalize` actually runs.)
   const merge = await mergeOf({ autoMerge: true, humanApproval: false }, { status: "converging" });
-  assertEquals(merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+  assertEquals(merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: false });
 });
 
 test("merge policy: a review-only request reads requested=false (distinct from env/human blocking)", async () => {
   const merge = await mergeOf({ autoMerge: false, convergeOnly: true });
-  assertEquals(merge, { requested: false, enabled: true, effective: false, blockedBy: null });
+  assertEquals(merge, { requested: false, enabled: true, effective: false, blockedBy: null, stale: false });
 });
 
 test("merge policy: no readable instance key (or neither variable) defaults to the historical merge default", async () => {
@@ -151,9 +153,9 @@ test("merge policy: no readable instance key (or neither variable) defaults to t
     user_tasks: { rows: [], key: "id" },
   };
   const [noKey] = await activePrs(memData(stores), fakeEngine({}));
-  assertEquals(noKey.merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+  assertEquals(noKey.merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
   const bare = await mergeOf({});
-  assertEquals(bare, { requested: true, enabled: true, effective: true, blockedBy: null });
+  assertEquals(bare, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
 });
 
 test("merge policy: NANO_PR_AUTO_MERGE=0 blocks a requested merge as env, never a review-only one", async () => {
@@ -165,9 +167,9 @@ test("merge policy: NANO_PR_AUTO_MERGE=0 blocks a requested merge as env, never 
   try {
     const mod: typeof import("./service.ts") = await import(`./service.ts?mergeStatusAutoMergeOff=${Date.now()}`);
     const requested = await mergeOfWith(mod, { autoMerge: true, humanApproval: true });
-    assertEquals(requested, { requested: true, enabled: false, effective: false, blockedBy: "env" });
+    assertEquals(requested, { requested: true, enabled: false, effective: false, blockedBy: "env", stale: false });
     const reviewOnly = await mergeOfWith(mod, { autoMerge: false });
-    assertEquals(reviewOnly, { requested: false, enabled: false, effective: false, blockedBy: null });
+    assertEquals(reviewOnly, { requested: false, enabled: false, effective: false, blockedBy: null, stale: false });
   } finally {
     if (prev === undefined) delete process.env["NANO_PR_AUTO_MERGE"];
     else process.env["NANO_PR_AUTO_MERGE"] = prev;
@@ -220,5 +222,5 @@ test("merge policy: a delayed successful probe cannot resurrect a policy after a
   } as any;
   const prs = await activePrs(memData(stores), engine);
   const pr = prs.find((p: { prKey?: string; pr_key?: string; number?: number }) => p.number === 1);
-  assertEquals(pr?.merge, { requested: true, enabled: true, effective: true, blockedBy: null }, "failed probe → default, not a half-read policy");
+  assertEquals(pr?.merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true }, "failed probe → default, not a half-read policy");
 });

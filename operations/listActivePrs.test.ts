@@ -265,7 +265,7 @@ test("issue #936: N active rows cost a constant 3 engine variable reads, not 3N 
   );
   // The batch still projects the per-row policy correctly.
   for (const pr of res.body.prs) {
-    assertEquals(pr.merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+    assertEquals(pr.merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: false });
   }
 });
 
@@ -420,7 +420,7 @@ test("PR #937 r4: a failed probe after a partial batch drops the partial entry (
   } as any;
   const res = (await handler(input(), { ...memApp([prRow936(1)]), engine: failing } as AppApi)) as any;
   assertEquals(res.status, 200);
-  assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+  assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
 });
 
 test("PR #937 r4: a cut-off instance is recovered with name-filtered (untruncatable) root probes", async () => {
@@ -476,5 +476,209 @@ test("PR #937 r3: a failed BATCH read still degrades every row to the default (n
   } as any;
   const res = (await handler(input(), { ...memApp([prRow936(1)]), engine: failing } as AppApi)) as any;
   assertEquals(res.status, 200);
-  assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null });
+  assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
+});
+
+// ── Issue #947: /status serves the merge policy from the app's OWN projection — ZERO engine reads ─
+// The #936/#937 batching left /status at 3 engine-wide `searchVariables` pages plus a per-(instance,
+// name) probe for any name cut from its page. On the loaded merlin host (v0.208.1, 9 PRs) the
+// variables search itself takes ~1.4 s and the engine-wide pages silently truncate, so every active
+// row paid probes — ~30 s per serve and a 502 behind the console proxy. The fix for the CLASS: the
+// merge policy is written onto the `pull_requests` row by the writers that already know it
+// (`submitPr` stamps `merge_requested` at submit/reopen and `merge_human_approval` when it gates a
+// live loop; `startMerge` stamps the merge-stage policy), so the hot read path serves it from the
+// app's own DB and never touches the engine. A NULL `merge_requested` marks a row written before
+// this projection existed; only those legacy rows fall back to the #937 batched engine read.
+
+/** A PR row carrying the durable merge-policy projection (issue #947): the shape every writer
+ *  stamps from this fix on, so /status never pays an engine round-trip for it. */
+function prRow947(n: number, over: Record<string, unknown> = {}) {
+  return { ...prRow936(n), merge_requested: 1, merge_human_approval: 0, ...over };
+}
+
+/** An engine double that counts calls and fails the test if it is read at all. */
+function countingEngine(rows: { name: string; value: string; processInstanceKey: string; scopeKey: string }[] = []) {
+  const queries: { processInstanceKey?: string; scopeKey?: string; name?: string }[] = [];
+  return {
+    queries,
+    searchVariables: async (q: { processInstanceKey?: string; scopeKey?: string; name?: string }) => {
+      queries.push(q);
+      return rows
+        .filter(
+          (r) =>
+            (q.processInstanceKey == null || r.processInstanceKey === q.processInstanceKey) &&
+            (q.scopeKey == null || r.scopeKey === q.scopeKey) &&
+            (q.name == null || r.name === q.name),
+        )
+        .slice(0, 10);
+    },
+  } as any;
+}
+
+test("issue #947: N policy-stamped rows cost ZERO engine reads — /status serves its own projection", async () => {
+  // Red against the pre-fix shape: `activePrs` consulted the engine for every row, so this fails
+  // with 3N+ calls. Green when the merge policy is served from the `pull_requests` projection.
+  const N = 9; // the merlin fleet size that took 29.6 s
+  const rows = Array.from({ length: N }, (_, i) => prRow947(i + 1));
+  const engine = countingEngine();
+  const started = Date.now();
+  const res = (await handler(input(), { ...memApp(rows), engine } as AppApi)) as any;
+  const elapsed = Date.now() - started;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.count, N);
+  assertEquals(
+    engine.queries.length,
+    0,
+    "a row whose merge policy is projected on the pull_requests row never costs an engine round-trip",
+  );
+  assert(
+    elapsed < 1000,
+    `the projected read serves ${N} rows in well under the 2 s acceptance budget (took ${elapsed} ms)`,
+  );
+  for (const pr of res.body.prs) {
+    assertEquals(pr.merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: false });
+  }
+});
+
+test("issue #947: the projected policy drives requested/blockedBy per row (review-only + approval gate)", async () => {
+  const rows = [
+    prRow947(1, { merge_requested: 0, merge_human_approval: 0 }), // review-only
+    prRow947(2, { merge_requested: 1, merge_human_approval: 1 }), // parked at merge-approval
+    prRow947(3, { merge_requested: 1, merge_human_approval: null }), // gated, approval outstanding
+    prRow947(4, { merge_requested: 1, merge_human_approval: 0 }), // approved / never gated
+  ];
+  const engine = countingEngine();
+  const res = (await handler(input(), { ...memApp(rows), engine } as AppApi)) as any;
+  assertEquals(engine.queries.length, 0);
+  const byKey = (k: string) => res.body.prs.find((p: any) => p.prKey === k).merge;
+  assertEquals(byKey("o/r#1"), { requested: false, enabled: true, effective: false, blockedBy: null, stale: false });
+  assertEquals(byKey("o/r#2"), { requested: true, enabled: true, effective: false, blockedBy: "human-approval", stale: false });
+  assertEquals(byKey("o/r#3"), { requested: true, enabled: true, effective: false, blockedBy: "human-approval", stale: false });
+  assertEquals(byKey("o/r#4"), { requested: true, enabled: true, effective: true, blockedBy: null, stale: false });
+});
+
+test("issue #947: ONLY legacy (unstamped) rows fall back to the batched engine read — stamped rows never do", async () => {
+  // Expand-and-contract back-compat: a row written before the projection existed carries
+  // `merge_requested: NULL`. It keeps the #937 batched engine read (3 constant calls for the whole
+  // legacy set, never per-row), while its stamped siblings are served from the projection.
+  const rows = [
+    prRow947(1, { merge_requested: 1, merge_human_approval: 0 }), // projected
+    prRow936(2), // legacy: no projection columns
+  ];
+  const engine = countingEngine([
+    v("PI-2", "autoMerge", false),
+    v("PI-2", "convergeOnly", true),
+    v("PI-2", "humanApproval", true),
+  ]);
+  const res = (await handler(input(), { ...memApp(rows), engine } as AppApi)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(
+    engine.queries.length,
+    3,
+    "the legacy fallback stays the constant 3 name-filtered reads — never a per-row fan-out",
+  );
+  const byKey = (k: string) => res.body.prs.find((p: any) => p.prKey === k).merge;
+  assertEquals(byKey("o/r#1"), { requested: true, enabled: true, effective: true, blockedBy: null, stale: false });
+  assertEquals(byKey("o/r#2"), { requested: false, enabled: true, effective: false, blockedBy: null, stale: false });
+});
+
+test("issue #947: a legacy row whose engine read fails degrades to the default, flagged stale", async () => {
+  // The timing guard's stale marker: when the policy cannot be verified (engine unreachable for a
+  // legacy row), the row is served immediately from the historical default and flagged `stale`
+  // rather than blocking the serve.
+  const failing = {
+    searchVariables: async () => {
+      throw new Error("engine unreachable");
+    },
+  } as any;
+  const res = (await handler(input(), { ...memApp([prRow936(1)]), engine: failing } as AppApi)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
+});
+
+// ── PR #950 review: the legacy fallback is BOUNDED and SELF-HEALING ───────────────────────────────
+test("PR #950 review: truncated pages bound legacy per-instance probes, regardless of legacy row count", async () => {
+  const { MAX_PROBED_LEGACY_INSTANCES } = await import("../app/service.ts");
+  const N = 20; // an upgraded install: every row unstamped
+  const rows = Array.from({ length: N }, (_, i) => prRow936(i + 1));
+  // Every engine-wide page is truncated to nothing, so every legacy instance would need probes.
+  const queries: any[] = [];
+  const engine = {
+    searchVariables: async (q: any) => {
+      queries.push(q);
+      if (q.processInstanceKey == null) return [];
+      return [v(q.processInstanceKey, q.name, q.name === "autoMerge")];
+    },
+  } as any;
+  const res = (await handler(input(), { ...memApp(rows), engine } as AppApi)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.count, N);
+  assert(
+    queries.length <= 3 + 3 * MAX_PROBED_LEGACY_INSTANCES,
+    `engine calls stay bounded (got ${queries.length} for ${N} legacy rows)`,
+  );
+  const stale = res.body.prs.filter((p: any) => p.merge.stale).length;
+  assertEquals(stale, N - MAX_PROBED_LEGACY_INSTANCES, "unprobed rows degrade to the stale default for this serve");
+});
+
+test("PR #950 review: a legacy row whose policy the engine proved is hydrated onto the projection", async () => {
+  const rows: any[] = [prRow936(1), prRow936(2)];
+  const engine = countingEngine([
+    v("PI-1", "autoMerge", false),
+    v("PI-1", "convergeOnly", true),
+    v("PI-1", "humanApproval", false),
+    v("PI-2", "autoMerge", true), // humanApproval PROVEN absent by its root probe (pre-humanApproval loop)
+    v("PI-2", "convergeOnly", false),
+  ]);
+  const app: any = memApp(rows);
+  const writes: unknown[][] = [];
+  app.data.open = () => ({
+    exec: async (sql: string, params: unknown[]) => {
+      assert(/WHERE "pr_key" = \? AND "process_key" = \? AND "merge_requested" IS NULL$/.test(sql), "guarded write-back");
+      writes.push(params);
+      return { changed: 1 };
+    },
+  });
+  const res = (await handler(input(), { ...app, engine } as AppApi)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(
+    [...writes].sort((a, b) => String(a[2]).localeCompare(String(b[2]))),
+    [
+      [0, 0, "o/r#1", "PI-1"],
+      [1, 0, "o/r#2", "PI-2"],
+    ],
+    "complete reads (incl. proven-absent humanApproval) are written back",
+  );
+});
+
+test("PR #950 review: hydration never overwrites a concurrently stamped approval decision", async () => {
+  const rows: any[] = [prRow936(1)];
+  const engine = countingEngine([v("PI-1", "autoMerge", true), v("PI-1", "humanApproval", true)]);
+  const app: any = memApp(rows);
+  const sqls: string[] = [];
+  app.data.open = () => ({
+    exec: async (sql: string) => {
+      sqls.push(sql);
+      return { changed: 1 };
+    },
+  });
+  await handler(input(), { ...app, engine } as AppApi);
+  assertEquals(sqls.length, 1);
+  assert(/"merge_human_approval" = COALESCE\("merge_human_approval", \?\)/.test(sqls[0]), "approval stamp preserved");
+});
+
+test("PR #950 review: the bounded probe window rotates so unhydratable leading rows cannot starve later rows", async () => {
+  const { MAX_PROBED_LEGACY_INSTANCES } = await import("../app/service.ts");
+  const N = MAX_PROBED_LEGACY_INSTANCES * 3;
+  const rows = Array.from({ length: N }, (_, i) => prRow936(i + 1));
+  const probed = new Set<string>();
+  const engine = {
+    searchVariables: async (q: any) => {
+      if (q.processInstanceKey == null) return [];
+      probed.add(q.processInstanceKey);
+      return []; // nothing provable -> never hydrated, stays in the queue
+    },
+  } as any;
+  for (let i = 0; i < 3; i++) await handler(input(), { ...memApp(rows), engine } as AppApi);
+  assertEquals(probed.size, N, "every legacy row is eventually probed");
 });

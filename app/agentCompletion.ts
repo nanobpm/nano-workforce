@@ -25,6 +25,7 @@ import type { DataLayer, EngineClient, GatewayDataSource } from "@nanobpm/urban"
 import { invalidateAdjudication, invalidateAdjudicationByCompletion } from "./adjudications.ts";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, isDeliveryEscalationTwin, isDeliveryHumanElement, isDeliveryWaitEscalationTwin } from "./deliveryHuman.ts";
+import { withMergePolicyLock } from "./mergePolicyLock.ts";
 import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, PR_MERGE_APPROVAL_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT } from "./userTasks.ts";
 
 const now = () => new Date().toISOString();
@@ -432,6 +433,11 @@ export async function completeUserTaskAttributed(
     created_at: now(),
   });
   const completionId = Number(id);
+  // Merge-approval approve: serialize the engine completion + projection stamp against gated adoption
+  // on the same loop (PR #950 review) so a concurrent adopter's stale `1` can never land after our `0`.
+  const approvingMerge = target.elementId === PR_MERGE_APPROVAL_ELEMENT && target.variables.mergeDecision === "approve";
+  const lockKey = approvingMerge ? target.processInstanceKey?.trim() : undefined;
+  const resume = async (): Promise<void> => {
   try {
     // Carry the completed user-task's identity forward on the resumed token (Copilot review of #806).
     // `pr.answer-escalation` (record-answer) reconciles the durable adjudication AFTER this completion
@@ -461,7 +467,40 @@ export async function completeUserTaskAttributed(
     }
     throw err;
   }
+  // Merge-policy projection (issue #947): a human APPROVE at the convergence loop's `merge-approval`
+  // task clears the loop's `humanApproval` variable via the task's output mapping — mirror that
+  // decision onto the durable row column `/status` reads, so the projection lifts the
+  // `human-approval` blocker the moment approval lands instead of reporting a stale block until
+  // `startMerge` re-stamps. Best-effort (the engine resume above already succeeded — a projection
+  // miss only leaves the row reading blocked until the merge hand-off, never blocks the merge) and
+  // ownership-guarded on the instance the task parked on, so a completion replayed against a stale
+  // instance can never clear a SUCCESSOR run's gate after a reopen re-pointed `process_key`.
+  if (approvingMerge) {
+    await stampMergeApprovalProjection(data, target.processInstanceKey);
+  }
+  };
+  if (lockKey) await withMergePolicyLock(lockKey, resume);
+  else await resume();
   return { completionId };
+}
+
+/** Mirror a `merge-approval` approve onto the durable `/status` merge-policy projection
+ *  (`merge_human_approval = 0` — decided-and-approved; 132_pull_requests_merge_policy.sql). The
+ *  stamp is keyed by the OWNING instance: the row is only updated while its `process_key` still
+ *  names the instance the completed task parked on, so a late/stray completion against an
+ *  already-replaced run is a no-op. Best-effort and never throws — the engine-side completion is
+ *  the authority; this column only feeds the read projection. */
+async function stampMergeApprovalProjection(data: DataLayer, processInstanceKey: string | null | undefined): Promise<void> {
+  const key = processInstanceKey?.trim();
+  if (!key) return;
+  try {
+    // ONE guarded UPDATE (PR #950 review): the ownership check and the stamp are a single atomic
+    // statement, so a reopen that re-points `process_key` between a lookup and a write can never let
+    // the PREVIOUS run's approval clear its successor's gate (no read-then-write window).
+    await data.open().exec(`UPDATE "pull_requests" SET "merge_human_approval" = 0 WHERE "process_key" = ?`, [key]);
+  } catch {
+    // swallow — a projection miss never masks a completion the engine has already resumed
+  }
 }
 
 /** The newest recorded completion for a user-task key, or undefined. */

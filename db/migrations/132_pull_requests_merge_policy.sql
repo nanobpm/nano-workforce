@@ -1,0 +1,22 @@
+-- Durable merge-policy projection for /status (issue #947). `/app/api/status` regressed to ~30 s
+-- (502 behind the console proxy) on merlin with only 9 PRs: the #937 batching left the merge-policy
+-- read at 3 engine-wide `searchVariables` pages plus a per-(instance, name) probe for any name cut
+-- from its (single, truncating) page — and on a loaded host each engine read costs ~1 s, so the
+-- serve was O(PRs x reads). The fix for the CLASS is to serve the hot read path from the app's own
+-- projection: the writers that already KNOW the policy stamp it on the row —
+--
+--   * `submitPr`  stamps `merge_requested` (the run's merge intent) at submit/reopen and
+--                 `merge_human_approval = 1` when a gated adopt narrows a live loop;
+--   * `completeUserTaskAttributed` (app/agentCompletion.ts) stamps `merge_human_approval = 0` when a
+--                 human APPROVES at the `merge-approval` task (mirroring the task's `humanApproval`
+--                 output mapping), so /status lifts the blocker the moment approval lands;
+--   * `startMerge` stamps `merge_requested = 1, merge_human_approval = 0` (a merge loop only starts
+--                 for a requested, approved merge).
+--
+-- `merge_requested` is NULL on every pre-#947 row: those legacy rows keep the #937 batched engine
+-- read (constant, never per-row) until they next reopen. `merge_human_approval` is NULL while an
+-- approval is outstanding and 0/1 once decided — mirroring the loop's `humanApproval` variable,
+-- which the `merge-approval` user task clears to `false` on an explicit approve. Both columns are
+-- run-scoped: `submitPr`'s atomic reopen resets them to the fresh run's intent.
+ALTER TABLE pull_requests ADD COLUMN merge_requested INTEGER;
+ALTER TABLE pull_requests ADD COLUMN merge_human_approval INTEGER;
