@@ -28,6 +28,7 @@ import { composeStreamId } from "@nanobpm/agentic/emit";
 import { noopLog } from "../../../test/log.ts";
 import { CorrelationRegistry, jobStream } from "../correlation.ts";
 import { AgenticCorrelationStore } from "../correlation-store.ts";
+import type { ElementInstanceResolver, JobPlacement } from "../element-instance.ts";
 import { createPresenceStore, PresenceRegistry } from "./presence.family.ts";
 import {
   type CorrelationLink,
@@ -159,7 +160,7 @@ function mkCorrelatedService(
   extra: {
     attributionForInstance?: (instance: string) => { identity?: string; host?: string } | undefined;
     correlationStore?: AgenticCorrelationStore;
-    resolveElementInstance?: (jobKey: string, processInstanceKey?: string) => Promise<string | undefined>;
+    resolveElementInstance?: ElementInstanceResolver;
     isInstanceLive?: (instance: string) => boolean;
     now?: () => string;
   } = {},
@@ -481,7 +482,7 @@ test("#544 element-instance enrichment: link-time resolution keys the completed 
   // The engine resolves job k1's live JOB park to element instance ei-1 (resolution wins the race,
   // i.e. it returns while the job is still live — the common case for a long-lived agent job).
   const resolveElementInstance = (jobKey: string) =>
-    Promise.resolve(jobKey === "k1" ? "ei-1" : undefined);
+    Promise.resolve(jobKey === "k1" ? { elementInstanceKey: "ei-1", processInstanceKey: "pi-1", elementId: "agent" } : undefined);
   const { service, hub } = mkCorrelatedService(registry, db, correlation, byConnection, {
     correlationStore: store,
     resolveElementInstance,
@@ -494,11 +495,16 @@ test("#544 element-instance enrichment: link-time resolution keys the completed 
   await tick();
   // The live correlation context is enriched while the job runs.
   assertEquals(correlation.resolve("k1")?.elementInstanceKey, "ei-1", "the live context carries the element instance");
+  // #948: the live context also carries the owning process instance + element, so the cockpit's
+  // process focus can follow a RUNNING job (the relay's bare link knows neither).
+  assertEquals(correlation.resolve("k1")?.processInstanceKey, "pi-1", "the live context carries the process instance");
+  assertEquals(correlation.resolve("k1")?.elementId, "agent", "the live context carries the element id");
 
   // Superseding with a new job completes k1 → its attribution persists WITH the element-instance key.
   hub.handler?.(produce(composeStreamId("worker-A", "k2"), 1, "job-2 line"), p.conn);
   const durable = store.get("k1");
   assertEquals(durable?.elementInstanceKey, "ei-1", "the completed session is keyed on the element instance");
+  assertEquals(durable?.processInstanceKey, "pi-1", "the completed session is attributed to its process instance");
   service.teardown();
 });
 
@@ -510,8 +516,8 @@ test("#544 element-instance enrichment: a resolution that lands AFTER completion
   const byConnection = new Map([["prod", "worker-A"]]);
   // A deferred resolution the test releases MANUALLY, to force the race where the element-instance
   // key arrives only after the job already completed and released its live correlation.
-  let release: (key: string | undefined) => void = () => {};
-  const pending = new Promise<string | undefined>((resolve) => {
+  let release: (placement: JobPlacement | undefined) => void = () => {};
+  const pending = new Promise<JobPlacement | undefined>((resolve) => {
     release = resolve;
   });
   const { service, hub } = mkCorrelatedService(registry, db, correlation, byConnection, {
@@ -528,9 +534,11 @@ test("#544 element-instance enrichment: a resolution that lands AFTER completion
   assertEquals(correlation.resolve("k1"), undefined, "k1's live correlation was already released");
 
   // The resolution finally lands — it backfills the durable row directly (the live context is gone).
-  release("ei-late");
+  release({ elementInstanceKey: "ei-late", processInstanceKey: "pi-late", elementId: "agent" });
   await tick();
   assertEquals(store.get("k1")?.elementInstanceKey, "ei-late", "the durable row is backfilled after the fact");
+  // #948: the process instance is backfilled too, so the per-process past-session scan finds it.
+  assertEquals(store.get("k1")?.processInstanceKey, "pi-late", "the durable row carries the process instance");
   service.teardown();
 });
 

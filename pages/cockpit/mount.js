@@ -1098,10 +1098,19 @@ export function mountCockpit(host, opts = {}) {
   async function autoFocusTerminal() {
     if (!focusAuto || disposed) return;
     const gen = focusGen;
+    // A job matches on its own process instance OR its call-hierarchy root (#948): the grid link names
+    // the root run, while the agent often runs in a callActivity child the engine has no AgentInstance
+    // for yet — the server-resolved `rootProcessInstanceKey` is then the only link back to the focus.
+    const inFocus = (c) =>
+      (c.processInstanceKey != null && focusKeys.has(c.processInstanceKey)) ||
+      (c.rootProcessInstanceKey != null && focusKeys.has(c.rootProcessInstanceKey));
     const live = (lastReport?.correlations ?? []).find(
-      (c) => c.processInstanceKey != null && focusKeys.has(c.processInstanceKey) && typeof c.stream === "string" && c.stream !== "",
+      (c) => inFocus(c) && typeof c.stream === "string" && c.stream !== "",
     );
     if (live) {
+      // Fold the child into the focused tree so the past-session fallback finds this job's capture
+      // once it completes (captures are listed per process instance).
+      if (live.processInstanceKey != null) focusKeys.add(live.processInstanceKey);
       autoDrillStream = live.stream;
       drillInto(live.stream);
       return;
