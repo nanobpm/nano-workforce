@@ -138,6 +138,17 @@ export async function cancelTrackedRun(
   // delta lies. Re-read the resolved record and count it reconciled only when its ADR-0065
   // `derived_status` has LEFT its `activeStatuses` (become terminal → resubmittable). When we cannot
   // read the record (no default source), trust the primitive's own count.
+  // Termination provenance (issue #943): a deliberate operator cancel of a PR loop is NOT an orphan —
+  // stamp the reason (as soon as the ENGINE confirms termination, before
+  // the record re-read — a 502 on an unreconciled record must not lose it; PR #944 review) on the owning PR row so `/status` does not flag it `orphaned`. Best-effort.
+  if (canResolveRecord) {
+    try {
+      await recordOperatorCancelProvenance(app.data, processInstanceKey, door);
+    } catch (err) {
+      app.log.warn("cancelInstance: could not record termination reason", { processInstanceKey, error: String(err) });
+    }
+  }
+
   let reconciled = result.reconciled;
   let recordReconciled = true;
   if (canResolveRecord) {
@@ -169,16 +180,6 @@ export async function cancelTrackedRun(
         error: responseBody.error ?? "instance terminated but tracked record was not reconciled",
       },
     };
-  }
-
-  // Termination provenance (issue #943): a deliberate operator cancel of a PR loop is NOT an orphan —
-  // stamp the reason on the owning PR row so `/status` does not flag it `orphaned`. Best-effort.
-  if (canResolveRecord) {
-    try {
-      await recordOperatorCancelProvenance(app.data, processInstanceKey, door);
-    } catch (err) {
-      app.log.warn("cancelInstance: could not record termination reason", { processInstanceKey, error: String(err) });
-    }
   }
 
   app.log.info("cancelInstance: instance terminated", {

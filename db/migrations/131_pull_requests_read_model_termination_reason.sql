@@ -42,6 +42,7 @@ SELECT
   pr.auto_resolve_escalations AS auto_resolve_escalations,
   pr.termination_reason AS termination_reason,
   pr.termination_process_key AS termination_process_key,
+  pr.retire_pending_key AS retire_pending_key,
   CASE WHEN COALESCE((COALESCE((COALESCE(("pr"."derived_status" = 'merged'), 0) OR COALESCE(("pr"."derived_status" = 'converged'), 0) OR COALESCE(("pr"."derived_status" = 'abandoned'), 0) OR COALESCE(("pr"."derived_status" = 'closed'), 0) OR COALESCE(("pr"."derived_status" = 'failed'), 0)), 0) AND COALESCE(("pr"."acknowledged_at" = "pr"."acknowledged_at"), 0)), 0) THEN 'history' ELSE 'active' END AS list_bucket,
   CASE WHEN COALESCE((COALESCE((COALESCE(("pr"."derived_status" = 'merged'), 0) OR COALESCE(("pr"."derived_status" = 'converged'), 0) OR COALESCE(("pr"."derived_status" = 'abandoned'), 0) OR COALESCE(("pr"."derived_status" = 'closed'), 0) OR COALESCE(("pr"."derived_status" = 'failed'), 0)), 0) AND (NOT COALESCE(COALESCE(("pr"."acknowledged_at" = "pr"."acknowledged_at"), 0), 0))), 0) THEN 1 ELSE 0 END AS ack_open
 FROM pull_requests__tracking pr;

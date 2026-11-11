@@ -293,3 +293,12 @@ test("record routing also covers PR/plan aggregates (a resolved pull_requests ke
   assertEquals(res.body.ok, true);
   assertEquals(res.body.reconciled, 1);
 });
+
+test("PR#944: operator-cancel provenance is recorded even when the record fails to reconcile (502)", async () => {
+  const rows: any[] = [{ pr_key: "o/r#4", process_key: "400", status: "converging" }];
+  const { app } = makeRecordApp({ pull_requests: { rows, key: "pr_key" } }, { readBackState: "TERMINATED" });
+  const res = await call(app, { processInstanceKey: "400" });
+  assertEquals(res.status, 502, "the unreconciled record still surfaces as 502");
+  assertEquals(rows[0].termination_process_key, "400", "provenance is stamped once the engine confirms termination");
+  assert(typeof rows[0].termination_reason === "string" && rows[0].termination_reason.length > 0);
+});

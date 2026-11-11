@@ -11,3 +11,7 @@ ALTER TABLE pull_requests ADD COLUMN termination_reason TEXT;
 -- only explains a termination while it equals the row's `process_key`, so a predecessor's reason can
 -- never mask the later orphaning of a successor.
 ALTER TABLE pull_requests ADD COLUMN termination_process_key TEXT;
+
+-- A handed-off predecessor merge loop whose retirement has not yet succeeded (PR #944 review): durable
+-- so the poller retries it every pass instead of dropping the key. NULL when nothing is pending.
+ALTER TABLE pull_requests ADD COLUMN retire_pending_key TEXT;

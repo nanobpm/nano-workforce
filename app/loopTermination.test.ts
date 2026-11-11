@@ -19,6 +19,7 @@ import {
   ORPHANED_PR_STATUS,
   recordOperatorCancelProvenance,
   retireHandedOffMergeLoop,
+  retryPendingRetirements,
   terminatePrLoop,
 } from "./service.ts";
 
@@ -236,4 +237,20 @@ test("#943 /status surfaces an orphaned PR instead of filtering it out", async (
   assertEquals(o?.status, ORPHANED_PR_STATUS);
   assertEquals(o?.terminationReason, null);
   assertEquals(rows.find((r) => r.prKey === "o/r#2")?.status, "waiting_merge");
+});
+
+test("#943/PR#944 a persistently failed retirement is persisted and retried by later poll passes", async () => {
+  const { data, stores } = memData([{ pr_key: "o/r#1", process_key: "succ", status: "waiting_review" }], []);
+  const failing = { cancelInstance: async () => Promise.reject(new Error("down")) };
+  assert(!(await retireHandedOffMergeLoop(data, failing as never, "o/r#1", "merge-1", "succ", "test")));
+  assertEquals(stores.pull_requests[0].retire_pending_key, "merge-1", "the predecessor key is never dropped");
+  await retryPendingRetirements(data, failing as never);
+  assertEquals(stores.pull_requests[0].retire_pending_key, "merge-1");
+  const cancelled: string[] = [];
+  const ok = { cancelInstance: async (a: { processInstanceKey: string }) => void cancelled.push(a.processInstanceKey) };
+  await retryPendingRetirements(data, ok as never);
+  assertEquals(cancelled, ["merge-1"]);
+  assertEquals(stores.pull_requests[0].retire_pending_key, null);
+  assertEquals(stores.pull_requests[0].process_key, "succ");
+  assertEquals(stores.pull_requests[0].status, "waiting_review");
 });

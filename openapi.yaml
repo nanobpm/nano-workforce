@@ -94,7 +94,15 @@ components:
         - autoResolveEscalations
         - merge
         - incident
+        - terminationReason
       properties:
+        terminationReason:
+          type: string
+          nullable: true
+          description: >-
+            Why the app (or an operator) last cancelled this PR's current loop instance (issue #943),
+            naming the successor/outcome; null when never. An `orphaned` status means the loop ended
+            with no recorded reason, successor, or escalation.
         prKey:
           type: string
         repo:
