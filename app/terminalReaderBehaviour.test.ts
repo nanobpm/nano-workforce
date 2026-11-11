@@ -104,6 +104,10 @@ test("submitPr re-opens a derive-only-terminated PR (base 'converging', derived 
           status: "converging", // base transient FROZEN — reconciler no longer writes the terminal
           derived_status: "abandoned", // ADR-0065 derive-only terminal
           current_round: 3,
+          // A PRIOR run's operator Dismiss + provenance must not survive the reopen (PR #944 review).
+          acknowledged_at: "2024-01-05",
+          termination_reason: "operator cancel",
+          termination_process_key: "PI-1",
         }],
         key: "pr_key",
       },
@@ -126,24 +130,31 @@ test("submitPr re-opens a derive-only-terminated PR (base 'converging', derived 
     assertEquals(pr.status, "converging");
     assertEquals(pr.current_round, 1); // re-opened for a fresh run
     assertEquals(pr.process_key, "PI-9");
+    assertEquals(pr.acknowledged_at, null, "a prior run's Dismiss never acknowledges this run's orphaning");
+    assertEquals(pr.termination_reason, null);
+    assertEquals(pr.termination_process_key, null);
   });
 });
 
-// #503 / #497 phantom: `activePrs` filters on `derived_status`, so a derive-only-terminated PR drops
-// off the Convergence tab instead of showing "active" indefinitely.
-test("activePrs excludes a derive-only-terminated PR and keeps a genuinely active one", async () => {
+// #503 / #497 phantom: `activePrs` classifies on `derived_status`, so a derive-only-terminated PR never
+// reads as its frozen in-flight base status. Issue #943: if NO reason was recorded for the termination
+// (an orphan) it is surfaced as `orphaned` rather than silently dropped; a recorded reason or an
+// operator Dismiss (`acknowledged_at`) excludes it.
+test("activePrs never reports a derive-only-terminated PR as active — orphaned if unexplained, excluded if explained/dismissed", async () => {
   const stores: Stores = {
     pull_requests: {
       rows: [
         { pr_key: "o/r#1", repo: "o/r", number: 1, url: "u1", status: "converging", derived_status: "abandoned", current_round: 2, updated_at: "2024-01-02" },
         { pr_key: "o/r#2", repo: "o/r", number: 2, url: "u2", status: "converging", derived_status: "converging", current_round: 1, updated_at: "2024-01-01" },
+        { pr_key: "o/r#3", repo: "o/r", number: 3, url: "u3", status: "converging", derived_status: "abandoned", process_key: "PI-3", termination_reason: "operator cancel", termination_process_key: "PI-3", current_round: 1, updated_at: "2024-01-03" },
+        { pr_key: "o/r#4", repo: "o/r", number: 4, url: "u4", status: "converging", derived_status: "abandoned", acknowledged_at: "2024-01-05", current_round: 1, updated_at: "2024-01-04" },
       ],
       key: "pr_key",
     },
     escalations: { rows: [], key: "id" },
   };
   const active = await activePrs(memData(stores));
-  assertEquals(active.map((p) => p.prKey), ["o/r#2"]);
+  assertEquals(active.map((p) => [p.prKey, p.status]), [["o/r#1", "orphaned"], ["o/r#2", "converging"]]);
 });
 
 // #503: `pollIncidentsImpl` classifies a dead instance on `derived_status`, so a derive-only-terminated

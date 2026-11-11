@@ -94,7 +94,15 @@ components:
         - autoResolveEscalations
         - merge
         - incident
+        - terminationReason
       properties:
+        terminationReason:
+          type: string
+          nullable: true
+          description: >-
+            Why the app (or an operator) last cancelled this PR's current loop instance (issue #943),
+            naming the successor/outcome; null when never. An `orphaned` status means the loop ended
+            with no recorded reason, successor, or escalation.
         prKey:
           type: string
         repo:
@@ -4335,6 +4343,51 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: "No tracked record owns the key (a clean no-op — the engine is never touched). Body is a CancelInstanceResult with `ok:false`, `state:\"gone\"`, `reconciled:0`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelInstanceResult"
+        "502":
+          description: "The cancel did not fully take: EITHER the engine did NOT stop the instance (the cancel was not committed; the run may still be live), OR the engine stopped it but the tracked record did not settle to a terminal edge (`ok:false`, `reconciled:0`) — a wedged record the caller must not read as done."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelInstanceResult"
+        "503":
+          description: The app has no data source configured, so the cancel cannot be reconciled into the record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /actions/cancel-pr:
+    post:
+      operationId: cancelPrRun
+      # x-mcp exclusion: the page-only twin of `cancelInstance` (the per-row Cancel button). Agents use
+      # the guarded `/actions/cancel` door.
+      x-mcp:
+        exclude: true
+      summary: "Page-facing record-consistent cancel (issue #943): identical to `cancelInstance` (shared implementation, records termination provenance) but unguarded, because the declarative page action cannot attach x-hook-secret (see operations/cancelPrRun.ts)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelInstanceIntent"
+      responses:
+        "200":
+          description: The instance was terminated; its record derives/flips to `abandoned` and drops out of `listActivePrs`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelInstanceResult"
+        "400":
+          description: Missing/invalid `processInstanceKey`.
           content:
             application/json:
               schema:
