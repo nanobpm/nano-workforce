@@ -159,7 +159,7 @@ describe("single-issue feature intake readiness gate (feature.bpmn, issue #295)"
       assert.ok(
         flows.includes("ensure-base-branch->record-feature-implementing") &&
           flows.includes("record-feature-implementing->implement") &&
-          flows.includes("Start->implement-task"),
+          flows.includes("slice-branch->implement-task"),
         `the run reaches the implement agent (via the implement cell) only after the gate (flows: ${flows.join(", ")})`,
       );
       // A green probe never escalates.
@@ -192,7 +192,7 @@ describe("single-issue feature intake readiness gate (feature.bpmn, issue #295)"
       assert.ok(!flows.includes("gw-readiness->readiness-preflight"), "an ungated feature never enters the preflight");
       assert.ok(
         flows.includes("record-feature-implementing->implement") &&
-          flows.includes("Start->implement-task"),
+          flows.includes("slice-branch->implement-task"),
         "an ungated feature reaches the implement agent (via the implement cell)",
       );
     } finally {

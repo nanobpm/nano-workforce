@@ -261,8 +261,8 @@ Two different `nano:dataEnvelope` uses have different rules — don't conflate t
   feat/<task.id>`, issue #945) can't ride it. A `<zeebe:output
   target="io.nanobpm.agentTask.branch.create">` does NOT work — a dotted ioMapping
   target builds a NESTED `{io:{nanobpm:{agentTask:…}}}` object the flat-key harness
-  never reads. The working channel: a worker running in the MI-child scope (e.g.
-  `pr.caps-prepare`) returns a result key literally named
+  never reads. The working channel: a worker running in a per-slice process instance (e.g.
+  `pr.slice-branch`, the first step of each implement-cell instance — NOT a task in the shared MI body, whose undeclared result keys land on the shared root where a sibling overwrites them) returns a result key literally named
   `"io.nanobpm.agentTask.branch.create"`; the engine propagates worker result
   variables verbatim (mapped or not), materialising a FLAT dotted process variable
   that the harness's `collectEnvelopeFrom` deep-merges with the whole-object seed.

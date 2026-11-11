@@ -134,7 +134,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
     // rides down through the wave subprocess + `implement-cell-call` callActivity into each agent job.
     // The epic seed carries the BASE branch as `ref` but NO `branch.create` — each slice's
     // `feat/<task.id>` differs per MI child, so it can't be named at seed time. Issue #945: the
-    // per-child `caps-prepare` worker now stamps the deterministic `branch.create` (`feat/<task.id>`)
+    // per-instance `slice-branch` worker (first step of each implement-cell) now stamps the deterministic `branch.create` (`feat/<task.id>`)
     // onto the envelope as a FLAT dotted process variable (`io.nanobpm.agentTask.branch.create`), which
     // the c8ctl harness deep-merges with the whole-object seed — so a retry re-derives the SAME branch
     // and the durable WIP checkpoint restore matches (previously every retry cut a random
@@ -160,13 +160,13 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         assert.equal(agentRepo.filter, "blob:none");
         // The whole-object seed still omits `branch` (it can't name a per-child branch)…
         assert.equal("branch" in agentTask, false, "the whole-object seed carries no per-slice branch");
-        // …but the per-child caps-prepare worker stamps it as a FLAT dotted variable, which the harness
+        // …but the per-instance slice-branch worker stamps it as a FLAT dotted variable, which the harness
         // merges onto the SAME envelope. Assert the dotted variable is present and names the
         // deterministic `feat/<task.id>` branch (the single task here is `t1`).
         assert.equal(
           agentVars["io.nanobpm.agentTask.branch.create"],
           "feat/t1",
-          "caps-prepare stamps the deterministic per-slice branch.create as a flat dotted variable (#945)",
+          "slice-branch stamps the deterministic per-slice branch.create as a flat dotted variable (#945)",
         );
         // Round-trip through the harness normalizer shape: the merged envelope must recover
         // `branch.create` from the top level (proving the dotted variable and the whole-object seed
@@ -176,6 +176,41 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
           "feat/t1",
           "the harness merges the dotted branch.create with the whole-object seed envelope (#945)",
         );
+      },
+    );
+  });
+
+  test("sibling isolation: two parallel slices each see their OWN branch.create, never a sibling's (#945)", async () => {
+    // A per-slice branch emitted into the SHARED plan-fanout MI body lands on the epic root, so a
+    // sibling's emission overwrites it and a slice can inherit `feat/<sibling>` — sending its work and
+    // checkpoint to the wrong branch. The emitter runs inside each implement-cell instance instead, so
+    // every activation's recovered branch must be `feat/<its own task.id>`.
+    const seen: Array<{ id: unknown; branch: string | undefined }> = [];
+    await withApp(
+      {
+        "senior:plan": () => ({
+          tasks: [
+            { id: "t1", title: "T1", prompt: "do t1" },
+            { id: "t2", title: "T2", prompt: "do t2" },
+          ],
+        }),
+        "senior:plan-review": approveReview,
+        "senior:feature": (job) => {
+          const vars = job.variables as Record<string, any>;
+          seen.push({ id: vars.task?.id, branch: recoverBranchCreate({}, vars) });
+          return { status: "blocked", summary: "n/a" };
+        },
+      },
+      async ({ app }) => {
+        await app.settle();
+        assert.deepEqual(
+          seen.map((s) => s.id).sort(),
+          ["t1", "t2"],
+          "both sibling slices activated their implement-task",
+        );
+        for (const s of seen) {
+          assert.equal(s.branch, `feat/${String(s.id)}`, `slice ${String(s.id)} must see its OWN branch.create`);
+        }
       },
     );
   });
@@ -593,7 +628,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
 
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("wait-caps-resolved->implement-cell-call") && flows.includes("Start->implement-task"),
+          flows.includes("wait-caps-resolved->implement-cell-call") && flows.includes("slice-branch->implement-task"),
           `caps-resolved released the barrier into the implement cell (flows: ${flows.join(", ")})`,
         );
         assert.equal(
@@ -675,7 +710,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         assert.ok(
           answered.includes("w_gw_answer->record-task-implementing") &&
             answered.includes("record-task-implementing->implement-cell-call") &&
-            answered.includes("Start->implement-task"),
+            answered.includes("slice-branch->implement-task"),
           `answering the caps escalation reset the stale question and released the barrier into the implement cell (flows: ${answered.join(", ")})`,
         );
         assert.equal(featureRan, true, "the agent was dispatched once the operator answered the caps escalation");
@@ -729,7 +764,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         assert.ok(
           entered.includes("w_gw_answer->record-task-implementing") &&
             entered.includes("record-task-implementing->implement-cell-call") &&
-            entered.includes("Start->implement-task"),
+            entered.includes("slice-branch->implement-task"),
           `answering the caps escalation reset the stale question and released the barrier into the implement cell (flows: ${entered.join(", ")})`,
         );
 

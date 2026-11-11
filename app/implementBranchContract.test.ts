@@ -18,8 +18,9 @@
 //     emission (`workers/caps-prepare`).
 //  3. The prompt's branch instruction is the SAME `feat/<task.id>` the envelope cuts — the two read
 //     off one value, not two.
-//  4. The plan-fanout MI body runs the `caps-prepare` emitter BEFORE the `implement-cell` callActivity,
-//     so the per-child `branch.create` is in scope when the implement-task job activates.
+//  4. Every execution path into the `implement-task` agent job passes through the `pr.slice-branch`
+//     emitter, which runs INSIDE each implement-cell process instance (so siblings can't clobber it) —
+//     checked on the sourceRef/targetRef graph, not on XML declaration order.
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
@@ -78,29 +79,80 @@ test("contract: the agent prompt's branch instruction is the SAME feat/<task.id>
   assertEquals(`feat/<task.id>`.replace("<task.id>", "t1"), sliceBranchCreate("t1"));
 });
 
-test("contract: the plan-fanout MI body runs the caps-prepare branch.create emitter BEFORE implement-cell (#945)", () => {
-  // The per-slice `branch.create` is stamped by the `pr.caps-prepare` worker (it alone runs per MI
-  // child and reads that child's `task.id`). For the implement-task job to carry it, caps-prepare must
-  // run upstream of the `implement-cell` callActivity inside the wave subprocess. Pin that wiring: the
-  // caps-prepare task is declared, AND the implement-cell callActivity is declared, AND caps-prepare's
-  // outgoing path reaches the implement-cell (both live in the same MI body, caps-prepare first).
-  const xml = flat("plan-fanout.bpmn");
+/** Parse the `<bpmn:sequenceFlow>` graph (sourceRef → targetRef) and the boundary-event attachments
+ * (host → boundary, an implicit edge) of one process file. */
+function flowGraph(xml: string): Map<string, string[]> {
+  const g = new Map<string, string[]>();
+  const add = (from: string, to: string): void => {
+    g.set(from, [...(g.get(from) ?? []), to]);
+  };
+  for (const m of xml.matchAll(/<bpmn:sequenceFlow\b[^>]*>/g)) {
+    const src = /sourceRef="([^"]+)"/.exec(m[0])?.[1];
+    const tgt = /targetRef="([^"]+)"/.exec(m[0])?.[1];
+    if (src && tgt) add(src, tgt);
+  }
+  for (const m of xml.matchAll(/<bpmn:boundaryEvent\b[^>]*>/g)) {
+    const id = /\bid="([^"]+)"/.exec(m[0])?.[1];
+    const host = /attachedToRef="([^"]+)"/.exec(m[0])?.[1];
+    if (id && host) add(host, id);
+  }
+  return g;
+}
+
+/** Can `to` be reached from any of `from` without visiting `avoid`? */
+function reachableAvoiding(g: Map<string, string[]>, from: string[], to: string, avoid: string): boolean {
+  const seen = new Set<string>();
+  const stack = from.filter((f) => f !== avoid);
+  while (stack.length > 0) {
+    const n = stack.pop();
+    if (n === undefined || seen.has(n)) continue;
+    if (n === to) return true;
+    seen.add(n);
+    for (const next of g.get(n) ?? []) if (next !== avoid) stack.push(next);
+  }
+  return false;
+}
+
+function startEvents(xml: string): string[] {
+  return [...xml.matchAll(/<bpmn:startEvent\b[^>]*\bid="([^"]+)"/g)].map((m) => m[1] ?? "");
+}
+
+test("contract: every path into the implement-task agent job passes through the slice-branch emitter (#945)", () => {
+  const xml = flat("implement-cell.bpmn");
   assert(
-    /<zeebe:taskDefinition type="pr\.caps-prepare"/.test(xml),
-    "plan-fanout must declare the pr.caps-prepare task (the per-slice branch.create emitter)",
+    /<bpmn:serviceTask id="slice-branch"[^>]*> <bpmn:extensionElements> <zeebe:taskDefinition type="pr\.slice-branch"/.test(xml),
+    "implement-cell must declare the slice-branch task backed by the pr.slice-branch worker",
   );
+  const g = flowGraph(xml);
+  const starts = startEvents(xml);
+  assert(starts.length > 0, "implement-cell must have a start event");
+  assert(reachableAvoiding(g, starts, "implement-task", "__none__"), "implement-task must be reachable at all");
+  assert(
+    !reachableAvoiding(g, starts, "implement-task", "slice-branch"),
+    "no execution path may reach implement-task without first passing the slice-branch emitter",
+  );
+});
+
+test("contract: the path checker detects a bypass of the emitter (guards the guard) (#945)", () => {
+  const bypass = flat("implement-cell.bpmn").replace(
+    /<bpmn:sequenceFlow id="ic_toSliceBranch" sourceRef="Start" targetRef="slice-branch" \/>/,
+    '<bpmn:sequenceFlow id="ic_toSliceBranch" sourceRef="Start" targetRef="implement-task" />',
+  );
+  assert(bypass.includes('sourceRef="Start" targetRef="implement-task"'), "fixture rewrite must apply");
+  assert(reachableAvoiding(flowGraph(bypass), startEvents(bypass), "implement-task", "slice-branch"));
+});
+
+test("contract: plan-fanout composes the implement step as a callActivity to implement-cell (#945)", () => {
+  // The emitter must run in a SEPARATE process instance per slice (its result keys land on that
+  // instance's root, never the shared epic root), so the MI body must call implement-cell rather than
+  // inline the agent task.
+  const xml = flat("plan-fanout.bpmn");
   assert(
     /<bpmn:callActivity[^>]*id="implement-cell-call"/.test(xml) &&
       /<zeebe:calledElement processId="implement-cell"/.test(xml),
     "plan-fanout must compose the per-wave implement step as a callActivity to implement-cell",
   );
-  // Ordering: within the wave MI body, caps-prepare's sequence flow leads (transitively) to the
-  // implement-cell call. Both are in the same subprocess; assert caps-prepare appears before the
-  // implement-cell callActivity in the model so the variable is in scope at activation.
-  assert(
-    xml.indexOf('type="pr.caps-prepare"') < xml.indexOf('id="implement-cell-call"'),
-    "caps-prepare must be modelled before the implement-cell call so the per-child branch.create is in scope",
-  );
+  assert(!xml.includes('type="senior:feature"'), "plan-fanout must not inline the implement agent task");
 });
 
 test("contract: the per-slice branch.create rides the FLAT dotted variable the harness reads (#945)", () => {

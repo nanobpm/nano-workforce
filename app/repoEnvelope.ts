@@ -53,7 +53,7 @@ export const AGENT_TASK_BRANCH_CREATE_VAR = `${AGENT_TASK_NS}.branch.create`;
  * `feat/<taskId>` (the agent-guide's `feat/*` convention, resources/prompts/feature.md). This is the
  * single source of truth for BOTH the whole-run feature seed (`feature.ts` `startFeature`, where the
  * branch is known at seed time and rides the envelope's `branch.create` directly) AND the epic
- * plan-fanout's per-MI-child emission (`workers/caps-prepare`, which stamps it onto the implement-cell
+ * plan-fanout's per-slice emission (`workers/slice-branch`, run inside each implement-cell instance, which stamps it onto the implement-cell
  * envelope via {@link AGENT_TASK_BRANCH_CREATE_VAR} because each slice's `task.id` differs per child
  * and can't be named at the whole-epic seed). Issue #945: the plan-fanout implement-cell previously
  * carried NO `branch.create`, so every c8ctl retry cut a random `nano/agent-work/*` fallback branch
