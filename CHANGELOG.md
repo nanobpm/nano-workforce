@@ -1,3 +1,9 @@
+## [0.208.5](https://github.com/nanobpm/nano-workforce/compare/v0.208.4...v0.208.5) (2026-11-11)
+
+### Bug Fixes
+
+* **status:** serve the /status merge policy from a durable pull_requests projection ([#950](https://github.com/nanobpm/nano-workforce/issues/950)) ([c3f19d5](https://github.com/nanobpm/nano-workforce/commit/c3f19d50ef6cf4f731f50ab778b5cd7ebdb3454e)), closes [#937](https://github.com/nanobpm/nano-workforce/issues/937) [#937](https://github.com/nanobpm/nano-workforce/issues/937) [#947](https://github.com/nanobpm/nano-workforce/issues/947)
+
 ## [0.208.4](https://github.com/nanobpm/nano-workforce/compare/v0.208.3...v0.208.4) (2026-11-11)
 
 ### Bug Fixes
