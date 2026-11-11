@@ -1,3 +1,9 @@
+## [0.208.4](https://github.com/nanobpm/nano-workforce/compare/v0.208.3...v0.208.4) (2026-11-11)
+
+### Bug Fixes
+
+* **plan-fanout:** emit deterministic branch.create on the implement-cell envelope ([#945](https://github.com/nanobpm/nano-workforce/issues/945)) ([#946](https://github.com/nanobpm/nano-workforce/issues/946)) ([0977243](https://github.com/nanobpm/nano-workforce/commit/097724344a2f3942af5b1796e2e0a7e8363b44f9))
+
 ## [0.208.3](https://github.com/nanobpm/nano-workforce/compare/v0.208.2...v0.208.3) (2026-11-11)
 
 ### Bug Fixes
