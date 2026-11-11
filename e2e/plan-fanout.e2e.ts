@@ -21,6 +21,7 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { recoverBranchCreate } from "../app/repoEnvelope.ts";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
 import { advancePastTimer, settleFully } from "./support/time.ts";
 
@@ -127,32 +128,127 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
   const singleTaskPlan: Stub = () => ({ tasks: [{ id: "t1", title: "T1", prompt: "do t1" }] });
   const approveReview: Stub = () => ({ approved: true, findings: "" });
 
-  test("host-git provisioning: each slice's implement-cell agent job carries the repository envelope (#684)", async () => {
+  test("host-git provisioning: each slice's implement-cell agent job carries the repository envelope AND the deterministic branch.create (#684/#945)", async () => {
     // The whole-epic seed emits `io.nanobpm.agentTask.repository` so every slice's `senior:feature`
     // agent gets an ISOLATED clone instead of clobbering the worker's launch dir. The process variable
     // rides down through the wave subprocess + `implement-cell-call` callActivity into each agent job.
     // The epic seed carries the BASE branch as `ref` but NO `branch.create` — each slice's
-    // `feat/<task.id>` differs per MI child, so the agent cuts its own branch inside the clone.
-    let agentTask: any = null;
+    // `feat/<task.id>` differs per MI child, so it can't be named at seed time. Issue #945: the
+    // per-instance `slice-branch` worker (first step of each implement-cell) now stamps the deterministic `branch.create` (`feat/<task.id>`)
+    // onto the envelope as a FLAT dotted process variable (`io.nanobpm.agentTask.branch.create`), which
+    // the c8ctl harness deep-merges with the whole-object seed — so a retry re-derives the SAME branch
+    // and the durable WIP checkpoint restore matches (previously every retry cut a random
+    // `nano/agent-work/*` fallback and discarded the prior session's work).
+    let agentVars: Record<string, unknown> = {};
     await withApp(
       {
         "senior:plan": singleTaskPlan,
         "senior:plan-review": approveReview,
         "senior:feature": (job) => {
-          agentTask = (job.variables as Record<string, any>)["io.nanobpm.agentTask"] ?? null;
+          agentVars = job.variables as Record<string, unknown>;
           return { status: "blocked", summary: "n/a" };
         },
       },
       async ({ app }) => {
         await app.settle();
+        const agentTask = agentVars["io.nanobpm.agentTask"] as Record<string, any> | undefined;
         assert.ok(agentTask, "the epic slice's senior:feature job carried the io.nanobpm.agentTask envelope");
         const agentRepo = agentTask.repository;
         assert.equal(agentRepo.url, "https://github.com/owner/repo.git", "the harness clones the target repo");
         assert.equal(agentRepo.ref, "epic/e2e", "the epic seed checks out the BASE (integration) branch");
-        // `branch` is a top-level sibling of `repository` (#882); the epic seed omits it entirely.
-        assert.equal("branch" in agentTask, false, "the epic seed omits branch.create — the agent branches per slice");
         assert.equal(agentRepo.singleBranch, true, "the blobless/single-branch monorepo shaping rides along");
         assert.equal(agentRepo.filter, "blob:none");
+        // The whole-object seed still omits `branch` (it can't name a per-child branch)…
+        assert.equal("branch" in agentTask, false, "the whole-object seed carries no per-slice branch");
+        // …but the per-instance slice-branch worker stamps it as a FLAT dotted variable, which the harness
+        // merges onto the SAME envelope. Assert the dotted variable is present and names the
+        // deterministic `feat/<task.id>` branch (the single task here is `t1`).
+        assert.equal(
+          agentVars["io.nanobpm.agentTask.branch.create"],
+          "feat/t1",
+          "slice-branch stamps the deterministic per-slice branch.create as a flat dotted variable (#945)",
+        );
+        // Round-trip through the harness normalizer shape: the merged envelope must recover
+        // `branch.create` from the top level (proving the dotted variable and the whole-object seed
+        // merge into one envelope the harness reads).
+        assert.equal(
+          recoverBranchCreate({}, agentVars),
+          "feat/t1",
+          "the harness merges the dotted branch.create with the whole-object seed envelope (#945)",
+        );
+      },
+    );
+  });
+
+  test("sibling isolation: two parallel slices each see their OWN branch.create, never a sibling's (#945)", async () => {
+    // A per-slice branch emitted into the SHARED plan-fanout MI body lands on the epic root, so a
+    // sibling's emission overwrites it and a slice can inherit `feat/<sibling>` — sending its work and
+    // checkpoint to the wrong branch. The emitter runs inside each implement-cell instance instead, so
+    // every activation's recovered branch must be `feat/<its own task.id>`.
+    const seen: Array<{ id: unknown; branch: string | undefined }> = [];
+    await withApp(
+      {
+        "senior:plan": () => ({
+          tasks: [
+            { id: "t1", title: "T1", prompt: "do t1" },
+            { id: "t2", title: "T2", prompt: "do t2" },
+          ],
+        }),
+        "senior:plan-review": approveReview,
+        "senior:feature": (job) => {
+          const vars = job.variables as Record<string, any>;
+          seen.push({ id: vars.task?.id, branch: recoverBranchCreate({}, vars) });
+          return { status: "blocked", summary: "n/a" };
+        },
+      },
+      async ({ app }) => {
+        await app.settle();
+        assert.deepEqual(
+          seen.map((s) => s.id).sort(),
+          ["t1", "t2"],
+          "both sibling slices activated their implement-task",
+        );
+        for (const s of seen) {
+          assert.equal(s.branch, `feat/${String(s.id)}`, `slice ${String(s.id)} must see its OWN branch.create`);
+        }
+      },
+    );
+  });
+
+  test("retry determinism: a re-dispatched implement-task names the SAME branch.create, so the WIP checkpoint restore matches (#945)", async () => {
+    // Issue #945's field failure: every c8ctl retry of an implement-cell slice cut a NEW random
+    // `nano/agent-work/*` fallback branch, so the durable WIP checkpoint (keyed on the deterministic
+    // `feat/<task.id>`) was NEVER restored — each retry started from the epic base and discarded the
+    // prior session's work. The fix makes `branch.create` a pure function of `task.id`, so a retry
+    // re-derives the SAME branch and the checkpoint restore matches. Drive the implement-task through
+    // TWO activations of the SAME slice (an escalation parks it; answering re-dispatches it — the same
+    // re-activation an idle-kill retry produces) and assert both carry the identical recovered
+    // `branch.create`.
+    const seenBranches: Array<string | undefined> = [];
+    await withApp(
+      {
+        "senior:plan": singleTaskPlan,
+        "senior:plan-review": approveReview,
+        "senior:feature": (job) => {
+          seenBranches.push(recoverBranchCreate({}, job.variables as Record<string, unknown>));
+          // First activation escalates (parks for a human); the resume (second activation) blocks.
+          return seenBranches.length === 1
+            ? { status: "escalated", question: "Which API should I use?", summary: "parked for a human" }
+            : { status: "blocked", summary: "resumed after answer" };
+        },
+      },
+      async ({ app, processKey }) => {
+        // First activation parked on the human-escalation task; answer it to re-dispatch the SAME slice.
+        const task = await openTask(app, processKey, "escalation");
+        await app.engine.completeUserTask(task.userTaskKey, { resolution: "answer", answer: "use v2" });
+        await app.settle();
+        assert.equal(seenBranches.length, 2, "the implement-task was activated twice (initial + retry)");
+        assert.equal(seenBranches[0], "feat/t1", "the FIRST activation carries the deterministic branch.create");
+        assert.equal(
+          seenBranches[1],
+          seenBranches[0],
+          "the RETRY activation re-derives the SAME branch.create — the WIP checkpoint restore matches (#945)",
+        );
       },
     );
   });
@@ -532,7 +628,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
 
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("wait-caps-resolved->implement-cell-call") && flows.includes("Start->implement-task"),
+          flows.includes("wait-caps-resolved->implement-cell-call") && flows.includes("slice-branch->implement-task"),
           `caps-resolved released the barrier into the implement cell (flows: ${flows.join(", ")})`,
         );
         assert.equal(
@@ -614,7 +710,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         assert.ok(
           answered.includes("w_gw_answer->record-task-implementing") &&
             answered.includes("record-task-implementing->implement-cell-call") &&
-            answered.includes("Start->implement-task"),
+            answered.includes("slice-branch->implement-task"),
           `answering the caps escalation reset the stale question and released the barrier into the implement cell (flows: ${answered.join(", ")})`,
         );
         assert.equal(featureRan, true, "the agent was dispatched once the operator answered the caps escalation");
@@ -668,7 +764,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         assert.ok(
           entered.includes("w_gw_answer->record-task-implementing") &&
             entered.includes("record-task-implementing->implement-cell-call") &&
-            entered.includes("Start->implement-task"),
+            entered.includes("slice-branch->implement-task"),
           `answering the caps escalation reset the stale question and released the barrier into the implement cell (flows: ${entered.join(", ")})`,
         );
 

@@ -21,7 +21,7 @@ import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { derivedTrackingTable } from "./instanceTracking.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
 import type { ReadinessProbe } from "./readiness.ts";
-import { requireRepoEnvelopeVars } from "./repoEnvelope.ts";
+import { requireRepoEnvelopeVars, sliceBranchCreate } from "./repoEnvelope.ts";
 
 /** Optional intake-time readiness gate for a feature run (issue #295): the `capability`/`command`/…
  * probes the run must ALL satisfy before its implementation agent is dispatched (parked, durably, at
@@ -503,7 +503,10 @@ export async function startFeature(
   const taskId = featureTaskId(parsed.number);
   // Pre-PR feature branch (issue #684): the deterministic `feat/<task.id>` the harness creates off the
   // base for the implementation agent (the agent-guide's `feat/*` convention), matching `task.id`.
-  const prePrBranch = `feat/${taskId}`;
+  // Derived via the ONE canonical `sliceBranchCreate` (issue #945) so the whole-run feature seed and the
+  // epic plan-fanout's per-slice emission can never drift into two branch-naming sources. A single-issue
+  // task id is always `issue-<number>`, so the derivation is never null here.
+  const prePrBranch = sliceBranchCreate(taskId) ?? `feat/${taskId}`;
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId: FEATURE_PROCESS_ID,
     variables: {

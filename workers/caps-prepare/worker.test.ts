@@ -60,3 +60,14 @@ test("caps-prepare: a malformed need is dropped — only a valid remainder gates
   );
   assertEquals(mixed.hasNeeds, true, "a valid need still gates even alongside a malformed one");
 });
+
+// Issue #945: caps-prepare runs in the plan-fanout MI body, whose un-declared result keys land on the
+// SHARED epic root — so it must NOT stamp the per-slice branch.create (a sibling would overwrite it).
+// The emitter lives in each implement-cell instance (`pr.slice-branch`) instead.
+test("caps-prepare: does NOT emit the per-slice branch.create (it would leak across MI siblings) (#945)", async () => {
+  const out = await handler(
+    { variables: { planKey: "owner/repo#7", taskId: "t1", needs: [] } } as any,
+    {} as any,
+  );
+  assertEquals(Object.keys(out).filter((k) => k.startsWith("io.nanobpm.agentTask")), []);
+});

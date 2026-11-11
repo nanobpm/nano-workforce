@@ -181,6 +181,10 @@
       "handler": "workers/select-wave/worker.ts"
     },
     {
+      "taskType": "pr.slice-branch",
+      "handler": "workers/slice-branch/worker.ts"
+    },
+    {
       "taskType": "pr.caps-prepare",
       "handler": "workers/caps-prepare/worker.ts"
     },

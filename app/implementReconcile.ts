@@ -22,6 +22,7 @@ import { hasAnswerableQuestion } from "./escalationTaxonomy.ts";
 import type { HeadPr } from "./github.ts";
 import { isClaimedCompletion } from "./implementEscalationReason.ts";
 import { parsePr } from "./prParse.ts";
+import { sliceBranchCreate } from "./repoEnvelope.ts";
 
 /** The escalate-arm inputs the reconcile step reads from the implement-cell scope. `subjectKey` is the
  *  cell's `owner/repo#N` subject (a feature run's `feature_key`, or a wave slice's epic `plan_key`) —
@@ -99,9 +100,14 @@ export function retryNudgeFor(status: string): string {
   return `\n\n---\n\n**Automatic retry — your previous attempt claimed completion but no adoptable pull request was found.** You reported status "${status}", yet a GitHub lookup confirmed there is no adoptable pull request for this slice on its base branch. Your work may NOT be lost: if you already pushed the \`feat/<task.id>\` branch, recover it — check the remote with \`git ls-remote --heads origin feat/<task.id>\`, and if a pull request exists but targets the WRONG base, retarget it onto this run's base branch with \`gh pr edit --base <base>\`. Otherwise you likely worked OUTSIDE your run workspace (e.g. \`cd /tmp\`), and those edits were discarded on teardown. This is your FINAL automatic retry; the next failure escalates to a human. Work ONLY inside your run workspace, then \`git commit -s\`, push \`feat/<task.id>\`, and open a PR on the correct base with \`gh pr create\`. Report \`status: "opened"\` with the \`pr\` key — not "${status}".`;
 }
 
-/** The cell's deterministic implement branch — `feat/<task.id>` (resources/prompts/feature.md). */
+/** The cell's deterministic implement branch — `feat/<task.id>` (resources/prompts/feature.md).
+ *  Delegates to the ONE canonical `sliceBranchCreate` (issue #945) so the reconcile lookup, the
+ *  repository-envelope `branch.create` the harness cuts, and the prompt's branch instruction all share
+ *  a single derivation — they can never drift into two branch-naming sources. A task id reaching the
+ *  reconcile step is always a real id, so the derivation is never null here; the `?? `` fallback is
+ *  defensive only (an implausible id would simply find no adoptable PR, the pre-existing behaviour). */
 export function implementCellBranch(taskId: string): string {
-  return `feat/${taskId}`;
+  return sliceBranchCreate(taskId) ?? `feat/${taskId}`;
 }
 
 /** The adoptable PR from a head-branch listing: the first OPEN one (a merged/closed PR on the branch is
