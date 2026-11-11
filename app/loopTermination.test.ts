@@ -328,18 +328,30 @@ function handoffData(rows: any[], tracking: any[]) {
   return { data, stores };
 }
 
-/** Run a handoff against an unroutable repo so the best-effort GitHub meta fetch fails fast
- * (`fetchPrMeta` throws → caught → `headRef` stays null) regardless of the ambient token — the test
- * never depends on network or credentials. The engine double publishes a NULL key (the phantom-row
- * path, #704/#497), so `submitPr` starts no successor and the handoff must roll back. */
+/** Run a handoff with the GitHub transport DISABLED (PR #944 round-7 review): forcing the `token`
+ * transport with no `GITHUB_TOKEN` makes `submitPr`'s best-effort `fetchPrMeta` return `null`
+ * WITHOUT any `gh` subprocess or network fetch — the test never depends on ambient credentials,
+ * the network, or an unroutable host failing fast. The engine double publishes a NULL key (the
+ * phantom-row path, #704/#497), so `submitPr` starts no successor and the handoff must roll back. */
 async function runPhantomHandoff(row: any, tracking: any[]) {
-  const { data, stores } = handoffData([row], tracking);
-  const engine = {
-    createInstance: async () => ({ processInstanceKey: null }),
-    cancelInstance: async () => {},
-  };
-  await handoffWaitingMergeToConvergence(data, engine as never, stores.pull_requests[0], "test");
-  return stores;
+  const prevTransport = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevToken = process.env["GITHUB_TOKEN"];
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  delete process.env["GITHUB_TOKEN"];
+  try {
+    const { data, stores } = handoffData([row], tracking);
+    const engine = {
+      createInstance: async () => ({ processInstanceKey: null }),
+      cancelInstance: async () => {},
+    };
+    await handoffWaitingMergeToConvergence(data, engine as never, stores.pull_requests[0], "test");
+    return stores;
+  } finally {
+    if (prevTransport === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevTransport;
+    if (prevToken === undefined) delete process.env["GITHUB_TOKEN"];
+    else process.env["GITHUB_TOKEN"] = prevToken;
+  }
 }
 
 test("PR#944 round 6: a restart-stranded KEYLESS waiting_merge row re-drives its handoff past the pending-predecessor guard", async () => {
