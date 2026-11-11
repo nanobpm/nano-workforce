@@ -431,6 +431,16 @@ export interface PullRequest {
   // Operator Dismiss stamp (app/acknowledge.ts). Run-scoped: cleared on reopen so a dismissal of a
   // PRIOR run never hides an orphaning of the current one.
   acknowledged_at?: string | null;
+  // Durable merge-policy projection (132_pull_requests_merge_policy.sql, issue #947): the run's
+  // merge intent (`merge_requested` 0|1) and its decided merge-approval state
+  // (`merge_human_approval` NULL = outstanding/undecided, 0|1 once decided), stamped by the writers
+  // that already know them — `submitPr` (submit/reopen, and the gated-adopt `setVariables` branch),
+  // `completeUserTaskAttributed` (a `merge-approval` approve clears it to 0, app/agentCompletion.ts),
+  // and `startMerge` — so `/status` serves the policy from the app's own DB with ZERO engine reads.
+  // `merge_requested` NULL marks a row written before this projection existed; only those legacy
+  // rows fall back to the #937 batched engine read. Run-scoped: reset by the atomic reopen.
+  merge_requested?: number | null;
+  merge_human_approval?: number | null;
 }
 
 interface PrDependency {
@@ -744,6 +754,11 @@ async function submitPrCritical(
       const state = match ? String(match.state ?? "").trim().toUpperCase() : null;
       if (state !== null && !ENGINE_TERMINAL_STATES.has(state)) {
         await engine.setVariables({ scopeKey: loopKey, variables: { humanApproval: true } });
+        // Mirror the gate onto the durable /status projection (issue #947): the loop variable is
+        // the process's own copy; the row column is what `/status` reads without an engine
+        // round-trip. NULL would read as "outstanding" too, but stamping 1 keeps the projection
+        // explicit (decided-and-gated) rather than undecided.
+        await table.update(parsed.prKey, { merge_human_approval: 1 });
       }
     }
     // Steward opt-in is monotonic too (issue #889 review): an opted-in caller adopting a live loop —
@@ -838,6 +853,12 @@ async function submitPrCritical(
       abandon_token: abandonToken,
       root_request_key: effectiveRoot,
       auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
+      // Merge-policy projection (issue #947): stamp the run's intent so `/status` serves it from
+      // the row with no engine read. `merge_human_approval` starts NULL (undecided): the
+      // `merge-approval` gate only exists when `gated`, and the loop's `humanApproval` variable
+      // write on approve maps to 0 — NULL and 1 both read as "outstanding" in `mergePolicyFromRow`.
+      merge_requested: mergeIntent ? 1 : 0,
+      merge_human_approval: null,
       created_at: ts,
       updated_at: ts,
     });
@@ -993,6 +1014,10 @@ async function submitPrCritical(
         // Record the opt-in on the row (the durable source the steward's eligibility reads) so a
         // fresh run's flag is authoritative even across a reopen (issue #889).
         auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
+        // Merge-policy projection (issue #947): run-scoped like every other field in this reset —
+        // the fresh run's intent wins, and the approval state restarts undecided (NULL).
+        merge_requested: mergeIntent ? 1 : 0,
+        merge_human_approval: null,
         // Publish the fresh run's identity in the SAME write as the status flip (may be null if the
         // instance could not be created — a phantom row a retry re-enrolls, as on first submit).
         process_key: processKey,
@@ -1129,7 +1154,15 @@ export async function startMerge(
     },
   });
   if (processInstanceKey != null) {
-    await prs(data).update(pr.prKey, { process_key: String(processInstanceKey), updated_at: now() });
+    await prs(data).update(pr.prKey, {
+      process_key: String(processInstanceKey),
+      // Merge-policy projection (issue #947): a merge loop only starts for a requested, approved
+      // merge (`pr.finalize`'s gate), so the merge-stage policy is known here — stamp it and the
+      // merge stage of `/status` never pays an engine read either.
+      merge_requested: 1,
+      merge_human_approval: 0,
+      updated_at: now(),
+    });
   }
   return { prKey: pr.prKey, mergeProcessKey: processInstanceKey };
 }
@@ -1150,6 +1183,11 @@ export interface MergePolicy {
    * (convergence-loop.bpmn), so the blocker lifts as soon as approval is complete — even while
    * the `pr.finalize` handoff is still queued or incidented. */
   blockedBy: "env" | "human-approval" | null;
+  /** The timing-guard marker (issue #947): `true` when the policy could not be verified and the row
+   *  was served from the historical default instead of blocking the serve (a legacy row — written
+   *  before the durable projection existed — whose fallback engine read failed). Rows served from
+   *  the `pull_requests` projection always read `false`. */
+  stale: boolean;
 }
 
 /** The status `/status` reports for a run whose instance is parked on an ACTIVE engine incident
@@ -1263,17 +1301,29 @@ export async function activePrs(
   // Merge intent (issue #916): read the loop's `autoMerge` / `convergeOnly` / `humanApproval`
   // variables per PR so the effective merge policy is visible without opening the engine.
   //
-  // A CONSTANT number of batched engine reads per /status call (issue #936) — never a per-row
-  // fan-out. The pre-#936 shape issued 3 `searchVariables` round-trips PER active PR (12 calls at 4
-  // rows ≈ 13 s; concurrent callers stacked until the console proxy 502'd). See
-  // `readMergePolicyVars` for the completeness contract (single-page seam, root scope only, one
-  // per-name root probe only for a page cut or legacy instance). Best-effort: a failed batched read degrades every
-  // PR to the historical default (merge requested); a failed per-instance fallback degrades only
-  // that PR.
+  // Issue #947: the policy is served from the app's OWN projection — the `merge_requested` /
+  // `merge_human_approval` columns `submitPr`/`startMerge` stamp on the row (the writers already
+  // know the policy) — so the hot read path pays ZERO engine round-trips. The #937 batched engine
+  // read below is kept ONLY for legacy rows (`merge_requested` NULL — written before the projection
+  // existed): it is a CONSTANT 3 name-filtered reads for the whole legacy set, never a per-row
+  // fan-out, and it shrinks to the empty set as rows reopen onto the projection. See
+  // `readMergePolicyVars` for the legacy completeness contract (single-page seam, root scope only,
+  // one per-name root probe only for a page cut or legacy instance). Best-effort: a failed batched
+  // read degrades every legacy row to the historical default (merge requested, flagged `stale`); a
+  // failed per-instance fallback degrades only that row.
   const mergeByPr = new Map<string, MergePolicy>();
-  const activeKeys = active.map((p) => p.process_key).filter((k): k is string => k != null && k !== "");
-  const varsByInstance = await readMergePolicyVars(engine, activeKeys);
+  const legacyKeys: string[] = [];
   for (const p of active) {
+    const projected = mergePolicyFromRow(p);
+    if (projected) {
+      mergeByPr.set(p.pr_key, projected);
+    } else if (p.process_key != null && p.process_key !== "") {
+      legacyKeys.push(p.process_key);
+    }
+  }
+  const varsByInstance = await readMergePolicyVars(engine, legacyKeys);
+  for (const p of active) {
+    if (mergeByPr.has(p.pr_key)) continue;
     mergeByPr.set(p.pr_key, mergePolicyFromVars(varsByInstance?.get(p.process_key ?? "")));
   }
   return active.map((p) => {
@@ -1352,9 +1402,25 @@ function hasOwnTerminationReason(p: {
 
 /** The default merge policy when no instance variables are readable (mid-handoff row, engine
  * unreachable, or a legacy loop carrying neither variable): the pre-#916 behaviour merged by
- * default, so the projection must NOT read such a PR as review-only. */
+ * default, so the projection must NOT read such a PR as review-only. Flagged `stale` (issue #947):
+ * the policy could not be verified — the row was served from the default rather than blocking. */
 function mergePolicyDefault(): MergePolicy {
-  return mergePolicyFrom(true, false);
+  return { ...mergePolicyFrom(true, false), stale: true };
+}
+
+/** Derive a PR's effective merge policy from its DURABLE row projection (issue #947) — the
+ *  `merge_requested` / `merge_human_approval` columns `submitPr`/`startMerge` stamp. Returns
+ *  `undefined` for a legacy row (`merge_requested` NULL — written before the projection existed),
+ *  which the caller falls back to the #937 batched engine read. `merge_human_approval` NULL means
+ *  the approval is outstanding/undecided (the gate still holds); 0|1 is the decided state the
+ *  `merge-approval` task's `humanApproval` variable write mirrors. A projected policy is always
+ *  fresh (`stale: false`) — it never blocks the serve on an engine round-trip. */
+function mergePolicyFromRow(p: {
+  merge_requested?: number | null;
+  merge_human_approval?: number | null;
+}): MergePolicy | undefined {
+  if (p.merge_requested == null) return undefined;
+  return { ...mergePolicyFrom(p.merge_requested === 1, p.merge_human_approval !== 0), stale: false };
 }
 
 /** Combine a merge intent + human-approval gate with the global switch into the effective policy.
@@ -1362,7 +1428,7 @@ function mergePolicyDefault(): MergePolicy {
  *  and the `merge-approval` user task clears it on an explicit "approve", so an approved PR whose
  *  finalization is still queued/incidented reads `effective` with no blocker rather than a stale
  *  `blockedBy: "human-approval"`. */
-function mergePolicyFrom(requested: boolean, humanApproval: boolean): MergePolicy {
+function mergePolicyFrom(requested: boolean, humanApproval: boolean): Omit<MergePolicy, "stale"> {
   const enabled = AUTO_MERGE;
   const effective = requested && enabled && !humanApproval;
   const blockedBy = !requested ? null : !enabled ? "env" : humanApproval ? "human-approval" : null;
@@ -1490,11 +1556,11 @@ async function readMergePolicyVars(
  * canonical positive `autoMerge` wins; the legacy inverted `convergeOnly` is the fallback for
  * in-flight loops seeded before `autoMerge` existed; an instance carrying neither (or absent from
  * the batch — mid-handoff row, instance gone) degrades to the historical default (merge
- * requested) rather than failing the status read. */
+ * requested, flagged `stale`) rather than failing the status read. */
 function mergePolicyFromVars(vars: MergePolicyVars | undefined): MergePolicy {
   if (!vars) return mergePolicyDefault();
   const requested = vars.autoMerge ?? (vars.convergeOnly === undefined ? true : !vars.convergeOnly);
-  return mergePolicyFrom(requested, vars.humanApproval === true);
+  return { ...mergePolicyFrom(requested, vars.humanApproval === true), stale: false };
 }
 
 /** A delivery-graph run currently in flight, as reported by the status endpoint (issue #889 §1 —

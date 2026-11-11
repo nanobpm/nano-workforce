@@ -1464,6 +1464,116 @@ test("startMerge seeds the merge-policy triple so /status needs no per-instance 
   });
 });
 
+// ── Issue #947: the durable merge-policy projection the writers stamp ────────────────────────────
+// `/status` serves the merge policy off the `pull_requests` row (zero engine reads) — these pin the
+// writer side of that contract: every path that KNOWS the policy must stamp it.
+
+test("submitPr stamps the merge-policy projection on the row (insert path)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores } = captureRoot();
+    await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 21,
+      url: "https://github.com/owner/repo/pull/21",
+      prKey: "owner/repo#21",
+    });
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.merge_requested, 1, "the default submit requests the merge");
+    assertEquals(pr.merge_human_approval, null, "approval starts undecided (NULL), not a stored false");
+  });
+});
+
+test("submitPr stamps a review-only intent as merge_requested 0 (convergeOnly)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores } = captureRoot();
+    await submitPr(
+      data,
+      engine,
+      { repo: "owner/repo", number: 22, url: "https://github.com/owner/repo/pull/22", prKey: "owner/repo#22" },
+      [],
+      20,
+      true, // convergeOnly
+    );
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.merge_requested, 0, "a review-only run projects requested=false with no engine read");
+    assertEquals(pr.merge_human_approval, null);
+  });
+});
+
+test("submitPr reopen restamps the projection to the FRESH run's intent (run-scoped reset)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores } = captureRoot();
+    (stores.pull_requests.rows as unknown[]).push({
+      pr_key: "owner/repo#23",
+      repo: "owner/repo",
+      number: 23,
+      url: "https://github.com/owner/repo/pull/23",
+      status: "converged", // terminal -> reopen path
+      current_round: 2,
+      process_key: "PI-OLD",
+      // The PRIOR run's projection: review-only, approval decided. A fresh default submit must
+      // overwrite both — a carried-over stamp would misreport the new run's policy.
+      merge_requested: 0,
+      merge_human_approval: 0,
+    });
+    await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 23,
+      url: "https://github.com/owner/repo/pull/23",
+      prKey: "owner/repo#23",
+    });
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.merge_requested, 1, "the fresh run's intent wins");
+    assertEquals(pr.merge_human_approval, null, "the approval state restarts undecided");
+  });
+});
+
+test("a gated submitPr adopting a live loop stamps merge_human_approval on the row (issue #947)", async () => {
+  await withGithubOff(async () => {
+    const pr = { repo: "owner/repo", number: 14, url: "https://github.com/owner/repo/pull/14", prKey: "owner/repo#14" };
+    const live = adoptLoop("converging", "ACTIVE");
+    await submitPr(live.data, live.engine, pr, [], 20, false, null, true);
+    const row = (await live.data.table("pull_requests", "pr_key").get(pr.prKey)) as {
+      merge_human_approval?: number | null;
+    } | null;
+    assertEquals(row?.merge_human_approval, 1, "the gate is mirrored onto the /status projection");
+
+    const ungated = adoptLoop("converging", "ACTIVE");
+    await submitPr(ungated.data, ungated.engine, pr);
+    const ungatedRow = (await ungated.data.table("pull_requests", "pr_key").get(pr.prKey)) as {
+      merge_human_approval?: number | null;
+    } | null;
+    assertEquals(ungatedRow?.merge_human_approval ?? null, null, "an ungated adopter leaves the projection undecided");
+  });
+});
+
+test("startMerge stamps the merge-stage policy on the row (issue #947)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores } = captureRoot();
+    (stores.pull_requests.rows as unknown[]).push({
+      pr_key: "owner/repo#24",
+      repo: "owner/repo",
+      number: 24,
+      url: "https://github.com/owner/repo/pull/24",
+      status: "converged",
+      current_round: 1,
+      process_key: "PI-CONV",
+      merge_requested: 1,
+      merge_human_approval: 1, // the convergence-stage gate — decided by the merge hand-off
+    });
+    await startMerge(data, engine, {
+      repo: "owner/repo",
+      number: 24,
+      url: "https://github.com/owner/repo/pull/24",
+      prKey: "owner/repo#24",
+      round: 1,
+    });
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.merge_requested, 1, "a merge loop only starts for a requested merge");
+    assertEquals(pr.merge_human_approval, 0, "…and an approved one — the gate is behind it");
+  });
+});
+
 // The repository envelope drives the c8ctl harness's isolated workspace provisioning: it is
 // emitted under the reserved `io.nanobpm.agentTask` namespace with the PR head branch as the
 // checkout ref, and omitted entirely when the head branch couldn't be resolved (so the harness

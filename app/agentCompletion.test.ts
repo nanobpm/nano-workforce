@@ -991,3 +991,94 @@ test("snapshotUserTaskFormOptions: an unresolvable form_key never throws (safe r
     "an unresolvable form_key falls back to the element's static form",
   );
 });
+
+// ── Issue #947: a merge-approval APPROVE mirrors onto the durable /status merge-policy projection ──
+// `submitPr` stamps `merge_human_approval = 1` when it gates a loop; the human's approve at the
+// `merge-approval` task clears the loop's `humanApproval` variable via the task's output mapping.
+// The canonical completer must stamp the SAME decision onto the row column `/status` reads, or the
+// projection reports `blockedBy: "human-approval"` long after approval landed.
+
+test("a merge-approval APPROVE stamps merge_human_approval=0 on the owning PR row (issue #947)", async () => {
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pull_requests: {
+      rows: [
+        { pr_key: "owner/repo#7", process_key: "PI-7", merge_requested: 1, merge_human_approval: 1 },
+      ],
+      key: "pr_key",
+    },
+  };
+  const data = memData(stores);
+  const { engine } = fakeEngine([{ userTaskKey: "ut-ma", elementId: "merge-approval", processInstanceKey: "PI-7" }]);
+
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-ma",
+    operatorId: "alice",
+    variables: { mergeDecision: "approve" },
+  });
+
+  assertEquals(r.ok, true);
+  const row = stores.pull_requests.rows[0];
+  assertEquals(row.merge_human_approval, 0, "the approval is mirrored onto the /status projection");
+  assertEquals(row.merge_requested, 1, "the merge intent is untouched");
+});
+
+test("a merge-approval REVISE leaves the projection gated (issue #947)", async () => {
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pull_requests: {
+      rows: [{ pr_key: "owner/repo#8", process_key: "PI-8", merge_requested: 1, merge_human_approval: 1 }],
+      key: "pr_key",
+    },
+  };
+  const data = memData(stores);
+  const { engine } = fakeEngine([{ userTaskKey: "ut-mr", elementId: "merge-approval", processInstanceKey: "PI-8" }]);
+
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-mr",
+    operatorId: "alice",
+    variables: { mergeDecision: "revise", answer: "split the migration" },
+  });
+
+  assertEquals(r.ok, true);
+  assertEquals(stores.pull_requests.rows[0].merge_human_approval, 1, "a revise keeps the gate outstanding");
+});
+
+test("a merge-approval approve against a SUPERSEDED instance never clears the fresh run's gate (issue #947)", async () => {
+  // The stamp is ownership-guarded on the instance the task parked on: after a reopen re-pointed
+  // `process_key` at the fresh run, a straggler completion resolved against the OLD instance must
+  // not clear the new run's projection.
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    pull_requests: {
+      rows: [{ pr_key: "owner/repo#9", process_key: "PI-NEW", merge_requested: 1, merge_human_approval: 1 }],
+      key: "pr_key",
+    },
+  };
+  const data = memData(stores);
+  const { engine } = fakeEngine([{ userTaskKey: "ut-stale", elementId: "merge-approval", processInstanceKey: "PI-OLD" }]);
+
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-stale",
+    operatorId: "alice",
+    variables: { mergeDecision: "approve" },
+  });
+
+  assertEquals(r.ok, true, "the engine completion itself still lands");
+  assertEquals(stores.pull_requests.rows[0].merge_human_approval, 1, "the fresh run's gate is not cleared by a stale instance");
+});
+
+test("a merge-approval projection-stamp failure never masks the engine completion (issue #947)", async () => {
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores); // no pull_requests store — the stamp's table read throws
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-mx", elementId: "merge-approval", processInstanceKey: "PI-X" }]);
+
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-mx",
+    operatorId: "alice",
+    variables: { mergeDecision: "approve" },
+  });
+
+  assertEquals(r.ok, true, "best-effort: the projection miss is swallowed");
+  assertEquals(completed.length, 1, "the engine resume already happened");
+});
