@@ -263,3 +263,22 @@ test("PR#944 a pending retirement whose key still OWNS the row (unpublished succ
   assertEquals(cancelled, [], "a live owning merge loop is never retired into nothing");
   assertEquals(stores.pull_requests[0].retire_pending_key, "merge-1");
 });
+
+test("PR#944 round 5: a KEYLESS owner row (unpublished handoff) is never retired into nothing — it stays recoverable", async () => {
+  // `submitPr` can publish a null `process_key` (phantom row, #704/#497); if the app stops before the
+  // handoff rollback lands (or the rollback write fails), the pending predecessor key survives with NO
+  // successor. Cancelling the still-live merge loop here would recreate the ownerless termination this
+  // PR prevents — the retirement must be deferred, leaving the NULL-key row for the dead-owner guard in
+  // `pollMerges` to re-drive the handoff.
+  const { data, stores } = memData([{ pr_key: "o/r#1", process_key: null, status: "waiting_review", retire_pending_key: "merge-1" }], []);
+  const cancelled: string[] = [];
+  const ok = { cancelInstance: async (a: { processInstanceKey: string }) => void cancelled.push(a.processInstanceKey) };
+  await retryPendingRetirements(data, ok as never);
+  assertEquals(cancelled, [], "no live successor → the predecessor is never retired");
+  assertEquals(stores.pull_requests[0].retire_pending_key, "merge-1", "the pending marker survives for recovery");
+  // Once a successor IS published, the same pass retires the predecessor against it.
+  stores.pull_requests[0].process_key = "succ";
+  await retryPendingRetirements(data, ok as never);
+  assertEquals(cancelled, ["merge-1"]);
+  assertEquals(stores.pull_requests[0].retire_pending_key, null);
+});

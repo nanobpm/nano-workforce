@@ -2145,8 +2145,17 @@ export async function retryPendingRetirements(data: DataLayer, engine: Pick<Engi
     // A pending key that is still the row's OWNER means the handoff never published a successor (e.g. a
     // restart mid-handoff): the merge loop is live and owning — never retire it into nothing.
     if (pr.process_key != null && String(pr.process_key) === String(key)) continue;
-    const owner = pr.process_key != null ? String(pr.process_key) : "none";
-    await retireHandedOffMergeLoop(data, engine, pr.pr_key, String(key), owner, "retire-retry", 1);
+    // A KEYLESS owner row is the same unpublished-handoff shape (PR #944 round-5 review): `submitPr`
+    // can publish a null `process_key`, and if the app stops before the rollback lands (or the rollback
+    // write fails) the pending key survives with NO successor. Retiring here would cancel the still-live
+    // merge loop with successor "none" — the ownerless termination this PR exists to prevent. Leave the
+    // pending marker in place: the dead-owner guard in `pollMerges` re-drives the handoff from the
+    // NULL-key row, and the next pass after a successor is published retires the predecessor against it.
+    if (pr.process_key == null) {
+      console.log(`[poller] retire-retry ${pr.pr_key}: no successor published (process_key null); deferring retirement of ${key}`);
+      continue;
+    }
+    await retireHandedOffMergeLoop(data, engine, pr.pr_key, String(key), String(pr.process_key), "retire-retry", 1);
   }
 }
 
