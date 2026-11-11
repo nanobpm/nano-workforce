@@ -1990,8 +1990,8 @@ export async function maybeEnsureFreshHeadRun(
  * RETRYABLE on failure, with creation and retirement recovered SEPARATELY (PR #944 review): if no
  * successor is created, the row is restored to `waiting_merge` naming the still-LIVE merge owner, so
  * the next pass simply retries. Once a successor is published the row is never demoted; retiring the
- * captured merge key is retried by {@link retireHandedOffMergeLoop}. */
-async function handoffWaitingMergeToConvergence(
+ * captured merge key is retried by {@link retireHandedOffMergeLoop}. Exported for tests. */
+export async function handoffWaitingMergeToConvergence(
   data: DataLayer,
   engine: EngineClient,
   pr: PullRequest,
@@ -2006,17 +2006,35 @@ async function handoffWaitingMergeToConvergence(
     // FENCE the staging write on the captured owner (PR #944 review): if a cancel/resubmit replaced the
     // owner while this pass awaited GitHub, the replacement owns the row (possibly parked on a stage such
     // as `waiting_deps`) — re-staging it to `waiting_review` would strand it outside its stage's scan.
+    // The STAGE side of the fence is an allowlist (PR #944 round-6 review), not "unchanged since this
+    // pass read the row": a restart mid-handoff can strand the row at a handoff-transient stage
+    // (`waiting_review`, or keyless at `converging` after a phantom null-key publish) outside the
+    // `waiting_merge` recovery scan, and an unchanged-stage fence would skip it forever. The fence
+    // admits (a) the LIVE merge stages the merge poller scans (`waiting_merge`, `waiting_lane`) and
+    // (b) a KEYLESS row at a handoff-transient stage — there is no live owner to protect, and the
+    // rollback below restores the live merge stage so the next pass re-drives the handoff. A
+    // successor-owned row (`converging` naming the fresh convergence instance) still fails the OWNER
+    // check and is never demoted; a predecessor-owned `waiting_review` row is mid-handoff and is left
+    // for `retryPendingRetirements`, not re-staged.
     const fresh = await prs(data).get(prKey);
     const freshOwner = fresh?.process_key != null ? String(fresh.process_key) : null;
-    if (!fresh || freshOwner !== mergeKey || fresh.status !== pr.status) {
+    const HANDOFFABLE_STAGES = new Set(["waiting_merge", "waiting_lane"]);
+    const HANDOFF_TRANSIENT_STAGES = new Set(["waiting_review", "converging"]);
+    const stageOk =
+      HANDOFFABLE_STAGES.has(String(fresh?.status)) ||
+      (freshOwner == null && HANDOFF_TRANSIENT_STAGES.has(String(fresh?.status)));
+    if (!fresh || freshOwner !== mergeKey || !stageOk) {
       console.log(`[poller] ${logContext} handoff ${prKey}: owner/stage changed (${freshOwner}/${fresh?.status}); skipping`);
       return;
     }
     // ONE pending predecessor retirement at a time (PR #944 review): while an earlier predecessor's
     // retirement is unconfirmed, never start another handoff — a second key would overwrite the first
-    // and leave that live loop untracked. `retryPendingRetirements` clears it first.
+    // and leave that live loop untracked. `retryPendingRetirements` clears it first. A KEYLESS owner
+    // row is exempt (PR #944 round-6 review): there is no live owner to protect — the pending key names
+    // the predecessor the ORIGINAL handoff stranded, and this recovery handoff re-stages against THAT
+    // SAME key, so nothing is overwritten.
     const pendingKey = fresh.retire_pending_key != null ? String(fresh.retire_pending_key) : "";
-    if (pendingKey !== "" && pendingKey !== mergeKey) {
+    if (pendingKey !== "" && mergeKey != null && pendingKey !== mergeKey) {
       console.log(`[poller] ${logContext} handoff ${prKey}: predecessor ${pendingKey} retirement pending; deferring`);
       return;
     }

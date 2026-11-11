@@ -15,6 +15,7 @@ import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import {
   activePrs,
+  handoffWaitingMergeToConvergence,
   isOrphanedPr,
   ORPHANED_PR_STATUS,
   recordOperatorCancelProvenance,
@@ -281,4 +282,119 @@ test("PR#944 round 5: a KEYLESS owner row (unpublished handoff) is never retired
   await retryPendingRetirements(data, ok as never);
   assertEquals(cancelled, ["merge-1"]);
   assertEquals(stores.pull_requests[0].retire_pending_key, null);
+});
+
+// ── PR #944 round-6 review: restart-recovery of a pending handoff ───────────────────────────────
+// A restart between the handoff's staging write and the successor publication strands the row in a
+// shape NEITHER poll pass recovers: the `waiting_review`/`converging` stages sit outside the
+// `waiting_merge` recovery scan, and the one-pending-retirement guard rejected a KEYLESS owner row
+// outright, so even a keyless `waiting_merge` row could never re-drive its handoff. The recovery
+// must be fenced to the LIVE merge stages (never demote a successor-owned `converging` row) and the
+// pending-predecessor guard must admit a keyless owner row (there IS no live owner to protect).
+
+/** In-memory `data` double with the exact tables `submitPr` touches on a phantom (null-key) publish. */
+function handoffData(rows: any[], tracking: any[]) {
+  const stores: Record<string, any[]> = {
+    pull_requests: rows,
+    pull_requests__tracking: tracking,
+    escalations: [],
+    pr_dependencies: [],
+    worker_durable_resume: [],
+    world_checkpoints: [],
+    world_effects: [],
+  };
+  const tbl = (name: string, pk: string) => {
+    const r = (stores[name] ??= []);
+    return {
+      all: async () => r.slice(),
+      get: async (id: any) => r.find((x) => x[pk] === id),
+      find: async (w: any = {}) => r.filter((x) => Object.entries(w).every(([k, v]) => x[k] === v)),
+      findOne: async (w: any = {}) => r.find((x) => Object.entries(w).every(([k, v]) => x[k] === v)),
+      insert: async (row: any) => void r.push(row),
+      update: async (id: any, patch: any) => {
+        const x = r.find((y) => y[pk] === id);
+        if (x) Object.assign(x, patch);
+      },
+      delete: async (id: any) => {
+        const i = r.findIndex((y) => y[pk] === id);
+        if (i >= 0) r.splice(i, 1);
+      },
+    };
+  };
+  const data = {
+    table: (n: string, pk = "id") => tbl(n, pk),
+    open: () => ({ exec: async () => {} }),
+  } as unknown as DataLayer;
+  return { data, stores };
+}
+
+/** Run a handoff against an unroutable repo so the best-effort GitHub meta fetch fails fast
+ * (`fetchPrMeta` throws → caught → `headRef` stays null) regardless of the ambient token — the test
+ * never depends on network or credentials. The engine double publishes a NULL key (the phantom-row
+ * path, #704/#497), so `submitPr` starts no successor and the handoff must roll back. */
+async function runPhantomHandoff(row: any, tracking: any[]) {
+  const { data, stores } = handoffData([row], tracking);
+  const engine = {
+    createInstance: async () => ({ processInstanceKey: null }),
+    cancelInstance: async () => {},
+  };
+  await handoffWaitingMergeToConvergence(data, engine as never, stores.pull_requests[0], "test");
+  return stores;
+}
+
+test("PR#944 round 6: a restart-stranded KEYLESS waiting_merge row re-drives its handoff past the pending-predecessor guard", async () => {
+  const stores = await runPhantomHandoff(
+    { pr_key: "o/r#1", repo: "o/r", number: 1, url: "u", process_key: null, status: "waiting_merge", retire_pending_key: "merge-1" },
+    [{ pr_key: "o/r#1", derived_status: "waiting_merge" }],
+  );
+  assertEquals(stores.pull_requests[0].status, "waiting_merge", "the failed handoff restores the live merge stage");
+  assertEquals(stores.pull_requests[0].process_key, null, "a keyless row stays keyless (the durable unfinished-handoff marker)");
+  assertEquals(stores.pull_requests[0].retire_pending_key, "merge-1", "the pending predecessor survives the retry for later passes");
+});
+
+test("PR#944 round 6: a restart-stranded waiting_review row still OWNED by its live merge loop is left for the retirement-retry pass, not demoted", async () => {
+  // The staging write already flipped the row to `waiting_review` and the owner is still the merge
+  // loop: this is a MID-HANDOFF shape, not a stranded one. The stage fence correctly skips it —
+  // re-staging would strand it outside `waiting_merge`'s scan. `retryPendingRetirements` recovers it
+  // once the successor publishes (the round-5 test covers that retirement); the fence must NOT
+  // "recover" it by demoting the stage back.
+  const stores = await runPhantomHandoff(
+    { pr_key: "o/r#1", repo: "o/r", number: 1, url: "u", process_key: "merge-1", status: "waiting_review", retire_pending_key: "merge-1" },
+    [{ pr_key: "o/r#1", derived_status: "waiting_merge" }],
+  );
+  assertEquals(stores.pull_requests[0].status, "waiting_review", "a mid-handoff row is never demoted back to waiting_merge");
+  assertEquals(stores.pull_requests[0].process_key, "merge-1", "the merge loop keeps owning the row until the successor publishes");
+  assertEquals(stores.pull_requests[0].retire_pending_key, "merge-1", "the pending marker survives for retryPendingRetirements");
+});
+
+test("PR#944 round 6: a restart-stranded KEYLESS converging row re-drives its handoff past the pending-predecessor guard", async () => {
+  // The reviewer's second stranded shape: the app stopped after the phantom (null-key) publish but
+  // before the rollback, leaving the row keyless at `converging` with the pending predecessor. The
+  // dead-owner guard in `pollMerges` re-drives the handoff from this shape; the pending-predecessor
+  // guard must admit it (there is no live owner to protect), and the rollback restores the live
+  // merge stage so the next pass retries cleanly.
+  const stores = await runPhantomHandoff(
+    { pr_key: "o/r#1", repo: "o/r", number: 1, url: "u", process_key: null, status: "converging", retire_pending_key: "merge-1" },
+    [{ pr_key: "o/r#1", derived_status: "converging" }],
+  );
+  assertEquals(stores.pull_requests[0].status, "waiting_merge", "the failed recovery handoff restores the live merge stage");
+  assertEquals(stores.pull_requests[0].process_key, null, "a keyless row stays keyless (the durable unfinished-handoff marker)");
+  assertEquals(stores.pull_requests[0].retire_pending_key, "merge-1", "the pending predecessor survives the retry for later passes");
+});
+
+test("PR#944 round 6: a successor-owned converging row is NEVER demoted by a redelivered handoff", async () => {
+  const { data, stores } = handoffData(
+    [{ pr_key: "o/r#1", repo: "o/r", number: 1, url: "u", process_key: "succ", status: "converging", retire_pending_key: "merge-1" }],
+    [{ pr_key: "o/r#1", derived_status: "converging" }],
+  );
+  const engine = {
+    createInstance: async () => {
+      throw new Error("must not be called — the successor owns the row");
+    },
+    cancelInstance: async () => {},
+  };
+  await handoffWaitingMergeToConvergence(data, engine as never, stores.pull_requests[0], "test");
+  assertEquals(stores.pull_requests[0].status, "converging");
+  assertEquals(stores.pull_requests[0].process_key, "succ");
+  assertEquals(stores.pull_requests[0].retire_pending_key, "merge-1", "the pending retirement is left for retryPendingRetirements");
 });
