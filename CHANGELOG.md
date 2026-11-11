@@ -1,3 +1,9 @@
+## [0.208.3](https://github.com/nanobpm/nano-workforce/compare/v0.208.2...v0.208.3) (2026-11-11)
+
+### Bug Fixes
+
+* **merge:** never retire a merge loop into nothing on the convergence hand-off ([#944](https://github.com/nanobpm/nano-workforce/issues/944)) ([ff42e2a](https://github.com/nanobpm/nano-workforce/commit/ff42e2a6fa77fd780949822adf3d4f2b9caefc38)), closes [nanobpm/nano-bpm#1452](https://github.com/nanobpm/nano-bpm/issues/1452) [#939](https://github.com/nanobpm/nano-workforce/issues/939) [#943](https://github.com/nanobpm/nano-workforce/issues/943)
+
 ## [0.208.2](https://github.com/nanobpm/nano-workforce/compare/v0.208.1...v0.208.2) (2026-11-10)
 
 ### Bug Fixes
