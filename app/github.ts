@@ -1022,6 +1022,12 @@ interface RollupEntry {
   name?: string;
   context?: string;
   workflowName?: string;
+  /** The GitHub event that triggered the run (GraphQL `CheckRun.event`, e.g. `pull_request` /
+   * `push`). Two runs sharing a display name but triggered by different events are DIFFERENT gates —
+   * a ruleset / branch-protection required context gates the `pull_request` run, so a green `push`
+   * run must never collapse away a red `pull_request` run of the same name (issue #955). Absent on
+   * legacy StatusContext entries and older payloads; runs without it keep the name-only identity. */
+  event?: string;
   /** CheckRun timestamps (GraphQL `statusCheckRollup`). A superseded run and the newer run that
    * replaced it carry the same check name but different times, so they order the runs of one check.
    * StatusContext carries `createdAt` instead. All are ISO-8601 or absent. */
@@ -1036,6 +1042,21 @@ interface RollupEntry {
  * commit — a superseded run plus the newer run that replaced it — so this is what we group by. */
 function checkKey(c: RollupEntry): string {
   return c.name || c.context || c.workflowName || "check";
+}
+
+/** The GATE identity a run is collapsed under (issue #955): the display identity ({@link checkKey})
+ * plus, when known, the triggering event. Same name is NOT the same gate when the runs come from
+ * different workflows or different triggering events — one workflow file with both `pull_request`
+ * and `push` jobs named `build` puts two runs named `build` on the same head SHA, and the ruleset /
+ * branch-protection required context gates the `pull_request` one. Grouping by name alone kept the
+ * NEWER run, so a green `push` `build` collapsed away a red required `pull_request` `build` and the
+ * merge loop never saw the failed required check (camunda/console-api-js#17). Runs whose event is
+ * unknown (legacy StatusContext, older payloads) share one name-only gate, exactly as pre-#955, so
+ * the #348 cancelled-rerun collapse is unchanged for them; a known event never merges with the
+ * unknown-event bucket, so an eventful red run is never shadowed by an event-less green one. */
+function gateKey(c: RollupEntry): string {
+  const event = (c.event || "").trim().toLowerCase();
+  return event === "" ? checkKey(c) : `${checkKey(c)}${event}`;
 }
 
 /** A run's ordering timestamp (newest wins): its completion, else its start, else its creation.
@@ -1055,17 +1076,22 @@ function isCancelled(c: RollupEntry): boolean {
   return (c.conclusion || c.state || "").toUpperCase() === "CANCELLED";
 }
 
-/** Collapse a head's rollup to the **newest run per check**. GitHub's CI-concurrency cancellation
+/** Collapse a head's rollup to the **newest run per gate**. GitHub's CI-concurrency cancellation
  * (issue #348) leaves BOTH a superseded run (stamped `CANCELLED`) and the newer run that replaced
  * it on the *same head SHA*, under the same check name. Counting the stale `CANCELLED` as a failure
  * escalates a self-healing PR whose head is actually green. The rollup is already scoped to the head
- * commit, so grouping by check name and keeping the newest run per name yields one ground-truth
- * conclusion per `(headSha, checkName)`. Ties (equal/absent timestamps) prefer a non-`CANCELLED`
- * run, so a superseded cancellation never shadows the real result even when GitHub omits times. */
+ * commit, so grouping by gate and keeping the newest run per gate yields one ground-truth
+ * conclusion per `(headSha, gate)`. Ties (equal/absent timestamps) prefer a non-`CANCELLED`
+ * run, so a superseded cancellation never shadows the real result even when GitHub omits times.
+ *
+ * The gate is the check's display identity PLUS its triggering event when known (issue #955): two
+ * runs named `build` from `pull_request` and `push` are different gates, so a newer green push run
+ * no longer collapses away a red required PR run. Within one `(name, event)` gate the #348
+ * cancelled-rerun collapse is preserved verbatim. */
 export function latestRunPerCheck(rollup: RollupEntry[]): RollupEntry[] {
   const newest = new Map<string, RollupEntry>();
   for (const c of rollup) {
-    const key = checkKey(c);
+    const key = gateKey(c);
     const prev = newest.get(key);
     if (prev === undefined) {
       newest.set(key, c);
@@ -1086,14 +1112,22 @@ export function latestRunPerCheck(rollup: RollupEntry[]): RollupEntry[] {
  * both the CheckRun shape (`conclusion` + `name`/`workflowName`) and the legacy StatusContext
  * shape (`state` + `context`). The names are what the CI-fix agent is handed so it knows which
  * gates to make green; `failingChecks` (the count) is derived from this list. Derivation is over the
- * **newest run per check** (`latestRunPerCheck`) so a `CANCELLED` run superseded by a newer green
- * run on the identical head SHA is not counted as a failing gate (issue #348). */
+ * **newest run per gate** (`latestRunPerCheck`) so a `CANCELLED` run superseded by a newer green
+ * run on the identical head SHA is not counted as a failing gate (issue #348). A name is failed
+ * when ANY non-superseded gate of that name is failed (issue #955): a green `push` run must not
+ * satisfy a red `pull_request` run of the same name, so the names are deduped to the display name —
+ * the required context (e.g. `build`) the fix-ci agent has to make green. */
 export function failingCheckNames(rollup: RollupEntry[]): string[] {
   const bad = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
   const names: string[] = [];
+  const seen = new Set<string>();
   for (const c of latestRunPerCheck(rollup)) {
     const v = (c.conclusion || c.state || "").toUpperCase();
-    if (bad.has(v)) names.push(checkKey(c));
+    const name = checkKey(c);
+    if (bad.has(v) && !seen.has(name)) {
+      seen.add(name);
+      names.push(name);
+    }
   }
   return names;
 }
@@ -1101,20 +1135,26 @@ export function failingCheckNames(rollup: RollupEntry[]): string[] {
 /** Names of checks that are still in flight — queued or in progress, i.e. NOT yet complete and not a
  * hard failure. Covers the CheckRun shape (`status` QUEUED/IN_PROGRESS/PENDING/WAITING/… anything but
  * COMPLETED) and the legacy StatusContext shape (`state` PENDING/EXPECTED). Derived over the newest
- * run per check (`latestRunPerCheck`) like {@link failingCheckNames}, so a superseded run doesn't
- * linger as pending. A `checks-green` gate MUST count these so it never reports green while a run has
- * not yet concluded (a pending run has no failing conclusion, so it would otherwise slip through). */
+ * run per gate (`latestRunPerCheck`) like {@link failingCheckNames}, so a superseded run doesn't
+ * linger as pending; deduped to the display name so same-named runs from different events (issue
+ * #955) list the gate once. A `checks-green` gate MUST count these so it never reports green while a
+ * run has not yet concluded (a pending run has no failing conclusion, so it would otherwise slip
+ * through). */
 export function pendingCheckNames(rollup: RollupEntry[]): string[] {
   const names: string[] = [];
+  const seen = new Set<string>();
   for (const c of latestRunPerCheck(rollup)) {
     const status = (c.status || "").toUpperCase();
-    if (status !== "") {
-      // CheckRun: anything other than COMPLETED is still running/queued.
-      if (status !== "COMPLETED") names.push(checkKey(c));
-    } else {
-      // Legacy StatusContext: PENDING/EXPECTED are not-yet-concluded.
-      const state = (c.state || "").toUpperCase();
-      if (state === "PENDING" || state === "EXPECTED") names.push(checkKey(c));
+    const name = checkKey(c);
+    const pending =
+      status !== ""
+        ? // CheckRun: anything other than COMPLETED is still running/queued.
+          status !== "COMPLETED"
+        : // Legacy StatusContext: PENDING/EXPECTED are not-yet-concluded.
+          (c.state || "").toUpperCase() === "PENDING" || (c.state || "").toUpperCase() === "EXPECTED";
+    if (pending && !seen.has(name)) {
+      seen.add(name);
+      names.push(name);
     }
   }
   return names;
@@ -1124,27 +1164,41 @@ export function pendingCheckNames(rollup: RollupEntry[]): string[] {
  * (`name`/`workflowName`) and the legacy StatusContext shape (`context`). Used to test whether a
  * repo's *required* checks are present on the head — so an unrelated always-on check (e.g.
  * Mergify's "Merge Queue") doesn't masquerade as the required CI run having already happened.
- * Deduped to the newest run per check so a superseded rerun doesn't list a check name twice. */
+ * Deduped to the newest run per gate so a superseded rerun doesn't list a check name twice, and
+ * deduped to the display name so same-named runs from different events (issue #955) report the
+ * required context once — presence is a per-name question. */
 export function allCheckNames(rollup: RollupEntry[]): string[] {
   const names: string[] = [];
+  const seen = new Set<string>();
   for (const c of latestRunPerCheck(rollup)) {
     const name = c.name || c.context || c.workflowName;
-    if (name) names.push(name);
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      names.push(name);
+    }
   }
   return names;
 }
 
 /** The ground-truth conclusion of each head check, keyed by check name, derived over the **newest run
- * per check** (`latestRunPerCheck`) so a `CANCELLED` run superseded by a newer green run on the
+ * per gate** (`latestRunPerCheck`) so a `CANCELLED` run superseded by a newer green run on the
  * identical head SHA reports the green result, not the stale cancellation (issue #348). The value is
  * the run's `conclusion` (CheckRun) or `state` (legacy StatusContext), upper-cased; a still-in-flight
  * run that has not concluded maps to `""` (it has no conclusion — `pendingCheckNames` tracks those).
  * In-flight is normalised to `""` for BOTH shapes: a CheckRun whose `status` is not `COMPLETED`, and a
  * legacy StatusContext whose `state` is `PENDING`/`EXPECTED`, so a caller never mistakes a pending
  * status-context's `PENDING`/`EXPECTED` `state` for a terminal conclusion.
+ *
+ * When same-named runs come from DIFFERENT triggering events (issue #955) they are different gates,
+ * so the per-name value reduces across them failure-first: a hard failure (`FAILURE`, `TIMED_OUT`,
+ * `CANCELLED`, `ACTION_REQUIRED`, `STARTUP_FAILURE`, `ERROR`) on ANY non-superseded gate wins over
+ * another gate's green — a green `push` run must not satisfy a red required `pull_request` run of
+ * the same name — then a concluded result wins over a still-in-flight `""`, so a pending gate never
+ * masks a settled one.
  * Lets `classifyMergeability` intersect a repo's declared `requiredChecks` against actual head
  * conclusions and honour each check's `acceptedConclusions` without re-deriving per-run state. */
 export function checkConclusions(rollup: RollupEntry[]): Record<string, string> {
+  const bad = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
   const out: Record<string, string> = {};
   for (const c of latestRunPerCheck(rollup)) {
     const status = (c.status || "").toUpperCase();
@@ -1152,7 +1206,14 @@ export function checkConclusions(rollup: RollupEntry[]): Record<string, string> 
     // A still-in-flight run has no terminal conclusion — normalise both shapes to "" (mirrors
     // `pendingCheckNames`): CheckRun status != COMPLETED, or legacy StatusContext state PENDING/EXPECTED.
     const inFlight = status !== "" ? status !== "COMPLETED" : state === "PENDING" || state === "EXPECTED";
-    out[checkKey(c)] = inFlight ? "" : (c.conclusion || c.state || "").toUpperCase();
+    const conclusion = inFlight ? "" : (c.conclusion || c.state || "").toUpperCase();
+    const name = checkKey(c);
+    const prev = out[name];
+    if (prev === undefined || (bad.has(conclusion) && !bad.has(prev)) || (prev === "" && conclusion !== "")) {
+      // First gate of this name, a newly-seen hard failure (failure wins across events, #955), or a
+      // settled conclusion replacing a still-in-flight placeholder.
+      out[name] = conclusion;
+    }
   }
   return out;
 }

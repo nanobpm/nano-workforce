@@ -12,7 +12,7 @@
 
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { allCheckNames, failingCheckNames, latestRunPerCheck } from "./github.ts";
+import { allCheckNames, checkConclusions, failingCheckNames, latestRunPerCheck } from "./github.ts";
 
 test("a CANCELLED run superseded by a newer green run on the same head does not count as failing", () => {
   const rollup = [
@@ -90,4 +90,76 @@ test("legacy StatusContext (state + context) supersession is handled by createdA
     { context: "ci/legacy", state: "SUCCESS", createdAt: "2024-01-01T00:02:00Z" },
   ];
   assertEquals(failingCheckNames(rollup), [], "a superseded legacy status context is not a failing gate");
+});
+
+// ── Issue #955: same display name, DIFFERENT triggering events — not the same gate ──────────────
+//
+// One workflow file with both `pull_request` and `push` jobs named `build` puts TWO runs named
+// `build` on the same head SHA. They are different gates: the ruleset / branch-protection required
+// context gates the `pull_request` run, so a red PR `build` must never be collapsed away by a newer
+// green push `build` (camunda/console-api-js#17: the collapse hid the red required check, the merge
+// loop classified `waiting`, and `senior:fix-ci` never ran).
+
+test("#955: a red pull_request `build` is not collapsed away by a newer green push `build`", () => {
+  const rollup = [
+    // The required gate: PR-event run, failed (biome check on CHANGELOG.md), completed 00:41:34Z.
+    { name: "build", event: "pull_request", conclusion: "FAILURE", startedAt: "2026-11-12T00:30:00Z", completedAt: "2026-11-12T00:41:34Z" },
+    // A different gate sharing the display name: push-event run, green, completed 4s later.
+    { name: "build", event: "push", conclusion: "SUCCESS", startedAt: "2026-11-12T00:41:30Z", completedAt: "2026-11-12T00:41:38Z" },
+  ];
+  assertEquals(
+    failingCheckNames(rollup),
+    ["build"],
+    "the red required pull_request run must survive the collapse — a green push job must not satisfy it",
+  );
+  assertEquals(
+    checkConclusions(rollup).build,
+    "FAILURE",
+    "the gate's conclusion is the red pull_request run's, so requiredChecksVerdict sees the failure",
+  );
+});
+
+test("#955: the #348 collapse still holds WITHIN one event — a cancelled rerun of the same job collapses", () => {
+  const rollup = [
+    { name: "build", event: "pull_request", conclusion: "CANCELLED", startedAt: "2026-11-12T00:30:00Z", completedAt: "2026-11-12T00:31:00Z" },
+    { name: "build", event: "pull_request", conclusion: "SUCCESS", startedAt: "2026-11-12T00:32:00Z", completedAt: "2026-11-12T00:35:00Z" },
+  ];
+  assertEquals(failingCheckNames(rollup), [], "a CANCELLED rerun of the SAME workflow/event still collapses to the newest run");
+  assertEquals(checkConclusions(rollup).build, "SUCCESS");
+});
+
+test("#955: a green pull_request run does not mask a red push run of the same name (symmetric)", () => {
+  const rollup = [
+    { name: "build", event: "pull_request", conclusion: "SUCCESS", startedAt: "2026-11-12T00:41:30Z", completedAt: "2026-11-12T00:41:38Z" },
+    { name: "build", event: "push", conclusion: "FAILURE", startedAt: "2026-11-12T00:30:00Z", completedAt: "2026-11-12T00:41:34Z" },
+  ];
+  assertEquals(failingCheckNames(rollup), ["build"], "any non-superseded failed run of the name fails the gate");
+});
+
+test("#955: distinct events keep both runs in latestRunPerCheck (one per gate, not one per name)", () => {
+  const rollup = [
+    { name: "build", event: "pull_request", conclusion: "FAILURE", completedAt: "2026-11-12T00:41:34Z" },
+    { name: "build", event: "push", conclusion: "SUCCESS", completedAt: "2026-11-12T00:41:38Z" },
+  ];
+  const latest = latestRunPerCheck(rollup);
+  assertEquals(latest.length, 2, "two different gates sharing a name must both survive");
+});
+
+test("#955: runs without event identity keep the pre-#955 name-only collapse (legacy shapes unchanged)", () => {
+  // A rollup whose entries carry no `event` (older gh, a StatusContext-only head) collapses exactly
+  // as before: same name → newest run wins.
+  const rollup = [
+    { name: "build", conclusion: "FAILURE", completedAt: "2026-11-12T00:41:34Z" },
+    { name: "build", conclusion: "SUCCESS", completedAt: "2026-11-12T00:41:38Z" },
+  ];
+  assertEquals(failingCheckNames(rollup), [], "no event identity → the name-only #348 collapse is unchanged");
+  assertEquals(latestRunPerCheck(rollup).length, 1);
+});
+
+test("#955: allCheckNames still reports the display name once when events differ", () => {
+  const rollup = [
+    { name: "build", event: "pull_request", conclusion: "FAILURE", completedAt: "2026-11-12T00:41:34Z" },
+    { name: "build", event: "push", conclusion: "SUCCESS", completedAt: "2026-11-12T00:41:38Z" },
+  ];
+  assertEquals(allCheckNames(rollup), ["build"], "presence is by required-context name, not per (name, event) pair");
 });

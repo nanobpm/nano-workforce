@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, checkConclusions, hasCopilotWorkStarted, classifyBlockedCause, copilotWorkStartedSince, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, THREAD_PROBE_FAILED, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, hasCopilotWorkStarted, classifyBlockedCause, copilotWorkStartedSince, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, failingCheckNames, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, THREAD_PROBE_FAILED, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -818,6 +818,88 @@ for (const c of TOKEN_MODE) {
     assertEquals(classifyMergeability(s, protocol), c.want);
   });
 }
+
+// ── Same-named checks from different triggering events are different gates (issue #955) ─────────
+//
+// One workflow file with both `pull_request` and `push` jobs named `build` puts two runs named
+// `build` on the same head SHA. Grouping the rollup by display name alone kept the NEWER run, so a
+// red required `pull_request` `build` was collapsed away by a green `push` `build` 4s later —
+// `failingChecks` read 0, `classifyBlockedCause` could not see the failed required check, the
+// poller classified `waiting`, and `senior:fix-ci` never ran (camunda/console-api-js#17). These
+// tests walk the exact observed rollup through the derivation helpers into the classifier — no
+// merge-protocol file required.
+
+test("#955 classifier walk: red PR `build` + newer green push `build` + pending CLA, BLOCKED -> blocked", () => {
+  // The exact head `641c7ee9` rollup shape from camunda/console-api-js#17.
+  const rollup = [
+    { name: "build", event: "pull_request", conclusion: "FAILURE", status: "COMPLETED", startedAt: "2026-11-12T00:30:00Z", completedAt: "2026-11-12T00:41:34Z" },
+    { name: "build", event: "push", conclusion: "SUCCESS", status: "COMPLETED", startedAt: "2026-11-12T00:41:30Z", completedAt: "2026-11-12T00:41:38Z" },
+    { context: "license/cla", state: "PENDING", createdAt: "2026-11-12T00:30:05Z" },
+  ];
+  const names = failingCheckNames(rollup);
+  assertEquals(names, ["build"], "the red required pull_request run survives the collapse and names the gate");
+  const s = prState({
+    mergeStateStatus: "BLOCKED",
+    failingChecks: names.length,
+    failingCheckNames: names,
+    unresolvedThreads: 0,
+  });
+  // No merge-protocol file on the repo — the default protocol declares no requiredChecks.
+  assertEquals(classifyBlockedCause(s), "checks");
+  assertEquals(classifyMergeability(s), "blocked", "the merge loop must route to fix-ci, not park on wait-mergeable");
+  assertEquals(classifyMergeability(s, DEFAULT_MERGE_PROTOCOL), "blocked");
+});
+
+test("#955 classifier walk: the same rollup ALSO blocks a ruleset-declared required `build`", () => {
+  // Even with #901's ruleset-sourced requiredChecks, the collapsed-away red run made
+  // `requiredChecksVerdict` return "pass". With the fix the required `build` reads FAILURE.
+  const rollup = [
+    { name: "build", event: "pull_request", conclusion: "FAILURE", status: "COMPLETED", completedAt: "2026-11-12T00:41:34Z" },
+    { name: "build", event: "push", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:38Z" },
+  ];
+  const conclusions = checkConclusions(rollup);
+  assertEquals(conclusions.build, "FAILURE", "the required context's conclusion is the red PR run's");
+  const s = prState({
+    mergeStateStatus: "BLOCKED",
+    failingChecks: 1,
+    failingCheckNames: ["build"],
+    presentCheckNames: ["build"],
+    checkConclusions: conclusions,
+    unresolvedThreads: 0,
+  });
+  assertEquals(classifyMergeability(s, protocolWith({ requiredChecks: reqChecks("build") })), "blocked");
+});
+
+test("#955: a genuinely non-required red check of a colliding name does not newly block a CLEAN PR", () => {
+  // UNSTABLE + only an OPTIONAL red check stays "ready" — the fix must not turn every cross-event
+  // red run into a merge block when GitHub itself says only non-required checks failed.
+  const rollup = [
+    { name: "build", event: "pull_request", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:34Z" },
+    { name: "build", event: "push", conclusion: "FAILURE", status: "COMPLETED", completedAt: "2026-11-12T00:41:38Z" },
+  ];
+  const names = failingCheckNames(rollup);
+  assertEquals(names, ["build"], "the optional red push run is still reported as failing");
+  const s = prState({
+    mergeStateStatus: "UNSTABLE",
+    failingChecks: names.length,
+    failingCheckNames: names,
+    unresolvedThreads: -1,
+  });
+  assertEquals(classifyMergeability(s), "ready", "UNSTABLE means only non-required checks failing — still mergeable");
+});
+
+test("#955: token mode (failingChecks === -1) is unchanged", () => {
+  const s = prState({
+    mergeStateStatus: "BLOCKED",
+    failingChecks: -1,
+    totalChecks: -1,
+    presentCheckNames: [],
+    pendingCheckNames: [],
+    checkConclusions: {},
+    unresolvedThreads: 0,
+  });
+  assertEquals(classifyMergeability(s), "waiting", "unenumerable checks stay conservative — never newly blocked");
+});
 
 // ── Draft PRs are never landable (issue #454) ────────────────────────────────────────────────────
 //
