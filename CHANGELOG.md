@@ -1,3 +1,9 @@
+## [0.209.0](https://github.com/nanobpm/nano-workforce/compare/v0.208.5...v0.209.0) (2026-11-12)
+
+### Features
+
+* **nav:** green Delivery Graphs badge counting staged proposals awaiting approval ([#954](https://github.com/nanobpm/nano-workforce/issues/954)) ([21622b4](https://github.com/nanobpm/nano-workforce/commit/21622b4529383c575de7ffcf77548a704353c4d4))
+
 ## [0.208.5](https://github.com/nanobpm/nano-workforce/compare/v0.208.4...v0.208.5) (2026-11-11)
 
 ### Bug Fixes
