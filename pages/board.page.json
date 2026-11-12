@@ -35,7 +35,20 @@
           },
           {
             "label": "Delivery Graphs",
-            "page": "delivery-graphs"
+            "page": "delivery-graphs",
+            "badge": {
+              "source": "app",
+              "table": "delivery_graph_proposals",
+              "filter": [
+                {
+                  "field": "status",
+                  "eq": "staged"
+                }
+              ],
+              "tone": "ok",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
           },
           {
             "label": "Tasks",
