@@ -21,6 +21,7 @@ function ops(over: Partial<ReviewRequestOps>, calls: string[]): ReviewRequestOps
     hasPending: async () => (calls.push("pending?"), false),
     remove: async () => calls.push("remove"),
     request: async () => (calls.push("request"), "requested"),
+    awaitStarted: async () => true,
     ...over,
   };
 }
@@ -51,4 +52,30 @@ test("Copilot not assignable reports unavailable; a transport error reports fail
     { reviewRequest: "failed" },
   );
   assertEquals(await makeHandler(ops({ request: async () => null }, []))(job(0), app), { reviewRequest: "failed" });
+});
+
+// Issue #951: a request that produced `review_requested` but never `copilot_work_started` is stuck —
+// verify via the timeline and withdraw + retry ONCE before leaving it to the bounded wait.
+test("a request that never starts Copilot is withdrawn and retried once (#951)", async () => {
+  const calls: string[] = [];
+  const { app } = fakeApp();
+  const out = await makeHandler(
+    ops({ awaitStarted: async () => (calls.push("started?"), false) }, calls),
+  )(job(0), app);
+  assertEquals(out, { reviewRequest: "requested" });
+  assertEquals(calls, ["request", "started?", "remove", "request", "started?"]);
+});
+
+test("a request that starts Copilot is not retried (#951)", async () => {
+  const calls: string[] = [];
+  const { app } = fakeApp();
+  await makeHandler(ops({ awaitStarted: async () => (calls.push("started?"), true) }, calls))(job(0), app);
+  assertEquals(calls, ["request", "started?"]);
+});
+
+test("an unverifiable timeline (null) is not treated as a dropped request (#951)", async () => {
+  const calls: string[] = [];
+  const { app } = fakeApp();
+  await makeHandler(ops({ awaitStarted: async () => (calls.push("started?"), null) }, calls))(job(0), app);
+  assertEquals(calls, ["request", "started?"]);
 });

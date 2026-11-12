@@ -716,7 +716,10 @@ export async function requestCopilotReview(
   const path = `repos/${repo}/pulls/${number}/requested_reviewers`;
   if (await useGh()) {
     try {
-      await runGh(["api", path, "-X", "POST", "-f", `reviewers[]=${COPILOT_REVIEWER}`]);
+      // `gh pr edit --add-reviewer @copilot` (issue #951): the REST POST with the bot login can add a
+      // `review_requested` event yet never start Copilot (`copilot_work_started` never appears); the
+      // gh-native @copilot reviewer path is the one that reliably triggers the review.
+      await runGh(["pr", "edit", String(number), "--repo", repo, "--add-reviewer", "@copilot"]);
       return "requested";
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -741,6 +744,73 @@ export async function requestCopilotReview(
   if (r.ok) return "requested";
   if (r.status === 422) return "unavailable";
   throw new Error(`github ${r.status} ${r.statusText}: ${(await r.text()).slice(0, 300)}`.trim());
+}
+
+/** Whether Copilot has STARTED working on a review request since `sinceIso` — a
+ * `copilot_work_started` event on the PR's issue timeline (issue #951). A request that produced
+ * `review_requested` but never `copilot_work_started` was silently dropped. `null` when no transport
+ * is usable or the read failed (unknown — callers must not treat it as "dropped").
+ *
+ * `opts.timeoutMs` bounds the WHOLE read (issue #951 review): the verification caller has a fixed
+ * deadline, so a stalled `gh` or REST read must not run past it and starve the BPMN review-wait
+ * timer. The `gh` path passes it to `runGh`'s process `timeout`; the REST path creates ONE
+ * `AbortSignal.timeout` before pagination and shares it across every page, so the whole walk —
+ * not each page — is bounded by the budget. A timeout surfaces as `null` (unknown), never `false`. */
+export async function hasCopilotWorkStarted(
+  repo: string,
+  number: number | string,
+  token: string,
+  sinceIso: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<boolean | null> {
+  const path = `repos/${repo}/issues/${number}/timeline?per_page=100`;
+  try {
+    let events: { event?: string; created_at?: string }[];
+    if (await useGh()) {
+      const out = await runGh(
+        ["api", path, "--paginate", "--slurp", "-H", "Accept: application/vnd.github+json"],
+        opts.timeoutMs === undefined ? undefined : { timeoutMs: opts.timeoutMs },
+      );
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      events = (JSON.parse(out) as { event?: string; created_at?: string }[][]).flat();
+    } else {
+      if (!token) return null;
+      // Walk EVERY page (mirrors the `gh --paginate` path): a `copilot_work_started` beyond the first
+      // 100 events must not read as "never started". An incomplete read (non-OK page, or the page cap
+      // still advertising `rel="next"`) is UNKNOWN (`null`), never `false`.
+      const MAX_PAGES = 20;
+      const signal = opts.timeoutMs === undefined ? undefined : AbortSignal.timeout(opts.timeoutMs);
+      events = [];
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const r = await fetch(`https://api.github.com/${path}&page=${page}`, {
+          headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+          ...(signal === undefined ? {} : { signal }),
+        });
+        if (!r.ok) return null;
+        // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+        const batch = (await r.json()) as { event?: string; created_at?: string }[];
+        if (!Array.isArray(batch)) return null;
+        events.push(...batch);
+        const hasNext = /<[^>]*>;\s*rel="next"/.test(r.headers.get("link") ?? "");
+        if (!hasNext) break;
+        if (page === MAX_PAGES) return copilotWorkStartedSince(events, sinceIso) ? true : null;
+      }
+    }
+    return copilotWorkStartedSince(events, sinceIso);
+  } catch {
+    return null;
+  }
+}
+
+/** Pure: does the timeline carry a `copilot_work_started` at/after `sinceIso`? GitHub timeline
+ * timestamps have WHOLE-SECOND precision, so the lower bound is floored to the second — otherwise a
+ * start in the same second as a millisecond-precise request time would never count. */
+export function copilotWorkStartedSince(events: { event?: string; created_at?: string }[], sinceIso: string): boolean {
+  const parsed = Date.parse(sinceIso);
+  const since = Number.isNaN(parsed) ? parsed : Math.floor(parsed / 1000) * 1000;
+  return events.some(
+    (e) => e.event === "copilot_work_started" && (Number.isNaN(since) || Date.parse(e.created_at ?? "") >= since),
+  );
 }
 
 /** Withdraw a pending Copilot review request (REST reviewers DELETE). Used by the merge loop's
@@ -1631,6 +1701,32 @@ function requiredChecksVerdict(s: PrState, protocol?: MergeProtocol): "blocked" 
   return "pass";
 }
 
+/** True for Mergify's merge-queue check run (e.g. "Mergify Merge Queue" / "Mergify — Merge Queue"). */
+export function isMergifyQueueCheck(name: string): boolean {
+  return /mergify/i.test(name) && /queue/i.test(name);
+}
+
+const SETTLED_OK_CONCLUSIONS = new Set(["SUCCESS", "SKIPPED"]);
+
+/** Issue #951: is this BLOCKED PR merely waiting for the repo's declared `mergify-queue` land step?
+ * True only when the protocol lands via `mergify-queue`, checks are enumerable and settled (none
+ * failing, none pending), and every non-SUCCESS/SKIPPED check is a Mergify queue check at NEUTRAL —
+ * with at least one such check present. Anything else keeps the conservative `waiting`. */
+export function awaitingMergifyEnqueue(s: PrState, protocol?: MergeProtocol): boolean {
+  if (protocol?.land.method !== "mergify-queue") return false;
+  if (s.failingChecks !== 0 || s.pendingCheckNames.length > 0) return false;
+  let sawMergifyNeutral = false;
+  for (const [name, conclusion] of Object.entries(s.checkConclusions)) {
+    if (SETTLED_OK_CONCLUSIONS.has(conclusion)) continue;
+    if (conclusion === "NEUTRAL" && isMergifyQueueCheck(name)) {
+      sawMergifyNeutral = true;
+      continue;
+    }
+    return false;
+  }
+  return sawMergifyNeutral;
+}
+
 export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Mergeability {
   // A draft PR is NEVER landable — GitHub refuses the merge outright, whatever its checks say — so
   // draft outranks every other signal (issue #454). Surface it as a first-class verdict rather than
@@ -1723,6 +1819,11 @@ export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Merg
           return "blocked";
         case "review-threads":
           return "review-threads";
+        case "reviews":
+          // Issue #951: on a `mergify-queue` repo a green, thread-free PR whose ONLY non-success
+          // check is Mergify's own queue check at NEUTRAL ("not queued yet") is waiting for the
+          // declared land step (`@mergifyio queue`), not a human review — land it.
+          return awaitingMergifyEnqueue(s, protocol) ? "ready" : "waiting";
         default:
           return "waiting";
       }
@@ -2320,4 +2421,39 @@ export async function ensurePromotionPr(
   const created = await createPullRequest(repo, headBranch, baseBranch, title, body, token);
   if (!created) return null;
   return { ...created, created: true };
+}
+
+/** Bring a PR's head up to date with its base (GitHub's "Update branch" — `PUT
+ * /pulls/{n}/update-branch`, the API behind `gh pr update-branch`). `expectedHeadSha` pins the head
+ * the caller judged, so a concurrent push makes GitHub refuse (422) rather than merge base into a
+ * head nobody inspected. Returns whether GitHub accepted the update; never throws (best-effort —
+ * a refusal falls through to the caller's existing remediation). Issue #951. */
+export async function updatePrBranch(
+  repo: string,
+  number: number | string,
+  token: string,
+  expectedHeadSha: string | null,
+): Promise<boolean> {
+  const apiPath = `repos/${repo}/pulls/${number}/update-branch`;
+  try {
+    if (await useGh()) {
+      const args = ["api", "-X", "PUT", apiPath, "-H", "Accept: application/vnd.github+json"];
+      if (expectedHeadSha) args.push("-f", `expected_head_sha=${expectedHeadSha}`);
+      await runGh(args);
+      return true;
+    }
+    if (!token) return false;
+    const r = await fetch(`https://api.github.com/${apiPath}`, {
+      method: "PUT",
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(expectedHeadSha ? { expected_head_sha: expectedHeadSha } : {}),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
 }

@@ -13,6 +13,7 @@ import { matchAdjudication, prAdjudications, resetAdjudications } from "./adjudi
 import { AGENT_SLA_JOB_TYPES, recordAgentJobObservation } from "./agentActivationLedger.ts";
 import { completeEscalationAutoApplied, escalationFormId } from "./agentCompletion.ts";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
+import { maybeUpdateBehindBranch } from "./behindBaseRemedy.ts";
 import {
   CAPS_RESOLVED_MESSAGE,
   type CapabilityNeed,
@@ -2644,6 +2645,12 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
           pr,
           `blocked by ${st.unresolvedThreads} unresolved review thread(s)`,
         );
+        continue;
+      }
+      if (verdict === "blocked" && (await maybeUpdateBehindBranch(repo, number, token, st, protocol))) {
+        // Issue #951: the checks failed on a head BEHIND its base (e.g. a CI-infra fix since landed on
+        // base) — update the branch (and reopen on a reopen-CI repo) and re-poll the fresh head
+        // instead of dispatching fix-ci / escalating "failing required checks". Once per head.
         continue;
       }
       if (verdict === "ready") {

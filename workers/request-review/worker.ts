@@ -11,7 +11,12 @@
 // second POST is then a no-op. On a re-request (round > 0) with Copilot still pending, withdraw the
 // request first and re-add it — the equivalent that re-triggers the review.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { hasPendingCopilotReviewer, removeCopilotReviewer, requestCopilotReview } from "../../app/github.ts";
+import {
+  hasCopilotWorkStarted,
+  hasPendingCopilotReviewer,
+  removeCopilotReviewer,
+  requestCopilotReview,
+} from "../../app/github.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`RequestReviewIn` in merge-loop.bpmn) — ADR 0040.
@@ -28,6 +33,29 @@ export interface ReviewRequestOps {
   hasPending: (repo: string, prNumber: number) => Promise<boolean | null>;
   remove: (repo: string, prNumber: number) => Promise<unknown>;
   request: (repo: string, prNumber: number) => Promise<"requested" | "unavailable" | null>;
+  /** Issue #951: poll the PR timeline until Copilot STARTS the requested review
+   * (`copilot_work_started` at/after `sinceIso`) or the verify window (~2 min) elapses. `true` =
+   * started, `false` = the request was silently dropped, `null` = unverifiable (treated as started). */
+  awaitStarted: (repo: string, prNumber: number, sinceIso: string) => Promise<boolean | null>;
+}
+
+const VERIFY_WINDOW_MS = 120_000;
+const VERIFY_POLL_MS = 15_000;
+
+async function pollWorkStarted(repo: string, n: number, sinceIso: string): Promise<boolean | null> {
+  const deadline = Date.now() + VERIFY_WINDOW_MS;
+  for (;;) {
+    // Bound each read by the REMAINING verification budget (issue #951 review): the deadline is
+    // otherwise checked only AFTER the read returns, so a stalled `gh`/REST read could run past it
+    // and starve the BPMN review-wait timer. A read that exhausts its budget returns null (unknown)
+    // — surfaced as "started" (no spurious retry), and the loop stops because the deadline is met.
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    const started = await hasCopilotWorkStarted(repo, n, token(), sinceIso, { timeoutMs: remaining });
+    if (started !== false) return started;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, Math.min(VERIFY_POLL_MS, deadline - Date.now())));
+  }
 }
 
 const token = () => process.env.GITHUB_TOKEN ?? "";
@@ -35,6 +63,7 @@ const defaultOps: ReviewRequestOps = {
   hasPending: (repo, n) => hasPendingCopilotReviewer(repo, n, token()),
   remove: (repo, n) => removeCopilotReviewer(repo, n, token()),
   request: (repo, n) => requestCopilotReview(repo, n, token()),
+  awaitStarted: pollWorkStarted,
 };
 
 export function makeHandler(ops: ReviewRequestOps): AppJobHandler<In, Out> {
@@ -47,7 +76,18 @@ export function makeHandler(ops: ReviewRequestOps): AppJobHandler<In, Out> {
       if (round > 0 && (await ops.hasPending(repo, prNumber)) === true) {
         await ops.remove(repo, prNumber);
       }
-      const res = await ops.request(repo, prNumber);
+      let since = new Date().toISOString();
+      let res = await ops.request(repo, prNumber);
+      // Issue #951: verify the request actually STARTED a review. A request that only produced
+      // `review_requested` (no `copilot_work_started`) is stuck — withdraw it and retry ONCE before
+      // leaving it to the bounded wait (and, past budget, the escalation).
+      if (res === "requested" && (await ops.awaitStarted(repo, prNumber, since)) === false) {
+        app.log.warn(`request-review: ${prKey} Copilot review request did not start — withdrawing and retrying once`);
+        await ops.remove(repo, prNumber);
+        since = new Date().toISOString();
+        res = await ops.request(repo, prNumber);
+        if (res === "requested") await ops.awaitStarted(repo, prNumber, since);
+      }
       result = res === "requested" ? "requested" : res === "unavailable" ? "unavailable" : "failed";
     } catch (err) {
       app.log.warn(`request-review: ${prKey} Copilot review request failed: ${err}`);
