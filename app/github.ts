@@ -1983,18 +1983,25 @@ const SETTLED_OK_CONCLUSIONS = new Set(["SUCCESS", "SKIPPED"]);
 /** Issue #951: is this BLOCKED PR merely waiting for the repo's declared `mergify-queue` land step?
  * True only when the protocol lands via `mergify-queue`, checks are enumerable and settled (none
  * failing, none pending), and every non-SUCCESS/SKIPPED check is a Mergify queue check at NEUTRAL —
- * with at least one such check present. Anything else keeps the conservative `waiting`. */
+ * with at least one such check present. Anything else keeps the conservative `waiting`. With
+ * per-gate conclusions (#955) EVERY retained gate of a name must qualify: a same-named gate that
+ * settled unaccepted (not SUCCESS/SKIPPED, not a Mergify-queue NEUTRAL) disqualifies the name even
+ * when a sibling gate is green. */
 export function awaitingMergifyEnqueue(s: PrState, protocol?: MergeProtocol): boolean {
   if (protocol?.land.method !== "mergify-queue") return false;
   if (s.failingChecks !== 0 || s.pendingCheckNames.length > 0) return false;
   let sawMergifyNeutral = false;
-  for (const [name, conclusion] of Object.entries(s.checkConclusions)) {
-    if (SETTLED_OK_CONCLUSIONS.has(conclusion)) continue;
-    if (conclusion === "NEUTRAL" && isMergifyQueueCheck(name)) {
-      sawMergifyNeutral = true;
-      continue;
+  for (const [name, gates] of Object.entries(s.checkGateConclusions)) {
+    let nameHasMergifyNeutral = false;
+    for (const conclusion of gates) {
+      if (SETTLED_OK_CONCLUSIONS.has(conclusion)) continue;
+      if (conclusion === "NEUTRAL" && isMergifyQueueCheck(name)) {
+        nameHasMergifyNeutral = true;
+        continue;
+      }
+      return false;
     }
-    return false;
+    if (nameHasMergifyNeutral) sawMergifyNeutral = true;
   }
   return sawMergifyNeutral;
 }

@@ -18,7 +18,7 @@ function state(over: Partial<PrState>): PrState {
     failingCheckNames: [],
     presentCheckNames: ["build", "Mergify Merge Queue"],
     pendingCheckNames: [],
-    checkConclusions: { build: "SUCCESS", "Mergify Merge Queue": "NEUTRAL" },
+    checkGateConclusions: { build: ["SUCCESS"], "Mergify Merge Queue": ["NEUTRAL"] },
     totalChecks: 2,
     isDraft: false,
     headRefOid: "abc",
@@ -80,7 +80,7 @@ test("merge-stall-probe: BLOCKED gh-merge PR with green checks still waits (#951
 // must NOT classify that head's stale check failures as `blocked` (which starts fix-ci / escalates).
 // It defers to `waiting` (bounded re-poll) until the head moves or the remedy's window lapses.
 test("merge-stall-probe: a blocked verdict on a pending-update old head defers to waiting (#951)", async () => {
-  const blocked = state({ failingChecks: 1, failingCheckNames: ["build"], checkConclusions: { build: "FAILURE" } });
+  const blocked = state({ failingChecks: 1, failingCheckNames: ["build"], checkGateConclusions: { build: ["FAILURE"] } });
   // Sanity: without a pending update this IS blocked (would route to fix-ci).
   assertEquals((await run(blocked, MERGIFY, false)).mergeState, "blocked");
   // With the update still pending on this head, the probe holds remediation.
