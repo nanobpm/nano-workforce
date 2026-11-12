@@ -1,3 +1,9 @@
+## [0.209.1](https://github.com/nanobpm/nano-workforce/compare/v0.209.0...v0.209.1) (2026-11-12)
+
+### Bug Fixes
+
+* **merge-loop:** land CLEAN mergify-queue PRs instead of escalating; never escalate merged PRs ([#953](https://github.com/nanobpm/nano-workforce/issues/953)) ([5b70c17](https://github.com/nanobpm/nano-workforce/commit/5b70c1733cd919fcc8f43ca118a863d3714030ea)), closes [#951](https://github.com/nanobpm/nano-workforce/issues/951) [#951](https://github.com/nanobpm/nano-workforce/issues/951)
+
 ## [0.209.0](https://github.com/nanobpm/nano-workforce/compare/v0.208.5...v0.209.0) (2026-11-12)
 
 ### Features
