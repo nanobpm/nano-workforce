@@ -968,12 +968,16 @@ export interface PrState {
   * REST fallback can't enumerate checks). Lets `classifyMergeability` hold a merge when a
   * declared-required check has not yet concluded, without re-deriving conclusions by hand. */
   pendingCheckNames: string[];
-  /** The newest concluded conclusion per head check (name → uppercase conclusion, e.g. `SUCCESS` /
-  * `FAILURE` / `NEUTRAL` / `SKIPPED`), derived over `latestRunPerCheck` so a `CANCELLED` run
-  * superseded by a newer green run on the same head reports the green result (#348). A still-pending
-  * run maps to `""` (it has no conclusion yet — use `pendingCheckNames`). Empty in token mode. Lets
-  * `classifyMergeability` honour a required check's `acceptedConclusions` precisely. */
-  checkConclusions: Record<string, string>;
+  /** The terminal conclusion of EVERY retained gate of each head check (name → one uppercase
+   * conclusion per non-superseded gate, e.g. `["SUCCESS"]` or `["FAILURE","SUCCESS"]` when
+   * same-named runs from different events are different gates, #955), derived over
+   * `latestRunPerCheck` so a `CANCELLED` run superseded by a newer green run on the same head
+   * reports the green result (#348). A still-pending gate contributes `""` (it has no conclusion
+   * yet — use `pendingCheckNames`). Empty in token mode. Keeping each gate's conclusion (rather than
+   * one reduced value per name) lets `classifyMergeability` honour a required check's
+   * `acceptedConclusions` precisely: EVERY retained gate must be accepted, and a settled rejection
+   * routes to fix-ci even while a same-named sibling gate is still pending. */
+  checkGateConclusions: Record<string, string[]>;
   /** Whether the PR is a draft (a fresh head run is produced by marking it ready, not reopen). */
   isDraft: boolean;
   /** Current head commit. Used to scope one-shot merge-protocol nudges to a landing attempt. */
@@ -1022,11 +1026,14 @@ interface RollupEntry {
   name?: string;
   context?: string;
   workflowName?: string;
-  /** The GitHub event that triggered the run (GraphQL `CheckRun.event`, e.g. `pull_request` /
-   * `push`). Two runs sharing a display name but triggered by different events are DIFFERENT gates —
-   * a ruleset / branch-protection required context gates the `pull_request` run, so a green `push`
-   * run must never collapse away a red `pull_request` run of the same name (issue #955). Absent on
-   * legacy StatusContext entries and older payloads; runs without it keep the name-only identity. */
+  /** The GitHub event that triggered the run (e.g. `pull_request` / `push`), read from GraphQL
+   * `CheckRun.checkSuite.workflowRun.event` (there is no `CheckRun.event` field; the `gh pr view
+   * --json statusCheckRollup` exporter omits it, so `fetchPrState` enriches it — see
+   * {@link enrichRollupEvents}). Two runs sharing a display name but triggered by different events
+   * are DIFFERENT gates — a ruleset / branch-protection required context gates the `pull_request`
+   * run, so a green `push` run must never collapse away a red `pull_request` run of the same name
+   * (issue #955). Absent on legacy StatusContext entries and older payloads; runs without it keep
+   * the name-only identity. */
   event?: string;
   /** CheckRun timestamps (GraphQL `statusCheckRollup`). A superseded run and the newer run that
    * replaced it carry the same check name but different times, so they order the runs of one check.
@@ -1053,10 +1060,19 @@ function checkKey(c: RollupEntry): string {
  * merge loop never saw the failed required check (camunda/console-api-js#17). Runs whose event is
  * unknown (legacy StatusContext, older payloads) share one name-only gate, exactly as pre-#955, so
  * the #348 cancelled-rerun collapse is unchanged for them; a known event never merges with the
- * unknown-event bucket, so an eventful red run is never shadowed by an event-less green one. */
+ * unknown-event bucket, so an eventful red run is never shadowed by an event-less green one.
+ *
+ * The key is an UNAMBIGUOUS tuple, not a bare concatenation: `${name.length}:${name}${event}`.
+ * Concatenating `name + event` lets two DIFFERENT identities collide — `name:"build", event:"push"`
+ * and an event-less `context:"buildpush"` both produce `"buildpush"`, so a newer green entry could
+ * discard an unrelated red check (and the known-event bucket could merge with the unknown-event one
+ * this function documents as separate). Length-prefixing the name makes the name/event boundary
+ * explicit, so no `(name, event)` pair can alias a different pair or a name-only key. */
 function gateKey(c: RollupEntry): string {
   const event = (c.event || "").trim().toLowerCase();
-  return event === "" ? checkKey(c) : `${checkKey(c)}${event}`;
+  if (event === "") return checkKey(c);
+  const name = checkKey(c);
+  return `${name.length}:${name}${event}`;
 }
 
 /** A run's ordering timestamp (newest wins): its completion, else its start, else its creation.
@@ -1180,26 +1196,26 @@ export function allCheckNames(rollup: RollupEntry[]): string[] {
   return names;
 }
 
-/** The ground-truth conclusion of each head check, keyed by check name, derived over the **newest run
- * per gate** (`latestRunPerCheck`) so a `CANCELLED` run superseded by a newer green run on the
- * identical head SHA reports the green result, not the stale cancellation (issue #348). The value is
- * the run's `conclusion` (CheckRun) or `state` (legacy StatusContext), upper-cased; a still-in-flight
- * run that has not concluded maps to `""` (it has no conclusion — `pendingCheckNames` tracks those).
- * In-flight is normalised to `""` for BOTH shapes: a CheckRun whose `status` is not `COMPLETED`, and a
- * legacy StatusContext whose `state` is `PENDING`/`EXPECTED`, so a caller never mistakes a pending
- * status-context's `PENDING`/`EXPECTED` `state` for a terminal conclusion.
+/** The ground-truth terminal conclusion of EVERY retained gate of a check, keyed by check name,
+ * derived over the **newest run per gate** (`latestRunPerCheck`) so a `CANCELLED` run superseded by
+ * a newer green run on the identical head SHA reports the green result, not the stale cancellation
+ * (issue #348). Each value is that gate run's `conclusion` (CheckRun) or `state` (legacy
+ * StatusContext), upper-cased; a still-in-flight gate maps to `""` (it has no conclusion —
+ * `pendingCheckNames` tracks those). In-flight is normalised to `""` for BOTH shapes: a CheckRun
+ * whose `status` is not `COMPLETED`, and a legacy StatusContext whose `state` is
+ * `PENDING`/`EXPECTED`, so a caller never mistakes a pending status-context's `PENDING`/`EXPECTED`
+ * `state` for a terminal conclusion.
  *
- * When same-named runs come from DIFFERENT triggering events (issue #955) they are different gates,
- * so the per-name value reduces across them failure-first: a hard failure (`FAILURE`, `TIMED_OUT`,
- * `CANCELLED`, `ACTION_REQUIRED`, `STARTUP_FAILURE`, `ERROR`) on ANY non-superseded gate wins over
- * another gate's green — a green `push` run must not satisfy a red required `pull_request` run of
- * the same name — then a concluded result wins over a still-in-flight `""`, so a pending gate never
- * masks a settled one.
- * Lets `classifyMergeability` intersect a repo's declared `requiredChecks` against actual head
- * conclusions and honour each check's `acceptedConclusions` without re-deriving per-run state. */
-export function checkConclusions(rollup: RollupEntry[]): Record<string, string> {
-  const bad = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
-  const out: Record<string, string> = {};
+ * Every retained gate KEEPS its own conclusion (issue #955): when same-named runs come from
+ * DIFFERENT triggering events they are different gates, so the name maps to ONE ENTRY PER GATE —
+ * e.g. a red `pull_request` `build` and a green `push` `build` yield `build → ["FAILURE",
+ * "SUCCESS"]`. No cross-gate reduction happens here: preserving each gate's terminal conclusion is
+ * what lets `requiredChecksVerdict` (a) route a settled FAILURE to fix-ci even while a same-named
+ * sibling gate is still pending, and (b) require EVERY retained gate of a required name to satisfy
+ * `acceptedConclusions` — a `SUCCESS` gate must not let a same-named `NEUTRAL`/`SKIPPED` gate pass a
+ * success-only protocol, and a pending gate must not delay a settled rejection's remediation. */
+export function checkGateConclusions(rollup: RollupEntry[]): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
   for (const c of latestRunPerCheck(rollup)) {
     const status = (c.status || "").toUpperCase();
     const state = (c.state || "").toUpperCase();
@@ -1208,12 +1224,35 @@ export function checkConclusions(rollup: RollupEntry[]): Record<string, string> 
     const inFlight = status !== "" ? status !== "COMPLETED" : state === "PENDING" || state === "EXPECTED";
     const conclusion = inFlight ? "" : (c.conclusion || c.state || "").toUpperCase();
     const name = checkKey(c);
-    const prev = out[name];
-    if (prev === undefined || (bad.has(conclusion) && !bad.has(prev)) || (prev === "" && conclusion !== "")) {
-      // First gate of this name, a newly-seen hard failure (failure wins across events, #955), or a
-      // settled conclusion replacing a still-in-flight placeholder.
-      out[name] = conclusion;
+    const gates = out[name] ?? [];
+    gates.push(conclusion);
+    out[name] = gates;
+  }
+  return out;
+}
+
+/** The ground-truth conclusion of each head check, keyed by check name — a SINGLE value per name,
+ * reduced from {@link checkGateConclusions} failure-first: a hard failure (`FAILURE`, `TIMED_OUT`,
+ * `CANCELLED`, `ACTION_REQUIRED`, `STARTUP_FAILURE`, `ERROR`) on ANY non-superseded gate wins over
+ * another gate's green (a green `push` run must not satisfy a red required `pull_request` run of
+ * the same name, issue #955), then a concluded result wins over a still-in-flight `""`, so a pending
+ * gate never masks a settled one. This is the lossy single-conclusion projection kept for callers
+ * that want one answer per name; the mergeability gate uses {@link checkGateConclusions} instead so
+ * no retained gate's terminal conclusion is collapsed away before `acceptedConclusions` is honoured. */
+export function checkConclusions(rollup: RollupEntry[]): Record<string, string> {
+  const bad = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
+  const out: Record<string, string> = {};
+  for (const [name, gates] of Object.entries(checkGateConclusions(rollup))) {
+    let best = "";
+    for (const g of gates) {
+      // A hard failure wins across gates; otherwise a settled conclusion beats an in-flight "".
+      if (bad.has(g)) {
+        best = g;
+        break;
+      }
+      if (best === "" && g !== "") best = g;
     }
+    out[name] = best;
   }
   return out;
 }
@@ -1317,6 +1356,69 @@ export async function fetchMergeQueueMembership(
   }
 }
 
+/** GraphQL response for the per-check triggering-event enrichment. Each `CheckRun` carries its
+ * `checkSuite.workflowRun.event` (e.g. `pull_request` / `push`); a `StatusContext` (or a CheckRun
+ * whose suite/run is unreadable) contributes no event. */
+interface CheckEventsResponse {
+  data?: {
+    repository?: {
+      pullRequest?: {
+        commits?: { nodes?: { commit?: { statusCheckRollup?: { contexts?: { nodes?: unknown[] } } } }[] };
+      } | null;
+    } | null;
+  } | null;
+}
+
+/** Stamp each rollup entry's `event` from the GraphQL `statusCheckRollup.contexts` nodes, matching
+ * POSITIONALLY: the connection and the CLI's exported `statusCheckRollup` array are the SAME
+ * head-commit contexts in the SAME order, so index `i` in one is index `i` in the other. An entry is
+ * only stamped when the node at its index is a `CheckRun` whose display name matches (a
+ * `StatusContext` or a misaligned/unreadable node is left event-less, keeping the conservative
+ * name-only identity). Mutates `rollup` in place. Exported for the transport regression test. */
+export function applyRollupEvents(rollup: RollupEntry[], nodes: unknown[]): void {
+  for (let i = 0; i < rollup.length && i < nodes.length; i++) {
+    const node = nodes[i];
+    if (typeof node !== "object" || node === null) continue;
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const n = node as {
+      __typename?: string;
+      name?: string;
+      checkSuite?: { workflowRun?: { event?: string | null } | null } | null;
+    };
+    if (n.__typename !== "CheckRun") continue; // a StatusContext carries no triggering event
+    const entryName = rollup[i].name || rollup[i].workflowName || "";
+    if (n.name !== undefined && entryName !== "" && n.name !== entryName) continue; // misaligned — don't stamp blindly
+    const event = n.checkSuite?.workflowRun?.event;
+    if (typeof event === "string" && event.trim() !== "") rollup[i].event = event;
+  }
+}
+
+/** Populate each rollup entry's `event` from GraphQL, because the `gh pr view --json
+ * statusCheckRollup` exporter omits it (cli/cli `api/export_pr.go`) — without it every run takes the
+ * name-only gate fallback and a green `push` run collapses away a red required `pull_request` run of
+ * the same name, leaving #955 unfixed on the real transport (PR #957 review). The event lives at
+ * `CheckRun.checkSuite.workflowRun.event` (there is no `CheckRun.event` field). Never throws and
+ * never blocks the read: any transport/parse failure leaves the rollup event-less (pre-#955
+ * behaviour) rather than wedging the merge loop. Mutates `rollup` in place. */
+export async function enrichRollupEvents(repo: string, number: number | string, rollup: RollupEntry[]): Promise<void> {
+  if (rollup.length === 0) return;
+  const [owner, name] = repo.split("/");
+  const query =
+    "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){" +
+    "commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{" +
+    "__typename ... on CheckRun{name checkSuite{workflowRun{event}}}}}}}}}}}}";
+  let nodes: unknown[];
+  try {
+    const out = await runGh(["api", "graphql", "-f", `query=${query}`, "-f", `o=${owner}`, "-f", `r=${name}`, "-F", `n=${number}`]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const payload = JSON.parse(out) as CheckEventsResponse;
+    nodes = payload.data?.repository?.pullRequest?.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ?? [];
+  } catch {
+    return; // a transport/parse hiccup leaves the rollup event-less (conservative name-only gates)
+  }
+  applyRollupEvents(rollup, nodes);
+}
+
 export async function fetchPrState(
   repo: string,
   number: number | string,
@@ -1344,6 +1446,12 @@ export async function fetchPrState(
       baseRefName?: string | null;
     };
     const rollup = j.statusCheckRollup ?? [];
+    // The `gh pr view --json statusCheckRollup` exporter does NOT emit a run's triggering `event`
+    // (cli/cli `api/export_pr.go` projects only name/status/conclusion/timestamps/workflowName), so a
+    // raw rollup would take the name-only fallback and a green `push` run would still hide a red
+    // `pull_request` run of the same name — leaving #955 unfixed on the real transport. Enrich each
+    // entry with its event (GraphQL `CheckRun.checkSuite.workflowRun.event`) before grouping.
+    await enrichRollupEvents(repo, number, rollup);
     const names = failingCheckNames(rollup);
     const merged = j.state === "MERGED" || !!j.mergedAt;
     // Probe native-queue membership only for the queued-PR reconciliation (block 4) — it is an extra
@@ -1361,7 +1469,7 @@ export async function fetchPrState(
       totalChecks: rollup.length,
       presentCheckNames: allCheckNames(rollup),
       pendingCheckNames: pendingCheckNames(rollup),
-      checkConclusions: checkConclusions(rollup),
+      checkGateConclusions: checkGateConclusions(rollup),
       isDraft: !!j.isDraft,
       headRefOid: j.headRefOid ?? null,
       mergeQueueEntry,
@@ -1400,7 +1508,7 @@ export async function fetchPrState(
     totalChecks: -1, // …and the fresh-head-run remedy stays conservative (never reopens blind)
     presentCheckNames: [], // …can't enumerate checks in token mode → no required-check presence signal
     pendingCheckNames: [], // …no per-check pending signal either → classifier degrades to today's switch
-    checkConclusions: {}, // …no per-check conclusions → protocol-aware gate falls through in token mode
+    checkGateConclusions: {}, // …no per-gate conclusions → protocol-aware gate falls through in token mode
     isDraft: !!j.draft,
     headRefOid: j.head?.sha ?? null,
     mergeQueueEntry, // native-queue membership (GraphQL), probed only for block-4 reconciliation
@@ -1740,21 +1848,37 @@ function requiredChecksVerdict(s: PrState, protocol?: MergeProtocol): "blocked" 
   let anyBlocked = false;
   let anyPending = false;
   for (const rc of required) {
-    // Absent from the head, or still in flight → not-yet-run → wait (never treat absence as pass).
-    if (!present.has(rc.name) || pending.has(rc.name)) {
-      anyPending = true;
-      continue;
-    }
-    const conclusion = (s.checkConclusions[rc.name] ?? "").toUpperCase();
-    if (conclusion === "") {
-      // Present but no terminal conclusion yet (and not flagged pending) — treat conservatively as
-      // not-yet-concluded rather than as a pass.
+    // Absent from the head entirely → not-yet-run → wait (never treat absence as pass).
+    if (!present.has(rc.name)) {
       anyPending = true;
       continue;
     }
     const accepted = rc.acceptedConclusions.map((a) => a.toUpperCase());
-    if (accepted.includes(conclusion)) continue; // satisfied
-    anyBlocked = true; // present, concluded, NOT accepted → a red required check
+    // Evaluate EVERY retained gate of this required name against `acceptedConclusions`, and a
+    // SETTLED rejection BEFORE any pending sibling (issue #955). Same-named runs from different
+    // events are different gates, so the name can carry several terminal conclusions. Two distinct
+    // failure modes are guarded here:
+    //   • a settled gate whose conclusion is NOT accepted (a hard failure like `FAILURE`, or any
+    //     other unaccepted terminal conclusion — e.g. a `NEUTRAL`/`SKIPPED` gate under a
+    //     success-only protocol) is a red required check → `blocked`, routed to fix-ci NOW. A
+    //     same-named gate still pending must NOT read as `waiting` first and delay that remediation
+    //     (a red PR `build` plus an in-progress push `build` is BLOCKED, not "wait").
+    //   • a same-named gate that IS accepted (e.g. a `SUCCESS` run) must not satisfy the required
+    //     check while a sibling gate settled unaccepted — every retained gate must be accepted.
+    const gates = s.checkGateConclusions[rc.name] ?? [];
+    let namePending = pending.has(rc.name);
+    let nameBlocked = false;
+    for (const g of gates) {
+      const conclusion = g.toUpperCase();
+      if (conclusion === "") {
+        // This gate has not concluded — treat conservatively as not-yet-concluded, not a pass.
+        namePending = true;
+        continue;
+      }
+      if (!accepted.includes(conclusion)) nameBlocked = true; // settled, NOT accepted → red
+    }
+    if (nameBlocked) anyBlocked = true;
+    else if (namePending) anyPending = true;
   }
   // A failing required check outranks a pending one: it needs fix-ci now, not more waiting.
   if (anyBlocked) return "blocked";

@@ -12,7 +12,7 @@
 
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { allCheckNames, checkConclusions, failingCheckNames, latestRunPerCheck } from "./github.ts";
+import { allCheckNames, applyRollupEvents, checkConclusions, failingCheckNames, latestRunPerCheck } from "./github.ts";
 
 test("a CANCELLED run superseded by a newer green run on the same head does not count as failing", () => {
   const rollup = [
@@ -162,4 +162,84 @@ test("#955: allCheckNames still reports the display name once when events differ
     { name: "build", event: "push", conclusion: "SUCCESS", completedAt: "2026-11-12T00:41:38Z" },
   ];
   assertEquals(allCheckNames(rollup), ["build"], "presence is by required-context name, not per (name, event) pair");
+});
+
+// ── PR #957 review: the gate key must be an unambiguous tuple ────────────────────────────────────
+//
+// A bare `name + event` concatenation lets two DIFFERENT identities collide: `name:"build",
+// event:"push"` and an event-less `context:"buildpush"` both produce `"buildpush"`, so a newer green
+// entry could discard an unrelated red check (and the known-event bucket could merge with the
+// unknown-event one). The key is length-prefixed (`${name.length}:${name}${event}`) so no
+// `(name, event)` pair aliases a different pair or a name-only key.
+
+test("#957: an eventful `build`+`push` never collides with an event-less `buildpush` context", () => {
+  const rollup = [
+    // The event-less legacy StatusContext whose context string happens to equal the concatenation.
+    { context: "buildpush", state: "FAILURE", createdAt: "2026-11-12T00:41:34Z" },
+    // A different gate: a CheckRun named `build` triggered by `push`, green, newer.
+    { name: "build", event: "push", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:38Z" },
+  ];
+  const latest = latestRunPerCheck(rollup);
+  assertEquals(latest.length, 2, "distinct identities must not collapse into one gate");
+  assertEquals(
+    failingCheckNames(rollup),
+    ["buildpush"],
+    "the event-less red `buildpush` survives — the green `build`+`push` run must not discard it",
+  );
+});
+
+test("#957: a known-event gate never merges with the unknown-event bucket of the same name", () => {
+  // Same display name, one run event-ful, one event-less: these are different gates, so both survive.
+  const rollup = [
+    { name: "build", conclusion: "FAILURE", completedAt: "2026-11-12T00:41:34Z" }, // event-less (legacy)
+    { name: "build", event: "push", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:38Z" },
+  ];
+  assertEquals(latestRunPerCheck(rollup).length, 2, "known-event and unknown-event runs of one name stay separate");
+  assertEquals(failingCheckNames(rollup), ["build"], "the event-less red run is not shadowed by the eventful green one");
+});
+
+// ── PR #957 review: the real transport must populate `event` ─────────────────────────────────────
+//
+// The `gh pr view --json statusCheckRollup` exporter omits `event` (cli/cli `api/export_pr.go`), so
+// `fetchPrState` enriches the rollup from GraphQL `CheckRun.checkSuite.workflowRun.event` before
+// grouping. `applyRollupEvents` is the pure mapping; these cover the transport normalisation path.
+
+test("#957: applyRollupEvents stamps each CheckRun's triggering event so the collapse separates events", () => {
+  // What `gh pr view --json statusCheckRollup` actually returns: NO `event` field on either run.
+  const rollup = [
+    { name: "build", conclusion: "FAILURE", status: "COMPLETED", startedAt: "2026-11-12T00:30:00Z", completedAt: "2026-11-12T00:41:34Z" },
+    { name: "build", conclusion: "SUCCESS", status: "COMPLETED", startedAt: "2026-11-12T00:41:30Z", completedAt: "2026-11-12T00:41:38Z" },
+  ];
+  // Without enrichment the name-only fallback collapses the red run away (the #955 hole).
+  assertEquals(failingCheckNames(rollup), [], "pre-enrichment: the newer green run hides the red one");
+  // The GraphQL `statusCheckRollup.contexts` nodes for the same head, positionally aligned.
+  const nodes = [
+    { __typename: "CheckRun", name: "build", checkSuite: { workflowRun: { event: "pull_request" } } },
+    { __typename: "CheckRun", name: "build", checkSuite: { workflowRun: { event: "push" } } },
+  ];
+  applyRollupEvents(rollup, nodes);
+  assertEquals(rollup[0].event, "pull_request");
+  assertEquals(rollup[1].event, "push");
+  assertEquals(
+    failingCheckNames(rollup),
+    ["build"],
+    "post-enrichment: the red pull_request run survives — #955 is actually fixed on the real transport",
+  );
+});
+
+test("#957: applyRollupEvents leaves a StatusContext / misaligned / unreadable node event-less", () => {
+  const rollup = [
+    { context: "ci/legacy", state: "SUCCESS", createdAt: "2026-11-12T00:41:34Z" }, // a StatusContext
+    { name: "build", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:38Z" },
+    { name: "test", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:39Z" },
+  ];
+  const nodes = [
+    { __typename: "StatusContext", context: "ci/legacy" }, // no event on this type
+    { __typename: "CheckRun", name: "DIFFERENT", checkSuite: { workflowRun: { event: "push" } } }, // misaligned name
+    { __typename: "CheckRun", name: "test", checkSuite: { workflowRun: { event: null } } }, // unreadable run
+  ];
+  applyRollupEvents(rollup, nodes);
+  assertEquals(rollup[0].event, undefined, "a StatusContext never gains an event");
+  assertEquals(rollup[1].event, undefined, "a misaligned node is not stamped blindly");
+  assertEquals(rollup[2].event, undefined, "a null/absent event leaves the entry event-less");
 });

@@ -780,7 +780,7 @@ function prObs(over: Partial<PrObservation> = {}): PrObservation {
     totalChecks: 0,
     presentCheckNames: [],
     pendingCheckNames: [],
-    checkConclusions: {},
+    checkGateConclusions: {},
     isDraft: false,
     headRefOid: "abc123",
     mergedSha: null,

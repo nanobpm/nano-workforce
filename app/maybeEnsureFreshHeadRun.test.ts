@@ -39,7 +39,7 @@ function draftState(overrides: Partial<PrState> = {}): PrState {
     totalChecks: 0, // no head run yet → frugal-CI stuck state
     presentCheckNames: [],
     pendingCheckNames: [],
-    checkConclusions: {},
+    checkGateConclusions: {},
     isDraft: true,
     headRefOid: "h1",
     ...overrides,

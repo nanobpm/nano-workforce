@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, checkConclusions, hasCopilotWorkStarted, classifyBlockedCause, copilotWorkStartedSince, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, failingCheckNames, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, THREAD_PROBE_FAILED, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, checkGateConclusions, hasCopilotWorkStarted, classifyBlockedCause, copilotWorkStartedSince, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, failingCheckNames, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, THREAD_PROBE_FAILED, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -551,7 +551,7 @@ function prState(over: Partial<PrState>): PrState {
     failingCheckNames: [],
     presentCheckNames: [],
     pendingCheckNames: [],
-    checkConclusions: {},
+    checkGateConclusions: {},
     totalChecks: 0,
     isDraft: false,
     headRefOid: null,
@@ -601,7 +601,7 @@ function mergePrState(over: Partial<PrState> & { rollup?: { name: string; conclu
     totalChecks: 0,
     presentCheckNames: [],
     pendingCheckNames: [],
-    checkConclusions: {},
+    checkGateConclusions: {},
     isDraft: false,
     headRefOid: "abc123",
     mergeQueueEntry: null,
@@ -613,17 +613,20 @@ function mergePrState(over: Partial<PrState> & { rollup?: { name: string; conclu
     const present: string[] = [];
     const pending: string[] = [];
     const failing: string[] = [];
-    const conclusions: Record<string, string> = {};
+    const conclusions: Record<string, string[]> = {};
     for (const c of rollup) {
       const v = c.conclusion.toUpperCase();
       present.push(c.name);
-      conclusions[c.name] = pendingStates.has(v) ? "" : v;
+      // One entry per rollup run of the name — mirrors `checkGateConclusions` (a per-gate list).
+      const gates = conclusions[c.name] ?? [];
+      gates.push(pendingStates.has(v) ? "" : v);
+      conclusions[c.name] = gates;
       if (pendingStates.has(v)) pending.push(c.name);
       else if (bad.has(v)) failing.push(c.name);
     }
     base.presentCheckNames = present;
     base.pendingCheckNames = pending;
-    base.checkConclusions = conclusions;
+    base.checkGateConclusions = conclusions;
     base.failingCheckNames = failing;
     base.failingChecks = failing.length;
     base.totalChecks = rollup.length;
@@ -812,7 +815,7 @@ for (const c of TOKEN_MODE) {
       totalChecks: -1,
       presentCheckNames: [],
       pendingCheckNames: [],
-      checkConclusions: {},
+      checkGateConclusions: {},
     });
     const protocol = protocolWith({ requiredChecks: reqChecks("build"), waitForChecks: true });
     assertEquals(classifyMergeability(s, protocol), c.want);
@@ -857,14 +860,14 @@ test("#955 classifier walk: the same rollup ALSO blocks a ruleset-declared requi
     { name: "build", event: "pull_request", conclusion: "FAILURE", status: "COMPLETED", completedAt: "2026-11-12T00:41:34Z" },
     { name: "build", event: "push", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:38Z" },
   ];
-  const conclusions = checkConclusions(rollup);
-  assertEquals(conclusions.build, "FAILURE", "the required context's conclusion is the red PR run's");
+  const conclusions = checkGateConclusions(rollup);
+  assertEquals(conclusions.build, ["FAILURE", "SUCCESS"], "each retained gate keeps its own conclusion");
   const s = prState({
     mergeStateStatus: "BLOCKED",
     failingChecks: 1,
     failingCheckNames: ["build"],
     presentCheckNames: ["build"],
-    checkConclusions: conclusions,
+    checkGateConclusions: conclusions,
     unresolvedThreads: 0,
   });
   assertEquals(classifyMergeability(s, protocolWith({ requiredChecks: reqChecks("build") })), "blocked");
@@ -895,10 +898,100 @@ test("#955: token mode (failingChecks === -1) is unchanged", () => {
     totalChecks: -1,
     presentCheckNames: [],
     pendingCheckNames: [],
-    checkConclusions: {},
+    checkGateConclusions: {},
     unresolvedThreads: 0,
   });
   assertEquals(classifyMergeability(s), "waiting", "unenumerable checks stay conservative — never newly blocked");
+});
+
+// ── PR #957 review: per-gate conclusions drive the required-check verdict ───────────────────────
+//
+// Same-named runs from different events are different gates, so a required name can carry SEVERAL
+// terminal conclusions. The verdict must (a) route a settled rejection to fix-ci even while a
+// same-named sibling gate is still pending, and (b) require EVERY retained gate to satisfy
+// `acceptedConclusions` — a single accepted gate must not whitewash a rejected sibling.
+
+test("#957: a settled FAILURE required gate routes to fix-ci even while a same-named sibling is pending", () => {
+  // A red PR `build` plus an in-progress push `build`: pending must not mask the settled failure.
+  const s = prState({
+    mergeStateStatus: "BLOCKED",
+    failingChecks: 1,
+    failingCheckNames: ["build"],
+    presentCheckNames: ["build"],
+    pendingCheckNames: ["build"], // the push gate is still running
+    checkGateConclusions: { build: ["FAILURE", ""] }, // PR gate failed, push gate in-flight
+    unresolvedThreads: 0,
+  });
+  assertEquals(
+    classifyMergeability(s, protocolWith({ requiredChecks: reqChecks("build") })),
+    "blocked",
+    "a settled rejected gate owns remediation now — a pending sibling must not delay fix-ci",
+  );
+});
+
+test("#957: a SUCCESS gate does not satisfy a success-only required check while a NEUTRAL sibling gate exists", () => {
+  // Every retained gate must be accepted: a green PR `build` + a NEUTRAL push `build` is rejected.
+  const s = prState({
+    mergeStateStatus: "CLEAN",
+    failingChecks: 0,
+    presentCheckNames: ["build"],
+    pendingCheckNames: [],
+    checkGateConclusions: { build: ["SUCCESS", "NEUTRAL"] },
+    unresolvedThreads: 0,
+  });
+  assertEquals(
+    classifyMergeability(s, protocolWith({ requiredChecks: reqChecks("build") })),
+    "blocked",
+    "a same-named NEUTRAL gate rejects a success-only required check even alongside a SUCCESS gate",
+  );
+});
+
+test("#957: a SUCCESS gate does not satisfy a success-only required check while a SKIPPED sibling gate exists", () => {
+  const s = prState({
+    mergeStateStatus: "CLEAN",
+    failingChecks: 0,
+    presentCheckNames: ["build"],
+    pendingCheckNames: [],
+    checkGateConclusions: { build: ["SUCCESS", "SKIPPED"] },
+    unresolvedThreads: 0,
+  });
+  assertEquals(
+    classifyMergeability(s, protocolWith({ requiredChecks: reqChecks("build") })),
+    "blocked",
+    "a same-named SKIPPED gate rejects a success-only required check even alongside a SUCCESS gate",
+  );
+});
+
+test("#957: every gate accepted passes; a NEUTRAL sibling is fine when the protocol accepts neutral", () => {
+  const s = prState({
+    mergeStateStatus: "CLEAN",
+    failingChecks: 0,
+    presentCheckNames: ["build"],
+    pendingCheckNames: [],
+    checkGateConclusions: { build: ["SUCCESS", "NEUTRAL"] },
+    unresolvedThreads: 0,
+  });
+  assertEquals(
+    classifyMergeability(s, protocolWith({ requiredChecks: [{ name: "build", acceptedConclusions: ["success", "neutral"] }] })),
+    "ready",
+    "when every retained gate's conclusion is accepted the required check is satisfied",
+  );
+});
+
+test("#957: a still-pending only gate (no settled conclusion) waits, never passes", () => {
+  const s = prState({
+    mergeStateStatus: "CLEAN",
+    failingChecks: 0,
+    presentCheckNames: ["build"],
+    pendingCheckNames: ["build"],
+    checkGateConclusions: { build: [""] },
+    unresolvedThreads: 0,
+  });
+  assertEquals(
+    classifyMergeability(s, protocolWith({ requiredChecks: reqChecks("build") })),
+    "waiting",
+    "a required check with no settled gate is not-yet-concluded → waiting, not pass",
+  );
 });
 
 // ── Draft PRs are never landable (issue #454) ────────────────────────────────────────────────────
@@ -1158,7 +1251,7 @@ test("classifyMergeability: a known merge conflict is never suppressed by the th
         mergeStateStatus: "DIRTY",
         failingChecks: 1,
         presentCheckNames: ["build"],
-        checkConclusions: { build: "FAILURE" },
+        checkGateConclusions: { build: ["FAILURE"] },
         unresolvedThreads: 2,
       }),
       { requiredChecks: [{ name: "build", acceptedConclusions: ["SUCCESS"] }] },
@@ -1182,7 +1275,7 @@ test("classifyMergeability: the declared required-check verdict outranks the set
         mergeStateStatus: "CLEAN",
         failingChecks: 0,
         presentCheckNames: ["build"],
-        checkConclusions: { build: "NEUTRAL" },
+        checkGateConclusions: { build: ["NEUTRAL"] },
         unresolvedThreads: 2,
       }),
       successOnly,
@@ -1207,7 +1300,7 @@ test("classifyMergeability: the declared required-check verdict outranks the set
         mergeStateStatus: "CLEAN",
         failingChecks: 0,
         presentCheckNames: ["build"],
-        checkConclusions: { build: "SUCCESS" },
+        checkGateConclusions: { build: ["SUCCESS"] },
         unresolvedThreads: 2,
       }),
       successOnly,

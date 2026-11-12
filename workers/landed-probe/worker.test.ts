@@ -12,7 +12,7 @@ const base: PrState = {
   totalChecks: 0,
   presentCheckNames: [],
   pendingCheckNames: [],
-  checkConclusions: {},
+  checkGateConclusions: {},
   isDraft: false,
   headRefOid: null,
   mergeQueueEntry: null,
