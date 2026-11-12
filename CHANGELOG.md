@@ -1,3 +1,9 @@
+## [0.210.0](https://github.com/nanobpm/nano-workforce/compare/v0.209.1...v0.210.0) (2026-11-12)
+
+### Features
+
+* accept custom instructions on convergence-loop start ([#958](https://github.com/nanobpm/nano-workforce/issues/958)) ([c1a72ce](https://github.com/nanobpm/nano-workforce/commit/c1a72ce90744ccd23aa8160d20f0add2779db837)), closes [#956](https://github.com/nanobpm/nano-workforce/issues/956) [#916](https://github.com/nanobpm/nano-workforce/issues/916) [#956](https://github.com/nanobpm/nano-workforce/issues/956) [#956](https://github.com/nanobpm/nano-workforce/issues/956) [#956](https://github.com/nanobpm/nano-workforce/issues/956) [#887](https://github.com/nanobpm/nano-workforce/issues/887)
+
 ## [0.209.1](https://github.com/nanobpm/nano-workforce/compare/v0.209.0...v0.209.1) (2026-11-12)
 
 ### Bug Fixes
