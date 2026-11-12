@@ -78,7 +78,12 @@ export function makeHandler(deps: StallProbeDeps): AppJobHandler<In, Out> {
   // exhausts into the misleading "mergeability never settled" escalation.
   const st = await deps.readState(repo, prNumber, token).catch(() => null);
   if (st === null) {
-    return { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1, pendingChecks: 0 };
+    // Explicitly clear `updatePending` (PR #953 review): a failed/null read returns `waiting`
+    // WITHOUT recomputing the hold, and an omitted field would leave any earlier `true` standing —
+    // `gw-merge-stall` would then keep bypassing the stall cap on the stale flag even after the
+    // remedy's bounded hold expired. Returning `false` keeps a GitHub outage from turning the
+    // bounded hold into an indefinite re-poll.
+    return { mergeState: "waiting", updatePending: false, failingChecks: 0, failingChecksList: "", reviewThreads: -1, pendingChecks: 0 };
   }
   // Issue #951: re-read PR liveness BEFORE any verdict. A PR that already MERGED (e.g. a human
   // queued it while the loop waited) or was CLOSED must never reach an escalation: surface `ready`,
@@ -90,7 +95,9 @@ export function makeHandler(deps: StallProbeDeps): AppJobHandler<In, Out> {
       prKey: job.variables.prKey,
       liveness,
     });
-    return { mergeState: "ready", failingChecks: 0, failingChecksList: "", reviewThreads: 0, pendingChecks: 0 };
+    // `updatePending: false` here too: a terminal PR short-circuits the merge, so a stale hold
+    // from an earlier round must not survive into `gw-merge-stall`'s bypass-cap condition.
+    return { mergeState: "ready", updatePending: false, failingChecks: 0, failingChecksList: "", reviewThreads: 0, pendingChecks: 0 };
   }
   const protocol = await deps.readProtocol(repo, token).catch(() => null);
   let mergeState = classifyMergeability(st, protocol ?? undefined);

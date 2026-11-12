@@ -45,6 +45,17 @@ async function run(st: PrState, protocol: MergeProtocol | null, isUpdatePending 
   return (await handler(job, app)) as Record<string, unknown>;
 }
 
+async function runNullRead(isUpdatePending = false): Promise<Record<string, unknown>> {
+  const handler = makeHandler({
+    readState: () => Promise.reject(new Error("GitHub unreachable")),
+    readProtocol: () => Promise.resolve(null),
+    isUpdatePending: () => isUpdatePending,
+  });
+  const job: any = { variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } };
+  const app: any = { log: noopLog() };
+  return (await handler(job, app)) as Record<string, unknown>;
+}
+
 test("merge-stall-probe: a PR already MERGED surfaces `ready` (never an escalation) (#951)", async () => {
   const out = await run(state({ merged: true, state: "merged", mergeStateStatus: "UNKNOWN" }), MERGIFY);
   assertEquals(out.mergeState, "ready");
@@ -84,4 +95,25 @@ test("merge-stall-probe: a non-blocked verdict is never downgraded by a pending 
   // A ready PR stays ready even if (spuriously) an update is pending — the hold only masks `blocked`.
   const out = await run(state({}), MERGIFY, true);
   assertEquals(out.mergeState, "ready");
+});
+
+// PR #953 review: a probe that emits `updatePending: true` is followed (next re-poll) by a read that
+// does NOT recompute the hold — a failed/null state read, or a terminal (merged/closed) liveness
+// short-circuit. Those paths must explicitly clear the flag: an omitted field would leave the stale
+// `true` standing, and `gw-merge-stall` would keep bypassing the stall cap on it even after the
+// remedy's bounded hold expired — a GitHub outage would turn the bounded hold into an indefinite
+// re-poll.
+test("merge-stall-probe: a failed/null state read clears updatePending (no stale cap bypass) (#953)", async () => {
+  const out = await runNullRead(true);
+  assertEquals(out.mergeState, "waiting");
+  assertEquals(out.updatePending, false);
+});
+
+test("merge-stall-probe: a terminal (merged/closed) read clears updatePending (#953)", async () => {
+  const merged = await run(state({ merged: true, state: "merged", mergeStateStatus: "UNKNOWN" }), MERGIFY, true);
+  assertEquals(merged.mergeState, "ready");
+  assertEquals(merged.updatePending, false);
+  const closed = await run(state({ state: "closed", mergeStateStatus: "UNKNOWN" }), null, true);
+  assertEquals(closed.mergeState, "ready");
+  assertEquals(closed.updatePending, false);
 });
