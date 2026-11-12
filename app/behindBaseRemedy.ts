@@ -42,6 +42,21 @@ export function _resetBehindBaseLatch(): void {
   pending.clear();
 }
 
+/** Is an accepted (async) update-branch still holding `headOid` as the old head? The merge-stall
+ * probe reads this so it does not classify the old head's stale check failures as `blocked` (and
+ * start fix-ci / escalate) while GitHub has accepted — but not yet applied — the branch update
+ * (issue #951 review). Bounded by the same BEHIND_BASE_PENDING_MS window the remedy uses, so a
+ * never-applied update stops holding once the window lapses. Pure read: never mutates the map. */
+export function isBehindBaseUpdatePending(
+  repo: string,
+  number: number,
+  headOid: string,
+  now: () => number = () => Date.now(),
+): boolean {
+  const inflight = pending.get(`${repo}#${number}`);
+  return inflight !== undefined && inflight.oldHead === headOid && now() - inflight.at < BEHIND_BASE_PENDING_MS;
+}
+
 /** If `st` has failing checks on a head that is behind its base, update the branch from base.
  * Returns `true` when an update was accepted OR is still pending on this (old) head — the caller
  * should re-poll instead of dispatching fix-ci/escalating. Never throws. `_protocol` is accepted for

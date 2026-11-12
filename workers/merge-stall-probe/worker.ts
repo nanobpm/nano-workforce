@@ -17,6 +17,7 @@
 // (incremented by this task's output mapping, capped by `mergeStallMax`) stops the probe from
 // re-arming forever: once exhausted, `gw-merge-stall` routes to human escalation instead.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { isBehindBaseUpdatePending } from "../../app/behindBaseRemedy.ts";
 import { classifyMergeability, classifyPrLiveness, fetchPrState, type PrState } from "../../app/github.ts";
 import { loadMergeProtocol, type MergeProtocol } from "../../app/mergeProtocol.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
@@ -47,11 +48,17 @@ interface Out extends Record<string, unknown> {
 export interface StallProbeDeps {
   readState: (repo: string, prNumber: number, token: string) => Promise<PrState | null>;
   readProtocol: (repo: string, token: string) => Promise<MergeProtocol | null>;
+  /** Issue #951 review: is an accepted (async) update-branch still holding this head? While it is,
+   * the old head's stale check failures must NOT classify as `blocked` (which would start fix-ci /
+   * escalate) — the branch update is in flight and will move the head. Bounded by the remedy's own
+   * window, so a never-applied update stops holding. */
+  isUpdatePending: (repo: string, prNumber: number, headOid: string) => boolean;
 }
 
 const realDeps: StallProbeDeps = {
   readState: (repo, prNumber, token) => fetchPrState(repo, prNumber, token, { withReviewThreads: true }),
   readProtocol: (repo, token) => loadMergeProtocol(repo, token),
+  isUpdatePending: (repo, prNumber, headOid) => isBehindBaseUpdatePending(repo, prNumber, headOid),
 };
 
 export function makeHandler(deps: StallProbeDeps): AppJobHandler<In, Out> {
@@ -86,7 +93,22 @@ export function makeHandler(deps: StallProbeDeps): AppJobHandler<In, Out> {
     return { mergeState: "ready", failingChecks: 0, failingChecksList: "", reviewThreads: 0, pendingChecks: 0 };
   }
   const protocol = await deps.readProtocol(repo, token).catch(() => null);
-  const mergeState = classifyMergeability(st, protocol ?? undefined);
+  let mergeState = classifyMergeability(st, protocol ?? undefined);
+
+  // Issue #951 review: a `blocked` verdict on the OLD head while an accepted update-branch is still
+  // pending is a stale-read, not a real block — the poller's behind-base remedy is holding that head
+  // (no fix-ci on its stale failures) until GitHub applies the update and the head moves. Mirroring
+  // that hold here, the probe downgrades the verdict to `waiting` so `gw-mergeable` routes to the
+  // bounded re-poll (`wait-mergeable-repoll`) instead of dispatching fix-ci / escalating against a
+  // head that is about to change. The hold shares the remedy's bounded window, so a never-applied
+  // update stops holding and the next probe judges the (still-red) head afresh.
+  if (mergeState === "blocked" && st.headRefOid && deps.isUpdatePending(repo, prNumber, st.headRefOid)) {
+    app.log.info("merge-stall-probe: behind-base update pending — deferring remediation until the head moves", {
+      prKey: job.variables.prKey,
+      head: st.headRefOid,
+    });
+    mergeState = "waiting";
+  }
 
   app.log.info("merge-stall-probe: poller stalled — re-derived mergeability", {
     prKey: job.variables.prKey,

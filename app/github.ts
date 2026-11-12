@@ -749,18 +749,28 @@ export async function requestCopilotReview(
 /** Whether Copilot has STARTED working on a review request since `sinceIso` — a
  * `copilot_work_started` event on the PR's issue timeline (issue #951). A request that produced
  * `review_requested` but never `copilot_work_started` was silently dropped. `null` when no transport
- * is usable or the read failed (unknown — callers must not treat it as "dropped"). */
+ * is usable or the read failed (unknown — callers must not treat it as "dropped").
+ *
+ * `opts.timeoutMs` bounds the WHOLE read (issue #951 review): the verification caller has a fixed
+ * deadline, so a stalled `gh` or REST read must not run past it and starve the BPMN review-wait
+ * timer. The `gh` path passes it to `runGh`'s process `timeout`; the REST path applies
+ * `AbortSignal.timeout` to every page (each page gets the full remaining budget — the caller
+ * re-checks its deadline between pages). A timeout surfaces as `null` (unknown), never `false`. */
 export async function hasCopilotWorkStarted(
   repo: string,
   number: number | string,
   token: string,
   sinceIso: string,
+  opts: { timeoutMs?: number } = {},
 ): Promise<boolean | null> {
   const path = `repos/${repo}/issues/${number}/timeline?per_page=100`;
   try {
     let events: { event?: string; created_at?: string }[];
     if (await useGh()) {
-      const out = await runGh(["api", path, "--paginate", "--slurp", "-H", "Accept: application/vnd.github+json"]);
+      const out = await runGh(
+        ["api", path, "--paginate", "--slurp", "-H", "Accept: application/vnd.github+json"],
+        opts.timeoutMs === undefined ? undefined : { timeoutMs: opts.timeoutMs },
+      );
       // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
       events = (JSON.parse(out) as { event?: string; created_at?: string }[][]).flat();
     } else {
@@ -773,6 +783,7 @@ export async function hasCopilotWorkStarted(
       for (let page = 1; page <= MAX_PAGES; page++) {
         const r = await fetch(`https://api.github.com/${path}&page=${page}`, {
           headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+          ...(opts.timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(opts.timeoutMs) }),
         });
         if (!r.ok) return null;
         // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape

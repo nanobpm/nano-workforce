@@ -1592,3 +1592,31 @@ test("hasCopilotWorkStarted (token): a failed later page is UNKNOWN (null), not 
   const got = await withTokenFetch(fetchImpl as typeof fetch, () => hasCopilotWorkStarted("o/r", 1, "t", "2026-11-11T10:00:00Z"));
   assertEquals(got, null);
 });
+
+// Issue #951 review: the verification caller has a fixed deadline, so the read must carry an abort
+// signal bounded by the remaining budget — a stalled read must not run unbounded and starve the
+// BPMN review-wait timer. Assert the token path passes a (timed) AbortSignal to fetch.
+test("hasCopilotWorkStarted (token): a timeout budget attaches an abort signal to the read (#951)", async () => {
+  let sawSignal: AbortSignal | undefined;
+  const fetchImpl = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    sawSignal = init?.signal ?? undefined;
+    return Promise.resolve(new Response(JSON.stringify([{ event: "copilot_work_started", created_at: "2026-11-11T10:00:02Z" }]), { status: 200 }));
+  };
+  const got = await withTokenFetch(fetchImpl as typeof fetch, () =>
+    hasCopilotWorkStarted("o/r", 1, "t", "2026-11-11T10:00:00Z", { timeoutMs: 5_000 }),
+  );
+  assertEquals(got, true);
+  assertEquals(sawSignal instanceof AbortSignal, true);
+  assertEquals(sawSignal?.aborted, false);
+});
+
+test("hasCopilotWorkStarted (token): an aborted (timed-out) read is UNKNOWN (null), not false (#951)", async () => {
+  const fetchImpl = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    // Simulate a read that exceeds the budget: reject with the abort reason.
+    return Promise.reject(init?.signal?.reason ?? new Error("aborted"));
+  };
+  const got = await withTokenFetch(fetchImpl as typeof fetch, () =>
+    hasCopilotWorkStarted("o/r", 1, "t", "2026-11-11T10:00:00Z", { timeoutMs: 1 }),
+  );
+  assertEquals(got, null);
+});

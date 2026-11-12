@@ -45,10 +45,16 @@ const VERIFY_POLL_MS = 15_000;
 async function pollWorkStarted(repo: string, n: number, sinceIso: string): Promise<boolean | null> {
   const deadline = Date.now() + VERIFY_WINDOW_MS;
   for (;;) {
-    const started = await hasCopilotWorkStarted(repo, n, token(), sinceIso);
+    // Bound each read by the REMAINING verification budget (issue #951 review): the deadline is
+    // otherwise checked only AFTER the read returns, so a stalled `gh`/REST read could run past it
+    // and starve the BPMN review-wait timer. A read that exhausts its budget returns null (unknown)
+    // — surfaced as "started" (no spurious retry), and the loop stops because the deadline is met.
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    const started = await hasCopilotWorkStarted(repo, n, token(), sinceIso, { timeoutMs: remaining });
     if (started !== false) return started;
     if (Date.now() >= deadline) return false;
-    await new Promise((r) => setTimeout(r, VERIFY_POLL_MS));
+    await new Promise((r) => setTimeout(r, Math.min(VERIFY_POLL_MS, deadline - Date.now())));
   }
 }
 

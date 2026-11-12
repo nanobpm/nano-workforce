@@ -3,7 +3,7 @@
 // "failing required checks" to a human.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { _resetBehindBaseLatch, BEHIND_BASE_PENDING_MS, type BehindBaseDeps, maybeUpdateBehindBranch } from "./behindBaseRemedy.ts";
+import { _resetBehindBaseLatch, BEHIND_BASE_PENDING_MS, type BehindBaseDeps, isBehindBaseUpdatePending, maybeUpdateBehindBranch } from "./behindBaseRemedy.ts";
 import type { PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol } from "./mergeProtocol.ts";
 
@@ -97,4 +97,19 @@ test("the remedy fires at most once per head (#951)", async () => {
   assertEquals(await maybeUpdateBehindBranch("o/r", 1, "t", st(), REOPEN, deps(3, calls, false)), false);
   assertEquals(await maybeUpdateBehindBranch("o/r", 1, "t", st(), REOPEN, deps(3, calls)), false);
   assertEquals(calls, ["update@head1"]);
+});
+
+// The merge-stall probe reads `isBehindBaseUpdatePending` to hold remediation on a stale head. It is
+// true only while the SAME head is held inside the bounded window — a moved head or a lapsed window
+// reads false, and it never mutates the pending state (the remedy still owns the lifecycle).
+test("isBehindBaseUpdatePending holds the old head only within the bounded window (#951)", async () => {
+  _resetBehindBaseLatch();
+  const clock = { t: 0 };
+  assertEquals(await maybeUpdateBehindBranch("o/r", 1, "t", st(), REOPEN, deps(3, [], true, clock)), true);
+  // Same head, inside the window → pending. A different head, or a lapsed window → not pending.
+  assertEquals(isBehindBaseUpdatePending("o/r", 1, "head1", () => clock.t), true);
+  assertEquals(isBehindBaseUpdatePending("o/r", 1, "head2", () => clock.t), false);
+  assertEquals(isBehindBaseUpdatePending("o/r", 1, "head1", () => clock.t + BEHIND_BASE_PENDING_MS), false);
+  // A PR with no accepted update is never pending.
+  assertEquals(isBehindBaseUpdatePending("o/r", 999, "head1", () => clock.t), false);
 });
