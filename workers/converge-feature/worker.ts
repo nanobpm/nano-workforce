@@ -53,13 +53,21 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   // read the durable flag off the `feature_runs` row (the source of truth) and hand it to `submitPr`.
   const featureRow = await featureRuns(app.data).get(featureKey);
   const autoResolve = featureRow?.auto_resolve_escalations === 1;
-  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, false, featureKey, humanApproval, autoResolve, autoMerge);
+  // Propagate the run's operator custom instructions (issue #956) the same way: the feature run's
+  // `customInstructions` process variable rides the job, so the convergence loop's agents are steered
+  // exactly as the implementation agent was — the steering is not dropped at the hand-off.
+  const customInstructions =
+    typeof job.variables.customInstructions === "string" && job.variables.customInstructions.trim() !== ""
+      ? job.variables.customInstructions
+      : null;
+  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, false, featureKey, humanApproval, autoResolve, autoMerge, null, null, customInstructions);
   app.log.info("converge-feature: enrolled PR into convergence loop", {
     featureKey,
     prKey: parsed.prKey,
     autoMerge,
     humanApproval,
     autoResolveEscalations: autoResolve,
+    hasCustomInstructions: customInstructions != null,
   });
   return {};
 };

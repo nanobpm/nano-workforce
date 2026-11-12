@@ -66,6 +66,23 @@ test("returns 200 with a count + projected active PRs", async () => {
   assertEquals(r.body.prs[0].processKey, "9");
 });
 
+test("surfaces hasCustomInstructions from the durable row projection (issue #956)", async () => {
+  // The operator can see that a loop is being steered without opening the engine: `submitPr` stamps
+  // the `custom_instructions` column (1/0) at submit/reopen, and `/status` serves it as a boolean.
+  // A legacy row (NULL — written before the projection existed) reads false, never an engine read.
+  const app = memApp([
+    { pr_key: "o/r#30", repo: "o/r", number: 30, url: "u30", title: "steered", status: "converging", current_round: 1, process_key: "PI-30", updated_at: "2026-01-03", custom_instructions: 1 },
+    { pr_key: "o/r#31", repo: "o/r", number: 31, url: "u31", title: "plain", status: "converging", current_round: 1, process_key: "PI-31", updated_at: "2026-01-02", custom_instructions: 0 },
+    { pr_key: "o/r#32", repo: "o/r", number: 32, url: "u32", title: "legacy", status: "converging", current_round: 1, process_key: "PI-32", updated_at: "2026-01-01" },
+  ]);
+  const res = (await handler(input(), app)) as any;
+  assertEquals(res.status, 200);
+  const byKey = (k: string) => res.body.prs.find((p: any) => p.prKey === k);
+  assertEquals(byKey("o/r#30").hasCustomInstructions, true, "a steered loop is visible");
+  assertEquals(byKey("o/r#31").hasCustomInstructions, false, "an unsteered loop reads false");
+  assertEquals(byKey("o/r#32").hasCustomInstructions, false, "a legacy (NULL) row reads false");
+});
+
 test("carries the running app's identity as a top-level version object (issue #925)", async () => {
   // `/status` is the endpoint everyone polls, so it must answer "is the fix live?" on its own:
   // version.version + version.gitSha, derived from the SAME app/version.ts getter /version uses.

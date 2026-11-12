@@ -136,12 +136,17 @@
           },
           {
             "key": "autoMerge",
-            "label": "Auto-merge \u2014 after convergence, drive the merge-loop",
+            "label": "Auto-merge — after convergence, drive the merge-loop",
             "type": "checkbox"
           },
           {
+            "key": "customInstructions",
+            "label": "Custom instructions (optional) — extra steering appended to every converge round's agent prompt, e.g. “commit as josh.wulf@camunda.com; keep the diff small; don't touch file X”",
+            "type": "text"
+          },
+          {
             "key": "autoResolveEscalations",
-            "label": "Automatically resolve escalations \u2014 the opt-in escalation steward reviews this loop's open escalations every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions",
+            "label": "Automatically resolve escalations — the opt-in escalation steward reviews this loop's open escalations every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions",
             "type": "checkbox"
           }
         ]

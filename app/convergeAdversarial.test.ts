@@ -346,3 +346,63 @@ test("#923 review: the converge-gate's reviewWaitCutoff reaches check-progress o
     `check-progress must receive the gate's reviewWaitCutoff, got ${JSON.stringify(progressJobs[0]?.reviewWaitCutoff)}`,
   );
 });
+
+// Issue #956: an optional `customInstructions` string seeded on the loop (by `submitPr` from the
+// start door) must reach EVERY converge round's agent prompt — the review-round agent and the
+// adversarial-review agent, on the first round AND on re-dispatches (the findings back-edge and a
+// new round after a review lands) — under the same "## Operator custom instructions" block the
+// implement cell uses. When the variable is null/absent the appendPrompt must be byte-identical to
+// the pre-#956 shape (the abandon brief alone).
+test("#956: customInstructions ride every converge round's agent prompt (review + adversarial, every round)", async () => {
+  const INSTRUCTIONS = "commit as josh.wulf@camunda.com";
+  const BLOCK = `## Operator custom instructions\n\nThe operator supplied these instructions for this run — follow them:\n\n${INSTRUCTIONS}`;
+  const { engine, seen } = await boot({
+    responses: {
+      // Round 1: findings loop back into a re-dispatched review-round, then clean. Round 2 (after a
+      // review lands) is clean — so the block must appear on round 1 (twice), its adversarial pass,
+      // AND round 2's review-round + adversarial pass.
+      "senior:adversarial-review": [{ adversarialFindings: FINDINGS, adversarialSummary: "1 finding" }, CLEAN, CLEAN],
+    },
+    vars: { advMax: 2, customInstructions: INSTRUCTIONS },
+  });
+  assertThatInstance(engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+  for (const [i, job] of seen["senior:pr-review"].entries()) {
+    const prompt = String(job.appendPrompt ?? "");
+    assert(prompt.includes(BLOCK), `review-round job ${i} must carry the operator block; got: ${JSON.stringify(prompt)}`);
+  }
+  for (const [i, job] of seen["senior:adversarial-review"].entries()) {
+    const prompt = String(job.appendPrompt ?? "");
+    assert(prompt.includes(BLOCK), `adversarial-review job ${i} must carry the operator block; got: ${JSON.stringify(prompt)}`);
+  }
+  // A new round after a review lands must STILL carry the block (the variable persists on the loop).
+  await engine.publishMessage({ name: "readiness-ready", correlationKey: "o/r#1", variables: { ready: true } });
+  assertThatInstance(engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+  assert(completions(engine, "review-round") === 3, `round 2 re-dispatches review-round: ${runs(engine)}`);
+  const roundTwo = seen["senior:pr-review"][2];
+  assert(
+    String(roundTwo?.appendPrompt ?? "").includes(BLOCK),
+    `round 2's review-round must still carry the operator block; got: ${JSON.stringify(roundTwo?.appendPrompt)}`,
+  );
+  const advRoundTwo = seen["senior:adversarial-review"][2];
+  assert(
+    String(advRoundTwo?.appendPrompt ?? "").includes(BLOCK),
+    `round 2's adversarial pass must still carry the operator block; got: ${JSON.stringify(advRoundTwo?.appendPrompt)}`,
+  );
+});
+
+test("#956: a null/absent customInstructions leaves every agent prompt byte-identical to today", async () => {
+  const withNull = await boot({ vars: { customInstructions: null } });
+  assertThatInstance(withNull.engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+  const absent = await boot({});
+  assertThatInstance(absent.engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+  for (const jobType of ["senior:pr-review", "senior:adversarial-review"] as const) {
+    const nullPrompt = String(withNull.seen[jobType][0]?.appendPrompt ?? "");
+    const absentPrompt = String(absent.seen[jobType][0]?.appendPrompt ?? "");
+    assert(!nullPrompt.includes("Operator custom instructions"), `${jobType}: null must not append the block`);
+    assert(!absentPrompt.includes("Operator custom instructions"), `${jobType}: absent must not append the block`);
+    assert(
+      nullPrompt === absentPrompt,
+      `${jobType}: null and absent must render byte-identical prompts (got ${JSON.stringify(nullPrompt)} vs ${JSON.stringify(absentPrompt)})`,
+    );
+  }
+});

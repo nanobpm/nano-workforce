@@ -76,6 +76,7 @@ curl -sS -X POST __BASE__/actions/start/convergence-loop \
 | `maxRounds` | integer | round cap before escalating (1–100; default `NANO_PR_MAX_ROUNDS`, 20). |
 | `dependsOn` | string[] | `prKey`s that must land before this one merges. |
 | `autoResolveEscalations` | boolean | opt in to the escalation steward (§3). Default `false`. |
+| `customInstructions` | string | OPTIONAL free-text steering appended to **every** converge round's agent prompt (review-round and adversarial-review) under a `## Operator custom instructions` block — e.g. `"commit as josh.wulf@camunda.com"`, `"don't touch file X"`, `"keep the diff small"`. Blank/whitespace is treated as absent (the prompt stays byte-identical to no-instructions); a non-string is a `400`. Persists across reconverge re-dispatches. Read it back as `hasCustomInstructions` on the PR's `/status` row. |
 
 Idempotent on the PR key: re-POSTing refreshes the record instead of starting a second
 loop. The 202 response echoes `prKey` and `processKey`.

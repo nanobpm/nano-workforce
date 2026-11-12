@@ -442,6 +442,11 @@ export interface PullRequest {
   // rows fall back to the #937 batched engine read. Run-scoped: reset by the atomic reopen.
   merge_requested?: number | null;
   merge_human_approval?: number | null;
+  // Operator-steering projection (134_pull_requests_custom_instructions.sql, issue #956): 1 ⇒ this
+  // run's converge agents carry `customInstructions` (stamped by `submitPr` at submit/reopen, run-
+  // scoped like the merge policy), so `/status` shows the loop is steered with no engine read. NULL
+  // marks a row written before the projection existed; it reads as false.
+  custom_instructions?: number | null;
 }
 
 interface PrDependency {
@@ -668,9 +673,10 @@ export async function submitPr(
   autoMerge?: boolean,
   handoffFrom: string | null = null,
   headShaOverride: string | null = null,
+  customInstructions: string | null = null,
 ) {
   return withPrSubmitLock(parsed.prKey, () =>
-    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom, headShaOverride),
+    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom, headShaOverride, customInstructions),
   );
 }
 
@@ -687,6 +693,7 @@ async function submitPrCritical(
   autoMerge?: boolean,
   handoffFrom: string | null = null,
   headShaOverride: string | null = null,
+  customInstructions: string | null = null,
 ) {
   // Merge intent (issue #916): `autoMerge` is the CANONICAL positive form end to end — the same name
   // the feature/convergence-loop/plan-fanout doors accept. The legacy inverted `convergeOnly`
@@ -700,6 +707,13 @@ async function submitPrCritical(
   // merge-loop — its own predicate, `AUTO_MERGE && merge intent on`. A run that won't merge
   // (review-only, or the global switch off) must not park for a pointless approval.
   const gated = humanApproval && mergeIntent && AUTO_MERGE;
+  // Operator free-text steering for the converge agents (issue #956), mirrored from the feature path
+  // (feature.ts): blank/absent → null so the agent tasks' `appendPrompt` FEEL skips the "## Operator
+  // custom instructions" block rather than appending an empty heading — an omitted/blank value leaves
+  // every prompt byte-identical to no-instructions.
+  const instructions = typeof customInstructions === "string" && customInstructions.trim() !== ""
+    ? customInstructions.trim()
+    : null;
   const table = prs(data);
   const existing = await table.get(parsed.prKey);
   // ADR-0065: classify "already running" on the DERIVED terminal edge, not the base transient. A
@@ -874,6 +888,9 @@ async function submitPrCritical(
       // Mirror the engine seed EXACTLY (PR #950 review): an ungated loop is seeded
       // `humanApproval: false` (decided — no gate), a gated one `true` (outstanding).
       merge_human_approval: gated ? 1 : 0,
+      // Operator-steering projection (issue #956): 1 ⇒ this run's converge agents carry custom
+      // instructions, so `/status` can show the loop is steered with no engine read.
+      custom_instructions: instructions != null ? 1 : 0,
       created_at: ts,
       updated_at: ts,
     });
@@ -942,6 +959,11 @@ async function submitPrCritical(
       // review-round agent's prompt, so it can stop before pushing if the run is cancelled.
       abandonUrl: abUrl,
       abandonBrief: renderAbandonBrief(abUrl),
+      // Optional operator steering (issue #956): appended to EVERY converge round's agent prompt
+      // (review-round + adversarial-review) via their `appendPrompt` FEEL, under the same
+      // "## Operator custom instructions" block the implement cell uses. Null when none was supplied;
+      // persists on the instance, so reconverge re-dispatches and later rounds keep carrying it.
+      customInstructions: instructions,
       // Host-git provisioning (c8ctl): deliver the repository envelope so the `senior:pr-review`
       // harness clones an isolated workspace checked out on the PR head branch. Spread last so an
       // unresolved head (`{}`) leaves the other vars untouched.
@@ -980,6 +1002,8 @@ async function submitPrCritical(
         // authoritative (`stale: false`) in `/status`.
         merge_requested: existing.merge_requested ?? null,
         merge_human_approval: existing.merge_human_approval ?? null,
+        // The operator-steering projection (issue #956) rolls back with the same ownership.
+        custom_instructions: existing.custom_instructions ?? null,
       }
     : null;
   try {
@@ -1042,6 +1066,8 @@ async function submitPrCritical(
         // the fresh run's intent wins, and the approval state mirrors the fresh loop's `humanApproval` seed.
         merge_requested: mergeIntent ? 1 : 0,
         merge_human_approval: gated ? 1 : 0,
+        // Operator-steering projection (issue #956): run-scoped too — the fresh run's steering wins.
+        custom_instructions: instructions != null ? 1 : 0,
         // Publish the fresh run's identity in the SAME write as the status flip (may be null if the
         // instance could not be created — a phantom row a retry re-enrolls, as on first submit).
         process_key: processKey,
@@ -1269,6 +1295,10 @@ export interface ActivePr {
   /** Whether this PR opted in to the escalation steward (issue #889) — its open escalations are
    * eligible for steward auto-resolution. Shown in `/status` per PR. */
   autoResolveEscalations: boolean;
+  /** Whether this run's converge agents carry operator custom instructions (issue #956), served
+   * from the durable `custom_instructions` row projection — the operator can see a loop is being
+   * steered with no engine read. */
+  hasCustomInstructions: boolean;
   /** The effective merge policy (issue #916): what the run intends (`requested`), what the
    * deployment allows (`enabled`), and what will actually happen (`effective`/`blockedBy`). */
   merge: MergePolicy;
@@ -1376,6 +1406,7 @@ export async function activePrs(
       activeWorker: p.active_worker ?? null,
       leaseUntil: p.lease_until ?? null,
       autoResolveEscalations: p.auto_resolve_escalations === 1,
+      hasCustomInstructions: p.custom_instructions === 1,
       merge: mergeByPr.get(p.pr_key) ?? mergePolicyDefault(),
       incident,
       terminationReason: p.termination_reason ?? null,

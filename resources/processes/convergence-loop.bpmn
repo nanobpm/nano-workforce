@@ -149,7 +149,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrReviewRoundOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
+          <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
           <zeebe:input source="=round" target="guardRound" />
           <zeebe:input source="=maxRounds" target="guardMaxRounds" />
           <zeebe:input source="=advPass" target="guardAdvPass" />
@@ -245,7 +245,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrAdversarialReviewOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
+          <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
           <zeebe:input source="=round" target="guardRound" />
           <zeebe:input source="=maxRounds" target="guardMaxRounds" />
           <zeebe:input source="=advPass" target="guardAdvPass" />
