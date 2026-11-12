@@ -6,7 +6,7 @@
 // loop already guards in `startPlan`). Drives `submitPr` against an in-memory data layer with the
 // GitHub transport forced off so it is hermetic.
 import { test } from "node:test";
-import { assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import { memDataFor } from "../test/worldDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
@@ -1664,14 +1664,38 @@ test("submitPr's run-scoped reopen carries a re-supplied text (and a handoff re-
     const { data, engine, stores, vars } = captureRoot();
     const parsed = { repo: "owner/repo", number: 32, url: "https://github.com/owner/repo/pull/32", prKey: "owner/repo#32" };
     await submitPr(data, engine, parsed, [], 20, false, null, false, false, undefined, null, null, "steer me");
-    // A merge→reconvergence handoff re-enters `submitPr` on the LIVE row. The caller (reconverge
-    // worker / handoff) re-supplies the text it read off the row, so the reopen keeps the steering.
+    const firstVars = vars();
+    assertEquals(firstVars.customInstructions, "steer me", "the first submission seeds the steering");
+    // A merge→reconvergence handoff re-enters `submitPr` on the LIVE row, and by then the merge
+    // loop OWNS it (`startMerge` re-points `process_key` at the merge instance). Simulate that
+    // owner: without this, `handoffFrom: "PI-MERGE"` fails the live-owner gate and the call
+    // short-circuits as `alreadyRunning` — never exercising the reopen this test exists for.
     const row = stores.pull_requests.rows[0] as Record<string, unknown>;
-    await submitPr(data, engine, parsed, [], 20, false, null, false, true, undefined, "PI-MERGE", null, row.custom_instructions_text as string);
+    assertEquals(row.process_key, "PI-1", "the first submission owns the row");
+    row.process_key = "PI-MERGE";
+    const handedBack = await submitPr(
+      data,
+      engine,
+      parsed,
+      [],
+      20,
+      false,
+      null,
+      false,
+      true,
+      undefined,
+      "PI-MERGE",
+      null,
+      row.custom_instructions_text as string,
+    );
+    assertEquals(handedBack, { prKey: "owner/repo#32", processKey: "PI-1" }, "the owning merge loop's hand-back mints a SUCCESSOR, not alreadyRunning");
     const after = stores.pull_requests.rows[0] as Record<string, unknown>;
     assertEquals(after.custom_instructions, 1, "the flag survives the handoff reopen");
     assertEquals(after.custom_instructions_text, "steer me", "the text survives the handoff reopen");
-    assertEquals(vars().customInstructions, "steer me", "the fresh convergence instance is re-seeded with the steering");
+    const successorVars = vars();
+    assertEquals(successorVars.customInstructions, "steer me", "the fresh convergence instance is re-seeded with the steering");
+    assert(successorVars !== firstVars, "a successor instance was actually created (not the first submission's captured variables)");
+    assertEquals(after.process_key, "PI-1", "the successor instance now owns the row (the fake engine mints PI-1 per capture)");
   });
 });
 
