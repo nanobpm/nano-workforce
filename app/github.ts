@@ -765,12 +765,24 @@ export async function hasCopilotWorkStarted(
       events = (JSON.parse(out) as { event?: string; created_at?: string }[][]).flat();
     } else {
       if (!token) return null;
-      const r = await fetch(`https://api.github.com/${path}`, {
-        headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
-      });
-      if (!r.ok) return null;
-      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-      events = (await r.json()) as { event?: string; created_at?: string }[];
+      // Walk EVERY page (mirrors the `gh --paginate` path): a `copilot_work_started` beyond the first
+      // 100 events must not read as "never started". An incomplete read (non-OK page, or the page cap
+      // still advertising `rel="next"`) is UNKNOWN (`null`), never `false`.
+      const MAX_PAGES = 20;
+      events = [];
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const r = await fetch(`https://api.github.com/${path}&page=${page}`, {
+          headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+        });
+        if (!r.ok) return null;
+        // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+        const batch = (await r.json()) as { event?: string; created_at?: string }[];
+        if (!Array.isArray(batch)) return null;
+        events.push(...batch);
+        const hasNext = /<[^>]*>;\s*rel="next"/.test(r.headers.get("link") ?? "");
+        if (!hasNext) break;
+        if (page === MAX_PAGES) return copilotWorkStartedSince(events, sinceIso) ? true : null;
+      }
     }
     return copilotWorkStartedSince(events, sinceIso);
   } catch {
@@ -778,9 +790,12 @@ export async function hasCopilotWorkStarted(
   }
 }
 
-/** Pure: does the timeline carry a `copilot_work_started` at/after `sinceIso`? */
+/** Pure: does the timeline carry a `copilot_work_started` at/after `sinceIso`? GitHub timeline
+ * timestamps have WHOLE-SECOND precision, so the lower bound is floored to the second — otherwise a
+ * start in the same second as a millisecond-precise request time would never count. */
 export function copilotWorkStartedSince(events: { event?: string; created_at?: string }[], sinceIso: string): boolean {
-  const since = Date.parse(sinceIso);
+  const parsed = Date.parse(sinceIso);
+  const since = Number.isNaN(parsed) ? parsed : Math.floor(parsed / 1000) * 1000;
   return events.some(
     (e) => e.event === "copilot_work_started" && (Number.isNaN(since) || Date.parse(e.created_at ?? "") >= since),
   );

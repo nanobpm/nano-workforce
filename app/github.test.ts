@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, checkConclusions, classifyBlockedCause, copilotWorkStartedSince, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, THREAD_PROBE_FAILED, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, hasCopilotWorkStarted, classifyBlockedCause, copilotWorkStartedSince, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, THREAD_PROBE_FAILED, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -1558,4 +1558,37 @@ test("copilotWorkStartedSince: only a copilot_work_started at/after the request 
   assertEquals(copilotWorkStartedSince([{ event: "review_requested", created_at: "2026-11-11T10:00:05Z" }], since), false);
   assertEquals(copilotWorkStartedSince([{ event: "copilot_work_started", created_at: "2026-11-11T09:59:00Z" }], since), false);
   assertEquals(copilotWorkStartedSince([{ event: "copilot_work_started", created_at: "2026-11-11T10:00:30Z" }], since), true);
+});
+
+test("copilotWorkStartedSince: a start in the SAME second as a ms-precise request counts (#951)", () => {
+  const since = "2026-11-11T10:00:00.750Z";
+  assertEquals(copilotWorkStartedSince([{ event: "copilot_work_started", created_at: "2026-11-11T10:00:00Z" }], since), true);
+  assertEquals(copilotWorkStartedSince([{ event: "copilot_work_started", created_at: "2026-11-11T09:59:59Z" }], since), false);
+});
+
+test("hasCopilotWorkStarted (token): paginates the timeline; a start on page 2 counts (#951)", async () => {
+  const pages = [
+    Array.from({ length: 100 }, () => ({ event: "commented", created_at: "2026-11-11T10:00:01Z" })),
+    [{ event: "copilot_work_started", created_at: "2026-11-11T10:00:02Z" }],
+  ];
+  const requests: string[] = [];
+  // biome-ignore lint/plugin: test stub shares the review-page fetch shape
+  const got = await withTokenFetch(reviewFetch(pages as unknown as GhReview[][], requests) as typeof fetch, () =>
+    hasCopilotWorkStarted("o/r", 1, "t", "2026-11-11T10:00:00Z"),
+  );
+  assertEquals(got, true);
+  assertEquals(requests.length, 2);
+});
+
+test("hasCopilotWorkStarted (token): a failed later page is UNKNOWN (null), not false (#951)", async () => {
+  const fetchImpl = (url: string | URL | Request): Promise<Response> => {
+    const page = Number(new URL(String(url)).searchParams.get("page") ?? "1");
+    if (page === 1) {
+      const headers = new Headers({ link: '<https://api.github.com/x?page=2>; rel="next"' });
+      return Promise.resolve(new Response(JSON.stringify([{ event: "commented" }]), { status: 200, headers }));
+    }
+    return Promise.resolve(new Response("boom", { status: 502 }));
+  };
+  const got = await withTokenFetch(fetchImpl as typeof fetch, () => hasCopilotWorkStarted("o/r", 1, "t", "2026-11-11T10:00:00Z"));
+  assertEquals(got, null);
 });

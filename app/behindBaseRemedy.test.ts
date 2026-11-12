@@ -3,7 +3,7 @@
 // "failing required checks" to a human.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { _resetBehindBaseLatch, type BehindBaseDeps, maybeUpdateBehindBranch } from "./behindBaseRemedy.ts";
+import { _resetBehindBaseLatch, BEHIND_BASE_PENDING_MS, type BehindBaseDeps, maybeUpdateBehindBranch } from "./behindBaseRemedy.ts";
 import type { PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol } from "./mergeProtocol.ts";
 
@@ -28,7 +28,7 @@ function st(over: Partial<PrState> = {}): PrState {
 
 const REOPEN: MergeProtocol = { ...DEFAULT_MERGE_PROTOCOL, freshHeadRun: "ready-or-reopen" };
 
-function deps(behindBy: number, calls: string[], updateOk = true): BehindBaseDeps {
+function deps(behindBy: number, calls: string[], updateOk = true, clock = { t: 0 }): BehindBaseDeps {
   return {
     readBase: () => Promise.resolve("main"),
     compare: () => Promise.resolve({ status: behindBy > 0 ? "diverged" : "ahead", aheadBy: 1, behindBy }),
@@ -36,18 +36,38 @@ function deps(behindBy: number, calls: string[], updateOk = true): BehindBaseDep
       calls.push(`update@${sha}`);
       return Promise.resolve(updateOk);
     },
-    freshHeadRun: (_r, _n, action) => {
-      calls.push(action);
-      return Promise.resolve(true);
-    },
+    now: () => clock.t,
   };
 }
 
-test("failing checks on a behind head: update-branch then reopen (reopen-CI repo) (#951)", async () => {
+test("failing checks on a behind head, reopen-CI repo: update-branch only — never reopen the stale head (#951)", async () => {
   _resetBehindBaseLatch();
   const calls: string[] = [];
   assertEquals(await maybeUpdateBehindBranch("o/r", 1, "t", st(), REOPEN, deps(3, calls)), true);
-  assertEquals(calls, ["update@head1", "reopen"]);
+  assertEquals(calls, ["update@head1"]);
+});
+
+test("an accepted (async) update HOLDS the old head until it moves — stale failures never reach fix-ci (#951)", async () => {
+  _resetBehindBaseLatch();
+  const calls: string[] = [];
+  const clock = { t: 0 };
+  const d = deps(3, calls, true, clock);
+  assertEquals(await maybeUpdateBehindBranch("o/r", 1, "t", st(), REOPEN, d), true);
+  clock.t = 60_000; // next poll: GitHub has not applied the update yet
+  assertEquals(await maybeUpdateBehindBranch("o/r", 1, "t", st(), REOPEN, d), true);
+  assertEquals(calls, ["update@head1"]);
+  // The new head appears (up to date) and is still red → falls through to fix-ci.
+  assertEquals(await maybeUpdateBehindBranch("o/r", 1, "t", st({ headRefOid: "head2" }), REOPEN, deps(0, calls, true, clock)), false);
+});
+
+test("a pending update that never applies stops holding after the bounded window (#951)", async () => {
+  _resetBehindBaseLatch();
+  const calls: string[] = [];
+  const clock = { t: 0 };
+  const d = deps(3, calls, true, clock);
+  assertEquals(await maybeUpdateBehindBranch("o/r", 1, "t", st(), REOPEN, d), true);
+  clock.t = BEHIND_BASE_PENDING_MS;
+  assertEquals(await maybeUpdateBehindBranch("o/r", 1, "t", st(), REOPEN, d), false);
 });
 
 test("failing checks on a behind head, plain repo: update-branch only (#951)", async () => {
