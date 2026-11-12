@@ -11,7 +11,18 @@
       { "label": "Convergence", "page": "home" },
       { "label": "Epics", "page": "epic" },
       { "label": "Feature", "page": "feature" },
-      { "label": "Delivery Graphs", "page": "delivery-graphs" },
+      {
+        "label": "Delivery Graphs",
+        "page": "delivery-graphs",
+        "badge": {
+          "source": "app",
+          "table": "delivery_graph_proposals",
+          "filter": [{ "field": "status", "eq": "staged" }],
+          "tone": "ok",
+          "refreshMs": 5000,
+          "hideWhenZero": true
+        }
+      },
       {
         "label": "Tasks",
         "page": "tasks",

@@ -85,3 +85,41 @@ test("issue #306: the badge's user_tasks table is defined by the migrations", ()
     "badge table \"user_tasks\" must be created (TABLE or VIEW) by db/migrations/*.sql",
   );
 });
+
+test("the Delivery Graphs nav item carries the staged-proposals-awaiting-approval badge", () => {
+  const canon = JSON.parse(readFileSync(`${ROOT}pages/_nav.json`, "utf8"));
+  const items = canon?.props?.items ?? [];
+  const dg = items.find((i: Json) => i?.page === "delivery-graphs");
+  assert(dg, "canonical nav has no Delivery Graphs item");
+  const badge = dg.badge;
+  assert(badge, "Delivery Graphs nav item must declare a live count badge");
+  // Counts ONLY proposals awaiting approval (status = staged) — dropping the filter
+  // would count approved/rejected proposals too; the drift check alone can't catch that.
+  assert(badge.source === "app", "badge.source must be \"app\"");
+  assert(
+    badge.table === "delivery_graph_proposals",
+    "badge.table must be \"delivery_graph_proposals\"",
+  );
+  assert(
+    stable(badge.filter) === stable([{ field: "status", eq: "staged" }]),
+    "badge.filter must be exactly [{ field: \"status\", eq: \"staged\" }]",
+  );
+  assert(badge.tone === "ok", "badge.tone must be \"ok\" (green)");
+  assert(badge.refreshMs === 5000, "badge.refreshMs must be 5000");
+  assert(badge.hideWhenZero === true, "badge.hideWhenZero must be true");
+
+  let sql = "";
+  for (const e of readdirSync(`${ROOT}db/migrations`, { withFileTypes: true })) {
+    if (e.isFile() && e.name.endsWith(".sql")) {
+      sql += readFileSync(`${ROOT}db/migrations/${e.name}`, "utf8");
+    }
+  }
+  assert(
+    /CREATE\s+(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?["`]?delivery_graph_proposals["`]?/i.test(sql),
+    "badge table \"delivery_graph_proposals\" must be created by db/migrations/*.sql",
+  );
+  assert(
+    /delivery_graph_proposals[\s\S]*?\bstatus\b/i.test(sql),
+    "delivery_graph_proposals must have a status column",
+  );
+});
