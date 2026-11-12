@@ -27,6 +27,12 @@ export function makeHandler(submit: Submit, fetchHead: FetchPrHead = fetchPrHead
     const row = await app.data.table("pull_requests", "pr_key").get(prKey);
     // biome-ignore lint/plugin: runtime/framework contract boundary for the untyped row shape
     const optIn = (row as { auto_resolve_escalations?: number } | undefined)?.auto_resolve_escalations === 1;
+    // Operator steering (issue #956 review): re-supply the run's durable instruction text so the
+    // merge→reconvergence handoff never starts an unsteered replacement loop (and never resets the
+    // `custom_instructions` projection). Read the SAME `pull_requests` row the opt-in came from.
+    // biome-ignore lint/plugin: runtime/framework contract boundary for the untyped row shape
+    const rowInstructions = (row as { custom_instructions_text?: string | null } | undefined)?.custom_instructions_text;
+    const customInstructions = typeof rowInstructions === "string" && rowInstructions.trim() !== "" ? rowInstructions : null;
     await app.data.table("merges", "id").insert({
       pr_key: prKey,
       outcome: "reconverge",
@@ -63,6 +69,7 @@ export function makeHandler(submit: Submit, fetchHead: FetchPrHead = fetchPrHead
       true,
       job.processInstanceKey != null ? String(job.processInstanceKey) : null,
       headSha,
+      customInstructions,
     );
     // `submitPr` can return `processKey: null` after rewriting the row to `converging` with no owner
     // (the create-instance failure window). Completing HERE would end the merge loop at

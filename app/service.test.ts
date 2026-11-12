@@ -1627,6 +1627,106 @@ test("startMerge stamps the merge-stage policy on the row (issue #947)", async (
   });
 });
 
+// ── Issue #956 review: the operator-steering TEXT is durable and survives the merge handoff ──────
+// Copilot threads 4547353262 / 4547353302: the #956 projection carried only the boolean
+// `custom_instructions` flag — the TEXT lived solely on the convergence instance's variables, so
+// every re-enrollment path that re-enters `submitPr` without it (merge→reconvergence handoff,
+// `handoffWaitingMergeToConvergence`, the poller's feature-delivery re-enroll) silently dropped the
+// steering and reset the flag. The text is now persisted on the row (`custom_instructions_text`)
+// and re-seeded by `startMerge`, so a steered run stays steered across the whole lifecycle.
+
+test("submitPr persists the instruction TEXT on the row (insert path) (#956 review)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores } = captureRoot();
+    await submitPr(
+      data,
+      engine,
+      { repo: "owner/repo", number: 31, url: "https://github.com/owner/repo/pull/31", prKey: "owner/repo#31" },
+      [],
+      20,
+      false,
+      null,
+      false,
+      false,
+      undefined,
+      null,
+      null,
+      "  prefer Deno; keep the diff small  ",
+    );
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.custom_instructions, 1, "the presence flag is stamped");
+    assertEquals(pr.custom_instructions_text, "prefer Deno; keep the diff small", "the TRIMMED text is durable on the row");
+  });
+});
+
+test("submitPr's run-scoped reopen carries a re-supplied text (and a handoff re-supplying the row's text keeps it) (#956 review)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, vars } = captureRoot();
+    const parsed = { repo: "owner/repo", number: 32, url: "https://github.com/owner/repo/pull/32", prKey: "owner/repo#32" };
+    await submitPr(data, engine, parsed, [], 20, false, null, false, false, undefined, null, null, "steer me");
+    // A merge→reconvergence handoff re-enters `submitPr` on the LIVE row. The caller (reconverge
+    // worker / handoff) re-supplies the text it read off the row, so the reopen keeps the steering.
+    const row = stores.pull_requests.rows[0] as Record<string, unknown>;
+    await submitPr(data, engine, parsed, [], 20, false, null, false, true, undefined, "PI-MERGE", null, row.custom_instructions_text as string);
+    const after = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(after.custom_instructions, 1, "the flag survives the handoff reopen");
+    assertEquals(after.custom_instructions_text, "steer me", "the text survives the handoff reopen");
+    assertEquals(vars().customInstructions, "steer me", "the fresh convergence instance is re-seeded with the steering");
+  });
+});
+
+test("startMerge re-seeds the merge-loop instance with the row's custom instructions (#956 review)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, vars } = captureRoot();
+    (stores.pull_requests.rows as unknown[]).push({
+      pr_key: "owner/repo#33",
+      repo: "owner/repo",
+      number: 33,
+      url: "https://github.com/owner/repo/pull/33",
+      status: "converged",
+      current_round: 2,
+      process_key: "PI-CONV",
+      merge_requested: 1,
+      merge_human_approval: 1,
+      custom_instructions: 1,
+      custom_instructions_text: "commit as josh.wulf@camunda.com",
+    });
+    await startMerge(data, engine, {
+      repo: "owner/repo",
+      number: 33,
+      url: "https://github.com/owner/repo/pull/33",
+      prKey: "owner/repo#33",
+      round: 2,
+    });
+    assertEquals(vars()?.customInstructions, "commit as josh.wulf@camunda.com", "the merge stage carries the steering (and a reconverge can re-read it)");
+  });
+});
+
+test("startMerge seeds customInstructions null on an unsteered row (prompts stay byte-identical)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, vars } = captureRoot();
+    (stores.pull_requests.rows as unknown[]).push({
+      pr_key: "owner/repo#34",
+      repo: "owner/repo",
+      number: 34,
+      url: "https://github.com/owner/repo/pull/34",
+      status: "converged",
+      current_round: 1,
+      process_key: "PI-CONV",
+      custom_instructions: 0,
+      custom_instructions_text: null,
+    });
+    await startMerge(data, engine, {
+      repo: "owner/repo",
+      number: 34,
+      url: "https://github.com/owner/repo/pull/34",
+      prKey: "owner/repo#34",
+      round: 1,
+    });
+    assertEquals(vars()?.customInstructions ?? null, null, "no steering → null, never a blank string");
+  });
+});
+
 // The repository envelope drives the c8ctl harness's isolated workspace provisioning: it is
 // emitted under the reserved `io.nanobpm.agentTask` namespace with the PR head branch as the
 // checkout ref, and omitted entirely when the head branch couldn't be resolved (so the harness

@@ -156,6 +156,37 @@ test("startFeature: autoResolveEscalations is persisted as 0/1 and seeded onto t
   }
 });
 
+// Issue #956 review (Copilot thread 4547353302): the feature-side steering text lived ONLY on the
+// feature instance's variables, so a poller/crash re-enrollment of the convergence loop (which
+// re-enters `submitPr` with no job variables) dropped it. Persist the trimmed text on the
+// `feature_runs` row BEFORE the instance/handoff exists, so every later enrollment path can recover it.
+test("startFeature: persists the trimmed custom-instructions text on the feature_runs row (#956 review)", async () => {
+  const stores = { feature_runs: { rows: [] as any[], key: "feature_key" } };
+  const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-1" }) } as any;
+  await startFeature(memData(stores), engine, PARSED, "main", true, true, "  prefer Deno; add integration tests  ");
+  assertEquals(stores.feature_runs.rows[0].custom_instructions, "prefer Deno; add integration tests");
+});
+
+test("startFeature: persists NULL custom-instructions when omitted or blank (#956 review)", async () => {
+  for (const input of [null, "   "]) {
+    const stores = { feature_runs: { rows: [] as any[], key: "feature_key" } };
+    const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-1" }) } as any;
+    await startFeature(memData(stores), engine, PARSED, "main", true, true, input);
+    assertEquals(stores.feature_runs.rows[0].custom_instructions ?? null, null);
+  }
+});
+
+test("startFeature: a re-seed refreshes the persisted custom-instructions text (#956 review)", async () => {
+  const stores = { feature_runs: { rows: [] as any[], key: "feature_key" } };
+  const data = memData(stores);
+  const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-1" }) } as any;
+  await startFeature(data, engine, PARSED, "main", true, true, "first steering");
+  // Simulate a settled row so the re-seed (update) branch runs.
+  stores.feature_runs.rows[0].process_key = null;
+  await startFeature(data, engine, PARSED, "main", true, true, "second steering");
+  assertEquals(stores.feature_runs.rows[0].custom_instructions, "second steering", "the fresh run's steering wins on a re-seed");
+});
+
 test("startFeature: seeds the single task slice + base-branch brief onto the instance", async () => {
   let captured: any = null;
   const engine = {

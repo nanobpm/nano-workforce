@@ -1,0 +1,11 @@
+-- Durable operator-steering TEXT for the convergence lifecycle (issue #956 review, Copilot threads
+-- 4547353262 / 4547353302). Migration 134 added only the boolean `custom_instructions` PROJECTION
+-- (1 ⇒ steered) so `/status` needs no engine read — but the TEXT itself lived solely on the
+-- convergence instance's variables. Every path that RE-ENTERS `submitPr` without the text
+-- (the merge→reconvergence `pr.reconverge` handoff, `handoffWaitingMergeToConvergence`, the
+-- poller's feature-delivery re-enroll) therefore started a replacement loop that ran UNSTEERED and
+-- reset the flag to 0. Persist the trimmed text on the row so any handoff can re-supply it, and so
+-- `startMerge` can re-seed the merge-loop instance (whose `pr.reconverge` is one of those paths).
+-- Run-scoped exactly like `custom_instructions`: the atomic reopen rewrites it to the fresh run's
+-- steering. NULL on every pre-existing row; those read as "no instructions".
+ALTER TABLE pull_requests ADD COLUMN custom_instructions_text TEXT;

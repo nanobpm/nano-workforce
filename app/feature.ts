@@ -67,6 +67,12 @@ export interface FeatureRun {
   /** 1 ⇒ this run OPTED IN to the escalation steward (issue #889): its open escalations are eligible
    * for the steward to auto-resolve (recorded reviewably). Default 0 — escalations stay human-only. */
   auto_resolve_escalations: number;
+  /** The operator's trimmed custom-instructions TEXT (137_feature_runs_custom_instructions.sql,
+   * issue #956 review), persisted BEFORE the instance/handoff exists so the convergence enrollment
+   * paths that have no job variables — `pollFeatureDelivery`'s re-enroll edge and the
+   * `pr.converge-feature` worker — read the SAME durable source and never start an unsteered loop.
+   * NULL when the run carries no steering. */
+  custom_instructions?: string | null;
   outcome: string | null;
   /** Human rollup detail. Projected by `pollFeatureDelivery` (fix: Feature history stuck at
    * `converging`) and also written by `pr.record-blocked-ack` with the operator's disposition
@@ -470,6 +476,9 @@ export async function startFeature(
       auto_merge: autoMerge ? 1 : 0,
       human_approval: humanApproval ? 1 : 0,
       auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
+      // Operator steering (issue #956 review): persist the trimmed text BEFORE the instance/handoff
+      // exists, so a poller-driven convergence (re-)enrollment recovers it with no job variables.
+      custom_instructions: instructions,
       outcome: null,
       delivery_label: null,
       // Clear the operator tick-off so a re-dispatched run is NOT silently dropped into History when
@@ -494,6 +503,9 @@ export async function startFeature(
       auto_merge: autoMerge ? 1 : 0,
       human_approval: humanApproval ? 1 : 0,
       auto_resolve_escalations: autoResolveEscalations ? 1 : 0,
+      // Operator steering (issue #956 review): durable from the start so the convergence handoff
+      // survives a worker/poller enrollment race or an interrupted handoff.
+      custom_instructions: instructions,
       outcome: null,
       delivery_label: null,
       created_at: ts,
