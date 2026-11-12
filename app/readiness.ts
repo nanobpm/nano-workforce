@@ -18,7 +18,7 @@
 // any credential is read at execution time from the typed env-contract (`credentialEnv` names a
 // declared {@link EnvKey}; ADR 0004 pinned decision 2) and is redacted from every log line.
 import { isEnvKey, readEnv, readEnvOr } from "./contracts.ts";
-import { allCheckNames, applyRollupEvents, checkGateConclusions, classifyMergeability, failingCheckNames, type PrState, pendingCheckNames } from "./github.ts";
+import { allCheckNames, applyRollupEvents, CHECK_EVENTS_QUERY, checkGateConclusions, classifyMergeability, failingCheckNames, type PrState, pendingCheckNames } from "./github.ts";
 import { parsePr } from "./prParse.ts";
 import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
 
@@ -861,12 +861,7 @@ export function prViewCommand(repo: string, number: string): string {
  * Mirrors the merge loop's enrichment (`enrichRollupEvents` in `app/github.ts`) but runs through the
  * probe's injected {@link ProbeExec} so the readiness path stays host-agnostic and unit-testable. */
 function prCheckEventsQuery(): string {
-  return (
-    "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){pullRequest(number:$n){" +
-    "commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100,after:$after){nodes{" +
-    "__typename ... on CheckRun{databaseId name startedAt checkSuite{workflowRun{event}}}}" +
-    "pageInfo{hasNextPage endCursor}}}}}}}}}}"
-  );
+  return CHECK_EVENTS_QUERY;
 }
 
 /** Enrich a `pr`-probe rollup with each run's triggering event, through the probe's injected

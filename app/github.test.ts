@@ -1815,3 +1815,18 @@ test("hasCopilotWorkStarted (token): an aborted (timed-out) read is UNKNOWN (nul
   );
   assertEquals(got, null);
 });
+
+test("CHECK_EVENTS_QUERY is brace-balanced (a malformed query leaves the rollup event-less, PR #957)", async () => {
+  const { CHECK_EVENTS_QUERY } = await import("./github.ts");
+  let depth = 0;
+  for (const ch of CHECK_EVENTS_QUERY) {
+    if (ch === "{") depth++;
+    if (ch === "}") depth--;
+    if (depth < 0) throw new Error("closing brace without a matching opening brace");
+  }
+  assertEquals(depth, 0);
+  for (const p of ["(", "["]) {
+    const close = p === "(" ? ")" : "]";
+    assertEquals(CHECK_EVENTS_QUERY.split(p).length, CHECK_EVENTS_QUERY.split(close).length);
+  }
+});

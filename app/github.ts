@@ -1449,6 +1449,16 @@ export function applyRollupEvents(rollup: RollupEntry[], nodes: unknown[]): void
   }
 }
 
+/** The ONE GraphQL page query reading each check-run's triggering event (PR #957). Shared by the
+ * merge loop ({@link enrichRollupEvents}) and the readiness probe so the two can never drift; its
+ * brace balance is pinned by a unit test (a malformed query is rejected by GitHub and silently
+ * leaves the rollup event-less). */
+export const CHECK_EVENTS_QUERY =
+  "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){pullRequest(number:$n){" +
+  "commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100,after:$after){nodes{" +
+  "__typename ... on CheckRun{databaseId name startedAt checkSuite{workflowRun{event}}}}" +
+  "pageInfo{hasNextPage endCursor}}}}}}}}}";
+
 /** Populate each rollup entry's `event` from GraphQL, because the `gh pr view --json
  * statusCheckRollup` exporter omits it (cli/cli `api/export_pr.go`) — without it every run takes the
  * name-only gate fallback and a green `push` run collapses away a red required `pull_request` run of
@@ -1474,11 +1484,7 @@ export async function enrichRollupEvents(
     // contexts would leave every later page event-less (cross-event failures hidden there) and split
     // a same-event cancelled/rerun pair across the boundary into two gates (PR #957 review).
     for (;;) {
-      const query =
-        "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){pullRequest(number:$n){" +
-        "commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100,after:$after){nodes{" +
-        "__typename ... on CheckRun{databaseId name startedAt checkSuite{workflowRun{event}}}}" +
-        "pageInfo{hasNextPage endCursor}}}}}}}}}}";
+      const query = CHECK_EVENTS_QUERY;
       const args = ["api", "graphql", "-f", `query=${query}`, "-f", `o=${owner}`, "-f", `r=${name}`, "-F", `n=${number}`];
       if (after !== null) args.push("-f", `after=${after}`);
       const out = await runGh(args);
