@@ -53,13 +53,22 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   // read the durable flag off the `feature_runs` row (the source of truth) and hand it to `submitPr`.
   const featureRow = await featureRuns(app.data).get(featureKey);
   const autoResolve = featureRow?.auto_resolve_escalations === 1;
-  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, false, featureKey, humanApproval, autoResolve, autoMerge);
+  // Propagate the run's operator custom instructions (issue #956) the same way. Read the DURABLE
+  // text off the `feature_runs` row — persisted by `startFeature` before the instance/handoff
+  // existed (issue #956 review) — NOT the job variable: the worker publishes `converging` BEFORE
+  // enrolling, so `pollFeatureDelivery`'s re-enroll edge can win the race (or recover an
+  // interrupted handoff) with no job variables at all. Both paths now read this one durable source,
+  // so the steering survives the worker/poller interleaving.
+  const rowInstructions = featureRow?.custom_instructions;
+  const customInstructions = typeof rowInstructions === "string" && rowInstructions.trim() !== "" ? rowInstructions : null;
+  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, false, featureKey, humanApproval, autoResolve, autoMerge, null, null, customInstructions);
   app.log.info("converge-feature: enrolled PR into convergence loop", {
     featureKey,
     prKey: parsed.prKey,
     autoMerge,
     humanApproval,
     autoResolveEscalations: autoResolve,
+    hasCustomInstructions: customInstructions != null,
   });
   return {};
 };

@@ -108,3 +108,53 @@ test("a head read that resolves no SHA degrades to the checkpoint restore (no ov
   await makeHandler(submit, head)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
   assertEquals(args[11], null, "no live head SHA → no override (checkpoint restore, the pre-fix behaviour)");
 });
+
+// Issue #956 review (Copilot thread 4547353262): a merge-stage reconverge re-enters `submitPr`
+// WITHOUT the run's operator custom instructions, so the replacement convergence loop runs
+// unsteered (and `submitPr`'s run-scoped reopen resets `custom_instructions` to 0). The worker must
+// read the durable text off the PR row (`custom_instructions_text`, stamped by `submitPr`) and pass
+// it through, so convergence → merge → reconvergence keeps the steering.
+test("preserves the run's custom instructions across the merge→reconvergence handoff (#956)", async () => {
+  const app = {
+    data: {
+      table: (name: string) => ({
+        get: async () =>
+          name === "pull_requests"
+            ? { auto_resolve_escalations: 1, custom_instructions_text: "  commit as josh.wulf@camunda.com  " }
+            : undefined,
+        insert: async () => 1,
+      }),
+    },
+    engine: {},
+    log: noopLog(),
+  } as any;
+  let args: unknown[] = [];
+  const submit = (async (...a: unknown[]) => {
+    args = a;
+    return { prKey: "acme/w#7", processKey: "999" };
+  }) as unknown as Submit;
+  const head = (async () => null) as unknown as FetchPrHead;
+  await makeHandler(submit, head)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  assertEquals(args[12], "  commit as josh.wulf@camunda.com  ", "the durable instruction text rides the handoff into the fresh convergence run");
+});
+
+test("a PR row with no stored instructions hands off with null (no steering)", async () => {
+  const app = {
+    data: {
+      table: (name: string) => ({
+        get: async () => (name === "pull_requests" ? { auto_resolve_escalations: 0, custom_instructions_text: null } : undefined),
+        insert: async () => 1,
+      }),
+    },
+    engine: {},
+    log: noopLog(),
+  } as any;
+  let args: unknown[] = [];
+  const submit = (async (...a: unknown[]) => {
+    args = a;
+    return { prKey: "acme/w#7", processKey: "999" };
+  }) as unknown as Submit;
+  const head = (async () => null) as unknown as FetchPrHead;
+  await makeHandler(submit, head)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  assertEquals(args[12], null, "no stored text → null (the fresh run's prompts stay byte-identical to no-instructions)");
+});

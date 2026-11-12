@@ -92,6 +92,7 @@ components:
         - activeWorker
         - leaseUntil
         - autoResolveEscalations
+        - hasCustomInstructions
         - merge
         - incident
         - terminationReason
@@ -172,6 +173,13 @@ components:
             Whether this PR's run opted into automatic escalation resolution by the escalation
             steward (issue #889). Derived from the subject row's durable `auto_resolve_escalations`
             flag, never a clobbered process variable.
+        hasCustomInstructions:
+          type: boolean
+          description: >-
+            Whether this run's converge agents carry operator custom instructions (issue #956) —
+            the loop was started with `customInstructions` and every round's agent prompt is being
+            steered. Served from the durable `custom_instructions` row projection that `submitPr`
+            stamps at submit/reopen; a pre-#956 (NULL) row reads false. Never an engine read.
         merge:
           type: object
           additionalProperties: false
@@ -2253,6 +2261,10 @@ components:
         autoResolveEscalations:
           type: boolean
           description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
+        customInstructions:
+          type: string
+          maxLength: 8000
+          description: "OPTIONAL free-text steering appended to every converge round's agent prompt (review-round and adversarial-review), like `FeatureStartByIssue.customInstructions` for the implementer. Blank is treated as absent; a non-string is a 400. Surfaced on `/status` as `hasCustomInstructions`."
         convergeOnly:
           type: boolean
           deprecated: true
@@ -2280,6 +2292,10 @@ components:
         autoResolveEscalations:
           type: boolean
           description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
+        customInstructions:
+          type: string
+          maxLength: 8000
+          description: "OPTIONAL free-text steering appended to every converge round's agent prompt (review-round and adversarial-review), like `FeatureStartByIssue.customInstructions` for the implementer. Blank is treated as absent; a non-string is a 400. Surfaced on `/status` as `hasCustomInstructions`."
         convergeOnly:
           type: boolean
           deprecated: true
@@ -5304,6 +5320,10 @@ paths:
                     autoResolveEscalations:
                       type: boolean
                       description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
+                    customInstructions:
+                      type: string
+                      maxLength: 8000
+                      description: OPTIONAL free-text steering appended to every converge round's agent prompt (review-round and adversarial-review), like `FeatureStartByIssue.customInstructions` for the implementer. Blank is treated as absent; a non-string is a 400. Surfaced on `/status` as `hasCustomInstructions`.
                     convergeOnly:
                       type: boolean
                       deprecated: true
@@ -5330,6 +5350,10 @@ paths:
                     autoResolveEscalations:
                       type: boolean
                       description: "Opt this loop's escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
+                    customInstructions:
+                      type: string
+                      maxLength: 8000
+                      description: OPTIONAL free-text steering appended to every converge round's agent prompt (review-round and adversarial-review), like `FeatureStartByIssue.customInstructions` for the implementer. Blank is treated as absent; a non-string is a 400. Surfaced on `/status` as `hasCustomInstructions`.
                     convergeOnly:
                       type: boolean
                       deprecated: true

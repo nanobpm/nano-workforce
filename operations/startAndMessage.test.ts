@@ -207,6 +207,86 @@ test("startConvergenceLoop → 400 on a non-boolean autoMerge (issue #916)", asy
   });
 });
 
+// Issue #956: the convergence-loop start door accepts an optional `customInstructions` string and
+// threads it to every converge round's agent prompt — mirroring the feature door. The capture
+// harness above records `convergeOnly`; this one records `customInstructions` off the same
+// createInstance variables.
+function captureInstructions() {
+  const rows: Record<string, unknown>[] = [];
+  let captured: unknown;
+  const data = {
+    table: (_name: string, key: string) => ({
+      get: (k: unknown) => Promise.resolve(rows.find((r) => r[key] === k) ?? null),
+      find: (q: Record<string, unknown>) =>
+        Promise.resolve(rows.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v))),
+      insert: (r: Record<string, unknown>) => {
+        rows.push(r);
+        return Promise.resolve(r);
+      },
+      update: (k: unknown, patch: Record<string, unknown>) => {
+        const row = rows.find((r) => r[key] === k);
+        if (row) Object.assign(row, patch);
+        return Promise.resolve(row);
+      },
+      delete: (k: unknown) => {
+        const i = rows.findIndex((r) => r[key] === k);
+        if (i >= 0) rows.splice(i, 1);
+        return Promise.resolve();
+      },
+    }),
+  };
+  const engine = {
+    createInstance: (req: { variables?: Record<string, unknown> }) => {
+      captured = req.variables?.customInstructions;
+      return Promise.resolve({ processInstanceKey: "PI-1" });
+    },
+  };
+  return { app: { data, engine, log: noopLog() } as any as AppApi, get: () => captured };
+}
+
+test("startConvergenceLoop threads customInstructions (trimmed) into the loop's variables (#956)", async () => {
+  await withGithubOff(async () => {
+    const { app: capApp, get } = captureInstructions();
+    const res = await startConvergenceLoop(
+      input({ pr: "owner/repo#20", customInstructions: "  commit as josh.wulf@camunda.com  " }),
+      capApp,
+    );
+    assertEquals((res as any).status, 202);
+    assertEquals(get(), "commit as josh.wulf@camunda.com");
+  });
+});
+
+test("startConvergenceLoop seeds customInstructions null when omitted or blank (#956)", async () => {
+  await withGithubOff(async () => {
+    const omitted = captureInstructions();
+    const res = await startConvergenceLoop(input({ pr: "owner/repo#21" }), omitted.app);
+    assertEquals((res as any).status, 202);
+    assertEquals(omitted.get(), null, "omitted ⇒ null, so the appendPrompt FEEL skips the block");
+
+    const blank = captureInstructions();
+    const blankRes = await startConvergenceLoop(
+      input({ pr: "owner/repo#22", customInstructions: "   " }),
+      blank.app,
+    );
+    assertEquals((blankRes as any).status, 202);
+    assertEquals(blank.get(), null, "blank/whitespace ⇒ null (byte-identical prompt to today)");
+  });
+});
+
+// Mirrors the `autoMerge` non-boolean 400 (issue #916): a present-but-non-string `customInstructions`
+// must not be silently dropped — the operator believes they steered the loop when nothing was
+// appended. Rejected at the edge with a 400.
+test("startConvergenceLoop → 400 on a non-string customInstructions (#956)", async () => {
+  await withGithubOff(async () => {
+    const { app: capApp, get } = captureInstructions();
+    const res = await startConvergenceLoop(input({ pr: "owner/repo#23", customInstructions: 42 }), capApp);
+    const r = res as any;
+    assertEquals(r.status, 400);
+    assertEquals(typeof r.body.error, "string");
+    assertEquals(get(), undefined, "a rejected door never reaches the engine");
+  });
+});
+
 test("startPlanFanout → 400 on an unparseable issue reference", async () => {
   const res = await startPlanFanout(input({ issue: "" }), app);
   const r = res as any;

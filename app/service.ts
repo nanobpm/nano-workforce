@@ -443,6 +443,17 @@ export interface PullRequest {
   // rows fall back to the #937 batched engine read. Run-scoped: reset by the atomic reopen.
   merge_requested?: number | null;
   merge_human_approval?: number | null;
+  // Operator-steering projection (134_pull_requests_custom_instructions.sql, issue #956): 1 ⇒ this
+  // run's converge agents carry `customInstructions` (stamped by `submitPr` at submit/reopen, run-
+  // scoped like the merge policy), so `/status` shows the loop is steered with no engine read. NULL
+  // marks a row written before the projection existed; it reads as false.
+  custom_instructions?: number | null;
+  // The steering TEXT itself (136_pull_requests_custom_instructions_text.sql, issue #956 review):
+  // the boolean above can't re-seed a loop, so the trimmed instructions are durable on the row and
+  // every re-enrollment path (merge→reconvergence `pr.reconverge`, `handoffWaitingMergeToConvergence`,
+  // the poller's feature-delivery re-enroll) re-supplies them, and `startMerge` re-seeds the merge
+  // instance. Run-scoped with the flag; NULL when the run carries no steering.
+  custom_instructions_text?: string | null;
 }
 
 interface PrDependency {
@@ -669,9 +680,10 @@ export async function submitPr(
   autoMerge?: boolean,
   handoffFrom: string | null = null,
   headShaOverride: string | null = null,
+  customInstructions: string | null = null,
 ) {
   return withPrSubmitLock(parsed.prKey, () =>
-    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom, headShaOverride),
+    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom, headShaOverride, customInstructions),
   );
 }
 
@@ -688,6 +700,7 @@ async function submitPrCritical(
   autoMerge?: boolean,
   handoffFrom: string | null = null,
   headShaOverride: string | null = null,
+  customInstructions: string | null = null,
 ) {
   // Merge intent (issue #916): `autoMerge` is the CANONICAL positive form end to end — the same name
   // the feature/convergence-loop/plan-fanout doors accept. The legacy inverted `convergeOnly`
@@ -701,6 +714,13 @@ async function submitPrCritical(
   // merge-loop — its own predicate, `AUTO_MERGE && merge intent on`. A run that won't merge
   // (review-only, or the global switch off) must not park for a pointless approval.
   const gated = humanApproval && mergeIntent && AUTO_MERGE;
+  // Operator free-text steering for the converge agents (issue #956), mirrored from the feature path
+  // (feature.ts): blank/absent → null so the agent tasks' `appendPrompt` FEEL skips the "## Operator
+  // custom instructions" block rather than appending an empty heading — an omitted/blank value leaves
+  // every prompt byte-identical to no-instructions.
+  const instructions = typeof customInstructions === "string" && customInstructions.trim() !== ""
+    ? customInstructions.trim()
+    : null;
   const table = prs(data);
   const existing = await table.get(parsed.prKey);
   // ADR-0065: classify "already running" on the DERIVED terminal edge, not the base transient. A
@@ -875,6 +895,11 @@ async function submitPrCritical(
       // Mirror the engine seed EXACTLY (PR #950 review): an ungated loop is seeded
       // `humanApproval: false` (decided — no gate), a gated one `true` (outstanding).
       merge_human_approval: gated ? 1 : 0,
+      // Operator-steering projection (issue #956): 1 ⇒ this run's converge agents carry custom
+      // instructions, so `/status` can show the loop is steered with no engine read. The TEXT is
+      // durable alongside (issue #956 review) so a handoff/re-enrollment can re-supply it.
+      custom_instructions: instructions != null ? 1 : 0,
+      custom_instructions_text: instructions,
       created_at: ts,
       updated_at: ts,
     });
@@ -943,6 +968,11 @@ async function submitPrCritical(
       // review-round agent's prompt, so it can stop before pushing if the run is cancelled.
       abandonUrl: abUrl,
       abandonBrief: renderAbandonBrief(abUrl),
+      // Optional operator steering (issue #956): appended to EVERY converge round's agent prompt
+      // (review-round + adversarial-review) via their `appendPrompt` FEEL, under the same
+      // "## Operator custom instructions" block the implement cell uses. Null when none was supplied;
+      // persists on the instance, so reconverge re-dispatches and later rounds keep carrying it.
+      customInstructions: instructions,
       // Host-git provisioning (c8ctl): deliver the repository envelope so the `senior:pr-review`
       // harness clones an isolated workspace checked out on the PR head branch. Spread last so an
       // unresolved head (`{}`) leaves the other vars untouched.
@@ -981,6 +1011,9 @@ async function submitPrCritical(
         // authoritative (`stale: false`) in `/status`.
         merge_requested: existing.merge_requested ?? null,
         merge_human_approval: existing.merge_human_approval ?? null,
+        // The operator-steering projection (issue #956) rolls back with the same ownership.
+        custom_instructions: existing.custom_instructions ?? null,
+        custom_instructions_text: existing.custom_instructions_text ?? null,
       }
     : null;
   try {
@@ -1043,6 +1076,9 @@ async function submitPrCritical(
         // the fresh run's intent wins, and the approval state mirrors the fresh loop's `humanApproval` seed.
         merge_requested: mergeIntent ? 1 : 0,
         merge_human_approval: gated ? 1 : 0,
+        // Operator-steering projection (issue #956): run-scoped too — the fresh run's steering wins.
+        custom_instructions: instructions != null ? 1 : 0,
+        custom_instructions_text: instructions,
         // Publish the fresh run's identity in the SAME write as the status flip (may be null if the
         // instance could not be created — a phantom row a retry re-enrolls, as on first submit).
         process_key: processKey,
@@ -1114,6 +1150,14 @@ export async function startMerge(
   // self-rooted PR carries its own `pr_key`; `?? null` only tolerates a legacy row predating the
   // column.
   const rootRequestKey = existing?.root_request_key ?? null;
+  // Operator steering (issue #956 review): re-seed the merge-loop instance with the run's durable
+  // custom instructions. The convergence instance's own copy dies with it at the merge handoff, and
+  // the merge stage's `pr.reconverge` re-entry is one of the paths that must not drop the steering —
+  // carrying it here keeps the merge-stage agents (and any reconverge fallback) steered.
+  const customInstructions =
+    typeof existing?.custom_instructions_text === "string" && existing.custom_instructions_text.trim() !== ""
+      ? existing.custom_instructions_text.trim()
+      : null;
   const abUrl = abandonUrl(abandonToken);
   // Resolve the PR head branch so the merge agents (fix-ci, rebase) get an isolated clone checked
   // out on it (same host-git provisioning path as review-round). Best-effort: an unresolved head
@@ -1163,6 +1207,9 @@ export async function startMerge(
       reviewRequest: null,
       // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).
       rootRequestKey,
+      // Operator steering (issue #956 review): the run's durable custom instructions, so the merge
+      // stage's agents and a `pr.reconverge` re-entry keep the steering the convergence loop ran with.
+      customInstructions,
       // Merge policy (issue #936): a merge loop only starts for a requested, approved merge. Seeding
       // the policy triple keeps it in /status's batched reads (no per-instance probes). Inert here —
       // the merge-loop process reads none of them.
@@ -1270,6 +1317,10 @@ export interface ActivePr {
   /** Whether this PR opted in to the escalation steward (issue #889) — its open escalations are
    * eligible for steward auto-resolution. Shown in `/status` per PR. */
   autoResolveEscalations: boolean;
+  /** Whether this run's converge agents carry operator custom instructions (issue #956), served
+   * from the durable `custom_instructions` row projection — the operator can see a loop is being
+   * steered with no engine read. */
+  hasCustomInstructions: boolean;
   /** The effective merge policy (issue #916): what the run intends (`requested`), what the
    * deployment allows (`enabled`), and what will actually happen (`effective`/`blockedBy`). */
   merge: MergePolicy;
@@ -1377,6 +1428,7 @@ export async function activePrs(
       activeWorker: p.active_worker ?? null,
       leaseUntil: p.lease_until ?? null,
       autoResolveEscalations: p.auto_resolve_escalations === 1,
+      hasCustomInstructions: p.custom_instructions === 1,
       merge: mergeByPr.get(p.pr_key) ?? mergePolicyDefault(),
       incident,
       terminationReason: p.termination_reason ?? null,
@@ -2326,6 +2378,10 @@ export async function handoffWaitingMergeToConvergence(
       pr.auto_resolve_escalations === 1,
       undefined,
       mergeKey,
+      // Operator steering (issue #956 review): re-supply the run's durable instruction text so the
+      // merge→convergence handoff never starts an unsteered replacement loop.
+      null,
+      typeof pr.custom_instructions_text === "string" ? pr.custom_instructions_text : null,
     );
     const successor = "processKey" in res ? res.processKey : null;
     if (successor == null) {
@@ -3870,6 +3926,12 @@ export async function pollFeatureDelivery(
             // Merge intent (issue #916): the canonical positive `autoMerge`, derived from the run's
             // durable `auto_merge` flag (mirrors `converge-feature`).
             run.auto_merge === 1,
+            // Operator steering (issue #956 review): the run's durable instruction text, so a
+            // poller-driven (re-)enrollment — which has no job variables — recovers the same
+            // steering the `converge-feature` worker would have forwarded.
+            null,
+            null,
+            typeof run.custom_instructions === "string" ? run.custom_instructions : null,
           );
         }
       }

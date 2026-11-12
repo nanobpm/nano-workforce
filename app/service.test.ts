@@ -6,7 +6,7 @@
 // loop already guards in `startPlan`). Drives `submitPr` against an in-memory data layer with the
 // GitHub transport forced off so it is hermetic.
 import { test } from "node:test";
-import { assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import { memDataFor } from "../test/worldDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
@@ -1624,6 +1624,130 @@ test("startMerge stamps the merge-stage policy on the row (issue #947)", async (
     const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
     assertEquals(pr.merge_requested, 1, "a merge loop only starts for a requested merge");
     assertEquals(pr.merge_human_approval, 0, "…and an approved one — the gate is behind it");
+  });
+});
+
+// ── Issue #956 review: the operator-steering TEXT is durable and survives the merge handoff ──────
+// Copilot threads 4547353262 / 4547353302: the #956 projection carried only the boolean
+// `custom_instructions` flag — the TEXT lived solely on the convergence instance's variables, so
+// every re-enrollment path that re-enters `submitPr` without it (merge→reconvergence handoff,
+// `handoffWaitingMergeToConvergence`, the poller's feature-delivery re-enroll) silently dropped the
+// steering and reset the flag. The text is now persisted on the row (`custom_instructions_text`)
+// and re-seeded by `startMerge`, so a steered run stays steered across the whole lifecycle.
+
+test("submitPr persists the instruction TEXT on the row (insert path) (#956 review)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores } = captureRoot();
+    await submitPr(
+      data,
+      engine,
+      { repo: "owner/repo", number: 31, url: "https://github.com/owner/repo/pull/31", prKey: "owner/repo#31" },
+      [],
+      20,
+      false,
+      null,
+      false,
+      false,
+      undefined,
+      null,
+      null,
+      "  prefer Deno; keep the diff small  ",
+    );
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.custom_instructions, 1, "the presence flag is stamped");
+    assertEquals(pr.custom_instructions_text, "prefer Deno; keep the diff small", "the TRIMMED text is durable on the row");
+  });
+});
+
+test("submitPr's run-scoped reopen carries a re-supplied text (and a handoff re-supplying the row's text keeps it) (#956 review)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, vars } = captureRoot();
+    const parsed = { repo: "owner/repo", number: 32, url: "https://github.com/owner/repo/pull/32", prKey: "owner/repo#32" };
+    await submitPr(data, engine, parsed, [], 20, false, null, false, false, undefined, null, null, "steer me");
+    const firstVars = vars();
+    assertEquals(firstVars.customInstructions, "steer me", "the first submission seeds the steering");
+    // A merge→reconvergence handoff re-enters `submitPr` on the LIVE row, and by then the merge
+    // loop OWNS it (`startMerge` re-points `process_key` at the merge instance). Simulate that
+    // owner: without this, `handoffFrom: "PI-MERGE"` fails the live-owner gate and the call
+    // short-circuits as `alreadyRunning` — never exercising the reopen this test exists for.
+    const row = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(row.process_key, "PI-1", "the first submission owns the row");
+    row.process_key = "PI-MERGE";
+    const handedBack = await submitPr(
+      data,
+      engine,
+      parsed,
+      [],
+      20,
+      false,
+      null,
+      false,
+      true,
+      undefined,
+      "PI-MERGE",
+      null,
+      row.custom_instructions_text as string,
+    );
+    assertEquals(handedBack, { prKey: "owner/repo#32", processKey: "PI-1" }, "the owning merge loop's hand-back mints a SUCCESSOR, not alreadyRunning");
+    const after = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(after.custom_instructions, 1, "the flag survives the handoff reopen");
+    assertEquals(after.custom_instructions_text, "steer me", "the text survives the handoff reopen");
+    const successorVars = vars();
+    assertEquals(successorVars.customInstructions, "steer me", "the fresh convergence instance is re-seeded with the steering");
+    assert(successorVars !== firstVars, "a successor instance was actually created (not the first submission's captured variables)");
+    assertEquals(after.process_key, "PI-1", "the successor instance now owns the row (the fake engine mints PI-1 per capture)");
+  });
+});
+
+test("startMerge re-seeds the merge-loop instance with the row's custom instructions (#956 review)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, vars } = captureRoot();
+    (stores.pull_requests.rows as unknown[]).push({
+      pr_key: "owner/repo#33",
+      repo: "owner/repo",
+      number: 33,
+      url: "https://github.com/owner/repo/pull/33",
+      status: "converged",
+      current_round: 2,
+      process_key: "PI-CONV",
+      merge_requested: 1,
+      merge_human_approval: 1,
+      custom_instructions: 1,
+      custom_instructions_text: "commit as josh.wulf@camunda.com",
+    });
+    await startMerge(data, engine, {
+      repo: "owner/repo",
+      number: 33,
+      url: "https://github.com/owner/repo/pull/33",
+      prKey: "owner/repo#33",
+      round: 2,
+    });
+    assertEquals(vars()?.customInstructions, "commit as josh.wulf@camunda.com", "the merge stage carries the steering (and a reconverge can re-read it)");
+  });
+});
+
+test("startMerge seeds customInstructions null on an unsteered row (prompts stay byte-identical)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, vars } = captureRoot();
+    (stores.pull_requests.rows as unknown[]).push({
+      pr_key: "owner/repo#34",
+      repo: "owner/repo",
+      number: 34,
+      url: "https://github.com/owner/repo/pull/34",
+      status: "converged",
+      current_round: 1,
+      process_key: "PI-CONV",
+      custom_instructions: 0,
+      custom_instructions_text: null,
+    });
+    await startMerge(data, engine, {
+      repo: "owner/repo",
+      number: 34,
+      url: "https://github.com/owner/repo/pull/34",
+      prKey: "owner/repo#34",
+      round: 1,
+    });
+    assertEquals(vars()?.customInstructions ?? null, null, "no steering → null, never a blank string");
   });
 });
 

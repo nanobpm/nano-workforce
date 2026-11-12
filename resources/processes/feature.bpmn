@@ -19,6 +19,7 @@
           <nano:extend name="prKey" type="string" optional="true" />
           <nano:extend name="autoMerge" type="boolean" optional="true" />
           <nano:extend name="humanApproval" type="boolean" optional="true" />
+          <nano:extend name="customInstructions" type="string" optional="true" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>

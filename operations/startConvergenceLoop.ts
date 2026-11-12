@@ -44,7 +44,18 @@ export default defineOperation("startConvergenceLoop", async ({ body }, app) => 
   // Opt-in escalation steward (issue #889): only when explicitly requested do this loop's
   // escalations become eligible for steward auto-resolution. Default off.
   const autoResolveEscalations = "autoResolveEscalations" in body && body.autoResolveEscalations === true;
-  const result = await submitPr(app.data, app.engine, parsed, dependsOn, maxRounds, false, null, false, autoResolveEscalations, autoMerge);
+  // Optional operator steering (issue #956), mirrored from the feature door: a present-but-non-string
+  // `customInstructions` is a 400 (the same way `autoMerge` is validated, #916) — silently dropping it
+  // would leave the operator believing they steered the loop when nothing was appended. Blank is
+  // normalized to null downstream (submitPr) so the prompt stays byte-identical to no-instructions.
+  if ("customInstructions" in body && typeof body.customInstructions !== "string") {
+    app.log.warn("start-convergence rejected: customInstructions must be a string", { customInstructions: body.customInstructions });
+    return { status: 400, body: { error: "customInstructions must be a string" } };
+  }
+  const customInstructions = "customInstructions" in body && typeof body.customInstructions === "string"
+    ? body.customInstructions
+    : null;
+  const result = await submitPr(app.data, app.engine, parsed, dependsOn, maxRounds, false, null, false, autoResolveEscalations, autoMerge, null, null, customInstructions);
   app.log.info("convergence loop started", {
     prKey: parsed.prKey,
     alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
@@ -52,6 +63,7 @@ export default defineOperation("startConvergenceLoop", async ({ body }, app) => 
     maxRounds,
     autoMerge: autoMerge ?? body.convergeOnly !== true,
     autoResolveEscalations,
+    hasCustomInstructions: customInstructions != null && customInstructions.trim() !== "",
   });
   return { status: 202, body: result };
 });

@@ -490,7 +490,17 @@ Notes:
   input `=(if abandonBrief = null then "" else abandonBrief)` — a non-string echo
   would carry a wrong/non-string brief into that later prompt). Both are plain
   process-owned reads, pinned by the usual `=guardAbandonUrl` / `=guardAbandonBrief`
-  restore. The reserved **`io.nanobpm.agentTask`** repository envelope is
+  restore. The seeded **operator steering** `customInstructions` (issue #956) is in
+  the protected set for the same reason as `abandonBrief`: it feeds every agent
+  task's `appendPrompt`, and an agent completion that echoes
+  `customInstructions: null` (or a colliding string) would otherwise clear or
+  replace the steering for every subsequent round while the durable row — and so
+  `/status` — still reports it enabled. It is seeded once at instance start and
+  never mutated mid-flight by the host, so the plain
+  `=guardCustomInstructions` snapshot/restore applies (no monotonic join) — on the
+  convergence loop's agent tasks and on the merge loop's `fix-ci`/`rebase` agents,
+  whose `appendPrompt` carries the same operator-instructions block. The
+  reserved **`io.nanobpm.agentTask`** repository envelope is
   *deliberately not* in this list: it is a flat dotted framework key with no
   FEEL-path access, so snapshotting it would need backtick-escaped FEEL
   (`` =`io.nanobpm.agentTask` ``) that has no precedent on this engine and would,

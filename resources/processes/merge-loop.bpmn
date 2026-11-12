@@ -477,8 +477,9 @@
             <zeebe:property name="io.nanobpm.dataEnvelope.out" value="FixCiOut" />
           </zeebe:properties>
           <zeebe:ioMapping>
-            <zeebe:input source="=(if (failingChecksList = null or failingChecksList = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Failing checks to make green:&#10;&#34; + failingChecksList) + (if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
+            <zeebe:input source="=(if (failingChecksList = null or failingChecksList = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Failing checks to make green:&#10;&#34; + failingChecksList) + (if (abandonBrief = null) then &#34;&#34; else abandonBrief) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
             <zeebe:input source="=ciFixRound" target="guardCiFixRound" />
+            <zeebe:input source="=customInstructions" target="guardCustomInstructions" />
             <zeebe:input source="=ciFixMax" target="guardCiFixMax" />
             <zeebe:input source="=rebaseRound" target="guardRebaseRound" />
             <zeebe:input source="=rebaseMax" target="guardRebaseMax" />
@@ -522,6 +523,7 @@
             <zeebe:output source="=guardRound" target="round" />
             <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
             <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
+            <zeebe:output source="=guardCustomInstructions" target="customInstructions" />
             <zeebe:output source="=guardReviewRequestRound" target="reviewRequestRound" />
             <zeebe:output source="=guardReviewRequestMax" target="reviewRequestMax" />
             <zeebe:output source="=guardReviewRequestWait" target="reviewRequestWait" />
@@ -687,8 +689,9 @@
             <zeebe:property name="io.nanobpm.dataEnvelope.out" value="RebaseOut" />
           </zeebe:properties>
           <zeebe:ioMapping>
-            <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
+            <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
             <zeebe:input source="=ciFixRound" target="guardCiFixRound" />
+            <zeebe:input source="=customInstructions" target="guardCustomInstructions" />
             <zeebe:input source="=ciFixMax" target="guardCiFixMax" />
             <zeebe:input source="=rebaseRound" target="guardRebaseRound" />
             <zeebe:input source="=rebaseMax" target="guardRebaseMax" />
@@ -732,6 +735,7 @@
             <zeebe:output source="=guardRound" target="round" />
             <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
             <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
+            <zeebe:output source="=guardCustomInstructions" target="customInstructions" />
             <zeebe:output source="=guardReviewRequestRound" target="reviewRequestRound" />
             <zeebe:output source="=guardReviewRequestMax" target="reviewRequestMax" />
             <zeebe:output source="=guardReviewRequestWait" target="reviewRequestWait" />
