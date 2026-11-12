@@ -497,7 +497,9 @@ Notes:
   replace the steering for every subsequent round while the durable row — and so
   `/status` — still reports it enabled. It is seeded once at instance start and
   never mutated mid-flight by the host, so the plain
-  `=guardCustomInstructions` snapshot/restore applies (no monotonic join). The
+  `=guardCustomInstructions` snapshot/restore applies (no monotonic join) — on the
+  convergence loop's agent tasks and on the merge loop's `fix-ci`/`rebase` agents,
+  whose `appendPrompt` carries the same operator-instructions block. The
   reserved **`io.nanobpm.agentTask`** repository envelope is
   *deliberately not* in this list: it is a flat dotted framework key with no
   FEEL-path access, so snapshotting it would need backtick-escaped FEEL

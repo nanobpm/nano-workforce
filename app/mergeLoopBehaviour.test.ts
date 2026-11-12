@@ -1437,3 +1437,51 @@ test("an abandoned merge ends the whole instance via the root terminate, without
   const open = await engine.searchUserTasks({});
   assert(open.length === 0, "the root terminate must leave nothing running (no re-armed poller, no parked escalation)");
 });
+
+// Operator steering (issue #956 review): the merge-stage agents must carry the run's custom
+// instructions in their `appendPrompt` (e.g. a required commit email), and an agent echo must not
+// clear them for later re-arms.
+const STEER = "Commit as bot@example.test.";
+const STEER_BLOCK = `## Operator custom instructions\n\nThe operator supplied these instructions for this run — follow them:\n\n${STEER}`;
+
+for (const [jobType, mergeState, failingChecks, failingChecksList, status] of [
+  ["senior:fix-ci", "blocked", 1, "build", "fixed"],
+  ["senior:rebase", "conflict", 0, "", "rebased"],
+] as const) {
+  test(`${jobType} appendPrompt carries operator custom instructions; an echo cannot clear them (#956)`, async () => {
+    const prompts: string[] = [];
+    const engine = await boot({
+      vars: { customInstructions: STEER },
+      responses: {
+        "pr.merge-stall-probe": { mergeState, failingChecks, failingChecksList },
+        [jobType]: (job) => {
+          prompts.push(String(job.variables.appendPrompt ?? ""));
+          return { status, customInstructions: null };
+        },
+      },
+    });
+    await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+    await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+    assert(prompts.length >= 1, `${jobType} was never dispatched`);
+    assertStringIncludes(prompts[0], STEER_BLOCK);
+    assertStringIncludes(prompts[0], "Abort if cancelled");
+    assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasVariable("customInstructions", STEER);
+  });
+
+  test(`${jobType} appendPrompt omits the operator block when no instructions were seeded (#956)`, async () => {
+    const prompts: string[] = [];
+    const engine = await boot({
+      responses: {
+        "pr.merge-stall-probe": { mergeState, failingChecks, failingChecksList },
+        [jobType]: (job) => {
+          prompts.push(String(job.variables.appendPrompt ?? ""));
+          return { status };
+        },
+      },
+    });
+    await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+    await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+    assert(prompts.length >= 1, `${jobType} was never dispatched`);
+    assert(!prompts[0].includes("Operator custom instructions"), "absent instructions must not append the block");
+  });
+}
