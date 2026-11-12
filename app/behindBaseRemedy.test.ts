@@ -16,7 +16,7 @@ function st(over: Partial<PrState> = {}): PrState {
     failingCheckNames: ["build"],
     presentCheckNames: ["build"],
     pendingCheckNames: [],
-    checkConclusions: { build: "FAILURE" },
+    checkGateConclusions: { build: ["FAILURE"] },
     totalChecks: 1,
     isDraft: false,
     headRefOid: "head1",

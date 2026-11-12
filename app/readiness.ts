@@ -18,7 +18,7 @@
 // any credential is read at execution time from the typed env-contract (`credentialEnv` names a
 // declared {@link EnvKey}; ADR 0004 pinned decision 2) and is redacted from every log line.
 import { isEnvKey, readEnv, readEnvOr } from "./contracts.ts";
-import { allCheckNames, checkConclusions, classifyMergeability, failingCheckNames, type PrState, pendingCheckNames } from "./github.ts";
+import { allCheckNames, applyRollupEvents, CHECK_EVENTS_QUERY, checkGateConclusions, classifyMergeability, failingCheckNames, type PrState, pendingCheckNames } from "./github.ts";
 import { parsePr } from "./prParse.ts";
 import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
 
@@ -764,7 +764,7 @@ export function parsePrView(payload: unknown): PrObservation {
     totalChecks: rollup.length,
     presentCheckNames: allCheckNames(rollup),
     pendingCheckNames: pending,
-    checkConclusions: checkConclusions(rollup),
+    checkGateConclusions: checkGateConclusions(rollup),
     isDraft: j.isDraft === true,
     headRefOid: str(j.headRefOid).trim() || null,
     mergeQueueEntry: null, // readiness probe doesn't read native-queue membership (merge-loop-only signal)
@@ -855,6 +855,76 @@ export function parsePlanKey(target: string): { planKey: string } | null {
  * ambient env (like `github-check`/`capability`) — no `credentialEnv`. */
 export function prViewCommand(repo: string, number: string): string {
   return `gh pr view ${shellQuote(number)} --repo ${shellQuote(repo)} --json ${shellQuote("state,mergedAt,mergeStateStatus,statusCheckRollup,isDraft,headRefOid,mergeCommit")}`;
+}
+
+/** The GraphQL page query backing {@link enrichPrViewEvents}, as a single-quoted shell argument.
+ * Mirrors the merge loop's enrichment (`enrichRollupEvents` in `app/github.ts`) but runs through the
+ * probe's injected {@link ProbeExec} so the readiness path stays host-agnostic and unit-testable. */
+function prCheckEventsQuery(): string {
+  return CHECK_EVENTS_QUERY;
+}
+
+/** Enrich a `pr`-probe rollup with each run's triggering event, through the probe's injected
+ * executor. The `gh pr view --json statusCheckRollup` read omits `event`, so without this the
+ * readiness path groups by name alone and a green `push` run hides a red required `pull_request` run
+ * of the same name — `checks-green` then reports ready while the PR run is red (PR #957 review).
+ * Pages `statusCheckRollup.contexts` to exhaustion and pins the read to the rollup's head SHA
+ * (aborting the stamp when the head moved between the two reads), exactly like the merge loop's
+ * `enrichRollupEvents`. Never throws: any transport/parse failure leaves the rollup event-less. */
+async function enrichPrViewEvents(
+  exec: ProbeExec,
+  env: Record<string, string | undefined>,
+  repo: string,
+  number: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const j = payload;
+  if (!Array.isArray(j.statusCheckRollup) || j.statusCheckRollup.length === 0) return;
+  const rollup = j.statusCheckRollup;
+  const headSha = typeof j.headRefOid === "string" ? j.headRefOid : "";
+  const [owner, name] = repo.split("/");
+  const nodes: unknown[] = [];
+  let after: string | null = null;
+  for (;;) {
+    const args = [
+      "api",
+      "graphql",
+      "-f",
+      `query=${prCheckEventsQuery()}`,
+      "-f",
+      `o=${owner}`,
+      "-f",
+      `r=${name}`,
+      "-F",
+      `n=${number}`,
+    ];
+    if (after !== null) args.push("-f", `after=${after}`);
+    const command = `gh ${args.map(shellQuote).join(" ")}`;
+    const out = await exec.run(command, env);
+    if (out.code !== 0) return; // a transport hiccup leaves the rollup event-less (name-only gates)
+    const page = parseJson(out.stdout);
+    if (!isRecord(page)) return;
+    const data = isRecord(page.data) ? page.data : undefined;
+    const repository = data && isRecord(data.repository) ? data.repository : undefined;
+    const pullRequest = repository && isRecord(repository.pullRequest) ? repository.pullRequest : undefined;
+    const commits = pullRequest && isRecord(pullRequest.commits) ? pullRequest.commits : undefined;
+    const firstCommit = commits && Array.isArray(commits.nodes) ? commits.nodes[0] : undefined;
+    const commit = isRecord(firstCommit) && isRecord(firstCommit.commit) ? firstCommit.commit : undefined;
+    if (!isRecord(commit)) return;
+    // Head-pin: the rollup came from the earlier `gh pr view`; if the head moved since, these
+    // contexts belong to a different head — stamping them would join events across heads.
+    const oid = typeof commit.oid === "string" ? commit.oid : "";
+    if (headSha !== "" && oid !== "" && oid !== headSha) return;
+    const rollupObj = isRecord(commit.statusCheckRollup) ? commit.statusCheckRollup : undefined;
+    const contexts = rollupObj && isRecord(rollupObj.contexts) ? rollupObj.contexts : undefined;
+    if (contexts === undefined) return;
+    if (Array.isArray(contexts.nodes)) nodes.push(...contexts.nodes);
+    const pageInfo = isRecord(contexts.pageInfo) ? contexts.pageInfo : undefined;
+    const endCursor = pageInfo && typeof pageInfo.endCursor === "string" ? pageInfo.endCursor : "";
+    if (pageInfo?.hasNextPage !== true || endCursor === "") break;
+    after = endCursor;
+  }
+  applyRollupEvents(rollup, nodes);
 }
 
 // ── Epic / plan-fanout probe (issue #568 — gate a graph on an epic reaching "fully merged") ──────
@@ -974,7 +1044,15 @@ export async function probeOnce(
       if (!ref) return { ready: false, detail: "pr: unparseable target (not ready)" };
       const out = await exec.run(prViewCommand(ref.repo, ref.number), env);
       if (out.code !== 0) return { ready: false, detail: "pr: gh pr view failed (not ready)" };
-      return matchPr(probe.match, parsePrView(parseJson(out.stdout)));
+      const payload = parseJson(out.stdout);
+      if (!isRecord(payload)) return matchPr(probe.match, parsePrView(payload));
+      // Normalise each run's triggering event BEFORE parsing (PR #957 review): the `gh pr view`
+      // rollup omits `event`, so an un-enriched read groups by name alone and a green `push` run
+      // hides a red required `pull_request` run of the same name — `checks-green` would report
+      // ready while the PR run is red. Shared transport logic with the merge loop, over the
+      // injected executor.
+      await enrichPrViewEvents(exec, env, ref.repo, ref.number, payload);
+      return matchPr(probe.match, parsePrView(payload));
     }
     case "epic": {
       // "Fully merged" is the app's AGGREGATE, not a GitHub read — observe it over the app's own
