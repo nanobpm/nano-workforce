@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, checkConclusions, classifyBlockedCause, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, THREAD_PROBE_FAILED, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, classifyBlockedCause, copilotWorkStartedSince, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, THREAD_PROBE_FAILED, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -1504,4 +1504,58 @@ test("updateBranchRef: CAS refuses (false) when the ref is absent/unreadable (nu
     () => updateBranchRef("o/r", "feat/x", "deadbeef", "tok", "basebase"),
   );
   assertEquals(moved, false, "a deleted/unreadable base ref is not the validated state, so the move is refused");
+});
+
+// ── Mergify queue awaiting its enqueue comment is ready, not a "required review" (issue #951) ─────
+//
+// A `mergify-queue` repo (nano-bpm) reports a converged, green PR with Mergify's own check sitting at
+// NEUTRAL ("not queued yet") and GitHub may still report the merge BLOCKED on it. That is the PR
+// waiting for the declared land step (`@mergifyio queue`), not a human review requirement — so the
+// classifier must say `ready` (→ attempt-merge posts the queue comment), never `waiting` (→ stall
+// budget → the misleading "likely a required review approval" escalation).
+const MERGIFY_PROTOCOL = protocolWith({
+  land: { method: "mergify-queue", comment: "@mergifyio queue" },
+  requiredChecks: reqChecks("build"),
+  waitForChecks: true,
+});
+const MERGIFY_ROLLUP = [
+  { name: "build", conclusion: "SUCCESS" },
+  { name: "Mergify Merge Queue", conclusion: "NEUTRAL" },
+];
+
+for (const status of ["BLOCKED", "CLEAN"]) {
+  test(`classifyMergeability: ${status} + NEUTRAL Mergify queue check + mergify-queue land → ready (#951)`, () => {
+    const s = mergePrState({ mergeStateStatus: status, unresolvedThreads: 0, rollup: MERGIFY_ROLLUP });
+    assertEquals(classifyMergeability(s, MERGIFY_PROTOCOL), "ready");
+  });
+}
+
+test("classifyMergeability: BLOCKED + NEUTRAL Mergify check on a gh-merge repo still waits (#951)", () => {
+  const s = mergePrState({ mergeStateStatus: "BLOCKED", unresolvedThreads: 0, rollup: MERGIFY_ROLLUP });
+  assertEquals(classifyMergeability(s, protocolWith({ requiredChecks: reqChecks("build") })), "waiting");
+});
+
+test("classifyMergeability: BLOCKED mergify-queue repo with NO Mergify queue check still waits (#951)", () => {
+  const s = mergePrState({
+    mergeStateStatus: "BLOCKED",
+    unresolvedThreads: 0,
+    rollup: [{ name: "build", conclusion: "SUCCESS" }],
+  });
+  assertEquals(classifyMergeability(s, MERGIFY_PROTOCOL), "waiting");
+});
+
+test("classifyMergeability: BLOCKED mergify-queue repo with another NEUTRAL check still waits (#951)", () => {
+  const s = mergePrState({
+    mergeStateStatus: "BLOCKED",
+    unresolvedThreads: 0,
+    rollup: [...MERGIFY_ROLLUP, { name: "lint", conclusion: "NEUTRAL" }],
+  });
+  assertEquals(classifyMergeability(s, MERGIFY_PROTOCOL), "waiting");
+});
+
+test("copilotWorkStartedSince: only a copilot_work_started at/after the request counts (#951)", () => {
+  const since = "2026-11-11T10:00:00Z";
+  assertEquals(copilotWorkStartedSince([{ event: "review_requested", created_at: "2026-11-11T10:00:05Z" }], since), false);
+  assertEquals(copilotWorkStartedSince([{ event: "copilot_work_started", created_at: "2026-11-11T09:59:00Z" }], since), false);
+  assertEquals(copilotWorkStartedSince([{ event: "copilot_work_started", created_at: "2026-11-11T10:00:30Z" }], since), true);
 });

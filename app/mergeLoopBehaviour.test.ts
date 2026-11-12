@@ -523,6 +523,27 @@ test("the stall-round cap escalates to a human instead of looping forever (#636)
   assert(!completedElementIds(engine).has("mark-merged"), "an exhausted stall must not mark-merged");
 });
 
+test("an exhausted stall budget whose probe re-reads a MERGED PR completes merged — never escalates (#951)", async () => {
+  // The probe re-reads PR state and surfaces `ready` for an already-merged PR (a human queued it while
+  // the loop waited). Even with the stall budget exhausted, `gw-merge-stall` must route a `ready`
+  // re-derivation to `attempt-merge` (whose already-merged short-circuit returns `merged`) rather
+  // than opening a "merge-blocked" escalation against a PR that has already landed.
+  const engine = await boot({
+    vars: { mergeStallMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "ready", failingChecks: 0, failingChecksList: "" },
+      "pr.merge": { mergeStatus: "merged" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .hasCompleted()
+    .hasNoIncident()
+    .hasCompletedElements("merge-stall-probe", "attempt-merge", "mark-merged");
+  assert(!completedElementIds(engine).has("merge-esc-conflict"), "a merged PR must never escalate");
+});
+
 // ---------------------------------------------------------------------------
 // Async-UNKNOWN "waiting" verdict → bounded re-poll, NOT a human (issue #774)
 // ---------------------------------------------------------------------------

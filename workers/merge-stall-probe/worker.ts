@@ -17,8 +17,8 @@
 // (incremented by this task's output mapping, capped by `mergeStallMax`) stops the probe from
 // re-arming forever: once exhausted, `gw-merge-stall` routes to human escalation instead.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { classifyMergeability, fetchPrState } from "../../app/github.ts";
-import { loadMergeProtocol } from "../../app/mergeProtocol.ts";
+import { classifyMergeability, classifyPrLiveness, fetchPrState, type PrState } from "../../app/github.ts";
+import { loadMergeProtocol, type MergeProtocol } from "../../app/mergeProtocol.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`MergeStallProbeIn` in merge-loop.bpmn) — ADR 0040.
@@ -43,7 +43,19 @@ interface Out extends Record<string, unknown> {
   pendingChecks: number;
 }
 
-const handler: AppJobHandler<In, Out> = async (job, app) => {
+/** Injectable GitHub readers (tests stub them); the default export binds the real ones. */
+export interface StallProbeDeps {
+  readState: (repo: string, prNumber: number, token: string) => Promise<PrState | null>;
+  readProtocol: (repo: string, token: string) => Promise<MergeProtocol | null>;
+}
+
+const realDeps: StallProbeDeps = {
+  readState: (repo, prNumber, token) => fetchPrState(repo, prNumber, token, { withReviewThreads: true }),
+  readProtocol: (repo, token) => loadMergeProtocol(repo, token),
+};
+
+export function makeHandler(deps: StallProbeDeps): AppJobHandler<In, Out> {
+  return async (job, app) => {
   const { repo, prNumber } = job.variables;
   const token = process.env.GITHUB_TOKEN ?? "";
 
@@ -57,11 +69,23 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // classified by its real cause (issue #921) — unresolved review threads surface as the
   // `review-threads` verdict and route to their own arm instead of re-polling until the budget
   // exhausts into the misleading "mergeability never settled" escalation.
-  const st = await fetchPrState(repo, prNumber, token, { withReviewThreads: true }).catch(() => null);
+  const st = await deps.readState(repo, prNumber, token).catch(() => null);
   if (st === null) {
     return { mergeState: "waiting", failingChecks: 0, failingChecksList: "", reviewThreads: -1, pendingChecks: 0 };
   }
-  const protocol = await loadMergeProtocol(repo, token).catch(() => null);
+  // Issue #951: re-read PR liveness BEFORE any verdict. A PR that already MERGED (e.g. a human
+  // queued it while the loop waited) or was CLOSED must never reach an escalation: surface `ready`,
+  // which `gw-merge-stall` always routes (even past the stall budget) to `attempt-merge`, whose
+  // already-merged / closed short-circuits finish the loop as merged / abandoned.
+  const liveness = classifyPrLiveness(st);
+  if (liveness === "merged" || liveness === "closed") {
+    app.log.info("merge-stall-probe: PR already terminal — routing to attempt-merge short-circuit", {
+      prKey: job.variables.prKey,
+      liveness,
+    });
+    return { mergeState: "ready", failingChecks: 0, failingChecksList: "", reviewThreads: 0, pendingChecks: 0 };
+  }
+  const protocol = await deps.readProtocol(repo, token).catch(() => null);
   const mergeState = classifyMergeability(st, protocol ?? undefined);
 
   app.log.info("merge-stall-probe: poller stalled — re-derived mergeability", {
@@ -79,6 +103,9 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     reviewThreads: st.unresolvedThreads,
     pendingChecks: st.pendingCheckNames.length,
   };
-};
+  };
+}
+
+const handler: AppJobHandler<In, Out> = makeHandler(realDeps);
 
 export default handler;
