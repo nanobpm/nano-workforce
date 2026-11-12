@@ -328,3 +328,53 @@ test("#957: checkGateConclusions survives a check named `constructor` / `toStrin
   assertEquals(gates.__proto__, ["SUCCESS"]);
   assertEquals(failingCheckNames(rollup), ["constructor"], "and the failure is still reported, not crashed");
 });
+
+// ── PR #957 review round 4: never assign events by position inside a multi-run bucket ────────────
+
+test("#957: same (name, startedAt) runs reordered between reads are joined by detailsUrl, not position", () => {
+  const t = "2026-11-12T00:30:00Z";
+  const rollup = [
+    { name: "build", conclusion: "FAILURE", status: "COMPLETED", startedAt: t, completedAt: "2026-11-12T00:41:34Z", detailsUrl: "https://github.com/o/r/actions/runs/1/job/11" },
+    { name: "build", conclusion: "SUCCESS", status: "COMPLETED", startedAt: t, completedAt: "2026-11-12T00:41:38Z", detailsUrl: "https://github.com/o/r/actions/runs/2/job/22" },
+  ];
+  const nodes = [
+    { __typename: "CheckRun", databaseId: 22, name: "build", startedAt: t, detailsUrl: "https://github.com/o/r/actions/runs/2/job/22", checkSuite: { workflowRun: { event: "push" } } },
+    { __typename: "CheckRun", databaseId: 11, name: "build", startedAt: t, detailsUrl: "https://github.com/o/r/actions/runs/1/job/11", checkSuite: { workflowRun: { event: "pull_request" } } },
+  ];
+  applyRollupEvents(rollup, nodes);
+  assertEquals(rollup[0].event, "pull_request");
+  assertEquals(rollup[0].databaseId, 11);
+  assertEquals(rollup[1].event, "push");
+  assertEquals(rollup[1].databaseId, 22);
+  assertEquals(failingCheckNames(rollup), ["build"]);
+});
+
+test("#957: a mixed-event multi-run bucket without a joinable URL stamps nothing (no positional swap)", () => {
+  const t = "2026-11-12T00:30:00Z";
+  const rollup = [
+    { name: "build", conclusion: "FAILURE", status: "COMPLETED", startedAt: t },
+    { name: "build", conclusion: "SUCCESS", status: "COMPLETED", startedAt: t },
+  ];
+  const nodes = [
+    { __typename: "CheckRun", name: "build", startedAt: t, checkSuite: { workflowRun: { event: "push" } } },
+    { __typename: "CheckRun", name: "build", startedAt: t, checkSuite: { workflowRun: { event: "pull_request" } } },
+  ];
+  applyRollupEvents(rollup, nodes);
+  assertEquals(rollup[0].event, undefined);
+  assertEquals(rollup[1].event, undefined);
+});
+
+test("#957: a same-event multi-run bucket is stamped order-independently", () => {
+  const t = "2026-11-12T00:30:00Z";
+  const rollup = [
+    { name: "build", conclusion: "CANCELLED", status: "COMPLETED", startedAt: t },
+    { name: "build", conclusion: "SUCCESS", status: "COMPLETED", startedAt: t },
+  ];
+  const nodes = [
+    { __typename: "CheckRun", name: "build", startedAt: t, checkSuite: { workflowRun: { event: "pull_request" } } },
+    { __typename: "CheckRun", name: "build", startedAt: t, checkSuite: { workflowRun: { event: "pull_request" } } },
+  ];
+  applyRollupEvents(rollup, nodes);
+  assertEquals(rollup[0].event, "pull_request");
+  assertEquals(rollup[1].event, "pull_request");
+});

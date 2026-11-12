@@ -1041,6 +1041,10 @@ interface RollupEntry {
   startedAt?: string;
   completedAt?: string;
   createdAt?: string;
+  /** The CheckRun's details URL (`gh pr view --json statusCheckRollup` exports it, and GraphQL
+   * `CheckRun.detailsUrl` returns it). It embeds the run/job id, so it is an IMMUTABLE identity
+   * present in BOTH reads — the primary join key of {@link applyRollupEvents}. */
+  detailsUrl?: string;
   /** The check run's IMMUTABLE GitHub identity (REST/GraphQL `databaseId`). Stamped by
    * {@link enrichRollupEvents} when it joins the event read onto the rollup, so the join is by
    * identity — never by array position, which can stamp one run's event onto another when the two
@@ -1409,7 +1413,9 @@ export function applyRollupEvents(rollup: RollupEntry[], nodes: unknown[]): void
    * check start at different instants; two different checks have different names — so the pair
    * singles out one run unless the two reads genuinely disagree (handled by the size check). */
   const bucketKey = (name: string, startedAt: string): string => `${name.length}:${name}${startedAt}`;
-  const nodeBuckets = new Map<string, { event: string; databaseId?: number }[]>();
+  type Stamp = { event: string; databaseId?: number };
+  const nodeBuckets = new Map<string, Stamp[]>();
+  const byUrl = new Map<string, Stamp | null>(); // null = duplicate URL → ambiguous, never joined
   for (const node of nodes) {
     if (typeof node !== "object" || node === null) continue;
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
@@ -1418,34 +1424,55 @@ export function applyRollupEvents(rollup: RollupEntry[], nodes: unknown[]): void
       databaseId?: number | null;
       name?: string;
       startedAt?: string | null;
+      detailsUrl?: string | null;
       checkSuite?: { workflowRun?: { event?: string | null } | null } | null;
     };
     if (n.__typename !== "CheckRun") continue; // a StatusContext carries no triggering event
     const event = n.checkSuite?.workflowRun?.event;
     if (typeof event !== "string" || event.trim() === "") continue; // unreadable run — nothing to stamp
+    const stamp: Stamp = { event, ...(typeof n.databaseId === "number" ? { databaseId: n.databaseId } : {}) };
+    if (typeof n.detailsUrl === "string" && n.detailsUrl !== "") {
+      byUrl.set(n.detailsUrl, byUrl.has(n.detailsUrl) ? null : stamp);
+    }
     const name = n.name ?? "";
     const startedAt = typeof n.startedAt === "string" ? n.startedAt : "";
     const bucket = nodeBuckets.get(bucketKey(name, startedAt)) ?? [];
-    bucket.push({ event, ...(typeof n.databaseId === "number" ? { databaseId: n.databaseId } : {}) });
+    bucket.push(stamp);
     nodeBuckets.set(bucketKey(name, startedAt), bucket);
   }
+  const stampEntry = (entry: RollupEntry, stamp: Stamp): void => {
+    entry.event = stamp.event;
+    if (stamp.databaseId !== undefined) entry.databaseId = stamp.databaseId;
+  };
   const rollupBuckets = new Map<string, RollupEntry[]>();
   for (const entry of rollup) {
+    // (1) Immutable identity: the details URL embeds the run/job id and is present in BOTH reads.
+    const url = entry.detailsUrl;
+    if (typeof url === "string" && url !== "" && byUrl.has(url)) {
+      const stamp = byUrl.get(url);
+      if (stamp) stampEntry(entry, stamp);
+      continue; // joined (or ambiguous) by identity — never fall back to the heuristic bucket
+    }
     const name = entry.name || entry.workflowName || "";
     const startedAt = entry.startedAt ?? "";
     const bucket = rollupBuckets.get(bucketKey(name, startedAt)) ?? [];
     bucket.push(entry);
     rollupBuckets.set(bucketKey(name, startedAt), bucket);
   }
+  // (2) Fallback for entries without a joinable URL: a `(name, startedAt)` bucket. NEVER assign by
+  // position within a multi-run bucket (PR #957 review) — stamp only when the bucket sizes agree AND
+  // every node in it carries the SAME event, so the stamp is order-independent. A mixed-event
+  // multi-run bucket stays event-less rather than risk swapping events across runs.
   for (const [key, entries] of rollupBuckets) {
     const nodeBucket = nodeBuckets.get(key);
-    // Stamp only on an EXACT 1:1 bucket match — a size mismatch means the two reads observed
-    // different run sets (a rerun landed between them), where stamping could cross runs.
     if (nodeBucket === undefined || nodeBucket.length !== entries.length) continue;
-    for (let i = 0; i < entries.length; i++) {
-      entries[i].event = nodeBucket[i].event;
-      if (nodeBucket[i].databaseId !== undefined) entries[i].databaseId = nodeBucket[i].databaseId;
+    if (nodeBucket.length === 1) {
+      stampEntry(entries[0], nodeBucket[0]);
+      continue;
     }
+    const event = nodeBucket[0].event;
+    if (!nodeBucket.every((st) => st.event === event)) continue;
+    for (const entry of entries) entry.event = event; // databaseId is ambiguous here — not stamped
   }
 }
 
@@ -1456,7 +1483,7 @@ export function applyRollupEvents(rollup: RollupEntry[], nodes: unknown[]): void
 export const CHECK_EVENTS_QUERY =
   "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){pullRequest(number:$n){" +
   "commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100,after:$after){nodes{" +
-  "__typename ... on CheckRun{databaseId name startedAt checkSuite{workflowRun{event}}}}" +
+  "__typename ... on CheckRun{databaseId name startedAt detailsUrl checkSuite{workflowRun{event}}}}" +
   "pageInfo{hasNextPage endCursor}}}}}}}}}";
 
 /** Populate each rollup entry's `event` from GraphQL, because the `gh pr view --json
