@@ -12,7 +12,7 @@
 
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { allCheckNames, applyRollupEvents, checkConclusions, failingCheckNames, latestRunPerCheck } from "./github.ts";
+import { allCheckNames, applyRollupEvents, checkConclusions, checkGateConclusions, failingCheckNames, latestRunPerCheck } from "./github.ts";
 
 test("a CANCELLED run superseded by a newer green run on the same head does not count as failing", () => {
   const rollup = [
@@ -212,14 +212,16 @@ test("#957: applyRollupEvents stamps each CheckRun's triggering event so the col
   ];
   // Without enrichment the name-only fallback collapses the red run away (the #955 hole).
   assertEquals(failingCheckNames(rollup), [], "pre-enrichment: the newer green run hides the red one");
-  // The GraphQL `statusCheckRollup.contexts` nodes for the same head, positionally aligned.
+  // The GraphQL `statusCheckRollup.contexts` nodes for the same head, joined by (name, startedAt).
   const nodes = [
-    { __typename: "CheckRun", name: "build", checkSuite: { workflowRun: { event: "pull_request" } } },
-    { __typename: "CheckRun", name: "build", checkSuite: { workflowRun: { event: "push" } } },
+    { __typename: "CheckRun", databaseId: 1001, name: "build", startedAt: "2026-11-12T00:30:00Z", checkSuite: { workflowRun: { event: "pull_request" } } },
+    { __typename: "CheckRun", databaseId: 1002, name: "build", startedAt: "2026-11-12T00:41:30Z", checkSuite: { workflowRun: { event: "push" } } },
   ];
   applyRollupEvents(rollup, nodes);
   assertEquals(rollup[0].event, "pull_request");
+  assertEquals(rollup[0].databaseId, 1001);
   assertEquals(rollup[1].event, "push");
+  assertEquals(rollup[1].databaseId, 1002);
   assertEquals(
     failingCheckNames(rollup),
     ["build"],
@@ -230,16 +232,99 @@ test("#957: applyRollupEvents stamps each CheckRun's triggering event so the col
 test("#957: applyRollupEvents leaves a StatusContext / misaligned / unreadable node event-less", () => {
   const rollup = [
     { context: "ci/legacy", state: "SUCCESS", createdAt: "2026-11-12T00:41:34Z" }, // a StatusContext
-    { name: "build", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:38Z" },
-    { name: "test", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:39Z" },
+    { name: "build", conclusion: "SUCCESS", status: "COMPLETED", startedAt: "2026-11-12T00:41:30Z", completedAt: "2026-11-12T00:41:38Z" },
+    { name: "test", conclusion: "SUCCESS", status: "COMPLETED", startedAt: "2026-11-12T00:41:31Z", completedAt: "2026-11-12T00:41:39Z" },
   ];
   const nodes = [
     { __typename: "StatusContext", context: "ci/legacy" }, // no event on this type
-    { __typename: "CheckRun", name: "DIFFERENT", checkSuite: { workflowRun: { event: "push" } } }, // misaligned name
-    { __typename: "CheckRun", name: "test", checkSuite: { workflowRun: { event: null } } }, // unreadable run
+    { __typename: "CheckRun", name: "DIFFERENT", startedAt: "2026-11-12T00:41:30Z", checkSuite: { workflowRun: { event: "push" } } }, // misaligned name
+    { __typename: "CheckRun", name: "test", startedAt: "2026-11-12T00:41:31Z", checkSuite: { workflowRun: { event: null } } }, // unreadable run
   ];
   applyRollupEvents(rollup, nodes);
   assertEquals(rollup[0].event, undefined, "a StatusContext never gains an event");
   assertEquals(rollup[1].event, undefined, "a misaligned node is not stamped blindly");
   assertEquals(rollup[2].event, undefined, "a null/absent event leaves the entry event-less");
+});
+
+// ── PR #957 review round 3: the join is by run identity, never array position ────────────────────
+//
+// The `gh pr view` read and the GraphQL contexts read are two SEPARATE GitHub calls that can observe
+// different runs or heads, so index `i` in one is not reliably run `i` in the other. A positional
+// join can stamp one run's event onto another (the name guard cannot catch it for duplicate `build`
+// names), re-creating the cross-event collapse #955 fixed. The join keys on `(name, startedAt)` and
+// stamps only an exact 1:1 bucket match.
+
+test("#957: applyRollupEvents joins by run identity, not position — a reordered read stamps the right runs", () => {
+  // The GraphQL read returns the two same-named runs in the OPPOSITE order from the CLI rollup.
+  const rollup = [
+    { name: "build", conclusion: "FAILURE", status: "COMPLETED", startedAt: "2026-11-12T00:30:00Z", completedAt: "2026-11-12T00:41:34Z" },
+    { name: "build", conclusion: "SUCCESS", status: "COMPLETED", startedAt: "2026-11-12T00:41:30Z", completedAt: "2026-11-12T00:41:38Z" },
+  ];
+  const nodes = [
+    // Reversed order vs the rollup: a positional join would stamp push onto the red run.
+    { __typename: "CheckRun", databaseId: 1002, name: "build", startedAt: "2026-11-12T00:41:30Z", checkSuite: { workflowRun: { event: "push" } } },
+    { __typename: "CheckRun", databaseId: 1001, name: "build", startedAt: "2026-11-12T00:30:00Z", checkSuite: { workflowRun: { event: "pull_request" } } },
+  ];
+  applyRollupEvents(rollup, nodes);
+  assertEquals(rollup[0].event, "pull_request", "the red run keeps ITS event despite the reorder");
+  assertEquals(rollup[1].event, "push", "the green run keeps ITS event despite the reorder");
+  assertEquals(failingCheckNames(rollup), ["build"], "no cross-run stamp → the red pull_request run survives");
+});
+
+test("#957: applyRollupEvents stamps nothing when the two reads observed different run sets", () => {
+  // A rerun landed between the `gh pr view` read and the GraphQL read: the GraphQL side has an
+  // EXTRA `build` run at the SAME start instant (a cancelled/re-run pair re-queued together), so the
+  // node bucket (2) out-sizes the rollup bucket (1) and stamping anything would risk a cross-run stamp.
+  const rollup = [
+    { name: "build", conclusion: "FAILURE", status: "COMPLETED", startedAt: "2026-11-12T00:30:00Z", completedAt: "2026-11-12T00:41:34Z" },
+  ];
+  const nodes = [
+    { __typename: "CheckRun", databaseId: 1001, name: "build", startedAt: "2026-11-12T00:30:00Z", checkSuite: { workflowRun: { event: "pull_request" } } },
+    { __typename: "CheckRun", databaseId: 1003, name: "build", startedAt: "2026-11-12T00:30:00Z", checkSuite: { workflowRun: { event: "push" } } },
+  ];
+  applyRollupEvents(rollup, nodes);
+  assertEquals(rollup[0].event, undefined, "a bucket-size mismatch (the reads disagree) stamps nothing");
+});
+
+// ── PR #957 review round 3: the gate key is encoded for EVERY entry, event-less included ─────────
+//
+// Encoding only the known-event bucket leaves the two key spaces overlapping: `name:"build",
+// event:"push"` produces `5:buildpush`, and an event-less `context:"5:buildpush"` ALSO produces
+// `5:buildpush`, so a newer green entry could still discard an unrelated red check. Every entry —
+// event-less ones included — is encoded as the same length-prefixed tuple.
+
+test("#957: an eventful `build`+`push` never collides with an event-less `5:buildpush` context", () => {
+  const rollup = [
+    // An event-less legacy StatusContext whose context string equals the ENCODED tuple of the other gate.
+    { context: "5:buildpush", state: "FAILURE", createdAt: "2026-11-12T00:41:34Z" },
+    // A different gate: a CheckRun named `build` triggered by `push`, green, newer.
+    { name: "build", event: "push", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:38Z" },
+  ];
+  const latest = latestRunPerCheck(rollup);
+  assertEquals(latest.length, 2, "the encoded event-less key never aliases an eventful gate");
+  assertEquals(
+    failingCheckNames(rollup),
+    ["5:buildpush"],
+    "the red event-less `5:buildpush` survives — encoding every entry closes the cross-bucket hole",
+  );
+});
+
+// ── PR #957 review round 3: a prototype-free dictionary for arbitrary check names ────────────────
+//
+// A check can legitimately be named `constructor`, `toString`, or `__proto__`; on a plain `{}` those
+// resolve to an INHERITED property, so `out[name] ?? []` returns a function/object and `.push`
+// throws — aborting `fetchPrState` / readiness parsing for that PR. The dictionary is
+// prototype-free (`Object.create(null)`), so every check name is a safe own-key.
+
+test("#957: checkGateConclusions survives a check named `constructor` / `toString` / `__proto__`", () => {
+  const rollup = [
+    { name: "constructor", conclusion: "FAILURE", status: "COMPLETED", completedAt: "2026-11-12T00:41:34Z" },
+    { name: "toString", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:35Z" },
+    { name: "__proto__", conclusion: "SUCCESS", status: "COMPLETED", completedAt: "2026-11-12T00:41:36Z" },
+  ];
+  const gates = checkGateConclusions(rollup);
+  assertEquals(gates.constructor, ["FAILURE"], "an inherited-property name is a safe own-key");
+  assertEquals(gates.toString, ["SUCCESS"]);
+  assertEquals(gates.__proto__, ["SUCCESS"]);
+  assertEquals(failingCheckNames(rollup), ["constructor"], "and the failure is still reported, not crashed");
 });

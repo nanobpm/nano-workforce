@@ -554,6 +554,95 @@ test("#856 parsePrTarget agrees with the canonical parsePr on every PR shape (no
   }
 });
 
+// ── PR #957 review round 3: the readiness `pr` path normalises events too ────────────────────────
+//
+// The `gh pr view` rollup omits `event`, so before this fix the readiness path grouped by name alone
+// and a green `push` run hid a red required `pull_request` run of the same name — `checks-green`
+// reported ready while the PR run was red. `probeOnce` now enriches the rollup through the injected
+// executor (shared transport logic with the merge loop) before parsing.
+
+test("#957 probeOnce pr checks-green: a green push run never hides a red pull_request run of the same name", async () => {
+  const head = "5fbd262a28987d647621da324bf1a7855a8da500";
+  // The `gh pr view` payload: two same-named runs, NO event on either (the CLI exporter omits it).
+  const prView = {
+    state: "OPEN",
+    mergedAt: null,
+    mergeStateStatus: "CLEAN",
+    isDraft: false,
+    headRefOid: head,
+    mergeCommit: null,
+    statusCheckRollup: [
+      { name: "build", conclusion: "FAILURE", status: "COMPLETED", startedAt: "2026-11-12T00:30:00Z", completedAt: "2026-11-12T00:41:34Z" },
+      { name: "build", conclusion: "SUCCESS", status: "COMPLETED", startedAt: "2026-11-12T00:41:30Z", completedAt: "2026-11-12T00:41:38Z" },
+    ],
+  };
+  // The GraphQL event read, keyed by the SAME head, joining by (name, startedAt).
+  const events = {
+    data: {
+      repository: {
+        pullRequest: {
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  oid: head,
+                  statusCheckRollup: {
+                    contexts: {
+                      nodes: [
+                        { __typename: "CheckRun", databaseId: 1001, name: "build", startedAt: "2026-11-12T00:30:00Z", checkSuite: { workflowRun: { event: "pull_request" } } },
+                        { __typename: "CheckRun", databaseId: 1002, name: "build", startedAt: "2026-11-12T00:41:30Z", checkSuite: { workflowRun: { event: "push" } } },
+                      ],
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  };
+  const exec: ProbeExec = {
+    async httpGet() {
+      return { status: 0, body: "" };
+    },
+    async run(command) {
+      // Route the two reads by shape: the GraphQL call carries `api graphql`, the rollup read `pr view`.
+      if (command.includes("api") && command.includes("graphql")) return { code: 0, stdout: JSON.stringify(events), stderr: "" };
+      return { code: 0, stdout: JSON.stringify(prView), stderr: "" };
+    },
+  };
+  const p = parseProbe({ kind: "pr", target: "o/r#12", match: { prState: "checks-green" } });
+  const res = await probeOnce(p, exec, {});
+  assertEquals(res.ready, false, "the red pull_request run survives event normalisation — checks-green is NOT ready");
+  assertStringIncludes(res.detail, "failing");
+});
+
+test("#957 probeOnce pr checks-green: an event-enrichment failure degrades to name-only, never throws", async () => {
+  const prView = {
+    state: "OPEN",
+    mergedAt: null,
+    mergeStateStatus: "CLEAN",
+    isDraft: false,
+    headRefOid: "abc",
+    mergeCommit: null,
+    statusCheckRollup: [{ name: "build", conclusion: "SUCCESS", status: "COMPLETED", startedAt: "2026-11-12T00:41:30Z", completedAt: "2026-11-12T00:41:38Z" }],
+  };
+  const exec: ProbeExec = {
+    async httpGet() {
+      return { status: 0, body: "" };
+    },
+    async run(command) {
+      if (command.includes("api") && command.includes("graphql")) return { code: 1, stdout: "", stderr: "boom" }; // the event read fails
+      return { code: 0, stdout: JSON.stringify(prView), stderr: "" };
+    },
+  };
+  const p = parseProbe({ kind: "pr", target: "o/r#12", match: { prState: "checks-green" } });
+  const res = await probeOnce(p, exec, {});
+  assertEquals(res.ready, true, "a failed event read leaves the rollup event-less — a single green run is still green");
+});
+
 // ── #857: an epic target is a CANONICAL planKey (`owner/repo#N`) — never a URL ────────────────────
 // The epic probe keys off the durable lineage root (`owner/repo#N`, `parseIssue`'s `planKey` shape).
 // Delegating its validation to `parsePr` (whose grammar includes GitHub PR URLs) let a URL pass the

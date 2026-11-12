@@ -1041,6 +1041,11 @@ interface RollupEntry {
   startedAt?: string;
   completedAt?: string;
   createdAt?: string;
+  /** The check run's IMMUTABLE GitHub identity (REST/GraphQL `databaseId`). Stamped by
+   * {@link enrichRollupEvents} when it joins the event read onto the rollup, so the join is by
+   * identity — never by array position, which can stamp one run's event onto another when the two
+   * reads observe different runs (PR #957 review). Absent on legacy/un-enriched payloads. */
+  databaseId?: number;
 }
 
 /** The canonical identity of a check across its reruns: its name (CheckRun) or context
@@ -1062,15 +1067,17 @@ function checkKey(c: RollupEntry): string {
  * the #348 cancelled-rerun collapse is unchanged for them; a known event never merges with the
  * unknown-event bucket, so an eventful red run is never shadowed by an event-less green one.
  *
- * The key is an UNAMBIGUOUS tuple, not a bare concatenation: `${name.length}:${name}${event}`.
- * Concatenating `name + event` lets two DIFFERENT identities collide — `name:"build", event:"push"`
- * and an event-less `context:"buildpush"` both produce `"buildpush"`, so a newer green entry could
- * discard an unrelated red check (and the known-event bucket could merge with the unknown-event one
- * this function documents as separate). Length-prefixing the name makes the name/event boundary
- * explicit, so no `(name, event)` pair can alias a different pair or a name-only key. */
+ * The key is an UNAMBIGUOUS tuple, not a bare concatenation: `${name.length}:${name}${event}`, with
+ * the event LOWER-CASE-normalised and the empty event encoded as the SAME tuple (never a bare
+ * name). Concatenating `name + event` lets two DIFFERENT identities collide — `name:"build",
+ * event:"push"` and an event-less `context:"buildpush"` both produce `"buildpush"`. Encoding only
+ * the known-event bucket leaves the same hole across buckets: `name:"build", event:"push"` yields
+ * `5:buildpush` and an event-less `context:"5:buildpush"` ALSO yields `5:buildpush`, so a newer
+ * green entry could still discard an unrelated red check (PR #957 review). Encoding EVERY entry —
+ * event-less ones included — makes the name/event boundary explicit for all, so no `(name, event)`
+ * pair can alias a different pair. */
 function gateKey(c: RollupEntry): string {
   const event = (c.event || "").trim().toLowerCase();
-  if (event === "") return checkKey(c);
   const name = checkKey(c);
   return `${name.length}:${name}${event}`;
 }
@@ -1215,7 +1222,12 @@ export function allCheckNames(rollup: RollupEntry[]): string[] {
  * `acceptedConclusions` — a `SUCCESS` gate must not let a same-named `NEUTRAL`/`SKIPPED` gate pass a
  * success-only protocol, and a pending gate must not delay a settled rejection's remediation. */
 export function checkGateConclusions(rollup: RollupEntry[]): Record<string, string[]> {
-  const out: Record<string, string[]> = {};
+  // A PROTOTYPE-FREE dictionary: a check can legitimately be named `constructor`, `toString`, or
+  // `__proto__` (GitHub imposes no restriction), and on a plain `{}` those resolve to an INHERITED
+  // property — `out[name] ?? []` would return a function/object, so `gates.push` throws and aborts
+  // `fetchPrState` / readiness parsing for that PR (PR #957 review). `Object.create(null)` makes
+  // every check name a safe own-key.
+  const out: Record<string, string[]> = Object.create(null);
   for (const c of latestRunPerCheck(rollup)) {
     const status = (c.status || "").toUpperCase();
     const state = (c.state || "").toUpperCase();
@@ -1357,39 +1369,83 @@ export async function fetchMergeQueueMembership(
 }
 
 /** GraphQL response for the per-check triggering-event enrichment. Each `CheckRun` carries its
- * `checkSuite.workflowRun.event` (e.g. `pull_request` / `push`); a `StatusContext` (or a CheckRun
- * whose suite/run is unreadable) contributes no event. */
+ * immutable `databaseId` plus its `checkSuite.workflowRun.event` (e.g. `pull_request` / `push`); a
+ * `StatusContext` (or a CheckRun whose suite/run is unreadable) contributes no event. `pageInfo`
+ * drives the pagination loop (`contexts(first:100)` is per-page, so >100 contexts need the cursor). */
 interface CheckEventsResponse {
   data?: {
     repository?: {
       pullRequest?: {
-        commits?: { nodes?: { commit?: { statusCheckRollup?: { contexts?: { nodes?: unknown[] } } } }[] };
+        commits?: {
+          nodes?: {
+            commit?: {
+              oid?: string;
+              statusCheckRollup?: {
+                contexts?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null } | null;
+              } | null;
+            };
+          }[];
+        };
       } | null;
     } | null;
   } | null;
 }
 
-/** Stamp each rollup entry's `event` from the GraphQL `statusCheckRollup.contexts` nodes, matching
- * POSITIONALLY: the connection and the CLI's exported `statusCheckRollup` array are the SAME
- * head-commit contexts in the SAME order, so index `i` in one is index `i` in the other. An entry is
- * only stamped when the node at its index is a `CheckRun` whose display name matches (a
- * `StatusContext` or a misaligned/unreadable node is left event-less, keeping the conservative
- * name-only identity). Mutates `rollup` in place. Exported for the transport regression test. */
+/** Stamp each rollup entry's `event` from the GraphQL `statusCheckRollup.contexts` nodes, joining by
+ * the run's IMMUTABLE identity — never by array position (PR #957 review): the `gh pr view` read and
+ * this GraphQL read are two SEPARATE GitHub calls that can observe different runs or heads, so index
+ * `i` in one is not reliably run `i` in the other, and a positional join can stamp one run's event
+ * onto another (the name guard cannot catch it for duplicate `build` names, re-creating the very
+ * cross-event collapse #955 fixed). The join key is the CheckRun `databaseId` — but the CLI's
+ * `statusCheckRollup` exporter omits the id, so the join is two-step: (1) bucket BOTH sides by
+ * `(name, startedAt)` — a run's start instant plus its display name identifies one run within a
+ * head — then (2) stamp the node's `event` (and `databaseId`, so a later reader can re-join) onto
+ * every rollup entry in the matching bucket. A bucket whose sizes disagree between the two reads is
+ * left event-less (the reads observed different run sets — stamping anything would risk a
+ * cross-run stamp), as is any entry with no matching bucket. Mutates `rollup` in place. Exported for
+ * the transport regression test. */
 export function applyRollupEvents(rollup: RollupEntry[], nodes: unknown[]): void {
-  for (let i = 0; i < rollup.length && i < nodes.length; i++) {
-    const node = nodes[i];
+  /** The within-a-head identity of one run: its display name + start instant. Two reruns of one
+   * check start at different instants; two different checks have different names — so the pair
+   * singles out one run unless the two reads genuinely disagree (handled by the size check). */
+  const bucketKey = (name: string, startedAt: string): string => `${name.length}:${name}${startedAt}`;
+  const nodeBuckets = new Map<string, { event: string; databaseId?: number }[]>();
+  for (const node of nodes) {
     if (typeof node !== "object" || node === null) continue;
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const n = node as {
       __typename?: string;
+      databaseId?: number | null;
       name?: string;
+      startedAt?: string | null;
       checkSuite?: { workflowRun?: { event?: string | null } | null } | null;
     };
     if (n.__typename !== "CheckRun") continue; // a StatusContext carries no triggering event
-    const entryName = rollup[i].name || rollup[i].workflowName || "";
-    if (n.name !== undefined && entryName !== "" && n.name !== entryName) continue; // misaligned — don't stamp blindly
     const event = n.checkSuite?.workflowRun?.event;
-    if (typeof event === "string" && event.trim() !== "") rollup[i].event = event;
+    if (typeof event !== "string" || event.trim() === "") continue; // unreadable run — nothing to stamp
+    const name = n.name ?? "";
+    const startedAt = typeof n.startedAt === "string" ? n.startedAt : "";
+    const bucket = nodeBuckets.get(bucketKey(name, startedAt)) ?? [];
+    bucket.push({ event, ...(typeof n.databaseId === "number" ? { databaseId: n.databaseId } : {}) });
+    nodeBuckets.set(bucketKey(name, startedAt), bucket);
+  }
+  const rollupBuckets = new Map<string, RollupEntry[]>();
+  for (const entry of rollup) {
+    const name = entry.name || entry.workflowName || "";
+    const startedAt = entry.startedAt ?? "";
+    const bucket = rollupBuckets.get(bucketKey(name, startedAt)) ?? [];
+    bucket.push(entry);
+    rollupBuckets.set(bucketKey(name, startedAt), bucket);
+  }
+  for (const [key, entries] of rollupBuckets) {
+    const nodeBucket = nodeBuckets.get(key);
+    // Stamp only on an EXACT 1:1 bucket match — a size mismatch means the two reads observed
+    // different run sets (a rerun landed between them), where stamping could cross runs.
+    if (nodeBucket === undefined || nodeBucket.length !== entries.length) continue;
+    for (let i = 0; i < entries.length; i++) {
+      entries[i].event = nodeBucket[i].event;
+      if (nodeBucket[i].databaseId !== undefined) entries[i].databaseId = nodeBucket[i].databaseId;
+    }
   }
 }
 
@@ -1397,22 +1453,47 @@ export function applyRollupEvents(rollup: RollupEntry[], nodes: unknown[]): void
  * statusCheckRollup` exporter omits it (cli/cli `api/export_pr.go`) — without it every run takes the
  * name-only gate fallback and a green `push` run collapses away a red required `pull_request` run of
  * the same name, leaving #955 unfixed on the real transport (PR #957 review). The event lives at
- * `CheckRun.checkSuite.workflowRun.event` (there is no `CheckRun.event` field). Never throws and
- * never blocks the read: any transport/parse failure leaves the rollup event-less (pre-#955
- * behaviour) rather than wedging the merge loop. Mutates `rollup` in place. */
-export async function enrichRollupEvents(repo: string, number: number | string, rollup: RollupEntry[]): Promise<void> {
+ * `CheckRun.checkSuite.workflowRun.event` (there is no `CheckRun.event` field). Pages the contexts
+ * connection to exhaustion (`pageInfo.endCursor`) so >100 checks are all enriched, and verifies the
+ * read observed the SAME head SHA as the rollup (`headSha`) before stamping — a head that moved
+ * between the two reads aborts the stamp rather than joining across heads. Never throws and never
+ * blocks the read: any transport/parse failure leaves the rollup event-less (pre-#955 behaviour)
+ * rather than wedging the merge loop. Mutates `rollup` in place. */
+export async function enrichRollupEvents(
+  repo: string,
+  number: number | string,
+  rollup: RollupEntry[],
+  headSha?: string,
+): Promise<void> {
   if (rollup.length === 0) return;
   const [owner, name] = repo.split("/");
-  const query =
-    "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){" +
-    "commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{" +
-    "__typename ... on CheckRun{name checkSuite{workflowRun{event}}}}}}}}}}}}";
-  let nodes: unknown[];
+  const nodes: unknown[] = [];
+  let after: string | null = null;
   try {
-    const out = await runGh(["api", "graphql", "-f", `query=${query}`, "-f", `o=${owner}`, "-f", `r=${name}`, "-F", `n=${number}`]);
-    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const payload = JSON.parse(out) as CheckEventsResponse;
-    nodes = payload.data?.repository?.pullRequest?.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ?? [];
+    // Page the contexts connection to exhaustion: `first:100` returns one page, and a PR with >100
+    // contexts would leave every later page event-less (cross-event failures hidden there) and split
+    // a same-event cancelled/rerun pair across the boundary into two gates (PR #957 review).
+    for (;;) {
+      const query =
+        "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){pullRequest(number:$n){" +
+        "commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100,after:$after){nodes{" +
+        "__typename ... on CheckRun{databaseId name startedAt checkSuite{workflowRun{event}}}}" +
+        "pageInfo{hasNextPage endCursor}}}}}}}}}}";
+      const args = ["api", "graphql", "-f", `query=${query}`, "-f", `o=${owner}`, "-f", `r=${name}`, "-F", `n=${number}`];
+      if (after !== null) args.push("-f", `after=${after}`);
+      const out = await runGh(args);
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const payload = JSON.parse(out) as CheckEventsResponse;
+      const commit = payload.data?.repository?.pullRequest?.commits?.nodes?.[0]?.commit;
+      // Head-pin: the rollup came from an earlier `gh pr view` read; if the head moved since, these
+      // contexts belong to a DIFFERENT head — stamping them would join events across heads.
+      if (typeof headSha === "string" && headSha !== "" && commit?.oid !== undefined && commit.oid !== headSha) return;
+      const contexts = commit?.statusCheckRollup?.contexts;
+      nodes.push(...(contexts?.nodes ?? []));
+      const pageInfo = contexts?.pageInfo;
+      if (pageInfo?.hasNextPage !== true || typeof pageInfo.endCursor !== "string" || pageInfo.endCursor === "") break;
+      after = pageInfo.endCursor;
+    }
   } catch {
     return; // a transport/parse hiccup leaves the rollup event-less (conservative name-only gates)
   }
@@ -1451,7 +1532,7 @@ export async function fetchPrState(
     // raw rollup would take the name-only fallback and a green `push` run would still hide a red
     // `pull_request` run of the same name — leaving #955 unfixed on the real transport. Enrich each
     // entry with its event (GraphQL `CheckRun.checkSuite.workflowRun.event`) before grouping.
-    await enrichRollupEvents(repo, number, rollup);
+    await enrichRollupEvents(repo, number, rollup, j.headRefOid ?? undefined);
     const names = failingCheckNames(rollup);
     const merged = j.state === "MERGED" || !!j.mergedAt;
     // Probe native-queue membership only for the queued-PR reconciliation (block 4) — it is an extra
