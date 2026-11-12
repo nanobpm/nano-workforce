@@ -73,7 +73,11 @@ test("merge-stall-probe: a blocked verdict on a pending-update old head defers t
   // Sanity: without a pending update this IS blocked (would route to fix-ci).
   assertEquals((await run(blocked, MERGIFY, false)).mergeState, "blocked");
   // With the update still pending on this head, the probe holds remediation.
-  assertEquals((await run(blocked, MERGIFY, true)).mergeState, "waiting");
+  const held = await run(blocked, MERGIFY, true);
+  assertEquals(held.mergeState, "waiting");
+  // The hold is surfaced so gw-merge-stall re-polls past the stall cap (only for this hold).
+  assertEquals(held.updatePending, true);
+  assertEquals((await run(blocked, MERGIFY, false)).updatePending, false);
 });
 
 test("merge-stall-probe: a non-blocked verdict is never downgraded by a pending update (#951)", async () => {

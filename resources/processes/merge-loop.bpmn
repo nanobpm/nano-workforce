@@ -55,6 +55,7 @@
           <nano:extend name="failingChecksList" type="string" optional="true" />
           <nano:extend name="reviewThreads" type="integer" optional="true" />
           <nano:extend name="pendingChecks" type="integer" optional="true" />
+          <nano:extend name="updatePending" type="boolean" optional="true" />
         </nano:shape>
         <nano:shape id="LandedProbeIn" name="Landed probe — input">
           <nano:extend name="prKey" type="string" />
@@ -846,7 +847,7 @@
     <bpmn:sequenceFlow id="f_mw_stall" sourceRef="wait-mergeable-timeout" targetRef="merge-stall-probe" />
     <bpmn:sequenceFlow id="f_msp_gate" sourceRef="merge-stall-probe" targetRef="gw-merge-stall" />
     <bpmn:sequenceFlow id="f_msp_rederive" name="re-derived — route to arm" sourceRef="gw-merge-stall" targetRef="gw-mergeable">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=mergeStallRounds &lt;= mergeStallMax or mergeState = "ready"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=mergeStallRounds &lt;= mergeStallMax or mergeState = "ready" or updatePending = true</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_msp_giveup" name="stall budget exhausted" sourceRef="gw-merge-stall" targetRef="merge-esc-conflict" />
     <bpmn:sequenceFlow id="f_m_ready" sourceRef="wait-mergeable" targetRef="gw-mergeable" />

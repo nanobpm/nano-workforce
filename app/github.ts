@@ -753,9 +753,9 @@ export async function requestCopilotReview(
  *
  * `opts.timeoutMs` bounds the WHOLE read (issue #951 review): the verification caller has a fixed
  * deadline, so a stalled `gh` or REST read must not run past it and starve the BPMN review-wait
- * timer. The `gh` path passes it to `runGh`'s process `timeout`; the REST path applies
- * `AbortSignal.timeout` to every page (each page gets the full remaining budget — the caller
- * re-checks its deadline between pages). A timeout surfaces as `null` (unknown), never `false`. */
+ * timer. The `gh` path passes it to `runGh`'s process `timeout`; the REST path creates ONE
+ * `AbortSignal.timeout` before pagination and shares it across every page, so the whole walk —
+ * not each page — is bounded by the budget. A timeout surfaces as `null` (unknown), never `false`. */
 export async function hasCopilotWorkStarted(
   repo: string,
   number: number | string,
@@ -779,11 +779,12 @@ export async function hasCopilotWorkStarted(
       // 100 events must not read as "never started". An incomplete read (non-OK page, or the page cap
       // still advertising `rel="next"`) is UNKNOWN (`null`), never `false`.
       const MAX_PAGES = 20;
+      const signal = opts.timeoutMs === undefined ? undefined : AbortSignal.timeout(opts.timeoutMs);
       events = [];
       for (let page = 1; page <= MAX_PAGES; page++) {
         const r = await fetch(`https://api.github.com/${path}&page=${page}`, {
           headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
-          ...(opts.timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(opts.timeoutMs) }),
+          ...(signal === undefined ? {} : { signal }),
         });
         if (!r.ok) return null;
         // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape

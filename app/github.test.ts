@@ -2,7 +2,7 @@
 // a COMPLETE file list or a thrown error — never a silently truncated one that under-approximates
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
-import { assertEquals, assertRejects } from "#test-assert";
+import { assert, assertEquals, assertRejects } from "#test-assert";
 import { BaseBranchMustExistError, checkConclusions, hasCopilotWorkStarted, classifyBlockedCause, copilotWorkStartedSince, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, THREAD_PROBE_FAILED, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
@@ -1608,6 +1608,26 @@ test("hasCopilotWorkStarted (token): a timeout budget attaches an abort signal t
   assertEquals(got, true);
   assertEquals(sawSignal instanceof AbortSignal, true);
   assertEquals(sawSignal?.aborted, false);
+});
+
+test("hasCopilotWorkStarted (token): ONE abort signal bounds every page of the walk (#951)", async () => {
+  const signals: (AbortSignal | null | undefined)[] = [];
+  const fetchImpl = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    signals.push(init?.signal);
+    const more = signals.length < 3;
+    return Promise.resolve(
+      new Response(JSON.stringify([{ event: "commented", created_at: "2026-11-11T10:00:02Z" }]), {
+        status: 200,
+        headers: more ? { link: '<https://api.github.com/x?page=2>; rel="next"' } : {},
+      }),
+    );
+  };
+  await withTokenFetch(fetchImpl as typeof fetch, () =>
+    hasCopilotWorkStarted("o/r", 1, "t", "2026-11-11T10:00:00Z", { timeoutMs: 5_000 }),
+  );
+  assertEquals(signals.length, 3);
+  assert(signals[0] instanceof AbortSignal);
+  assert(signals.every((s) => s === signals[0]), "every page must share the one budget signal");
 });
 
 test("hasCopilotWorkStarted (token): an aborted (timed-out) read is UNKNOWN (null), not false (#951)", async () => {

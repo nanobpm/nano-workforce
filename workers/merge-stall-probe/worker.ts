@@ -102,7 +102,11 @@ export function makeHandler(deps: StallProbeDeps): AppJobHandler<In, Out> {
   // bounded re-poll (`wait-mergeable-repoll`) instead of dispatching fix-ci / escalating against a
   // head that is about to change. The hold shares the remedy's bounded window, so a never-applied
   // update stops holding and the next probe judges the (still-red) head afresh.
+  // `updatePending` is surfaced so `gw-merge-stall` keeps re-polling inside the remedy's bounded hold
+  // window even once `mergeStallMax` is spent (an ordinary `waiting` still respects the stall cap).
+  let updatePending = false;
   if (mergeState === "blocked" && st.headRefOid && deps.isUpdatePending(repo, prNumber, st.headRefOid)) {
+    updatePending = true;
     app.log.info("merge-stall-probe: behind-base update pending — deferring remediation until the head moves", {
       prKey: job.variables.prKey,
       head: st.headRefOid,
@@ -118,6 +122,7 @@ export function makeHandler(deps: StallProbeDeps): AppJobHandler<In, Out> {
 
   return {
     mergeState,
+    updatePending,
     // Carried for the CI-fix arm (mergeState "blocked" = a failed required check), mirroring the
     // poller's `merge-ready` payload so fix-ci knows which gates to green.
     failingChecks: st.failingChecks,
