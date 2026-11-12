@@ -1,3 +1,9 @@
+## [0.210.1](https://github.com/nanobpm/nano-workforce/compare/v0.210.0...v0.210.1) (2026-11-12)
+
+### Bug Fixes
+
+* **merge:** same-named check-runs from different events are different gates ([#957](https://github.com/nanobpm/nano-workforce/issues/957)) ([e2c4e96](https://github.com/nanobpm/nano-workforce/commit/e2c4e966b566ce8b4bdc19e84bceb130909a981c)), closes [#348](https://github.com/nanobpm/nano-workforce/issues/348) [camunda/console-api-js#17](https://github.com/camunda/console-api-js/issues/17) [#348](https://github.com/nanobpm/nano-workforce/issues/348) [#955](https://github.com/nanobpm/nano-workforce/issues/955) [#955](https://github.com/nanobpm/nano-workforce/issues/955) [#951](https://github.com/nanobpm/nano-workforce/issues/951) [#955](https://github.com/nanobpm/nano-workforce/issues/955)
+
 ## [0.210.0](https://github.com/nanobpm/nano-workforce/compare/v0.209.1...v0.210.0) (2026-11-12)
 
 ### Features
