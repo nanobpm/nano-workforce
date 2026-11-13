@@ -82,6 +82,28 @@ time:
   synonyms / contradictions / mock-vs-real skew (advisory). `npm run check:contracts` is the hard,
   registry-only gate (also in CI).
 
+## Operator doors: one `openapi.yaml`, generated `operations/` delegates (a shared map surface)
+
+`openapi.yaml` (~3,500 lines) is the **single source** that generates every operator door and its
+schemas; each operation additionally gets its own hand-authored delegate under `operations/`. The
+delegates are disjoint, but the `paths:` and `components.schemas:` **maps inside `openapi.yaml` are
+one shared surface** — the same class as the one-task-owns-each-`.bpmn` rule below and the
+migration-prefix numbering surface further down.
+
+- **Two slices that each add a door in the same fan-out wave both insert into those two maps with no
+  ordering between them**, so the second to land hits a merge conflict there — green alone, collides
+  on merge, and no single PR's CI ever exercised the combined file. (#519: the `dismiss` door (S1)
+  and the four `library` doors (S3) both edited the delivery-graph region of `paths:` /
+  `components.schemas:` in the same wave.)
+- Unlike a `.bpmn` DI collision this is **loud** (a YAML-map conflict git surfaces at merge, not a
+  silent stale artifact) and each door keeps its own `operations/` delegate, so it is cheaper to
+  resolve — but it is still a wasted rebase per colliding slice. **Confine your additions to your own
+  operation's region** of the two maps so the diff stays minimal, **POST a blackboard `file-claim`
+  for `openapi.yaml`** before editing and read the board for a sibling's prior claim, and expect the
+  second-to-land of a same-wave pair to rebase its `paths:` / `components.schemas:` additions onto the
+  first. When decomposing, prefer giving one slice ownership of a contiguous door block over fanning
+  two door-adders onto the file with only a `dependsOn` edge to serialise them.
+
 ## BPMN: author the semantic model, generate the diagram
 
 **The `.bpmn` files under `resources/processes/` are hand-authored semantic
