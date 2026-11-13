@@ -482,6 +482,34 @@ test("#833: a process-focus route live-drills the worker running a job of a CHIL
   }
 });
 
+test("#948: the focus live-drills a job in a child the engine has no AgentInstance for yet, via its root", async () => {
+  // The common active-task case: the agent job runs in a callActivity child (`implement-cell`) that
+  // has NO engine AgentInstance for the focus to discover it through, so only the correlation's
+  // server-resolved root names the linked run.
+  const seen: string[] = [];
+  const restore = installEnv(
+    focusStub({
+      correlations: [{ jobKey: "j9", stream: "wk-b/j9", processInstanceKey: "pi-unlisted-child", rootProcessInstanceKey: PI_ROOT }],
+      seen,
+    }),
+  );
+  (globalThis as { location: { hash: string } }).location.hash = `#/cockpit/process/${PI_ROOT}`;
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await settle();
+      const terminal = document.querySelector(".cockpit-terminal");
+      assertEquals(terminal?.getAttribute("data-terminal-mode"), "live", "the running child job is live-drilled");
+      assert(StubWebSocket.instances.length > 0, "a relay socket was opened for the focused job");
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
+
 test("#833: with no live job, the process focus replays the newest captured transcript of that process", async () => {
   const replay = {
     stream: "wk-a/j9",

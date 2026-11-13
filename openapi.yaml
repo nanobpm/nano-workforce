@@ -916,6 +916,11 @@ components:
         planKey:
           type: string
           description: The plan / epic key this job is part of (e.g. owner/repo#142), if known.
+        rootProcessInstanceKey:
+          type: string
+          description: The root process instance of the call hierarchy the job runs in (#948) — equal to
+            processInstanceKey for a top-level instance. Lets the cockpit's process focus follow a job running
+            in a callActivity child. Resolved from the engine after the link; advisory.
     AgenticSupplyReport:
       type: object
       description: The SUPPLY-ONLY visibility report — the live worker list grouped by leaf. No demand-side

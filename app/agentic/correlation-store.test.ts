@@ -181,11 +181,29 @@ test("record preserves an existing element_instance_key when a later re-record o
   const got = store.get("job-4");
   assertEquals(got?.host, "later.local");
   assertEquals(got?.elementInstanceKey, "ei-777");
-  // setElementInstanceKey backfill then a bare re-record likewise survives.
+  // setPlacement backfill then a bare re-record likewise survives.
   store.record({ jobKey: "job-5", stream: st("job-5"), completedAt: "2026-08-23T03:00:00.000Z", instance: "worker-E" });
-  store.setElementInstanceKey("job-5", "ei-888");
+  store.setPlacement("job-5", { elementInstanceKey: "ei-888" });
   store.record({ jobKey: "job-5", stream: st("job-5"), completedAt: "2026-08-23T03:05:00.000Z", instance: "worker-E" });
   assertEquals(store.get("job-5")?.elementInstanceKey, "ei-888");
+});
+
+test("#948 setPlacement backfills the process instance + element onto a row recorded before resolution landed", () => {
+  const store = new AgenticCorrelationStore(memoryDb());
+  // Completion won the race: the row was recorded with no engine context (a bare relay link).
+  store.record({ jobKey: "job-6", stream: st("job-6"), completedAt: "2026-08-23T04:00:00.000Z", instance: "worker-F" });
+  store.setPlacement("job-6", { elementInstanceKey: "ei-6", processInstanceKey: "pi-child", elementId: "implement" });
+  const got = store.get("job-6");
+  assertEquals(got?.processInstanceKey, "pi-child");
+  assertEquals(got?.elementId, "implement");
+  assertEquals(got?.elementInstanceKey, "ei-6");
+  // A partial backfill never clears a field it does not carry.
+  store.setPlacement("job-6", { elementInstanceKey: "ei-6" });
+  assertEquals(store.get("job-6")?.processInstanceKey, "pi-child");
+  // A later bare re-record does not wipe the backfilled placement either.
+  store.record({ jobKey: "job-6", stream: st("job-6"), completedAt: "2026-08-23T04:05:00.000Z", instance: "worker-F" });
+  assertEquals(store.get("job-6")?.processInstanceKey, "pi-child");
+  assertEquals(store.get("job-6")?.elementId, "implement");
 });
 
 test("get is undefined for an unknown jobKey and byStream undefined for a non-job stream", () => {
