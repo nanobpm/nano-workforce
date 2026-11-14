@@ -20,7 +20,7 @@ import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generate
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { isPlausibleBranchName } from "./baseBranch.ts";
-import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText } from "./deliveryGraphCompiler.ts";
+import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText, requiredEmitsByNodeId } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -115,7 +115,7 @@ const EMPTY_REQUIRED_EMITS: ReadonlySet<string> = new Set<string>();
  * union mirrored by the compiler's `ioMappingLines` — the two must agree on field names (a drift here
  * silently seeds `null` into a node body), so both derive from the same node kinds. */
 type NodeInput =
-  | { jobType: string; appendPrompt: string; timeout: string }
+  | { jobType: string; appendPrompt: string; timeout: string; enrollment?: { target: string; dedupeKey: string } }
   | { gateKey: string; probe: unknown; probeTimeout: string; probePollEvery: string }
   | { escalationSlaTimeout: string; escalationAssignee: string | null; prompt: string; nodeId: string; emits: DeliveryFact[] }
   | { target: string; dedupeKey: string | null; payload: Record<string, unknown> | null; timeout: string };
@@ -191,21 +191,15 @@ export async function prepareDeliveryGraph(
   };
   const elementByNodeId = new Map(compiled.resolved.nodes.map((n) => [n.id, n.element]));
   // Required-emit subset per node (#761), derived from the SAME canonical `resolved.edges` the compiler's
-  // `requiredEmitsByElement` gate uses: a fact is a required data dependency exactly when some edge
-  // threads it as a fact-qualified `from: "<node>.<fact>"` (`fromFact` set). A routing-only fact (named
-  // only in a `when` guard) is deliberately absent, so the producer contract leaves it optional.
-  const requiredEmitsByNodeId = new Map<string, Set<string>>();
-  for (const edge of compiled.resolved.edges) {
-    if (edge.fromFact === undefined) continue;
-    const set = requiredEmitsByNodeId.get(edge.fromNode) ?? new Set<string>();
-    set.add(edge.fromFact);
-    requiredEmitsByNodeId.set(edge.fromNode, set);
-  }
+  // `requiredEmitsByElement` gate uses — via the ONE shared {@link requiredEmitsByNodeId} derivation,
+  // which also counts the converge/merge enrollment as a required consumer of `pr` (#962), so the
+  // prompt can never omit a requirement the compiled gate enforces.
+  const requiredByNodeId = requiredEmitsByNodeId(graph.nodes, compiled.resolved.edges);
   const nodeInputs: Record<string, NodeInput> = {};
   for (const node of graph.nodes) {
     const element = elementByNodeId.get(node.id);
     if (element === undefined) continue; // unreachable — resolved covers every node — but keep total.
-    nodeInputs[element] = buildNodeInput(node, { runKey, element, ...timeouts, requiredEmits: requiredEmitsByNodeId.get(node.id) ?? EMPTY_REQUIRED_EMITS });
+    nodeInputs[element] = buildNodeInput(node, { runKey, element, ...timeouts, requiredEmits: requiredByNodeId.get(node.id) ?? EMPTY_REQUIRED_EMITS });
   }
   return { ok: true, prepared: { processDefinitionId, bpmn, nodeInputs, runKey, runNodeTimeout: timeouts.nodeTimeout } };
 }
@@ -603,7 +597,18 @@ function buildNodeInput(
       // dependency (`ctx.requiredEmits`) — so it never contradicts the emit contract by demanding a
       // routing-only fact be non-null (#761).
       const requiredEmits = emits.filter((f) => ctx.requiredEmits.has(f.name));
-      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + basePrompt + renderEmitContract(emits) + renderProducerContract(requiredEmits), timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
+      // Issue #962: the first-class `converge`/`merge` completion policy lowers (in the compiler) to an
+      // in-body enrollment task running the `pr.delivery-connector` worker. Seed the connector config
+      // that task reads — the SAME `target`/`dedupeKey` names an authored connector node seeds — with
+      // the target DERIVED from the ONE canonical flag→target mapping ({@link agentEnrollmentTarget},
+      // shared with the compiler so seed and element can never drift) and a run-unique dedupe key
+      // (`<runKey>:<element>:enrollment`), so a re-run of the same content-addressed graph enrolls
+      // afresh while an at-least-once job redelivery collapses onto the one ledger row. The enrollment
+      // inherits the run's escalation-steward opt-in the same way an authored converge connector does
+      // (the worker resolves it from the durable `delivery_graph_runs` row, issue #889).
+      const enrollmentTarget = agentEnrollmentTarget(node.agent);
+      const enrollment = enrollmentTarget !== null ? { enrollment: { target: enrollmentTarget, dedupeKey: `${ctx.runKey}:${ctx.element}:enrollment` } } : {};
+      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + basePrompt + renderEmitContract(emits) + renderProducerContract(requiredEmits), timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout), ...enrollment };
     }
     case "wait": {
       const probe = parseProbe(node.wait, { allowLateBoundTarget: true });

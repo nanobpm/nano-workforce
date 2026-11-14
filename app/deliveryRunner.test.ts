@@ -785,3 +785,45 @@ test("PR #934 producer contract prompt: no accepted status is ever cited as a fo
   }
   assert(examples.includes("`in_progress`"), `a genuine out-of-vocabulary example remains: ${rejectLine}`);
 });
+
+test("#962 nodeInputs seeds the lowered enrollment config (target + run-unique dedupe key) for a policy-carrying agent only", async () => {
+  // The compiler lowers `agent.converge`/`agent.merge` to an in-body `pr.delivery-connector` enrollment
+  // task that reads `target`/`dedupeKey` from the runner-seeded `nodeInputs.<el>.enrollment` block —
+  // the SAME connector config names an authored connector node seeds. The target is DERIVED from the
+  // one canonical flag→target mapping (agentEnrollmentTarget) and the dedupe key is run-unique
+  // (`<runKey>:<element>:enrollment`), so a re-run of the same content-addressed graph enrolls afresh
+  // while an at-least-once job redelivery collapses onto the one ledger row.
+  const graph: DeliveryGraph = {
+    nodes: [
+      { id: "impl", kind: "agent", agent: { jobType: "senior:feature", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "review", kind: "agent", agent: { jobType: "senior:review", converge: true } },
+      { id: "plain", kind: "agent", agent: { jobType: "senior:chore" } },
+    ],
+    edges: [],
+  };
+  const p = await prepareOk(graph, { runKey: "run-962" });
+  // Element ids are positional by sorted node id: impl → n0, plain → n1, review → n2.
+  assertEquals(p.nodeInputs.n0 && (p.nodeInputs.n0 as Record<string, unknown>).enrollment, { target: "converge-merge", dedupeKey: "run-962:n0:enrollment" }, "converge+merge lowers to the unit-level land target");
+  assertEquals(p.nodeInputs.n2 && (p.nodeInputs.n2 as Record<string, unknown>).enrollment, { target: "converge", dedupeKey: "run-962:n2:enrollment" }, "converge-only lowers to the review-only target");
+  assertEquals((p.nodeInputs.n1 as Record<string, unknown>).enrollment, undefined, "a policy-less agent seeds no enrollment block");
+  // A distinct runKey re-keys the enrollment (a fresh run re-enrolls; the SAME run's redelivery dedupes).
+  const rerun = await prepareOk(graph, { runKey: "run-963" });
+  assertEquals(rerun.nodeInputs.n0 && (rerun.nodeInputs.n0 as Record<string, unknown>).enrollment, { target: "converge-merge", dedupeKey: "run-963:n0:enrollment" }, "the dedupe key tracks the run key");
+});
+
+test("#962 a policy node with no fact-qualified outgoing edge still renders pr as REQUIRED in its prompt (compiler/runner share one derivation)", async () => {
+  // The compiled contract gate treats the lowered enrollment as a required consumer of `pr`; the
+  // runner's producer-contract prompt must agree, or following the prompt (omitting `pr`) trips the gate.
+  const graph: DeliveryGraph = {
+    nodes: [
+      { id: "impl", kind: "agent", agent: { jobType: "senior:feature", converge: true }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "plain", kind: "agent", agent: { jobType: "senior:chore" }, emits: [{ name: "pr", type: "pr" }] },
+    ],
+    edges: [],
+  };
+  const p = await prepareOk(graph, { runKey: "run-962b" });
+  const policyPrompt = String((p.nodeInputs.n0 as Record<string, unknown>).appendPrompt);
+  const plainPrompt = String((p.nodeInputs.n1 as Record<string, unknown>).appendPrompt);
+  assert(policyPrompt !== plainPrompt, "the policy node's prompt must differ from a policy-less node's (pr is required there)");
+  assert(policyPrompt.length > plainPrompt.length && policyPrompt.includes("`pr`"), `the policy prompt names pr in its required contract: ${policyPrompt}`);
+});
