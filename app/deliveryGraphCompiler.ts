@@ -1768,16 +1768,11 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       // is a top-level launch variable (deliveryRunner) — guarded so a hand-seeded instance without it
       // threads null rather than raising a FEEL error.
       inputs.push({ source: guarded(TRANSCRIPT_URL_BASE_VAR), target: TRANSCRIPT_URL_BASE_VAR });
-      // Issue #962: the `converge`/`merge` completion policy lowers to an in-body enrollment task
-      // (see {@link enrollmentLines}) running the `pr.delivery-connector` worker. Seed the connector
-      // config it reads — the SAME names an authored connector node uses — from the runner's
-      // `nodeInputs.<el>.enrollment` block (derived from the SAME {@link agentEnrollmentTarget} mapping,
-      // so the seed and the lowered element can never drift). The enrollment's `payload.pr` binds the
-      // node's OWN `pr` result/emit value at task scope (see enrollmentLines), NOT here.
-      if (agentEnrollmentTarget(node.agent) !== null) {
-        inputs.push({ source: cfg("enrollment.target"), target: "target" });
-        inputs.push({ source: cfg("enrollment.dedupeKey"), target: "dedupeKey" });
-      }
+      // Issue #962: the `converge`/`merge` completion policy's connector config (`target`/`dedupeKey`)
+      // is deliberately NOT seeded here at subProcess scope — `target`/`dedupeKey` are valid agent emit
+      // names, so a subProcess-scoped seed could be overwritten by an agent result (or cleared by the
+      // retry reset). The enrollment task binds them on its OWN ioMapping straight from `nodeInputs`
+      // (see {@link enrollmentLines}).
       break;
     case "wait": {
       inputs.push({ source: cfg("gateKey"), target: "gateKey" });
@@ -2230,10 +2225,23 @@ function serviceBodyLines(
   const allEmits = nodeEmits;
   const contractEsc = contractEscalationTaskElement(el);
   const contractEmits = contractGate?.requiredEmits ?? [];
+  // Issue #962: the lowered converge/merge enrollment (see {@link enrollmentLines}). Computed up front
+  // because BOTH escalations' validated resumes route through it.
+  const hasEnrollment = isAgent && enrollmentTarget !== null;
+  const enrollTarget = hasEnrollment ? `${el}_enroll` : `${el}_end`;
+  const timeoutResumable = resumeEmits.length > 0;
+  const contractResumable = isAgent && contractEmits.length > 0;
+  const enrollment = hasEnrollment && enrollmentTarget !== null
+    ? enrollmentLines(el, nodeId, enrollmentTarget, [
+        `${el}_g0`,
+        ...(timeoutResumable ? [`${esc}Vok`] : []),
+        ...(contractResumable ? [`${contractEsc}Vok`] : []),
+      ])
+    : [];
   const timeoutEscalation = escalationTaskLines(
     esc,
     nodeId,
-    [`${el}_i2`],
+    [`${el}_i2`, ...(hasEnrollment ? [`${el}_e2`] : [])],
     `${el}_i3`,
     `${escalationContextFeel(
       nodeId,
@@ -2245,7 +2253,9 @@ function serviceBodyLines(
       // #863 Retry + #876 Continue/validate, nested: the timeout escalation routes through a retry gate
       // (`retryElement`) and, on Continue with a required emit, a fail-closed validation gate
       // (`validTarget`) that re-parks a null/invalid value instead of threading it downstream.
-      ...(resumeEmits.length > 0 ? { resume: { kind, emits: resumeEmits, declaredEmits: nodeEmits }, validTarget: `${el}_end` } : {}),
+      // Issue #962: a validated timeout resume (the operator supplied the node's PR) routes through the
+      // lowered enrollment too, so a policy-carrying node never completes without enrolling its PR.
+      ...(resumeEmits.length > 0 ? { resume: { kind, emits: resumeEmits, declaredEmits: nodeEmits }, validTarget: enrollTarget } : {}),
       displayName: taskName,
       retryElement: el,
       reservedTargets: reservedFlagTargets,
@@ -2265,8 +2275,6 @@ function serviceBodyLines(
     "      </bpmn:boundaryEvent>",
     ...timeoutEscalation,
   ];
-  const timeoutResumable = resumeEmits.length > 0;
-  const contractResumable = isAgent && contractEmits.length > 0;
   // #863 shared reset: both escalations' retry branches (`${esc}Rr` / `${contractEsc}Rr`) loop into ONE
   // reset-throw that clears the node-local scratch (including each escalation's resume-valid flag) then
   // re-enters the task. Per-escalation retry gates (built in `escalationTaskLines`) feed it, so a Continue
@@ -2303,8 +2311,6 @@ function serviceBodyLines(
   // route through it: the gate's success flow AND a contract-escalation resume that supplied the
   // missing `pr` out of band (the resume validation gate's valid branch targets the enrollment, so a
   // resumed producer's PR is enrolled exactly like a first-pass one).
-  const enrollment = enrollmentTarget !== null ? enrollmentLines(el, nodeId, enrollmentTarget) : [];
-  const enrollTarget = enrollment.length > 0 ? `${el}_enroll` : `${el}_end`;
   const contractEscalation = escalationTaskLines(
     contractEsc,
     nodeId,
@@ -2330,13 +2336,19 @@ function serviceBodyLines(
     ...contractEscalation,
     ...reset,
     ...enrollment,
-    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${enrollment.length > 0 ? `${el}_e1` : `${el}_g0`}</bpmn:incoming><bpmn:incoming>${timeoutResumable ? `${esc}Vok` : `${esc}Rc`}</bpmn:incoming><bpmn:incoming>${contractResumable ? `${contractEsc}Vok` : `${contractEsc}Rc`}</bpmn:incoming></bpmn:endEvent>`,
+    `      <bpmn:endEvent id="${el}_end">${[
+      hasEnrollment ? `${el}_e1` : `${el}_g0`,
+      ...(hasEnrollment && timeoutResumable ? [] : [timeoutResumable ? `${esc}Vok` : `${esc}Rc`]),
+      ...(hasEnrollment && contractResumable ? [] : [contractResumable ? `${contractEsc}Vok` : `${contractEsc}Rc`]),
+    ]
+      .map((f) => `<bpmn:incoming>${f}</bpmn:incoming>`)
+      .join("")}</bpmn:endEvent>`,
     flow(`${el}_i0`, `${el}_start`, `${el}_task`),
     flow(`${el}_i1`, `${el}_task`, `${el}_gate`),
     `      <bpmn:sequenceFlow id="${el}_g0" name="contract met" sourceRef="${el}_gate" targetRef="${enrollTarget}"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${proceedCondition}</bpmn:conditionExpression></bpmn:sequenceFlow>`,
     `      <bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="${contractEsc}" />`,
     flow(`${el}_g2`, contractEsc, `${contractEsc}Rg`),
-    ...(enrollment.length > 0 ? [flow(`${el}_e1`, `${el}_enroll`, `${el}_end`)] : []),
+    ...(hasEnrollment ? [flow(`${el}_e1`, `${el}_enroll`, `${el}_end`), flow(`${el}_e2`, `${el}_enrollBe`, esc)] : []),
     flow(`${el}_i2`, `${el}_be`, esc),
     flow(`${el}_i3`, esc, `${esc}Rg`),
   ];
@@ -2352,11 +2364,11 @@ function serviceBodyLines(
  * The task reuses the CANONICAL connector worker (no duplicated enrollment machinery): it reads the
  * SAME `target`/`dedupeKey`/`payload`/`boundFacts` variables an authored connector node seeds. The
  * runner seeds `nodeInputs.<el>.enrollment.{target,dedupeKey}` (derived from the ONE
- * {@link agentEnrollmentTarget} mapping) and the subProcess ioMapping binds them node-locally; the
+ * {@link agentEnrollmentTarget} mapping) and the enrollment task binds them on its OWN ioMapping (never at subProcess scope, where an agent emit could clobber them); the
  * dedupe key is the run-unique `<runKey>:<el>:enrollment`, so a re-run of the same content-addressed
  * graph enrolls afresh while an at-least-once job redelivery collapses onto the one ledger row. The
- * enrollment runs INSIDE the node's `=nodeTimeout` boundary, so a stalled enrollment escalates onto
- * the node's existing timeout twin instead of wedging.
+ * enrollment runs INSIDE its OWN `=nodeTimeout` boundary routed onto the node's timeout escalation,
+ * so a stalled enrollment escalates instead of wedging.
  *
  * `payload.pr` binds the node's OWN `pr` — the result field every implementer prompt's output
  * contract returns and the canonical `pr` emit share (both are the node-local `pr` variable; the
@@ -2366,7 +2378,7 @@ function serviceBodyLines(
  * operator rather than silently reporting success without enrolling). The `boundFacts` self-entry
  * (`<nodeId>.pr` → the node-local `pr`) mirrors the canonical authored shape's late-binding channel,
  * so the worker resolves the PR through the exact path an authored `connector[converge*]` uses. */
-function enrollmentLines(el: string, nodeId: string, target: string): string[] {
+function enrollmentLines(el: string, nodeId: string, target: string, incoming: readonly string[]): string[] {
   const task = `${el}_enroll`;
   return [
     `      <bpmn:serviceTask id="${task}" name="Enroll PR into convergence (${target})">`,
@@ -2377,11 +2389,23 @@ function enrollmentLines(el: string, nodeId: string, target: string): string[] {
     // payload the worker's `readConvergeInput` parses; a null `pr` fails closed there.
     `            <zeebe:input ${attr("source", '=context put({}, "pr", if (is defined(pr)) then pr else null)')} target="payload" />`,
     `            <zeebe:input ${attr("source", `=[{from: ${feelStr(nodeId)}, name: "pr", value: if (is defined(pr)) then pr else null}]`)} target="boundFacts" />`,
+    // The connector config is bound at THIS task's scope straight from the runner-seeded
+    // `nodeInputs.<el>.enrollment` block — never from a subProcess-scoped variable that an agent emit
+    // (`target`/`dedupeKey` are valid emit names) or the retry reset could overwrite/clear.
+    `            <zeebe:input source="=nodeInputs.${el}.enrollment.target" target="target" />`,
+    `            <zeebe:input source="=nodeInputs.${el}.enrollment.dedupeKey" target="dedupeKey" />`,
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
-    `        <bpmn:incoming>${el}_g0</bpmn:incoming>`,
+    ...incoming.map((f) => `        <bpmn:incoming>${f}</bpmn:incoming>`),
     `        <bpmn:outgoing>${el}_e1</bpmn:outgoing>`,
     "      </bpmn:serviceTask>",
+    // Bounded: the agent task's `=nodeTimeout` boundary is withdrawn once the agent completes, so the
+    // enrollment carries its OWN interrupting timer onto the node's timeout escalation — an unclaimed
+    // or stalled enrollment escalates instead of parking the graph indefinitely.
+    `      <bpmn:boundaryEvent id="${el}_enrollBe" name="Enrollment timed out" attachedToRef="${task}">`,
+    `        <bpmn:outgoing>${el}_e2</bpmn:outgoing>`,
+    `        <bpmn:timerEventDefinition id="${el}_enrollTed"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=nodeTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
+    "      </bpmn:boundaryEvent>",
   ];
 }
 

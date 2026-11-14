@@ -4160,18 +4160,31 @@ test("#962 converge+merge flags lower to an in-body converge-merge enrollment af
   assert(enroll.includes('context put({}, "pr", if (is defined(pr)) then pr else null)'), "payload.pr binds the node's own pr value");
   assert(enroll.includes('target="boundFacts"'), "the enrollment carries the self boundFacts entry");
   assert(enroll.includes('{from: "impl", name: "pr", value:'), "the boundFacts entry names the node's own pr fact");
-  // The enrollment config (target + dedupe key) is seeded from the runner's nodeInputs — the SAME
-  // connector config names an authored connector node uses — never baked into the digest-stable BPMN.
+  // The enrollment config (target + dedupe key) is bound on the ENROLLMENT TASK's own ioMapping straight
+  // from the runner's nodeInputs — NOT at subProcess scope, where an agent emit named `target`/`dedupeKey`
+  // (valid emit names) or the retry reset could overwrite/clear it (PR #964 review).
   const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`), r.bpmn.indexOf("</zeebe:ioMapping>", r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`)));
-  assert(sub.includes(`source="=nodeInputs.${el}.enrollment.target" target="target"`), "the enrollment target is seeded from nodeInputs");
-  assert(sub.includes(`source="=nodeInputs.${el}.enrollment.dedupeKey" target="dedupeKey"`), "the enrollment dedupe key is seeded from nodeInputs");
+  assert(enroll.includes(`source="=nodeInputs.${el}.enrollment.target" target="target"`), "the enrollment target is bound task-locally from nodeInputs");
+  assert(enroll.includes(`source="=nodeInputs.${el}.enrollment.dedupeKey" target="dedupeKey"`), "the enrollment dedupe key is bound task-locally from nodeInputs");
+  assert(!sub.includes(`target="target"`) && !sub.includes(`target="dedupeKey"`), "no subProcess-scoped target/dedupeKey seed an agent emit could clobber");
   // The connector's fixed result metadata is node-local on a policy-carrying agent (parallel policy
   // cells must not overwrite one shared root connectorOutcome).
   for (const v of ["connectorOutcome", "connectorDedupeKey", "connectorDetail"]) {
     assert(sub.includes(`target="${v}"`), `a policy-carrying agent declares connector result '${v}' node-local`);
   }
-  // The enrollment runs INSIDE the node's bounded-timeout scope (the subProcess body), so a stalled
-  // enrollment escalates onto the node's existing timeout twin rather than wedging.
+  // The enrollment is BOUNDED by its own interrupting timer onto the node's timeout escalation (the agent
+  // task's boundary is withdrawn once the agent completes), so a stalled enrollment escalates (PR #964 review).
+  assert(r.bpmn.includes(`<bpmn:boundaryEvent id="${el}_enrollBe" name="Enrollment timed out" attachedToRef="${el}_enroll">`), "the enrollment carries its own timeout boundary");
+  assert(r.bpmn.includes(`<bpmn:timerEventDefinition id="${el}_enrollTed"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=nodeTimeout</bpmn:timeDuration>`), "bounded by the node's timeout");
+  assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_e2" sourceRef="${el}_enrollBe" targetRef="delivery-human-task__${el}__esc" />`), "a stalled enrollment routes onto the node's timeout escalation");
+  // BOTH validated resume paths (timeout AND contract escalation) route through the enrollment, never
+  // straight to the node end — a resumed PR is enrolled exactly like a first-pass one (PR #964 review).
+  for (const esc of [`delivery-human-task__${el}__esc`, `delivery-human-task__${el}__contract`]) {
+    assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${esc}Vok" name="valid" sourceRef="${esc}Vg" targetRef="${el}_enroll">`), `${esc}'s validated resume routes through the enrollment`);
+    assert(enroll.includes(`<bpmn:incoming>${esc}Vok</bpmn:incoming>`), `the enrollment declares ${esc}Vok as incoming`);
+  }
+  const end = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:endEvent id="${el}_end"`), r.bpmn.indexOf("</bpmn:endEvent>", r.bpmn.indexOf(`<bpmn:endEvent id="${el}_end"`)));
+  assert(!end.includes("Vok"), "the node end declares no resume flow that now targets the enrollment");
   assert(r.bpmn.indexOf(`<bpmn:serviceTask id="${el}_enroll"`) > r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`), "the enrollment is inside the node subProcess");
   assert(r.bpmn.indexOf(`<bpmn:serviceTask id="${el}_enroll"`) < r.bpmn.indexOf(`<bpmn:endEvent id="${el}_end"`), "the enrollment precedes the node end");
 });

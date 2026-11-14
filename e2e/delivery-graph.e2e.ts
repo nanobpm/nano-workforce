@@ -22,7 +22,8 @@ import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { connectorDedupeKey, deliveryConnectorDispatches, dispatchConnector } from "../app/deliveryConnector.ts";
 import type { CommandResult } from "../app/readiness.ts";
-import { readConnectorInput } from "../workers/delivery-connector/worker.ts";
+import connectorHandler, { readConnectorInput } from "../workers/delivery-connector/worker.ts";
+import { deliveryGraphRuns } from "../app/deliveryGraphRun.ts";
 import { __setProbeExecForTest } from "../workers/readiness-probe/worker.ts";
 import { prepareDeliveryGraph, runDeliveryGraph } from "../app/deliveryRunner.ts";
 import { isDeliveryEscalationTwin } from "../app/deliveryHuman.ts";
@@ -1147,5 +1148,148 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     await app.engine.completeUserTask(contract.userTaskKey, { value: "owner/repo#88", humanOutcome: "completed" });
     await app.settle();
     assert.deepEqual(enrollments, ["converge-merge"], "the resumed producer's PR is enrolled exactly like a first-pass one");
+  });
+
+  /** Observe the lowered #962 enrollment through the canonical connector dispatch path (the same
+   * observer-stub shape the canonical-shape tests use), recording what the connector job received. */
+  async function observeEnrollments(app: TestApp): Promise<{ target: string; dedupeKey: string; payload: unknown }[]> {
+    const seen: { target: string; dedupeKey: string; payload: unknown }[] = [];
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => {
+        const vars = job.variables as Record<string, unknown>;
+        const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key available");
+        seen.push({ target, dedupeKey, payload });
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
+      },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+    );
+    return seen;
+  }
+
+  test("#962 an agent result carrying `target`/`dedupeKey` keys can NOT overwrite the enrollment config (PR #964 review)", async () => {
+    const app = track(await boot(freshDir()));
+    // `target`/`dedupeKey` are valid agent result/emit names. A subProcess-scoped config seed would be
+    // clobbered by them — `target: "release"` sends the connector down its acknowledgement-only path
+    // without enrolling. The enrollment task binds its config task-locally from nodeInputs instead.
+    await app.engine.registerWorker("senior:demo", async () => ({ status: "opened", pr: "owner/repo#91", target: "release", dedupeKey: "hijacked" }));
+    const seen = await observeEnrollments(app);
+    const graph: DeliveryGraph = {
+      name: "e2e emit collision",
+      nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:demo", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] }],
+      edges: [],
+    };
+    const run = await runDeliveryGraph(app.engine, graph, { runKey: "run-962-collide", repoless: true });
+    assert.ok(run.ok, JSON.stringify(run));
+    await app.settle();
+    assert.equal(seen.length, 1, "the enrollment fired once");
+    assert.equal(seen[0].target, "converge-merge", "the agent's `target` result never reaches the enrollment");
+    assert.equal(seen[0].dedupeKey, "run-962-collide:n0:enrollment", "the agent's `dedupeKey` result never reaches the enrollment");
+  });
+
+  test("#962 a validated TIMEOUT-escalation resume routes through the enrollment (PR #964 review)", async () => {
+    const app = track(await boot(freshDir()));
+    // No `senior:demo` worker for `impl`: its job never completes, so the node SLA fires the timeout
+    // escalation. The operator supplies the PR on Continue — the policy must still enroll it.
+    const seen = await observeEnrollments(app);
+    const graph: DeliveryGraph = {
+      name: "e2e timeout resume enrolls",
+      nodes: [
+        { id: "impl", kind: "agent", agent: { jobType: "senior:never", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "downstream", kind: "agent", agent: { jobType: "senior:demo" } },
+      ],
+      edges: [{ from: "impl.pr", to: "downstream" }],
+    };
+    await app.engine.registerWorker("senior:demo", async () => ({ status: "opened" }));
+    const run = await runDeliveryGraph(app.engine, graph, { nodeTimeout: "PT2S", escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, JSON.stringify(run));
+    await app.settle();
+    await app.advanceTime(2_100);
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
+    assert.ok(esc, "the timed-out policy agent parks on its timeout escalation");
+    assert.equal(seen.length, 0, "nothing enrolled before the resume");
+    await app.engine.completeUserTask(esc.userTaskKey, { value: "owner/repo#92", humanOutcome: "completed" });
+    await app.settle();
+    assert.deepEqual(seen.map((e) => [e.target, e.payload]), [["converge-merge", { pr: "owner/repo#92" }]], "the resumed PR is enrolled");
+  });
+
+  test("#962 a STALLED enrollment escalates on its own timeout instead of parking forever (PR #964 review)", async () => {
+    const app = track(await boot(freshDir()));
+    // The agent completes (withdrawing its task's timeout boundary), but the enrollment job never
+    // completes — here the connector worker keeps failing (an outage / fail-closed input), parking the
+    // job on an incident. The enrollment's own `=nodeTimeout` boundary must fire the node's escalation.
+    await app.engine.registerWorker("senior:demo", async () => ({ status: "opened", pr: "owner/repo#93" }));
+    await app.engine.registerWorker("pr.delivery-connector", async () => {
+      throw new Error("connector outage");
+    });
+    const graph: DeliveryGraph = {
+      name: "e2e stalled enrollment",
+      nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:demo", converge: true }, emits: [{ name: "pr", type: "pr" }] }],
+      edges: [],
+    };
+    const run = await runDeliveryGraph(app.engine, graph, { nodeTimeout: "PT2S", escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, JSON.stringify(run));
+    await app.settle();
+    assert.ok((await app.engine.searchUserTasks({ state: "CREATED" })).every((t) => !t.elementId?.endsWith("__esc")), "no escalation before the SLA");
+    await app.advanceTime(2_100);
+    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
+    assert.ok(esc, "the stalled enrollment escalates onto the node's timeout escalation");
+  });
+
+  test("#962 through the REAL connector handler: the lowered enrollment registers the PR converging with merge intent and the run's escalation opt-in (PR #964 review)", async () => {
+    // Hermetic: the real enrollment's `submitPr` fetches PR meta — force the token transport with NO
+    // token so it returns null without touching the network (mirrors the worker unit tests' withGithubOff).
+    const prevMode = process.env.NANO_PR_GITHUB_TRANSPORT;
+    const prevTok = process.env.GITHUB_TOKEN;
+    process.env.NANO_PR_GITHUB_TRANSPORT = "token";
+    delete process.env.GITHUB_TOKEN;
+    after(() => {
+      if (prevMode === undefined) delete process.env.NANO_PR_GITHUB_TRANSPORT;
+      else process.env.NANO_PR_GITHUB_TRANSPORT = prevMode;
+      if (prevTok !== undefined) process.env.GITHUB_TOKEN = prevTok;
+    });
+    const app = track(await boot(freshDir()));
+    await app.engine.registerWorker("senior:demo", async () => ({ status: "opened", pr: "owner/repo#94" }));
+    const log = { info: () => {}, warn: () => {}, error: () => {} };
+    // The REAL `pr.delivery-connector` handler (not the acknowledgement-only dispatch stub): a converge
+    // target enrolls via `submitPr`, resolving the steward opt-in from the durable run row.
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => await connectorHandler(job as never, { data: app.db, engine: app.engine, log } as never),
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload", "autoResolveEscalations"] },
+    );
+    const graph: DeliveryGraph = {
+      name: "e2e real enrollment",
+      nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:demo", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] }],
+      edges: [],
+    };
+    // The durable opted-in run row the connector resolves the opt-in from — claimed BEFORE launch with a
+    // NULL process_key and stamped after, exactly as `dispatchDeliveryGraphRun` does in production.
+    const ts = new Date().toISOString();
+    await deliveryGraphRuns(app.db).insert({ run_key: "run-962-real", digest: "d", status: "running", process_key: null, auto_resolve_escalations: 1, created_at: ts, updated_at: ts } as never);
+    const run = await runDeliveryGraph(app.engine, graph, { runKey: "run-962-real", autoResolveEscalations: true, repoless: true });
+    assert.ok(run.ok, JSON.stringify(run));
+    await deliveryGraphRuns(app.db).update("run-962-real", { process_key: run.handle.processInstanceKey } as never);
+    await app.settle();
+    // The handler is async past the engine's settle fixpoint (submitPr awaits); drain until the node
+    // completes through its enrollment (bounded).
+    for (let i = 0; i < 250 && !takenFlows(app).some((f) => f.endsWith("->End")); i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      await app.settle();
+    }
+    const prs = app.db.table<{ pr_key: string; status: string; merge_requested: number; auto_resolve_escalations: number; root_request_key: string }>("pull_requests", "pr_key");
+    const row = await prs.findOne({ pr_key: "owner/repo#94" });
+    assert.ok(row, "the lowered enrollment registered the PR for convergence");
+    assert.equal(row?.status, "converging", "the PR is actively converging");
+    assert.equal(row?.merge_requested, 1, "converge+merge enrolls with merge intent (convergeOnly=false)");
+    assert.equal(row?.auto_resolve_escalations, 1, "the run's escalation opt-in propagates to the enrolled PR");
+    const ledger = await deliveryConnectorDispatches(app.db).find({ dedupe_key: "run-962-real:n0:enrollment" });
+    assert.equal(ledger.length, 1, "the enrollment dispatch was recorded under the run-unique key");
   });
 });
