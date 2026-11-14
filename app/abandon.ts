@@ -24,6 +24,7 @@
 import type { DataLayer } from "@nanobpm/urban";
 import { publicBaseUrl } from "./blackboard.ts";
 import { trackingTargetFor } from "./instanceTracking.ts";
+import { OWNER_TERMINATED_COLUMN } from "./prTrackingReadModel.ts";
 
 /** The one derived-status value meaning a PR is terminally abandoned — the run must not be worked on
  * further. Two disjoint producers surface a row here, and both are non-completion terminals that must
@@ -118,7 +119,10 @@ export async function abandonStatusForToken(
     );
   }
   const status = rawStatus;
-  return { prKey: row.pr_key, status, abandoned: isAbandoned(status) };
+  // `derived_status` reports a landed PR as `merged` even when its run was terminated (issue #959),
+  // so termination is read from its own column: a terminated owner ALWAYS aborts the agent.
+  const ownerTerminated = Boolean(row[OWNER_TERMINATED_COLUMN]);
+  return { prKey: row.pr_key, status, abandoned: isAbandoned(status) || ownerTerminated };
 }
 
 /** The instruction block appended (verbatim, via `appendPrompt`) to each side-effecting agent's

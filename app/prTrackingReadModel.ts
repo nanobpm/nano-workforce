@@ -120,13 +120,28 @@ export function derivePrEffectiveStatusExpr(): Expr {
   return caseWhen(whens, col(statusField));
 }
 
+/** The derived column exposing "this PR's owning run was terminated" SEPARATELY from the effective
+ *  status. `derived_status` deliberately reports a landed PR as `merged` even when its run was
+ *  terminated, so it can no longer carry the cancellation signal on its own — the abort protocol
+ *  (`abandonStatusForToken`) reads THIS column too, so terminating a redundant post-merge round still
+ *  tells its agent to stop. `1` when terminated, otherwise `NULL`. */
+export const OWNER_TERMINATED_COLUMN = "owner_terminated";
+
+/** `CASE WHEN <terminated> THEN 1 END` over the same terminal edge `derived_status` uses. */
+export function deriveOwnerTerminatedExpr(): Expr {
+  return caseWhen([when(terminatedEdge(trackingBindingFor(TABLE).keyField), lit(1))], lit(null));
+}
+
 /** The app-owned `pull_requests__tracking` read model. `selectBaseColumns: true` (the default) so the
  *  VIEW re-exports `pull_requests.*` plus the derived `derived_status` — byte-compatible with the
  *  framework's own tracking VIEW shape, so every existing reader keeps working unchanged. */
 export const pullRequestTrackingReadModel: ReadModel = defineReadModel({
   name: trackingTargetFor(TABLE).view,
   baseTable: TABLE,
-  derive: { [trackingTargetFor(TABLE).statusColumn]: derivePrEffectiveStatusExpr() },
+  derive: {
+    [trackingTargetFor(TABLE).statusColumn]: derivePrEffectiveStatusExpr(),
+    [OWNER_TERMINATED_COLUMN]: deriveOwnerTerminatedExpr(),
+  },
 });
 
 /** Register the merge-aware tracking VIEW into the process-wide `readModelRegistry` so the framework

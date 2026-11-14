@@ -143,6 +143,22 @@ test("a non-merged audit outcome does not fold a terminated run to merged", () =
   db.close();
 });
 
+test("owner_terminated exposes termination separately: set for a terminated merged PR, NULL for a live one", () => {
+  const db = viewDb();
+  addPr(db, "o/r#mt", { status: "merged", processKey: "901", mergedAt: "t" });
+  terminate(db, "901");
+  addPr(db, "o/r#ml", { status: "merged", processKey: "902", mergedAt: "t" });
+  const get = (k: string) =>
+    (db.prepare("SELECT derived_status, owner_terminated FROM pull_requests__tracking WHERE pr_key = ?").get(k) as {
+      derived_status: string;
+      owner_terminated: number | null;
+    });
+  assertEquals(get("o/r#mt").derived_status, "merged");
+  assertEquals(get("o/r#mt").owner_terminated, 1);
+  assertEquals(get("o/r#ml").owner_terminated, null);
+  db.close();
+});
+
 // The whole fix hinges on the app-owned model claiming the EXACT view name urban's provisioner would
 // otherwise manage, so the framework defers to it. Pin that contract: the model is named
 // `pull_requests__tracking`, registers into the process-wide registry (idempotently), and the
