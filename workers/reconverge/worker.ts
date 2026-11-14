@@ -16,7 +16,7 @@ import type { AppJobHandler } from "@nanobpm/urban";
 import { classifyPrLiveness, fetchPrHead, fetchPrState } from "../../app/github.ts";
 import { parsePr } from "../../app/prParse.ts";
 import { maybeStartRetro } from "../../app/retro.ts";
-import { MAX_ROUNDS, submitPr } from "../../app/service.ts";
+import { abandonClosedPr, MAX_ROUNDS, submitPr } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`ReconvergeIn` in merge-loop.bpmn) — ADR 0040.
@@ -94,6 +94,14 @@ export function makeHandler(
       // The merged-completion side effect `pr.mark-merged` runs: an externally merged PR may be its
       // plan's last to settle, so its automatic retrospective must still start. Best-effort, never throws.
       await maybeStartRetro(app.data, app.engine, prKey);
+      return {};
+    }
+    // A PR verified CLOSED without merging (it closed between the merge worker's findings and this
+    // hand-off) has nothing to reconverge either: settle it terminal through the ONE canonical
+    // `abandonClosedPr` (row + plan tasks + idempotent audit) and end the loop — never start a
+    // replacement convergence run on a closed PR.
+    if (liveness === "closed") {
+      await abandonClosedPr(app.data, prKey, "PR was closed without merging before the reconverge hand-off");
       return {};
     }
     // The PR was already merging (merge intent on, any human approval already given), so the fresh

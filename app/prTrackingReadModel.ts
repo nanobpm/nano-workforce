@@ -42,6 +42,7 @@ import {
   isNotNull,
   lit,
   not,
+  or,
   pcol,
   type ReadModel,
   readModelRegistry,
@@ -74,10 +75,21 @@ function waitingHumanEdge(keyField: string): Expr {
   return exists("urban_open_user_tasks", eq(pcol("process_instance_key"), col(keyField)));
 }
 
+/** The landed signal: the base row's `merged_at` stamp OR a durable `merges.outcome='merged'` audit
+ *  row. `pr.merge` writes the audit BEFORE the separate `pr.mark-merged` task stamps `merged_at`, so a
+ *  run terminated between the two still landed — the audit alone must be sufficient. Neither signal
+ *  depends on a retained instance-state row (a pruned/null `process_key` still reads `merged`). */
+function landedEdge(): Expr {
+  return or(
+    isNotNull(col("merged_at")),
+    exists("merges", and(eq(pcol("pr_key"), col("pr_key")), eq(pcol("outcome"), lit("merged")))),
+  );
+}
+
 /** The merge-aware effective-status derivation for the `pull_requests` binding:
  *
  *   CASE
- *     WHEN <terminated> AND <merged_at set>            THEN 'merged'      -- landed wins over terminated
+ *     WHEN <merged_at set OR merged audit row>         THEN 'merged'      -- landed wins, however the run ended
  *     WHEN <terminated>                                THEN <onTerminated> -- terminated-unmerged = abandoned
  *     WHEN <waiting-on-human> AND NOT <terminated>     THEN <onWaitingHuman>
  *     ELSE base.<statusField>                          -- the worker-owned transient
@@ -95,7 +107,7 @@ export function derivePrEffectiveStatusExpr(): Expr {
 
   const whens = [
     // Landed beats terminated: a merged PR is `merged` even when its loop was terminated afterwards.
-    when(and(terminated, isNotNull(col("merged_at"))), lit("merged")),
+    when(landedEdge(), lit("merged")),
   ];
   const terminalStatus = binding.onTerminated?.set?.[statusField];
   if (typeof terminalStatus === "string") {

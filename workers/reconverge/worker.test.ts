@@ -5,6 +5,10 @@ import { assert, assertEquals, assertRejects, assertStringIncludes } from "#test
 import { noopLog } from "../../test/log.ts";
 import { makeHandler, type FetchPrHead, type ReadLiveness, type Submit } from "./worker.ts";
 
+// Deterministic liveness stub for hand-off tests: never reach the real GitHub transport.
+const openLive: ReadLiveness = async () => "open";
+const nullHead = (async () => null) as unknown as FetchPrHead;
+
 // Issue #959: a reconverge hand-off can fire AFTER the PR landed out-of-band (a gate override /
 // Mergify / a manual merge). Re-entering `submitPr` on a landed PR would restart a redundant
 // convergence loop against a deleted head branch (the nano-bpm#1579 clone incident). The worker must
@@ -115,7 +119,7 @@ test("re-submits through submitPr with auto-merge on and handoffFrom = this merg
     args = a;
     return { prKey: "acme/w#7" };
   }) as unknown as Submit;
-  await makeHandler(submit)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  await makeHandler(submit, nullHead, openLive)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
   assertEquals((args[2] as { prKey: string }).prKey, "acme/w#7");
   assertEquals(args[7], false, "no re-gate on human approval");
   assertEquals(args[8], true, "steward opt-in carried from the row");
@@ -142,7 +146,7 @@ test("throws on a null processKey so the hand-off stays retryable (#941)", async
   } as any;
   const submit = (async () => ({ prKey: "acme/w#7", processKey: null })) as unknown as Submit;
   const err = await assertRejects(
-    () => makeHandler(submit)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app),
+    () => makeHandler(submit, nullHead, openLive)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app),
     Error,
     "null processKey",
   );
@@ -177,7 +181,7 @@ test("hands off at the CURRENT PR head, not the stale convergence checkpoint (#9
     baseRef: "main",
     headRepo: "acme/w",
   })) as unknown as FetchPrHead;
-  await makeHandler(submit, head)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  await makeHandler(submit, head, openLive)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
   assertEquals(args[11], "b".repeat(40), "the restore override is the live PR head SHA");
 });
 
@@ -198,7 +202,7 @@ test("a head read that resolves no SHA degrades to the checkpoint restore (no ov
     return { prKey: "acme/w#7", processKey: "999" };
   }) as unknown as Submit;
   const head = (async () => null) as unknown as FetchPrHead;
-  await makeHandler(submit, head)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  await makeHandler(submit, head, openLive)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
   assertEquals(args[11], null, "no live head SHA → no override (checkpoint restore, the pre-fix behaviour)");
 });
 
@@ -227,7 +231,7 @@ test("preserves the run's custom instructions across the merge→reconvergence h
     return { prKey: "acme/w#7", processKey: "999" };
   }) as unknown as Submit;
   const head = (async () => null) as unknown as FetchPrHead;
-  await makeHandler(submit, head)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  await makeHandler(submit, head, openLive)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
   assertEquals(args[12], "  commit as josh.wulf@camunda.com  ", "the durable instruction text rides the handoff into the fresh convergence run");
 });
 
@@ -248,6 +252,38 @@ test("a PR row with no stored instructions hands off with null (no steering)", a
     return { prKey: "acme/w#7", processKey: "999" };
   }) as unknown as Submit;
   const head = (async () => null) as unknown as FetchPrHead;
-  await makeHandler(submit, head)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  await makeHandler(submit, head, openLive)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
   assertEquals(args[12], null, "no stored text → null (the fresh run's prompts stay byte-identical to no-instructions)");
+});
+
+// A PR closed WITHOUT merging before the hand-off must be settled abandoned via the canonical
+// `abandonClosedPr` (row + plan tasks + audit) — never resubmitted into a replacement run.
+test("a closed-unmerged PR is abandoned and no replacement run is submitted", async () => {
+  const merges: Record<string, unknown>[] = [];
+  const prUpdates: Record<string, unknown>[] = [];
+  const app = {
+    data: {
+      table: (name: string) => ({
+        get: async () => (name === "pull_requests" ? { pr_key: "acme/w#7", auto_resolve_escalations: 0 } : undefined),
+        find: async () => [],
+        findOne: async () => null,
+        insert: async (r: Record<string, unknown>) => (name === "merges" && merges.push(r), 1),
+        update: async (_k: string, patch: Record<string, unknown>) => (name === "pull_requests" && prUpdates.push(patch), undefined),
+        upsert: async () => undefined,
+      }),
+    },
+    engine: {},
+    log: noopLog(),
+  } as any;
+  let submitted = false;
+  const submit = (async () => {
+    submitted = true;
+    return { prKey: "acme/w#7", processKey: "999" };
+  }) as unknown as Submit;
+  const live: ReadLiveness = async () => "closed";
+  const out = await makeHandler(submit, nullHead, live)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  assertEquals(submitted, false);
+  assertEquals(out, {});
+  assert(merges.some((m) => m.outcome === "abandoned" && m.method === "pr-closed"), "closed audit row written");
+  assert(prUpdates.some((u) => u.status === "abandoned"), "row settled abandoned");
 });

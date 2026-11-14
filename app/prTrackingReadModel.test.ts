@@ -32,6 +32,7 @@ function viewDb(): DatabaseSync {
   const db = new DatabaseSync(":memory:");
   db.exec(
     `CREATE TABLE pull_requests (pr_key TEXT PRIMARY KEY, status TEXT, process_key TEXT, merged_at TEXT);
+     CREATE TABLE merges (id INTEGER PRIMARY KEY, pr_key TEXT, outcome TEXT, method TEXT, detail TEXT, at TEXT);
      CREATE TABLE _urban_instance_state (process_instance_key TEXT PRIMARY KEY, state TEXT, waiting_on_human INTEGER NOT NULL DEFAULT 0, updated_at TEXT);`,
   );
   db.exec(pullRequestTrackingReadModel.viewDdl());
@@ -109,12 +110,36 @@ test("a merged PR whose instance COMPLETED normally (no terminated edge) reads b
   db.close();
 });
 
-test("a terminated run with no live process_key (null) still derives the terminal edge off merged_at", () => {
+test("a landed PR with no instance-state row (null process_key) still derives merged off merged_at", () => {
   const db = viewDb();
   // merged_at set but the instance row is gone/null: the merged WHEN keys on merged_at, not the join.
   addPr(db, "o/r#nullkey", { status: "converging", processKey: null, mergedAt: "2026-11-01T00:00:00Z" });
-  // No instance-state row at all → not terminated → base status passes through.
-  assertEquals(derivedStatus(db, "o/r#nullkey"), "converging");
+  assertEquals(derivedStatus(db, "o/r#nullkey"), "merged");
+  db.close();
+});
+
+test("a landed PR whose instance-state row was pruned still derives merged off merged_at", () => {
+  const db = viewDb();
+  addPr(db, "o/r#pruned", { status: "waiting_merge", processKey: "777", mergedAt: "2026-11-01T00:00:00Z" });
+  assertEquals(derivedStatus(db, "o/r#pruned"), "merged");
+  db.close();
+});
+
+test("a run terminated between pr.merge's audit and pr.mark-merged (merged_at NULL) derives merged", () => {
+  const db = viewDb();
+  addPr(db, "o/r#gap", { status: "merging", processKey: "888", mergedAt: null });
+  db.prepare("INSERT INTO merges (pr_key, outcome, method, detail, at) VALUES ('o/r#gap', 'merged', 'squash', '', 't')").run();
+  terminate(db, "888");
+  assertEquals(derivedStatus(db, "o/r#gap"), "merged");
+  db.close();
+});
+
+test("a non-merged audit outcome does not fold a terminated run to merged", () => {
+  const db = viewDb();
+  addPr(db, "o/r#rc", { status: "merging", processKey: "889", mergedAt: null });
+  db.prepare("INSERT INTO merges (pr_key, outcome, method, detail, at) VALUES ('o/r#rc', 'reconverge', 'x', '', 't')").run();
+  terminate(db, "889");
+  assertEquals(derivedStatus(db, "o/r#rc"), "abandoned");
   db.close();
 });
 
