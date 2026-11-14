@@ -135,6 +135,28 @@ export const AGENT_REPO_SPEC_HEADER = `${AGENT_TASK_NS}.__repoSpec`;
  * Derived from the ONE canonical vocabulary (`convergeTargets.ts`) so the lowered enrollment and every
  * authored `connector[converge*]` node dispatch through the same targets. Exported so the runner's
  * `nodeInputs` seed derives the SAME target (never a second copy of the mapping). */
+/**
+ * The ONE canonical required-emit derivation (issues #731/#761/#962), keyed by node id and shared by the
+ * compiler's producer-contract gate and the runner's prompt rendering so they can never drift. A fact is
+ * required when some edge threads it fact-qualified (`from: "<node>.<fact>"`); additionally the lowered
+ * converge/merge enrollment is itself a required consumer of the node's `pr`, independently of any edge.
+ * Routing-only facts (named only in a `when` guard) stay optional.
+ */
+export function requiredEmitsByNodeId(
+  nodes: readonly { id: string; kind: string; agent?: { converge?: boolean; merge?: boolean } }[],
+  edges: readonly { fromNode: string; fromFact?: string | undefined }[],
+): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  const add = (id: string, fact: string): void => {
+    const set = out.get(id) ?? new Set<string>();
+    set.add(fact);
+    out.set(id, set);
+  };
+  for (const edge of edges) if (edge.fromFact !== undefined) add(edge.fromNode, edge.fromFact);
+  for (const node of nodes) if (node.kind === "agent" && node.agent !== undefined && agentEnrollmentTarget(node.agent) !== null) add(node.id, "pr");
+  return out;
+}
+
 export function agentEnrollmentTarget(agent: { converge?: boolean; merge?: boolean }): string | null {
   if (agent.merge === true) return CONVERGE_MERGE_TARGET;
   if (agent.converge === true) return CONVERGE_TARGET;
@@ -759,24 +781,7 @@ export async function compileDeliveryGraphSemantic(
   // here — those stay optional (omit ⇒ default branch). Grouped by producer element; only set
   // membership is ever queried downstream, so the sets carry no ordering guarantee.
   const requiredEmitsByElement = new Map<string, Set<string>>();
-  for (const edge of resolvedEdges) {
-    if (edge.fromFact === undefined) continue;
-    const producerEl = mustGet(elementById, edge.fromNode);
-    const set = requiredEmitsByElement.get(producerEl) ?? new Set<string>();
-    set.add(edge.fromFact);
-    requiredEmitsByElement.set(producerEl, set);
-  }
-  // Issue #962: the lowered converge/merge enrollment is itself a REQUIRED consumer of the node's `pr`
-  // fact, independently of any authored edge — so the producer contract, the prompt, and BOTH
-  // escalation recovery paths (timeout + contract) treat `pr` as required and a Continue resume maps
-  // its `value` onto `pr` and routes through the enrollment, never bypassing it.
-  for (const node of nodes) {
-    if (node.kind !== "agent" || agentEnrollmentTarget(node.agent) === null) continue;
-    const producerEl = mustGet(elementById, node.id);
-    const set = requiredEmitsByElement.get(producerEl) ?? new Set<string>();
-    set.add("pr");
-    requiredEmitsByElement.set(producerEl, set);
-  }
+  for (const [nodeId, facts] of requiredEmitsByNodeId(nodes, resolvedEdges)) requiredEmitsByElement.set(mustGet(elementById, nodeId), facts);
 
   const semanticBpmn = renderBpmn(typed, wirings, numberedFlows, startForkGateway, endJoinGateway, boundInputsByElement, requiredEmitsByElement);
   const diagram = renderMermaid(typed, wirings, resolvedEdges, elementById);

@@ -810,3 +810,20 @@ test("#962 nodeInputs seeds the lowered enrollment config (target + run-unique d
   const rerun = await prepareOk(graph, { runKey: "run-963" });
   assertEquals(rerun.nodeInputs.n0 && (rerun.nodeInputs.n0 as Record<string, unknown>).enrollment, { target: "converge-merge", dedupeKey: "run-963:n0:enrollment" }, "the dedupe key tracks the run key");
 });
+
+test("#962 a policy node with no fact-qualified outgoing edge still renders pr as REQUIRED in its prompt (compiler/runner share one derivation)", async () => {
+  // The compiled contract gate treats the lowered enrollment as a required consumer of `pr`; the
+  // runner's producer-contract prompt must agree, or following the prompt (omitting `pr`) trips the gate.
+  const graph: DeliveryGraph = {
+    nodes: [
+      { id: "impl", kind: "agent", agent: { jobType: "senior:feature", converge: true }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "plain", kind: "agent", agent: { jobType: "senior:chore" }, emits: [{ name: "pr", type: "pr" }] },
+    ],
+    edges: [],
+  };
+  const p = await prepareOk(graph, { runKey: "run-962b" });
+  const policyPrompt = String((p.nodeInputs.n0 as Record<string, unknown>).appendPrompt);
+  const plainPrompt = String((p.nodeInputs.n1 as Record<string, unknown>).appendPrompt);
+  assert(policyPrompt !== plainPrompt, "the policy node's prompt must differ from a policy-less node's (pr is required there)");
+  assert(policyPrompt.length > plainPrompt.length && policyPrompt.includes("`pr`"), `the policy prompt names pr in its required contract: ${policyPrompt}`);
+});

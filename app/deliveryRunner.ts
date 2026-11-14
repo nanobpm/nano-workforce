@@ -20,7 +20,7 @@ import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generate
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { isPlausibleBranchName } from "./baseBranch.ts";
-import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText } from "./deliveryGraphCompiler.ts";
+import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText, requiredEmitsByNodeId } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -191,21 +191,15 @@ export async function prepareDeliveryGraph(
   };
   const elementByNodeId = new Map(compiled.resolved.nodes.map((n) => [n.id, n.element]));
   // Required-emit subset per node (#761), derived from the SAME canonical `resolved.edges` the compiler's
-  // `requiredEmitsByElement` gate uses: a fact is a required data dependency exactly when some edge
-  // threads it as a fact-qualified `from: "<node>.<fact>"` (`fromFact` set). A routing-only fact (named
-  // only in a `when` guard) is deliberately absent, so the producer contract leaves it optional.
-  const requiredEmitsByNodeId = new Map<string, Set<string>>();
-  for (const edge of compiled.resolved.edges) {
-    if (edge.fromFact === undefined) continue;
-    const set = requiredEmitsByNodeId.get(edge.fromNode) ?? new Set<string>();
-    set.add(edge.fromFact);
-    requiredEmitsByNodeId.set(edge.fromNode, set);
-  }
+  // `requiredEmitsByElement` gate uses — via the ONE shared {@link requiredEmitsByNodeId} derivation,
+  // which also counts the converge/merge enrollment as a required consumer of `pr` (#962), so the
+  // prompt can never omit a requirement the compiled gate enforces.
+  const requiredByNodeId = requiredEmitsByNodeId(graph.nodes, compiled.resolved.edges);
   const nodeInputs: Record<string, NodeInput> = {};
   for (const node of graph.nodes) {
     const element = elementByNodeId.get(node.id);
     if (element === undefined) continue; // unreachable — resolved covers every node — but keep total.
-    nodeInputs[element] = buildNodeInput(node, { runKey, element, ...timeouts, requiredEmits: requiredEmitsByNodeId.get(node.id) ?? EMPTY_REQUIRED_EMITS });
+    nodeInputs[element] = buildNodeInput(node, { runKey, element, ...timeouts, requiredEmits: requiredByNodeId.get(node.id) ?? EMPTY_REQUIRED_EMITS });
   }
   return { ok: true, prepared: { processDefinitionId, bpmn, nodeInputs, runKey, runNodeTimeout: timeouts.nodeTimeout } };
 }
