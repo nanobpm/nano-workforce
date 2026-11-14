@@ -4123,3 +4123,109 @@ test("contract escalation context: carries the agent's own report, question, err
     assert(esc.includes(s), `the context includes '${s}'`);
   }
 });
+
+// ── Issue #962: the first-class `agent.converge`/`agent.merge` completion policy LOWERING ──────────
+// The flags validated but never acted (the merlin `staged-dfc122d107e9f86e` wedge: a `converge: true,
+// merge: true` node completed, bound its `pr`, and NOTHING enrolled it — the downstream `wait[pr
+// merged]` would have polled out its 3-day SLA). The compiler now lowers the policy to a real
+// enrollment INSIDE the agent node's body: a `pr.delivery-connector` service task seated between the
+// producer-contract gate's success flow and the node end, driving the SAME `submitPr` door an authored
+// `connector[converge*]` node drives (no duplicated machinery).
+
+test("#962 converge+merge flags lower to an in-body converge-merge enrollment after the producer-contract gate", async () => {
+  const graph = {
+    name: "policy lowering",
+    nodes: [
+      { id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "Implement and open a PR.", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: "impl.pr", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "impl.pr", to: "merged" }],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "impl");
+  // The enrollment task exists INSIDE the agent node's subProcess, delegating to the canonical
+  // connector worker (NOT a raw converge/merge job, NOT a second agent).
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${el}_enroll" name="Enroll PR into convergence (converge-merge)">`), "the lowered enrollment task exists");
+  const enroll = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:serviceTask id="${el}_enroll"`), r.bpmn.indexOf(`</bpmn:serviceTask>`, r.bpmn.indexOf(`<bpmn:serviceTask id="${el}_enroll"`)));
+  assert(enroll.includes(`<zeebe:taskDefinition type="pr.delivery-connector" />`), "the enrollment delegates to the canonical connector worker");
+  // It is seated BETWEEN the contract gate's success flow and the node end: the gate no longer flows
+  // straight to the end; the enrollment flows there instead.
+  assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_g0" name="contract met" sourceRef="${el}_gate" targetRef="${el}_enroll"`), "the contract-met success flow routes INTO the enrollment");
+  assert(!r.bpmn.includes(`sourceRef="${el}_gate" targetRef="${el}_end"`), "the contract gate no longer bypasses the enrollment");
+  assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_e1" sourceRef="${el}_enroll" targetRef="${el}_end" />`), "the enrollment flows to the node end");
+  // The enrollment binds the node's OWN `pr` (the result field / canonical pr emit share one
+  // node-local variable) as the connector payload's `pr`, plus the self boundFacts entry the worker's
+  // late-binding path resolves through.
+  assert(enroll.includes('target="payload"'), "the enrollment seeds a payload");
+  assert(enroll.includes('context put({}, "pr", if (is defined(pr)) then pr else null)'), "payload.pr binds the node's own pr value");
+  assert(enroll.includes('target="boundFacts"'), "the enrollment carries the self boundFacts entry");
+  assert(enroll.includes('{from: "impl", name: "pr", value:'), "the boundFacts entry names the node's own pr fact");
+  // The enrollment config (target + dedupe key) is seeded from the runner's nodeInputs — the SAME
+  // connector config names an authored connector node uses — never baked into the digest-stable BPMN.
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`), r.bpmn.indexOf("</zeebe:ioMapping>", r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`)));
+  assert(sub.includes(`source="=nodeInputs.${el}.enrollment.target" target="target"`), "the enrollment target is seeded from nodeInputs");
+  assert(sub.includes(`source="=nodeInputs.${el}.enrollment.dedupeKey" target="dedupeKey"`), "the enrollment dedupe key is seeded from nodeInputs");
+  // The connector's fixed result metadata is node-local on a policy-carrying agent (parallel policy
+  // cells must not overwrite one shared root connectorOutcome).
+  for (const v of ["connectorOutcome", "connectorDedupeKey", "connectorDetail"]) {
+    assert(sub.includes(`target="${v}"`), `a policy-carrying agent declares connector result '${v}' node-local`);
+  }
+  // The enrollment runs INSIDE the node's bounded-timeout scope (the subProcess body), so a stalled
+  // enrollment escalates onto the node's existing timeout twin rather than wedging.
+  assert(r.bpmn.indexOf(`<bpmn:serviceTask id="${el}_enroll"`) > r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`), "the enrollment is inside the node subProcess");
+  assert(r.bpmn.indexOf(`<bpmn:serviceTask id="${el}_enroll"`) < r.bpmn.indexOf(`<bpmn:endEvent id="${el}_end"`), "the enrollment precedes the node end");
+});
+
+test("#962 converge-only (no merge) lowers to the review-only `converge` target", async () => {
+  const r = await compileOk({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", converge: true }, emits: [{ name: "pr", type: "pr" }] }],
+    edges: [],
+  });
+  const el = elementForNode(r.bpmn, "impl");
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${el}_enroll" name="Enroll PR into convergence (converge)">`), "converge-only lowers to the review-only target");
+  assert(!r.bpmn.includes("Enroll PR into convergence (converge-merge)"), "no merge without the merge flag");
+});
+
+test("#962 a policy-LESS agent node compiles byte-identically to before (no enrollment, no connector locals)", async () => {
+  const r = await compileOk({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature" }, emits: [{ name: "pr", type: "pr" }] }],
+    edges: [],
+  });
+  const el = elementForNode(r.bpmn, "impl");
+  assert(!r.bpmn.includes(`${el}_enroll`), "no enrollment task without the policy flags");
+  assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_g0" name="contract met" sourceRef="${el}_gate" targetRef="${el}_end"`), "the contract gate still flows straight to the end");
+  const sub = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`), r.bpmn.indexOf("</zeebe:ioMapping>", r.bpmn.indexOf(`<bpmn:subProcess id="${el}"`)));
+  assert(!sub.includes("enrollment.target"), "no enrollment config is seeded without the policy");
+  for (const v of ["connectorOutcome", "connectorDedupeKey", "connectorDetail"]) {
+    assert(!sub.includes(`target="${v}"`), `a policy-less agent never declares connector-only '${v}'`);
+  }
+});
+
+test("#962 the preview's side-effect list includes the implied enrollment for each flag combination", async () => {
+  // An operator approving a staged graph authorises EVERY side effect it will perform — the implied
+  // enrollment must be listed alongside the agent job run, per flag combination.
+  const both = await compileOk({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", converge: true, merge: true } }],
+    edges: [],
+  });
+  const bothEffects = both.sideEffects.filter((s) => s.nodeId === "impl");
+  assertEquals(bothEffects.length, 2, "the agent job run AND the implied enrollment are both listed");
+  assertEquals(bothEffects[0].kind, "agent");
+  assertEquals(bothEffects[1].kind, "connector");
+  assert(bothEffects[1].description.includes("converge-merge"), "the implied enrollment names the converge-merge target");
+
+  const convergeOnly = await compileOk({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", converge: true } }],
+    edges: [],
+  });
+  const convergeEffects = convergeOnly.sideEffects.filter((s) => s.nodeId === "impl");
+  assertEquals(convergeEffects.length, 2, "converge-only lists the implied enrollment too");
+  assert(convergeEffects[1].description.includes("`converge`"), "the implied enrollment names the review-only target");
+  assert(!convergeEffects[1].description.includes("converge-merge"), "converge-only does not promise a merge");
+
+  const none = await compileOk({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature" } }],
+    edges: [],
+  });
+  assertEquals(none.sideEffects.length, 1, "a policy-less agent lists only its job run");
+});

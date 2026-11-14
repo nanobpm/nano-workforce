@@ -128,6 +128,19 @@ function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait"
  * an internal marker the harness never reads. */
 export const AGENT_REPO_SPEC_HEADER = `${AGENT_TASK_NS}.__repoSpec`;
 
+/** The converge-enrollment target an `agent` node's completion-policy flags lower to (issue #962):
+ * `merge` (which the validator requires to imply `converge` — `merge-requires-converge`) lowers to the
+ * unit-level land (`converge-merge` — converge AND drive the merge loop); `converge` alone lowers to
+ * the review-only `converge` (stop at `converged`). Returns `null` when the node carries no policy.
+ * Derived from the ONE canonical vocabulary (`convergeTargets.ts`) so the lowered enrollment and every
+ * authored `connector[converge*]` node dispatch through the same targets. Exported so the runner's
+ * `nodeInputs` seed derives the SAME target (never a second copy of the mapping). */
+export function agentEnrollmentTarget(agent: { converge?: boolean; merge?: boolean }): string | null {
+  if (agent.merge === true) return CONVERGE_MERGE_TARGET;
+  if (agent.converge === true) return CONVERGE_TARGET;
+  return null;
+}
+
 /** The engine-native BODY every node kind delegates to (Decision 2 — the graph SCHEDULES, it does not
  * re-implement execution). Each node compiles to an EMBEDDED `bpmn:subProcess` (call activities are a
  * no-op on the pinned WASM engine — the child is never instantiated — so, like the rest of the
@@ -938,7 +951,9 @@ function buildHumanNodes(nodes: readonly DeliveryNode[]): DeliveryHumanStop[] {
 
 /** Extract the SIDE EFFECTS (sorted by id) the compiled graph will perform — `agent` job runs and
  * `connector` outbound actions. `wait` gates are read-only and `human` stops are surfaced separately,
- * so neither is a side effect. */
+ * so neither is a side effect. An `agent` node carrying the first-class `converge`/`merge` completion
+ * policy (ADR 0006 §3) ALSO lists the enrollment the compiler lowers into its body (issue #962) — the
+ * preview must name every side effect an approval authorises, including the implied one. */
 function buildSideEffects(nodes: readonly DeliveryNode[]): DeliverySideEffect[] {
   const effects: DeliverySideEffect[] = [];
   for (const node of nodes) {
@@ -952,6 +967,18 @@ function buildSideEffects(nodes: readonly DeliveryNode[]): DeliverySideEffect[] 
         // any more than in the node label/documentation (issue #778 review — thread :1202).
         description: `runs agent job \`${redactConnectorValue(node.agent.jobType)}\``,
       });
+      // Issue #962: the `converge`/`merge` policy flags lower to a real convergence enrollment after
+      // the agent task (the SAME `submitPr` door an authored `connector[converge*]` drives), so the
+      // preview surfaces the implied enrollment alongside the job run — an operator approving this
+      // graph authorises BOTH.
+      const enrollment = agentEnrollmentTarget(node.agent);
+      if (enrollment !== null) {
+        effects.push({
+          nodeId: node.id,
+          kind: "connector",
+          description: `enrolls the opened PR into the convergence loop (\`${enrollment}\`)`,
+        });
+      }
     } else if (node.kind === "connector") {
       // Redact the operator-facing `target`/`dedupeKey` at their SOURCE with the SAME display-safe
       // helper `nodeDisplay` renders with: this projection is persisted into the staged proposal
@@ -1741,6 +1768,16 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       // is a top-level launch variable (deliveryRunner) — guarded so a hand-seeded instance without it
       // threads null rather than raising a FEEL error.
       inputs.push({ source: guarded(TRANSCRIPT_URL_BASE_VAR), target: TRANSCRIPT_URL_BASE_VAR });
+      // Issue #962: the `converge`/`merge` completion policy lowers to an in-body enrollment task
+      // (see {@link enrollmentLines}) running the `pr.delivery-connector` worker. Seed the connector
+      // config it reads — the SAME names an authored connector node uses — from the runner's
+      // `nodeInputs.<el>.enrollment` block (derived from the SAME {@link agentEnrollmentTarget} mapping,
+      // so the seed and the lowered element can never drift). The enrollment's `payload.pr` binds the
+      // node's OWN `pr` result/emit value at task scope (see enrollmentLines), NOT here.
+      if (agentEnrollmentTarget(node.agent) !== null) {
+        inputs.push({ source: cfg("enrollment.target"), target: "target" });
+        inputs.push({ source: cfg("enrollment.dedupeKey"), target: "dedupeKey" });
+      }
       break;
     case "wait": {
       inputs.push({ source: cfg("gateKey"), target: "gateKey" });
@@ -1852,6 +1889,13 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       for (const v of ESCALATION_LOCAL_VARS) locals.add(v);
       if (node.kind === "agent") {
         for (const v of AGENT_RESULT_LOCAL_VARS) locals.add(v);
+        // Issue #962: a policy-carrying agent (`converge`/`merge`) runs a lowered enrollment task
+        // (the `pr.delivery-connector` worker) INSIDE its body, so the connector's fixed result
+        // metadata must ALSO be node-local here — left undeclared, two parallel policy cells would
+        // overwrite one shared root `connectorOutcome`/`connectorDedupeKey`/`connectorDetail`.
+        if (agentEnrollmentTarget(node.agent) !== null) {
+          for (const v of CONNECTOR_RESULT_LOCAL_VARS) locals.add(v);
+        }
       } else if (node.kind === "connector") {
         for (const v of CONNECTOR_RESULT_LOCAL_VARS) locals.add(v);
       } else {
@@ -1942,7 +1986,7 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // be a leak here), but the `descriptor` is embedded by `serviceBodyLines` into the operator-visible
       // timeout / producer-contract escalation FEEL `prompt` — so it takes the SAME display redaction
       // `nodeDisplay` applies, never the raw value (issue #778 review — thread deliveryGraphCompiler.ts:1606).
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, "agent", nodeEmits, undefined);
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName, "agent", nodeEmits, undefined, agentEnrollmentTarget(node.agent));
     }
     case "connector": {
       // TRIM the target before building the escalation descriptor — `nodeDisplay` and the connector
@@ -2106,6 +2150,10 @@ function serviceBodyLines(
   // onto a consumed fact (issue #872). Defaults to the contract gate's required emits (an agent); a
   // connector passes its own required subset explicitly (it has no gate to derive from).
   resumeEmits: readonly DeliveryFact[] = contractGate?.requiredEmits ?? [],
+  // The lowered converge-enrollment target for an `agent` node carrying the first-class
+  // `converge`/`merge` completion policy (issue #962), derived ONCE at the call site via
+  // {@link agentEnrollmentTarget}. `null`/absent (and every `connector` node) lowers nothing.
+  enrollmentTarget: string | null = null,
 ): string[] {
   const esc = escalationTaskElement(el);
   const isAgent = contractGate !== undefined;
@@ -2246,6 +2294,17 @@ function serviceBodyLines(
   // the GATE (not straight to the end), and the gate's valid branch flows to the end (PR #876 review).
   const emits = contractEmits;
   const proceedCondition = `=${contractMetVar} = true`;
+  // Issue #962: the first-class `converge`/`merge` completion policy (ADR 0006 §3) lowers to a REAL
+  // enrollment INSIDE this agent node's body — after the producer contract is met, the node's opened
+  // PR is enrolled into the shared convergence (+ merge) loop through the SAME `pr.delivery-connector`
+  // worker an authored `connector[converge*]` node drives (no duplicated machinery). Without this the
+  // flags validated but never acted — the PR was never enrolled and a downstream `wait[pr merged]`
+  // polled out its full SLA (the merlin `staged-dfc122d107e9f86e` wedge). BOTH contract-met paths
+  // route through it: the gate's success flow AND a contract-escalation resume that supplied the
+  // missing `pr` out of band (the resume validation gate's valid branch targets the enrollment, so a
+  // resumed producer's PR is enrolled exactly like a first-pass one).
+  const enrollment = enrollmentTarget !== null ? enrollmentLines(el, nodeId, enrollmentTarget) : [];
+  const enrollTarget = enrollment.length > 0 ? `${el}_enroll` : `${el}_end`;
   const contractEscalation = escalationTaskLines(
     contractEsc,
     nodeId,
@@ -2257,8 +2316,9 @@ function serviceBodyLines(
     // so the downstream consumer late-binds a real value instead of the null that poisoned it (#731) —
     // VALIDATED by the post-escalation gate (`validTarget`) so an omitted/malformed value re-parks
     // instead of threading null downstream (PR #876 review), and routed through the retry gate
-    // (`retryElement`) so Retry resets+reruns the node (#863).
-    { ...(contractResumable ? { resume: { kind: "agent" as const, emits, declaredEmits: nodeEmits }, validTarget: `${el}_end` } : {}), displayName: taskName, retryElement: el, reservedTargets: reservedFlagTargets },
+    // (`retryElement`) so Retry resets+reruns the node (#863). With a converge/merge policy the valid
+    // branch targets the ENROLLMENT (not the bare end), so a resumed producer's PR is enrolled too.
+    { ...(contractResumable ? { resume: { kind: "agent" as const, emits, declaredEmits: nodeEmits }, validTarget: enrollTarget } : {}), displayName: taskName, retryElement: el, reservedTargets: reservedFlagTargets },
   );
   return [
     ...head,
@@ -2269,14 +2329,59 @@ function serviceBodyLines(
     "      </bpmn:exclusiveGateway>",
     ...contractEscalation,
     ...reset,
-    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_g0</bpmn:incoming><bpmn:incoming>${timeoutResumable ? `${esc}Vok` : `${esc}Rc`}</bpmn:incoming><bpmn:incoming>${contractResumable ? `${contractEsc}Vok` : `${contractEsc}Rc`}</bpmn:incoming></bpmn:endEvent>`,
+    ...enrollment,
+    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${enrollment.length > 0 ? `${el}_e1` : `${el}_g0`}</bpmn:incoming><bpmn:incoming>${timeoutResumable ? `${esc}Vok` : `${esc}Rc`}</bpmn:incoming><bpmn:incoming>${contractResumable ? `${contractEsc}Vok` : `${contractEsc}Rc`}</bpmn:incoming></bpmn:endEvent>`,
     flow(`${el}_i0`, `${el}_start`, `${el}_task`),
     flow(`${el}_i1`, `${el}_task`, `${el}_gate`),
-    `      <bpmn:sequenceFlow id="${el}_g0" name="contract met" sourceRef="${el}_gate" targetRef="${el}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${proceedCondition}</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+    `      <bpmn:sequenceFlow id="${el}_g0" name="contract met" sourceRef="${el}_gate" targetRef="${enrollTarget}"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${proceedCondition}</bpmn:conditionExpression></bpmn:sequenceFlow>`,
     `      <bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="${contractEsc}" />`,
     flow(`${el}_g2`, contractEsc, `${contractEsc}Rg`),
+    ...(enrollment.length > 0 ? [flow(`${el}_e1`, `${el}_enroll`, `${el}_end`)] : []),
     flow(`${el}_i2`, `${el}_be`, esc),
     flow(`${el}_i3`, esc, `${esc}Rg`),
+  ];
+}
+
+/** The lowered converge/merge ENROLLMENT for an `agent` node carrying the first-class completion
+ * policy (issue #962, ADR 0006 §3): a `pr.delivery-connector` service task seated between the
+ * producer-contract gate's success flow and the node end, so a contract-met completion enrolls the
+ * PR the agent opened into the shared convergence loop — `converge-merge` (unit-level land, driving
+ * the merge loop too) when `merge` is set, else the review-only `converge`. Returns `[]` for a
+ * policy-less node (byte-identical body to before #962).
+ *
+ * The task reuses the CANONICAL connector worker (no duplicated enrollment machinery): it reads the
+ * SAME `target`/`dedupeKey`/`payload`/`boundFacts` variables an authored connector node seeds. The
+ * runner seeds `nodeInputs.<el>.enrollment.{target,dedupeKey}` (derived from the ONE
+ * {@link agentEnrollmentTarget} mapping) and the subProcess ioMapping binds them node-locally; the
+ * dedupe key is the run-unique `<runKey>:<el>:enrollment`, so a re-run of the same content-addressed
+ * graph enrolls afresh while an at-least-once job redelivery collapses onto the one ledger row. The
+ * enrollment runs INSIDE the node's `=nodeTimeout` boundary, so a stalled enrollment escalates onto
+ * the node's existing timeout twin instead of wedging.
+ *
+ * `payload.pr` binds the node's OWN `pr` — the result field every implementer prompt's output
+ * contract returns and the canonical `pr` emit share (both are the node-local `pr` variable; the
+ * contract gate has already required it non-null when a downstream node binds a declared `pr` emit).
+ * A `skipped`/`blocked` outcome leaves `pr` null, which the worker's `readConvergeInput` fails CLOSED
+ * on (a skipped slice opens no PR, so there is nothing to enroll — the incident parks the node for an
+ * operator rather than silently reporting success without enrolling). The `boundFacts` self-entry
+ * (`<nodeId>.pr` → the node-local `pr`) mirrors the canonical authored shape's late-binding channel,
+ * so the worker resolves the PR through the exact path an authored `connector[converge*]` uses. */
+function enrollmentLines(el: string, nodeId: string, target: string): string[] {
+  const task = `${el}_enroll`;
+  return [
+    `      <bpmn:serviceTask id="${task}" name="Enroll PR into convergence (${target})">`,
+    "        <bpmn:extensionElements>",
+    `          <zeebe:taskDefinition type="${DELEGATE_TASK_TYPE.connector}" />`,
+    "          <zeebe:ioMapping>",
+    // The enrollment target PR is the node's own `pr` (see the doc above). `context put` builds the
+    // payload the worker's `readConvergeInput` parses; a null `pr` fails closed there.
+    `            <zeebe:input ${attr("source", '=context put({}, "pr", if (is defined(pr)) then pr else null)')} target="payload" />`,
+    `            <zeebe:input ${attr("source", `=[{from: ${feelStr(nodeId)}, name: "pr", value: if (is defined(pr)) then pr else null}]`)} target="boundFacts" />`,
+    "          </zeebe:ioMapping>",
+    "        </bpmn:extensionElements>",
+    `        <bpmn:incoming>${el}_g0</bpmn:incoming>`,
+    `        <bpmn:outgoing>${el}_e1</bpmn:outgoing>`,
+    "      </bpmn:serviceTask>",
   ];
 }
 

@@ -988,4 +988,164 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.endsWith("__esc"));
     assert.ok(esc.length >= 1, `the literal PT1H default eventually escalates the parked node, got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`);
   });
+
+  test("#962 the converge+merge policy LOWERS to a real enrollment: the node's PR is enrolled with merge requested, no explicit connector authored", async () => {
+    const app = track(await boot(freshDir()));
+
+    // The merlin `staged-dfc122d107e9f86e` wedge: a `converge: true, merge: true` agent node completed
+    // and bound its `pr`, yet NOTHING enrolled the PR — the flags validated but were never lowered into
+    // a convergence enrollment. The fix lowers them to an in-body `pr.delivery-connector` task seated
+    // after the producer-contract gate, driving the SAME dispatch path an authored `connector[
+    // converge-merge]` node uses. This graph carries NO explicit connector node — the enrollment must
+    // fire from the flags alone.
+    let agentFired = 0;
+    await app.engine.registerWorker("senior:demo", async () => {
+      agentFired++;
+      return { status: "opened", pr: "owner/repo#77", summary: "PR opened." };
+    });
+    // Observe the enrollment through the REAL connector dispatch path (the same observer-stub the
+    // canonical-shape tests use): it must receive the lowered `converge-merge` target, the node's own
+    // `pr` as `payload.pr`, and the run-unique `<runKey>:<element>:enrollment` dedupe key.
+    const enrollments: { target: string; payload: unknown; dedupeKey: string; boundFacts: unknown }[] = [];
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => {
+        const vars = job.variables as Record<string, unknown>;
+        const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key (author-supplied or graph-derived) available");
+        enrollments.push({ target, payload, dedupeKey, boundFacts });
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
+      },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+    );
+
+    const graph: DeliveryGraph = {
+      name: "e2e policy lowering",
+      nodes: [
+        { id: "impl", kind: "agent", agent: { jobType: "senior:demo", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+      ],
+      edges: [],
+    };
+
+    const run = await runDeliveryGraph(app.engine, graph, { runKey: "run-962-e2e", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+
+    assert.equal(agentFired, 1, "the agent node's job fired once");
+    // The lowered enrollment fired EXACTLY ONCE, after the contract gate passed, with the merge-requested
+    // target and the node's own PR — no authored connector node involved.
+    assert.equal(enrollments.length, 1, "the implied enrollment fired exactly once");
+    assert.equal(enrollments[0].target, "converge-merge", "converge+merge lowers to the unit-level land target (merge requested)");
+    assert.deepEqual(enrollments[0].payload, { pr: "owner/repo#77" }, "the enrollment binds the node's own pr as payload.pr");
+    assert.equal(enrollments[0].dedupeKey, "run-962-e2e:n0:enrollment", "the enrollment dedupe key is the run-unique <runKey>:<element>:enrollment");
+    assert.deepEqual(enrollments[0].boundFacts, [{ from: "impl", name: "pr", value: "owner/repo#77" }], "the self boundFacts entry carries the node's pr fact");
+    // The dispatch ledger recorded the delivery under the run-unique key (at-most-once).
+    const rows = await deliveryConnectorDispatches(app.db).find({ dedupe_key: "run-962-e2e:n0:enrollment" });
+    assert.equal(rows.length, 1, "the enrollment was recorded in the dispatch ledger");
+    assert.equal(rows[0].outcome, "delivered");
+    assert.equal(rows[0].target, "converge-merge");
+    // The node completed THROUGH the enrollment — the graph reached End.
+    assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the policy-carrying node completed through its enrollment to End");
+  });
+
+  test("#962 a converge-ONLY policy enrolls review-only (convergeOnly semantics), and a policy-less node enrolls nothing", async () => {
+    const app = track(await boot(freshDir()));
+
+    await app.engine.registerWorker("senior:demo", async () => ({ status: "opened", pr: "owner/repo#78" }));
+    const targets: string[] = [];
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => {
+        const vars = job.variables as Record<string, unknown>;
+        const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key available");
+        targets.push(target);
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
+      },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+    );
+
+    const graph: DeliveryGraph = {
+      name: "e2e converge-only policy",
+      nodes: [
+        { id: "impl", kind: "agent", agent: { jobType: "senior:demo", converge: true }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "chore", kind: "agent", agent: { jobType: "senior:demo" } },
+      ],
+      edges: [],
+    };
+
+    const run = await runDeliveryGraph(app.engine, graph, { repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+
+    // Exactly ONE enrollment fired — the converge-only node's — with the review-only target; the
+    // policy-less `chore` node enrolled nothing.
+    assert.deepEqual(targets, ["converge"], "only the policy-carrying node enrolls, with the review-only target");
+    assert.ok(takenFlows(app).filter((f) => f.endsWith("->End")).length > 0, "both nodes completed to End");
+  });
+
+  test("#962 a contract-escalation RESUME that supplies the missing pr out of band is enrolled too (the policy survives the resume path)", async () => {
+    const app = track(await boot(freshDir()));
+
+    // The agent breaks its producer contract (no PR), parks on the __contract escalation, and a human
+    // supplies the out-of-band PR on resume. The node's converge+merge policy must STILL enroll that
+    // PR — the resume validation gate's valid branch routes through the lowered enrollment, not
+    // straight to the node end.
+    await app.engine.registerWorker("senior:demo", async () => ({ status: "blocked", summary: "could not open the PR" }));
+    const enrollments: string[] = [];
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => {
+        const vars = job.variables as Record<string, unknown>;
+        const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key available");
+        enrollments.push(target);
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
+      },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+    );
+
+    const graph: DeliveryGraph = {
+      name: "e2e policy resume",
+      nodes: [
+        { id: "impl", kind: "agent", agent: { jobType: "senior:demo", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+        // The downstream consumer makes `pr` a REQUIRED emit (a fact-qualified edge is a required
+        // data dependency), so the blocked producer (no PR) trips the contract gate and the resume
+        // must supply it. A second agent node — not a `wait[pr]`, whose probe would escape this
+        // suite's hermetic command-probe seam (a `pr` probe runs a real `gh` call).
+        { id: "downstream", kind: "agent", agent: { jobType: "senior:demo" } },
+      ],
+      edges: [{ from: "impl.pr", to: "downstream" }],
+    };
+
+    const run = await runDeliveryGraph(app.engine, graph, { escalationSlaTimeout: "PT1H", probeTimeout: "PT2S", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+
+    // The broken producer parked on its __contract escalation; nothing enrolled yet.
+    const open = await app.engine.searchUserTasks({ state: "CREATED" });
+    const contract = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && t.elementId?.endsWith("__contract"));
+    assert.ok(contract, `the broken producer parks on its contract escalation, got ${JSON.stringify(open.map((t) => t.elementId))}`);
+    assert.equal(enrollments.length, 0, "no enrollment before the contract is met");
+
+    // Resume with the out-of-band PR — the validated resume routes THROUGH the enrollment.
+    await app.engine.completeUserTask(contract.userTaskKey, { value: "owner/repo#88", humanOutcome: "completed" });
+    await app.settle();
+    assert.deepEqual(enrollments, ["converge-merge"], "the resumed producer's PR is enrolled exactly like a first-pass one");
+  });
 });
