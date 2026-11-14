@@ -410,3 +410,7 @@ test("PR#944 round 6: a successor-owned converging row is NEVER demoted by a red
   assertEquals(stores.pull_requests[0].process_key, "succ");
   assertEquals(stores.pull_requests[0].retire_pending_key, "merge-1", "the pending retirement is left for retryPendingRetirements");
 });
+
+test("#959 isOrphanedPr: an audit-only landing (derived merged, base merging, no merged_at) is never orphaned", () => {
+  assert(!isOrphanedPr({ status: "merging", derived_status: "merged", termination_reason: null, merged_at: null }));
+});

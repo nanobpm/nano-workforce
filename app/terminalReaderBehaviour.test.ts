@@ -319,3 +319,47 @@ test("startPlan re-admits a derive-only-abandoned epic (base 'dispatched', deriv
     assertEquals(stores.plan_tasks.rows.length, 0);
   });
 });
+
+// #959: an audit-only landing (merge recorded in `merges`, `pr.mark-merged` never ran) derives
+// `merged` while the base row is still `merging`. It must count as lane-complete and never surface as
+// `orphaned` in /status.
+test("#959 mergeLaneDecisionForPr treats an audit-only landed (derived merged) predecessor as complete", async () => {
+  const PLAN_KEY = "o/r#100";
+  const stores: Stores = {
+    plan_tasks: {
+      rows: [
+        { id: 1, plan_key: PLAN_KEY, task_id: "a", pr_key: "o/r#1" },
+        { id: 2, plan_key: PLAN_KEY, task_id: "b", pr_key: "o/r#2" },
+      ],
+      key: "id",
+    },
+    plan_merge_exclusions: {
+      rows: [{ id: 1, plan_key: PLAN_KEY, task_a: "a", task_b: "b", files: JSON.stringify(["shared.ts"]), source: "file-overlap" }],
+      key: "id",
+    },
+    plan_task_deps: { rows: [], key: "plan_key" },
+    pull_requests: {
+      rows: [
+        { pr_key: "o/r#1", repo: "o/r", number: 1, status: "merging", derived_status: "merged", merged_at: null },
+        { pr_key: "o/r#2", repo: "o/r", number: 2, status: "converging", derived_status: "converging" },
+      ],
+      key: "pr_key",
+    },
+  };
+  const decision = await mergeLaneDecisionForPr(memData(stores), "o/r#2");
+  assertEquals(decision?.isHeld, false);
+});
+
+test("#959 activePrs does not surface an audit-only landed (derived merged) PR as orphaned", async () => {
+  const stores: Stores = {
+    pull_requests: {
+      rows: [
+        { pr_key: "o/r#1", repo: "o/r", number: 1, url: "u1", status: "merging", derived_status: "merged", merged_at: null, current_round: 1, updated_at: "2024-01-01" },
+      ],
+      key: "pr_key",
+    },
+    escalations: { rows: [], key: "id" },
+  };
+  const active = await activePrs(memData(stores));
+  assertEquals(active.some((p) => p.status === "orphaned"), false);
+});
