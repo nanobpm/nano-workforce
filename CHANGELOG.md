@@ -1,3 +1,9 @@
+## [0.211.1](https://github.com/nanobpm/nano-workforce/compare/v0.211.0...v0.211.1) (2026-11-14)
+
+### Bug Fixes
+
+* **delivery-graph:** lower agent.converge/agent.merge flags into a real convergence enrollment ([#964](https://github.com/nanobpm/nano-workforce/issues/964)) ([deb5e33](https://github.com/nanobpm/nano-workforce/commit/deb5e33400a0e259b92660c50cbb527343660754)), closes [#962](https://github.com/nanobpm/nano-workforce/issues/962)
+
 ## [0.211.0](https://github.com/nanobpm/nano-workforce/compare/v0.210.2...v0.211.0) (2026-11-14)
 
 ### Features
