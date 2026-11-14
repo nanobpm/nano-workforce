@@ -766,6 +766,17 @@ export async function compileDeliveryGraphSemantic(
     set.add(edge.fromFact);
     requiredEmitsByElement.set(producerEl, set);
   }
+  // Issue #962: the lowered converge/merge enrollment is itself a REQUIRED consumer of the node's `pr`
+  // fact, independently of any authored edge — so the producer contract, the prompt, and BOTH
+  // escalation recovery paths (timeout + contract) treat `pr` as required and a Continue resume maps
+  // its `value` onto `pr` and routes through the enrollment, never bypassing it.
+  for (const node of nodes) {
+    if (node.kind !== "agent" || agentEnrollmentTarget(node.agent) === null) continue;
+    const producerEl = mustGet(elementById, node.id);
+    const set = requiredEmitsByElement.get(producerEl) ?? new Set<string>();
+    set.add("pr");
+    requiredEmitsByElement.set(producerEl, set);
+  }
 
   const semanticBpmn = renderBpmn(typed, wirings, numberedFlows, startForkGateway, endJoinGateway, boundInputsByElement, requiredEmitsByElement);
   const diagram = renderMermaid(typed, wirings, resolvedEdges, elementById);

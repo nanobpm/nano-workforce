@@ -4199,6 +4199,24 @@ test("#962 converge-only (no merge) lowers to the review-only `converge` target"
   assert(!r.bpmn.includes("Enroll PR into convergence (converge-merge)"), "no merge without the merge flag");
 });
 
+test("#962 a converge node with NO fact-qualified outgoing edge still requires `pr` and routes BOTH Continue resumes through the enrollment", async () => {
+  // PR #964 review: with no authored `impl.pr` consumer, `pr` was not a required emit, so both
+  // escalations were non-resumable — Continue ended the node WITHOUT enrolling and a supplied `value`
+  // was never mapped to `pr`. The implied enrollment is itself a required consumer of `pr`.
+  const r = await compileOk({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] }],
+    edges: [],
+  });
+  const el = elementForNode(r.bpmn, "impl");
+  assert(!r.bpmn.includes(`targetRef="${el}_end"`) || !r.bpmn.includes(`sourceRef="${el}_gate" targetRef="${el}_end"`), "contract gate never bypasses enrollment");
+  for (const esc of [`delivery-human-task__${el}__esc`, `delivery-human-task__${el}__contract`]) {
+    assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${esc}Vok" name="valid" sourceRef="${esc}Vg" targetRef="${el}_enroll">`), `${esc}'s Continue resume is validated and routes through the enrollment`);
+  }
+  const end = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:endEvent id="${el}_end"`), r.bpmn.indexOf("</bpmn:endEvent>", r.bpmn.indexOf(`<bpmn:endEvent id="${el}_end"`)));
+  assert(!end.includes("__esc") && !end.includes("__contract"), "no escalation path reaches the node end directly (enrollment cannot be bypassed)");
+  assert(/(is defined\(pr\) and pr != null)/.test(r.bpmn), "the producer contract requires a non-null pr");
+});
+
 test("#962 a policy-LESS agent node compiles byte-identically to before (no enrollment, no connector locals)", async () => {
   const r = await compileOk({
     nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature" }, emits: [{ name: "pr", type: "pr" }] }],
