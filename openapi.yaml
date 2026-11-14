@@ -4986,9 +4986,12 @@ paths:
   /agentic/transcripts/{stream}:
     get:
       operationId: getAgenticTranscript
+      # x-cli exclusion (#744): the legacy PATH form 404s behind a proxy that decodes %2F in a path
+      # segment for slash-bearing worker-instance ids (`34:<instance>/<jobKey>` — covered by
+      # app/agentic/transcript-url.test.ts). The proxy-safe single-stream read is the query form,
+      # `agentic transcripts list --stream <stream>`; do not project this route into the CLI.
       x-cli:
-        command: [agentic, transcripts, get]
-        positional: [stream]
+        exclude: true
       summary: Fetch a stored transcript's bytes (H3/#146), range/offset-based so the cockpit terminal
         replays it through the same resume-from-offset renderer it uses for a live stream. PATH form
         of the single-stream read (back-compat; a slash-bearing id 404s behind a decoding proxy —
