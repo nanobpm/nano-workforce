@@ -1,3 +1,9 @@
+## [0.210.2](https://github.com/nanobpm/nano-workforce/compare/v0.210.1...v0.210.2) (2026-11-14)
+
+### Bug Fixes
+
+* **tracking:** merged PRs no longer derive 'abandoned' when their run was terminated ([#960](https://github.com/nanobpm/nano-workforce/issues/960)) ([56f0ff4](https://github.com/nanobpm/nano-workforce/commit/56f0ff4c4a3a0d8a3cf68745b1f7b9bf539987da)), closes [nano-bpm#1579](https://github.com/nanobpm/nano-bpm/issues/1579) [#959](https://github.com/nanobpm/nano-workforce/issues/959)
+
 ## [0.210.1](https://github.com/nanobpm/nano-workforce/compare/v0.210.0...v0.210.1) (2026-11-12)
 
 ### Bug Fixes
