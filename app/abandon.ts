@@ -29,7 +29,9 @@ import { trackingTargetFor } from "./instanceTracking.ts";
  * further. Two disjoint producers surface a row here, and both are non-completion terminals that must
  * stop a servicing agent:
  *   1. an explicit **cancel** of a live convergence/merge run (Urban's cancel primitive terminates
- *      the instance; the `instanceTracking` `onTerminated.set` edge derives `abandoned` on read), and
+ *      the instance; the `instanceTracking` `onTerminated.set` edge derives `abandoned` on read) —
+ *      but ONLY when the PR did NOT land: the merge-aware derivation (app/prTrackingReadModel.ts,
+ *      issue #959) folds a terminated-but-MERGED PR to `merged`, never `abandoned`, and
  *   2. **`abandonClosedPr`** reconciling a wave-member PR that was **closed on GitHub without
  *      merging** (#352) — for both `pull_requests` and its `plan_tasks` — by writing the base row.
  * Convergence/merge terminal states `converged`/`merged` are NOT abandonment. In either abandoned
