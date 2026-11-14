@@ -24,12 +24,15 @@
 import type { DataLayer } from "@nanobpm/urban";
 import { publicBaseUrl } from "./blackboard.ts";
 import { trackingTargetFor } from "./instanceTracking.ts";
+import { OWNER_TERMINATED_COLUMN } from "./prTrackingReadModel.ts";
 
 /** The one derived-status value meaning a PR is terminally abandoned — the run must not be worked on
  * further. Two disjoint producers surface a row here, and both are non-completion terminals that must
  * stop a servicing agent:
  *   1. an explicit **cancel** of a live convergence/merge run (Urban's cancel primitive terminates
- *      the instance; the `instanceTracking` `onTerminated.set` edge derives `abandoned` on read), and
+ *      the instance; the `instanceTracking` `onTerminated.set` edge derives `abandoned` on read) —
+ *      but ONLY when the PR did NOT land: the merge-aware derivation (app/prTrackingReadModel.ts,
+ *      issue #959) folds a terminated-but-MERGED PR to `merged`, never `abandoned`, and
  *   2. **`abandonClosedPr`** reconciling a wave-member PR that was **closed on GitHub without
  *      merging** (#352) — for both `pull_requests` and its `plan_tasks` — by writing the base row.
  * Convergence/merge terminal states `converged`/`merged` are NOT abandonment. In either abandoned
@@ -116,7 +119,10 @@ export async function abandonStatusForToken(
     );
   }
   const status = rawStatus;
-  return { prKey: row.pr_key, status, abandoned: isAbandoned(status) };
+  // `derived_status` reports a landed PR as `merged` even when its run was terminated (issue #959),
+  // so termination is read from its own column: a terminated owner ALWAYS aborts the agent.
+  const ownerTerminated = Boolean(row[OWNER_TERMINATED_COLUMN]);
+  return { prKey: row.pr_key, status, abandoned: isAbandoned(status) || ownerTerminated };
 }
 
 /** The instruction block appended (verbatim, via `appendPrompt`) to each side-effecting agent's

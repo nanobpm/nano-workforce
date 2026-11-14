@@ -1464,7 +1464,10 @@ export function isOrphanedPr(p: {
     // Provenance only explains the CURRENT owner's termination: a reason bound to a different
     // (predecessor) instance never masks an orphaned successor.
     !hasOwnTerminationReason(p) &&
-    p.merged_at == null
+    p.merged_at == null &&
+    // #959: a landing recorded only in the merge audit derives `merged` (base still `merging`,
+    // `merged_at` NULL) — that PR landed, it is not orphaned.
+    p.derived_status !== "merged"
   );
 }
 
@@ -2053,7 +2056,7 @@ async function classifyWaveTarget(
   token: string,
 ): Promise<"cleared" | "closed" | "pending"> {
   const tracked = await prsTracking(data).get(prKey);
-  if (tracked && tracked.status === "merged") return "cleared"; // worker-owned terminal, passes through the derive edge unchanged
+  if (tracked && (tracked.status === "merged" || tracked.derived_status === "merged")) return "cleared"; // worker-owned terminal, passes through the derive edge unchanged
   if (tracked && tracked.derived_status === ABANDONED_STATUS) return "cleared"; // ADR-0065 derive-only terminal → non-blocking, no re-reconcile needed
   const parsed = parsePr(prKey);
   if (!parsed) return "cleared"; // unparseable ref can't be checked → never wedge the barrier
@@ -2139,7 +2142,12 @@ export async function mergeLaneDecisionForPr(data: DataLayer, prKey: string): Pr
     // cancelled/terminated (derive-only terminal → `derived_status === "abandoned"`; the base row is
     // still frozen at its transient). Reading only base `status` here missed a cancelled member and
     // stalled/misrouted the lane.
-    if (lanePr && (lanePr.status === "merged" || lanePr.derived_status === "abandoned")) {
+    // #959: an audit-only landing (merge recorded, `pr.mark-merged` never ran) derives `merged` while
+    // the base row is still `merging` — it is just as complete as a base `merged` row.
+    if (
+      lanePr &&
+      (lanePr.status === "merged" || lanePr.derived_status === "merged" || lanePr.derived_status === "abandoned")
+    ) {
       completedPrKeys.add(lanePr.pr_key);
     }
   }

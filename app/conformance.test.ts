@@ -126,6 +126,23 @@ test("hasDeliveredImplementation: true iff at least one PR landed", async () => 
   assert(hasDeliveredImplementation(await gatherConformance(data, PLAN)));
 });
 
+// Issue #959: a PR that MERGED but whose loop was terminated afterwards (operator cancel, out-of-band
+// merge reconcile, restart cleanup) derived `abandoned` off the `onTerminated` edge — and conformance
+// then refused to count it as landed. The merge-aware derivation folds it to `merged` (merged_at set),
+// so a merged-then-terminated PR IS landed. Model the terminated divergence by seeding the base row at
+// its frozen transient (`converging`) WITH `merged_at` set: the tracking view must report `merged`.
+test("hasDeliveredImplementation: a merged-then-terminated PR (frozen base + merged_at) counts as landed (#959)", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  seedTask(stores, { id: 1, task_index: 0, task_id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  // Base status frozen at the in-flight transient, but the PR landed (merged_at set) before termination.
+  stores["pull_requests"] = [{ pr_key: "acme/widgets#10", status: "converging", merged_at: "2026-11-01T00:00:00Z" }];
+  assertEquals(await hasDeliveredImplementationForPlan(data, PLAN), true);
+  const d = await gatherConformance(data, PLAN);
+  assertEquals(hasDeliveredImplementation(d), true);
+  assertEquals(d.slices.find((s) => s.taskId === "t1")?.landed, true);
+});
+
 test("hasDeliveredImplementationForPlan: matches the digest without a blackboard scan", async () => {
   const { data, stores } = memData();
   seedPlan(stores);

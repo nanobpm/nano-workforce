@@ -7,10 +7,16 @@
 // (`submitPr`), declaring this merge-loop instance as the hand-off source so the live row it owns is
 // not misread as "already running". The merge loop then ends; the fresh convergence run starts a new
 // merge loop on convergence, exactly as a first pass does. No parallel review loop is introduced.
+//
+// EXCEPTION (issue #959): if the PR has ALREADY MERGED out-of-band by the time the hand-off fires
+// (a gate override / Mergify / a manual merge landed it), there is nothing to reconverge — the worker
+// stamps the row `merged`, records the already-merged audit, kicks the retrospective, and ends the
+// loop cleanly instead of restarting convergence against a deleted head branch.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { fetchPrHead } from "../../app/github.ts";
+import { classifyPrLiveness, fetchPrHead, fetchPrState } from "../../app/github.ts";
 import { parsePr } from "../../app/prParse.ts";
-import { MAX_ROUNDS, submitPr } from "../../app/service.ts";
+import { maybeStartRetro } from "../../app/retro.ts";
+import { abandonClosedPr, MAX_ROUNDS, submitPr } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`ReconvergeIn` in merge-loop.bpmn) — ADR 0040.
@@ -18,8 +24,18 @@ type In = WorkerInputs["pr.reconverge"];
 
 export type Submit = typeof submitPr;
 export type FetchPrHead = typeof fetchPrHead;
+/** The PR-liveness reader used for the already-merged guard. Injectable so tests drive the
+ * merged/closed/open matrix without a transport; the default binds the canonical `fetchPrState`. */
+export type ReadLiveness = (repo: string, prNumber: number) => Promise<"open" | "merged" | "closed" | "unknown">;
 
-export function makeHandler(submit: Submit, fetchHead: FetchPrHead = fetchPrHead): AppJobHandler<In> {
+const defaultReadLiveness: ReadLiveness = async (repo, prNumber) =>
+  classifyPrLiveness(await fetchPrState(repo, prNumber, process.env.GITHUB_TOKEN ?? ""));
+
+export function makeHandler(
+  submit: Submit,
+  fetchHead: FetchPrHead = fetchPrHead,
+  readLiveness: ReadLiveness = defaultReadLiveness,
+): AppJobHandler<In> {
   return async (job, app) => {
     const { prKey } = job.variables;
     const parsed = parsePr(prKey);
@@ -53,6 +69,40 @@ export function makeHandler(submit: Submit, fetchHead: FetchPrHead = fetchPrHead
       headSha = (await fetchHead(parsed.repo, parsed.number, process.env.GITHUB_TOKEN ?? ""))?.headSha ?? null;
     } catch (err) {
       app.log.warn("reconverge: head read failed — falling back to the checkpoint restore", { prKey, err: String(err) });
+    }
+    // Already-merged guard (issue #959): a reconverge hand-off can fire AFTER the PR landed out-of-band
+    // (a gate override / Mergify / a manual merge) — the very race that left nano-bpm#1579's loop dying
+    // trying to clone a deleted head branch. Re-entering `submitPr` on a landed PR would restart a
+    // redundant convergence loop against a deleted head. Detect the terminal merge first and end the
+    // merge loop cleanly instead: stamp the row `merged` (so the merge-aware derivation reports
+    // `merged`, not `abandoned`, when this instance then ends), record the already-merged audit row, and
+    // kick the retrospective exactly as `pr.mark-merged` would. The merge loop then completes normally
+    // at `MergeReconverged` — a COMPLETED instance is NOT the `onTerminated` edge, so the row stays
+    // `merged`. Best-effort: an unreadable liveness (`unknown` / a throw) falls through to the normal
+    // hand-off rather than blocking a genuine reconverge.
+    const liveness = await readLiveness(parsed.repo, parsed.number).catch(() => "unknown" as const);
+    if (liveness === "merged") {
+      const ts = new Date().toISOString();
+      await app.data.table("pull_requests", "pr_key").update(prKey, { status: "merged", merged_at: ts, updated_at: ts });
+      await app.data.table("merges", "id").insert({
+        pr_key: prKey,
+        outcome: "merged",
+        method: "already-merged",
+        detail: "PR was already merged on GitHub (landed out-of-band) — ending the merge loop instead of reconverging",
+        at: ts,
+      });
+      // The merged-completion side effect `pr.mark-merged` runs: an externally merged PR may be its
+      // plan's last to settle, so its automatic retrospective must still start. Best-effort, never throws.
+      await maybeStartRetro(app.data, app.engine, prKey);
+      return {};
+    }
+    // A PR verified CLOSED without merging (it closed between the merge worker's findings and this
+    // hand-off) has nothing to reconverge either: settle it terminal through the ONE canonical
+    // `abandonClosedPr` (row + plan tasks + idempotent audit) and end the loop — never start a
+    // replacement convergence run on a closed PR.
+    if (liveness === "closed") {
+      await abandonClosedPr(app.data, prKey, "PR was closed without merging before the reconverge hand-off");
+      return {};
     }
     // The PR was already merging (merge intent on, any human approval already given), so the fresh
     // run keeps auto-merge and does not re-gate on approval.

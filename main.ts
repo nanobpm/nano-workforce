@@ -23,9 +23,15 @@ import { type AgenticChannelHandle, mountAgenticChannel } from "./app/agentic/ch
 import { makeElementInstanceResolver } from "./app/agentic/element-instance.ts";
 import { mountConsoleRedirect, resolveConsoleOrigin } from "./app/consoleRedirect.ts";
 import { announceEngine, resolveEngineAddress } from "./app/enginePreflight.ts";
+import { registerPullRequestTrackingReadModel } from "./app/prTrackingReadModel.ts";
 import { runEngineReconcile } from "./app/reconcile.ts";
 import { MAX_ROUNDS, pollOnce } from "./app/service.ts";
 import { envVar } from "./app/version.ts";
+
+// Issue #959: register the app-owned, merge-aware `pull_requests__tracking` read model BEFORE the
+// runtime mounts workers/instance-tracking, so the framework provisions THIS derivation (a landed PR
+// reads `merged`, never `abandoned`, however its loop ended) instead of the merge-blind default.
+registerPullRequestTrackingReadModel();
 
 const PORT = Number(process.env.PR_REVIEW_PORT ?? 3000);
 const POLL_MS = Number(process.env.NANO_PR_POLL_MS ?? 60_000);

@@ -134,6 +134,37 @@ test("abandonStatusForToken derives abandoned from the row status", async () => 
   assertEquals(await abandonStatusForToken(data, "nope"), undefined);
 });
 
+test("abandonStatusForToken aborts a MERGED PR whose owning run was terminated (owner_terminated)", async () => {
+  // derived_status reports a landed PR as `merged` even when its run was terminated (#959), so the
+  // cancellation signal rides the separate owner_terminated column — terminating a redundant
+  // post-merge round must still tell its agent to stop.
+  const data = memData();
+  await data.table("pull_requests", "pr_key").insert({
+    pr_key: "o/r#4",
+    abandon_token: "landed-term",
+    status: "merged",
+    merged_at: "t",
+    owner_terminated: 1,
+  });
+  await data.table("pull_requests", "pr_key").insert({
+    pr_key: "o/r#5",
+    abandon_token: "landed-live",
+    status: "merged",
+    merged_at: "t",
+    owner_terminated: null,
+  });
+  assertEquals(await abandonStatusForToken(data, "landed-term"), {
+    prKey: "o/r#4",
+    status: "merged",
+    abandoned: true,
+  });
+  assertEquals(await abandonStatusForToken(data, "landed-live"), {
+    prKey: "o/r#5",
+    status: "merged",
+    abandoned: false,
+  });
+});
+
 test("abandonStatusForToken fails CLOSED on a non-string derived status", async () => {
   // A malformed/missing derived_status must never be reported as `abandoned:false`
   // (that would let a cancelled run proceed with irreversible side effects). It throws

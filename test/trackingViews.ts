@@ -17,6 +17,21 @@ import { baseStatusFieldFor, baseTableForTrackingView, trackingTargetFor } from 
 // biome-ignore lint/suspicious/noExplicitAny: test-only fake `table` resolver over dynamic row shapes.
 type TableFn = (name: string, pk?: string) => any;
 
+/** Project a base row onto its tracking-VIEW shape: the base columns plus `derived_status`. Mirrors
+ *  the merge-aware derivation (app/prTrackingReadModel.ts, issue #959): an explicitly-seeded
+ *  `derived_status` (a test modelling the ADR-0065 terminated divergence) wins ONLY when the row has
+ *  NOT landed — a `merged_at` stamp folds the effective status to `merged` regardless, exactly as the
+ *  real VIEW's merged-beats-terminated `WHEN` does. Absent an explicit override, the VIEW's
+ *  `ELSE base.<statusField>` fall-through applies. */
+// biome-ignore lint/suspicious/noExplicitAny: test-only projection over dynamic row shapes.
+function projectRow(row: any, derivedColumn: string, statusField: string) {
+  if (row == null) return row;
+  const seeded = row[derivedColumn];
+  // merged beats terminated: a landed PR (merged_at set) is `merged` even when its run was terminated.
+  if (row.merged_at != null) return { ...row, [derivedColumn]: "merged" };
+  return { ...row, [derivedColumn]: seeded ?? row[statusField] };
+}
+
 /** Decorate a fake `table(name, pk)` resolver so it also serves every `<table>__tracking` derived
  * VIEW off the corresponding base store, projecting `derived_status := base.<statusField>` onto each
  * row the read methods (`findOne`/`get`/`find`/`all`) return. A non-tracking name is passed through
@@ -29,18 +44,7 @@ export function withTrackingViews<F extends TableFn>(base: F): F {
     const derivedColumn = trackingTargetFor(baseName).statusColumn;
     const statusField = baseStatusFieldFor(baseName);
     // biome-ignore lint/suspicious/noExplicitAny: test-only projection over dynamic row shapes.
-    const project = (row: any) =>
-      row == null
-        ? row
-        : // Honor an explicitly-seeded `derived_status` so a test can model the ADR-0065 divergence a
-          // real terminated instance produces — the base `<statusField>` frozen at its last transient
-          // while the derive edge reports the terminal (`abandoned`/`failed`/`reviewed`). When a row
-          // seeds no derived column the VIEW's `ELSE base.<statusField>` fall-through applies, so it
-          // stays byte-for-byte the pass-through the previous behaviour modelled.
-          {
-            ...row,
-            [derivedColumn]: row[derivedColumn] ?? row[statusField],
-          };
+    const project = (row: any) => projectRow(row, derivedColumn, statusField);
     // biome-ignore lint/suspicious/noExplicitAny: test-only Proxy over a dynamic DataLayer table.
     return new Proxy(inner, {
       get(target: any, prop: string) {

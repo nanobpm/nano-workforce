@@ -140,6 +140,17 @@ test("isPlanComplete: true when every task is settled (terminal PR or skipped/bl
   assertEquals(await isPlanComplete(data, PLAN), true);
 });
 
+// Issue #959: a PR that MERGED but whose loop was terminated afterwards derived `abandoned` off the
+// `onTerminated` edge. Retro must still treat it as the landed terminal it is. Model the terminated
+// divergence by seeding the base row at its frozen in-flight transient WITH `merged_at` set: the
+// merge-aware tracking view folds it to `merged`, so the plan reads complete (not stuck-in-flight).
+test("isPlanComplete: a merged-then-terminated PR (frozen base + merged_at) is terminal/landed (#959)", async () => {
+  const { data, stores } = memData();
+  seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  stores["pull_requests"] = [{ pr_key: "acme/widgets#10", status: "converging", merged_at: "2026-11-01T00:00:00Z" }];
+  assertEquals(await isPlanComplete(data, PLAN), true);
+});
+
 test("isPlanComplete: an empty plan has nothing to retrospect", async () => {
   const { data } = memData();
   assertEquals(await isPlanComplete(data, PLAN), false);
