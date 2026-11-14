@@ -4312,6 +4312,8 @@ paths:
   /status:
     get:
       operationId: listActivePrs
+      x-cli:
+        command: [status]
       summary: List every tracked PR currently in flight (not converged/abandoned), newest-updated first.
       security:
         - hookSecret: []
@@ -4332,6 +4334,8 @@ paths:
   /actions/cancel:
     post:
       operationId: cancelInstance
+      x-cli:
+        command: [cancel]
       summary: "Cancel a wedged run the app-owned, record-consistent way: terminate the engine instance AND flip its PR/plan record to `abandoned` (issue #667). The correct unstick — go through the app so its record state stays consistent, rather than engine-level `urban_debug_cancel_instance`, which cancels out from under the app and leaves the PR row inconsistent."
       security:
         - hookSecret: []
@@ -4391,6 +4395,9 @@ paths:
   /actions/cancel-pr:
     post:
       operationId: cancelPrRun
+      x-cli:
+        command: [cancel-pr]
+        audience: operator
       # x-mcp exclusion: the page-only twin of `cancelInstance` (the per-row Cancel button). Agents use
       # the guarded `/actions/cancel` door.
       x-mcp:
@@ -4436,6 +4443,9 @@ paths:
   /actions/incident/retry:
     post:
       operationId: retryIncident
+      x-cli:
+        command: [incidents, retry]
+        audience: operator
       # x-mcp exclusion (ADR 0067 §2 / nano-ide#488): operator-only remediation door. Retrying an
       # incident-parked run is the human unstick action on the Convergence/Home grids (the incident
       # row's "Retry incident" button); agents diagnose through the read surface and escalate, they
@@ -4491,6 +4501,8 @@ paths:
   /auto-resolutions:
     get:
       operationId: listAutoResolutions
+      x-cli:
+        command: [auto-resolutions, list]
       summary: List the escalation steward's auto-resolution records (reviewable), newest first.
       description: >-
         The durable, reviewable record of every escalation the opt-in steward (issue #889) resolved
@@ -4537,6 +4549,8 @@ paths:
   /auto-resolutions/review:
     post:
       operationId: reviewAutoResolution
+      x-cli:
+        command: [auto-resolutions, review]
       summary: Mark an auto-resolution record dismissed (reviewed, no action) or intervened (operator stepped in).
       description: >-
         The Auto-resolutions view's review affordance (issue #889). `dismiss` marks the record
@@ -4594,6 +4608,8 @@ paths:
   /incidents:
     get:
       operationId: listIncidents
+      x-cli:
+        command: [incidents, list]
       summary: List every tracked run parked on an ACTIVE engine incident, oldest first.
       description: >-
         Sibling of `/escalations` for technical liveness faults (issue #931). Read-only projection
@@ -4619,6 +4635,8 @@ paths:
   /escalations:
     get:
       operationId: listEscalations
+      x-cli:
+        command: [escalations, list]
       summary: List every OPEN escalation awaiting a human/agent decision, with the completable userTaskKey.
       description: >-
         Discovery for the escalation-answer path (epic #664, issue #666): across every surfaced
@@ -4649,6 +4667,8 @@ paths:
   /lineage:
     get:
       operationId: getLineage
+      x-cli:
+        command: [lineage]
       summary: "Intent to progress lineage projection (issue #245): every request stitched into one arc (request, implementation, PRs, convergence, merge, outcome), active frontier first. Pass root to fetch a single origin's thread."
       security:
         - hookSecret: []
@@ -4676,6 +4696,8 @@ paths:
   /prs/history:
     get:
       operationId: getPrHistory
+      x-cli:
+        command: [prs, history]
       summary: "A PR's escalation + round history (issue #668): per-round status transitions and outcome, plus each escalation's kind, question/answer, and timestamps — the read that retires the DB-over-ssh fallback. Identify the PR by prKey, or by processKey. Reads the same rounds/escalations tables the Convergence page surfaces."
       security:
         - hookSecret: []
@@ -4715,6 +4737,8 @@ paths:
   /agentic/supply:
     get:
       operationId: getAgenticSupply
+      x-cli:
+        command: [agentic, supply]
       summary: The SUPPLY-ONLY agentic visibility report — the live worker list (family, host, current jobs,
         liveness) grouped by leaf, sourced from the H1 presence registry. Feeds the H5 cockpit page.
       security:
@@ -4736,6 +4760,8 @@ paths:
   /agentic/vocab:
     get:
       operationId: getAgenticVocab
+      x-cli:
+        command: [agentic, vocab]
       summary: The crew vocabulary artifact (enrolment epic 152 slice N1) — the ONE capability→token map a
         worker resolves its SERVE set against. Returns the networks/roles tree plus the flattened
         per-token enrolment requirements and the artifact version. Read-only; advisory.
@@ -4758,6 +4784,8 @@ paths:
   /agentic/enrol:
     post:
       operationId: enrolAgenticWorker
+      x-cli:
+        command: [agentic, enrol]
       summary: Resolve a worker's declared enrolment capability to its SERVE token set (ADR 0059 revised
         REGISTER→SERVE, per-worker). Returns the SERVE leaf tokens, the vocab version resolved against,
         and the liveness lease TTL. Pure/deterministic — idempotent per (app, worker).
@@ -4827,6 +4855,8 @@ paths:
   /agentic/registry:
     get:
       operationId: getAgenticRegistry
+      x-cli:
+        command: [agentic, registry]
       summary: The demand×supply report (enrolment epic 152 slice N1) — deployed demand (the models'
         taskDefinition leaves) diffed against live supply (the presence registry resolved through the
         crew vocab), per network, with missing-agent-type reds and the diversity SLO. Read-only; advisory.
@@ -4849,6 +4879,8 @@ paths:
   /agentic/transcripts:
     get:
       operationId: listAgenticTranscripts
+      x-cli:
+        command: [agentic, transcripts, list]
       summary: List captured agent sessions (H3/#146) — the durable transcripts an ephemeral agent flushed
         on job completion, readable AFTER it exited. Optional filters by jobKey / process instance / plan /
         time. Also serves the proxy-safe single-stream READ form `?stream=` (#744). Advisory read-only;
@@ -4954,6 +4986,9 @@ paths:
   /agentic/transcripts/{stream}:
     get:
       operationId: getAgenticTranscript
+      x-cli:
+        command: [agentic, transcripts, get]
+        positional: [stream]
       summary: Fetch a stored transcript's bytes (H3/#146), range/offset-based so the cockpit terminal
         replays it through the same resume-from-offset renderer it uses for a live stream. PATH form
         of the single-stream read (back-compat; a slash-bearing id 404s behind a decoding proxy —
@@ -5004,6 +5039,8 @@ paths:
   /agentic/agent-instances:
     get:
       operationId: listAgentInstances
+      x-cli:
+        command: [agentic, instances, list]
       summary: >-
         List engine-native AgentInstances (issue #745/#747, umbrella #746) — the durable agent-task
         runs the worker harness minted against the `<zeebe:agentDefinition agentType="external"/>` marker,
@@ -5061,6 +5098,9 @@ paths:
   /agentic/agent-instances/{agentInstanceKey}/history:
     get:
       operationId: getAgentInstanceHistory
+      x-cli:
+        command: [agentic, instances, history]
+        positional: [agentInstanceKey]
       summary: >-
         Fetch one AgentInstance's durable conversation history (turns + per-turn metrics) from
         engine `searchAgentInstanceHistory` (issue #745/#747), in conversational order, with the owning
@@ -5120,6 +5160,9 @@ paths:
   /reconcile:
     post:
       operationId: reconcileEngineState
+      x-cli:
+        command: [admin, reconcile]
+        audience: operator
       summary: Reconcile engine-backed inflight projections after an engine reset/rewind (issue #622).
       description: >-
         The explicit operator command for the app-side reconciliation surface. Probes the engine's
@@ -5154,6 +5197,8 @@ paths:
   /version:
     get:
       operationId: getVersion
+      x-cli:
+        command: [version]
       summary: The running app's identity (app/urban versions, git sha/branch, runtime, pid, uptime).
       security:
         - hookSecret: []
@@ -5174,6 +5219,8 @@ paths:
   /agent:
     get:
       operationId: getAgentInstructions
+      x-cli:
+        command: [guide]
       summary: The agent operator guide (markdown) — how to submit PRs/epics, answer escalations, and
         debug this instance. Point a coding agent at this URL to drive and debug the workforce.
       security:
@@ -5195,6 +5242,8 @@ paths:
   /agent/skill:
     get:
       operationId: getAgentSkill
+      x-cli:
+        command: [guide, skill]
       summary: The portable operator skill (markdown SKILL.md) an agent runtime loads on demand — a
         thin bootstrap that resolves which instance to drive, then fetches the live operator guide
         (GET /agent). Surfaced from the Overview tab's "Agent Instructions" prompt.
@@ -5217,6 +5266,8 @@ paths:
   /agent/guide:
     get:
       operationId: getAgentGuide
+      x-cli:
+        command: [guide, full]
       summary: The operator guide, ADDRESSABLE — fetch one section instead of the whole ~43KB blob.
         Read-only, pure, idempotent. Call with NO `section` to get a compact table of contents (every
         stable section id + a one-line summary); call with `section` set to a TOC id (e.g.
@@ -5289,6 +5340,9 @@ paths:
   /actions/start/convergence-loop:
     post:
       operationId: startConvergenceLoop
+      x-cli:
+        command: [converge]
+        positional: [pr]
       summary: Register/refresh a PR aggregate (idempotent on prKey) and start its convergence loop.
       requestBody:
         required: true
@@ -5376,6 +5430,9 @@ paths:
   /actions/start/plan-fanout:
     post:
       operationId: startPlanFanout
+      x-cli:
+        command: [start, epic]
+        positional: [issue]
       summary: Register/refresh a plan aggregate (idempotent on planKey) and start the planning fan-out.
       requestBody:
         required: true
@@ -5451,6 +5508,8 @@ paths:
   /actions/start/epic-set:
     post:
       operationId: startEpicSet
+      x-cli:
+        command: [start, epic-set]
       summary: Admit a SET of epics plus their inter-epic dependency edges in one all-or-nothing call (issue #292).
       description: >-
         The set/batch admission door (slice S2). Validates the WHOLE submission before persisting
@@ -5581,6 +5640,9 @@ paths:
   /actions/start/sequence-issues:
     post:
       operationId: sequenceIssues
+      x-cli:
+        command: [sequence]
+        positional: [issues]
       summary: Generate + STAGE the canonical "implement issue → converge → merge" delivery graph from a high-level intent (never dispatches). (epic #605 / S4)
       description: >-
         An INTENT-SHAPED door (epic nano-workforce#605, S4). ADR 0005's delivery graph is a closed
@@ -5716,6 +5778,8 @@ paths:
   /actions/compile-delivery-graph:
     post:
       operationId: compileDeliveryGraph
+      x-cli:
+        command: [graph, compile]
       summary: Validate + compile a delivery graph and STAGE it for operator review (never dispatches). (ADR 0005 Decision 7 / #460)
       description: >-
         The agent-facing delivery-graph door — the END of the agent's surface (ADR 0005 Decision 7,
@@ -6192,6 +6256,8 @@ paths:
   /actions/delivery-graph/preview:
     post:
       operationId: previewDeliveryGraph
+      x-cli:
+        command: [graph, preview]
       summary: UI JSON-paste PURE PREVIEW — parse a pasted delivery-graph JSON string and compile it, without staging. (ADR 0005 Decision 7 / #460 / #516)
       description: >-
         The human-facing UI JSON-paste PURE PREVIEW ingress. The Delivery Graphs page's "Preview"
@@ -6246,6 +6312,9 @@ paths:
   /actions/delivery-graph/stage:
     post:
       operationId: stageDeliveryGraph
+      x-cli:
+        command: [graph, stage]
+        audience: operator
       # x-mcp exclusion (ADR 0067 §2 / nano-ide#488): operator-only cockpit door, kept OFF the
       # runtime-projected MCP tool surface. The staged-proposal lifecycle (stage -> dispatch ->
       # dismiss) is the human approval path (ADR 0005 Decision 7 — the operator's click IS the
@@ -6285,6 +6354,9 @@ paths:
   /actions/delivery-graph/dispatch:
     post:
       operationId: dispatchDeliveryGraph
+      x-cli:
+        command: [graph, dispatch]
+        audience: operator
       # x-mcp exclusion (ADR 0067 §2 / nano-ide#488): the canonical operator-only door. Dispatch
       # approval IS a human clicking Dispatch in the cockpit (ADR 0005 Decision 7) — there is no
       # replayable token and no agent-facing dispatch handle, so it is never a projected MCP tool.
@@ -6335,6 +6407,9 @@ paths:
   /actions/delivery-graph/dismiss:
     post:
       operationId: dismissProposal
+      x-cli:
+        command: [graph, dismiss]
+        audience: operator
       # x-mcp exclusion (ADR 0067 §2 / nano-ide#488): operator-only cockpit door — discarding a
       # staged proposal as noise is a human decision in the same approval class as dispatch, so it
       # stays off the projected MCP tool surface.
@@ -6373,6 +6448,8 @@ paths:
   /actions/delivery-graph/proposal-bpmn:
     post:
       operationId: previewProposalBpmn
+      x-cli:
+        command: [graph, proposal-bpmn]
       summary: Recompile a staged delivery-graph proposal's BPMN (with DI) for read-only preview — no deploy, no dispatch.
       description: >-
         Return the compiled BPMN 2.0 XML (including diagram interchange) of a staged delivery-graph
@@ -6413,6 +6490,8 @@ paths:
   /delivery-graph/staged:
     get:
       operationId: listStagedProposals
+      x-cli:
+        command: [graph, staged]
       summary: List the LIVE staged delivery-graph proposals awaiting dispatch (issue #511), newest first.
       description: >-
         The read behind the staged-proposals App-View AND the MCP `listStagedProposals` tool: every
@@ -6453,6 +6532,8 @@ paths:
   /delivery-graph/vocabulary:
     get:
       operationId: getDeliveryGraphVocabulary
+      x-cli:
+        command: [graph, vocabulary]
       summary: The closed delivery-graph vocabulary + wait-probe semantics as structured JSON (ADR 0005).
       description: >-
         Read tool (projected onto the MCP surface like `getAgentInstructions`). Returns the CLOSED
@@ -6709,6 +6790,8 @@ paths:
   /actions/delivery-graph/library/save:
     post:
       operationId: saveToLibrary
+      x-cli:
+        command: [graph, library, save]
       summary: Save a delivery graph to the reusable library — from a raw graph JSON or an existing proposal digest (issue #522, #519 S3).
       description: >-
         Persist a delivery graph to the reusable LIBRARY (issue #522, epic #519 S3) — the durable base
@@ -6764,6 +6847,8 @@ paths:
   /actions/delivery-graph/library/import:
     post:
       operationId: importToLibrary
+      x-cli:
+        command: [graph, library, import]
       summary: Import a delivery graph FROM A FILE into the reusable library (issue #524, #519 S5).
       description: >-
         Import a delivery graph into the LIBRARY from a filesystem file (issue #524, epic #519 S5). The
@@ -6823,6 +6908,8 @@ paths:
   /delivery-graph/library:
     get:
       operationId: listLibrary
+      x-cli:
+        command: [graph, library, list]
       summary: List the saved reusable delivery-graph library entries (issue #522, #519 S3), newest first.
       description: >-
         The read behind the Library App-View (S4/#523): every saved library entry, newest first, with
@@ -6849,6 +6936,9 @@ paths:
   /delivery-graph/library/{id}:
     get:
       operationId: getLibraryEntry
+      x-cli:
+        command: [graph, library, get]
+        positional: [id]
       summary: Fetch one saved library entry by id (issue #522, #519 S3).
       description: >-
         Return one saved library entry (issue #522) by its `id`, including its full `graph` JSON. An
@@ -6884,6 +6974,9 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
     delete:
       operationId: deleteLibraryEntry
+      x-cli:
+        command: [graph, library, delete]
+        positional: [id]
       summary: Delete one saved library entry by id (issue #522, #519 S3).
       description: >-
         Delete one saved library entry (issue #522) by its `id`. Idempotent — deleting an id that names
@@ -6915,6 +7008,9 @@ paths:
   /actions/start/feature:
     post:
       operationId: startFeature
+      x-cli:
+        command: [start, feature]
+        positional: [issue]
       summary: Register/refresh a feature-run aggregate (idempotent on featureKey) and start the single-issue run.
       requestBody:
         required: true
@@ -7259,6 +7355,9 @@ paths:
   /actions/message:
     post:
       operationId: postMessage
+      x-cli:
+        command: [admin, message]
+        audience: operator
       summary: "Publish a BPMN message (optionally correlated) into the engine. Every escalation kind
         (task, plan-review, trial-merge, PR review-loop, PR merge-loop) is a native user task answered
         via the Tasks inbox / POST /actions/complete-user-task, not this route."
@@ -7307,6 +7406,9 @@ paths:
   /actions/complete-user-task:
     post:
       operationId: completeUserTask
+      x-cli:
+        command: [escalations, answer]
+        positional: [userTaskKey]
       summary: "Complete an open native user-task escalation from the nwf Tasks inbox (issue #236).
         Submits the parked task's typed `.form` variables (e.g. a plan-review `{ directive, notes }`, a
         trial-merge `{ action, notes }`, a PR `{ answer }`, a feature escalation `{ resolution, answer }`,
@@ -7360,6 +7462,8 @@ paths:
   /actions/acknowledge-done:
     post:
       operationId: acknowledgeDone
+      x-cli:
+        command: [ack, done]
       summary: "Tick off a TERMINAL feature run (issue #254 §5). Stamps `acknowledged_at` on the run so
         the gateway recomputes its `list_bucket` to 'history', dropping the finished run out of the
         primary Active list into History. The Done twin of the blocked acknowledgement, but a terminal run is
@@ -7407,6 +7511,8 @@ paths:
   /actions/acknowledge-epic:
     post:
       operationId: acknowledgeEpic
+      x-cli:
+        command: [ack, epic]
       summary: "Dismiss a RESOLVED epic (issue #298). Stamps `acknowledged_at` on the `plans` row so
         the gateway recomputes its `list_bucket` to 'history' (and `ack_open` to 0), dropping the
         resolved epic out of the Active epic list into History. The epic twin of acknowledge-done, but
@@ -7458,6 +7564,8 @@ paths:
   /actions/acknowledge-pr:
     post:
       operationId: acknowledgePr
+      x-cli:
+        command: [ack, pr]
       summary: "Dismiss a TERMINAL pull request (issue #641). Stamps `acknowledged_at` on the
         `pull_requests` row so the `pull_requests_read_model` VIEW recomputes its `list_bucket` to
         'history' (and `ack_open` to 0), dropping the finished PR out of the Active convergence list
@@ -7507,6 +7615,8 @@ paths:
   /actions/acknowledge-delivery-graph:
     post:
       operationId: acknowledgeDeliveryGraph
+      x-cli:
+        command: [ack, graph]
       summary: "Dismiss a TERMINAL delivery-graph run (issue #641). Stamps `acknowledged_at` on the
         `delivery_graph_runs` row so the `delivery_graph_read_model` VIEW recomputes its `list_bucket`
         to 'history' (and `ack_open` to 0), dropping the finished run out of the Active delivery-graph
@@ -7556,6 +7666,8 @@ paths:
   /hooks/agent-complete:
     post:
       operationId: agentCompleteEscalation
+      x-cli:
+        exclude: true
       summary: "Complete an escalation user task as an agent assignee (ADR 0046). Reuses the same
         `.form` contract + engine resume path a human uses; records the agent identity for
         attribution. Optional shared-secret guard (x-hook-secret), enforced only when
@@ -7618,6 +7730,8 @@ paths:
   /hooks/revert-completion:
     post:
       operationId: revertEscalationCompletion
+      x-cli:
+        exclude: true
       summary: "Revert/override an agent escalation completion (ADR 0046 reversibility). A human marks
         a reversible agent completion reverted so the agent's answer is no longer authoritative.
         Optional shared-secret guard (x-hook-secret), enforced only when NANO_PR_WEBHOOK_SECRET is
@@ -7677,6 +7791,8 @@ paths:
   /hooks/blackboard:
     get:
       operationId: readBlackboard
+      x-cli:
+        exclude: true
       summary: Read a plan's blackboard, scoped by the capability token (Tier 1). Optional ?since=<id>
         returns only newer entries.
       parameters:
@@ -7717,6 +7833,8 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
     post:
       operationId: appendBlackboard
+      x-cli:
+        exclude: true
       summary: Append one entry to a plan's blackboard, scoped by the capability token (Tier 1).
         Idempotent on (plan, dedupe_key).
       parameters:
@@ -7791,6 +7909,8 @@ paths:
   /hooks/abandon:
     get:
       operationId: checkAbandon
+      x-cli:
+        exclude: true
       summary: "Cooperative abandon check (issue #76): tell a running agent whether its run was cancelled.
         Scoped by the per-PR capability token."
       parameters:
