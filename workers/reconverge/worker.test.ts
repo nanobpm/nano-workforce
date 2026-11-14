@@ -1,9 +1,102 @@
 // pr.reconverge (issue #939): findings on a head-current review hand the PR back to the ONE canonical
 // convergence entry (`submitPr`), declaring the merge-loop instance as the hand-off source.
 import { test } from "node:test";
-import { assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
-import { makeHandler, type FetchPrHead, type Submit } from "./worker.ts";
+import { makeHandler, type FetchPrHead, type ReadLiveness, type Submit } from "./worker.ts";
+
+// Issue #959: a reconverge hand-off can fire AFTER the PR landed out-of-band (a gate override /
+// Mergify / a manual merge). Re-entering `submitPr` on a landed PR would restart a redundant
+// convergence loop against a deleted head branch (the nano-bpm#1579 clone incident). The worker must
+// instead stamp the row `merged` (so the merge-aware derivation reports `merged`, not `abandoned`,
+// when the instance then ends), record the already-merged audit row, and end the loop cleanly — NOT
+// reconverge.
+test("an already-merged PR ends the loop cleanly instead of reconverging (#959)", async () => {
+  const merges: Record<string, unknown>[] = [];
+  const updates: Record<string, unknown>[] = [];
+  const app = {
+    data: {
+      table: (name: string) => ({
+        get: async () => (name === "pull_requests" ? { auto_resolve_escalations: 0 } : undefined),
+        find: async () => [],
+        findOne: async () => undefined,
+        insert: async (r: Record<string, unknown>) => (merges.push(r), 1),
+        update: async (_k: string, patch: Record<string, unknown>) => (updates.push(patch), undefined),
+      }),
+      source: () => ({ on: () => {}, off: () => {}, emit: () => {} }),
+    },
+    engine: { createInstance: async () => ({ processInstanceKey: "retro-1" }) },
+    log: noopLog(),
+  } as any;
+  let submitted = false;
+  const submit = (async () => {
+    submitted = true;
+    return { prKey: "acme/w#7", processKey: "999" };
+  }) as unknown as Submit;
+  const head = (async () => ({ headRef: "feat/x", headSha: "b".repeat(40), baseRef: "main", headRepo: "acme/w" })) as unknown as FetchPrHead;
+  const live: ReadLiveness = async () => "merged";
+  const out = await makeHandler(submit, head, live)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  // Ends cleanly — NO reconverge submit, no mergeStatus routing (the loop completes at MergeReconverged).
+  assertEquals(submitted, false);
+  assertEquals(out, {});
+  // The row is stamped landed (merged_at set) so the derivation reports `merged` on termination.
+  assert(updates.some((u) => u.status === "merged" && typeof u.merged_at === "string"), "row must be stamped merged");
+  // The audit trail carries the already-merged landing (alongside the reconverge-findings record).
+  const landing = merges.filter((m) => m.outcome === "merged");
+  assertEquals(landing.length, 1);
+  assertEquals(landing[0].method, "already-merged");
+});
+
+// The guard must NOT fire on a still-open PR: the normal reconverge hand-off proceeds.
+test("a still-open PR proceeds with the normal reconverge hand-off", async () => {
+  const app = {
+    data: {
+      table: (name: string) => ({
+        get: async () => (name === "pull_requests" ? { auto_resolve_escalations: 0 } : undefined),
+        insert: async () => 1,
+        update: async () => undefined,
+      }),
+    },
+    engine: {},
+    log: noopLog(),
+  } as any;
+  let submitted = false;
+  const submit = (async () => {
+    submitted = true;
+    return { prKey: "acme/w#7", processKey: "999" };
+  }) as unknown as Submit;
+  const head = (async () => ({ headRef: "feat/x", headSha: "b".repeat(40), baseRef: "main", headRepo: "acme/w" })) as unknown as FetchPrHead;
+  const live: ReadLiveness = async () => "open";
+  const out = await makeHandler(submit, head, live)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  assertEquals(submitted, true);
+  assertEquals(out, {});
+});
+
+// An unreadable liveness read (transport hiccup) must not block a genuine reconverge — fail open.
+test("an unreadable liveness read falls through to the normal hand-off (fail-open)", async () => {
+  const app = {
+    data: {
+      table: (name: string) => ({
+        get: async () => (name === "pull_requests" ? { auto_resolve_escalations: 0 } : undefined),
+        insert: async () => 1,
+        update: async () => undefined,
+      }),
+    },
+    engine: {},
+    log: noopLog(),
+  } as any;
+  let submitted = false;
+  const submit = (async () => {
+    submitted = true;
+    return { prKey: "acme/w#7", processKey: "999" };
+  }) as unknown as Submit;
+  const head = (async () => ({ headRef: "feat/x", headSha: "b".repeat(40), baseRef: "main", headRepo: "acme/w" })) as unknown as FetchPrHead;
+  const live: ReadLiveness = async () => {
+    throw new Error("github unreachable");
+  };
+  await makeHandler(submit, head, live)({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  assertEquals(submitted, true);
+});
 
 test("re-submits through submitPr with auto-merge on and handoffFrom = this merge-loop instance", async () => {
   const merges: Record<string, unknown>[] = [];
