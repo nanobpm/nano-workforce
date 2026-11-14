@@ -1,3 +1,9 @@
+## [0.211.0](https://github.com/nanobpm/nano-workforce/compare/v0.210.2...v0.211.0) (2026-11-14)
+
+### Features
+
+* **openapi:** add x-cli command projection to every operation ([#963](https://github.com/nanobpm/nano-workforce/issues/963)) ([4ba5c8c](https://github.com/nanobpm/nano-workforce/commit/4ba5c8c61e6d5bfceaff3883c1719795797eb9a4)), closes [#961](https://github.com/nanobpm/nano-workforce/issues/961) [#961](https://github.com/nanobpm/nano-workforce/issues/961)
+
 ## [0.210.2](https://github.com/nanobpm/nano-workforce/compare/v0.210.1...v0.210.2) (2026-11-14)
 
 ### Bug Fixes
