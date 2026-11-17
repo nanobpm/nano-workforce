@@ -1,3 +1,9 @@
+## [0.211.2](https://github.com/nanobpm/nano-workforce/compare/v0.211.1...v0.211.2) (2026-11-17)
+
+### Bug Fixes
+
+* **feature:** reconcile a self-reported blocked run with the remote before parking it for a human ([#968](https://github.com/nanobpm/nano-workforce/issues/968)) ([e813785](https://github.com/nanobpm/nano-workforce/commit/e81378571d4e07990fea6bcc2431bc56499e4d7a)), closes [#967](https://github.com/nanobpm/nano-workforce/issues/967) [#967](https://github.com/nanobpm/nano-workforce/issues/967) [#967](https://github.com/nanobpm/nano-workforce/issues/967) [#951](https://github.com/nanobpm/nano-workforce/issues/951)
+
 ## [0.211.1](https://github.com/nanobpm/nano-workforce/compare/v0.211.0...v0.211.1) (2026-11-14)
 
 ### Bug Fixes
