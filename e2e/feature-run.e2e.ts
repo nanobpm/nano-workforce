@@ -452,6 +452,181 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
     }
   });
 
+  test("blocked reconcile: a blocked report whose branch IS pushed + ahead opens the PR itself and converges (issue #967)", async () => {
+    // The #967 defect, end to end: the agent reports `blocked` ("complete and committed LOCALLY …
+    // cut off before I could push") but the branch IS on the remote (at the agent's own reported
+    // headSha) and ahead of base — only the PR step is missing. The run must reconcile with the
+    // remote, open the PR from the branch, and continue to converge — NEVER park in the human inbox.
+    //
+    // PR #968 review (round 2): driven THROUGH auto-merge — the run carries `autoMerge: true`, so
+    // the recovered DRAFT PR is enrolled with merge intent. That intent is what hands the PR to the
+    // merge stage (`finalize → startMerge → pollMerges`), where the new promote-after-validation
+    // path (`draftPromotionReady` + `markPullRequestReady`) un-drafts the now-converged, green draft
+    // so it lands without a human "mark it ready" escalation. This test asserts the enrolment carries
+    // the merge intent (the handoff that reaches that path); the promotion itself is unit-pinned in
+    // app/mergeProtocol.test.ts (draftPromotionReady) and app/github.test.ts (markPullRequestReady),
+    // because this hermetic suite seals GitHub to the token transport, which cannot enumerate checks.
+    githubState.branches.set("feat/issue-7", "f".repeat(40));
+    githubState.comparisons.set("epic/e2e...feat/issue-7", { status: "ahead", ahead_by: 2, behind_by: 0 });
+    try {
+      await withApp(
+        // The fake agent result says "blocked" while the remote branch exists — exactly the
+        // regression case the issue demands. The agent's self-reported headSha rides the reserved
+        // `io.nanobpm.agentResult` envelope (context only; the remote is the authority).
+        {
+          "senior:feature": () => ({
+            status: "blocked",
+            summary: "complete and committed LOCALLY — cut off before I could push",
+            "io.nanobpm.agentResult": { headSha: "f".repeat(40), exitCode: 0 },
+          }),
+        },
+        { baseBranch: "epic/e2e", converge: true, autoMerge: true },
+        async ({ app, featureKey }) => {
+          const flows = takenFlows(app);
+          assert.ok(
+            !flows.includes("gw-blocked->feature-blocked"),
+            `the run did NOT park on the operator inbox (flows: ${flows.join(", ")})`,
+          );
+          assert.ok(
+            flows.includes("gw-converge->converge"),
+            `the reconciled PR was handed to the convergence loop (flows: ${flows.join(", ")})`,
+          );
+
+          // The host opened exactly one PR THIS run (the shared stub state accumulates across the
+          // file's tests — snapshot the delta), from the agent's branch onto the run's base, as a
+          // DRAFT (the agent never vouched for it), linking the issue with a non-blocking ref.
+          const mine = githubState.createdPrs.filter((p) => p.head === "feat/issue-7");
+          assert.equal(mine.length, 1, "exactly one PR was opened by the reconcile");
+          const created = mine[0];
+          assert.equal(created.head, "feat/issue-7", "the PR was opened FROM the agent's pushed branch");
+          assert.equal(created.base, "epic/e2e", "the PR targets the run's base branch");
+          assert.equal(created.draft, true, "a reconcile-opened PR is a draft");
+          assert.ok(created.body.includes("Refs owner/repo#7"), "the PR links the issue non-blockingly");
+
+          const run = await featureRow(app, featureKey);
+          assert.equal(run.status, "converging", "the run settled at converging, never blocked");
+          assert.equal(run.pr_key, `owner/repo#${created.number}`, "the opened PR key is recorded on the run");
+          const prs = await app.db.table<PrRow>("pull_requests", "pr_key").find({ pr_key: run.pr_key! });
+          assert.equal(prs.length, 1, "the reconcile-opened PR was enrolled into the convergence loop");
+
+          // THROUGH AUTO-MERGE (PR #968 review): the recovered DRAFT PR's convergence loop is seeded
+          // with the merge intent (`autoMerge: true`), so on convergence it hands off to the merge
+          // stage — where the promote-after-validation path un-drafts the converged, green draft and
+          // lands it without a human. Read the still-ACTIVE loop's variables (a completed instance
+          // folds them away) to prove the intent survived the reconcile → submitPr handoff.
+          const instances = app.snapshot().instances;
+          assert.ok(Array.isArray(instances), "snapshot.instances is an array of instance rows");
+          const loop = instances.find((i) => i?.key === prs[0].process_key);
+          assert.ok(loop, "the recovered PR's convergence loop is live");
+          assert.equal(
+            loop?.variables?.autoMerge,
+            true,
+            "the recovered draft PR was enrolled with autoMerge intent (reaches the merge stage's draft promotion)",
+          );
+
+          // No human task was ever parked.
+          const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: run.process_key! });
+          assert.ok(
+            !tasks.some((t) => t.elementId === "feature-blocked"),
+            "no feature-blocked operator task was created",
+          );
+        },
+      );
+    } finally {
+      githubState.branches.delete("feat/issue-7");
+      githubState.comparisons.delete("epic/e2e...feat/issue-7");
+    }
+  });
+
+  test("blocked reconcile: a blocked report whose branch already has an OPEN PR adopts it (issue #967)", async () => {
+    // The agent pushed the branch AND opened the PR, then misreported `blocked`. The reconcile
+    // adopts the existing PR (never opens a duplicate) and converges.
+    githubState.branches.set("feat/issue-7", "f".repeat(40));
+    githubState.openPrs.set("feat/issue-7", { number: 967, base: "epic/e2e" });
+    const createsBefore = githubState.createdPrs.length;
+    try {
+      await withApp(
+        { "senior:feature": () => ({ status: "blocked", summary: "stuck" }) },
+        { baseBranch: "epic/e2e", converge: true },
+        async ({ app, featureKey }) => {
+          const flows = takenFlows(app);
+          assert.ok(!flows.includes("gw-blocked->feature-blocked"), "the run did NOT park on the operator inbox");
+          assert.ok(flows.includes("gw-converge->converge"), "the adopted PR was handed to the convergence loop");
+          assert.equal(
+            githubState.createdPrs.length,
+            createsBefore,
+            "no duplicate PR was opened — the existing one was adopted",
+          );
+
+          const run = await featureRow(app, featureKey);
+          assert.equal(run.status, "converging");
+          assert.equal(run.pr_key, "owner/repo#967", "the adopted PR key is recorded on the run");
+
+          // Issue #907: the adopted PR was announced on the claimed issue exactly once.
+          const comments = (githubState.issueComments.get(7) ?? []).filter((c) => c.body.includes("nwf:pr-linked:#967"));
+          assert.equal(comments.length, 1, "exactly one comment was posted for the adopted PR");
+        },
+      );
+    } finally {
+      githubState.branches.delete("feat/issue-7");
+      githubState.openPrs.delete("feat/issue-7");
+    }
+  });
+
+  test("blocked reconcile: a blocked report with NOTHING on the remote still parks for a human (issue #967)", async () => {
+    // Escalate ONLY when there is no commit to deliver: no branch on the remote → the run parks at
+    // `feature-blocked` exactly as before the fix, and no PR is opened.
+    const createsBefore = githubState.createdPrs.length;
+    await withApp(
+      { "senior:feature": () => ({ status: "blocked", summary: "could not proceed" }) },
+      { baseBranch: "epic/e2e", converge: true },
+      async ({ app, featureKey, processKey }) => {
+        const flows = takenFlows(app);
+        assert.ok(
+          flows.includes("gw-blocked->feature-blocked"),
+          `a genuinely undelivered run still routes to the operators (flows: ${flows.join(", ")})`,
+        );
+        assert.equal(githubState.createdPrs.length, createsBefore, "no PR was opened for an empty remote");
+
+        const tasks = await app.engine.searchUserTasks({ processInstanceKey: processKey });
+        const task = tasks.find((t) => t.elementId === "feature-blocked") as InboxTask | undefined;
+        assert.ok(task?.userTaskKey, "the run parked a completable feature-blocked task");
+        const parked = await featureRow(app, featureKey);
+        assert.equal(parked.status, "awaiting_operator", "the run is non-terminal awaiting_operator while parked");
+        assert.equal(parked.pr_key, null);
+      },
+    );
+  });
+
+  test("blocked reconcile: a pushed branch with NOTHING over base still parks for a human (issue #967)", async () => {
+    // The branch exists on the remote but carries no commit over base (identical) — there is no
+    // commit to deliver, so the run escalates rather than opening an empty PR.
+    githubState.branches.set("feat/issue-7", "0".repeat(40));
+    githubState.comparisons.set("epic/e2e...feat/issue-7", { status: "identical", ahead_by: 0, behind_by: 0 });
+    const createsBefore = githubState.createdPrs.length;
+    try {
+      await withApp(
+        { "senior:feature": () => ({ status: "blocked", summary: "branched but never committed" }) },
+        { baseBranch: "epic/e2e", converge: true },
+        async ({ app, featureKey, processKey }) => {
+          const flows = takenFlows(app);
+          assert.ok(flows.includes("gw-blocked->feature-blocked"), "a branch with nothing over base still escalates");
+          assert.equal(githubState.createdPrs.length, createsBefore, "an empty PR was never opened");
+          const tasks = await app.engine.searchUserTasks({ processInstanceKey: processKey });
+          assert.ok(
+            tasks.some((t) => t.elementId === "feature-blocked"),
+            "the run parked on the operator inbox",
+          );
+          const parked = await featureRow(app, featureKey);
+          assert.equal(parked.status, "awaiting_operator");
+        },
+      );
+    } finally {
+      githubState.branches.delete("feat/issue-7");
+      githubState.comparisons.delete("epic/e2e...feat/issue-7");
+    }
+  });
+
   test("escalate + abandon: abandoning routes to record-feature (default flow)", async () => {
     await withApp(
       {

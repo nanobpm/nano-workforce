@@ -20,6 +20,14 @@ export interface AdmitGithubState {
    *  head via `listPrsForHead`. Empty by default → the pulls listing returns `[]` (no adoptable PR),
    *  so suites that don't opt in keep exactly today's escalate behaviour. */
   openPrs: Map<string, { number: number; base?: string }>;
+  /** PRs CREATED via `POST /repos/{repo}/pulls` (issue #967: the feature-run blocked reconcile opens
+   *  a draft PR from the pushed branch). Recorded for assertions AND registered into `openPrs` so a
+   *  re-run of the reconcile adopts the PR an earlier pass opened (idempotent, never a duplicate). */
+  createdPrs: { number: number; head: string; base: string; title: string; body: string; draft: boolean }[];
+  /** Compare verdicts keyed by `<base>...<head>` (issue #967: the blocked reconcile's ahead-of-base
+   *  check). A missing key 404s → the reconcile treats ahead-ness as UNKNOWN and escalates (never
+   *  opens a maybe-empty PR), so a suite that wants delivery must seed it. */
+  comparisons: Map<string, { status: string; ahead_by: number; behind_by: number }>;
   /** Issue comments keyed by issue number (issue #907): the record-feature "PR opened" link lists
    *  existing comments (marker dedupe) and POSTs new ones here. Seeded empty. */
   issueComments: Map<number, { body: string }[]>;
@@ -38,6 +46,8 @@ export function admitGithubState(
     creates: [],
     resets: [],
     openPrs: new Map(),
+    createdPrs: [],
+    comparisons: new Map(),
     issueComments: new Map(),
   };
 }
@@ -98,6 +108,38 @@ function admitFetch(state: AdmitGithubState) {
           },
         ]),
       );
+    }
+    // POST /repos/{repo}/pulls → create a PR (issue #967: the feature-run blocked reconcile opens a
+    // DRAFT PR from the pushed branch). Recorded + registered into `openPrs` so a repeated reconcile
+    // adopts it instead of duplicating. 422 when the head branch is unknown (GitHub's own refusal).
+    if (method === "POST" && path === `/repos/${state.repo}/pulls`) {
+      // biome-ignore lint/plugin: runtime contract boundary for parsed JSON
+      const body = JSON.parse(String(init?.body ?? "{}")) as { title?: string; head?: string; base?: string; body?: string; draft?: boolean };
+      const head = String(body.head ?? "");
+      if (!state.branches.has(head)) {
+        return Promise.resolve(json({ message: "Validation Failed" }, 422));
+      }
+      const number = 9000 + state.createdPrs.length + 1;
+      const created = {
+        number,
+        head,
+        base: String(body.base ?? state.defaultBranch),
+        title: String(body.title ?? ""),
+        body: String(body.body ?? ""),
+        draft: body.draft === true,
+      };
+      state.createdPrs.push(created);
+      state.openPrs.set(head, { number, base: created.base });
+      return Promise.resolve(json({ number, html_url: `https://github.com/${state.repo}/pull/${number}` }, 201));
+    }
+    // GET /repos/{repo}/compare/{base}...{head} → the ancestry verdict (issue #967: the blocked
+    // reconcile's ahead-of-base check, `compareCommits`). A missing key 404s (unknown → escalate).
+    const compareMatch = path.match(/^\/repos\/([^/]+\/[^/]+)\/compare\/(.+)\.\.\.(.+)$/);
+    if (method === "GET" && compareMatch) {
+      const key = `${decodeURIComponent(compareMatch[2])}...${decodeURIComponent(compareMatch[3])}`;
+      const hit = state.comparisons.get(key);
+      if (!hit) return Promise.resolve(new Response("Not Found", { status: 404 }));
+      return Promise.resolve(json(hit));
     }
     // GET /repos/{repo}/pulls/{n} → a PR's meta (fetchPrMeta — the "PR opened" link's best-effort
     // title read, issue #907). Served from the openPrs entry when one names this number.

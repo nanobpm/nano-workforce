@@ -2294,6 +2294,69 @@ export async function ensureFreshHeadRun(
   }
 }
 
+/** Mark a DRAFT pull request ready for review (un-draft it). Dual-transport: gh shells out to
+ * `gh pr ready`; headless token mode runs the GraphQL `markPullRequestReadyForReview` mutation
+ * (resolving the PR's node id first). Used by the merge poller's promote-after-validation path
+ * (issue #967, PR #968 review): a recovered PR is opened as a draft, but once it has converged and
+ * its checks are green it is a validated draft that must be promoted so the merge can land without
+ * a human. Returns whether the PR was actually marked ready — `false` on any transport failure,
+ * missing token, or a GraphQL error, so the caller falls through to the actionable escalation
+ * instead of looping on a promotion that can never succeed. Never throws. */
+export async function markPullRequestReady(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<boolean> {
+  const n = String(number);
+  if (await useGh()) {
+    try {
+      await runGh(["pr", "ready", n, "--repo", repo]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  if (!token) return false;
+  const [owner, name] = repo.split("/");
+  const headers = {
+    authorization: `Bearer ${token}`,
+    accept: "application/vnd.github+json",
+    "content-type": "application/json",
+  };
+  try {
+    // Resolve the PR's node id (the mutation keys on it, not the number).
+    const idQuery = "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){id}}}";
+    const idRes = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ query: idQuery, variables: { o: owner, r: name, n: Number(number) } }),
+    });
+    if (!idRes.ok) return false;
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const idPayload = (await idRes.json()) as { data?: { repository?: { pullRequest?: { id?: string } | null } | null } | null };
+    const nodeId = idPayload.data?.repository?.pullRequest?.id;
+    if (!nodeId) return false;
+    const mutation =
+      "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}";
+    const mRes = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ query: mutation, variables: { id: nodeId } }),
+    });
+    if (!mRes.ok) return false;
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const mPayload = (await mRes.json()) as {
+      data?: { markPullRequestReadyForReview?: { pullRequest?: { isDraft?: boolean } | null } | null } | null;
+      errors?: unknown;
+    };
+    const result = mPayload.data?.markPullRequestReadyForReview?.pullRequest;
+    // Confirmed un-drafted (isDraft === false). A GraphQL error or an absent payload is not a success.
+    return result?.isDraft === false;
+  } catch {
+    return false;
+  }
+}
+
 /** Post a comment on the PR (e.g. `@mergifyio queue`) to enqueue it in the repo's merge queue.
  * gh transport shells out; token mode posts an issue comment via REST. Returns whether the
  * comment was accepted. */
@@ -2651,7 +2714,10 @@ export interface CreatedPr {
 
 /** Open a pull request from `headBranch` into `baseBranch` on `repo`. Returns the new PR's
  * number + URL, or `null` when no transport is usable (idle — the caller retries next pass). Throws
- * on a genuine create failure so the caller logs and retries rather than silently losing the PR. */
+ * on a genuine create failure so the caller logs and retries rather than silently losing the PR.
+ * `opts.draft` (default `false`) opens the PR as a DRAFT — the feature-run blocked reconcile (issue
+ * #967) uses it because a PR opened from a self-reported-`blocked` branch was never vouched
+ * review-ready by the agent. */
 export async function createPullRequest(
   repo: string,
   headBranch: string,
@@ -2659,9 +2725,11 @@ export async function createPullRequest(
   title: string,
   body: string,
   token: string,
+  opts?: { draft?: boolean },
 ): Promise<CreatedPr | null> {
+  const draft = opts?.draft === true;
   if (await useGh()) {
-    const out = await runGh([
+    const args = [
       "pr",
       "create",
       "--repo",
@@ -2674,7 +2742,9 @@ export async function createPullRequest(
       title,
       "--body",
       body,
-    ]);
+    ];
+    if (draft) args.push("--draft");
+    const out = await runGh(args);
     // `gh pr create` prints the new PR's URL on stdout; parse its number from the canonical path.
     const url = out.trim().split(/\s+/).pop() ?? "";
     const pr = parsePr(url); // the ONE PR-shape grammar (#856)
@@ -2689,7 +2759,7 @@ export async function createPullRequest(
       accept: "application/vnd.github+json",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ title, head: headBranch, base: baseBranch, body }),
+    body: JSON.stringify({ title, head: headBranch, base: baseBranch, body, ...(draft ? { draft: true } : {}) }),
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}: ${(await r.text()).slice(0, 300)}`.trim());
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
