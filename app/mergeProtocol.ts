@@ -15,7 +15,7 @@
 // A repo that publishes neither keeps today's behaviour (DEFAULT_MERGE_PROTOCOL).
 
 import { classifyEscalation, type EscalationDisposition } from "./escalationTaxonomy.ts";
-import { fetchRepoFile } from "./github.ts";
+import { fetchRepoFile, isMergifyQueueCheck } from "./github.ts";
 
 /** How to give branch protection a fresh head `pull_request` run before landing. `none` = the
  * repo re-runs CI on every push, so no synthetic run is needed. `ready` = mark a draft ready
@@ -301,13 +301,22 @@ export interface DraftPromotionState {
  *
  * The predicate is deliberately conservative — it returns `true` only when validation is KNOWN to
  * pass, mirroring the gates `classifyMergeability` would apply to a non-draft:
- *   • mergeability is KNOWN and non-conflicting — only a settled `CLEAN` / `HAS_HOOKS` / `UNSTABLE`
- *     / `BEHIND` promotes. `UNKNOWN`, `null`, and `""` mean GitHub is still computing whether the PR
+ *   • mergeability is KNOWN and non-conflicting — a settled `CLEAN` / `HAS_HOOKS` / `UNSTABLE` /
+ *     `BEHIND` promotes. `UNKNOWN`, `null`, and `""` mean GitHub is still computing whether the PR
  *     conflicts (`fetchPrState` reports `UNKNOWN` for an unavailable merge state, and
  *     `classifyMergeability` maps all three to `"waiting"`, never a validated verdict) — promoting
  *     there would strip the draft safeguard before the conflict state is known, so they are NOT
- *     validated. A `DIRTY` conflict routes to the rebase arm; a `BLOCKED` merge state means a
- *     required check / review / branch-protection gate is unmet, so it is not validated either.
+ *     validated. A `DIRTY` conflict routes to the rebase arm. Two draft-specific states are also
+ *     promotable (PR #968 review, round 4):
+ *       - `DRAFT` — GitHub's merge state for a draft PR carries no conflict signal of its own (a
+ *         draft is un-mergeable *because* it is a draft); the conflict question is answered by the
+ *         `DIRTY`/`UNKNOWN` rejections, so a green, thread-free `DRAFT` is the validated recovery
+ *         case, not a wedge.
+ *       - `BLOCKED` — only when it is the validated mergify-queue case (`mergifyQueueAwaitingEnqueue`,
+ *         mirroring `awaitingMergifyEnqueue`/`classifyMergeability` issue #951): a green, thread-free
+ *         PR whose only non-success check is Mergify's NEUTRAL queue check is awaiting the declared
+ *         `@mergifyio queue` land step, not a human review. Every other BLOCKED (a red/unmet required
+ *         gate, a required human review) is NOT validated.
  *   • every declared-required check satisfied (`requiredChecksVerdict` semantics: none red, none
  *     pending/absent) AND no failing non-required check (`failingChecks === 0`) — red CI routes to
  *     fix-ci;
@@ -323,16 +332,33 @@ export function draftPromotionReady(
   protocol?: MergeProtocol,
 ): boolean {
   // Mergeability must be KNOWN and non-conflicting (PR #968 review): reject `UNKNOWN`/`null`/`""`
-  // (GitHub still computing — could be a conflict) and `DIRTY`/`BLOCKED` (a known conflict / unmet
-  // gate). Only the statuses `classifyMergeability` maps to a landable `"ready"` for a non-draft
-  // may promote.
+  // (GitHub still computing — could be a conflict) and `DIRTY` (a known conflict). The promotable
+  // statuses are those `classifyMergeability` maps to a landable `"ready"` for a non-draft — plus
+  // two draft-specific cases the round-3 allow-list wrongly rejected (PR #968 review, round 4):
   switch (state.mergeStateStatus) {
     case "CLEAN":
     case "HAS_HOOKS":
     case "UNSTABLE": // only non-required checks failing — still mergeable (no DECLARED-required red)
     case "BEHIND": // out of date; a queue rebases, a direct merge is still allowed
+    // `DRAFT` is GitHub's merge state for a draft PR (`fetchPrState` preserves it). It carries NO
+    // conflict signal of its own — a draft is simply not-yet-mergeable *because* it is a draft — so
+    // the conflict/mergeability question is answered by the OTHER arms: `DIRTY` (a real conflict) is
+    // rejected below, `UNKNOWN`/`null`/`""` (still computing) are rejected below. A draft that reads
+    // `DRAFT` with green checks and zero unresolved threads is exactly the validated recovery case
+    // (issue #967) — reject it and the PR can never promote, wedging on a human (PR #968 review).
+    case "DRAFT":
       break;
-    default: // UNKNOWN / null / "" / DIRTY / BLOCKED → not validated
+    case "BLOCKED":
+      // A BLOCKED merge state means a required gate is unmet — EXCEPT the one validated case
+      // `classifyMergeability` already maps to `ready` (issue #951): on a `mergify-queue` repo a
+      // green, thread-free PR whose ONLY non-success check is Mergify's own queue check at NEUTRAL
+      // ("not queued yet") is waiting for the declared land step (`@mergifyio queue`), not a human
+      // review. Promote it so the queue land arm can run; every OTHER BLOCKED (a red/unmet required
+      // gate, a required human review) stays rejected. The check/thread gates below still run, so
+      // this only admits a BLOCKED that is genuinely the mergify-queue-awaiting-enqueue shape.
+      if (!mergifyQueueAwaitingEnqueue(state, protocol)) return false;
+      break;
+    default: // UNKNOWN / null / "" / DIRTY → not validated (conflict not ruled out / known conflict)
       return false;
   }
   if (state.failingChecks !== 0) return false; // red check (or token-mode unknown, -1) → fix-ci / escalate
@@ -355,4 +381,34 @@ export function draftPromotionReady(
     }
   }
   return true;
+}
+
+/** The `DraftPromotionState` mirror of `awaitingMergifyEnqueue` (github.ts, issue #951): is this
+ * BLOCKED draft merely waiting for the repo's declared `mergify-queue` land step? True only when the
+ * protocol lands via `mergify-queue`, checks are enumerable and settled (none failing, none pending),
+ * and every non-SUCCESS/SKIPPED check is a Mergify queue check at NEUTRAL — with at least one such
+ * check present. Anything else keeps the conservative reject. Kept structurally identical to the
+ * github.ts original (same per-gate "every retained gate must qualify" semantics, issue #955) so the
+ * two never drift; it lives here because `draftPromotionReady` reads the structural
+ * `DraftPromotionState`, not `PrState`, and this module must stay import-cycle-free of the
+ * `PrState` type. */
+const MERGIFY_SETTLED_OK = new Set(["SUCCESS", "SKIPPED"]);
+function mergifyQueueAwaitingEnqueue(state: DraftPromotionState, protocol?: MergeProtocol): boolean {
+  if (protocol?.land.method !== "mergify-queue") return false;
+  if (state.failingChecks !== 0 || state.pendingCheckNames.length > 0) return false;
+  let sawMergifyNeutral = false;
+  for (const [name, gates] of Object.entries(state.checkGateConclusions)) {
+    let nameHasMergifyNeutral = false;
+    for (const conclusion of gates) {
+      const c = conclusion.toUpperCase();
+      if (MERGIFY_SETTLED_OK.has(c)) continue;
+      if (c === "NEUTRAL" && isMergifyQueueCheck(name)) {
+        nameHasMergifyNeutral = true;
+        continue;
+      }
+      return false;
+    }
+    if (nameHasMergifyNeutral) sawMergifyNeutral = true;
+  }
+  return sawMergifyNeutral;
 }
