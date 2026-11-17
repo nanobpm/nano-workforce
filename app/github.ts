@@ -2651,7 +2651,10 @@ export interface CreatedPr {
 
 /** Open a pull request from `headBranch` into `baseBranch` on `repo`. Returns the new PR's
  * number + URL, or `null` when no transport is usable (idle — the caller retries next pass). Throws
- * on a genuine create failure so the caller logs and retries rather than silently losing the PR. */
+ * on a genuine create failure so the caller logs and retries rather than silently losing the PR.
+ * `opts.draft` (default `false`) opens the PR as a DRAFT — the feature-run blocked reconcile (issue
+ * #967) uses it because a PR opened from a self-reported-`blocked` branch was never vouched
+ * review-ready by the agent. */
 export async function createPullRequest(
   repo: string,
   headBranch: string,
@@ -2659,9 +2662,11 @@ export async function createPullRequest(
   title: string,
   body: string,
   token: string,
+  opts?: { draft?: boolean },
 ): Promise<CreatedPr | null> {
+  const draft = opts?.draft === true;
   if (await useGh()) {
-    const out = await runGh([
+    const args = [
       "pr",
       "create",
       "--repo",
@@ -2674,7 +2679,9 @@ export async function createPullRequest(
       title,
       "--body",
       body,
-    ]);
+    ];
+    if (draft) args.push("--draft");
+    const out = await runGh(args);
     // `gh pr create` prints the new PR's URL on stdout; parse its number from the canonical path.
     const url = out.trim().split(/\s+/).pop() ?? "";
     const pr = parsePr(url); // the ONE PR-shape grammar (#856)
@@ -2689,7 +2696,7 @@ export async function createPullRequest(
       accept: "application/vnd.github+json",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ title, head: headBranch, base: baseBranch, body }),
+    body: JSON.stringify({ title, head: headBranch, base: baseBranch, body, ...(draft ? { draft: true } : {}) }),
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}: ${(await r.text()).slice(0, 300)}`.trim());
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape

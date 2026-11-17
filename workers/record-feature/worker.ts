@@ -20,8 +20,19 @@
 // delivered. Epic slices never set `claimIssue`, so they never comment on the parent epic. The
 // comment is best-effort — a failure never fails the run; the owed link is persisted and the
 // poller's retry pass (app/service.ts → retryOutstandingIssuePrLinks) re-attempts it.
+//
+// Issue #967: before a self-reported `blocked` is persisted (which routes the run to the
+// `feature-blocked` operator inbox via `gw-blocked`), the worker RECONCILES with the remote
+// (app/featureReconcile.ts): the agent's `feat/<task.id>` branch may be pushed and ahead of base
+// with only the PR step missing — a machine-observable, recoverable outcome the process can check
+// for itself (`agentResult` carries `branch`/`headSha`, but the remote is the authority). A
+// delivered branch resolves to `opened` + a PR key (adopting an existing open PR, or opening a
+// draft one from the branch) and continues to the converge path; only a run with NO commit to
+// deliver parks for a human.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { type FeatureRunStatus, featureRuns } from "../../app/feature.ts";
+import { reconcileBlockedFeature, shouldReconcileBlockedFeature } from "../../app/featureReconcile.ts";
+import { compareCommits, createPullRequest, fetchBranchHead, listPrsForHead } from "../../app/github.ts";
 import { requestIssuePrLink } from "../../app/issuePrLink.ts";
 import { parsePr } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
@@ -42,12 +53,59 @@ const isAgentStatus = (s: string): s is AgentStatus => s === "opened" || s === "
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
   const featureKey = job.variables.featureKey;
-  const rawStatus = str(job.variables.status);
+  let rawStatus = str(job.variables.status);
+  let deliveredPr = str(job.variables.pr);
+  let reconciled = false;
+  // Issue #967: a self-reported `blocked` is reconciled against the remote BEFORE it is persisted
+  // (and routed to `feature-blocked`). The branch/headSha the agent reported ride the reserved
+  // `io.nanobpm.agentResult` envelope; the remote lookup is the authority. Only a `blocked` report
+  // triggers the reconcile — every other status routes untouched (no GitHub I/O).
+  if (shouldReconcileBlockedFeature(rawStatus)) {
+    // Framework-injected (`io.nanobpm.agentResult`) — read through the Record-typed seam, like the
+    // other agent-result consumers (workers/persist-escalation et al.); it is not an envelope field.
+    // biome-ignore lint/plugin: runtime/framework contract boundary for the reserved agent-result envelope
+    const vars = job.variables as Record<string, unknown>;
+    const agentResult = vars["io.nanobpm.agentResult"];
+    const headSha =
+      agentResult !== null && typeof agentResult === "object" && "headSha" in agentResult ? agentResult.headSha : undefined;
+    const taskId = job.variables.task?.id;
+    const res = await reconcileBlockedFeature(
+      {
+        status: rawStatus,
+        subjectKey: featureKey,
+        taskId,
+        baseBranch: job.variables.baseBranch,
+        headSha,
+      },
+      {
+        branch: fetchBranchHead,
+        compare: compareCommits,
+        listPrs: listPrsForHead,
+        createPr: (repo, head, base, title, body, draft, token) =>
+          createPullRequest(repo, head, base, title, body, token, { draft }),
+      },
+      process.env.GITHUB_TOKEN ?? "",
+    );
+    if (res.featureStatus !== "blocked") {
+      // The remote contradicted the self-report: the branch WAS delivered. Route exactly as an
+      // agent-reported `opened` from here on (converge hand-off, issue PR link, terminal row).
+      rawStatus = res.featureStatus;
+      deliveredPr = res.prKey ?? deliveredPr;
+      reconciled = true;
+    }
+    app.log.info("record-feature: blocked reconcile", {
+      featureKey,
+      reconciled,
+      featureStatus: res.featureStatus,
+      prKey: res.prKey,
+    });
+  }
   const status: AgentStatus = rawStatus && isAgentStatus(rawStatus) ? rawStatus : "blocked";
   const summary = str(job.variables.summary);
-  const prRef = str(job.variables.pr);
-  // Only trust a PR ref when the agent reports it actually opened one.
-  const parsed = status === "opened" && prRef ? parsePr(prRef) : null;
+  // Only trust a PR ref when the agent reports it actually opened one — OR when the blocked
+  // reconcile itself delivered the PR (issue #967: the agent reported `blocked`, so its `pr` field
+  // was never trusted, but the reconcile's adopted/opened PR is the delivery).
+  const parsed = status === "opened" && deliveredPr ? parsePr(deliveredPr) : null;
   // A keyless "opened" cannot be handed off, but a PR was still raised — keep the status `opened`
   // (the run is complete), just with no `pr_key` to converge.
   const prKey = parsed?.prKey ?? null;
