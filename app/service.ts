@@ -2670,22 +2670,22 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
         // escalate with an ACTIONABLE "mark it ready" message, instead of `continue`-looping forever
         // or surfacing GitHub's opaque "blocked" refusal.
         if (draftPromotionReady(st, protocol ?? undefined)) {
-          // One-shot per landing-attempt head (mirrors `maybeEnsureFreshHeadRun`): if this head was
-          // already promoted, don't re-attempt — GitHub may still be settling the un-draft, and a
-          // persistently-refused promotion must fall through to the escalation, not loop.
-          const alreadyPromoted = st.headRefOid != null && pr.fresh_head_run_head === st.headRefOid;
-          if (!alreadyPromoted) {
-            const promoted = await markPullRequestReady(repo, number, token).catch(() => false);
-            if (promoted) {
-              if (st.headRefOid) {
-                await prs(data).update(prKey, { fresh_head_run_head: st.headRefOid, updated_at: now() });
-              }
-              console.log(`[poller] draft validated (green, no conflict, no open threads) -> promoted to ready -> ${prKey}`);
-              continue; // re-poll: the now-ready PR re-classifies and lands through the normal merge arm
-            }
+          // Promote WITHOUT touching `fresh_head_run_head` (PR #968 review): that column is
+          // `maybeEnsureFreshHeadRun`'s one-shot de-dupe for the close/reopen CI-start, NOT a
+          // promotion marker. Recording the head here would make the NEXT `waiting` pass's
+          // `freshHeadRunAction` see "this head already nudged" and suppress the close/reopen a
+          // `freshHeadRun: "reopen"` repo needs to start CI on `opened`/`reopened`-only workflows —
+          // leaving branch-protection checks missing until escalation. No separate de-dupe is
+          // needed: a successful mark-ready flips `isDraft` false, so the next pass re-classifies
+          // the PR `waiting`/`ready` (never `draft`) and this branch is not re-entered; a REFUSED
+          // promotion falls through to the escalation below rather than looping.
+          const promoted = await markPullRequestReady(repo, number, token).catch(() => false);
+          if (promoted) {
+            console.log(`[poller] draft validated (green, no conflict, no open threads) -> promoted to ready -> ${prKey}`);
+            continue; // re-poll: the now-ready PR re-classifies and lands through the normal merge arm
           }
-          // Promotion already done for this head, or attempted but refused (missing permission /
-          // repo policy) — fall through to the actionable escalation rather than looping forever.
+          // Promotion refused (missing permission / repo policy) — fall through to the actionable
+          // escalation rather than looping forever.
         }
         if (protocol) {
           if (await maybeEnsureFreshHeadRun(data, repo, number, prKey, protocol, verdict, st, pr)) {

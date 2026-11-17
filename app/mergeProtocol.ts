@@ -301,7 +301,13 @@ export interface DraftPromotionState {
  *
  * The predicate is deliberately conservative — it returns `true` only when validation is KNOWN to
  * pass, mirroring the gates `classifyMergeability` would apply to a non-draft:
- *   • no merge conflict (`mergeStateStatus !== "DIRTY"`) — a conflict routes to the rebase arm;
+ *   • mergeability is KNOWN and non-conflicting — only a settled `CLEAN` / `HAS_HOOKS` / `UNSTABLE`
+ *     / `BEHIND` promotes. `UNKNOWN`, `null`, and `""` mean GitHub is still computing whether the PR
+ *     conflicts (`fetchPrState` reports `UNKNOWN` for an unavailable merge state, and
+ *     `classifyMergeability` maps all three to `"waiting"`, never a validated verdict) — promoting
+ *     there would strip the draft safeguard before the conflict state is known, so they are NOT
+ *     validated. A `DIRTY` conflict routes to the rebase arm; a `BLOCKED` merge state means a
+ *     required check / review / branch-protection gate is unmet, so it is not validated either.
  *   • every declared-required check satisfied (`requiredChecksVerdict` semantics: none red, none
  *     pending/absent) AND no failing non-required check (`failingChecks === 0`) — red CI routes to
  *     fix-ci;
@@ -316,7 +322,19 @@ export function draftPromotionReady(
   state: DraftPromotionState,
   protocol?: MergeProtocol,
 ): boolean {
-  if (state.mergeStateStatus === "DIRTY") return false; // conflict → rebase arm owns it
+  // Mergeability must be KNOWN and non-conflicting (PR #968 review): reject `UNKNOWN`/`null`/`""`
+  // (GitHub still computing — could be a conflict) and `DIRTY`/`BLOCKED` (a known conflict / unmet
+  // gate). Only the statuses `classifyMergeability` maps to a landable `"ready"` for a non-draft
+  // may promote.
+  switch (state.mergeStateStatus) {
+    case "CLEAN":
+    case "HAS_HOOKS":
+    case "UNSTABLE": // only non-required checks failing — still mergeable (no DECLARED-required red)
+    case "BEHIND": // out of date; a queue rebases, a direct merge is still allowed
+      break;
+    default: // UNKNOWN / null / "" / DIRTY / BLOCKED → not validated
+      return false;
+  }
   if (state.failingChecks !== 0) return false; // red check (or token-mode unknown, -1) → fix-ci / escalate
   if (state.pendingCheckNames.length > 0) return false; // checks still settling → wait
   if (state.unresolvedThreads !== 0) return false; // open OR unknown (-1/-2) threads → not validated

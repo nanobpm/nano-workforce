@@ -276,6 +276,27 @@ test("draftPromotionReady: a conflicting draft is NOT promoted (routes to the re
   assertEquals(draftPromotionReady(draftState({ mergeStateStatus: "DIRTY" }), DEFAULT_MERGE_PROTOCOL), false);
 });
 
+// PR #968 review (finding 1): mergeability must be KNOWN non-conflicting before the draft safeguard
+// is stripped. `UNKNOWN` / `null` / `""` mean GitHub is still computing whether the PR conflicts
+// (`classifyMergeability` maps them to `"waiting"`, never a validated verdict) — an otherwise green,
+// thread-free draft must NOT be promoted on an unread merge state.
+test("draftPromotionReady: UNKNOWN / null / empty mergeability is NOT promoted (conflict not yet ruled out)", () => {
+  assertEquals(draftPromotionReady(draftState({ mergeStateStatus: "UNKNOWN" }), DEFAULT_MERGE_PROTOCOL), false);
+  assertEquals(draftPromotionReady(draftState({ mergeStateStatus: null }), DEFAULT_MERGE_PROTOCOL), false);
+  assertEquals(draftPromotionReady(draftState({ mergeStateStatus: "" }), DEFAULT_MERGE_PROTOCOL), false);
+});
+
+test("draftPromotionReady: a BLOCKED merge state is NOT promoted (a required gate is unmet)", () => {
+  assertEquals(draftPromotionReady(draftState({ mergeStateStatus: "BLOCKED" }), DEFAULT_MERGE_PROTOCOL), false);
+});
+
+test("draftPromotionReady: every known-non-conflicting merge state IS promotable when otherwise validated", () => {
+  // Mirror `classifyMergeability`'s `ready` arms: CLEAN / HAS_HOOKS / UNSTABLE / BEHIND.
+  for (const mergeStateStatus of ["CLEAN", "HAS_HOOKS", "UNSTABLE", "BEHIND"]) {
+    assertEquals(draftPromotionReady(draftState({ mergeStateStatus }), DEFAULT_MERGE_PROTOCOL), true);
+  }
+});
+
 test("draftPromotionReady: a draft with a pending check is NOT promoted (still settling)", () => {
   assertEquals(
     draftPromotionReady(draftState({ presentCheckNames: ["build"], pendingCheckNames: ["build"], checkGateConclusions: { build: [""] } }), DEFAULT_MERGE_PROTOCOL),

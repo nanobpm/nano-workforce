@@ -148,3 +148,31 @@ test("maybeEnsureFreshHeadRun: no applicable action never attempts the self-heal
   assertEquals(ret, false);
   assert(!attempted, "must not attempt a self-heal when no action applies");
 });
+
+// PR #968 review (finding 2): the draft-promotion path must NOT record `fresh_head_run_head`, or it
+// would suppress the close/reopen a `freshHeadRun: "reopen"` repo needs to START CI on
+// `opened`/`reopened`-only workflows. After promotion the PR is no longer a draft, so the next poll
+// re-classifies it `waiting` and lands HERE. This pins that subsequent pass: a non-draft with no
+// head run and a NULL `fresh_head_run_head` (promotion left it untouched) MUST still fire the reopen.
+test("maybeEnsureFreshHeadRun: a promoted draft (non-draft, no run, marker untouched) still fires the reopen", async () => {
+  const REOPEN = parseMergeProtocol({ freshHeadRun: "reopen", land: { method: "gh-merge" } });
+  const { data, row } = memData(prRow()); // fresh_head_run_head: null — promotion did NOT record it
+  let action: string | null = null;
+  const ret = await maybeEnsureFreshHeadRun(
+    data,
+    "o/r",
+    1,
+    "o/r#1",
+    REOPEN,
+    "waiting", // the post-promotion verdict (isDraft flipped false → no longer "draft")
+    draftState({ isDraft: false, totalChecks: 0 }), // promoted, but no head run yet
+    prRow(),
+    async (_repo, _n, act) => {
+      action = act;
+      return true;
+    },
+  );
+  assertEquals(ret, true); // the close/reopen CI-start fired (not suppressed)
+  assertEquals(action, "reopen");
+  assertEquals(row().fresh_head_run_head, "h1"); // the self-heal's own one-shot de-dupe, recorded now
+});
