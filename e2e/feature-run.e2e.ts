@@ -457,6 +457,15 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
     // cut off before I could push") but the branch IS on the remote (at the agent's own reported
     // headSha) and ahead of base — only the PR step is missing. The run must reconcile with the
     // remote, open the PR from the branch, and continue to converge — NEVER park in the human inbox.
+    //
+    // PR #968 review (round 2): driven THROUGH auto-merge — the run carries `autoMerge: true`, so
+    // the recovered DRAFT PR is enrolled with merge intent. That intent is what hands the PR to the
+    // merge stage (`finalize → startMerge → pollMerges`), where the new promote-after-validation
+    // path (`draftPromotionReady` + `markPullRequestReady`) un-drafts the now-converged, green draft
+    // so it lands without a human "mark it ready" escalation. This test asserts the enrolment carries
+    // the merge intent (the handoff that reaches that path); the promotion itself is unit-pinned in
+    // app/mergeProtocol.test.ts (draftPromotionReady) and app/github.test.ts (markPullRequestReady),
+    // because this hermetic suite seals GitHub to the token transport, which cannot enumerate checks.
     githubState.branches.set("feat/issue-7", "f".repeat(40));
     githubState.comparisons.set("epic/e2e...feat/issue-7", { status: "ahead", ahead_by: 2, behind_by: 0 });
     try {
@@ -471,7 +480,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
             "io.nanobpm.agentResult": { headSha: "f".repeat(40), exitCode: 0 },
           }),
         },
-        { baseBranch: "epic/e2e", converge: true },
+        { baseBranch: "epic/e2e", converge: true, autoMerge: true },
         async ({ app, featureKey }) => {
           const flows = takenFlows(app);
           assert.ok(
@@ -499,6 +508,21 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
           assert.equal(run.pr_key, `owner/repo#${created.number}`, "the opened PR key is recorded on the run");
           const prs = await app.db.table<PrRow>("pull_requests", "pr_key").find({ pr_key: run.pr_key! });
           assert.equal(prs.length, 1, "the reconcile-opened PR was enrolled into the convergence loop");
+
+          // THROUGH AUTO-MERGE (PR #968 review): the recovered DRAFT PR's convergence loop is seeded
+          // with the merge intent (`autoMerge: true`), so on convergence it hands off to the merge
+          // stage — where the promote-after-validation path un-drafts the converged, green draft and
+          // lands it without a human. Read the still-ACTIVE loop's variables (a completed instance
+          // folds them away) to prove the intent survived the reconcile → submitPr handoff.
+          const instances = app.snapshot().instances;
+          assert.ok(Array.isArray(instances), "snapshot.instances is an array of instance rows");
+          const loop = instances.find((i) => i?.key === prs[0].process_key);
+          assert.ok(loop, "the recovered PR's convergence loop is live");
+          assert.equal(
+            loop?.variables?.autoMerge,
+            true,
+            "the recovered draft PR was enrolled with autoMerge intent (reaches the merge stage's draft promotion)",
+          );
 
           // No human task was ever parked.
           const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: run.process_key! });

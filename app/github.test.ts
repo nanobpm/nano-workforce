@@ -2,8 +2,8 @@
 // a COMPLETE file list or a thrown error — never a silently truncated one that under-approximates
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
-import { assert, assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, checkConclusions, checkGateConclusions, hasCopilotWorkStarted, classifyBlockedCause, copilotWorkStartedSince, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, failingCheckNames, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, THREAD_PROBE_FAILED, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
+import { BaseBranchMustExistError, checkConclusions, checkGateConclusions, hasCopilotWorkStarted, classifyBlockedCause, copilotWorkStartedSince, classifyMergeability, classifyPrLiveness, coalesceTitle, compareCommits, createPullRequest, ensureBaseBranch, ensurePromotionPr, failingCheckNames, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, fetchPrReviews, isNotAPullRequestError, listPrsForHead, markPullRequestReady, THREAD_PROBE_FAILED, updateBranchRef, type GhReview, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -83,6 +83,70 @@ test("fetchPrReviews: returns the newest review when it is beyond page one", asy
   assertEquals(reviews?.length, 101);
   assertEquals(reviews?.[reviews.length - 1]?.id, 101);
   assertEquals(requests.length, 2, "the final page must be fetched after page one");
+});
+
+// ── markPullRequestReady: dual-transport un-draft (issue #967, PR #968 review) ───────────────────
+//
+// The merge poller's promote-after-validation path un-drafts a *validated* recovered draft PR so the
+// merge can land without a human. In headless token mode this runs the GraphQL
+// `markPullRequestReadyForReview` mutation (node-id resolved first). These tests stub
+// `globalThis.fetch` and pin the token transport.
+
+/** A fetch stub that answers the two GraphQL calls: the node-id query, then the mutation. Records
+ *  each request body so the test can assert the mutation carried the resolved node id. */
+function markReadyFetch(nodeId: string | null, mutationIsDraft: boolean, requests: string[]) {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    requests.push(String(init?.body ?? ""));
+    const body = String(init?.body ?? "");
+    const json = (obj: unknown, status = 200) =>
+      new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+    if (body.includes("markPullRequestReadyForReview")) {
+      return Promise.resolve(
+        json({ data: { markPullRequestReadyForReview: { pullRequest: { isDraft: mutationIsDraft } } } }),
+      );
+    }
+    // node-id lookup
+    return Promise.resolve(
+      json({ data: { repository: { pullRequest: nodeId === null ? null : { id: nodeId } } } }),
+    );
+  };
+}
+
+test("markPullRequestReady: token mode resolves the node id then marks ready (isDraft=false → true)", async () => {
+  const requests: string[] = [];
+  const ok = await withTokenFetch(markReadyFetch("PR_node_123", false, requests) as typeof fetch, () =>
+    markPullRequestReady("o/r", 7, "tok"),
+  );
+  assertEquals(ok, true);
+  assertEquals(requests.length, 2, "node-id query then the mutation");
+  assertStringIncludes(requests[1], "PR_node_123");
+});
+
+test("markPullRequestReady: a still-draft mutation result (isDraft=true) is NOT a success", async () => {
+  const ok = await withTokenFetch(markReadyFetch("PR_node_123", true, []) as typeof fetch, () =>
+    markPullRequestReady("o/r", 7, "tok"),
+  );
+  assertEquals(ok, false);
+});
+
+test("markPullRequestReady: an unresolvable node id is NOT a success (never claims a blind ready)", async () => {
+  const ok = await withTokenFetch(markReadyFetch(null, false, []) as typeof fetch, () =>
+    markPullRequestReady("o/r", 7, "tok"),
+  );
+  assertEquals(ok, false);
+});
+
+test("markPullRequestReady: no token in token mode → false (idle, never throws)", async () => {
+  const ok = await withTokenFetch((() => Promise.resolve(new Response("x", { status: 200 }))) as typeof fetch, () =>
+    markPullRequestReady("o/r", 7, ""),
+  );
+  assertEquals(ok, false);
+});
+
+test("markPullRequestReady: a transport failure → false (best-effort, caller escalates)", async () => {
+  const failing = (() => Promise.resolve(new Response("boom", { status: 500 }))) as typeof fetch;
+  const ok = await withTokenFetch(failing, () => markPullRequestReady("o/r", 7, "tok"));
+  assertEquals(ok, false);
 });
 
 test("fetchPrFiles: returns the complete list for a sub-cap PR (short final page)", async () => {

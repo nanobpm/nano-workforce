@@ -2294,6 +2294,69 @@ export async function ensureFreshHeadRun(
   }
 }
 
+/** Mark a DRAFT pull request ready for review (un-draft it). Dual-transport: gh shells out to
+ * `gh pr ready`; headless token mode runs the GraphQL `markPullRequestReadyForReview` mutation
+ * (resolving the PR's node id first). Used by the merge poller's promote-after-validation path
+ * (issue #967, PR #968 review): a recovered PR is opened as a draft, but once it has converged and
+ * its checks are green it is a validated draft that must be promoted so the merge can land without
+ * a human. Returns whether the PR was actually marked ready — `false` on any transport failure,
+ * missing token, or a GraphQL error, so the caller falls through to the actionable escalation
+ * instead of looping on a promotion that can never succeed. Never throws. */
+export async function markPullRequestReady(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<boolean> {
+  const n = String(number);
+  if (await useGh()) {
+    try {
+      await runGh(["pr", "ready", n, "--repo", repo]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  if (!token) return false;
+  const [owner, name] = repo.split("/");
+  const headers = {
+    authorization: `Bearer ${token}`,
+    accept: "application/vnd.github+json",
+    "content-type": "application/json",
+  };
+  try {
+    // Resolve the PR's node id (the mutation keys on it, not the number).
+    const idQuery = "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){id}}}";
+    const idRes = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ query: idQuery, variables: { o: owner, r: name, n: Number(number) } }),
+    });
+    if (!idRes.ok) return false;
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const idPayload = (await idRes.json()) as { data?: { repository?: { pullRequest?: { id?: string } | null } | null } | null };
+    const nodeId = idPayload.data?.repository?.pullRequest?.id;
+    if (!nodeId) return false;
+    const mutation =
+      "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}";
+    const mRes = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ query: mutation, variables: { id: nodeId } }),
+    });
+    if (!mRes.ok) return false;
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const mPayload = (await mRes.json()) as {
+      data?: { markPullRequestReadyForReview?: { pullRequest?: { isDraft?: boolean } | null } | null } | null;
+      errors?: unknown;
+    };
+    const result = mPayload.data?.markPullRequestReadyForReview?.pullRequest;
+    // Confirmed un-drafted (isDraft === false). A GraphQL error or an absent payload is not a success.
+    return result?.isDraft === false;
+  } catch {
+    return false;
+  }
+}
+
 /** Post a comment on the PR (e.g. `@mergifyio queue`) to enqueue it in the repo's merge queue.
  * gh transport shells out; token mode posts an issue comment via REST. Returns whether the
  * comment was accepted. */

@@ -9,6 +9,8 @@ import { assertEquals } from "#test-assert";
 import {
   classifyMergeLanding,
   DEFAULT_MERGE_PROTOCOL,
+  type DraftPromotionState,
+  draftPromotionReady,
   extractProtocolBlock,
   freshHeadRunAction,
   headRunPresenceCount,
@@ -234,4 +236,90 @@ test("classifyMergeLanding: only `ui` is decision-required", () => {
   assertEquals(classifyMergeLanding(withMethod("gh-merge")), "transient");
   assertEquals(classifyMergeLanding(withMethod("admin")), "transient");
   assertEquals(classifyMergeLanding(withMethod("mergify-queue")), "transient");
+});
+
+// ── draftPromotionReady: promote a *validated* draft, never an unvalidated one (issue #967) ──────
+//
+// A recovered PR is opened as a DRAFT because the agent never vouched for it — but by the time it
+// reaches the merge stage it HAS been vouched for (converged review, green checks). The merge poller
+// must mark such a draft ready itself rather than wedging on a human "mark it ready" escalation.
+// The predicate is the guard: it returns true ONLY when validation is KNOWN to pass, so an
+// unvalidated / unreadable / failing draft still escalates. These are pure unit tests over the
+// structural `DraftPromotionState`.
+
+function draftState(over: Partial<DraftPromotionState> = {}): DraftPromotionState {
+  return {
+    mergeStateStatus: "CLEAN",
+    failingChecks: 0,
+    presentCheckNames: [],
+    pendingCheckNames: [],
+    checkGateConclusions: {},
+    unresolvedThreads: 0,
+    ...over,
+  };
+}
+
+test("draftPromotionReady: a converged, green, conflict-free draft IS promoted (the #967 recovery case)", () => {
+  // No declared required checks, no failing/pending checks, no open threads, no conflict → validated.
+  assertEquals(draftPromotionReady(draftState(), DEFAULT_MERGE_PROTOCOL), true);
+  assertEquals(draftPromotionReady(draftState(), undefined), true); // no protocol → same validation
+});
+
+test("draftPromotionReady: a draft with a failing check is NOT promoted (routes to fix-ci)", () => {
+  assertEquals(
+    draftPromotionReady(draftState({ failingChecks: 1, presentCheckNames: ["build"], checkGateConclusions: { build: ["FAILURE"] } }), DEFAULT_MERGE_PROTOCOL),
+    false,
+  );
+});
+
+test("draftPromotionReady: a conflicting draft is NOT promoted (routes to the rebase arm)", () => {
+  assertEquals(draftPromotionReady(draftState({ mergeStateStatus: "DIRTY" }), DEFAULT_MERGE_PROTOCOL), false);
+});
+
+test("draftPromotionReady: a draft with a pending check is NOT promoted (still settling)", () => {
+  assertEquals(
+    draftPromotionReady(draftState({ presentCheckNames: ["build"], pendingCheckNames: ["build"], checkGateConclusions: { build: [""] } }), DEFAULT_MERGE_PROTOCOL),
+    false,
+  );
+});
+
+test("draftPromotionReady: open review threads are NOT promoted (route back into convergence)", () => {
+  assertEquals(draftPromotionReady(draftState({ unresolvedThreads: 2 }), DEFAULT_MERGE_PROTOCOL), false);
+});
+
+test("draftPromotionReady: an UNKNOWN thread count is NOT promoted (the merge contract is zero threads)", () => {
+  // -1 = not probed, -2 = probe failed. Neither may auto-promote a draft over unverified threads.
+  assertEquals(draftPromotionReady(draftState({ unresolvedThreads: -1 }), DEFAULT_MERGE_PROTOCOL), false);
+  assertEquals(draftPromotionReady(draftState({ unresolvedThreads: -2 }), DEFAULT_MERGE_PROTOCOL), false);
+});
+
+test("draftPromotionReady: token mode (checks unenumerable) is NOT promoted (never promote blind)", () => {
+  assertEquals(draftPromotionReady(draftState({ failingChecks: -1 }), DEFAULT_MERGE_PROTOCOL), false);
+});
+
+test("draftPromotionReady: a declared-required check gates promotion (absent / pending / red all block)", () => {
+  const req: MergeProtocol = { ...DEFAULT_MERGE_PROTOCOL, requiredChecks: [{ name: "build", acceptedConclusions: ["success"] }] };
+  // Required check green → promote.
+  assertEquals(
+    draftPromotionReady(draftState({ presentCheckNames: ["build"], checkGateConclusions: { build: ["SUCCESS"] } }), req),
+    true,
+  );
+  // Required check absent from the head → not validated.
+  assertEquals(draftPromotionReady(draftState(), req), false);
+  // Required check still pending → not validated.
+  assertEquals(
+    draftPromotionReady(draftState({ presentCheckNames: ["build"], pendingCheckNames: ["build"], checkGateConclusions: { build: [""] } }), req),
+    false,
+  );
+  // Required check settled red → not validated.
+  assertEquals(
+    draftPromotionReady(draftState({ presentCheckNames: ["build"], failingChecks: 1, checkGateConclusions: { build: ["FAILURE"] } }), req),
+    false,
+  );
+  // Required check whose accepted conclusion is `skipped` (change-gated) accepts a SKIPPED gate.
+  const skipOk: MergeProtocol = { ...DEFAULT_MERGE_PROTOCOL, requiredChecks: [{ name: "build", acceptedConclusions: ["success", "skipped"] }] };
+  assertEquals(
+    draftPromotionReady(draftState({ presentCheckNames: ["build"], checkGateConclusions: { build: ["SKIPPED"] } }), skipOk),
+    true,
+  );
 });

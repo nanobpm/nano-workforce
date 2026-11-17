@@ -56,6 +56,7 @@ import {
   hasPendingCopilotReviewer,
   isNotAPullRequestError,
   type MergeMethod,
+  markPullRequestReady,
   type PrState,
   requestCopilotReview,
 } from "./github.ts";
@@ -67,6 +68,7 @@ import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { mergeLandedWaitTimeout } from "./mergeLandedWait.ts";
 import { withMergePolicyLock } from "./mergePolicyLock.ts";
 import {
+  draftPromotionReady,
   freshHeadRunAction,
   headRunPresenceCount,
   loadMergeProtocol,
@@ -2649,22 +2651,48 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
       const protocol = await loadMergeProtocol(repo, token).catch(() => null);
       const verdict = classifyMergeability(st, protocol ?? undefined);
       if (verdict === "draft") {
-        // A draft PR is never landable — GitHub refuses the merge outright (issue #454). Two remedies,
-        // in order: (1) self-heal — when the repo's merge protocol has a mark-ready capability
+        // A draft PR is never landable — GitHub refuses the merge outright (issue #454). Three
+        // remedies, in order: (1) PROMOTE-AFTER-VALIDATION — a draft that has already passed every
+        // validation the merge contract applies to a non-draft (green checks, no conflict, zero
+        // unresolved threads) is a `ready` PR still flagged draft, so mark it ready ourselves and
+        // re-poll (issue #967, PR #968 review). This is what lets a *recovered* PR — opened as a
+        // draft because the agent never vouched for it, but since converged and green — land
+        // without a human on a repo whose protocol has no mark-ready self-heal (the default
+        // `freshHeadRun: "none"`) or once a head run already exists (`ready-or-reopen` skips
+        // promotion there). `draftPromotionReady` is conservative: it never promotes a draft whose
+        // validation is unknown (token-mode checks, an unprobed/failed thread read) or failing.
+        // (2) self-heal — when the repo's merge protocol has a mark-ready capability
         // (`freshHeadRun: "ready"`/`"ready-or-reopen"`), mark the PR ready ourselves (the frugal-CI
         // path), which both un-drafts it and produces the required run, then re-poll; a `"reopen"`-only
         // protocol has NO mark-ready capability, so `freshHeadRunAction` returns null for a draft (a
-        // reopen can't un-draft) and this falls straight through to (2). (2) otherwise — no self-heal
-        // applies, OR the self-heal was attempted but could not be performed (e.g. missing permission /
-        // repo policy) — escalate with an ACTIONABLE "mark it ready" message, instead of
-        // `continue`-looping forever on a self-heal that can never succeed or surfacing GitHub's opaque
-        // "blocked" refusal.
+        // reopen can't un-draft) and this falls straight through to (3). (3) otherwise — the draft is
+        // NOT yet validated (red/pending checks, open threads, a conflict, or an unreadable state) —
+        // escalate with an ACTIONABLE "mark it ready" message, instead of `continue`-looping forever
+        // or surfacing GitHub's opaque "blocked" refusal.
+        if (draftPromotionReady(st, protocol ?? undefined)) {
+          // One-shot per landing-attempt head (mirrors `maybeEnsureFreshHeadRun`): if this head was
+          // already promoted, don't re-attempt — GitHub may still be settling the un-draft, and a
+          // persistently-refused promotion must fall through to the escalation, not loop.
+          const alreadyPromoted = st.headRefOid != null && pr.fresh_head_run_head === st.headRefOid;
+          if (!alreadyPromoted) {
+            const promoted = await markPullRequestReady(repo, number, token).catch(() => false);
+            if (promoted) {
+              if (st.headRefOid) {
+                await prs(data).update(prKey, { fresh_head_run_head: st.headRefOid, updated_at: now() });
+              }
+              console.log(`[poller] draft validated (green, no conflict, no open threads) -> promoted to ready -> ${prKey}`);
+              continue; // re-poll: the now-ready PR re-classifies and lands through the normal merge arm
+            }
+          }
+          // Promotion already done for this head, or attempted but refused (missing permission /
+          // repo policy) — fall through to the actionable escalation rather than looping forever.
+        }
         if (protocol) {
           if (await maybeEnsureFreshHeadRun(data, repo, number, prKey, protocol, verdict, st, pr)) {
             continue; // re-poll: the mark-ready both un-drafts the PR and produces the required run
           }
         }
-        // No applicable (or successful) protocol-driven self-heal → escalate so a human marks it ready.
+        // No applicable (or successful) promotion/self-heal → escalate so a human marks it ready.
         await flipToMergingThenPublish(data, engine, prKey, "waiting_merge", {
           name: "merge-ready",
           correlationKey: prKey,
@@ -2674,7 +2702,7 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
             failingChecksList: st.failingCheckNames.join("\n"),
           },
         });
-        console.log(`[poller] draft (no self-heal) -> escalate mark-ready -> ${prKey}`);
+        console.log(`[poller] draft (not validated / no self-heal) -> escalate mark-ready -> ${prKey}`);
         continue;
       }
       if (verdict === "waiting") {

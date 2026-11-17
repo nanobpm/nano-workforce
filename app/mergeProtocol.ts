@@ -270,3 +270,71 @@ export function freshHeadRunAction(
       return null;
   }
 }
+
+/** The minimal head state {@link draftPromotionReady} reads to judge a draft PR validated. This is
+ * a structural subset of `app/github.ts`'s `PrState` — declared here so the merge-protocol module
+ * stays import-cycle-free (github.ts already imports this module). `checkGateConclusions` /
+ * `pendingCheckNames` / `presentCheckNames` are the per-check fields `requiredChecksVerdict`
+ * consumes; the rest are the conflict / thread / failing-check signals. */
+export interface DraftPromotionState {
+  mergeStateStatus: string | null;
+  failingChecks: number;
+  presentCheckNames: string[];
+  pendingCheckNames: string[];
+  checkGateConclusions: Record<string, string[]>;
+  unresolvedThreads: number;
+}
+
+/** Whether a DRAFT PR parked in the merge stage has passed every validation the merge contract
+ * applies to a non-draft — and so may be marked ready (`gh pr ready`) by the poller instead of
+ * escalating to a human.
+ *
+ * Issue #967 (PR #968 review): a recovered PR is opened as a draft *because the agent never
+ * vouched for it*. But by the time it reaches the merge stage it HAS been vouched for — the
+ * convergence loop ran review rounds to zero unresolved threads and the head's checks are green.
+ * Treating that validated draft like an unvalidated one wedges it on a human "mark it ready"
+ * escalation (`merge-esc-conflict`) on every repo whose protocol lacks a mark-ready self-heal
+ * (the default `freshHeadRun: "none"`), and even on `ready-or-reopen` once a head run already
+ * exists (`freshHeadRunAction` returns null). The fix is to promote *after validation*: a draft
+ * that is green, conflict-free, and thread-free is exactly a `ready` PR that happens to still be
+ * flagged draft, so un-draft it and let the normal merge arm land it.
+ *
+ * The predicate is deliberately conservative — it returns `true` only when validation is KNOWN to
+ * pass, mirroring the gates `classifyMergeability` would apply to a non-draft:
+ *   • no merge conflict (`mergeStateStatus !== "DIRTY"`) — a conflict routes to the rebase arm;
+ *   • every declared-required check satisfied (`requiredChecksVerdict` semantics: none red, none
+ *     pending/absent) AND no failing non-required check (`failingChecks === 0`) — red CI routes to
+ *     fix-ci;
+ *   • no check still in flight (`pendingCheckNames` empty) — a pending head is still settling;
+ *   • zero unresolved review threads (`unresolvedThreads === 0`) — open threads route back into
+ *     convergence. An UNPROBED (`-1`) or FAILED (`-2`) thread read is NOT validated: the merge
+ *     contract is zero unresolved threads, so an unknown count must not auto-promote.
+ * Token mode (checks unenumerable, `failingChecks < 0`) is likewise not validated — never promote a
+ * draft whose validation state cannot be observed. Anything not validated keeps today's behaviour:
+ * escalate the actionable "mark it ready" so a human decides. */
+export function draftPromotionReady(
+  state: DraftPromotionState,
+  protocol?: MergeProtocol,
+): boolean {
+  if (state.mergeStateStatus === "DIRTY") return false; // conflict → rebase arm owns it
+  if (state.failingChecks !== 0) return false; // red check (or token-mode unknown, -1) → fix-ci / escalate
+  if (state.pendingCheckNames.length > 0) return false; // checks still settling → wait
+  if (state.unresolvedThreads !== 0) return false; // open OR unknown (-1/-2) threads → not validated
+  // Declared-required checks must all be satisfied. Mirror `requiredChecksVerdict` (github.ts):
+  // absent → pending → not validated; a settled unaccepted conclusion → blocked → not validated.
+  const required = protocol?.requiredChecks ?? [];
+  const present = new Set(state.presentCheckNames);
+  const pending = new Set(state.pendingCheckNames);
+  for (const rc of required) {
+    if (!present.has(rc.name)) return false; // required check never ran on this head
+    if (pending.has(rc.name)) return false; // required check still in flight
+    const accepted = rc.acceptedConclusions.map((a) => a.toUpperCase());
+    const gates = state.checkGateConclusions[rc.name] ?? [];
+    for (const g of gates) {
+      const conclusion = g.toUpperCase();
+      if (conclusion === "") return false; // gate not yet concluded
+      if (!accepted.includes(conclusion)) return false; // settled, unaccepted → red
+    }
+  }
+  return true;
+}
