@@ -34,9 +34,9 @@
           <nano:extend name="baseBranch" type="string" />
           <nano:extend name="baseBranchBrief" type="string" optional="true" />
           <nano:reference name="readinessProbes" ref="ReadinessProbe" list="true" optional="true" />
-          <nano:extend name="probeTimeout" type="string" />
-          <nano:extend name="probePollEvery" type="string" />
-          <nano:extend name="gateKey" type="string" />
+          <nano:extend name="probeTimeout" type="string" optional="true" />
+          <nano:extend name="probePollEvery" type="string" optional="true" />
+          <nano:extend name="gateKey" type="string" optional="true" />
           <nano:extend name="resolvedArtifacts" type="string" list="true" optional="true" />
         </nano:shape>
         <nano:shape id="EnsureBaseBranchIn" name="Ensure base branch — input">
@@ -473,6 +473,9 @@
           <zeebe:ioMapping>
             <zeebe:input source="=task" target="task" />
             <zeebe:input source="=planKey" target="subjectKey" />
+            <zeebe:input source="=if (is defined(repo)) then repo else null" target="repo" />
+            <zeebe:input source="=if (is defined(issue)) then issue else null" target="issue" />
+            <zeebe:input source="=if (is defined(claimIssue)) then claimIssue else null" target="claimIssue" />
             <zeebe:input source="=baseBranch" target="baseBranch" />
             <zeebe:input source="=escalationSlaTimeout" target="escalationSlaTimeout" />
             <zeebe:input source="=agentSlaTimeout" target="agentSlaTimeout" />

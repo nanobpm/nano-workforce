@@ -17,7 +17,7 @@
           <nano:extend name="claimIssue" type="boolean" optional="true" />
           <nano:extend name="answer" type="string" optional="true" />
           <nano:extend name="status" type="string" optional="true" />
-          <nano:extend name="question" type="string" />
+          <nano:extend name="question" type="string" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
           <nano:extend name="pr" type="string" optional="true" />
           <nano:extend name="escalationSlaTimeout" type="string" />
@@ -27,9 +27,9 @@
           <nano:extend name="baseBranchBrief" type="string" optional="true" />
           <nano:extend name="customInstructions" type="string" optional="true" />
           <nano:reference name="readinessProbes" ref="ReadinessProbe" list="true" optional="true" />
-          <nano:extend name="probeTimeout" type="string" />
-          <nano:extend name="probePollEvery" type="string" />
-          <nano:extend name="gateKey" type="string" />
+          <nano:extend name="probeTimeout" type="string" optional="true" />
+          <nano:extend name="probePollEvery" type="string" optional="true" />
+          <nano:extend name="gateKey" type="string" optional="true" />
           <nano:extend name="resolvedArtifacts" type="string" list="true" optional="true" />
           <nano:extend name="transcriptUrlBase" type="string" optional="true" />
         </nano:shape>
@@ -226,6 +226,9 @@
           <zeebe:input source="=escalationSlaTimeout" target="escalationSlaTimeout" />
           <zeebe:input source="=agentSlaTimeout" target="agentSlaTimeout" />
           <zeebe:input source="=featureKey" target="subjectKey" />
+          <zeebe:input source="=if (is defined(repo)) then repo else null" target="repo" />
+          <zeebe:input source="=if (is defined(issue)) then issue else null" target="issue" />
+          <zeebe:input source="=if (is defined(claimIssue)) then claimIssue else null" target="claimIssue" />
           <zeebe:output source="=status" target="status" />
           <zeebe:output source="=if (is defined(summary)) then summary else null" target="summary" />
           <zeebe:output source="=if (is defined(pr)) then pr else null" target="pr" />

@@ -10,6 +10,9 @@
         </nano:shape>
         <nano:shape id="ImplementCellStartIn" name="Implement cell — start input">
           <nano:reference name="task" ref="CellTask" />
+          <nano:extend name="repo" type="string" optional="true" />
+          <nano:extend name="issue" type="string" optional="true" />
+          <nano:extend name="claimIssue" type="boolean" optional="true" />
           <nano:extend name="baseBranch" type="string" />
           <nano:extend name="baseBranchBrief" type="string" optional="true" />
           <nano:extend name="resolvedArtifacts" type="string" list="true" optional="true" />
