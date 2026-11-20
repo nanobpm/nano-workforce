@@ -22,7 +22,7 @@
 // and THROWS on invalid input — the worker task fails into an engine incident, never a silent
 // blank-variable run.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
-import { startFeature } from "./feature.ts";
+import { type StartFeatureResult, startFeature } from "./feature.ts";
 import { type FeatureReadiness, parseFeatureReadiness } from "./featureReadiness.ts";
 import { admitPlan, parseIssue, startPlan } from "./plan.ts";
 import { clampRounds, MAX_ROUNDS, parsePr, submitPr } from "./service.ts";
@@ -97,7 +97,7 @@ export async function admitFeatureTool(
     allowSharedBase,
     confirmDefaultBase,
   });
-  await startFeature(
+  const result = await startFeature(
     data,
     engine,
     parsed,
@@ -109,6 +109,20 @@ export async function admitFeatureTool(
     humanApproval,
     autoResolveEscalations,
   );
+  assertFeatureDispatched(result);
+}
+
+/** Fail closed when the canonical `startFeature` dispatched NO engine instance (`noop-terminal`,
+ *  issue #704): the API door maps it to a 502, so the MCP admission must THROW (→ worker retry /
+ *  incident) rather than let the starter instance terminate as if a run had been started.
+ *  `started` / `already-active` are both legitimate admissions. */
+export function assertFeatureDispatched(result: Pick<StartFeatureResult, "outcome" | "featureKey">): void {
+  if (result.outcome === "noop-terminal") {
+    throw new Error(
+      `start_feature: feature run for ${result.featureKey} started no engine instance — the engine ` +
+        `returned no instance key, so nothing was dispatched`,
+    );
+  }
 }
 
 /** Admit a message-started epic (`start_plan_fanout` tool) through the canonical `startPlan`
