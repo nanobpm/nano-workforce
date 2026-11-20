@@ -1,3 +1,9 @@
+## [0.212.0](https://github.com/nanobpm/nano-workforce/compare/v0.211.4...v0.212.0) (2026-11-20)
+
+### Features
+
+* **api:** add Camunda key names and items/page lists alongside deprecated fields ([#980](https://github.com/nanobpm/nano-workforce/issues/980)) ([ff4c971](https://github.com/nanobpm/nano-workforce/commit/ff4c9714b2af8c4379891028f97253222df94a7a)), closes [#972](https://github.com/nanobpm/nano-workforce/issues/972) [#715](https://github.com/nanobpm/nano-workforce/issues/715)
+
 ## [0.211.4](https://github.com/nanobpm/nano-workforce/compare/v0.211.3...v0.211.4) (2026-11-20)
 
 ### Bug Fixes
