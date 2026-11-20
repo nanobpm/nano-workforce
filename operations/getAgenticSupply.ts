@@ -61,6 +61,8 @@ function toCorrelation(c: JobCorrelation): AgenticJobCorrelation {
   const out: AgenticJobCorrelation = { jobKey: c.jobKey, stream: c.stream };
   if (c.processInstanceKey !== undefined) out.processInstanceKey = c.processInstanceKey;
   if (c.bpmnProcessId !== undefined) out.bpmnProcessId = c.bpmnProcessId;
+  // #972: the Camunda name for the BPMN process id; `bpmnProcessId` is its deprecated alias.
+  if (c.bpmnProcessId !== undefined) out.processDefinitionId = c.bpmnProcessId;
   if (c.elementId !== undefined) out.elementId = c.elementId;
   if (c.planKey !== undefined) out.planKey = c.planKey;
   return out;

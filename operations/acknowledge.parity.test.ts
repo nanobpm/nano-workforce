@@ -213,6 +213,16 @@ for (const s of SURFACES) {
     assertEquals(rows[0].acknowledged_at, stamp, `${s.id}: NOT re-stamped (no double-stamp)`);
   });
 
+  test(`${s.id}: accepts the canonical camelCase key, which wins over the deprecated snake_case alias (#972)`, async () => {
+    const key = "o/r#5";
+    const camel = s.bodyKey.replace(/_(\w)/g, (_m, c: string) => c.toUpperCase());
+    const { app, rows } = memApp(s, [s.terminalRow(key)]);
+    // The deprecated alias points at a row that does not exist: a 200 proves the canonical key won.
+    const res = await call(app, s.handler, { [camel]: key, [s.bodyKey]: "o/r#404" });
+    assertEquals(res.status, 200, `${s.id}: ${camel} accepted`);
+    assertEquals(typeof rows[0].acknowledged_at, "string", `${s.id}: stamped via ${camel}`);
+  });
+
   test(`${s.id}: no such row → 404`, async () => {
     const { app } = memApp(s, []);
     assertEquals((await call(app, s.handler, { [s.bodyKey]: "o/r#404" })).status, 404);

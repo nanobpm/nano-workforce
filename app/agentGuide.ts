@@ -29,7 +29,7 @@ const RAW_GUIDE: string = (() => {
       "The full guide document could not be read from this deployment.",
       "",
       "Key endpoints (under the app control-API base `__BASE__`):",
-      "- `GET /status` — every PR in flight, with its engine `processKey` and any open escalation.",
+      "- `GET /status` — every PR and delivery run in flight as `items` (each with its engine `processInstanceKey` and any open escalation).",
       "- `GET /version` — which code is live.",
       "- `POST /actions/start/convergence-loop` — submit a PR (`{ pr, autoMerge?, maxRounds?, dependsOn? }`; `autoMerge` is the positive per-request merge control).",
       "- `POST /actions/start/plan-fanout` — submit an epic (`{ issue, baseBranch }` or `{ url, baseBranch }`; base is required — a missing `epic/*` base is auto-created, and `confirmDefaultBase`/`allowSharedBase` gate the default-branch and shared-base cases — see ADR 0003).",

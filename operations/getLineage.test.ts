@@ -80,6 +80,15 @@ test("narrows to a single origin thread via ?root=", async () => {
   assertEquals(t.prCount, 2);
 });
 
+test("#972: threads (and their PRs) carry processInstanceKey; the Camunda items/page list mirrors threads", async () => {
+  const res = (await handler(input({ root: "o/r#2" }), memApp(fixture()))) as any;
+  const t = res.body.threads[0];
+  assertEquals(t.processInstanceKey, t.processKey);
+  for (const pr of t.prs) assertEquals(pr.processInstanceKey, pr.processKey);
+  assertEquals(res.body.items, res.body.threads);
+  assertEquals(res.body.page, { totalItems: 1 });
+});
+
 test("unknown root returns an empty thread list", async () => {
   const res = (await handler(input({ root: "o/r#999" }), memApp(fixture()))) as any;
   assertEquals(res.status, 200);

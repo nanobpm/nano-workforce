@@ -193,6 +193,29 @@ test("surfaces each in-flight delivery run with its durable escalation-steward o
   assertEquals(d.openEscalation, { userTaskKey: "ut-d1", kind: "delivery-human-taskish", summary: "approve the release?" });
 });
 
+test("#972: adds processInstanceKey + the Camunda items/page list (one list over both kinds, discriminated by kind)", async () => {
+  const app = memApp(
+    [{ pr_key: "o/r#1", repo: "o/r", number: 1, url: "u1", title: "t", status: "converging", current_round: 2, process_key: "9", updated_at: "2026-01-02" }],
+    [],
+    [{ run_key: "run-live", process_key: "pk-live", status: "running", phase: "Running", title: "Ship it", auto_resolve_escalations: 0, updated_at: "2026-03-02" }],
+  );
+  const res = (await handler(input(), app)) as any;
+  assertEquals(res.status, 200);
+  // Deprecated fields still served, each row carrying the canonical key next to the old one.
+  assertEquals(res.body.prs[0].processInstanceKey, "9");
+  assertEquals(res.body.prs[0].processKey, "9");
+  assertEquals(res.body.deliveries[0].processInstanceKey, "pk-live");
+  // The Camunda list: PRs then deliveries, each tagged with its `kind`.
+  assertEquals(res.body.page, { totalItems: 2 });
+  assertEquals(
+    res.body.items.map((i: any) => [i.kind, i.prKey ?? i.runKey, i.processInstanceKey]),
+    [
+      ["pr", "o/r#1", "9"],
+      ["delivery", "run-live", "pk-live"],
+    ],
+  );
+});
+
 test("a delivery run with no opt-in row flag surfaces autoResolveEscalations false and a null escalation", async () => {
   const app = memApp(
     [],

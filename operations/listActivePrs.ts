@@ -7,6 +7,7 @@
 // stays HERE (the runtime does not enforce OpenAPI `security`): when NANO_PR_WEBHOOK_SECRET is set,
 // callers must present it via the x-hook-secret header. Unset → open (unchanged default).
 
+import { listEnvelope, withProcessInstanceKey } from "../app/apiShape.ts";
 import { activeDeliveries, activePrs } from "../app/service.ts";
 import { buildVersionInfo, envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -41,7 +42,7 @@ export default defineOperation("listActivePrs", async ({ req }, app) => {
   if (readMs > STATUS_SLOW_MS) {
     app.log.warn("listActivePrs slow", { ms: readMs, prRows: prs.length, deliveryRows: deliveries.length });
   }
-  return { status: 200, body: { count: prs.length, prs, deliveries, version: { version, gitSha } } };
+  return { status: 200, body: activePrsBody(prs, deliveries, { version, gitSha }) };
 });
 
 /** The wall-clock budget over which a /status serve is logged as slow (issue #947: raised from the
@@ -50,3 +51,20 @@ export default defineOperation("listActivePrs", async ({ req }, app) => {
  *  regression signal an operator can grep for). The endpoint targets well under 1 s for a handful
  *  of rows now that the merge policy is served from the app's own projection. */
 const STATUS_SLOW_MS = 5_000;
+
+/** The /status body: the deprecated `prs`/`deliveries`/`count` (each row also carrying the canonical
+ *  `processInstanceKey` next to the deprecated `processKey`) plus the Camunda `{ items, page }` list —
+ *  ONE list over both kinds, discriminated by `kind` (`pr` | `delivery`; docs/api-conventions.md). */
+export function activePrsBody<P extends { processKey: string | null }, D extends { processKey: string | null }, V>(
+  prs: readonly P[],
+  deliveries: readonly D[],
+  version: V,
+) {
+  const prRows = prs.map(withProcessInstanceKey);
+  const deliveryRows = deliveries.map(withProcessInstanceKey);
+  const items = [
+    ...prRows.map((r) => ({ kind: "pr" as const, ...r })),
+    ...deliveryRows.map((r) => ({ kind: "delivery" as const, ...r })),
+  ];
+  return { count: prRows.length, prs: prRows, deliveries: deliveryRows, ...listEnvelope(items), version };
+}

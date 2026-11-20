@@ -14,19 +14,20 @@
 // The guard now reads the terminal-folded `ack_open`, never the base `status`.
 
 import { acknowledgeVia } from "../app/acknowledge.ts";
+import { pickKey } from "../app/apiShape.ts";
 import { featureReadModel } from "../app/featureReadModel.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
-const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
 export default defineOperation("acknowledgeDone", async ({ body }, app) => {
   if (!body || typeof body !== "object") {
     app.log.warn("acknowledge-done rejected: missing request body");
-    return { status: 400, body: { ok: false, error: "feature_key is required" } };
+    return { status: 400, body: { ok: false, error: "featureKey is required" } };
   }
 
-  const featureKey = str(body.feature_key);
-  if (!featureKey) return { status: 400, body: { ok: false, error: "feature_key is required" } };
+  // #972 dual-accept: the canonical `featureKey` wins over the deprecated `feature_key`.
+  const featureKey = pickKey(body, "featureKey", "feature_key");
+  if (!featureKey) return { status: 400, body: { ok: false, error: "featureKey is required" } };
 
   return acknowledgeVia(
     app,

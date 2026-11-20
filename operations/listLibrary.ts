@@ -7,6 +7,7 @@
 // listStagedProposals): when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the
 // x-hook-secret header; unset → open.
 
+import { listEnvelope, } from "../app/apiShape.ts";
 import { libraryEntryDto, listLibraryEntries } from "../app/deliveryGraphLibrary.ts";
 import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -20,5 +21,5 @@ export default defineOperation("listLibrary", async ({ req }, app) => {
   }
   const rows = await listLibraryEntries(app.data);
   const entries = rows.map(libraryEntryDto);
-  return { status: 200, body: { count: entries.length, entries } };
+  return { status: 200, body: { count: entries.length, entries, ...listEnvelope(entries) } };
 });

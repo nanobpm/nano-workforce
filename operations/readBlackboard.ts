@@ -10,6 +10,7 @@
 //          optional ?since=<id> returns only entries with id > since (incremental poll). `cursor` is
 //          the plan's current head id; pass it back as `since` on the next poll (Tier 2).
 
+import { listEnvelope, } from "../app/apiShape.ts";
 import { planKeyForToken, readBlackboardPage } from "../app/blackboard.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -25,5 +26,5 @@ export default defineOperation("readBlackboard", async ({ req }, app) => {
   const rawSince = req.query.get("since");
   const since = rawSince != null && /^\d+$/.test(rawSince) ? Number(rawSince) : undefined;
   const { entries, cursor } = await readBlackboardPage(app.data, planKey, { since });
-  return { status: 200, body: { planKey, entries, cursor } };
+  return { status: 200, body: { planKey, entries, ...listEnvelope(entries), cursor } };
 });

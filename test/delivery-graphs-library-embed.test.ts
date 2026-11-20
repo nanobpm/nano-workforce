@@ -63,8 +63,10 @@ test("#523/#467/#536: the Library list door default is module-anchored and hits 
   assert(spec.endsWith("delivery-graph/library"), `libraryUrl default "${spec}" must hit the listLibrary door`);
   assert(!spec.startsWith("/"), `default libraryUrl "${spec}" must not be absolute (App-View #279 resolution class)`);
   assert(spec.startsWith("../"), `default libraryUrl "${spec}" must step up out of /delivery-graphs/ (module-anchored, #467/#536)`);
-  // The list read consumes the door's `entries` array (one row per saved entry).
-  assert(/body\.entries/.test(LIBRARY_JS), "library.mount.js must render one row per `entries[]` item the listLibrary door returns");
+  // The list read consumes the door's Camunda `items` array (one row per saved entry), falling back to
+  // the deprecated `entries` alias (#972).
+  assert(/body\?\.items/.test(LIBRARY_JS), "library.mount.js must render one row per `items[]` entry the listLibrary door returns");
+  assert(/body\?\.entries/.test(LIBRARY_JS), "library.mount.js must still fall back to the deprecated `entries` alias");
 });
 
 test("#523: Reuse drives the compose fill seam over the shared host-bridge message", () => {

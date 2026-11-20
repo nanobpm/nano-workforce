@@ -11,6 +11,7 @@
 // The optional shared-secret guard stays HERE (the runtime does not enforce OpenAPI `security`): when
 // NANO_PR_WEBHOOK_SECRET is set, callers must present it via the x-hook-secret header — mirroring the
 // other read doors (getLineage / listActivePrs).
+import { listEnvelope, } from "../app/apiShape.ts";
 import { listStagedProposals } from "../app/deliveryGraphProposals.ts";
 import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -33,5 +34,5 @@ export default defineOperation("listStagedProposals", async ({ req }, app) => {
     createdAt: row.created_at,
     expiresAt: row.expires_at,
   }));
-  return { status: 200, body: { count: proposals.length, proposals } };
+  return { status: 200, body: { count: proposals.length, proposals, ...listEnvelope(proposals) } };
 });

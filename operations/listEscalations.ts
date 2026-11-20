@@ -13,6 +13,7 @@
 // The optional shared-secret guard stays HERE (the runtime does not enforce OpenAPI `security`):
 // when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the x-hook-secret header. Unset →
 // open (unchanged default), mirroring `listActivePrs`.
+import { listEnvelope, withProcessInstanceKey } from "../app/apiShape.ts";
 import { toEscalationView, userTasks } from "../app/userTasks.ts";
 import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -27,6 +28,6 @@ export default defineOperation("listEscalations", async ({ req }, app) => {
   const rows = await userTasks(app.data).all();
   const escalations = rows
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0))
-    .map(toEscalationView);
-  return { status: 200, body: { count: escalations.length, escalations } };
+    .map((row) => withProcessInstanceKey(toEscalationView(row)));
+  return { status: 200, body: { count: escalations.length, escalations, ...listEnvelope(escalations) } };
 });

@@ -15,19 +15,20 @@
 // on base `status` while the read model folds it terminal no longer trips the guard.
 
 import { acknowledgeVia } from "../app/acknowledge.ts";
+import { pickKey } from "../app/apiShape.ts";
 import { planReadModel } from "../app/planReadModel.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
-const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
 export default defineOperation("acknowledgeEpic", async ({ body }, app) => {
   if (!body || typeof body !== "object") {
     app.log.warn("acknowledge-epic rejected: missing request body");
-    return { status: 400, body: { ok: false, error: "plan_key is required" } };
+    return { status: 400, body: { ok: false, error: "planKey is required" } };
   }
 
-  const planKey = str(body.plan_key);
-  if (!planKey) return { status: 400, body: { ok: false, error: "plan_key is required" } };
+  // #972 dual-accept: the canonical `planKey` wins over the deprecated `plan_key`.
+  const planKey = pickKey(body, "planKey", "plan_key");
+  if (!planKey) return { status: 400, body: { ok: false, error: "planKey is required" } };
 
   return acknowledgeVia(
     app,

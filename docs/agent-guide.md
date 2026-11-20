@@ -31,8 +31,13 @@ curl -sS __BASE__/status  | jq   # tool: listActivePrs: every PR in flight
 checkout, then the release-baked `build-info.json` an npm install ships), so the endpoint
 everyone polls answers "is the fix live?" in one call.
 
-Each `/status` entry carries `prKey` (`owner/repo#123`), `status`, `round`, `processKey`
-(the **engine process-instance key**, the bridge to §5), `openEscalation`,
+`/status` lists every in-flight PR and delivery-graph run as ONE Camunda-shaped list,
+`items` (with `page.totalItems`); each row has a `kind` of `"pr"` or `"delivery"`. The older
+`prs`/`deliveries` arrays and `count` are deprecated aliases that are still returned for now.
+
+Each PR row carries `prKey` (`owner/repo#123`), `status`, `round`, `processInstanceKey`
+(the **engine process-instance key**, the bridge to §5; `processKey` is its deprecated
+alias), `openEscalation`,
 `activeWorker`/`leaseUntil` (an agent holds the round, or the job is just queued), and
 `updatedAt`.
 
@@ -51,7 +56,7 @@ merge?" is a read, not a guess):
 | `blockedBy` | why a *requested* merge will not proceed: `"env"` (the global switch is off) or `"human-approval"` (parked at the merge-approval task). `null` when the merge is effective — and when the run is converge-only (`requested: false`), which is a *choice*, not a block. |
 
 The same intent is on the engine variables of the loop itself: query the instance
-(`processKey`) for `autoMerge` — it is always seeded, so a missing `autoMerge` means a loop
+(`processInstanceKey`) for `autoMerge` — it is always seeded, so a missing `autoMerge` means a loop
 started before this version (read `convergeOnly` and invert it there).
 
 ---
@@ -79,7 +84,7 @@ curl -sS -X POST __BASE__/actions/start/convergence-loop \
 | `customInstructions` | string | OPTIONAL free-text steering appended to **every** converge round's agent prompt (review-round and adversarial-review) under a `## Operator custom instructions` block — e.g. `"commit as josh.wulf@camunda.com"`, `"don't touch file X"`, `"keep the diff small"`. Blank/whitespace is treated as absent (the prompt stays byte-identical to no-instructions); a non-string is a `400`. Persists across reconverge re-dispatches. Read it back as `hasCustomInstructions` on the PR's `/status` row. |
 
 Idempotent on the PR key: re-POSTing refreshes the record instead of starting a second
-loop. The 202 response echoes `prKey` and `processKey`.
+loop. The 202 response echoes `prKey` and `processInstanceKey` (`processKey` is a deprecated alias).
 
 `autoMerge` must be a JSON **boolean** — a string (`"true"`) is a `400` at every start door
 (`startConvergenceLoop`, `startFeature`), never a silent review-only run. To *read* the intent
@@ -110,7 +115,7 @@ curl -sS -X POST __BASE__/actions/start/feature \
   -d '{ "issue": "owner/repo#123", "baseBranch": "main", "confirmDefaultBase": true, "converge": true, "autoMerge": true }'
 ```
 
-Idempotent on the plan key. The 202 response echoes `planKey` and `processKey`, and the
+Idempotent on the plan key. The 202 response echoes `planKey` and `processInstanceKey` (`processKey` is a deprecated alias), and the
 plan's PRs appear in `/status` as ordinary convergence loops. Both doors accept
 `autoResolveEscalations` (default `false`), and it propagates to every child the run spawns.
 
@@ -217,12 +222,12 @@ The merge-stage statuses only ever appear when the run's merge policy is effecti
 
 ## 5. Debug: find engine instances and relate them to PRs
 
-`processKey` (DB column `process_key`) joins the app's record to the engine instance. Take it
+`processInstanceKey` (DB column `process_key`; the deprecated `processKey` alias carries the same value) joins the app's record to the engine instance. Take it
 from `/status`, then query the engine. Over MCP, the framework `urban_debug_*` tools front
 these same searches (§10).
 
 ```bash
-PK=<processKey>
+PK=<processInstanceKey>
 H='content-type: application/json'
 # State, BPMN process, start time:
 curl -sS -X POST __ENGINE__/process-instances/search -H "$H" -d "{\"filter\":{\"processInstanceKey\":\"$PK\"}}" | jq
@@ -240,7 +245,7 @@ An active incident is mirrored onto the PR row, so a PR showing an incident in t
 parked on an engine fault. The engine base comes from `NANOBPMN_BASE_URL` or
 `CAMUNDA_REST_ADDRESS`.
 
-Have a `processKey` but not the PR? Use `/status | jq '.prs[] | select(.processKey == "<PK>")'`.
+Have a `processInstanceKey` but not the PR? Use `/status | jq '.items[] | select(.processInstanceKey == "<PK>")'`.
 A terminal PR has left `/status`.
 
 ---
@@ -300,7 +305,7 @@ Validate a model or prompt change with `npm run layout:check`, `check:prompts`, 
 ## 8. Raise an issue or a PR against nano-workforce
 
 For a genuine orchestration bug or gap (not a transient repo/agent problem), file it against
-`nanobpm/nano-workforce`. Include the evidence: `prKey`, `processKey`, the parked element or
+`nanobpm/nano-workforce`. Include the evidence: `prKey`, `processInstanceKey`, the parked element or
 incident message (§5), and the BPMN or prompt file you suspect (§6).
 
 If you change code: open or claim an issue first, work in a worktree off `origin/main`, and

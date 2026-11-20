@@ -37,6 +37,7 @@ import type {
   AgentInstance as WireAgentInstance,
   AgentInstanceList as WireAgentInstanceList,
 } from "../../nano-generated/api-io.d.ts";
+import { listEnvelope } from "../apiShape.ts";
 
 /**
  * The narrow slice of the engine read model the historical-transcript consumer needs: the three
@@ -168,7 +169,7 @@ export async function listAgentInstances(
     const byTime = (b.creationDate ?? "").localeCompare(a.creationDate ?? "");
     return byTime !== 0 ? byTime : a.agentInstanceKey.localeCompare(b.agentInstanceKey);
   });
-  return { count: instances.length, generatedAt: new Date().toISOString(), instances };
+  return { count: instances.length, generatedAt: new Date().toISOString(), instances, ...listEnvelope(instances) };
 }
 
 /**
@@ -184,7 +185,7 @@ export async function readAgentHistory(
   query: AgentHistoryQuery = {},
 ): Promise<WireAgentHistory> {
   if (!present(agentInstanceKey)) {
-    return { agentInstanceKey: "", count: 0, generatedAt: new Date().toISOString(), records: [] };
+    return { agentInstanceKey: "", count: 0, generatedAt: new Date().toISOString(), records: [], ...listEnvelope([]) };
   }
   const filter: AgentHistoryFilter = {
     ...(query.role !== undefined ? { role: query.role } : {}),
@@ -205,6 +206,7 @@ export async function readAgentHistory(
     count: records.length,
     generatedAt: new Date().toISOString(),
     records,
+    ...listEnvelope(records),
   };
   if (summary !== null) out.instance = toWireInstance(summary);
   return out;

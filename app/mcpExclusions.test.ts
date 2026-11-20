@@ -34,7 +34,22 @@ function projectedOperations() {
 // dismiss) whose approval is a human click in the cockpit (ADR 0005 Decision 7), plus the
 // incident-retry remediation door (issue #931) — the human unstick action on an incident-parked
 // run. These — and ONLY these — must be excluded from the projected MCP tool surface.
-const EXPECTED_EXCLUDED = ["stageDeliveryGraph", "dispatchDeliveryGraph", "dismissProposal", "retryIncident", "cancelPrRun"];
+//
+// The four acknowledge/dismiss doors joined this set in #980: they exist solely for the cockpit
+// pages' Dismiss/Tick-off buttons (an operator filing a terminal row into History), are never
+// referenced by the agent guide/runbook, and their withdrawal keeps the serialized tools/list under
+// the #715 tractability byte budget.
+const EXPECTED_EXCLUDED = [
+  "stageDeliveryGraph",
+  "dispatchDeliveryGraph",
+  "dismissProposal",
+  "retryIncident",
+  "cancelPrRun",
+  "acknowledgeDone",
+  "acknowledgeEpic",
+  "acknowledgePr",
+  "acknowledgeDeliveryGraph",
+];
 
 // A representative set of agent-facing operations that MUST stay exposed as tools — the drive doors
 // (submit PR / epic / delivery-graph set), the pure compile/preview doors, and the read/orientation

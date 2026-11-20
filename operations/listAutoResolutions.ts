@@ -4,6 +4,7 @@
 // `reviewState` / `subject` / `kind`. Read-only projection over the ONE `escalation_auto_resolutions`
 // table (app/escalationSteward.ts) — no second source of truth. The optional shared-secret guard
 // mirrors `listEscalations`.
+import { listEnvelope, } from "../app/apiShape.ts";
 import {
   type EscalationAutoResolution,
   listAutoResolutions,
@@ -79,5 +80,5 @@ export default defineOperation("listAutoResolutions", async ({ query, req }, app
   const kind = str(query.kind);
   const records = (await listAutoResolutions(app.data, { reviewState, subjectKey: subject, kind })).map(toView);
   const pendingCount = await pendingAutoResolutionCount(app.data);
-  return { status: 200, body: { count: records.length, pendingCount, records } };
+  return { status: 200, body: { count: records.length, pendingCount, records, ...listEnvelope(records) } };
 });

@@ -183,7 +183,7 @@ test("listEscalations: empty when no open escalations", async () => {
   const { app } = memApp([], []);
   const res = await callList(app);
   assertEquals(res.status, 200);
-  assertEquals(res.body, { count: 0, escalations: [] });
+  assertEquals(res.body, { count: 0, escalations: [], items: [], page: { totalItems: 0 } });
 });
 
 // The optional shared-secret guard is captured at module load from NANO_PR_WEBHOOK_SECRET, so

@@ -114,6 +114,14 @@ test("an unknown PR returns an empty history (not a 404)", async () => {
   assertEquals(res.body.escalations, []);
 });
 
+test("resolves the PR by the canonical processInstanceKey, which wins over the deprecated processKey (#972)", async () => {
+  const res = (await handler(input({ processInstanceKey: "proc-7", processKey: "proc-unknown" }), escalatedThenResumed())) as Row;
+  const viaLegacy = (await handler(input({ processKey: "proc-7" }), escalatedThenResumed())) as Row;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.prKey, "o/r#7");
+  assertEquals(res.body, viaLegacy.body);
+});
+
 test("neither prKey nor processKey → 400", async () => {
   const res = (await handler(input({}), memApp({}))) as Row;
   assertEquals(res.status, 400);

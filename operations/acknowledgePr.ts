@@ -14,19 +14,20 @@
 // guard now reads the terminal-folded `ack_open`, never the base `status`.
 
 import { acknowledgeVia } from "../app/acknowledge.ts";
+import { pickKey } from "../app/apiShape.ts";
 import { pullRequestReadModel } from "../app/pullRequestReadModel.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
-const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
 export default defineOperation("acknowledgePr", async ({ body }, app) => {
   if (!body || typeof body !== "object") {
     app.log.warn("acknowledge-pr rejected: missing request body");
-    return { status: 400, body: { ok: false, error: "pr_key is required" } };
+    return { status: 400, body: { ok: false, error: "prKey is required" } };
   }
 
-  const prKey = str(body.pr_key);
-  if (!prKey) return { status: 400, body: { ok: false, error: "pr_key is required" } };
+  // #972 dual-accept: the canonical `prKey` wins over the deprecated `pr_key`.
+  const prKey = pickKey(body, "prKey", "pr_key");
+  if (!prKey) return { status: 400, body: { ok: false, error: "prKey is required" } };
 
   return acknowledgeVia(
     app,

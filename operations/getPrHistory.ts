@@ -9,6 +9,7 @@
 //
 // The optional shared-secret guard stays HERE (the runtime does not enforce OpenAPI `security`):
 // when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the x-hook-secret header.
+import { pickKey } from "../app/apiShape.ts";
 import { prHistory, prKeyForProcess } from "../app/prHistory.ts";
 import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -21,12 +22,12 @@ export default defineOperation("getPrHistory", async ({ query, req }, app) => {
     return { status: 401, body: { error: "unauthorized" } };
   }
   const rawPrKey = query.prKey;
-  const rawProcessKey = query.processKey;
   const prKeyArg = typeof rawPrKey === "string" ? rawPrKey.trim() : "";
-  const processKeyArg = typeof rawProcessKey === "string" ? rawProcessKey.trim() : "";
+  // #972 dual-accept: the canonical `processInstanceKey` wins over the deprecated `processKey`.
+  const processKeyArg = pickKey(query, "processInstanceKey", "processKey");
 
   if (!prKeyArg && !processKeyArg) {
-    return { status: 400, body: { error: "prKey or processKey is required" } };
+    return { status: 400, body: { error: "prKey or processInstanceKey is required" } };
   }
 
   const prKey = prKeyArg || (await prKeyForProcess(app.data, processKeyArg));

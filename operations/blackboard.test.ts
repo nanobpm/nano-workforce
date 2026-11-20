@@ -80,6 +80,9 @@ test("POST appends then GET reads back, scoped by the token's plan", async () =>
   assertEquals(get.body.entries.length, 1);
   assertEquals(get.body.entries[0].files, ["engine/tests.rs"]);
   assertEquals(get.body.entries[0].kind, "file-claim");
+  // #972: the Camunda list shape mirrors the deprecated `entries` alias.
+  assertEquals(get.body.items, get.body.entries);
+  assertEquals(get.body.page, { totalItems: 1 });
 });
 
 test("POST with a blank body → 400", async () => {
