@@ -147,8 +147,12 @@ export const MCP_TOOL_COUNT_BUDGET = 61;
  * liveness sibling of `listEscalations`) plus the `incident` field on the status row schemas.
  * Measured 91,069 bytes serialized (over the old ceiling's headroom). Deliberate, documented growth
  * of a real new read surface — not schema fat.
+ *
+ * RAISE PROVENANCE — 92_000 → 93_000 (#970): quoting summaries/descriptions containing ' #' so YAML
+ * no longer truncates them at the comment marker restores their full text. Measured 92,734 bytes
+ * serialized. Deliberate, documented growth of restored description text — not schema fat.
  */
-export const MCP_SURFACE_BYTES_BUDGET = 92_000;
+export const MCP_SURFACE_BYTES_BUDGET = 93_000;
 
 /**
  * The eagerly-loaded curated subset MUST stay materially smaller than the full surface — otherwise it
