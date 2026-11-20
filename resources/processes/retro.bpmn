@@ -3,6 +3,12 @@
   <bpmn:process id="retro" name="Epic Retrospective" isExecutable="true">
     <bpmn:extensionElements>
       <nano:shapes>
+        <nano:shape id="RetroStartIn" name="Retro — start input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="repo" type="string" />
+          <nano:extend name="issueUrl" type="string" />
+          <nano:extend name="agentSlaTimeout" type="string" />
+        </nano:shape>
         <nano:shape id="RetroGatherIn" name="Gather learnings — input">
           <nano:extend name="planKey" type="string" />
         </nano:shape>
@@ -32,6 +38,11 @@
       </nano:shapes>
     </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Epic complete">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RetroStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>f_start</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:serviceTask id="gather" name="Gather learnings">

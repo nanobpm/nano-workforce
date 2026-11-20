@@ -11,6 +11,28 @@
   <bpmn:process id="convergence-loop" name="PR Review Convergence" isExecutable="true">
     <bpmn:extensionElements>
       <nano:shapes>
+        <nano:shape id="ConvergenceStartIn" name="PR review convergence — start input">
+          <nano:extend name="repo" type="string" />
+          <nano:extend name="prNumber" type="integer" />
+          <nano:extend name="prUrl" type="string" />
+          <nano:extend name="prKey" type="string" />
+          <nano:extend name="round" type="integer" />
+          <nano:extend name="maxRounds" type="integer" optional="true" />
+          <nano:extend name="reviewWaitTimeout" type="string" optional="true" />
+          <nano:extend name="agentSlaTimeout" type="string" />
+          <nano:extend name="ackRetryRound" type="integer" optional="true" />
+          <nano:extend name="ackRetryMax" type="integer" optional="true" />
+          <nano:extend name="advPass" type="integer" optional="true" />
+          <nano:extend name="advMax" type="integer" optional="true" />
+          <nano:extend name="rootRequestKey" type="string" optional="true" />
+          <nano:extend name="autoMerge" type="boolean" optional="true" />
+          <nano:extend name="convergeOnly" type="boolean" optional="true" />
+          <nano:extend name="humanApproval" type="boolean" optional="true" />
+          <nano:extend name="autoResolveEscalations" type="boolean" optional="true" />
+          <nano:extend name="abandonUrl" type="string" optional="true" />
+          <nano:extend name="abandonBrief" type="string" optional="true" />
+          <nano:extend name="customInstructions" type="string" optional="true" />
+        </nano:shape>
         <nano:shape id="PrReviewRoundIn" name="PR review round — input">
           <nano:extend name="prUrl" type="string" />
           <nano:extend name="repo" type="string" />
@@ -135,6 +157,11 @@
       </nano:shapes>
     </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="PR submitted">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ConvergenceStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>f_start</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:serviceTask id="review-round" name="Review round (agent)">

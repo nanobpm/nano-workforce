@@ -3,6 +3,25 @@
   <bpmn:process id="implement-cell" name="Implement cell" isExecutable="true">
     <bpmn:extensionElements>
       <nano:shapes>
+        <nano:shape id="CellTask" name="Implement cell — task slice">
+          <nano:extend name="id" type="string" />
+          <nano:extend name="title" type="string" optional="true" />
+          <nano:extend name="prompt" type="string" />
+        </nano:shape>
+        <nano:shape id="ImplementCellStartIn" name="Implement cell — start input">
+          <nano:reference name="task" ref="CellTask" />
+          <nano:extend name="baseBranch" type="string" />
+          <nano:extend name="baseBranchBrief" type="string" optional="true" />
+          <nano:extend name="resolvedArtifacts" type="string" list="true" optional="true" />
+          <nano:extend name="customInstructions" type="string" optional="true" />
+          <nano:extend name="transcriptUrlBase" type="string" optional="true" />
+          <nano:extend name="escalationAssignee" type="string" optional="true" />
+          <nano:extend name="escalationSlaTimeout" type="string" />
+          <nano:extend name="agentSlaTimeout" type="string" />
+          <nano:extend name="subjectKey" type="string" />
+          <nano:extend name="blackboardBrief" type="string" optional="true" />
+          <nano:extend name="resolvedDepsBrief" type="string" optional="true" />
+        </nano:shape>
         <nano:shape id="RecordEscalationIn" name="Record cell escalation — input">
           <nano:extend name="subjectKey" type="string" />
           <nano:extend name="status" type="string" optional="true" />
@@ -17,6 +36,11 @@
       </nano:shapes>
     </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Task">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ImplementCellStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>ic_toSliceBranch</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:serviceTask id="slice-branch" name="Stamp slice branch">

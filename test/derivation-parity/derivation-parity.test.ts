@@ -180,7 +180,7 @@ test("loop() inserts a gateway head, so back-edges cannot merge into a task", ()
 // `FlowNode` union has no such node; AGENTS.md). Prove the blockers are real AND
 // that they are the ONLY divergence, so the parked entry is a complete, verified
 // port held ready — not an abandoned one.
-test("retro's complete port differs from its golden by ONLY the agent-task marker + SLA boundaries", () => {
+test("retro's complete port differs from its golden by ONLY the agent-task marker + SLA boundaries (+ start envelope)", () => {
   const golden = readFileSync(goldenPath("retro"), "utf8");
   const derived = declarativeToBpmn(retroFlow);
   const markers = (xml: string): number =>
@@ -218,7 +218,11 @@ test("retro's complete port differs from its golden by ONLY the agent-task marke
     .replace(/^[ \t]*<(?:\w+:)?serviceTask\b[^>]*\bid="record-(?:conformance|synthesize)-sla"[\s\S]*?<\/(?:\w+:)?serviceTask>\r?\n/gm, "")
     .replace(/^[ \t]*<(?:\w+:)?sequenceFlow\b[^>]*\bsourceRef="be_[^"]*"[^>]*\/>[ \t]*\r?\n/gm, "")
     .replace(/^[ \t]*<(?:\w+:)?sequenceFlow\b[^>]*\bsourceRef="record-(?:conformance|synthesize)-sla"[^>]*\/>[ \t]*\r?\n/gm, "")
-    .replace(/^[ \t]*<(?:\w+:)?incoming>f_(?:conformanceSla|synthesizeSla)(?:ToEsc)?<\/(?:\w+:)?incoming>[ \t]*\r?\n/gm, "");
+    .replace(/^[ \t]*<(?:\w+:)?incoming>f_(?:conformanceSla|synthesizeSla)(?:ToEsc)?<\/(?:\w+:)?incoming>[ \t]*\r?\n/gm, "")
+    // the start-event data envelope (issue #975): the builder's start event carries no extension
+    // elements, so strip the golden's `io.nanobpm.dataEnvelope.in` start declaration too. Its field
+    // set is pinned against the app seed by app/startEnvelopeDrift.test.ts.
+    .replace(/(<(?:\w+:)?startEvent\b[^>]*>)\s*<(?:\w+:)?extensionElements>[\s\S]*?<\/(?:\w+:)?extensionElements>/, "$1");
   assertEquals(markers(unmarked), 0, "the strip must remove every marker line");
   assertEquals(boundaries(unmarked), 0, "the strip must remove every SLA boundary");
   const expected = normalize(unmarked);
