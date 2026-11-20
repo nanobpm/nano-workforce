@@ -971,6 +971,62 @@ test("pollJobActivation excludes a non-agent job and reports an unactivated agen
 // source also keeps the returned key aligned with the DB-persisted `String(...)` value and dodges
 // JS 53-bit precision limits for large 64-bit keys (which is why keys travel as strings in
 // practice). `submitPr` must stringify it both in the returned body and the persisted row.
+// Issue #971: a PR in `merging` must surface the merge-loop agent (fix-ci / rebase) that holds
+// its job, and clear it when the job completes — not report `activeWorker: null` (looks wedged).
+for (const jobType of ["senior:fix-ci", "senior:rebase"]) {
+  test(`pollJobActivation surfaces a leased ${jobType} merge agent on a merging PR and clears it on completion`, async () => {
+    const row = {
+      pr_key: "owner/repo#30",
+      status: "merging",
+      process_key: "PI-30",
+      active_worker: null as string | null,
+      lease_until: null as string | null,
+      updated_at: "t0",
+    };
+    const data = jobActivationData([row]);
+    const headers = { "content-type": "application/json" };
+    const prevFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = jobActivationFetch({
+        "PI-30": [{ type: jobType, worker: "agent-m", deadline: "2024-01-01T00:20:00Z", state: "CREATED" }],
+      }) as typeof fetch;
+      await pollJobActivationImpl(data, "http://engine/v2", headers);
+      assertEquals(row.active_worker, "agent-m");
+      assertEquals(row.lease_until, "2024-01-01T00:20:00Z");
+      // Job completes: no open job left → lease clears.
+      globalThis.fetch = jobActivationFetch({ "PI-30": [] }) as typeof fetch;
+      await pollJobActivationImpl(data, "http://engine/v2", headers);
+      assertEquals(row.active_worker, null);
+      assertEquals(row.lease_until, null);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+  });
+}
+
+test("pollJobActivation does not let a convergence-agent job masquerade on a merging PR", async () => {
+  const row = {
+    pr_key: "owner/repo#31",
+    status: "merging",
+    process_key: "PI-31",
+    active_worker: null as string | null,
+    lease_until: null as string | null,
+    updated_at: "t0",
+  };
+  const data = jobActivationData([row]);
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = jobActivationFetch(
+    { "PI-31": [{ type: "senior:pr-review", worker: "stale", deadline: "x", state: "CREATED" }] },
+    { ignoreTypeFilter: true },
+  ) as typeof fetch;
+  try {
+    await pollJobActivationImpl(data, "http://engine/v2", { "content-type": "application/json" });
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(row.active_worker, null);
+});
+
 test("submitPr stringifies a numeric processInstanceKey (contract: string | null)", async () => {
   await withGithubOff(async () => {
     const PR_KEY = "owner/repo#7";

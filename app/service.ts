@@ -158,6 +158,16 @@ const ADVERSARIAL_JOB_TYPE = "senior:adversarial-review";
  * flashes a phantom "queued". Typed `readonly string[]` (not `as const`) so `.includes(aString)`
  * needs no `as` cast at the read site. */
 const CONVERGENCE_AGENT_JOB_TYPES: readonly string[] = [REVIEW_JOB_TYPE, ADVERSARIAL_JOB_TYPE];
+/** Every external-agent job type the merge loop (`merge-loop.bpmn`) parks on while the PR reads
+ * `merging` — the CI-fix cell (`senior:fix-ci`) and the rebase cell (`senior:rebase`). Issue #971:
+ * without these, a PR in `merging` reported `activeWorker: null` while an agent held the job. */
+const MERGE_AGENT_JOB_TYPES: readonly string[] = ["senior:fix-ci", "senior:rebase"];
+/** The ONE status → agent-job-types map `pollJobActivation` reconciles against (keyed on the
+ * DERIVED status; the PR row's `process_key` is the instance of that stage). */
+const AGENT_JOB_TYPES_BY_STATUS: Readonly<Record<string, readonly string[]>> = {
+  converging: CONVERGENCE_AGENT_JOB_TYPES,
+  merging: MERGE_AGENT_JOB_TYPES,
+};
 
 /** Default round cap before the loop escalates to a human. A per-submit override (submit form /
  * webhook / start action) takes precedence; this env var sets the fleet-wide default. The cap
@@ -3019,7 +3029,8 @@ export async function pollJobActivationImpl(
     // a PR whose instance was terminated out-of-band keeps its base `status` frozen at `converging`
     // but reads `abandoned` on `derived_status`, so a base read would leave `active_worker`/
     // `lease_until` set on a dead run (a phantom "agent working"). Writes stay on the base `prs`.
-    if (pr.derived_status !== "converging") {
+    const agentJobTypes = AGENT_JOB_TYPES_BY_STATUS[pr.derived_status ?? ""];
+    if (!agentJobTypes) {
       if (pr.active_worker || pr.lease_until) {
         await prs(data).update(pr.pr_key, {
           active_worker: null,
@@ -3055,7 +3066,7 @@ export async function pollJobActivationImpl(
             // (`senior:pr-review`) and `adversarial-review` (`senior:adversarial-review`) without
             // leaving `converging`, so filtering on only one would clear the lease mid-handoff and
             // report "queued" while the other agent is actively working (issue #845 review).
-            type: { $in: [...CONVERGENCE_AGENT_JOB_TYPES] },
+            type: { $in: [...agentJobTypes] },
             processInstanceKey: pr.process_key,
             state: "CREATED",
           },
@@ -3074,7 +3085,7 @@ export async function pollJobActivationImpl(
           (j) =>
             typeof j.worker === "string" &&
             j.worker.length > 0 &&
-            CONVERGENCE_AGENT_JOB_TYPES.includes(j.type ?? ""),
+            agentJobTypes.includes(j.type ?? ""),
         )
         .sort((a, b) => (a.deadline ?? "").localeCompare(b.deadline ?? ""))
         .pop();
