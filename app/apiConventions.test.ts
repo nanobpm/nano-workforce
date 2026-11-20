@@ -137,7 +137,10 @@ function successSchemas(op: OperationInfo): unknown[] {
 }
 
 function listViolation(doc: OpenApiDoc, op: OperationInfo): string | null {
-  for (const schema of successSchemas(op)) {
+  const schemas = successSchemas(op);
+  // Fail closed: a list op with no 2xx response schema declares neither items nor page.totalItems.
+  if (schemas.length === 0) return `list:${op.operationId}`;
+  for (const schema of schemas) {
     const props = topProps(doc, schema);
     const hasItems = props.items !== undefined && isArraySchema(doc, props.items);
     const page = topProps(doc, props.page);
@@ -207,6 +210,12 @@ paths:
                 type: object
                 properties:
                   rows: { type: array, items: { type: object, properties: { processKey: { type: string, deprecated: true } } } }
+  /schemaless:
+    get:
+      operationId: listSchemaless
+      responses:
+        "200":
+          description: ok
 components:
   schemas:
     Good:
@@ -218,6 +227,7 @@ components:
   const v = collectViolations(spec);
   assert(v.includes("list:listBad"), JSON.stringify(v));
   assert(v.includes("key:listBad:response200.rows[]:processKey"), JSON.stringify(v));
+  assert(v.includes("list:listSchemaless"), JSON.stringify(v));
   assert(!v.some((x) => x.includes("listGood")), JSON.stringify(v));
 });
 
