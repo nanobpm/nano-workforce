@@ -1,3 +1,27 @@
+## [0.213.0](https://github.com/nanobpm/nano-workforce/compare/v0.212.0...v0.213.0) (2026-11-20)
+
+### ⚠ BREAKING CHANGES
+
+* **api:** v0.212.0 is the release that carried both shapes; this
+release removes the legacy names. API clients must switch to the
+canonical names (or stay pinned to v0.212.0):
+- `processKey` / `process_key` on responses → `processInstanceKey`;
+  `getPrHistory?processKey=` → `?processInstanceKey=`.
+- Transcript/supply `bpmnProcessId` → `processDefinitionId`.
+- `acknowledge*` bodies: `pr_key`/`feature_key`/`plan_key`/`run_key` →
+  `prKey`/`featureKey`/`planKey`/`runKey`.
+- List responses: the per-list arrays (`prs`/`deliveries`, `escalations`,
+  `incidents`, `records`, `threads`, `instances`, `proposals`, `entries`,
+  `transcripts`) and `count` → `items` + `page.totalItems`. `/status`
+  returns a single `items` list where each row has `kind: "pr"|"delivery"`.
+  The blackboard keeps its top-level `cursor`.
+
+Signed-off-by: Josh Wulf <josh.wulf@camunda.com>
+
+### Features
+
+* **api:** remove deprecated processKey and legacy list fields ([#982](https://github.com/nanobpm/nano-workforce/issues/982)) ([93cdafb](https://github.com/nanobpm/nano-workforce/commit/93cdafb1c8a896339173e724aa264cf7bf838846)), closes [#972](https://github.com/nanobpm/nano-workforce/issues/972) [#972](https://github.com/nanobpm/nano-workforce/issues/972) [#972](https://github.com/nanobpm/nano-workforce/issues/972)
+
 ## [0.212.0](https://github.com/nanobpm/nano-workforce/compare/v0.211.4...v0.212.0) (2026-11-20)
 
 ### Features
