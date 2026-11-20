@@ -227,7 +227,8 @@ test("#713: the correlation registry is demoted to drill-in context — a link a
     assertEquals(c.jobKey, "6494");
     assertEquals(c.stream, composeStreamId("wk-a", "6494"));
     assertEquals(c.processInstanceKey, "4612");
-    assertEquals(c.bpmnProcessId, "plan-fanout");
+    assertEquals(c.processDefinitionId, "plan-fanout");
+    assert(!("bpmnProcessId" in c), "#972: the BPMN process id rides only under its Camunda name");
     assertEquals(c.planKey, "o/r#142");
   } finally {
     correlationFamily.teardown?.();

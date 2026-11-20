@@ -32,12 +32,11 @@ checkout, then the release-baked `build-info.json` an npm install ships), so the
 everyone polls answers "is the fix live?" in one call.
 
 `/status` lists every in-flight PR and delivery-graph run as ONE Camunda-shaped list,
-`items` (with `page.totalItems`); each row has a `kind` of `"pr"` or `"delivery"`. The older
-`prs`/`deliveries` arrays and `count` are deprecated aliases that are still returned for now.
+`items` (with `page.totalItems`); each row has a `kind` of `"pr"` or `"delivery"`. (The
+legacy `prs`/`deliveries` arrays and `count` were removed in the breaking release after v0.212.0 — #972.)
 
 Each PR row carries `prKey` (`owner/repo#123`), `status`, `round`, `processInstanceKey`
-(the **engine process-instance key**, the bridge to §5; `processKey` is its deprecated
-alias), `openEscalation`,
+(the **engine process-instance key**, the bridge to §5), `openEscalation`,
 `activeWorker`/`leaseUntil` (an agent holds the round, or the job is just queued), and
 `updatedAt`.
 
@@ -84,7 +83,7 @@ curl -sS -X POST __BASE__/actions/start/convergence-loop \
 | `customInstructions` | string | OPTIONAL free-text steering appended to **every** converge round's agent prompt (review-round and adversarial-review) under a `## Operator custom instructions` block — e.g. `"commit as josh.wulf@camunda.com"`, `"don't touch file X"`, `"keep the diff small"`. Blank/whitespace is treated as absent (the prompt stays byte-identical to no-instructions); a non-string is a `400`. Persists across reconverge re-dispatches. Read it back as `hasCustomInstructions` on the PR's `/status` row. |
 
 Idempotent on the PR key: re-POSTing refreshes the record instead of starting a second
-loop. The 202 response echoes `prKey` and `processInstanceKey` (`processKey` is a deprecated alias).
+loop. The 202 response echoes `prKey` and `processInstanceKey`.
 
 `autoMerge` must be a JSON **boolean** — a string (`"true"`) is a `400` at every start door
 (`startConvergenceLoop`, `startFeature`), never a silent review-only run. To *read* the intent
@@ -115,7 +114,7 @@ curl -sS -X POST __BASE__/actions/start/feature \
   -d '{ "issue": "owner/repo#123", "baseBranch": "main", "confirmDefaultBase": true, "converge": true, "autoMerge": true }'
 ```
 
-Idempotent on the plan key. The 202 response echoes `planKey` and `processInstanceKey` (`processKey` is a deprecated alias), and the
+Idempotent on the plan key. The 202 response echoes `planKey` and `processInstanceKey`, and the
 plan's PRs appear in `/status` as ordinary convergence loops. Both doors accept
 `autoResolveEscalations` (default `false`), and it propagates to every child the run spawns.
 
@@ -222,7 +221,7 @@ The merge-stage statuses only ever appear when the run's merge policy is effecti
 
 ## 5. Debug: find engine instances and relate them to PRs
 
-`processInstanceKey` (DB column `process_key`; the deprecated `processKey` alias carries the same value) joins the app's record to the engine instance. Take it
+`processInstanceKey` (DB column `process_key`) joins the app's record to the engine instance. Take it
 from `/status`, then query the engine. Over MCP, the framework `urban_debug_*` tools front
 these same searches (§10).
 

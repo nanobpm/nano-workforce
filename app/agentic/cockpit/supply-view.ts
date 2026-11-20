@@ -65,7 +65,7 @@ export interface SupplyCorrelationReport {
   /** The owning process instance key, if known. */
   readonly processInstanceKey?: string;
   /** The BPMN process id, if known. */
-  readonly bpmnProcessId?: string;
+  readonly processDefinitionId?: string;
   /** The BPMN element id, if known. */
   readonly elementId?: string;
   /** The plan / epic key, if known. */
@@ -97,7 +97,7 @@ export interface JobCorrelationView {
   /** The owning process instance key, if known. */
   readonly processInstanceKey?: string;
   /** The BPMN process id, if known. */
-  readonly bpmnProcessId?: string;
+  readonly processDefinitionId?: string;
   /** The BPMN element id, if known. */
   readonly elementId?: string;
   /** The plan / epic key, if known. */
@@ -182,7 +182,7 @@ function liveness(worker: SupplyWorkerReport, staleAfterMs: number): Liveness {
 /** A single stable human label for a job's process instance / plan (empty parts are dropped). */
 function correlationLabel(c: SupplyCorrelationReport): string {
   const parts: string[] = [];
-  if (c.bpmnProcessId !== undefined) parts.push(c.bpmnProcessId);
+  if (c.processDefinitionId !== undefined) parts.push(c.processDefinitionId);
   if (c.elementId !== undefined) parts.push(c.elementId);
   if (c.processInstanceKey !== undefined) parts.push(`inst ${c.processInstanceKey}`);
   if (c.planKey !== undefined) parts.push(c.planKey);
@@ -195,7 +195,7 @@ function correlationView(c: SupplyCorrelationReport): JobCorrelationView {
     stream: c.stream,
     label: correlationLabel(c),
     ...(c.processInstanceKey !== undefined ? { processInstanceKey: c.processInstanceKey } : {}),
-    ...(c.bpmnProcessId !== undefined ? { bpmnProcessId: c.bpmnProcessId } : {}),
+    ...(c.processDefinitionId !== undefined ? { processDefinitionId: c.processDefinitionId } : {}),
     ...(c.elementId !== undefined ? { elementId: c.elementId } : {}),
     ...(c.planKey !== undefined ? { planKey: c.planKey } : {}),
   };

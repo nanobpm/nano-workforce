@@ -23,8 +23,8 @@ export default defineOperation("getPrHistory", async ({ query, req }, app) => {
   }
   const rawPrKey = query.prKey;
   const prKeyArg = typeof rawPrKey === "string" ? rawPrKey.trim() : "";
-  // #972 dual-accept: the canonical `processInstanceKey` wins over the deprecated `processKey`.
-  const processKeyArg = pickKey(query, "processInstanceKey", "processKey");
+  // #972: the canonical Camunda/nwf name `processInstanceKey` (its legacy alias was removed).
+  const processKeyArg = pickKey(query, "processInstanceKey");
 
   if (!prKeyArg && !processKeyArg) {
     return { status: 400, body: { error: "prKey or processInstanceKey is required" } };

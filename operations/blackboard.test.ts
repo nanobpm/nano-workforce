@@ -77,11 +77,11 @@ test("POST appends then GET reads back, scoped by the token's plan", async () =>
   const get = await call(app, "GET", { token: "tok" });
   assertEquals(get.status, 200);
   assertEquals(get.body.planKey, "o/r#1");
-  assertEquals(get.body.entries.length, 1);
-  assertEquals(get.body.entries[0].files, ["engine/tests.rs"]);
-  assertEquals(get.body.entries[0].kind, "file-claim");
-  // #972: the Camunda list shape mirrors the deprecated `entries` alias.
-  assertEquals(get.body.items, get.body.entries);
+  assertEquals(get.body.items.length, 1);
+  assertEquals(get.body.items[0].files, ["engine/tests.rs"]);
+  assertEquals(get.body.items[0].kind, "file-claim");
+  // #972: the Camunda list shape — the legacy `entries` array is gone; `cursor` stays.
+  assertEquals(Object.keys(get.body).sort(), ["cursor", "items", "page", "planKey"]);
   assertEquals(get.body.page, { totalItems: 1 });
 });
 
@@ -121,9 +121,9 @@ test("GET ?since returns only newer entries", async () => {
   await call(app, "POST", { token: "tok" }, { body: "one" });
   await call(app, "POST", { token: "tok" }, { body: "two" });
   const all = await call(app, "GET", { token: "tok" });
-  const since = String(all.body.entries[0].id);
+  const since = String(all.body.items[0].id);
   const tail = await call(app, "GET", { token: "tok", since });
-  assertEquals(tail.body.entries.map((e: { body: string }) => e.body), ["two"]);
+  assertEquals(tail.body.items.map((e: { body: string }) => e.body), ["two"]);
 });
 
 test("GET returns a cursor at the plan head for incremental polling (Tier 2)", async () => {
@@ -132,10 +132,10 @@ test("GET returns a cursor at the plan head for incremental polling (Tier 2)", a
   await call(app, "POST", { token: "tok" }, { body: "one" });
   await call(app, "POST", { token: "tok" }, { body: "two" });
   const all = await call(app, "GET", { token: "tok" });
-  assertEquals(all.body.cursor, all.body.entries[1].id, "cursor is the head id");
+  assertEquals(all.body.cursor, all.body.items[1].id, "cursor is the head id");
   // Poll from the cursor: caught up, cursor holds.
   const caughtUp = await call(app, "GET", { token: "tok", since: String(all.body.cursor) });
-  assertEquals(caughtUp.body.entries, []);
+  assertEquals(caughtUp.body.items, []);
   assertEquals(caughtUp.body.cursor, all.body.cursor);
 });
 
@@ -209,9 +209,9 @@ test("POST kind='contract' persists the contract kind and round-trips through GE
   assertEquals(post.body.contractConflicts, []);
 
   const get = await call(app, "GET", { token: "tok" });
-  assertEquals(get.body.entries.length, 1);
+  assertEquals(get.body.items.length, 1);
   // The store's normaliser would coerce an unknown kind to 'note'; the adapter restores 'contract'.
-  assertEquals(get.body.entries[0].kind, "contract");
+  assertEquals(get.body.items[0].kind, "contract");
 });
 
 test("POST kind='contract' reintroducing a rejected synonym surfaces a declaration conflict (#223/#227)", async () => {

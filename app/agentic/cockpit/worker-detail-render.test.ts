@@ -43,7 +43,7 @@ const report: SupplyReport = {
     {
       jobKey: "6494",
       stream: "job:6494",
-      bpmnProcessId: "plan-fanout",
+      processDefinitionId: "plan-fanout",
       processInstanceKey: "4612",
       planKey: "o/r#142",
     },

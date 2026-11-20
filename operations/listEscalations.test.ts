@@ -113,8 +113,8 @@ test("listEscalations: round-trip — the listed userTaskKey is exactly what com
 
   const listed = await callList(app);
   assertEquals(listed.status, 200);
-  assertEquals(listed.body.count, 1);
-  const esc = listed.body.escalations[0];
+  assertEquals(listed.body.page.totalItems, 1);
+  const esc = listed.body.items[0];
   assertEquals(esc.userTaskKey, "ut-answer");
   assertEquals(esc.kind, "wait-answer");
   assertEquals(esc.prKey, "acme/repo#7");
@@ -130,7 +130,7 @@ test("listEscalations: round-trip — the listed userTaskKey is exactly what com
   // The answered task's read-model row is dropped, so a re-list no longer shows it.
   assertEquals(stores.user_tasks, []);
   const reListed = await callList(app);
-  assertEquals(reListed.body.count, 0);
+  assertEquals(reListed.body.page.totalItems, 0);
 });
 
 test("listEscalations: lists across all four escalation kinds, newest-updated first", async () => {
@@ -167,13 +167,13 @@ test("listEscalations: lists across all four escalation kinds, newest-updated fi
 
   const res = await callList(app);
   assertEquals(res.status, 200);
-  assertEquals(res.body.count, 4);
+  assertEquals(res.body.page.totalItems, 4);
   assertEquals(
-    res.body.escalations.map((e: { userTaskKey: string }) => e.userTaskKey),
+    res.body.items.map((e: { userTaskKey: string }) => e.userTaskKey),
     ["ut-pr", "ut-plan", "ut-trial", "ut-feat"],
   );
   // Non-PR subjects carry a null prKey; the PR subject carries the pr key.
-  const byKey = Object.fromEntries(res.body.escalations.map((e: { userTaskKey: string }) => [e.userTaskKey, e]));
+  const byKey = Object.fromEntries(res.body.items.map((e: { userTaskKey: string }) => [e.userTaskKey, e]));
   assertEquals(byKey["ut-pr"].prKey, "acme/repo#7");
   assertEquals(byKey["ut-plan"].prKey, null);
   assertEquals(byKey["ut-feat"].subjectType, "feature");
@@ -183,7 +183,7 @@ test("listEscalations: empty when no open escalations", async () => {
   const { app } = memApp([], []);
   const res = await callList(app);
   assertEquals(res.status, 200);
-  assertEquals(res.body, { count: 0, escalations: [], items: [], page: { totalItems: 0 } });
+  assertEquals(res.body, { items: [], page: { totalItems: 0 } });
 });
 
 // The optional shared-secret guard is captured at module load from NANO_PR_WEBHOOK_SECRET, so
@@ -207,7 +207,7 @@ test("listEscalations: shared-secret guard — 401 without x-hook-secret, 200 wi
       // biome-ignore lint/suspicious/noExplicitAny: test harness cast, mirrors sibling op tests
     )) as any;
     assertEquals(ok.status, 200);
-    assert("count" in ok.body);
+    assert("items" in ok.body);
   } finally {
     if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
     else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;

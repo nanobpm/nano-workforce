@@ -41,16 +41,16 @@ Top-level fields that are not per-item may sit next to it (`generatedAt`, `versi
 The guard treats an operation as a list if it is one of the operations named in #972, or if its
 `operationId` starts with `list` or `search`.
 
-### Migration (additive phase)
+### Migration (completed)
 
-During the additive phase (#972 delivery steps 2–3) every list response returns `items` and
-`page.totalItems` **next to** its legacy array and `count`, which are marked `deprecated: true`
-in `openapi.yaml`. Likewise every response that carried `processKey` also carries
-`processInstanceKey`, transcripts carry `processDefinitionId` next to `bpmnProcessId`, and
-requests accept both names (the canonical one wins): `getPrHistory?processInstanceKey=` (alias
-`processKey`) and the `acknowledge*` bodies' `prKey`/`featureKey`/`planKey`/`runKey` (aliases
-`pr_key`/`feature_key`/`plan_key`/`run_key`). Clients should switch now; the deprecated names
-are removed in a later breaking release.
+The additive phase (#972 delivery steps 2–3) shipped in **v0.212.0**: that release returned
+`items` + `page.totalItems` next to the legacy arrays and `count`, `processInstanceKey` next to
+`processKey`, `processDefinitionId` next to `bpmnProcessId`, and accepted both request names.
+The following breaking release (#972 step 4) **removed** every legacy name: list responses are
+only `{ items, page: { totalItems } }` (plus non-per-item top-level fields), engine keys use only
+their Camunda names, and requests accept only the canonical names (`getPrHistory?processInstanceKey=`;
+`acknowledge*` bodies `prKey`/`featureKey`/`planKey`/`runKey`). Clients pin a release, so a client
+still on the legacy names should stay on v0.212.0 until it migrates.
 
 ### Decision: `listActivePrs` is one list with a `kind` discriminator
 
@@ -72,15 +72,6 @@ self-describing, and clients that want one kind filter on it
 
 ## Ratchet
 
-`app/apiConventions.baseline.json` lists the violations that existed when the guard was added.
-The test fails when:
-
-- a **new** violation appears (fix it; don't add it to the baseline), or
-- a baselined violation **disappears** (shrink the baseline in the same PR).
-
-Fields marked `deprecated: true` still count until they are removed. To regenerate the baseline
-after a deliberate fix:
-
-```sh
-NWF_API_BASELINE_WRITE=1 node --experimental-strip-types --test app/apiConventions.test.ts
-```
+`app/apiConventions.baseline.json` is **empty**: the guard fully enforces. The test fails when a
+violation appears (fix it — don't baseline it), and a dedicated test keeps the baseline empty.
+Any field marked `deprecated: true` that breaks a convention counts as a violation.

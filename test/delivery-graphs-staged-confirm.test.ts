@@ -52,7 +52,7 @@ function harness(dispatchError?: string) {
     const body = init && typeof init.body === "string" ? init.body : "";
     calls.push({ url, method, body });
     if (method === "GET" && url === STAGED_URL) {
-      return new Response(JSON.stringify({ proposals: [PROPOSAL] }), { status: 200 });
+      return new Response(JSON.stringify({ items: [PROPOSAL], page: { totalItems: 1 } }), { status: 200 });
     }
     if (url === DISPATCH_URL) {
       return dispatchError

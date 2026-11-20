@@ -139,11 +139,12 @@ test("renderCoordinationBrief: leads with a separator and teaches the protocol +
   assertStringIncludes(brief, "cursor");
   assertStringIncludes(brief, "&since=");
   assertStringIncludes(brief, "conflicts");
-  // #972: the Camunda list shape — `items` + `page.totalItems` is THE array; `entries` is a
-  // deprecated alias still returned.
+  // #972: the Camunda list shape — `items` + `page.totalItems` is THE array; the removed legacy
+  // `entries` array must not be documented as the response shape.
   assertStringIncludes(brief, '"items": [');
   assertStringIncludes(brief, '"page": { "totalItems"');
-  assertStringIncludes(brief, "`entries` is a deprecated alias");
+  assert(!brief.includes('"entries"'), "brief must not document the removed `entries` array");
+  assert(!/`entries`/.test(brief), "brief must not mention the removed `entries` field");
   // Learnings: teaches reading prior gotchas and posting a reusable `learning`.
   assertStringIncludes(brief, "learning");
   assertStringIncludes(brief, "Share what you learn");

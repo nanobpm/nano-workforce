@@ -158,7 +158,7 @@ export function agentSessionView(i: AgentInstanceReport): AgentSessionView {
  * diff-friendly regardless of the report's incoming order; no input mutates and no I/O happens.
  */
 export function agentSessionsView(report: AgentInstanceListReport): AgentSessionsView {
-  const sessions = report.instances
+  const sessions = report.items
     .map(agentSessionView)
     .sort((a, b) => {
       const byTime = (b.capturedAt ?? "").localeCompare(a.capturedAt ?? "");
@@ -193,7 +193,7 @@ export function agentTurnView(r: AgentHistoryRecord): AgentTurnView {
  * order. Pure and total; no I/O.
  */
 export function agentHistoryView(report: AgentHistoryReport): AgentHistoryView {
-  const turns = report.records.map(agentTurnView);
+  const turns = report.items.map(agentTurnView);
   return {
     agentInstanceKey: report.agentInstanceKey,
     ...(report.instance !== undefined ? { instance: agentSessionView(report.instance) } : {}),

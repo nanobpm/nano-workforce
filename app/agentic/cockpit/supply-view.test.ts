@@ -96,7 +96,7 @@ test("H6: resolves each worker's jobKeys into correlation views with a human lab
     report({
       workers: [{ instance: "wk-a", identity: "leaf-a", stream: "job:6494", jobKeys: ["6494"], live: true, staleMs: 0 }],
       correlations: [
-        { jobKey: "6494", stream: "job:6494", processInstanceKey: "4612", bpmnProcessId: "plan-fanout", elementId: "implement-task", planKey: "o/r#142" },
+        { jobKey: "6494", stream: "job:6494", processInstanceKey: "4612", processDefinitionId: "plan-fanout", elementId: "implement-task", planKey: "o/r#142" },
       ],
     }),
   );

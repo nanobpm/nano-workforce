@@ -26,8 +26,8 @@ export default defineOperation("acknowledgeDeliveryGraph", async ({ body }, app)
     return { status: 400, body: { ok: false, error: "runKey is required" } };
   }
 
-  // #972 dual-accept: the canonical `runKey` wins over the deprecated `run_key`.
-  const runKey = pickKey(body, "runKey", "run_key");
+  // #972: the canonical Camunda/nwf name `runKey` (its legacy alias was removed).
+  const runKey = pickKey(body, "runKey");
   if (!runKey) return { status: 400, body: { ok: false, error: "runKey is required" } };
 
   return acknowledgeVia(

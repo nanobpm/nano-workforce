@@ -19,6 +19,7 @@
 import { currentCorrelation } from "../app/agentic/correlation.ts";
 import { currentRelayTranscriptService } from "../app/agentic/families/relay.family.ts";
 import { listTranscripts, readSingleTranscript, type TranscriptFilter } from "../app/agentic/transcript-read.ts";
+import { listEnvelope } from "../app/apiShape.ts";
 import { envVar } from "../app/version.ts";
 import type { AgenticTranscriptList } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -57,7 +58,7 @@ export default defineOperation("listAgenticTranscripts", async ({ query, req }, 
   if (!store) {
     // The relay family has not mounted, or is running unpersisted (no DataLayer) - no transcripts to
     // report, not an error (advisory).
-    const empty: AgenticTranscriptList = { count: 0, generatedAt: new Date().toISOString(), transcripts: [] };
+    const empty: AgenticTranscriptList = { generatedAt: new Date().toISOString(), ...listEnvelope([]) };
     return { status: 200, body: empty };
   }
 
@@ -72,10 +73,9 @@ export default defineOperation("listAgenticTranscripts", async ({ query, req }, 
   };
   const transcripts = listTranscripts(store, currentCorrelation(), filter, service?.correlationStore);
   const body: AgenticTranscriptList = {
-    count: transcripts.length,
     generatedAt: new Date().toISOString(),
     retentionMs: store.ephemeralRetentionMs,
-    transcripts,
+    ...listEnvelope(transcripts),
   };
   return { status: 200, body };
 });

@@ -63,7 +63,7 @@ const SUPERSEDE_V2 = {
 };
 
 interface StagedRow { digest: string; title: string | null }
-interface ListBody { count: number; proposals: StagedRow[] }
+interface ListBody { page: { totalItems: number }; items: StagedRow[] }
 
 /** Compile a graph over MCP and return the staged digest the door reports (asserting it staged). */
 async function compileAndStage(h: McpHarness, graph: unknown): Promise<string> {
@@ -81,7 +81,7 @@ async function listStaged(h: McpHarness): Promise<ListBody> {
   const res = await h.callTool("listStagedProposals", {});
   assert.ok(!res.isError, `listStagedProposals must not error: ${res.text}`);
   const json = res.json as ListBody | undefined;
-  assert.ok(json && Array.isArray(json.proposals), `listStagedProposals must return a proposals array: ${res.text}`);
+  assert.ok(json && Array.isArray(json.items), `listStagedProposals must return an items array: ${res.text}`);
   return json;
 }
 
@@ -94,7 +94,7 @@ describe("S2 — listStagedProposals read-after-write is trustworthy (#608)", ()
     const digest = await compileAndStage(h, STAGES_A_PROPOSAL);
     // The immediate read — no sleep, no retry, no poll — must show the write.
     const list = await listStaged(h);
-    const digests = list.proposals.map((p) => p.digest);
+    const digests = list.items.map((p) => p.digest);
     assert.ok(
       digests.includes(digest),
       `the digest ${digest} compileDeliveryGraph just returned must appear in listStagedProposals ` +
@@ -110,7 +110,7 @@ describe("S2 — listStagedProposals read-after-write is trustworthy (#608)", ()
     const digestV2 = await compileAndStage(h, SUPERSEDE_V2);
     assert.notEqual(digestV1, digestV2, "V1 and V2 must differ in content so V2 genuinely supersedes V1");
     const list = await listStaged(h);
-    const digests = list.proposals.map((p) => p.digest);
+    const digests = list.items.map((p) => p.digest);
     assert.ok(
       digests.includes(digestV2),
       `after superseding, listStagedProposals must show the latest digest ${digestV2} (got ${JSON.stringify(digests)})`,
@@ -121,7 +121,7 @@ describe("S2 — listStagedProposals read-after-write is trustworthy (#608)", ()
     );
     // Exactly one live proposal FOR THIS logical key — filter by title so the assertion is per-logical-key
     // and does not couple to how many other proposals exist in the shared store.
-    const forLogicalKey = list.proposals.filter((p) => p.title === SUPERSEDE_KEY);
+    const forLogicalKey = list.items.filter((p) => p.title === SUPERSEDE_KEY);
     assert.equal(
       forLogicalKey.length,
       1,

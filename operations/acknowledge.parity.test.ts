@@ -71,7 +71,7 @@ const SURFACES: Surface[] = [
     baseStore: "pull_requests",
     keyColumn: "pr_key",
     handler: prHandler as Handler,
-    bodyKey: "pr_key",
+    bodyKey: "prKey",
     terminalRow: (key) => ({ pr_key: key, status: "converging", derived_status: "abandoned", acknowledged_at: null }),
     liveRow: (key) => ({ pr_key: key, status: "converging", acknowledged_at: null }),
     deriveView: (r) => ({ ...r, ...pullRequestReadModel.evaluate({ ...r, derived_status: effective(r) }) }),
@@ -82,7 +82,7 @@ const SURFACES: Surface[] = [
     baseStore: "feature_runs",
     keyColumn: "feature_key",
     handler: doneHandler as Handler,
-    bodyKey: "feature_key",
+    bodyKey: "featureKey",
     terminalRow: (key) => ({ feature_key: key, status: "running", derived_status: "abandoned", acknowledged_at: null }),
     liveRow: (key) => ({ feature_key: key, status: "running", acknowledged_at: null }),
     deriveView: (r) => ({
@@ -96,7 +96,7 @@ const SURFACES: Surface[] = [
     baseStore: "delivery_graph_runs",
     keyColumn: "run_key",
     handler: dgHandler as Handler,
-    bodyKey: "run_key",
+    bodyKey: "runKey",
     terminalRow: (key) => ({ run_key: key, status: "running", derived_status: "abandoned", acknowledged_at: null }),
     liveRow: (key) => ({ run_key: key, status: "running", acknowledged_at: null }),
     deriveView: (r) => ({
@@ -110,7 +110,7 @@ const SURFACES: Surface[] = [
     baseStore: "plans",
     keyColumn: "plan_key",
     handler: epicHandler as Handler,
-    bodyKey: "plan_key",
+    bodyKey: "planKey",
     // A `done` epic whose base status is frozen (modelled here) while the derive edge folds it
     // `abandoned` — resolved-not-landed (`delivery=null`), so dismissable.
     terminalRow: (key) => ({ plan_key: key, status: "dispatched", derived_status: "abandoned", delivery: null, acknowledged_at: null }),
@@ -213,14 +213,13 @@ for (const s of SURFACES) {
     assertEquals(rows[0].acknowledged_at, stamp, `${s.id}: NOT re-stamped (no double-stamp)`);
   });
 
-  test(`${s.id}: accepts the canonical camelCase key, which wins over the deprecated snake_case alias (#972)`, async () => {
+  test(`${s.id}: the removed snake_case alias is no longer accepted → 400 (#972)`, async () => {
     const key = "o/r#5";
-    const camel = s.bodyKey.replace(/_(\w)/g, (_m, c: string) => c.toUpperCase());
+    const snake = s.bodyKey.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
     const { app, rows } = memApp(s, [s.terminalRow(key)]);
-    // The deprecated alias points at a row that does not exist: a 200 proves the canonical key won.
-    const res = await call(app, s.handler, { [camel]: key, [s.bodyKey]: "o/r#404" });
-    assertEquals(res.status, 200, `${s.id}: ${camel} accepted`);
-    assertEquals(typeof rows[0].acknowledged_at, "string", `${s.id}: stamped via ${camel}`);
+    const res = await call(app, s.handler, { [snake]: key });
+    assertEquals(res.status, 400, `${s.id}: ${snake} rejected`);
+    assertEquals(rows[0].acknowledged_at, null, `${s.id}: not stamped via ${snake}`);
   });
 
   test(`${s.id}: no such row → 404`, async () => {

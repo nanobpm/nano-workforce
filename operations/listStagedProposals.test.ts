@@ -43,7 +43,7 @@ interface StagedProposalSummary {
   createdAt: string;
   expiresAt: string;
 }
-type ListResponse = { count: number; proposals: StagedProposalSummary[] };
+type ListResponse = { items: StagedProposalSummary[]; page: { totalItems: number } };
 
 describe("listStagedProposals — the live staged-proposals list", () => {
   const dirs: string[] = [];
@@ -65,8 +65,8 @@ describe("listStagedProposals — the live staged-proposals list", () => {
     assert.ok(app.api);
     const res = await app.api.call<ListResponse>("listStagedProposals", {});
     assert.equal(res.status, 200);
-    assert.equal(res.body.count, 0);
-    assert.deepEqual(res.body.proposals, []);
+    assert.equal(res.body.page.totalItems, 0);
+    assert.deepEqual(res.body.items, []);
   });
 
   test("a staged graph appears with its projected counts; no graph/preview payload is leaked", async () => {
@@ -78,8 +78,8 @@ describe("listStagedProposals — the live staged-proposals list", () => {
 
     const res = await api.call<ListResponse>("listStagedProposals", {});
     assert.equal(res.status, 200);
-    assert.equal(res.body.count, 1);
-    const row = res.body.proposals[0];
+    assert.equal(res.body.page.totalItems, 1);
+    const row = res.body.items[0];
     assert.equal(row.digest, digest);
     assert.equal(row.title, "release runbook");
     assert.equal(row.nodeCount, 2);
@@ -100,8 +100,8 @@ describe("listStagedProposals — the live staged-proposals list", () => {
     const api = app.api;
     await api.call<{ digest: string }>("compileDeliveryGraph", { body: WAIT_ONLY });
     const res = await api.call<ListResponse>("listStagedProposals", {});
-    assert.equal(res.body.count, 1);
-    const row = res.body.proposals[0];
+    assert.equal(res.body.page.totalItems, 1);
+    const row = res.body.items[0];
     assert.equal(row.sideEffecting, false);
     assert.equal(row.sideEffectCount, 0);
     assert.equal(row.humanNodeCount, 1);
@@ -113,13 +113,13 @@ describe("listStagedProposals — the live staged-proposals list", () => {
     const api = app.api;
     const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SIDE_EFFECTING });
     const digest = staged.body.digest;
-    assert.equal((await api.call<ListResponse>("listStagedProposals", {})).body.count, 1);
+    assert.equal((await api.call<ListResponse>("listStagedProposals", {})).body.page.totalItems, 1);
 
     const dispatched = await api.call<{ ok: boolean }>("dispatchDeliveryGraph", { body: { digest, repoless: true } });
     assert.equal(dispatched.body.ok, true);
 
     const after = await api.call<ListResponse>("listStagedProposals", {});
-    assert.equal(after.body.count, 0, "a dispatched proposal is no longer staged");
+    assert.equal(after.body.page.totalItems, 0, "a dispatched proposal is no longer staged");
   });
 
   // The optional shared-secret guard is enforced in the handler (not by OpenAPI `security`), mirroring
@@ -150,7 +150,7 @@ describe("listStagedProposals — the live staged-proposals list", () => {
       assert.equal(bad.status, 401);
       const ok = await guarded(ctx({ "x-hook-secret": "s3cr3t" }), stubApp);
       assert.equal(ok.status, 200);
-      assert.ok(Array.isArray(ok.body.proposals));
+      assert.ok(Array.isArray(ok.body.items));
     } finally {
       if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
       else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;

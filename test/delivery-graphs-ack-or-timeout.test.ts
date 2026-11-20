@@ -102,7 +102,7 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const LIBRARY_URL = `${ORIGIN}/app/api/delivery-graph/library`;
 const ENTRY = { id: "lib-1", name: "Onboarding", graph: '{"nodes":[],"edges":[]}' };
 const libraryFetch = async (input: unknown) => {
-  if (String(input).startsWith(LIBRARY_URL)) return new Response(JSON.stringify({ entries: [ENTRY] }), { status: 200 });
+  if (String(input).startsWith(LIBRARY_URL)) return new Response(JSON.stringify({ items: [ENTRY], page: { totalItems: 1 } }), { status: 200 });
   return new Response(JSON.stringify({}), { status: 404 });
 };
 

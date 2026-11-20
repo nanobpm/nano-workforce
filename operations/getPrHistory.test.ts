@@ -82,8 +82,8 @@ test("an escalated-then-resumed PR exposes its round + escalation history by prK
   assertEquals(e.answeredAt, "2026-03-01T00:50:00Z");
 });
 
-test("resolves the PR by processKey when no prKey is given", async () => {
-  const res = (await handler(input({ processKey: "proc-7" }), escalatedThenResumed())) as Row;
+test("resolves the PR by processInstanceKey when no prKey is given", async () => {
+  const res = (await handler(input({ processInstanceKey: "proc-7" }), escalatedThenResumed())) as Row;
   assertEquals(res.status, 200);
   assertEquals(res.body.prKey, "o/r#7");
   assertEquals(res.body.rounds.length, 2);
@@ -114,15 +114,12 @@ test("an unknown PR returns an empty history (not a 404)", async () => {
   assertEquals(res.body.escalations, []);
 });
 
-test("resolves the PR by the canonical processInstanceKey, which wins over the deprecated processKey (#972)", async () => {
-  const res = (await handler(input({ processInstanceKey: "proc-7", processKey: "proc-unknown" }), escalatedThenResumed())) as Row;
-  const viaLegacy = (await handler(input({ processKey: "proc-7" }), escalatedThenResumed())) as Row;
-  assertEquals(res.status, 200);
-  assertEquals(res.body.prKey, "o/r#7");
-  assertEquals(res.body, viaLegacy.body);
+test("the removed processKey alias no longer resolves a PR (#972)", async () => {
+  const res = (await handler(input({ processKey: "proc-7" }), escalatedThenResumed())) as Row;
+  assertEquals(res.status, 400);
 });
 
-test("neither prKey nor processKey → 400", async () => {
+test("neither prKey nor processInstanceKey → 400", async () => {
   const res = (await handler(input({}), memApp({}))) as Row;
   assertEquals(res.status, 400);
 });

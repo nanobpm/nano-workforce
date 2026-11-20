@@ -21,5 +21,5 @@ export default defineOperation("listLibrary", async ({ req }, app) => {
   }
   const rows = await listLibraryEntries(app.data);
   const entries = rows.map(libraryEntryDto);
-  return { status: 200, body: { count: entries.length, entries, ...listEnvelope(entries) } };
+  return { status: 200, body: listEnvelope(entries) };
 });

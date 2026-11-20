@@ -127,9 +127,9 @@ test("listAgentInstances applies only non-blank selectors and sorts newest-creat
   ]);
   const out = await listAgentInstances(reader, { processInstanceKey: "pi-1", status: "", elementId: undefined });
   assert.deepEqual(reader.instanceFilter, { processInstanceKey: "pi-1" });
-  assert.equal(out.count, 2);
+  assert.equal(out.page.totalItems, 2);
   assert.deepEqual(
-    out.instances.map((i) => i.agentInstanceKey),
+    out.items.map((i) => i.agentInstanceKey),
     ["new", "old"],
   );
 });
@@ -149,7 +149,7 @@ test("readAgentHistory sorts by loopIteration then key, enriches with the owning
   assert.equal(reader.historyKey, "ai-1");
   assert.deepEqual(reader.historyFilter, { role: "ASSISTANT", loopIteration: 1 });
   assert.deepEqual(
-    out.records.map((r) => r.historyItemKey),
+    out.items.map((r) => r.historyItemKey),
     ["h-0", "h-1", "h-2"],
   );
   assert.equal(out.instance?.agentInstanceKey, "ai-1");
@@ -159,7 +159,7 @@ test("readAgentHistory sorts by loopIteration then key, enriches with the owning
 test("readAgentHistory read-as-absence: a blank key yields an empty history and no engine call", async () => {
   const reader = new FakeReader([instance({ agentInstanceKey: "x" })], [record({ historyItemKey: "h" })]);
   const out = await readAgentHistory(reader, "");
-  assert.equal(out.count, 0);
+  assert.equal(out.page.totalItems, 0);
   assert.equal(out.agentInstanceKey, "");
   assert.equal(reader.historyKey, undefined);
 });

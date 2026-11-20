@@ -7,9 +7,9 @@ import type {
 } from "../../../nano-generated/api-io.d.ts";
 import { agentHistoryView, agentSessionsView } from "./agent-history-view.ts";
 
-const list = (instances: AgentInstanceListReport["instances"]): AgentInstanceListReport => ({
-  count: instances.length,
-  instances,
+const list = (items: AgentInstanceListReport["items"]): AgentInstanceListReport => ({
+  items,
+  page: { totalItems: items.length },
 });
 
 test("agentSessionsView labels, rolls up metrics, and sorts newest-captured first", () => {
@@ -47,14 +47,14 @@ test("agentSessionsView labels, rolls up metrics, and sorts newest-captured firs
 test("agentHistoryView projects turns in transport order with text, tool calls and per-turn metrics", () => {
   const report: AgentHistoryReport = {
     agentInstanceKey: "ai-1",
-    count: 2,
+    page: { totalItems: 2 },
     instance: {
       agentInstanceKey: "ai-1",
       status: "COMPLETED",
       processInstanceKey: "pi-1",
       metrics: { inputTokens: 20, outputTokens: 8, modelCalls: 2, toolCalls: 1 },
     },
-    records: [
+    items: [
       {
         historyItemKey: "h-0",
         agentInstanceKey: "ai-1",
@@ -99,8 +99,8 @@ test("agentHistoryView projects turns in transport order with text, tool calls a
 test("agentHistoryView carries each turn's producedAt timestamp (absent when unreported)", () => {
   const view = agentHistoryView({
     agentInstanceKey: "ai-1",
-    count: 2,
-    records: [
+    page: { totalItems: 2 },
+    items: [
       { historyItemKey: "h-0", agentInstanceKey: "ai-1", loopIteration: 0, role: "USER", commitStatus: "COMMITTED", content: [], toolCalls: [], producedAt: "2024-05-01T12:34:56.789Z" },
       { historyItemKey: "h-1", agentInstanceKey: "ai-1", loopIteration: 1, role: "ASSISTANT", commitStatus: "COMMITTED", content: [], toolCalls: [] },
     ],
@@ -113,7 +113,7 @@ test("agentHistoryView carries each turn's producedAt timestamp (absent when unr
 });
 
 test("agentHistoryView read-as-absence: an empty history yields zero turns", () => {
-  const view = agentHistoryView({ agentInstanceKey: "ai-9", count: 0, records: [] });
+  const view = agentHistoryView({ agentInstanceKey: "ai-9", items: [], page: { totalItems: 0 } });
   assert.equal(view.count, 0);
   assert.equal(view.turns.length, 0);
   assert.equal(view.instance, undefined);

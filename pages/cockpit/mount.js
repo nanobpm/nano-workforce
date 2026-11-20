@@ -94,7 +94,7 @@ function liveness(worker, staleAfterMs) {
 
 function correlationLabel(c) {
   const parts = [];
-  if (c.bpmnProcessId != null) parts.push(c.bpmnProcessId);
+  if (c.processDefinitionId != null) parts.push(c.processDefinitionId);
   if (c.elementId != null) parts.push(c.elementId);
   if (c.processInstanceKey != null) parts.push(`inst ${c.processInstanceKey}`);
   if (c.planKey != null) parts.push(c.planKey);
@@ -366,7 +366,7 @@ function humanDuration(ms) {
 
 function sessionLabel(t) {
   const parts = [];
-  if (t.bpmnProcessId != null) parts.push(t.bpmnProcessId);
+  if (t.processDefinitionId != null) parts.push(t.processDefinitionId);
   if (t.elementId != null) parts.push(t.elementId);
   if (t.processInstanceKey != null) parts.push(`inst ${t.processInstanceKey}`);
   if (t.planKey != null) parts.push(t.planKey);
@@ -376,7 +376,7 @@ function sessionLabel(t) {
 }
 
 function transcriptsView(report) {
-  const sessions = (report.transcripts ?? [])
+  const sessions = (report.items ?? [])
     .map((t) => ({
       stream: t.stream,
       label: sessionLabel(t),
@@ -586,7 +586,7 @@ function agentSessionView(i) {
 }
 
 function agentSessionsView(report) {
-  const sessions = (report.items ?? report.instances ?? [])
+  const sessions = (report.items ?? [])
     .map(agentSessionView)
     .sort((a, b) => {
       const byTime = String(b.capturedAt ?? "").localeCompare(String(a.capturedAt ?? ""));
@@ -619,7 +619,7 @@ function turnTime(iso) {
 }
 
 function agentHistoryView(report) {
-  const turns = (report.items ?? report.records ?? []).map((r) => ({
+  const turns = (report.items ?? []).map((r) => ({
     historyItemKey: r.historyItemKey,
     loopIteration: r.loopIteration,
     role: r.role,
@@ -1130,9 +1130,9 @@ export function mountCockpit(host, opts = {}) {
         url.searchParams.set("processInstanceKey", key);
         const report = await boundedJson(url.href);
         if (gen !== focusGen || disposed) return;
-        transcripts.push(...(report.transcripts ?? []));
+        transcripts.push(...(report.items ?? []));
       }
-      const newest = transcriptsView({ count: transcripts.length, transcripts }).sessions[0];
+      const newest = transcriptsView({ items: transcripts, page: { totalItems: transcripts.length } }).sessions[0];
       if (newest && gen === focusGen && focusAuto && mode == null && !disposed) await replayInto(newest.stream);
     } catch (err) {
       onError(err);
@@ -1399,12 +1399,12 @@ export function mountCockpit(host, opts = {}) {
       const report = await boundedJson(url.href);
       // The focus changed while this list was in flight — drop it rather than fold a stale tree's keys
       // into the new focus's `focusKeys`.
-      if (gen !== focusGen || disposed) return { count: 0, instances: [] };
-      for (const i of report.items ?? report.instances ?? []) byKey.set(i.agentInstanceKey, i);
+      if (gen !== focusGen || disposed) return { items: [], page: { totalItems: 0 } };
+      for (const i of report.items ?? []) byKey.set(i.agentInstanceKey, i);
     }
     const instances = [...byKey.values()];
     for (const i of instances) if (i.processInstanceKey) focusKeys.add(i.processInstanceKey);
-    return { count: instances.length, instances };
+    return { items: instances, page: { totalItems: instances.length } };
   }
 
   async function refreshAgentHistory() {

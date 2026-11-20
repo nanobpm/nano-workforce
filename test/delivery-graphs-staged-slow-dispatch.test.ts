@@ -34,7 +34,7 @@ test("#852: a dispatch slower than the generic 30 s request timeout is NOT abort
   const origFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     const url = String(input);
-    if (url === STAGED_URL) return new Response(JSON.stringify({ proposals: [PROPOSAL] }), { status: 200 });
+    if (url === STAGED_URL) return new Response(JSON.stringify({ items: [PROPOSAL], page: { totalItems: 1 } }), { status: 200 });
     if (url === DISPATCH_URL) {
       return await new Promise<Response>((resolve, reject) => {
         init?.signal?.addEventListener("abort", () => {

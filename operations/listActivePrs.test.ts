@@ -1,5 +1,5 @@
 // Tests for GET /app/api/status → operation `listActivePrs` (ADR 0058 OpenAPI surface).
-// Covers the happy path (count/prs projection) and the optional shared-secret guard. A minimal
+// Covers the happy path (items/page projection) and the optional shared-secret guard. A minimal
 // in-memory DataLayer backs `activePrs` (it reads the `pull_requests` table via `.all()`).
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
@@ -7,6 +7,12 @@ import type { AppApi } from "@nanobpm/urban";
 import { noopLog } from "../test/log.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import handler from "./listActivePrs.ts";
+
+// #972: /status is ONE Camunda `items` list discriminated by `kind`; these split it back per kind.
+// biome-ignore lint/suspicious/noExplicitAny: test projection over an untyped response body
+const prsOf = (body: any): any[] => body.items.filter((i: any) => i.kind === "pr");
+// biome-ignore lint/suspicious/noExplicitAny: test projection over an untyped response body
+const deliveriesOf = (body: any): any[] => body.items.filter((i: any) => i.kind === "delivery");
 
 function memApp(rows: any[], userTaskRows: any[] = [], deliveryRows: any[] = []): AppApi {
   const table = (name: string) => {
@@ -60,10 +66,10 @@ test("returns 200 with a count + projected active PRs", async () => {
   const r = res as any;
   assertEquals(r.status, 200);
   // `converged` is terminal → filtered out, leaving one active PR.
-  assertEquals(r.body.count, 1);
-  assertEquals(r.body.prs.length, 1);
-  assertEquals(r.body.prs[0].prKey, "o/r#1");
-  assertEquals(r.body.prs[0].processKey, "9");
+  assertEquals(prsOf(r.body).length, 1);
+  assertEquals(prsOf(r.body).length, 1);
+  assertEquals(prsOf(r.body)[0].prKey, "o/r#1");
+  assertEquals(prsOf(r.body)[0].processInstanceKey, "9");
 });
 
 test("surfaces hasCustomInstructions from the durable row projection (issue #956)", async () => {
@@ -77,7 +83,7 @@ test("surfaces hasCustomInstructions from the durable row projection (issue #956
   ]);
   const res = (await handler(input(), app)) as any;
   assertEquals(res.status, 200);
-  const byKey = (k: string) => res.body.prs.find((p: any) => p.prKey === k);
+  const byKey = (k: string) => prsOf(res.body).find((p: any) => p.prKey === k);
   assertEquals(byKey("o/r#30").hasCustomInstructions, true, "a steered loop is visible");
   assertEquals(byKey("o/r#31").hasCustomInstructions, false, "an unsteered loop reads false");
   assertEquals(byKey("o/r#32").hasCustomInstructions, false, "a legacy (NULL) row reads false");
@@ -127,8 +133,8 @@ test("surfaces the structured openEscalation from the user_tasks read model (bot
   );
   const res = (await handler(input(), app)) as any;
   assertEquals(res.status, 200);
-  const p10 = res.body.prs.find((p: any) => p.prKey === "o/r#10");
-  const p11 = res.body.prs.find((p: any) => p.prKey === "o/r#11");
+  const p10 = prsOf(res.body).find((p: any) => p.prKey === "o/r#10");
+  const p11 = prsOf(res.body).find((p: any) => p.prKey === "o/r#11");
   assertEquals(p10.openEscalation, {
     userTaskKey: "ut-10",
     kind: "wait-merge-answer",
@@ -148,7 +154,7 @@ test("shared-secret guard rejects a missing secret when configured", async () =>
     assertEquals(bad.status, 401);
     const ok = (await guarded(input({ "x-hook-secret": "s3cr3t" }), app)) as any;
     assertEquals(ok.status, 200);
-    assert("count" in ok.body);
+    assert("items" in ok.body);
   } finally {
     if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
     else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
@@ -185,15 +191,15 @@ test("surfaces each in-flight delivery run with its durable escalation-steward o
   );
   const res = (await handler(input(), app)) as any;
   assertEquals(res.status, 200);
-  assertEquals(res.body.deliveries.length, 1, "a terminal (done) run drops out of the active list");
-  const d = res.body.deliveries[0];
+  assertEquals(deliveriesOf(res.body).length, 1, "a terminal (done) run drops out of the active list");
+  const d = deliveriesOf(res.body)[0];
   assertEquals(d.runKey, "run-live");
   assertEquals(d.autoResolveEscalations, true, "the durable opt-in flag is surfaced for the delivery");
-  assertEquals(d.processKey, "pk-live");
+  assertEquals(d.processInstanceKey, "pk-live");
   assertEquals(d.openEscalation, { userTaskKey: "ut-d1", kind: "delivery-human-taskish", summary: "approve the release?" });
 });
 
-test("#972: adds processInstanceKey + the Camunda items/page list (one list over both kinds, discriminated by kind)", async () => {
+test("#972: the Camunda items/page list (one list over both kinds, discriminated by kind) keyed by processInstanceKey only", async () => {
   const app = memApp(
     [{ pr_key: "o/r#1", repo: "o/r", number: 1, url: "u1", title: "t", status: "converging", current_round: 2, process_key: "9", updated_at: "2026-01-02" }],
     [],
@@ -201,10 +207,11 @@ test("#972: adds processInstanceKey + the Camunda items/page list (one list over
   );
   const res = (await handler(input(), app)) as any;
   assertEquals(res.status, 200);
-  // Deprecated fields still served, each row carrying the canonical key next to the old one.
-  assertEquals(res.body.prs[0].processInstanceKey, "9");
-  assertEquals(res.body.prs[0].processKey, "9");
-  assertEquals(res.body.deliveries[0].processInstanceKey, "pk-live");
+  // The legacy prs/deliveries/count and processKey are gone (#972 step 4).
+  assertEquals(Object.keys(res.body).sort(), ["items", "page", "version"]);
+  assertEquals(prsOf(res.body)[0].processInstanceKey, "9");
+  assert(!("processKey" in prsOf(res.body)[0]));
+  assertEquals(deliveriesOf(res.body)[0].processInstanceKey, "pk-live");
   // The Camunda list: PRs then deliveries, each tagged with its `kind`.
   assertEquals(res.body.page, { totalItems: 2 });
   assertEquals(
@@ -224,10 +231,10 @@ test("a delivery run with no opt-in row flag surfaces autoResolveEscalations fal
   );
   const res = (await handler(input(), app)) as any;
   assertEquals(res.status, 200);
-  assertEquals(res.body.deliveries.length, 1);
-  assertEquals(res.body.deliveries[0].autoResolveEscalations, false);
-  assertEquals(res.body.deliveries[0].openEscalation, null);
-  assertEquals(res.body.deliveries[0].processKey, null, "a launch-in-flight run has no stamped process_key yet");
+  assertEquals(deliveriesOf(res.body).length, 1);
+  assertEquals(deliveriesOf(res.body)[0].autoResolveEscalations, false);
+  assertEquals(deliveriesOf(res.body)[0].openEscalation, null);
+  assertEquals(deliveriesOf(res.body)[0].processInstanceKey, null, "a launch-in-flight run has no stamped process_key yet");
 });
 
 // ── Issue #936: /status latency + concurrency regression guard ────────────────────────────────
@@ -293,7 +300,7 @@ test("issue #936: N active rows cost a constant 3 engine variable reads, not 3N 
   const res = (await handler(input(), app)) as any;
   const elapsed = Date.now() - started;
   assertEquals(res.status, 200);
-  assertEquals(res.body.count, N);
+  assertEquals(prsOf(res.body).length, N);
   assertEquals(
     engine.calls(),
     3,
@@ -304,7 +311,7 @@ test("issue #936: N active rows cost a constant 3 engine variable reads, not 3N 
     `one batched ~25 ms upstream read serves ${N} rows (took ${elapsed} ms); the per-row fan-out this regresses to would take ≥ ${25 * N} ms`,
   );
   // The batch still projects the per-row policy correctly.
-  for (const pr of res.body.prs) {
+  for (const pr of prsOf(res.body)) {
     assertEquals(pr.merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: false });
   }
 });
@@ -325,7 +332,7 @@ test("issue #936: K concurrent /status callers overlap instead of queueing behin
   const elapsed = Date.now() - started;
   for (const res of results) {
     assertEquals((res as any).status, 200);
-    assertEquals((res as any).body.count, 2);
+    assertEquals(prsOf((res as any).body).length, 2);
   }
   assertEquals(engine.calls(), 3 * K, "each serve issues its own batched reads (no cross-request cache serving stale policy)");
   assertEquals(
@@ -339,8 +346,8 @@ test("issue #936: K concurrent /status callers overlap instead of queueing behin
   );
   // Mixed intents still project per row under the batched read.
   const body = (results[0] as any).body;
-  assertEquals(body.prs.find((p: any) => p.prKey === "o/r#1").merge.requested, true);
-  assertEquals(body.prs.find((p: any) => p.prKey === "o/r#2").merge.requested, false);
+  assertEquals(prsOf(body).find((p: any) => p.prKey === "o/r#1").merge.requested, true);
+  assertEquals(prsOf(body).find((p: any) => p.prKey === "o/r#2").merge.requested, false);
 });
 
 // ── PR #937 review: completeness, root scope, idle skip ──────────────────────────────────────
@@ -381,13 +388,13 @@ test("PR #937: an active PR's policy cut off the first engine page is still read
   rows.push(v("PI-1", "autoMerge", false), v("PI-1", "convergeOnly", true), v("PI-1", "humanApproval", true));
   const engine = pagedEngine(rows, 10);
   const res = (await handler(input(), { ...memApp([prRow936(1)]), engine } as AppApi)) as any;
-  assertEquals(res.body.prs[0].merge.requested, false, "autoMerge:false beyond page 1 must not degrade to requested");
+  assertEquals(prsOf(res.body)[0].merge.requested, false, "autoMerge:false beyond page 1 must not degrade to requested");
   const withApproval = pagedEngine(
     [...rows.filter((r) => r.processInstanceKey !== "PI-1"), v("PI-1", "autoMerge", true), v("PI-1", "humanApproval", true)],
     10,
   );
   const res2 = (await handler(input(), { ...memApp([prRow936(1)]), engine: withApproval } as AppApi)) as any;
-  assertEquals(res2.body.prs[0].merge.blockedBy != null, true, "the human-approval blocker beyond page 1 is not dropped");
+  assertEquals(prsOf(res2.body)[0].merge.blockedBy != null, true, "the human-approval blocker beyond page 1 is not dropped");
 });
 
 for (const order of ["root-first", "child-first"] as const) {
@@ -396,7 +403,7 @@ for (const order of ["root-first", "child-first"] as const) {
     const child = [v("PI-1", "autoMerge", true, "EI-9"), v("PI-1", "humanApproval", false, "EI-9")];
     const engine = pagedEngine(order === "root-first" ? [...root, ...child] : [...child, ...root], 100);
     const res = (await handler(input(), { ...memApp([prRow936(1)]), engine } as AppApi)) as any;
-    assertEquals(res.body.prs[0].merge.requested, false);
+    assertEquals(prsOf(res.body)[0].merge.requested, false);
     const engine2 = pagedEngine(
       order === "root-first"
         ? [v("PI-1", "autoMerge", true), v("PI-1", "humanApproval", true), ...child]
@@ -404,7 +411,7 @@ for (const order of ["root-first", "child-first"] as const) {
       100,
     );
     const res2 = (await handler(input(), { ...memApp([prRow936(1)]), engine: engine2 } as AppApi)) as any;
-    assertEquals(res2.body.prs[0].merge.blockedBy != null, true, "a child humanApproval:false cannot hide the root gate");
+    assertEquals(prsOf(res2.body)[0].merge.blockedBy != null, true, "a child humanApproval:false cannot hide the root gate");
   });
 }
 
@@ -431,7 +438,7 @@ test("PR #937 r4: populated merge-loop roots cost a constant 3 reads (startMerge
   }
   const engine = pagedEngine(vars, 100);
   const res = (await handler(input(), { ...memApp(rows), engine } as AppApi)) as any;
-  assertEquals(res.body.count, N);
+  assertEquals(prsOf(res.body).length, N);
   assertEquals(engine.queries.length, 3, "populated merge-loop roots need no per-instance probes");
 });
 
@@ -443,7 +450,7 @@ test("PR #937 r4: a name cut from ONE page is re-probed even when the instance a
   rows.push(v("PI-1", "humanApproval", true));
   const engine = pagedEngine(rows, 10);
   const res = (await handler(input(), { ...memApp([prRow936(1)]), engine } as AppApi)) as any;
-  assertEquals(res.body.prs[0].merge.blockedBy, "human-approval", "the cut humanApproval gate is recovered");
+  assertEquals(prsOf(res.body)[0].merge.blockedBy, "human-approval", "the cut humanApproval gate is recovered");
   const targeted = engine.queries.filter((q: any) => q.processInstanceKey === "PI-1");
   assertEquals(targeted.length, 1, "only the missing name is probed");
   assertEquals(targeted[0].name, "humanApproval");
@@ -460,7 +467,7 @@ test("PR #937 r4: a failed probe after a partial batch drops the partial entry (
   } as any;
   const res = (await handler(input(), { ...memApp([prRow936(1)]), engine: failing } as AppApi)) as any;
   assertEquals(res.status, 200);
-  assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
+  assertEquals(prsOf(res.body)[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
 });
 
 test("PR #937 r4: a cut-off instance is recovered with name-filtered (untruncatable) root probes", async () => {
@@ -472,7 +479,7 @@ test("PR #937 r4: a cut-off instance is recovered with name-filtered (untruncata
   rows.push(v("PI-2", "autoMerge", true), v("PI-2", "convergeOnly", false), v("PI-2", "humanApproval", true));
   const engine = pagedEngine(rows, 10);
   const res = (await handler(input(), { ...memApp([prRow936(1), prRow936(2)]), engine } as AppApi)) as any;
-  const pr2 = res.body.prs.find((p: any) => p.prKey === "o/r#2");
+  const pr2 = prsOf(res.body).find((p: any) => p.prKey === "o/r#2");
   assertEquals(pr2.merge.requested, true);
   assertEquals(pr2.merge.blockedBy, "human-approval");
   for (const q of engine.queries.filter((q: any) => q.processInstanceKey != null)) {
@@ -496,10 +503,10 @@ test("PR #937 r3: one failed targeted read degrades only its own instance, not e
   } as any;
   const res = (await handler(input(), { ...memApp([prRow936(1), prRow936(2)]), engine: failing } as AppApi)) as any;
   assertEquals(res.status, 200);
-  const pr1 = res.body.prs.find((p: any) => p.prKey === "o/r#1");
+  const pr1 = prsOf(res.body).find((p: any) => p.prKey === "o/r#1");
   assertEquals(pr1.merge.requested, true, "PI-1's fetched merge intent survives PI-2's failed fallback");
   assertEquals(pr1.merge.blockedBy, "human-approval", "PI-1's fetched approval blocker survives PI-2's failed fallback");
-  const pr2 = res.body.prs.find((p: any) => p.prKey === "o/r#2");
+  const pr2 = prsOf(res.body).find((p: any) => p.prKey === "o/r#2");
   assertEquals(pr2.merge.requested, true, "the failed instance degrades to the historical default (merge requested)");
   assertEquals(pr2.merge.blockedBy, null, "the failed instance shows no approval blocker it could not verify");
 });
@@ -516,7 +523,7 @@ test("PR #937 r3: a failed BATCH read still degrades every row to the default (n
   } as any;
   const res = (await handler(input(), { ...memApp([prRow936(1)]), engine: failing } as AppApi)) as any;
   assertEquals(res.status, 200);
-  assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
+  assertEquals(prsOf(res.body)[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
 });
 
 // ── Issue #947: /status serves the merge policy from the app's OWN projection — ZERO engine reads ─
@@ -565,7 +572,7 @@ test("issue #947: N policy-stamped rows cost ZERO engine reads — /status serve
   const res = (await handler(input(), { ...memApp(rows), engine } as AppApi)) as any;
   const elapsed = Date.now() - started;
   assertEquals(res.status, 200);
-  assertEquals(res.body.count, N);
+  assertEquals(prsOf(res.body).length, N);
   assertEquals(
     engine.queries.length,
     0,
@@ -575,7 +582,7 @@ test("issue #947: N policy-stamped rows cost ZERO engine reads — /status serve
     elapsed < 1000,
     `the projected read serves ${N} rows in well under the 2 s acceptance budget (took ${elapsed} ms)`,
   );
-  for (const pr of res.body.prs) {
+  for (const pr of prsOf(res.body)) {
     assertEquals(pr.merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: false });
   }
 });
@@ -590,7 +597,7 @@ test("issue #947: the projected policy drives requested/blockedBy per row (revie
   const engine = countingEngine();
   const res = (await handler(input(), { ...memApp(rows), engine } as AppApi)) as any;
   assertEquals(engine.queries.length, 0);
-  const byKey = (k: string) => res.body.prs.find((p: any) => p.prKey === k).merge;
+  const byKey = (k: string) => prsOf(res.body).find((p: any) => p.prKey === k).merge;
   assertEquals(byKey("o/r#1"), { requested: false, enabled: true, effective: false, blockedBy: null, stale: false });
   assertEquals(byKey("o/r#2"), { requested: true, enabled: true, effective: false, blockedBy: "human-approval", stale: false });
   assertEquals(byKey("o/r#3"), { requested: true, enabled: true, effective: false, blockedBy: "human-approval", stale: false });
@@ -617,7 +624,7 @@ test("issue #947: ONLY legacy (unstamped) rows fall back to the batched engine r
     3,
     "the legacy fallback stays the constant 3 name-filtered reads — never a per-row fan-out",
   );
-  const byKey = (k: string) => res.body.prs.find((p: any) => p.prKey === k).merge;
+  const byKey = (k: string) => prsOf(res.body).find((p: any) => p.prKey === k).merge;
   assertEquals(byKey("o/r#1"), { requested: true, enabled: true, effective: true, blockedBy: null, stale: false });
   assertEquals(byKey("o/r#2"), { requested: false, enabled: true, effective: false, blockedBy: null, stale: false });
 });
@@ -633,7 +640,7 @@ test("issue #947: a legacy row whose engine read fails degrades to the default, 
   } as any;
   const res = (await handler(input(), { ...memApp([prRow936(1)]), engine: failing } as AppApi)) as any;
   assertEquals(res.status, 200);
-  assertEquals(res.body.prs[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
+  assertEquals(prsOf(res.body)[0].merge, { requested: true, enabled: true, effective: true, blockedBy: null, stale: true });
 });
 
 // ── PR #950 review: the legacy fallback is BOUNDED and SELF-HEALING ───────────────────────────────
@@ -652,12 +659,12 @@ test("PR #950 review: truncated pages bound legacy per-instance probes, regardle
   } as any;
   const res = (await handler(input(), { ...memApp(rows), engine } as AppApi)) as any;
   assertEquals(res.status, 200);
-  assertEquals(res.body.count, N);
+  assertEquals(prsOf(res.body).length, N);
   assert(
     queries.length <= 3 + 3 * MAX_PROBED_LEGACY_INSTANCES,
     `engine calls stay bounded (got ${queries.length} for ${N} legacy rows)`,
   );
-  const stale = res.body.prs.filter((p: any) => p.merge.stale).length;
+  const stale = prsOf(res.body).filter((p: any) => p.merge.stale).length;
   assertEquals(stale, N - MAX_PROBED_LEGACY_INSTANCES, "unprobed rows degrade to the stale default for this serve");
 });
 

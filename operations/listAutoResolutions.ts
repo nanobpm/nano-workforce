@@ -80,5 +80,5 @@ export default defineOperation("listAutoResolutions", async ({ query, req }, app
   const kind = str(query.kind);
   const records = (await listAutoResolutions(app.data, { reviewState, subjectKey: subject, kind })).map(toView);
   const pendingCount = await pendingAutoResolutionCount(app.data);
-  return { status: 200, body: { count: records.length, pendingCount, records, ...listEnvelope(records) } };
+  return { status: 200, body: { pendingCount, ...listEnvelope(records) } };
 });

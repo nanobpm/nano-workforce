@@ -69,10 +69,10 @@ const relayFamily = createRelayFamily();
 
 test("returns an empty list when no relay/transcript family is mounted", async () => {
   relayFamily.teardown?.();
-  const res = (await handler(input(), app)) as { status: number; body: { count: number; transcripts: unknown[] } };
+  const res = (await handler(input(), app)) as { status: number; body: { page: { totalItems: number }; items: unknown[] } };
   assertEquals(res.status, 200);
-  assertEquals(res.body.count, 0);
-  assertEquals(res.body.transcripts.length, 0);
+  assertEquals(res.body.page.totalItems, 0);
+  assertEquals(res.body.items.length, 0);
 });
 
 test("projects the TranscriptStore rows into the list (byteLength, chunkCount, lifecycle, jobKey)", async () => {
@@ -84,12 +84,12 @@ test("projects the TranscriptStore rows into the list (byteLength, chunkCount, l
   try {
     const res = (await handler(input(), app)) as {
       status: number;
-      body: { count: number; retentionMs?: number; transcripts: Array<Record<string, unknown>> };
+      body: { retentionMs?: number; page: { totalItems: number }; items: Array<Record<string, unknown>> };
     };
     assertEquals(res.status, 200);
-    assertEquals(res.body.count, 1);
+    assertEquals(res.body.page.totalItems, 1);
     assert(typeof res.body.retentionMs === "number", "the list surfaces the retention window");
-    const t = res.body.transcripts[0];
+    const t = res.body.items[0];
     assertEquals(t.stream, composeStreamId("wk", "6494"));
     assertEquals(t.jobKey, "6494", "the jobKey is decoded from the instance-scoped stream id");
     assertEquals(t.lifecycle, "ephemeral");
@@ -110,10 +110,11 @@ test("enriches with the H6 correlation (process instance / plan) when it is stil
   correlationFamily.mount({ hub: undefined as never, registry: undefined as never, transport: undefined as never, data: undefined, log: noopLog() });
   currentCorrelation()?.link("wk-a", "6494", { processInstanceKey: "4612", bpmnProcessId: "plan-fanout", planKey: "o/r#142" });
   try {
-    const res = (await handler(input(), app)) as { body: { transcripts: Array<Record<string, unknown>> } };
-    const t = res.body.transcripts[0];
+    const res = (await handler(input(), app)) as { body: { items: Array<Record<string, unknown>> } };
+    const t = res.body.items[0];
     assertEquals(t.processInstanceKey, "4612");
-    assertEquals(t.bpmnProcessId, "plan-fanout");
+    assertEquals(t.processDefinitionId, "plan-fanout");
+    assert(!("bpmnProcessId" in t), "#972: the BPMN process id rides only under its Camunda name");
     assertEquals(t.planKey, "o/r#142");
   } finally {
     correlationFamily.teardown?.();
@@ -130,13 +131,13 @@ test("filters by jobKey and plan", async () => {
   correlationFamily.mount({ hub: undefined as never, registry: undefined as never, transport: undefined as never, data: undefined, log: noopLog() });
   currentCorrelation()?.link("wk", "2", { planKey: "o/r#9" });
   try {
-    const byJob = (await handler(input({ jobKey: "1" }), app)) as { body: { count: number; transcripts: Array<Record<string, unknown>> } };
-    assertEquals(byJob.body.count, 1);
-    assertEquals(byJob.body.transcripts[0]?.stream, composeStreamId("wk", "1"));
+    const byJob = (await handler(input({ jobKey: "1" }), app)) as { body: { page: { totalItems: number }; items: Array<Record<string, unknown>> } };
+    assertEquals(byJob.body.page.totalItems, 1);
+    assertEquals(byJob.body.items[0]?.stream, composeStreamId("wk", "1"));
 
-    const byPlan = (await handler(input({ planKey: "o/r#9" }), app)) as { body: { count: number; transcripts: Array<Record<string, unknown>> } };
-    assertEquals(byPlan.body.count, 1);
-    assertEquals(byPlan.body.transcripts[0]?.stream, composeStreamId("wk", "2"));
+    const byPlan = (await handler(input({ planKey: "o/r#9" }), app)) as { body: { page: { totalItems: number }; items: Array<Record<string, unknown>> } };
+    assertEquals(byPlan.body.page.totalItems, 1);
+    assertEquals(byPlan.body.items[0]?.stream, composeStreamId("wk", "2"));
   } finally {
     correlationFamily.teardown?.();
     relayFamily.teardown?.();

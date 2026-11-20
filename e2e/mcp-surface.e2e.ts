@@ -265,9 +265,9 @@ describe("MCP surface e2e — the runtime-served /app/mcp handshake, per tool (S
   test("side-effecting calls leave no live staged proposals behind (repeatable)", async () => {
     const res = await h.callTool("listStagedProposals", {});
     assert.ok(!res.isError, `listStagedProposals must not error: ${res.text}`);
-    const json = res.json as { count?: number; proposals?: unknown[] } | undefined;
-    assert.equal(json?.count, 0, `the harness must stage nothing: ${res.text}`);
-    assert.deepEqual(json?.proposals, [], "no live staged proposals may remain");
+    const json = res.json as { items?: unknown[]; page?: { totalItems?: number } } | undefined;
+    assert.equal(json?.page?.totalItems, 0, `the harness must stage nothing: ${res.text}`);
+    assert.deepEqual(json?.items, [], "no live staged proposals may remain");
   });
 });
 

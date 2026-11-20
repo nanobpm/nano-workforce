@@ -139,7 +139,7 @@ Your blackboard endpoint (already scoped to this epic — no auth header needed)
 
     curl -s "${url}"
 
-Returns \`{ "planKey": "...", "cursor": <head-entry-id>, "items": [ { "id", "author_task", "kind", "files", "body", "wave", "created_at" }, ... ], "page": { "totalItems": <n> } }\` (\`cursor\` is the head entry id, or \`0\` for an empty plan). Read the entries from \`items\`; \`entries\` is a deprecated alias of \`items\`, still returned for now.
+Returns \`{ "planKey": "...", "cursor": <head-entry-id>, "items": [ { "id", "author_task", "kind", "files", "body", "wave", "created_at" }, ... ], "page": { "totalItems": <n> } }\` (\`cursor\` is the head entry id, or \`0\` for an empty plan). Read the entries from \`items\` (\`page.totalItems\` is their count).
 If an entry overlaps your slice (same file, a changed contract/constraint), adapt: coordinate,
 rebase your plan, or if it genuinely blocks you, escalate with a \`question\` per your normal contract.
 **Apply prior \`learning\` entries before you start** — a gotcha a sibling already hit (e.g. "run

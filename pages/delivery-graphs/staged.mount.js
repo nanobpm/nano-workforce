@@ -310,8 +310,8 @@ export function mountStagedProposals(host, config = {}) {
     try {
       const { status, body } = await get(stagedUrl);
       if (disposed) return;
-      // #972: read the Camunda `items` list; `proposals` is its deprecated alias.
-      const proposals = Array.isArray(body?.items) ? body.items : body?.proposals;
+      // #972: the Camunda `items` list.
+      const proposals = body?.items;
       if (status === 200 && Array.isArray(proposals)) {
         currentProposals = proposals;
         // If the proposal an inline confirmation is open over has since dropped off the list (dispatched

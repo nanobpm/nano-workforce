@@ -47,7 +47,7 @@ interface InboxTask {
 }
 
 interface StatusBody {
-  prs: Array<{
+  items: Array<{
     prKey: string;
     status: string;
     openEscalation: { userTaskKey: string; kind: string; summary: string | null } | null;
@@ -238,7 +238,7 @@ describe("retire escalation subsystem (U7 — destructive contract phase)", () =
     // the parked `wait-answer` task before reading /status.
     await pollUserTasks(app.db, app.engine);
     const status = await app.callRoute<StatusBody>({ method: "GET", path: "/app/api/status" });
-    const statusRow = status.body.prs.find((p) => p.prKey === prKey);
+    const statusRow = status.body.items.find((p) => p.prKey === prKey);
     assert.equal(statusRow?.status, "escalated", "the PR reads as escalated");
     assert.equal(
       statusRow?.openEscalation?.summary,
@@ -266,7 +266,7 @@ describe("retire escalation subsystem (U7 — destructive contract phase)", () =
     // before re-reading /status.
     await pollUserTasks(app.db, app.engine);
     const afterStatus = await app.callRoute<StatusBody>({ method: "GET", path: "/app/api/status" });
-    const afterRow = afterStatus.body.prs.find((p) => p.prKey === prKey);
+    const afterRow = afterStatus.body.items.find((p) => p.prKey === prKey);
     if (afterRow) {
       assert.equal(afterRow.openEscalation, null, "no open escalation lingers after the answer");
     }
