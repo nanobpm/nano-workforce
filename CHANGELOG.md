@@ -1,3 +1,9 @@
+## [0.215.0](https://github.com/nanobpm/nano-workforce/compare/v0.214.0...v0.215.0) (2026-11-20)
+
+### Features
+
+* **processes:** message start events so entry processes are MCP process tools ([#983](https://github.com/nanobpm/nano-workforce/issues/983)) ([e10dcce](https://github.com/nanobpm/nano-workforce/commit/e10dcce518687b792d8c3c0670c42e6501c2036e)), closes [nano-bpm#1499](https://github.com/nanobpm/nano-bpm/issues/1499) [nano-bpm#1738](https://github.com/nanobpm/nano-bpm/issues/1738) [#975](https://github.com/nanobpm/nano-workforce/issues/975) [#976](https://github.com/nanobpm/nano-workforce/issues/976)
+
 ## [0.214.0](https://github.com/nanobpm/nano-workforce/compare/v0.213.0...v0.214.0) (2026-11-20)
 
 ### Features
