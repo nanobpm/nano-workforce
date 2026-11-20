@@ -41,6 +41,30 @@ Top-level fields that are not per-item may sit next to it (`generatedAt`, `versi
 The guard treats an operation as a list if it is one of the operations named in #972, or if its
 `operationId` starts with `list` or `search`.
 
+### Migration (additive phase)
+
+During the additive phase (#972 delivery steps 2–3) every list response returns `items` and
+`page.totalItems` **next to** its legacy array and `count`, which are marked `deprecated: true`
+in `openapi.yaml`. Likewise every response that carried `processKey` also carries
+`processInstanceKey`, transcripts carry `processDefinitionId` next to `bpmnProcessId`, and
+requests accept both names (the canonical one wins): `getPrHistory?processInstanceKey=` (alias
+`processKey`) and the `acknowledge*` bodies' `prKey`/`featureKey`/`planKey`/`runKey` (aliases
+`pr_key`/`feature_key`/`plan_key`/`run_key`). Clients should switch now; the deprecated names
+are removed in a later breaking release.
+
+### Decision: `listActivePrs` is one list with a `kind` discriminator
+
+`GET /status` (`listActivePrs`) used to return two arrays, `prs` and `deliveries`. We keep it as
+**one operation** whose `items` holds both, PR rows first then delivery-run rows, each tagged
+`kind: "pr"` or `kind: "delivery"` (`page.totalItems` counts both).
+
+Why not split into two operations: `/status` is the single "what is in flight?" poll that
+operators, the MCP `listActivePrs` tool and the guide all rely on, and the top-level `version`
+object answers "is the fix live?" in that same call. Splitting would double the polls and the
+MCP tool surface for no gain. A `kind` field is how Camunda's own mixed lists stay
+self-describing, and clients that want one kind filter on it
+(`jq '.items[] | select(.kind == "pr")'`).
+
 ## 3. Search and query parameters
 
 - **POST search** endpoints take a Camunda-style body: `{ "filter": {…}, "sort": [{ "field", "order" }], "page": { "from", "limit" } }`.

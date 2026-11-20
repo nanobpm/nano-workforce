@@ -15,19 +15,20 @@
 // terminal-folded `ack_open`, never the base `status`.
 
 import { acknowledgeVia } from "../app/acknowledge.ts";
+import { pickKey } from "../app/apiShape.ts";
 import { deliveryGraphReadModel } from "../app/deliveryGraphReadModel.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
-const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
 export default defineOperation("acknowledgeDeliveryGraph", async ({ body }, app) => {
   if (!body || typeof body !== "object") {
     app.log.warn("acknowledge-delivery-graph rejected: missing request body");
-    return { status: 400, body: { ok: false, error: "run_key is required" } };
+    return { status: 400, body: { ok: false, error: "runKey is required" } };
   }
 
-  const runKey = str(body.run_key);
-  if (!runKey) return { status: 400, body: { ok: false, error: "run_key is required" } };
+  // #972 dual-accept: the canonical `runKey` wins over the deprecated `run_key`.
+  const runKey = pickKey(body, "runKey", "run_key");
+  if (!runKey) return { status: 400, body: { ok: false, error: "runKey is required" } };
 
   return acknowledgeVia(
     app,

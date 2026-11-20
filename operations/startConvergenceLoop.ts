@@ -13,6 +13,7 @@
 // keeps the PR-parse guard because the reference FORMAT (owner/repo#123 or a URL) is app logic the
 // JSON schema can't express — an unparseable reference is a 400.
 
+import { withProcessInstanceKey } from "../app/apiShape.ts";
 import { clampRounds, MAX_ROUNDS, parsePr, submitPr } from "../app/service.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -65,5 +66,5 @@ export default defineOperation("startConvergenceLoop", async ({ body }, app) => 
     autoResolveEscalations,
     hasCustomInstructions: customInstructions != null && customInstructions.trim() !== "",
   });
-  return { status: 202, body: result };
+  return { status: 202, body: withProcessInstanceKey(result) };
 });

@@ -9,8 +9,10 @@
 //
 // The optional shared-secret guard stays HERE (the runtime does not enforce OpenAPI `security`):
 // when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the x-hook-secret header.
-import { getLineage, listLineage } from "../app/lineage.ts";
+import { listEnvelope, withProcessInstanceKey } from "../app/apiShape.ts";
+import { getLineage, type LineageThread, listLineage } from "../app/lineage.ts";
 import { envVar } from "../app/version.ts";
+import type { LineageThreadView } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
@@ -24,9 +26,15 @@ export default defineOperation("getLineage", async ({ query, req }, app) => {
   const root = typeof rawRoot === "string" ? rawRoot.trim() : "";
   if (root) {
     const thread = await getLineage(app.data, root);
-    const threads = thread ? [thread] : [];
-    return { status: 200, body: { count: threads.length, threads } };
+    const threads = thread ? [lineageWire(thread)] : [];
+    return { status: 200, body: { count: threads.length, threads, ...listEnvelope(threads) } };
   }
-  const threads = await listLineage(app.data);
-  return { status: 200, body: { count: threads.length, threads } };
+  const threads = (await listLineage(app.data)).map(lineageWire);
+  return { status: 200, body: { count: threads.length, threads, ...listEnvelope(threads) } };
 });
+
+/** A lineage thread on the wire: the canonical `processInstanceKey` next to the deprecated
+ *  `processKey`, on the thread and on each of its PRs (#972). */
+function lineageWire(thread: LineageThread): LineageThreadView {
+  return { ...withProcessInstanceKey(thread), prs: thread.prs.map(withProcessInstanceKey) };
+}

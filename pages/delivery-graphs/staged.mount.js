@@ -310,15 +310,17 @@ export function mountStagedProposals(host, config = {}) {
     try {
       const { status, body } = await get(stagedUrl);
       if (disposed) return;
-      if (status === 200 && Array.isArray(body.proposals)) {
-        currentProposals = body.proposals;
+      // #972: read the Camunda `items` list; `proposals` is its deprecated alias.
+      const proposals = Array.isArray(body?.items) ? body.items : body?.proposals;
+      if (status === 200 && Array.isArray(proposals)) {
+        currentProposals = proposals;
         // If the proposal an inline confirmation is open over has since dropped off the list (dispatched
         // elsewhere, dismissed, or expired), the confirmation is stale — clear it so the poll can redraw.
-        if (pending != null && !body.proposals.some((p) => p.digest === pending.digest)) pending = null;
+        if (pending != null && !proposals.some((p) => p.digest === pending.digest)) pending = null;
         // While a confirmation (or its name input) is open, DON'T clobber the DOM the operator is
         // interacting with — the fetch above still runs, so an expiry is detected and cleared above.
         if (pending == null) {
-          listEl.innerHTML = renderList(body.proposals, pending);
+          listEl.innerHTML = renderList(proposals, pending);
           applyDisabled();
         }
         if (loadErrorShown) {

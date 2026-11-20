@@ -8,7 +8,9 @@
 // disagree with the `/status` rows' `incident` overlay. Oldest incident first (longest-dead first).
 //
 // The optional shared-secret guard stays HERE (mirrors `listEscalations`).
+
 import type { DataLayer } from "@nanobpm/urban";
+import { listEnvelope, } from "../app/apiShape.ts";
 import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -72,7 +74,7 @@ export default defineOperation("listIncidents", async ({ req }, app) => {
     app.log.warn("listIncidents rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
   }
-  if (!app.data) return { status: 200, body: { count: 0, incidents: [] } };
+  if (!app.data) return { status: 200, body: { count: 0, incidents: [], ...listEnvelope([]) } };
   const incidents = await activeIncidents(app.data);
-  return { status: 200, body: { count: incidents.length, incidents } };
+  return { status: 200, body: { count: incidents.length, incidents, ...listEnvelope(incidents) } };
 });

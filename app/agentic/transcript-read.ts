@@ -117,6 +117,8 @@ export function toTranscript(
   if (fields.jobKey !== undefined) out.jobKey = fields.jobKey;
   if (fields.processInstanceKey !== undefined) out.processInstanceKey = fields.processInstanceKey;
   if (fields.bpmnProcessId !== undefined) out.bpmnProcessId = fields.bpmnProcessId;
+  // #972: the Camunda name for the BPMN process id; `bpmnProcessId` is its deprecated alias.
+  if (fields.bpmnProcessId !== undefined) out.processDefinitionId = fields.bpmnProcessId;
   if (fields.elementId !== undefined) out.elementId = fields.elementId;
   if (fields.elementInstanceKey !== undefined) out.elementInstanceKey = fields.elementInstanceKey;
   if (fields.planKey !== undefined) out.planKey = fields.planKey;
@@ -240,6 +242,8 @@ export function readTranscriptFrom(
   if (fields.jobKey !== undefined) out.jobKey = fields.jobKey;
   if (fields.processInstanceKey !== undefined) out.processInstanceKey = fields.processInstanceKey;
   if (fields.bpmnProcessId !== undefined) out.bpmnProcessId = fields.bpmnProcessId;
+  // #972: the Camunda name for the BPMN process id; `bpmnProcessId` is its deprecated alias.
+  if (fields.bpmnProcessId !== undefined) out.processDefinitionId = fields.bpmnProcessId;
   if (fields.elementId !== undefined) out.elementId = fields.elementId;
   if (fields.elementInstanceKey !== undefined) out.elementInstanceKey = fields.elementInstanceKey;
   if (fields.planKey !== undefined) out.planKey = fields.planKey;

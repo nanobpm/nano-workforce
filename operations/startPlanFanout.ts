@@ -10,6 +10,7 @@
 // ONE of `issue` or `url` — so an empty or ambiguous target is a 400 at the edge; this delegate just
 // narrows the validated variant and keeps the issue-FORMAT parse guard (schema can't express it).
 
+import { withProcessInstanceKey } from "../app/apiShape.ts";
 import { admitPlan, admitPlanErrorResponse, parseIssue, startPlan } from "../app/plan.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -62,5 +63,5 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     alreadyRunning,
     autoResolveEscalations,
   });
-  return { status: 202, body: result };
+  return { status: 202, body: withProcessInstanceKey(result) };
 });

@@ -586,7 +586,7 @@ function agentSessionView(i) {
 }
 
 function agentSessionsView(report) {
-  const sessions = (report.instances ?? [])
+  const sessions = (report.items ?? report.instances ?? [])
     .map(agentSessionView)
     .sort((a, b) => {
       const byTime = String(b.capturedAt ?? "").localeCompare(String(a.capturedAt ?? ""));
@@ -619,7 +619,7 @@ function turnTime(iso) {
 }
 
 function agentHistoryView(report) {
-  const turns = (report.records ?? []).map((r) => ({
+  const turns = (report.items ?? report.records ?? []).map((r) => ({
     historyItemKey: r.historyItemKey,
     loopIteration: r.loopIteration,
     role: r.role,
@@ -1400,7 +1400,7 @@ export function mountCockpit(host, opts = {}) {
       // The focus changed while this list was in flight — drop it rather than fold a stale tree's keys
       // into the new focus's `focusKeys`.
       if (gen !== focusGen || disposed) return { count: 0, instances: [] };
-      for (const i of report.instances ?? []) byKey.set(i.agentInstanceKey, i);
+      for (const i of report.items ?? report.instances ?? []) byKey.set(i.agentInstanceKey, i);
     }
     const instances = [...byKey.values()];
     for (const i of instances) if (i.processInstanceKey) focusKeys.add(i.processInstanceKey);

@@ -12,6 +12,7 @@
 // a feature run's PR is admitted through the same required+explicit / create-if-missing /
 // confirm-default / shared-base rules, with the same typed-error → HTTP mapping.
 
+import { withProcessInstanceKey } from "../app/apiShape.ts";
 import { startFeature } from "../app/feature.ts";
 import { type FeatureReadiness, parseFeatureReadiness } from "../app/featureReadiness.ts";
 import { BaseBranchMustExistError } from "../app/github.ts";
@@ -218,5 +219,5 @@ export default defineOperation("startFeature", async ({ body }, app) => {
       },
     };
   }
-  return { status: 202, body: result };
+  return { status: 202, body: withProcessInstanceKey(result) };
 });
