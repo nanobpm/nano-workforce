@@ -163,11 +163,7 @@ export async function admitConvergenceTool(
     throw new Error(`${tool}: could not parse PR (use owner/repo#123 or a PR URL)`);
   }
   const dependsOn = optionalStringList(variables, "dependsOn", tool) ?? [];
-  const rawMaxRounds = variables.maxRounds;
-  if (rawMaxRounds !== undefined && rawMaxRounds !== null && typeof rawMaxRounds !== "number") {
-    throw new Error(`${tool}: "maxRounds" must be an integer`);
-  }
-  const maxRounds = clampRounds(rawMaxRounds, MAX_ROUNDS);
+  const maxRounds = clampRounds(requireOptionalPositiveInt(variables, "maxRounds", tool), MAX_ROUNDS);
   const autoMerge = optionalBool(variables, "autoMerge", tool);
   const autoResolveEscalations = optionalBool(variables, "autoResolveEscalations", tool) === true;
   const customInstructions = optionalString(variables, "customInstructions", tool);
@@ -186,4 +182,20 @@ export async function admitConvergenceTool(
     null,
     customInstructions,
   );
+}
+
+/** An optional tool argument that, when supplied, must be a positive integer (openapi.yaml
+ *  `minimum: 1`). Zero, negative, fractional, non-finite, or non-number values throw (→ incident)
+ *  rather than silently falling back to a default or being truncated. */
+export function requireOptionalPositiveInt(
+  variables: Record<string, unknown>,
+  name: string,
+  tool: string,
+): number | undefined {
+  const raw = variables[name];
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
+    throw new Error(`${tool}: "${name}" must be a positive integer`);
+  }
+  return raw;
 }
