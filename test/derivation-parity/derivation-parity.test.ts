@@ -88,6 +88,8 @@ test("class-1 blocked goldens genuinely have multiple top-level start/end events
     "merge-loop",
     "plan-fanout",
     "delivery-human",
+    // Since issue #976 (the MCP tool message start + terminate end alongside the API's none start).
+    "convergence-loop",
   ]);
   for (const model of multiStartEndBlocked) {
     const xml = readFileSync(goldenPath(model), "utf8");
@@ -99,20 +101,20 @@ test("class-1 blocked goldens genuinely have multiple top-level start/end events
     );
   }
 
-  // The two single-start/single-end goldens (retro, convergence-loop) clear
-  // class 1; each is blocked on a LATER class instead — retro on the class-3
-  // agent-task marker (proven below), convergence-loop on its class-2 arbitrary
-  // graph.
-  for (const model of ["retro", "convergence-loop"]) {
+  // The single-start/single-end golden (retro) clears class 1; it is blocked on a LATER class
+  // instead — the class-3 agent-task marker (proven below). (convergence-loop moved INTO class 1
+  // with issue #976's MCP tool message start + terminate end, alongside its class-2 arbitrary
+  // graph.)
+  for (const model of ["retro"]) {
     const xml = readFileSync(goldenPath(model), "utf8");
     assertEquals(countTag(xml, "startEvent"), 1, `${model} should have one start event`);
     assertEquals(countTag(xml, "endEvent"), 1, `${model} should have one end event`);
   }
 });
 
-// CLASS 2 — convergence-loop has a single start/end (clears class 1) but an
-// ARBITRARY control-flow graph the structured-only builder cannot emit. Prove
-// the three specific features against the golden itself.
+// CLASS 2 — convergence-loop has an ARBITRARY control-flow graph the structured-only builder cannot
+// emit (independently of its class-1 multi-start/end, which issue #976 added with the MCP tool
+// message start). Prove the three specific features against the golden itself.
 test("convergence-loop golden has arbitrary-graph features the structured builder cannot emit", () => {
   const xml = readFileSync(goldenPath("convergence-loop"), "utf8");
   const between = (id: string, closeTag: string, tag: string): number => {

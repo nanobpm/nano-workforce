@@ -267,6 +267,18 @@
     {
       "taskType": "pr.escalation-steward-record",
       "handler": "workers/escalation-steward-record/worker.ts"
+    },
+    {
+      "taskType": "pr.start-feature-mcp",
+      "handler": "workers/start-feature-mcp/worker.ts"
+    },
+    {
+      "taskType": "pr.start-plan-mcp",
+      "handler": "workers/start-plan-mcp/worker.ts"
+    },
+    {
+      "taskType": "pr.start-convergence-mcp",
+      "handler": "workers/start-convergence-mcp/worker.ts"
     }
   ],
   "externalTaskTypes": [

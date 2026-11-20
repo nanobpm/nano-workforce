@@ -59,8 +59,11 @@ function shapeFields(block: string, shapeId: string): Set<string> | null {
   return out;
 }
 
-/** The top-level start event of a process block: the first `<bpmn:startEvent>` that is NOT nested in
- *  a subProcess. Sub-process bodies are cut out before matching. */
+/** The top-level NONE start event of a process block: the first `<bpmn:startEvent>` that is NOT
+ *  nested in a subProcess AND not a message/signal/timer start (those carry an event definition).
+ *  Sub-process bodies are cut out before matching. A process may ALSO carry a message start event
+ *  (issue #976 — the MCP tool door); the API/call-activity start contract this guard pins lives on
+ *  the NONE start, so the message start is deliberately not matched here. */
 function topLevelStart(block: string): string | null {
   let flat = block;
   // Remove nested subProcess bodies (repeat until stable, innermost first).
@@ -69,9 +72,12 @@ function topLevelStart(block: string): string | null {
     if (next === flat) break;
     flat = next;
   }
-  const m = /<bpmn:startEvent\b[^>]*?(?:\/>|>([\s\S]*?)<\/bpmn:startEvent>)/.exec(flat);
-  if (m === null) return null;
-  return m[0];
+  for (const m of flat.matchAll(/<bpmn:startEvent\b[^>]*?(?:\/>|>[\s\S]*?<\/bpmn:startEvent>)/g)) {
+    const start = m[0];
+    // A message/timer/signal start carries an event definition child; the none start carries none.
+    if (!/<bpmn:(message|timer|signal|conditional|error)EventDefinition\b/.test(start)) return start;
+  }
+  return null;
 }
 
 function startEnvelopes(): StartEnvelope[] {
