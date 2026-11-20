@@ -163,7 +163,7 @@
             "showWhenField": "ack_open",
             "action": {
               "path": "/app/api/actions/acknowledge-pr",
-              "body": { "pr_key": "{{row.pr_key}}" }
+              "body": { "prKey": "{{row.pr_key}}" }
             }
           }
         ]
@@ -201,7 +201,7 @@
             "showWhenField": "ack_open",
             "action": {
               "path": "/app/api/actions/acknowledge-epic",
-              "body": { "plan_key": "{{row.plan_key}}" }
+              "body": { "planKey": "{{row.plan_key}}" }
             }
           }
         ]
@@ -238,7 +238,7 @@
             "showWhenField": "ack_open",
             "action": {
               "path": "/app/api/actions/acknowledge-done",
-              "body": { "feature_key": "{{row.feature_key}}" }
+              "body": { "featureKey": "{{row.feature_key}}" }
             }
           }
         ],
@@ -305,7 +305,7 @@
             "showWhenField": "ack_open",
             "action": {
               "path": "/app/api/actions/acknowledge-delivery-graph",
-              "body": { "run_key": "{{row.run_key}}" }
+              "body": { "runKey": "{{row.run_key}}" }
             }
           }
         ]

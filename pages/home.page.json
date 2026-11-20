@@ -278,7 +278,7 @@
             "action": {
               "path": "/app/api/actions/acknowledge-pr",
               "body": {
-                "pr_key": "{{row.pr_key}}"
+                "prKey": "{{row.pr_key}}"
               }
             }
           }

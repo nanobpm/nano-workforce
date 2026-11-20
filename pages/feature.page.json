@@ -177,7 +177,7 @@
             "showWhenField": "ack_open",
             "action": {
               "path": "/app/api/actions/acknowledge-done",
-              "body": { "feature_key": "{{row.feature_key}}" }
+              "body": { "featureKey": "{{row.feature_key}}" }
             }
           }
         ],

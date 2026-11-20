@@ -165,7 +165,7 @@
             "showWhenField": "ack_open",
             "action": {
               "path": "/app/api/actions/acknowledge-epic",
-              "body": { "plan_key": "{{row.plan_key}}" }
+              "body": { "planKey": "{{row.plan_key}}" }
             }
           }
         ]
