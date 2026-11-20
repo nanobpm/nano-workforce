@@ -219,8 +219,11 @@ export const PORTS: readonly PortEntry[] = [
   {
     model: "convergence-loop",
     blockedReason:
-      "blocked (arbitrary control-flow graph): single top-level start/end, but " +
-      "its topology is not expressible with the published @nanobpm/workflow's " +
+      "blocked (multi-start/end + arbitrary control-flow graph): since issue #976 it carries " +
+      "TWO top-level starts (the none start the API uses + the `start-convergence-loop` MCP tool " +
+      "message start) and two ends (the loop's `End` + the MCP starter's terminate `EndMcp`), " +
+      "which the published @nanobpm/workflow compiler (a single top-level start/end) cannot " +
+      "reproduce; and its topology is not expressible with the published @nanobpm/workflow's " +
       "structured-only builder (loop/switch/branch). Proven in the test suite: " +
       "the loop head `capture-head` is a serviceTask that merges 6 back-edges " +
       "directly (in=6: f_start, f_reviewLoop, f_answerLoop, the #786 husk " +
