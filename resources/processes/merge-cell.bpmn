@@ -1,7 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_merge_cell" targetNamespace="http://nanobpm.io/nano-workforce">
   <bpmn:process id="merge-cell" name="Merge cell (trial merge)" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="MergeCellOpenHead" name="Merge cell — open head">
+          <nano:extend name="repo" type="string" />
+          <nano:extend name="prNumber" type="integer" />
+          <nano:extend name="headRef" type="string" optional="true" />
+          <nano:extend name="headSha" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="MergeCellStartIn" name="Merge cell — start input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="currentWave" type="integer" optional="true" />
+          <nano:extend name="trialMergeWave" type="integer" optional="true" />
+          <nano:reference name="waveOpenHeads" ref="MergeCellOpenHead" list="true" />
+          <nano:extend name="agentSlaTimeout" type="string" />
+          <nano:extend name="escalationSlaTimeout" type="string" />
+          <nano:extend name="escalationAssignee" type="string" optional="true" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Wave produced">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="MergeCellStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>mc_toTrial</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:serviceTask id="trial-merge" name="Trial merge (agent)">

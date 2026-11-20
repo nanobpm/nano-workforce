@@ -11,6 +11,13 @@
   <bpmn:process id="readiness-gate" name="Artifact readiness wait-gate" isExecutable="true">
     <bpmn:extensionElements>
       <nano:shapes>
+        <nano:shape id="ReadinessGateStartIn" name="Readiness gate — start input">
+          <nano:extend name="gateKey" type="string" />
+          <nano:extend name="probeTimeout" type="string" />
+          <nano:extend name="probePollEvery" type="string" />
+          <nano:extend name="onTimeout" type="string" optional="true" />
+          <nano:reference name="probe" ref="ReadinessProbe" />
+        </nano:shape>
         <nano:shape id="ReadinessProbeMatch" name="Readiness probe — match predicate">
           <nano:extend name="status" type="integer" optional="true" />
           <nano:extend name="bodyIncludes" type="string" optional="true" />
@@ -61,6 +68,11 @@
       </nano:shapes>
     </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Gate opened">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ReadinessGateStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>f_start</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:parallelGateway id="fork" name="arm probe + gate">

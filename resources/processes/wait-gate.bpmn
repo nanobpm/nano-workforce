@@ -1,7 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_wait_gate" targetNamespace="http://nanobpm.io/nano-workforce">
   <bpmn:process id="wait-gate" name="Readiness wait-gate cell" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="WaitGateStartIn" name="Wait-gate cell — start input">
+          <nano:extend name="gateKey" type="string" />
+          <nano:reference name="probe" ref="ReadinessProbe" />
+          <nano:extend name="probeTimeout" type="string" />
+          <nano:extend name="probePollEvery" type="string" />
+          <nano:extend name="onTimeout" type="string" optional="true" />
+          <nano:extend name="escalationSlaTimeout" type="string" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Gate opened">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="WaitGateStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>wg_toProbe</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:subProcess id="probe-loop" name="Probe readiness loop">

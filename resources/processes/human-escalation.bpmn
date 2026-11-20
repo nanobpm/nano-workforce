@@ -1,7 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_human_escalation" targetNamespace="http://nanobpm.io/nano-workforce">
   <bpmn:process id="human-escalation" name="Human escalation cell" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="HumanEscalationStartIn" name="Human escalation cell — start input">
+          <nano:extend name="question" type="string" />
+          <nano:extend name="escalationAssignee" type="string" optional="true" />
+          <nano:extend name="escalationSlaTimeout" type="string" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Escalated">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="HumanEscalationStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>he_toTask</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:userTask id="escalation" name="Task escalation (human)">

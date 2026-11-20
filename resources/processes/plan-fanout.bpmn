@@ -16,6 +16,29 @@
   <bpmn:process id="plan-fanout" name="Agent Fleet — plan &#38; implement" isExecutable="true">
     <bpmn:extensionElements>
       <nano:shapes>
+        <nano:shape id="PlanStartIn" name="Plan &#38; implement — start input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="repo" type="string" />
+          <nano:extend name="issue" type="string" />
+          <nano:extend name="issueNumber" type="integer" />
+          <nano:extend name="issueUrl" type="string" />
+          <nano:extend name="planFindings" type="string" optional="true" />
+          <nano:extend name="planReviewEpoch" type="integer" optional="true" />
+          <nano:extend name="escalationSlaTimeout" type="string" />
+          <nano:extend name="escalationAssignee" type="string" optional="true" />
+          <nano:extend name="autoResolveEscalations" type="boolean" optional="true" />
+          <nano:extend name="agentSlaTimeout" type="string" />
+          <nano:extend name="capsWaitTimeout" type="string" />
+          <nano:extend name="blackboardUrl" type="string" optional="true" />
+          <nano:extend name="blackboardBrief" type="string" optional="true" />
+          <nano:extend name="baseBranch" type="string" />
+          <nano:extend name="baseBranchBrief" type="string" optional="true" />
+          <nano:reference name="readinessProbes" ref="ReadinessProbe" list="true" optional="true" />
+          <nano:extend name="probeTimeout" type="string" optional="true" />
+          <nano:extend name="probePollEvery" type="string" optional="true" />
+          <nano:extend name="gateKey" type="string" optional="true" />
+          <nano:extend name="resolvedArtifacts" type="string" list="true" optional="true" />
+        </nano:shape>
         <nano:shape id="EnsureBaseBranchIn" name="Ensure base branch — input">
           <nano:extend name="repo" type="string" />
           <nano:extend name="baseBranch" type="string" />
@@ -111,6 +134,11 @@
       </nano:shapes>
     </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Issue submitted">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PlanStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>f_toReadinessGw</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:exclusiveGateway id="gw-readiness" name="dependent (has capability gate)?" default="f_readiness_skip">
@@ -445,6 +473,9 @@
           <zeebe:ioMapping>
             <zeebe:input source="=task" target="task" />
             <zeebe:input source="=planKey" target="subjectKey" />
+            <zeebe:input source="=if (is defined(repo)) then repo else null" target="repo" />
+            <zeebe:input source="=if (is defined(issue)) then issue else null" target="issue" />
+            <zeebe:input source="=if (is defined(claimIssue)) then claimIssue else null" target="claimIssue" />
             <zeebe:input source="=baseBranch" target="baseBranch" />
             <zeebe:input source="=escalationSlaTimeout" target="escalationSlaTimeout" />
             <zeebe:input source="=agentSlaTimeout" target="agentSlaTimeout" />

@@ -3,6 +3,10 @@
   <bpmn:process id="escalation-steward" name="Escalation steward" isExecutable="true">
     <bpmn:extensionElements>
       <nano:shapes>
+        <nano:shape id="StewardStartIn" name="Escalation steward — start input">
+          <nano:extend name="minAgeMs" type="integer" />
+          <nano:extend name="agentSlaTimeout" type="string" />
+        </nano:shape>
         <nano:shape id="StewardCollectIn" name="Collect eligible escalations — input">
           <nano:extend name="minAgeMs" type="integer" optional="true" />
         </nano:shape>
@@ -17,6 +21,11 @@
       </nano:shapes>
     </bpmn:extensionElements>
     <bpmn:startEvent id="tick" name="Steward tick">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="StewardStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>es_toCollect</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:serviceTask id="collect" name="Collect eligible escalations">

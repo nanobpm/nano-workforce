@@ -1,7 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_converge_cell" targetNamespace="http://nanobpm.io/nano-workforce">
   <bpmn:process id="converge-cell" name="Converge cell" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="ConvergeCellStartIn" name="Converge cell — start input">
+          <nano:extend name="featureKey" type="string" />
+          <nano:extend name="prKey" type="string" />
+          <nano:extend name="autoMerge" type="boolean" optional="true" />
+          <nano:extend name="humanApproval" type="boolean" optional="true" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="PR to converge">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ConvergeCellStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>cc_toConverge</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:serviceTask id="converge" name="Hand off to convergence loop">

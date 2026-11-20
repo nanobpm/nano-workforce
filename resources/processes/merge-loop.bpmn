@@ -26,6 +26,36 @@
   <bpmn:process id="merge-loop" name="PR Merge" isExecutable="true">
     <bpmn:extensionElements>
       <nano:shapes>
+        <nano:shape id="MergeStartIn" name="PR merge — start input">
+          <nano:extend name="repo" type="string" />
+          <nano:extend name="prNumber" type="integer" />
+          <nano:extend name="prUrl" type="string" />
+          <nano:extend name="prKey" type="string" />
+          <nano:extend name="round" type="integer" />
+          <nano:extend name="ciFixRound" type="integer" optional="true" />
+          <nano:extend name="ciFixMax" type="integer" optional="true" />
+          <nano:extend name="rebaseRound" type="integer" optional="true" />
+          <nano:extend name="rebaseMax" type="integer" optional="true" />
+          <nano:extend name="mergeRetryRound" type="integer" optional="true" />
+          <nano:extend name="mergeRetryMax" type="integer" optional="true" />
+          <nano:extend name="agentSlaTimeout" type="string" />
+          <nano:extend name="landedWaitTimeout" type="string" />
+          <nano:extend name="mergeableWaitTimeout" type="string" />
+          <nano:extend name="mergeableRepollInterval" type="string" />
+          <nano:extend name="mergeStallRounds" type="integer" optional="true" />
+          <nano:extend name="mergeStallMax" type="integer" optional="true" />
+          <nano:extend name="reviewRequestRound" type="integer" optional="true" />
+          <nano:extend name="reviewRequestMax" type="integer" optional="true" />
+          <nano:extend name="reviewRequestWait" type="string" />
+          <nano:extend name="reviewRequest" type="string" optional="true" />
+          <nano:extend name="rootRequestKey" type="string" optional="true" />
+          <nano:extend name="customInstructions" type="string" optional="true" />
+          <nano:extend name="autoMerge" type="boolean" optional="true" />
+          <nano:extend name="convergeOnly" type="boolean" optional="true" />
+          <nano:extend name="humanApproval" type="boolean" optional="true" />
+          <nano:extend name="abandonUrl" type="string" optional="true" />
+          <nano:extend name="abandonBrief" type="string" optional="true" />
+        </nano:shape>
         <nano:shape id="MergeArmIn" name="Arm merge poller — input">
           <nano:extend name="prKey" type="string" />
         </nano:shape>
@@ -118,6 +148,11 @@
       </nano:shapes>
     </bpmn:extensionElements>
     <bpmn:startEvent id="MergeStart" name="PR converged">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="MergeStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>f_m_start</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:intermediateCatchEvent id="wait-deps" name="Wait: dependencies merged">
