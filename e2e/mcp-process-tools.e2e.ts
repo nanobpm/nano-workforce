@@ -43,8 +43,35 @@ interface ToolStartSpec {
   readonly toolName: string;
   readonly messageName: string;
   readonly envelopeShape: string;
-  /** Fields the tool's input schema must expose (the start message's envelope shape). */
-  readonly requiredFields: readonly string[];
+  /** The EXACT field contract of the tool's input schema (the start message's envelope shape):
+   *  name → type, required/optional, list. Pinned exhaustively so a type, optionality, or list
+   *  change (or an added/removed field) fails here rather than silently changing the MCP schema. */
+  readonly fields: Readonly<Record<string, FieldSpec>>;
+}
+
+interface FieldSpec {
+  readonly type: "string" | "integer" | "boolean";
+  readonly optional: boolean;
+  readonly list: boolean;
+}
+
+const req = (type: FieldSpec["type"]): FieldSpec => ({ type, optional: false, list: false });
+const opt = (type: FieldSpec["type"]): FieldSpec => ({ type, optional: true, list: false });
+const optList = (type: FieldSpec["type"]): FieldSpec => ({ type, optional: true, list: true });
+
+/** Parse every `<nano:extend>` of a shape into its field contract. */
+function shapeFields(shape: string): Map<string, FieldSpec> {
+  const out = new Map<string, FieldSpec>();
+  for (const m of shape.matchAll(/<nano:extend\b([^>]*?)\/?>/g)) {
+    const attrs = m[1] ?? "";
+    const attr = (n: string): string | undefined => new RegExp(`\\b${n}="([^"]*)"`).exec(attrs)?.[1];
+    const name = attr("name");
+    assert(name !== undefined, `nano:extend without a name: ${m[0]}`);
+    const type = attr("type");
+    assert(type === "string" || type === "integer" || type === "boolean", `${name}: unexpected type ${type}`);
+    out.set(name, { type, optional: attr("optional") === "true", list: attr("list") === "true" });
+  }
+  return out;
 }
 
 const TOOL_STARTS: readonly ToolStartSpec[] = [
@@ -54,7 +81,14 @@ const TOOL_STARTS: readonly ToolStartSpec[] = [
     toolName: "start_convergence_loop",
     messageName: "start-convergence-loop",
     envelopeShape: "ConvergenceToolIn",
-    requiredFields: ["pr"],
+    fields: {
+      pr: req("string"),
+      dependsOn: optList("string"),
+      maxRounds: opt("integer"),
+      autoMerge: opt("boolean"),
+      autoResolveEscalations: opt("boolean"),
+      customInstructions: opt("string"),
+    },
   },
   {
     file: "feature.bpmn",
@@ -62,7 +96,19 @@ const TOOL_STARTS: readonly ToolStartSpec[] = [
     toolName: "start_feature",
     messageName: "start-feature",
     envelopeShape: "FeatureToolIn",
-    requiredFields: ["issue", "baseBranch"],
+    fields: {
+      issue: req("string"),
+      baseBranch: req("string"),
+      converge: opt("boolean"),
+      autoMerge: opt("boolean"),
+      humanApproval: opt("boolean"),
+      confirmDefaultBase: opt("boolean"),
+      allowSharedBase: opt("boolean"),
+      autoResolveEscalations: opt("boolean"),
+      customInstructions: opt("string"),
+      blockedOn: optList("string"),
+      consumerPackage: opt("string"),
+    },
   },
   {
     file: "plan-fanout.bpmn",
@@ -70,7 +116,13 @@ const TOOL_STARTS: readonly ToolStartSpec[] = [
     toolName: "start_plan_fanout",
     messageName: "start-plan-fanout",
     envelopeShape: "PlanToolIn",
-    requiredFields: ["issue", "baseBranch"],
+    fields: {
+      issue: req("string"),
+      baseBranch: req("string"),
+      allowSharedBase: opt("boolean"),
+      confirmDefaultBase: opt("boolean"),
+      autoResolveEscalations: opt("boolean"),
+    },
   },
 ];
 
@@ -124,15 +176,14 @@ describe("MCP process tools — model contract (issue #976)", () => {
         toolStart.includes(`<zeebe:property name="io.camunda.tool:name" value="${spec.toolName}"`),
         `${spec.file}: the tool name must be ${spec.toolName}`,
       );
-      // The envelope shape carries the door's inputs (required fields present).
+      // The envelope shape carries EXACTLY the door's input contract: names, types, optionality, lists.
       const shape = shapeBlock(block, spec.envelopeShape);
       assert(shape !== null, `${spec.file}: the ${spec.envelopeShape} shape must exist`);
-      for (const field of spec.requiredFields) {
-        assert.ok(
-          new RegExp(`<nano:extend\\b[^>]*\\bname="${field}"`).test(shape),
-          `${spec.file}: ${spec.envelopeShape} must declare the required field "${field}"`,
-        );
-      }
+      assert.deepEqual(
+        Object.fromEntries(shapeFields(shape)),
+        spec.fields,
+        `${spec.file}: ${spec.envelopeShape} must declare exactly the MCP tool input contract`,
+      );
     });
   }
 });
@@ -285,6 +336,71 @@ describe("MCP process tools — message-started runs (issue #976)", () => {
       const instances = await app.engine.searchProcessInstances({ processDefinitionId: "convergence-loop" });
       const active = instances.filter((i) => String(i.state) === "ACTIVE");
       assert.equal(active.length, 1, "exactly one live convergence-loop instance");
+    });
+  });
+
+  test("plan-fanout: a duplicate start-plan-fanout message is idempotent (no second run, no incident)", async () => {
+    await withApp(async (app) => {
+      await app.engine.registerWorker("senior:plan", async () => ({ tasks: [] }));
+      // A custom base branch, so the duplicate's admitPlan shared-base check must exclude the epic's
+      // OWN live plan (selfPlanKey) rather than reject it as a sibling sharing the base.
+      const vars = { issue: "owner/repo#4", baseBranch: "epic/e2e-mcp-dup" };
+      await app.engine.publishMessage({ name: "start-plan-fanout", correlationKey: "mcp-plan-4a", variables: vars });
+      await settleFully(app);
+      await app.engine.publishMessage({ name: "start-plan-fanout", correlationKey: "mcp-plan-4b", variables: vars });
+      await settleFully(app);
+      const instances = await app.engine.searchProcessInstances({ processDefinitionId: "plan-fanout" });
+      const active = instances.filter((i) => String(i.state) === "ACTIVE");
+      assert.equal(active.length, 1, "a duplicate submission does not start a second epic");
+      const plans = await app.db.table<{ plan_key: string }>("plans", "plan_key").find({ plan_key: "owner/repo#4" });
+      assert.equal(plans.length, 1, "still exactly one plans row");
+      assert.equal((await app.engine.searchIncidents({})).length, 0, "the duplicate admission raised no incident");
+    });
+  });
+
+  test("plan-fanout: invalid input fails loudly (incident), never a silent run", async () => {
+    await withApp(async (app) => {
+      await app.engine.publishMessage({
+        name: "start-plan-fanout",
+        correlationKey: "mcp-plan-bad",
+        variables: { issue: "not-an-issue-ref", baseBranch: "epic/e2e-mcp-bad" },
+      });
+      await settleFully(app);
+      assert.ok((await app.engine.searchIncidents({})).length > 0, "an invalid start message raises an incident");
+      const plans = await app.db.table<{ plan_key: string }>("plans", "plan_key").all();
+      assert.equal(plans.length, 0, "no plan was registered for invalid input");
+    });
+  });
+
+  test("convergence-loop: a duplicate start-convergence-loop message is idempotent (no second run, no incident)", async () => {
+    await withApp(async (app) => {
+      const vars = { pr: "owner/repo#8" };
+      await app.engine.publishMessage({ name: "start-convergence-loop", correlationKey: "mcp-pr-8a", variables: vars });
+      await settleFully(app);
+      await app.engine.publishMessage({ name: "start-convergence-loop", correlationKey: "mcp-pr-8b", variables: vars });
+      await settleFully(app);
+      const instances = await app.engine.searchProcessInstances({ processDefinitionId: "convergence-loop" });
+      const active = instances.filter((i) => String(i.state) === "ACTIVE");
+      assert.equal(active.length, 1, "a duplicate submission does not start a second loop");
+      const prs = await app.db
+        .table<{ pr_key: string }>("pull_requests", "pr_key")
+        .find({ pr_key: "owner/repo#8" });
+      assert.equal(prs.length, 1, "still exactly one pull_requests row");
+      assert.equal((await app.engine.searchIncidents({})).length, 0, "the duplicate admission raised no incident");
+    });
+  });
+
+  test("convergence-loop: invalid input fails loudly (incident), never a silent run", async () => {
+    await withApp(async (app) => {
+      await app.engine.publishMessage({
+        name: "start-convergence-loop",
+        correlationKey: "mcp-pr-bad",
+        variables: { pr: "not-a-pr-ref" },
+      });
+      await settleFully(app);
+      assert.ok((await app.engine.searchIncidents({})).length > 0, "an invalid start message raises an incident");
+      const prs = await app.db.table<{ pr_key: string }>("pull_requests", "pr_key").all();
+      assert.equal(prs.length, 0, "no pull_requests row was registered for invalid input");
     });
   });
 });
