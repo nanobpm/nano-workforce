@@ -83,7 +83,9 @@ function startEnvelopes(): StartEnvelope[] {
     const prop = /<zeebe:property\s+name="io\.nanobpm\.dataEnvelope\.in"\s+value="([^"]+)"/.exec(start);
     const shapeId = prop === null ? null : (prop[1] ?? null);
     const fields = shapeId === null ? null : shapeFields(block, shapeId);
-    const body = block.replace(/<nano:shapes>[\s\S]*?<\/nano:shapes>/, "");
+    // Exclude the start event itself: its own `dataEnvelope.in` property would otherwise count every
+    // declared field as a body "read", making the no-phantom-inputs check vacuous.
+    const body = block.replace(/<nano:shapes>[\s\S]*?<\/nano:shapes>/, "").replace(start, "");
     return { file, processId: id, shapeId, fields, body };
   });
 }

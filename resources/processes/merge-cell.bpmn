@@ -3,7 +3,17 @@
   <bpmn:process id="merge-cell" name="Merge cell (trial merge)" isExecutable="true">
     <bpmn:extensionElements>
       <nano:shapes>
+        <nano:shape id="MergeCellOpenHead" name="Merge cell — open head">
+          <nano:extend name="repo" type="string" />
+          <nano:extend name="prNumber" type="integer" />
+          <nano:extend name="headRef" type="string" optional="true" />
+          <nano:extend name="headSha" type="string" optional="true" />
+        </nano:shape>
         <nano:shape id="MergeCellStartIn" name="Merge cell — start input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="currentWave" type="integer" optional="true" />
+          <nano:extend name="trialMergeWave" type="integer" optional="true" />
+          <nano:reference name="waveOpenHeads" ref="MergeCellOpenHead" list="true" />
           <nano:extend name="agentSlaTimeout" type="string" />
           <nano:extend name="escalationSlaTimeout" type="string" />
           <nano:extend name="escalationAssignee" type="string" optional="true" />
