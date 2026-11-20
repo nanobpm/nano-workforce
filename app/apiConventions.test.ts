@@ -17,7 +17,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { collectOperations, type OpenApiDoc, type OperationInfo, parseSpec } from "@nanobpm/urban/toolkit";
+import { collectOperations, type OpenApiDoc, type OperationInfo, parseSpec, validateValue } from "@nanobpm/urban/toolkit";
 import { assert } from "#test-assert";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -252,4 +252,41 @@ test("the named #972 list operations all exist in the spec", () => {
   const ids = new Set(collectOperations(doc()).map((o) => o.operationId));
   const missing = NAMED_LIST_OPS.filter((id) => !ids.has(id));
   assert(missing.length === 0, `missing list ops: ${missing.join(", ")}`);
+});
+
+// PR #980 review: the four acknowledgement request bodies carry a canonical key plus its deprecated
+// alias, both optional so the canonical name can take precedence when both are sent — but that left
+// `{}` valid under the schema while each delegate 400s it. The schemas now require at least one of
+// the pair via `anyOf`; this pins the contract for every canonical/deprecated-alias request body so
+// the next alias pair cannot reintroduce an empty-object hole.
+test("acknowledgement request schemas reject an empty body and accept either key name (#980)", () => {
+  const ACK_KEYS: Record<string, readonly [string, string]> = {
+    acknowledgeDeliveryGraph: ["runKey", "run_key"],
+    acknowledgeDone: ["featureKey", "feature_key"],
+    acknowledgeEpic: ["planKey", "plan_key"],
+    acknowledgePr: ["prKey", "pr_key"],
+  };
+  const spec = doc();
+  const ops = new Map(collectOperations(spec).map((o) => [o.operationId, o]));
+  for (const [id, [canonical, alias]] of Object.entries(ACK_KEYS)) {
+    const op = ops.get(id);
+    assert(op?.requestBodySchema !== undefined, `${id} request body schema missing`);
+    const schema = op.requestBodySchema;
+    assert(
+      validateValue(spec, schema, {}).length > 0,
+      `${id} must reject {} — require ${canonical} or its deprecated alias ${alias}`,
+    );
+    assert(
+      validateValue(spec, schema, { [canonical]: "owner/repo#1" }).length === 0,
+      `${id} must accept the canonical ${canonical}`,
+    );
+    assert(
+      validateValue(spec, schema, { [alias]: "owner/repo#1" }).length === 0,
+      `${id} must accept the deprecated alias ${alias}`,
+    );
+    assert(
+      validateValue(spec, schema, { [canonical]: "owner/repo#1", [alias]: "owner/repo#1" }).length === 0,
+      `${id} must accept both names (canonical wins at the delegate)`,
+    );
+  }
 });

@@ -7664,6 +7664,12 @@ paths:
       operationId: acknowledgeDone
       x-cli:
         command: [ack, done]
+        audience: operator
+      # x-mcp exclusion (ADR 0067 §2 / nano-ide#488): operator-only cockpit door — the terminal run's
+      # "Tick off" button on the Feature page. Agents never file a finished run into History; they
+      # read the list surface. Also keeps the tractability byte budget (#715) under its ceiling.
+      x-mcp:
+        exclude: true
       summary: "Tick off a TERMINAL feature run (issue #254 §5). Stamps `acknowledged_at` on the run so
         the gateway recomputes its `list_bucket` to 'history', dropping the finished run out of the
         primary Active list into History. The Done twin of the blocked acknowledgement, but a terminal run is
@@ -7677,6 +7683,9 @@ paths:
               type: object
               additionalProperties: false
               description: "Provide `featureKey` (or its deprecated alias `feature_key`; `featureKey` wins when both are present, #972)."
+              anyOf:
+                - required: [featureKey]
+                - required: [feature_key]
               properties:
                 featureKey:
                   type: string
@@ -7717,6 +7726,12 @@ paths:
       operationId: acknowledgeEpic
       x-cli:
         command: [ack, epic]
+        audience: operator
+      # x-mcp exclusion (ADR 0067 §2 / nano-ide#488): operator-only cockpit door — the resolved epic's
+      # "Dismiss" button on the Epic page. Agents never file a resolved epic into History; they read
+      # the list surface. Also keeps the tractability byte budget (#715) under its ceiling.
+      x-mcp:
+        exclude: true
       summary: "Dismiss a RESOLVED epic (issue #298). Stamps `acknowledged_at` on the `plans` row so
         the gateway recomputes its `list_bucket` to 'history' (and `ack_open` to 0), dropping the
         resolved epic out of the Active epic list into History. The epic twin of acknowledge-done, but
@@ -7732,6 +7747,9 @@ paths:
               type: object
               additionalProperties: false
               description: "Provide `planKey` (or its deprecated alias `plan_key`; `planKey` wins when both are present, #972)."
+              anyOf:
+                - required: [planKey]
+                - required: [plan_key]
               properties:
                 planKey:
                   type: string
@@ -7774,6 +7792,12 @@ paths:
       operationId: acknowledgePr
       x-cli:
         command: [ack, pr]
+        audience: operator
+      # x-mcp exclusion (ADR 0067 §2 / nano-ide#488): operator-only cockpit door — the terminal PR's
+      # "Dismiss" button on the Home page. Agents never file a finished PR into History; they read
+      # the list surface. Also keeps the tractability byte budget (#715) under its ceiling.
+      x-mcp:
+        exclude: true
       summary: "Dismiss a TERMINAL pull request (issue #641). Stamps `acknowledged_at` on the
         `pull_requests` row so the `pull_requests_read_model` VIEW recomputes its `list_bucket` to
         'history' (and `ack_open` to 0), dropping the finished PR out of the Active convergence list
@@ -7789,6 +7813,9 @@ paths:
               type: object
               additionalProperties: false
               description: "Provide `prKey` (or its deprecated alias `pr_key`; `prKey` wins when both are present, #972)."
+              anyOf:
+                - required: [prKey]
+                - required: [pr_key]
               properties:
                 prKey:
                   type: string
@@ -7829,6 +7856,12 @@ paths:
       operationId: acknowledgeDeliveryGraph
       x-cli:
         command: [ack, graph]
+        audience: operator
+      # x-mcp exclusion (ADR 0067 §2 / nano-ide#488): operator-only cockpit door — the terminal run's
+      # "Dismiss" button on the Delivery graphs page. Agents never file a finished run into History;
+      # they read the list surface. Also keeps the tractability byte budget (#715) under its ceiling.
+      x-mcp:
+        exclude: true
       summary: "Dismiss a TERMINAL delivery-graph run (issue #641). Stamps `acknowledged_at` on the
         `delivery_graph_runs` row so the `delivery_graph_read_model` VIEW recomputes its `list_bucket`
         to 'history' (and `ack_open` to 0), dropping the finished run out of the Active delivery-graph
@@ -7844,6 +7877,9 @@ paths:
               type: object
               additionalProperties: false
               description: "Provide `runKey` (or its deprecated alias `run_key`; `runKey` wins when both are present, #972)."
+              anyOf:
+                - required: [runKey]
+                - required: [run_key]
               properties:
                 runKey:
                   type: string
