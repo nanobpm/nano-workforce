@@ -1,3 +1,9 @@
+## [0.211.3](https://github.com/nanobpm/nano-workforce/compare/v0.211.2...v0.211.3) (2026-11-20)
+
+### Bug Fixes
+
+* **status:** surface merge-stage agent (fix-ci, rebase) as activeWorker ([#974](https://github.com/nanobpm/nano-workforce/issues/974)) ([c297160](https://github.com/nanobpm/nano-workforce/commit/c29716012301406a8bdd2bd702b6ef165c122013)), closes [#971](https://github.com/nanobpm/nano-workforce/issues/971)
+
 ## [0.211.2](https://github.com/nanobpm/nano-workforce/compare/v0.211.1...v0.211.2) (2026-11-17)
 
 ### Bug Fixes
