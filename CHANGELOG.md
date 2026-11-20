@@ -1,3 +1,9 @@
+## [0.214.0](https://github.com/nanobpm/nano-workforce/compare/v0.213.0...v0.214.0) (2026-11-20)
+
+### Features
+
+* **processes:** declare data envelopes on process start events ([#979](https://github.com/nanobpm/nano-workforce/issues/979)) ([bd64fc2](https://github.com/nanobpm/nano-workforce/commit/bd64fc29b7040a62cd5cdd64ccebdf9d94cb689e)), closes [#975](https://github.com/nanobpm/nano-workforce/issues/975)
+
 ## [0.213.0](https://github.com/nanobpm/nano-workforce/compare/v0.212.0...v0.213.0) (2026-11-20)
 
 ### ⚠ BREAKING CHANGES
