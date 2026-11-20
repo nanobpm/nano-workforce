@@ -28,7 +28,7 @@
           <nano:extend name="escalationAssignee" type="string" optional="true" />
           <nano:extend name="autoResolveEscalations" type="boolean" optional="true" />
           <nano:extend name="agentSlaTimeout" type="string" />
-          <nano:extend name="capsWaitTimeout" type="string" optional="true" />
+          <nano:extend name="capsWaitTimeout" type="string" />
           <nano:extend name="blackboardUrl" type="string" optional="true" />
           <nano:extend name="blackboardBrief" type="string" optional="true" />
           <nano:extend name="baseBranch" type="string" />

@@ -17,8 +17,8 @@
           <nano:extend name="prUrl" type="string" />
           <nano:extend name="prKey" type="string" />
           <nano:extend name="round" type="integer" />
-          <nano:extend name="maxRounds" type="integer" optional="true" />
-          <nano:extend name="reviewWaitTimeout" type="string" optional="true" />
+          <nano:extend name="maxRounds" type="integer" />
+          <nano:extend name="reviewWaitTimeout" type="string" />
           <nano:extend name="agentSlaTimeout" type="string" />
           <nano:extend name="ackRetryRound" type="integer" optional="true" />
           <nano:extend name="ackRetryMax" type="integer" optional="true" />
