@@ -53,7 +53,14 @@ test("openapi.yaml has no unquoted summary/description scalar containing ' #' (i
 });
 
 test("openapi.yaml graph compile summary is served in full (issue #970)", () => {
-	const spec = parseSpec(readFileSync(SPEC_PATH, "utf8"));
-	const summaries = JSON.stringify(spec);
-	assert(summaries.includes("(ADR 0005 Decision 7 / #460)"), "graph compile summary truncated");
+	const spec: { paths?: Record<string, Record<string, { operationId?: string; summary?: string }>> } =
+		parseSpec(readFileSync(SPEC_PATH, "utf8"));
+	const op = Object.values(spec.paths ?? {})
+		.flatMap((item) => Object.values(item))
+		.find((o) => o?.operationId === "compileDeliveryGraph");
+	assert(
+		op?.summary ===
+			"Validate + compile a delivery graph and STAGE it for operator review (never dispatches). (ADR 0005 Decision 7 / #460)",
+		`compileDeliveryGraph summary truncated: ${op?.summary}`,
+	);
 });
