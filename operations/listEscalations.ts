@@ -29,5 +29,5 @@ export default defineOperation("listEscalations", async ({ req }, app) => {
   const escalations = rows
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0))
     .map((row) => withProcessInstanceKey(toEscalationView(row)));
-  return { status: 200, body: { count: escalations.length, escalations, ...listEnvelope(escalations) } };
+  return { status: 200, body: listEnvelope(escalations) };
 });

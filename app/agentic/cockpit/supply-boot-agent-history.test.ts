@@ -19,8 +19,8 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 const supply: SupplyReport = { count: 0, workers: [], leaves: [] };
 
 const instances: AgentInstanceListReport = {
-  count: 2,
-  instances: [
+  page: { totalItems: 2 },
+  items: [
     { agentInstanceKey: "ai-old", status: "COMPLETED", processInstanceKey: "pi-1", elementId: "implement-task", completionDate: "2024-01-01T00:00:00Z", metrics: { inputTokens: 100, outputTokens: 20, modelCalls: 2, toolCalls: 1 } },
     { agentInstanceKey: "ai-new", status: "IDLE", processInstanceKey: "pi-2", lastUpdatedDate: "2024-02-01T00:00:00Z" },
   ],
@@ -28,9 +28,9 @@ const instances: AgentInstanceListReport = {
 
 const history: AgentHistoryReport = {
   agentInstanceKey: "ai-old",
-  count: 1,
-  instance: instances.instances[0],
-  records: [
+  page: { totalItems: 1 },
+  instance: instances.items[0],
+  items: [
     { historyItemKey: "h-0", agentInstanceKey: "ai-old", loopIteration: 0, role: "ASSISTANT", commitStatus: "COMMITTED", content: [{ contentType: "TEXT", text: "did the thing" }], toolCalls: [] },
   ],
 };

@@ -197,7 +197,7 @@ test("E2E: the whole visibility plane wires up — presence, correlation, supply
     assertEquals(c.jobKey, JOB);
     assertEquals(c.stream, STREAM);
     assertEquals(c.processInstanceKey, "4612");
-    assertEquals(c.bpmnProcessId, "plan-fanout");
+    assertEquals(c.processDefinitionId, "plan-fanout");
     assertEquals(c.planKey, "nanobpm/nano-workforce#142");
   }
 

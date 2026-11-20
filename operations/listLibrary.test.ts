@@ -35,8 +35,8 @@ test("list-library: empty → count 0", async () => {
   await withApp(async (app) => {
     const res = await call(app);
     assertEquals(res.status, 200);
-    assertEquals(res.body.count, 0);
-    assertEquals(res.body.entries.length, 0);
+    assertEquals(res.body.page.totalItems, 0);
+    assertEquals(res.body.items.length, 0);
   });
 });
 
@@ -46,12 +46,12 @@ test("list-library: saved entries returned newest-first with their graph JSON", 
     await saveLibraryEntry(data, buildLibraryEntryRow({ name: "newer", graphJson: GRAPH, source: "imported", createdAt: "2024-06-01T00:00:00.000Z" }));
     const res = await call(app);
     assertEquals(res.status, 200);
-    assertEquals(res.body.count, 2);
-    assertEquals(res.body.entries[0].name, "newer");
-    assertEquals(res.body.entries[1].name, "older");
-    assertEquals(res.body.entries[0].graph, GRAPH);
-    assertEquals(res.body.entries[0].createdAt, "2024-06-01T00:00:00.000Z");
-    assert(typeof res.body.entries[0].updatedAt === "string");
+    assertEquals(res.body.page.totalItems, 2);
+    assertEquals(res.body.items[0].name, "newer");
+    assertEquals(res.body.items[1].name, "older");
+    assertEquals(res.body.items[0].graph, GRAPH);
+    assertEquals(res.body.items[0].createdAt, "2024-06-01T00:00:00.000Z");
+    assert(typeof res.body.items[0].updatedAt === "string");
   });
 });
 
@@ -70,7 +70,7 @@ test("list-library: shared-secret guard — 401 without x-hook-secret, 200 with 
       assertEquals(bad.status, 401);
       const ok = await guarded({ req: { headers: new Headers({ "x-hook-secret": "s3cr3t" }) }, params: {}, query: {} } as any, app);
       assertEquals(ok.status, 200);
-      assert(Array.isArray(ok.body.entries));
+      assert(Array.isArray(ok.body.items));
     } finally {
       if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
       else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;

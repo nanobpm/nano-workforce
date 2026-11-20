@@ -35,8 +35,8 @@ function denseGraph(n: number, fan: number): { name: string; nodes: unknown[]; e
 }
 
 interface ListBody {
-  count: number;
-  proposals: Array<{ digest: string; title: string | null }>;
+  page: { totalItems: number };
+  items: Array<{ digest: string; title: string | null }>;
 }
 
 describe("#716 — a heavy compile/stage tool returns an accepted response (not a timeout) over MCP", () => {
@@ -79,7 +79,7 @@ describe("#716 — a heavy compile/stage tool returns an accepted response (not 
     assert.ok(!list.isError, `listStagedProposals must not error: ${list.text}`);
     const listed = list.json as ListBody | undefined;
     assert.ok(
-      listed?.proposals?.some((p) => p.digest === json?.digest),
+      listed?.items?.some((p) => p.digest === json?.digest),
       `the staged digest ${json?.digest} must be listed: ${list.text}`,
     );
   });

@@ -25,8 +25,8 @@ export default defineOperation("acknowledgeDone", async ({ body }, app) => {
     return { status: 400, body: { ok: false, error: "featureKey is required" } };
   }
 
-  // #972 dual-accept: the canonical `featureKey` wins over the deprecated `feature_key`.
-  const featureKey = pickKey(body, "featureKey", "feature_key");
+  // #972: the canonical Camunda/nwf name `featureKey` (its legacy alias was removed).
+  const featureKey = pickKey(body, "featureKey");
   if (!featureKey) return { status: 400, body: { ok: false, error: "featureKey is required" } };
 
   return acknowledgeVia(

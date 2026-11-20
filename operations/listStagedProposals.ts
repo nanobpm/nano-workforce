@@ -34,5 +34,5 @@ export default defineOperation("listStagedProposals", async ({ req }, app) => {
     createdAt: row.created_at,
     expiresAt: row.expires_at,
   }));
-  return { status: 200, body: { count: proposals.length, proposals, ...listEnvelope(proposals) } };
+  return { status: 200, body: listEnvelope(proposals) };
 });

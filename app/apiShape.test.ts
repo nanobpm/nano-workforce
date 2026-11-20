@@ -1,4 +1,4 @@
-// Unit tests for the Camunda-aligned API shape helpers (Part of #972).
+// Unit tests for the Camunda-aligned API shape helpers (#972).
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { listEnvelope, pickKey, withProcessInstanceKey } from "./apiShape.ts";
@@ -8,9 +8,9 @@ test("listEnvelope: wraps a list as { items, page: { totalItems } }", () => {
   assertEquals(listEnvelope([]), { items: [], page: { totalItems: 0 } });
 });
 
-test("withProcessInstanceKey: mirrors the deprecated processKey onto processInstanceKey", () => {
-  assertEquals(withProcessInstanceKey({ a: 1, processKey: "9" }), { a: 1, processKey: "9", processInstanceKey: "9" });
-  assertEquals(withProcessInstanceKey({ processKey: null }), { processKey: null, processInstanceKey: null });
+test("withProcessInstanceKey: renames the internal processKey to processInstanceKey (no processKey on the wire)", () => {
+  assertEquals(withProcessInstanceKey({ a: 1, processKey: "9" }), { a: 1, processInstanceKey: "9" });
+  assertEquals(withProcessInstanceKey({ processKey: null }), { processInstanceKey: null });
   assertEquals(withProcessInstanceKey({}), { processInstanceKey: null });
 });
 

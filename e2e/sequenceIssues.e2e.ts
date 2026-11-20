@@ -25,14 +25,14 @@ import {
 
 const TOOL = "sequenceIssues";
 
-interface ListBody { count: number; proposals: Array<{ digest: string; title: string | null }> }
+interface ListBody { page: { totalItems: number }; items: Array<{ digest: string; title: string | null }> }
 
 /** The current live staged list, read over the SAME MCP surface. */
 async function listStaged(h: McpHarness): Promise<ListBody> {
   const res = await h.callTool("listStagedProposals", {});
   assert.ok(!res.isError, `listStagedProposals must not error: ${res.text}`);
   const json = res.json as ListBody | undefined;
-  assert.ok(json && Array.isArray(json.proposals), `listStagedProposals must return a proposals array: ${res.text}`);
+  assert.ok(json && Array.isArray(json.items), `listStagedProposals must return an items array: ${res.text}`);
   return json;
 }
 
@@ -64,8 +64,8 @@ describe("S4 — sequenceIssues generates + stages the canonical chain over MCP 
     // Read-after-write: the staged digest is visible immediately (shared compile+stage path, S2).
     const list = await listStaged(h);
     assert.ok(
-      list.proposals.some((p) => p.digest === json.digest),
-      `the staged digest ${json.digest} must appear in listStagedProposals immediately (got ${JSON.stringify(list.proposals.map((p) => p.digest))})`,
+      list.items.some((p) => p.digest === json.digest),
+      `the staged digest ${json.digest} must appear in listStagedProposals immediately (got ${JSON.stringify(list.items.map((p) => p.digest))})`,
     );
 
     // The door STAGES, never dispatches — no run handle in the response.
@@ -75,11 +75,11 @@ describe("S4 — sequenceIssues generates + stages the canonical chain over MCP 
   });
 
   test("empty issues is rejected with the uniform issues[{path,message}] contract — nothing staged", async () => {
-    const before = (await listStaged(h)).proposals.length;
+    const before = (await listStaged(h)).items.length;
     const res = await h.callTool(TOOL, { body: { issues: [] } });
     // A tool-level door 4xx: the object arrived (not stringified) AND carries issues[{path,message}].
     assertValidationIssues(res, TOOL);
-    assert.equal((await listStaged(h)).proposals.length, before, "a rejected intent must stage nothing");
+    assert.equal((await listStaged(h)).items.length, before, "a rejected intent must stage nothing");
   });
 
   test("an unparseable issue ref is rejected at the offending path", async () => {

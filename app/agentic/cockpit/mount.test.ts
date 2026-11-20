@@ -78,7 +78,7 @@ function fetchStub(replay?: unknown) {
     const ok = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => body });
     if (url.includes("/supply")) return ok(SUPPLY);
     if (replay !== undefined && /[?&]stream=/.test(url)) return ok(replay);
-    if (url.includes("/agent-instances")) return ok({ count: 0, instances: [] });
+    if (url.includes("/agent-instances")) return ok({ items: [], page: { totalItems: 0 } });
     if (url.includes("/transcripts")) return ok({ sessions: [] });
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
   };
@@ -134,7 +134,7 @@ test("#802: mount.js renders a stale-harness badge for a stale worker and none f
   const restore = installEnv((url) => {
     const ok = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => body });
     if (url.includes("/supply")) return ok(report);
-    if (url.includes("/agent-instances")) return ok({ count: 0, instances: [] });
+    if (url.includes("/agent-instances")) return ok({ items: [], page: { totalItems: 0 } });
     if (url.includes("/transcripts")) return ok({ sessions: [] });
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
   });
@@ -278,8 +278,8 @@ test("#744: replay fetches the proxy-safe ?stream= query form — a slash-bearin
 // test is the browser twin's coverage.
 test("agent-history panel renders the engine run list and a selected run's turns", async () => {
   const instances = {
-    count: 1,
-    instances: [
+    page: { totalItems: 1 },
+    items: [
       {
         agentInstanceKey: "ai-42",
         status: "COMPLETED",
@@ -292,9 +292,9 @@ test("agent-history panel renders the engine run list and a selected run's turns
   };
   const history = {
     agentInstanceKey: "ai-42",
-    count: 1,
-    instance: instances.instances[0],
-    records: [
+    page: { totalItems: 1 },
+    instance: instances.items[0],
+    items: [
       {
         historyItemKey: "h-0",
         agentInstanceKey: "ai-42",
@@ -360,14 +360,14 @@ test("agent-history panel renders the engine run list and a selected run's turns
 // just the tool name — never `toolName ()`.
 test("agent-history tool call with an empty-string elementId renders no empty () suffix", async () => {
   const instances = {
-    count: 1,
-    instances: [{ agentInstanceKey: "ai-77", status: "COMPLETED", processInstanceKey: "pi-1", elementId: "impl" }],
+    page: { totalItems: 1 },
+    items: [{ agentInstanceKey: "ai-77", status: "COMPLETED", processInstanceKey: "pi-1", elementId: "impl" }],
   };
   const history = {
     agentInstanceKey: "ai-77",
-    count: 1,
-    instance: instances.instances[0],
-    records: [
+    page: { totalItems: 1 },
+    instance: instances.items[0],
+    items: [
       {
         historyItemKey: "h-0",
         agentInstanceKey: "ai-77",
@@ -423,9 +423,9 @@ const FOCUS_INSTANCE = {
 };
 const FOCUS_HISTORY = {
   agentInstanceKey: "ai-7",
-  count: 1,
+  page: { totalItems: 1 },
   instance: FOCUS_INSTANCE,
-  records: [
+  items: [
     {
       historyItemKey: "h-0",
       agentInstanceKey: "ai-7",
@@ -446,12 +446,12 @@ function focusStub(opts: { correlations: unknown[]; transcripts?: unknown[]; rep
     if (/\/agent-instances\/[^/?]+\/history/.test(url)) return ok(FOCUS_HISTORY);
     if (url.includes("/agent-instances")) {
       const root = url.includes(`rootProcessInstanceKey=${PI_ROOT}`);
-      return ok(root ? { count: 1, instances: [FOCUS_INSTANCE] } : { count: 0, instances: [] });
+      return ok(root ? { items: [FOCUS_INSTANCE], page: { totalItems: 1 } } : { items: [], page: { totalItems: 0 } });
     }
     if (/[?&]stream=/.test(url)) return ok(opts.replay);
     if (url.includes("/transcripts")) {
       const mine = (opts.transcripts ?? []).filter((t) => url.includes(`processInstanceKey=${(t as { processInstanceKey: string }).processInstanceKey}`));
-      return ok({ count: mine.length, transcripts: mine });
+      return ok({ items: mine, page: { totalItems: mine.length } });
     }
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
   };
@@ -555,12 +555,12 @@ function mutableFocusStub(state: { correlations: unknown[]; transcripts: unknown
     if (/\/agent-instances\/[^/?]+\/history/.test(url)) return ok(FOCUS_HISTORY);
     if (url.includes("/agent-instances")) {
       const root = (state.roots ?? [PI_ROOT]).some((r) => url.includes(`rootProcessInstanceKey=${r}`));
-      return ok(root ? { count: 1, instances: [FOCUS_INSTANCE] } : { count: 0, instances: [] });
+      return ok(root ? { items: [FOCUS_INSTANCE], page: { totalItems: 1 } } : { items: [], page: { totalItems: 0 } });
     }
     if (/[?&]stream=/.test(url)) return ok(state.replay);
     if (url.includes("/transcripts")) {
       const mine = state.transcripts.filter((t) => url.includes(`processInstanceKey=${(t as { processInstanceKey: string }).processInstanceKey}`));
-      return ok({ count: mine.length, transcripts: mine });
+      return ok({ items: mine, page: { totalItems: mine.length } });
     }
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
   };
@@ -767,7 +767,7 @@ test("#834: a superseded focus's in-flight transcript scan does not block the ne
   const restore = installEnv(async (url: string) => {
     if (url.includes("/transcripts") && url.includes(`processInstanceKey=${PI_ROOT}`)) {
       await aParked; // focus A's scan hangs here until released
-      return { ok: true, status: 200, json: async () => ({ count: 0, transcripts: [] }) };
+      return { ok: true, status: 200, json: async () => ({ items: [], page: { totalItems: 0 } }) };
     }
     return base(url);
   });

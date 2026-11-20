@@ -63,37 +63,41 @@ function fixture(): Record<string, any[]> {
 test("lists every stitched thread, active frontier first", async () => {
   const res = (await handler(input(), memApp(fixture()))) as any;
   assertEquals(res.status, 200);
-  assertEquals(res.body.count, 3);
+  assertEquals(res.body.page.totalItems, 3);
   // Active threads (feature + epic) sort ahead of the settled human PR.
-  assert(res.body.threads[res.body.threads.length - 1].active === false);
-  const kinds = res.body.threads.map((t: any) => t.kind).sort();
+  assert(res.body.items[res.body.items.length - 1].active === false);
+  const kinds = res.body.items.map((t: any) => t.kind).sort();
   assertEquals(kinds, ["epic", "feature", "pr"]);
 });
 
 test("narrows to a single origin thread via ?root=", async () => {
   const res = (await handler(input({ root: "o/r#2" }), memApp(fixture()))) as any;
   assertEquals(res.status, 200);
-  assertEquals(res.body.count, 1);
-  const t = res.body.threads[0];
+  assertEquals(res.body.page.totalItems, 1);
+  const t = res.body.items[0];
   assertEquals(t.kind, "epic");
   assertEquals(t.rootRequestKey, "o/r#2");
   assertEquals(t.prCount, 2);
 });
 
-test("#972: threads (and their PRs) carry processInstanceKey; the Camunda items/page list mirrors threads", async () => {
+test("#972: threads (and their PRs) carry processInstanceKey only; the response is the Camunda items/page list", async () => {
   const res = (await handler(input({ root: "o/r#2" }), memApp(fixture()))) as any;
-  const t = res.body.threads[0];
-  assertEquals(t.processInstanceKey, t.processKey);
-  for (const pr of t.prs) assertEquals(pr.processInstanceKey, pr.processKey);
-  assertEquals(res.body.items, res.body.threads);
+  const t = res.body.items[0];
+  assert(typeof t.processInstanceKey === "string");
+  assert(!("processKey" in t), "the removed processKey must not ride the wire");
+  for (const pr of t.prs) {
+    assert(typeof pr.processInstanceKey === "string");
+    assert(!("processKey" in pr));
+  }
+  assertEquals(Object.keys(res.body).sort(), ["items", "page"]);
   assertEquals(res.body.page, { totalItems: 1 });
 });
 
 test("unknown root returns an empty thread list", async () => {
   const res = (await handler(input({ root: "o/r#999" }), memApp(fixture()))) as any;
   assertEquals(res.status, 200);
-  assertEquals(res.body.count, 0);
-  assertEquals(res.body.threads, []);
+  assertEquals(res.body.page.totalItems, 0);
+  assertEquals(res.body.items, []);
 });
 
 test("shared-secret guard rejects a missing secret when configured", async () => {
@@ -107,7 +111,7 @@ test("shared-secret guard rejects a missing secret when configured", async () =>
     assertEquals(bad.status, 401);
     const ok = (await guarded(input({}, { "x-hook-secret": "s3cr3t" }), app)) as any;
     assertEquals(ok.status, 200);
-    assert("count" in ok.body);
+    assert("items" in ok.body);
   } finally {
     if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
     else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;

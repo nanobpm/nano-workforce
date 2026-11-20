@@ -35,8 +35,8 @@ test("listAgentInstances: read-as-absence → 200 with an empty instance list", 
   await withApp(async (app) => {
     const res = await app.api.call<AgentInstanceList>("listAgentInstances", {});
     assertEquals(res.status, 200);
-    assertEquals(res.body.count, 0);
-    assertEquals(res.body.instances.length, 0);
+    assertEquals(res.body.page.totalItems, 0);
+    assertEquals(res.body.items.length, 0);
   });
 });
 
@@ -47,8 +47,8 @@ test("getAgentInstanceHistory: an unknown key → 200 with an empty history (rea
     });
     assertEquals(res.status, 200);
     assertEquals(res.body.agentInstanceKey, "no-such-instance");
-    assertEquals(res.body.count, 0);
-    assertEquals(res.body.records.length, 0);
+    assertEquals(res.body.page.totalItems, 0);
+    assertEquals(res.body.items.length, 0);
   });
 });
 

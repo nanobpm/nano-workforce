@@ -1,26 +1,3 @@
 {
-  "violations": [
-    "key:acknowledgeDeliveryGraph:request:run_key",
-    "key:acknowledgeDone:request:feature_key",
-    "key:acknowledgeEpic:request:plan_key",
-    "key:acknowledgePr:request:pr_key",
-    "key:getAgenticSupply:response200.correlations[]:bpmnProcessId",
-    "key:getAgenticTranscript:response200:bpmnProcessId",
-    "key:getLineage:response200.items[].prs[]:processKey",
-    "key:getLineage:response200.items[]:processKey",
-    "key:getLineage:response200.threads[].prs[]:processKey",
-    "key:getLineage:response200.threads[]:processKey",
-    "key:getPrHistory:query:processKey",
-    "key:listActivePrs:response200.deliveries[]:processKey",
-    "key:listActivePrs:response200.items[]:processKey",
-    "key:listActivePrs:response200.prs[]:processKey",
-    "key:listAgenticTranscripts:response200.transcripts[]:bpmnProcessId",
-    "key:listAgenticTranscripts:response200:bpmnProcessId",
-    "key:listEscalations:response200.escalations[]:processKey",
-    "key:listEscalations:response200.items[]:processKey",
-    "key:startConvergenceLoop:response202:processKey",
-    "key:startFeature:response202:processKey",
-    "key:startPlanFanout:response202:processKey",
-    "list:listAgenticTranscripts"
-  ]
+  "violations": []
 }

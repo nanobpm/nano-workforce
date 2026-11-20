@@ -117,7 +117,7 @@ test("H6: renders a process/plan cell that drills into the job's stream", () => 
         workers: [{ instance: "wk-a", identity: "leaf-1", stream: "job:6494", family: "senior", host: "h1", jobKeys: ["6494"], live: true, staleMs: 0 }],
       },
     ],
-    correlations: [{ jobKey: "6494", stream: "job:6494", bpmnProcessId: "plan-fanout", processInstanceKey: "4612", planKey: "o/r#142" }],
+    correlations: [{ jobKey: "6494", stream: "job:6494", processDefinitionId: "plan-fanout", processInstanceKey: "4612", planKey: "o/r#142" }],
   };
   renderSupply(host, doc, supplyView(correlated), { onDrill: (stream) => drilled.push(stream) });
 

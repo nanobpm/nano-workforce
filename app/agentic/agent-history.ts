@@ -169,7 +169,7 @@ export async function listAgentInstances(
     const byTime = (b.creationDate ?? "").localeCompare(a.creationDate ?? "");
     return byTime !== 0 ? byTime : a.agentInstanceKey.localeCompare(b.agentInstanceKey);
   });
-  return { count: instances.length, generatedAt: new Date().toISOString(), instances, ...listEnvelope(instances) };
+  return { generatedAt: new Date().toISOString(), ...listEnvelope(instances) };
 }
 
 /**
@@ -185,7 +185,7 @@ export async function readAgentHistory(
   query: AgentHistoryQuery = {},
 ): Promise<WireAgentHistory> {
   if (!present(agentInstanceKey)) {
-    return { agentInstanceKey: "", count: 0, generatedAt: new Date().toISOString(), records: [], ...listEnvelope([]) };
+    return { agentInstanceKey: "", generatedAt: new Date().toISOString(), ...listEnvelope([]) };
   }
   const filter: AgentHistoryFilter = {
     ...(query.role !== undefined ? { role: query.role } : {}),
@@ -203,9 +203,7 @@ export async function readAgentHistory(
   });
   const out: WireAgentHistory = {
     agentInstanceKey,
-    count: records.length,
     generatedAt: new Date().toISOString(),
-    records,
     ...listEnvelope(records),
   };
   if (summary !== null) out.instance = toWireInstance(summary);

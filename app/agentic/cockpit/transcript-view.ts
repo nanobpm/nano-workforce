@@ -23,7 +23,7 @@ export interface TranscriptSummaryReport {
   readonly chunkCount: number;
   readonly jobKey?: string;
   readonly processInstanceKey?: string;
-  readonly bpmnProcessId?: string;
+  readonly processDefinitionId?: string;
   readonly elementId?: string;
   readonly planKey?: string;
   readonly instance?: string;
@@ -33,10 +33,10 @@ export interface TranscriptSummaryReport {
 
 /** The transcript list report the cockpit polls (mirrors `AgenticTranscriptList`). */
 export interface TranscriptListReport {
-  readonly count: number;
   readonly generatedAt?: string;
   readonly retentionMs?: number;
-  readonly transcripts: readonly TranscriptSummaryReport[];
+  readonly items: readonly TranscriptSummaryReport[];
+  readonly page?: { readonly totalItems: number };
 }
 
 /** One past-session row in the renderable history view. */
@@ -73,7 +73,7 @@ export interface TranscriptsView {
 /** A single stable human label for a captured session's process instance / plan (empty parts dropped). */
 function sessionLabel(t: TranscriptSummaryReport): string {
   const parts: string[] = [];
-  if (t.bpmnProcessId !== undefined) parts.push(t.bpmnProcessId);
+  if (t.processDefinitionId !== undefined) parts.push(t.processDefinitionId);
   if (t.elementId !== undefined) parts.push(t.elementId);
   if (t.processInstanceKey !== undefined) parts.push(`inst ${t.processInstanceKey}`);
   if (t.planKey !== undefined) parts.push(t.planKey);
@@ -125,7 +125,7 @@ function sessionView(t: TranscriptSummaryReport): TranscriptView {
  * diff-friendly regardless of the report's incoming order; no input mutates and no I/O happens.
  */
 export function transcriptsView(report: TranscriptListReport): TranscriptsView {
-  const sessions = report.transcripts
+  const sessions = report.items
     .map(sessionView)
     .sort((a, b) => {
       const byTime = b.capturedAt.localeCompare(a.capturedAt);

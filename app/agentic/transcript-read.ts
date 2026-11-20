@@ -116,8 +116,7 @@ export function toTranscript(
   const fields = correlationFieldsFor(meta.stream, correlation, durable);
   if (fields.jobKey !== undefined) out.jobKey = fields.jobKey;
   if (fields.processInstanceKey !== undefined) out.processInstanceKey = fields.processInstanceKey;
-  if (fields.bpmnProcessId !== undefined) out.bpmnProcessId = fields.bpmnProcessId;
-  // #972: the Camunda name for the BPMN process id; `bpmnProcessId` is its deprecated alias.
+  // #972: the BPMN process id rides the wire under its Camunda name.
   if (fields.bpmnProcessId !== undefined) out.processDefinitionId = fields.bpmnProcessId;
   if (fields.elementId !== undefined) out.elementId = fields.elementId;
   if (fields.elementInstanceKey !== undefined) out.elementInstanceKey = fields.elementInstanceKey;
@@ -241,8 +240,7 @@ export function readTranscriptFrom(
   const fields = correlationFieldsFor(out.stream, correlation, durable);
   if (fields.jobKey !== undefined) out.jobKey = fields.jobKey;
   if (fields.processInstanceKey !== undefined) out.processInstanceKey = fields.processInstanceKey;
-  if (fields.bpmnProcessId !== undefined) out.bpmnProcessId = fields.bpmnProcessId;
-  // #972: the Camunda name for the BPMN process id; `bpmnProcessId` is its deprecated alias.
+  // #972: the BPMN process id rides the wire under its Camunda name.
   if (fields.bpmnProcessId !== undefined) out.processDefinitionId = fields.bpmnProcessId;
   if (fields.elementId !== undefined) out.elementId = fields.elementId;
   if (fields.elementInstanceKey !== undefined) out.elementInstanceKey = fields.elementInstanceKey;

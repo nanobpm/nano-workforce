@@ -236,8 +236,8 @@ export function mountDeliveryGraphLibrary(host, config = {}) {
     try {
       const { status, body } = await get(libraryUrl);
       if (disposed) return;
-      // #972: read the Camunda `items` list; `entries` is its deprecated alias.
-      const list = Array.isArray(body?.items) ? body.items : body?.entries;
+      // #972: the Camunda `items` list.
+      const list = body?.items;
       if (status === 200 && Array.isArray(list)) {
         entries = list;
         listEl.innerHTML = renderList(entries);

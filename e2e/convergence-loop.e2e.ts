@@ -130,15 +130,15 @@ describe("nano-workforce e2e (urban-testkit pilot)", () => {
     assert.ok(Number.isFinite(appended.body.id), "append returns a numeric entry id");
 
     // GET it back via `readBlackboard` — the entry the POST just wrote must be visible.
-    const read = await api.call<{ planKey: string; entries: Array<{ id: number; body: string }> }>(
+    const read = await api.call<{ planKey: string; items: Array<{ id: number; body: string }> }>(
       "readBlackboard",
       { query: { token } },
     );
     assert.equal(read.status, 200, "read returns 200 OK");
     assert.equal(read.body.planKey, planKey, "read is scoped to the seeded plan");
-    assert.equal(read.body.entries.length, 1, "exactly the one appended entry is returned");
-    assert.equal(read.body.entries[0].body, "hello from the pilot", "round-tripped body matches");
-    assert.equal(read.body.entries[0].id, appended.body.id, "read id matches the appended id");
+    assert.equal(read.body.items.length, 1, "exactly the one appended entry is returned");
+    assert.equal(read.body.items[0].body, "hello from the pilot", "round-tripped body matches");
+    assert.equal(read.body.items[0].id, appended.body.id, "read id matches the appended id");
 
     // An unknown token is a 404 (never leaks which plans exist).
     const unknown = await api.call("readBlackboard", { query: { token: "nope" } });

@@ -14,9 +14,9 @@ const doc = new FakeDocument();
 
 function view() {
   return transcriptsView({
-    count: 2,
+    page: { totalItems: 2 },
     retentionMs: 86_400_000,
-    transcripts: [
+    items: [
       { stream: "job:1", lifecycle: "ephemeral", status: "completed", createdAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T00:05:00Z", nextOffset: 1, byteLength: 5, chunkCount: 1, jobKey: "1", planKey: "o/r#1" },
       { stream: "job:2", lifecycle: "ephemeral", status: "open", createdAt: "2026-01-02T00:00:00Z", nextOffset: 1, byteLength: 5, chunkCount: 1, jobKey: "2" },
     ],
@@ -52,7 +52,7 @@ test("highlights the active (currently replayed) session", () => {
 
 test("renders an empty state when there are no captured sessions", () => {
   const host = new FakeElement("div");
-  renderTranscripts(host, doc, transcriptsView({ count: 0, transcripts: [] }));
+  renderTranscripts(host, doc, transcriptsView({ items: [], page: { totalItems: 0 } }));
   assertEquals(host.byData("empty", "true").length, 1);
 });
 

@@ -25,8 +25,8 @@ export default defineOperation("acknowledgePr", async ({ body }, app) => {
     return { status: 400, body: { ok: false, error: "prKey is required" } };
   }
 
-  // #972 dual-accept: the canonical `prKey` wins over the deprecated `pr_key`.
-  const prKey = pickKey(body, "prKey", "pr_key");
+  // #972: the canonical Camunda/nwf name `prKey` (its legacy alias was removed).
+  const prKey = pickKey(body, "prKey");
   if (!prKey) return { status: 400, body: { ok: false, error: "prKey is required" } };
 
   return acknowledgeVia(

@@ -95,7 +95,6 @@ components:
         - title
         - status
         - round
-        - processKey
         - waitingSince
         - openEscalation
         - updatedAt
@@ -111,7 +110,7 @@ components:
         processInstanceKey:
           type: string
           nullable: true
-          description: "The engine process instance key (Camunda name, #972). Replaces the deprecated `processKey`."
+          description: "The engine process instance key (Camunda name, #972).."
         kind:
           type: string
           enum: [pr]
@@ -145,11 +144,6 @@ components:
             clears.
         round:
           type: integer
-        processKey:
-          deprecated: true
-          type: string
-          nullable: true
-          description: The engine process instance key; also the keyField the pages processExplorer link uses.
         waitingSince:
           type: string
           nullable: true
@@ -274,16 +268,13 @@ components:
     ActivePrList:
       type: object
       required:
-        - count
-        - prs
-        - deliveries
         - version
         - items
         - page
       properties:
         items:
           type: array
-          description: "The list items — the Camunda list shape (#972). Replaces the deprecated `prs` + `deliveries` arrays: ONE list over both kinds, discriminated by `kind`."
+          description: "The list items — the Camunda list shape (#972): ONE list over both kinds, discriminated by `kind`."
           items:
             oneOf:
               - $ref: "#/components/schemas/ActivePr"
@@ -291,22 +282,6 @@ components:
             description: "One row per in-flight PR (`kind: pr`) then per in-flight delivery-graph run (`kind: delivery`)."
         page:
           $ref: "#/components/schemas/ListPage"
-        count:
-          deprecated: true
-          type: integer
-        prs:
-          deprecated: true
-          type: array
-          items:
-            $ref: "#/components/schemas/ActivePr"
-        deliveries:
-          deprecated: true
-          type: array
-          description: >-
-            Every delivery-graph run currently in flight (not done/failed/abandoned), newest-updated
-            first (issue #889 §1 — the opt-in is shown for each PR AND each delivery).
-          items:
-            $ref: "#/components/schemas/ActiveDelivery"
         version:
           type: object
           additionalProperties: false
@@ -336,7 +311,6 @@ components:
         - title
         - status
         - phase
-        - processKey
         - openEscalation
         - updatedAt
         - autoResolveEscalations
@@ -346,7 +320,7 @@ components:
         processInstanceKey:
           type: string
           nullable: true
-          description: "The engine process instance key (Camunda name, #972). Replaces the deprecated `processKey`."
+          description: "The engine process instance key (Camunda name, #972).."
         kind:
           type: string
           enum: [delivery]
@@ -365,11 +339,6 @@ components:
         phase:
           type: string
           nullable: true
-        processKey:
-          deprecated: true
-          type: string
-          nullable: true
-          description: The engine process instance key; null while the launch claim has not been stamped yet.
         openEscalation:
           type: object
           nullable: true
@@ -444,14 +413,13 @@ components:
         - subjectUrl
         - question
         - formKey
-        - processKey
         - formVariables
         - processInstanceKey
       properties:
         processInstanceKey:
           type: string
           nullable: true
-          description: "The engine process instance key (Camunda name, #972). Replaces the deprecated `processKey`."
+          description: "The engine process instance key (Camunda name, #972).."
         userTaskKey:
           type: string
           description: The completable engine user-task key (answer via completeUserTask / agentCompleteEscalation).
@@ -486,11 +454,6 @@ components:
           type: string
           nullable: true
           description: The deployed `.form` key of the parked user task, for rendering/answering; null when unresolved.
-        processKey:
-          deprecated: true
-          type: string
-          nullable: true
-          description: The owning engine process-instance key; null when unknown.
         formVariables:
           type: object
           additionalProperties: true
@@ -501,23 +464,15 @@ components:
     IncidentList:
       type: object
       additionalProperties: false
-      required: [count, incidents, items, page]
+      required: [items, page]
       properties:
         items:
           type: array
-          description: "The list items — the Camunda list shape (#972). Replaces the deprecated `incidents` array."
+          description: "The list items — the Camunda list shape (#972)."
           items:
             $ref: "#/components/schemas/IncidentEntry"
         page:
           $ref: "#/components/schemas/ListPage"
-        count:
-          deprecated: true
-          type: integer
-        incidents:
-          deprecated: true
-          type: array
-          items:
-            $ref: "#/components/schemas/IncidentEntry"
     IncidentEntry:
       type: object
       additionalProperties: false
@@ -564,26 +519,16 @@ components:
       type: object
       additionalProperties: false
       required:
-        - count
-        - escalations
         - items
         - page
       properties:
         items:
           type: array
-          description: "The list items — the Camunda list shape (#972). Replaces the deprecated `escalations` array."
+          description: "The list items — the Camunda list shape (#972)."
           items:
             $ref: "#/components/schemas/Escalation"
         page:
           $ref: "#/components/schemas/ListPage"
-        count:
-          deprecated: true
-          type: integer
-        escalations:
-          deprecated: true
-          type: array
-          items:
-            $ref: "#/components/schemas/Escalation"
     AutoResolution:
       type: object
       description: "One escalation-steward auto-resolution record (issue #889) — a reviewable record of an escalation the steward resolved or abstained from."
@@ -674,30 +619,20 @@ components:
       type: object
       additionalProperties: false
       required:
-        - count
         - pendingCount
-        - records
         - items
         - page
       properties:
         items:
           type: array
-          description: "The list items — the Camunda list shape (#972). Replaces the deprecated `records` array."
+          description: "The list items — the Camunda list shape (#972)."
           items:
             $ref: "#/components/schemas/AutoResolution"
         page:
           $ref: "#/components/schemas/ListPage"
-        count:
-          deprecated: true
-          type: integer
         pendingCount:
           type: integer
           description: The number of `pending` (not-yet-reviewed) records — the nav badge count.
-        records:
-          deprecated: true
-          type: array
-          items:
-            $ref: "#/components/schemas/AutoResolution"
     AutoResolutionReview:
       type: object
       additionalProperties: false
@@ -740,14 +675,13 @@ components:
         - url
         - status
         - round
-        - processKey
         - outcome
         - processInstanceKey
       properties:
         processInstanceKey:
           type: string
           nullable: true
-          description: "The engine process instance key (Camunda name, #972). Replaces the deprecated `processKey`."
+          description: "The engine process instance key (Camunda name, #972).."
         prKey:
           type: string
         title:
@@ -759,10 +693,6 @@ components:
           type: string
         round:
           type: integer
-        processKey:
-          deprecated: true
-          type: string
-          nullable: true
         outcome:
           type: string
           nullable: true
@@ -777,7 +707,6 @@ components:
         - issueUrl
         - stage
         - stageLabel
-        - processKey
         - prKeys
         - prCount
         - active
@@ -787,7 +716,7 @@ components:
         processInstanceKey:
           type: string
           nullable: true
-          description: "The engine process instance key (Camunda name, #972). Replaces the deprecated `processKey`."
+          description: "The engine process instance key (Camunda name, #972).."
         rootRequestKey:
           type: string
           description: The origin issue key (feature_key/plan_key), a self-rooted pr_key, or a delivery-graph run_key.
@@ -805,11 +734,6 @@ components:
           description: The active-frontier stage (implementing|converging|merged|…).
         stageLabel:
           type: string
-        processKey:
-          deprecated: true
-          type: string
-          nullable: true
-          description: The active-frontier process instance key (for the processExplorer link).
         prKeys:
           type: array
           items:
@@ -826,26 +750,16 @@ components:
     LineageList:
       type: object
       required:
-        - count
-        - threads
         - items
         - page
       properties:
         items:
           type: array
-          description: "The list items — the Camunda list shape (#972). Replaces the deprecated `threads` array."
+          description: "The list items — the Camunda list shape (#972)."
           items:
             $ref: "#/components/schemas/LineageThreadView"
         page:
           $ref: "#/components/schemas/ListPage"
-        count:
-          deprecated: true
-          type: integer
-        threads:
-          deprecated: true
-          type: array
-          items:
-            $ref: "#/components/schemas/LineageThreadView"
     PrHistoryRound:
       type: object
       description: "One convergence round in a PR's timeline (issue #668) — its status transition/outcome, owning worker, and timestamps. Sourced from the `rounds` table the Convergence page reads."
@@ -1005,7 +919,7 @@ components:
       properties:
         processDefinitionId:
           type: string
-          description: "The BPMN process id (Camunda name, #972), when known. Replaces the deprecated `bpmnProcessId`."
+          description: "The BPMN process id (Camunda name, #972), when known.."
         jobKey:
           type: string
           description: The Camunda-8 job key the worker activated.
@@ -1015,10 +929,6 @@ components:
         processInstanceKey:
           type: string
           description: The owning process instance key, if known.
-        bpmnProcessId:
-          deprecated: true
-          type: string
-          description: The BPMN process id the job belongs to, if known.
         elementId:
           type: string
           description: The BPMN element id (activity/task) the job is for, if known.
@@ -1414,7 +1324,7 @@ components:
       properties:
         processDefinitionId:
           type: string
-          description: "The BPMN process id (Camunda name, #972), when known. Replaces the deprecated `bpmnProcessId`."
+          description: "The BPMN process id (Camunda name, #972), when known.."
         stream:
           type: string
           description: The relay stream id the transcript was captured under (`job:<jobKey>` for a job stream).
@@ -1451,10 +1361,6 @@ components:
         processInstanceKey:
           type: string
           description: The owning process instance key, when the correlation is still known (advisory).
-        bpmnProcessId:
-          deprecated: true
-          type: string
-          description: The BPMN process id the job belonged to, when still known (advisory).
         elementId:
           type: string
           description: The BPMN element id (activity/task) the job was for, when still known (advisory).
@@ -1480,12 +1386,9 @@ components:
       type: object
       description: The list of captured agent sessions (past + open) — the cockpit "past sessions" feed.
       required:
-        - count
-        - transcripts
+        - items
+        - page
       properties:
-        count:
-          type: integer
-          description: The number of transcripts returned (after any filters).
         generatedAt:
           type: string
           description: When this snapshot was taken, ISO-8601.
@@ -1493,10 +1396,13 @@ components:
           type: integer
           description: The completed-ephemeral retention window in ms (how long a finished session is kept
             before a retention sweep may drop it). Absent when no transcript store is mounted.
-        transcripts:
+        items:
           type: array
+          description: "The captured sessions (after any filters) — the Camunda list shape (#972)."
           items:
             $ref: "#/components/schemas/AgenticTranscript"
+        page:
+          $ref: "#/components/schemas/ListPage"
     AgenticTranscriptChunk:
       type: object
       description: One durable transcript chunk and the offset it was recorded at.
@@ -1528,7 +1434,7 @@ components:
       properties:
         processDefinitionId:
           type: string
-          description: "The BPMN process id (Camunda name, #972), when known. Replaces the deprecated `bpmnProcessId`."
+          description: "The BPMN process id (Camunda name, #972), when known.."
         stream:
           type: string
           description: The relay stream id.
@@ -1566,10 +1472,6 @@ components:
         processInstanceKey:
           type: string
           description: The owning process instance key, when still known (advisory).
-        bpmnProcessId:
-          deprecated: true
-          type: string
-          description: The BPMN process id, when still known (advisory).
         elementId:
           type: string
           description: The BPMN element id, when still known (advisory).
@@ -1676,30 +1578,19 @@ components:
         The list of engine-native agent instances (issue #745/#747), newest-created first —
         the cockpit "historical sessions" feed sourced from engine history (not the relay store).
       required:
-        - count
-        - instances
         - items
         - page
       properties:
         items:
           type: array
-          description: "The list items — the Camunda list shape (#972). Replaces the deprecated `instances` array."
+          description: "The list items — the Camunda list shape (#972)."
           items:
             $ref: "#/components/schemas/AgentInstance"
         page:
           $ref: "#/components/schemas/ListPage"
-        count:
-          deprecated: true
-          type: integer
-          description: The number of instances returned (after any filters).
         generatedAt:
           type: string
           description: When this snapshot was taken, ISO-8601.
-        instances:
-          deprecated: true
-          type: array
-          items:
-            $ref: "#/components/schemas/AgentInstance"
     AgentHistoryContentBlock:
       type: object
       description: One typed content block in a turn's message (Camunda `AgentHistoryMessageContentValue`
@@ -1827,14 +1718,12 @@ components:
         overlay only. Keyed by `agentInstanceKey` — never the slash-bearing relay stream id (#744 moot).
       required:
         - agentInstanceKey
-        - count
-        - records
         - items
         - page
       properties:
         items:
           type: array
-          description: "The list items — the Camunda list shape (#972). Replaces the deprecated `records` array."
+          description: "The list items — the Camunda list shape (#972)."
           items:
             $ref: "#/components/schemas/AgentHistoryRecord"
         page:
@@ -1842,10 +1731,6 @@ components:
         agentInstanceKey:
           type: string
           description: The agent-instance key this history belongs to.
-        count:
-          deprecated: true
-          type: integer
-          description: The number of history records (turns) returned.
         generatedAt:
           type: string
           description: When this snapshot was taken, ISO-8601.
@@ -1854,12 +1739,6 @@ components:
             - $ref: "#/components/schemas/AgentInstance"
           description: The owning instance summary (rolled-up metrics + lifecycle), when the engine still
             reports it. Absent when the instance is unknown/aged out.
-        records:
-          deprecated: true
-          type: array
-          description: The history records (turns), ordered by loopIteration then creation-ordered key.
-          items:
-            $ref: "#/components/schemas/AgentHistoryRecord"
     VersionInfo:
       type: object
       description: The running app's identity (which code is actually live).
@@ -1976,7 +1855,7 @@ components:
               key:
                 type: string
                 nullable: true
-                description: The engine instance key (e.g. process_key) the row projected.
+                description: The engine instance key (the processInstanceKey) the row projected.
               fromStatus:
                 type: string
                 description: The non-terminal status the row carried before it was orphaned.
@@ -2145,14 +2024,9 @@ components:
         processInstanceKey:
           type: string
           nullable: true
-          description: "The engine process instance key (Camunda name, #972). Replaces the deprecated `processKey`."
+          description: "The engine process instance key (Camunda name, #972).."
         prKey:
           type: string
-        processKey:
-          deprecated: true
-          type: string
-          nullable: true
-          description: The started convergence-loop instance key (null if the engine did not return one).
         alreadyRunning:
           type: boolean
           description: True when a non-terminal convergence loop for this PR already exists; the aggregate was
@@ -2165,13 +2039,9 @@ components:
         processInstanceKey:
           type: string
           nullable: true
-          description: "The engine process instance key (Camunda name, #972). Replaces the deprecated `processKey`."
+          description: "The engine process instance key (Camunda name, #972).."
         planKey:
           type: string
-        processKey:
-          deprecated: true
-          type: string
-          nullable: true
         alreadyRunning:
           type: boolean
           description: True when a non-terminal plan for this issue already exists; no new instance was started.
@@ -2184,7 +2054,7 @@ components:
         processInstanceKey:
           type: string
           nullable: true
-          description: "The engine process instance key (Camunda name, #972). Replaces the deprecated `processKey`."
+          description: "The engine process instance key (Camunda name, #972).."
         featureKey:
           type: string
         outcome:
@@ -2195,15 +2065,11 @@ components:
             - noop-terminal
           description: >-
             Discriminated intake outcome (issue #704). `started` — a fresh engine instance was
-            dispatched (`processKey` set). `already-active` — a non-terminal prior run for this issue is
-            still live, so the start short-circuited (no new instance; `processKey` is the live run's).
+            dispatched (`processInstanceKey` set). `already-active` — a non-terminal prior run for this issue is
+            still live, so the start short-circuited (no new instance; `processInstanceKey` is the live run's).
             `noop-terminal` — the engine returned no instance key, so NOTHING was dispatched; the
             operation surfaces this as a 502 (never on a 202 body), so a submit that dispatched no
             instance is never reported as success.
-        processKey:
-          deprecated: true
-          type: string
-          nullable: true
         alreadyRunning:
           type: boolean
           description: True iff a non-terminal feature run for this issue already existed and short-circuited the start (outcome `already-active`); no new instance was started.
@@ -3336,26 +3202,16 @@ components:
       type: object
       additionalProperties: false
       required:
-        - count
-        - proposals
         - items
         - page
       properties:
         items:
           type: array
-          description: "The list items — the Camunda list shape (#972). Replaces the deprecated `proposals` array."
+          description: "The list items — the Camunda list shape (#972)."
           items:
             $ref: "#/components/schemas/StagedProposalSummary"
         page:
           $ref: "#/components/schemas/ListPage"
-        count:
-          deprecated: true
-          type: integer
-        proposals:
-          deprecated: true
-          type: array
-          items:
-            $ref: "#/components/schemas/StagedProposalSummary"
     DeliveryGraphLibraryEntry:
       description: >-
         One saved reusable delivery-graph LIBRARY entry (issue #522, epic #519 S3) — the durable base
@@ -3406,26 +3262,16 @@ components:
       type: object
       additionalProperties: false
       required:
-        - count
-        - entries
         - items
         - page
       properties:
         items:
           type: array
-          description: "The list items — the Camunda list shape (#972). Replaces the deprecated `entries` array."
+          description: "The list items — the Camunda list shape (#972)."
           items:
             $ref: "#/components/schemas/DeliveryGraphLibraryEntry"
         page:
           $ref: "#/components/schemas/ListPage"
-        count:
-          deprecated: true
-          type: integer
-        entries:
-          deprecated: true
-          type: array
-          items:
-            $ref: "#/components/schemas/DeliveryGraphLibraryEntry"
     SaveToLibrarySubmit:
       description: >-
         Save a delivery graph to the reusable library (issue #522). Carries the entry `name` (its
@@ -4290,25 +4136,19 @@ components:
       type: object
       required:
         - planKey
-        - entries
         - cursor
         - items
         - page
       properties:
         items:
           type: array
-          description: "The list items — the Camunda list shape (#972). Replaces the deprecated `entries` array."
+          description: "The list items — the Camunda list shape (#972)."
           items:
             $ref: "#/components/schemas/BlackboardEntry"
         page:
           $ref: "#/components/schemas/ListPage"
         planKey:
           type: string
-        entries:
-          deprecated: true
-          type: array
-          items:
-            $ref: "#/components/schemas/BlackboardEntry"
         cursor:
           type: integer
           nullable: true
@@ -4421,7 +4261,7 @@ components:
       properties:
         processInstanceKey:
           type: string
-          description: The engine process-instance key of the run to cancel (the `process_key` column surfaced by `listActivePrs`/the Convergence page). Must be a string — engine keys are 64-bit and a numeric value risks silent JS precision loss.
+          description: The engine process-instance key of the run to cancel (the `processInstanceKey` surfaced by `listActivePrs`/the Convergence page). Must be a string — engine keys are 64-bit and a numeric value risks silent JS precision loss.
     CancelInstanceResult:
       type: object
       required:
@@ -4454,7 +4294,7 @@ components:
       properties:
         processInstanceKey:
           type: string
-          description: The engine process-instance key of the incident-parked run to retry (the `process_key` column surfaced by `listActivePrs`/the Convergence page). Must be a string — engine keys are 64-bit and a numeric value risks silent JS precision loss.
+          description: The engine process-instance key of the incident-parked run to retry (the `processInstanceKey` surfaced by `listActivePrs`/the Convergence page). Must be a string — engine keys are 64-bit and a numeric value risks silent JS precision loss.
     RetryIncidentResult:
       type: object
       additionalProperties: false
@@ -4543,7 +4383,7 @@ paths:
               properties:
                 processInstanceKey:
                   type: string
-                  description: The engine process-instance key of the run to cancel (the `process_key` column surfaced by `listActivePrs`/the Convergence page). Must be a string — engine keys are 64-bit and a numeric value risks silent JS precision loss.
+                  description: The engine process-instance key of the run to cancel (the `processInstanceKey` surfaced by `listActivePrs`/the Convergence page). Must be a string — engine keys are 64-bit and a numeric value risks silent JS precision loss.
               # END generated:mcp-body
       responses:
         "200":
@@ -4888,7 +4728,7 @@ paths:
       operationId: getPrHistory
       x-cli:
         command: [prs, history]
-      summary: "A PR's escalation + round history (issue #668): per-round status transitions and outcome, plus each escalation's kind, question/answer, and timestamps — the read that retires the DB-over-ssh fallback. Identify the PR by prKey, or by processInstanceKey (deprecated alias processKey). Reads the same rounds/escalations tables the Convergence page surfaces."
+      summary: "A PR's escalation + round history (issue #668): per-round status transitions and outcome, plus each escalation's kind, question/answer, and timestamps — the read that retires the DB-over-ssh fallback. Identify the PR by prKey, or by processInstanceKey. Reads the same rounds/escalations tables the Convergence page surfaces."
       security:
         - hookSecret: []
         - {}
@@ -4904,14 +4744,7 @@ paths:
           required: false
           schema:
             type: string
-          description: "The engine process-instance key driving the PR (Camunda name, #972); resolved to its prKey. Provide this or prKey. Wins over the deprecated processKey."
-        - name: processKey
-          in: query
-          required: false
-          deprecated: true
-          schema:
-            type: string
-          description: "Deprecated alias of processInstanceKey (#972)."
+          description: "The engine process-instance key driving the PR (Camunda name, #972); resolved to its prKey. Provide this or prKey."
       responses:
         "200":
           description: The PR's round + escalation history (empty arrays when there is none).
@@ -4920,7 +4753,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/PrHistory"
         "400":
-          description: Neither prKey nor processInstanceKey (or processKey) supplied.
+          description: Neither prKey nor processInstanceKey supplied.
           content:
             application/json:
               schema:
@@ -7682,17 +7515,9 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              description: "Provide `featureKey` (or its deprecated alias `feature_key`; `featureKey` wins when both are present, #972)."
-              anyOf:
-                - required: [featureKey]
-                - required: [feature_key]
+              required: [featureKey]
               properties:
                 featureKey:
-                  type: string
-                  minLength: 1
-                  description: The feature run's key (feature_runs.feature_key, `<owner>/<repo>#<n>`).
-                feature_key:
-                  deprecated: true
                   type: string
                   minLength: 1
                   description: The feature run's key (feature_runs.feature_key, `<owner>/<repo>#<n>`).
@@ -7746,17 +7571,9 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              description: "Provide `planKey` (or its deprecated alias `plan_key`; `planKey` wins when both are present, #972)."
-              anyOf:
-                - required: [planKey]
-                - required: [plan_key]
+              required: [planKey]
               properties:
                 planKey:
-                  type: string
-                  minLength: 1
-                  description: The epic's key (plans.plan_key, `<owner>/<repo>#<n>`).
-                plan_key:
-                  deprecated: true
                   type: string
                   minLength: 1
                   description: The epic's key (plans.plan_key, `<owner>/<repo>#<n>`).
@@ -7812,17 +7629,9 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              description: "Provide `prKey` (or its deprecated alias `pr_key`; `prKey` wins when both are present, #972)."
-              anyOf:
-                - required: [prKey]
-                - required: [pr_key]
+              required: [prKey]
               properties:
                 prKey:
-                  type: string
-                  minLength: 1
-                  description: The pull request's key (pull_requests.pr_key).
-                pr_key:
-                  deprecated: true
                   type: string
                   minLength: 1
                   description: The pull request's key (pull_requests.pr_key).
@@ -7876,17 +7685,9 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              description: "Provide `runKey` (or its deprecated alias `run_key`; `runKey` wins when both are present, #972)."
-              anyOf:
-                - required: [runKey]
-                - required: [run_key]
+              required: [runKey]
               properties:
                 runKey:
-                  type: string
-                  minLength: 1
-                  description: The delivery-graph run's key (delivery_graph_runs.run_key).
-                run_key:
-                  deprecated: true
                   type: string
                   minLength: 1
                   description: The delivery-graph run's key (delivery_graph_runs.run_key).

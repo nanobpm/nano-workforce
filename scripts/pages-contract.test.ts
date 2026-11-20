@@ -351,6 +351,64 @@ test("issue #205: overview is the landing page and first nav item", async () => 
 });
 
 
+test("issue #972: every page action body posting to an acknowledgement door uses the canonical camelCase key — never a removed snake_case alias", async () => {
+  // The drift class this closes (PR #982 review): #972 step 4 made the four acknowledgement
+  // endpoints canonical-only — `acknowledgePr`/`acknowledgeEpic`/`acknowledgeDone`/
+  // `acknowledgeDeliveryGraph` each require `prKey`/`planKey`/`featureKey`/`runKey` and REJECT the
+  // removed snake_case alias (`additionalProperties: false`, pinned by app/apiConventions.test.ts).
+  // But the pages' Dismiss buttons are authored in `pages/*.page.json`, a surface that test never
+  // reads: each still POSTed `{ "<pr|plan|feature|run>_key": "{{row.*_key}}" }`, so every Dismiss
+  // click 400'd and a terminal run could never be filed into History. A page action body is a
+  // hand-authored API client — it must send the SAME canonical key the OpenAPI request schema
+  // declares. This guard walks every page's action bodies and fails the build on any body that
+  // posts a removed snake_case alias (or omits the canonical key) to an acknowledgement door, so
+  // the class can't creep back on a new/edited button.
+  const ACK_DOORS: Record<string, { canonical: string; alias: string }> = {
+    "/app/api/actions/acknowledge-delivery-graph": { canonical: "runKey", alias: "run_key" },
+    "/app/api/actions/acknowledge-done": { canonical: "featureKey", alias: "feature_key" },
+    "/app/api/actions/acknowledge-epic": { canonical: "planKey", alias: "plan_key" },
+    "/app/api/actions/acknowledge-pr": { canonical: "prKey", alias: "pr_key" },
+  };
+
+  // Collect every { page, path, body } action in every page (rowActions, detail actions, …).
+  const actions: { page: string; path: string; body: Record<string, Json> }[] = [];
+  const walk = (page: string, n: Json): void => {
+    if (Array.isArray(n)) return n.forEach((v) => walk(page, v));
+    if (n && typeof n === "object") {
+      const path = n.action?.path;
+      if (typeof path === "string" && path in ACK_DOORS && n.action?.body && typeof n.action.body === "object") {
+        actions.push({ page, path, body: n.action.body });
+      }
+      for (const v of Object.values(n)) walk(page, v);
+    }
+  };
+  for (const e of readdirSync(`${ROOT}pages`, { withFileTypes: true })) {
+    if (!e.isFile() || !e.name.endsWith(".page.json")) continue;
+    walk(e.name, JSON.parse(readFileSync(`${ROOT}pages/${e.name}`, "utf8")));
+  }
+  assert(actions.length >= 4, `expected the acknowledgement Dismiss actions, found only ${actions.length}`);
+
+  for (const a of actions) {
+    const { canonical, alias } = ACK_DOORS[a.path];
+    const keys = Object.keys(a.body);
+    assert(
+      !keys.includes(alias),
+      `${a.page}: action "${a.path}" posts the removed snake_case alias "${alias}" — the endpoint 400s it; send the canonical "${canonical}" instead (issue #972)`,
+    );
+    assert(
+      keys.includes(canonical),
+      `${a.page}: action "${a.path}" must post the canonical "${canonical}" key (got ${JSON.stringify(keys)}) — the endpoint requires it (issue #972)`,
+    );
+    // The value must stay bound to the row's key column (e.g. "{{row.pr_key}}") — the *binding*
+    // source keeps the snake_case read-model column name; only the wire key is canonicalised.
+    const value = a.body[canonical];
+    assert(
+      typeof value === "string" && value.includes(`row.${alias}`),
+      `${a.page}: action "${a.path}" body.${canonical} must bind the row's "${alias}" column (got ${JSON.stringify(value)})`,
+    );
+  }
+});
+
 test("issue #641: no Active/History grid filters a base-`status` allowlist — every dispatch Active list buckets on a derived read-model VIEW", async () => {
   // The drift class this closes (the last mile of #637): an "Active …" dispatch list that re-encodes
   // activeness as a hardcoded base-`status` allowlist (`{ field: "status", in: [...] }`) instead of the

@@ -52,9 +52,8 @@ export default defineOperation("listActivePrs", async ({ req }, app) => {
  *  of rows now that the merge policy is served from the app's own projection. */
 const STATUS_SLOW_MS = 5_000;
 
-/** The /status body: the deprecated `prs`/`deliveries`/`count` (each row also carrying the canonical
- *  `processInstanceKey` next to the deprecated `processKey`) plus the Camunda `{ items, page }` list —
- *  ONE list over both kinds, discriminated by `kind` (`pr` | `delivery`; docs/api-conventions.md). */
+/** The /status body: the Camunda `{ items, page }` list — ONE list over both kinds, discriminated by
+ *  `kind` (`pr` | `delivery`; docs/api-conventions.md), each row keyed by `processInstanceKey`. */
 export function activePrsBody<P extends { processKey: string | null }, D extends { processKey: string | null }, V>(
   prs: readonly P[],
   deliveries: readonly D[],
@@ -66,5 +65,5 @@ export function activePrsBody<P extends { processKey: string | null }, D extends
     ...prRows.map((r) => ({ kind: "pr" as const, ...r })),
     ...deliveryRows.map((r) => ({ kind: "delivery" as const, ...r })),
   ];
-  return { count: prRows.length, prs: prRows, deliveries: deliveryRows, ...listEnvelope(items), version };
+  return { ...listEnvelope(items), version };
 }

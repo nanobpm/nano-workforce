@@ -419,7 +419,7 @@ function replayRig(onPermissionResolve?: SupplyCockpitEnv["onPermissionResolve"]
   const data = permissionTranscript("job:done");
   const env: SupplyCockpitEnv = {
     ...r.env,
-    fetchTranscripts: () => Promise.resolve({ count: 0, transcripts: [] }),
+    fetchTranscripts: () => Promise.resolve({ items: [], page: { totalItems: 0 } }),
     fetchTranscript: () => Promise.resolve(data),
     ...(onPermissionResolve !== undefined ? { onPermissionResolve } : {}),
   };

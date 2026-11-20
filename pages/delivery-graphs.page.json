@@ -226,7 +226,7 @@
             "showWhenField": "ack_open",
             "action": {
               "path": "/app/api/actions/acknowledge-delivery-graph",
-              "body": { "run_key": "{{row.run_key}}" }
+              "body": { "runKey": "{{row.run_key}}" }
             }
           }
         ]

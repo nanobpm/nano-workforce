@@ -9,9 +9,9 @@
 //   2. `list:` — a list response lacking an `items` array + `page.totalItems`.
 // Fields marked `deprecated: true` are NOT exempt: they count until removed.
 //
-// Ratchet mode: today's violations are frozen in `apiConventions.baseline.json`. A NEW violation
-// fails; a baselined violation that disappeared also fails until the baseline is shrunk. Regenerate
-// the baseline deliberately with `NWF_API_BASELINE_WRITE=1 node --experimental-strip-types --test
+// Fully enforcing (#972 step 4): `apiConventions.baseline.json` is EMPTY and must stay empty — any
+// violation fails. The ratchet mechanics remain so a future convention can be introduced report-only:
+// regenerate with `NWF_API_BASELINE_WRITE=1 node --experimental-strip-types --test
 // app/apiConventions.test.ts` (test-only switch, not a runtime config key).
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -141,12 +141,20 @@ function listViolation(doc: OpenApiDoc, op: OperationInfo): string | null {
   // Fail closed: a list op with no 2xx response schema declares neither items nor page.totalItems.
   if (schemas.length === 0) return `list:${op.operationId}`;
   for (const schema of schemas) {
-    const props = topProps(doc, schema);
-    const hasItems = props.items !== undefined && isArraySchema(doc, props.items);
-    const page = topProps(doc, props.page);
-    if (!hasItems || page.totalItems === undefined) return `list:${op.operationId}`;
+    // A polymorphic (`oneOf`) response — e.g. listAgenticTranscripts' `?stream=` single-resource
+    // read form — conforms when one of its variants is the list envelope.
+    const s = resolve(doc, schema, new Set());
+    const variants = s && Array.isArray(s.oneOf) ? s.oneOf : [schema];
+    if (!variants.some((v) => isListEnvelope(doc, v))) return `list:${op.operationId}`;
   }
   return null;
+}
+
+/** True when `node` is the Camunda list envelope: an `items` array + `page.totalItems`. */
+function isListEnvelope(doc: OpenApiDoc, node: unknown): boolean {
+  const props = topProps(doc, node);
+  const hasItems = props.items !== undefined && isArraySchema(doc, props.items);
+  return hasItems && topProps(doc, props.page).totalItems !== undefined;
 }
 
 /** A response is a list response if named by #972, or generically by operationId: `list*` /
@@ -210,6 +218,20 @@ paths:
                 type: object
                 properties:
                   rows: { type: array, items: { type: object, properties: { processKey: { type: string, deprecated: true } } } }
+  /poly:
+    get:
+      operationId: listPoly
+      responses:
+        "200":
+          description: ok
+          content: { application/json: { schema: { oneOf: [{ $ref: "#/components/schemas/Good" }, { type: object, properties: { bytes: { type: string } } }] } } }
+  /polyBad:
+    get:
+      operationId: listPolyBad
+      responses:
+        "200":
+          description: ok
+          content: { application/json: { schema: { oneOf: [{ type: object, properties: { rows: { type: array, items: { type: string } } } }, { type: object, properties: { bytes: { type: string } } }] } } }
   /schemaless:
     get:
       operationId: listSchemaless
@@ -229,6 +251,14 @@ components:
   assert(v.includes("key:listBad:response200.rows[]:processKey"), JSON.stringify(v));
   assert(v.includes("list:listSchemaless"), JSON.stringify(v));
   assert(!v.some((x) => x.includes("listGood")), JSON.stringify(v));
+  assert(!v.includes("list:listPoly"), JSON.stringify(v));
+  assert(v.includes("list:listPolyBad"), JSON.stringify(v));
+});
+
+test("the API-conventions baseline is empty: the guard fully enforces (#972)", () => {
+  const parsed: unknown = JSON.parse(readFileSync(BASELINE_PATH, "utf8"));
+  assert(isObj(parsed) && Array.isArray(parsed.violations), "baseline must have a violations array");
+  assert(parsed.violations.length === 0, `baseline must stay empty — fix the violation instead: ${JSON.stringify(parsed.violations)}`);
 });
 
 test("openapi.yaml conforms to the API conventions (ratchet against baseline)", () => {
@@ -254,12 +284,10 @@ test("the named #972 list operations all exist in the spec", () => {
   assert(missing.length === 0, `missing list ops: ${missing.join(", ")}`);
 });
 
-// PR #980 review: the four acknowledgement request bodies carry a canonical key plus its deprecated
-// alias, both optional so the canonical name can take precedence when both are sent — but that left
-// `{}` valid under the schema while each delegate 400s it. The schemas now require at least one of
-// the pair via `anyOf`; this pins the contract for every canonical/deprecated-alias request body so
-// the next alias pair cannot reintroduce an empty-object hole.
-test("acknowledgement request schemas reject an empty body and accept either key name (#980)", () => {
+// PR #980 review: `{}` must never validate against an acknowledgement body (each delegate 400s it).
+// #972 step 4 removed the snake_case aliases, so the canonical key is required and the legacy alias
+// is now rejected (`additionalProperties: false`).
+test("acknowledgement request schemas require the canonical key and reject the removed alias (#972)", () => {
   const ACK_KEYS: Record<string, readonly [string, string]> = {
     acknowledgeDeliveryGraph: ["runKey", "run_key"],
     acknowledgeDone: ["featureKey", "feature_key"],
@@ -272,21 +300,14 @@ test("acknowledgement request schemas reject an empty body and accept either key
     const op = ops.get(id);
     assert(op?.requestBodySchema !== undefined, `${id} request body schema missing`);
     const schema = op.requestBodySchema;
-    assert(
-      validateValue(spec, schema, {}).length > 0,
-      `${id} must reject {} — require ${canonical} or its deprecated alias ${alias}`,
-    );
+    assert(validateValue(spec, schema, {}).length > 0, `${id} must reject {}`);
     assert(
       validateValue(spec, schema, { [canonical]: "owner/repo#1" }).length === 0,
       `${id} must accept the canonical ${canonical}`,
     );
     assert(
-      validateValue(spec, schema, { [alias]: "owner/repo#1" }).length === 0,
-      `${id} must accept the deprecated alias ${alias}`,
-    );
-    assert(
-      validateValue(spec, schema, { [canonical]: "owner/repo#1", [alias]: "owner/repo#1" }).length === 0,
-      `${id} must accept both names (canonical wins at the delegate)`,
+      validateValue(spec, schema, { [alias]: "owner/repo#1" }).length > 0,
+      `${id} must reject the removed alias ${alias}`,
     );
   }
 });

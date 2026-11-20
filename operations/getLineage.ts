@@ -27,14 +27,14 @@ export default defineOperation("getLineage", async ({ query, req }, app) => {
   if (root) {
     const thread = await getLineage(app.data, root);
     const threads = thread ? [lineageWire(thread)] : [];
-    return { status: 200, body: { count: threads.length, threads, ...listEnvelope(threads) } };
+    return { status: 200, body: { ...listEnvelope(threads) } };
   }
   const threads = (await listLineage(app.data)).map(lineageWire);
-  return { status: 200, body: { count: threads.length, threads, ...listEnvelope(threads) } };
+  return { status: 200, body: { ...listEnvelope(threads) } };
 });
 
-/** A lineage thread on the wire: the canonical `processInstanceKey` next to the deprecated
- *  `processKey`, on the thread and on each of its PRs (#972). */
+/** A lineage thread on the wire: the engine key as the canonical `processInstanceKey`, on the
+ *  thread and on each of its PRs (#972). */
 function lineageWire(thread: LineageThread): LineageThreadView {
   return { ...withProcessInstanceKey(thread), prs: thread.prs.map(withProcessInstanceKey) };
 }

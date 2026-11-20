@@ -21,9 +21,9 @@ const supply: SupplyReport = {
 };
 
 const transcripts: TranscriptListReport = {
-  count: 1,
+  page: { totalItems: 1 },
   retentionMs: 86_400_000,
-  transcripts: [
+  items: [
     { stream: "job:past", lifecycle: "ephemeral", status: "completed", createdAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T00:05:00Z", nextOffset: 2, byteLength: 4, chunkCount: 2, jobKey: "past", planKey: "o/r#1" },
   ],
 };

@@ -47,12 +47,12 @@ test("listIncidents: lists PR + delivery incidents oldest-first with the retry r
   });
   const res = await call(app);
   assertEquals(res.status, 200);
-  assertEquals(res.body.count, 2);
+  assertEquals(res.body.page.totalItems, 2);
   assertEquals(
-    res.body.incidents.map((i: { kind: string; subjectKey: string }) => `${i.kind}:${i.subjectKey}`),
+    res.body.items.map((i: { kind: string; subjectKey: string }) => `${i.kind}:${i.subjectKey}`),
     ["delivery:run-a", "pr:o/r#2"],
   );
-  assertEquals(res.body.incidents[1], {
+  assertEquals(res.body.items[1], {
     kind: "pr",
     subjectKey: "o/r#2",
     processInstanceKey: "22",
@@ -66,5 +66,5 @@ test("listIncidents: lists PR + delivery incidents oldest-first with the retry r
 
 test("listIncidents: empty when nothing is parked", async () => {
   const res = await call(memApp({ pull_requests: [{ pr_key: "x", incident_key: null }] }));
-  assertEquals(res.body, { count: 0, incidents: [], items: [], page: { totalItems: 0 } });
+  assertEquals(res.body, { items: [], page: { totalItems: 0 } });
 });

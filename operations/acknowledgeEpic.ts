@@ -26,8 +26,8 @@ export default defineOperation("acknowledgeEpic", async ({ body }, app) => {
     return { status: 400, body: { ok: false, error: "planKey is required" } };
   }
 
-  // #972 dual-accept: the canonical `planKey` wins over the deprecated `plan_key`.
-  const planKey = pickKey(body, "planKey", "plan_key");
+  // #972: the canonical Camunda/nwf name `planKey` (its legacy alias was removed).
+  const planKey = pickKey(body, "planKey");
   if (!planKey) return { status: 400, body: { ok: false, error: "planKey is required" } };
 
   return acknowledgeVia(

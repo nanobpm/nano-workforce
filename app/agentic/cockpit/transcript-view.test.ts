@@ -26,10 +26,10 @@ test("humanDuration renders s / m / h / d, undefined for non-positive", () => {
 
 test("projects sessions newest-first with a process/plan label and surfaces retention", () => {
   const report: TranscriptListReport = {
-    count: 2,
+    page: { totalItems: 2 },
     retentionMs: 86_400_000,
-    transcripts: [
-      { stream: "job:1", lifecycle: "ephemeral", status: "completed", createdAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T00:05:00Z", nextOffset: 2, byteLength: 2048, chunkCount: 2, jobKey: "1", bpmnProcessId: "plan-fanout", processInstanceKey: "4612", planKey: "o/r#142" },
+    items: [
+      { stream: "job:1", lifecycle: "ephemeral", status: "completed", createdAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T00:05:00Z", nextOffset: 2, byteLength: 2048, chunkCount: 2, jobKey: "1", processDefinitionId: "plan-fanout", processInstanceKey: "4612", planKey: "o/r#142" },
       { stream: "job:2", lifecycle: "ephemeral", status: "completed", createdAt: "2026-01-02T00:00:00Z", completedAt: "2026-01-02T00:05:00Z", nextOffset: 1, byteLength: 10, chunkCount: 1, jobKey: "2" },
     ],
   };
@@ -48,8 +48,8 @@ test("projects sessions newest-first with a process/plan label and surfaces rete
 
 test("falls back to the stream id when neither jobKey nor context is known, and uses createdAt when open", () => {
   const report: TranscriptListReport = {
-    count: 1,
-    transcripts: [
+    page: { totalItems: 1 },
+    items: [
       { stream: "ctrl:x", lifecycle: "long-lived", status: "open", createdAt: "2026-01-01T00:00:00Z", nextOffset: 3, byteLength: 3, chunkCount: 3 },
     ],
   };

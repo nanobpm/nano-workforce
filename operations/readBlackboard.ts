@@ -26,5 +26,5 @@ export default defineOperation("readBlackboard", async ({ req }, app) => {
   const rawSince = req.query.get("since");
   const since = rawSince != null && /^\d+$/.test(rawSince) ? Number(rawSince) : undefined;
   const { entries, cursor } = await readBlackboardPage(app.data, planKey, { since });
-  return { status: 200, body: { planKey, entries, ...listEnvelope(entries), cursor } };
+  return { status: 200, body: { planKey, cursor, ...listEnvelope(entries) } };
 });

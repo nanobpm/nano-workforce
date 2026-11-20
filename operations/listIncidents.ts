@@ -74,7 +74,7 @@ export default defineOperation("listIncidents", async ({ req }, app) => {
     app.log.warn("listIncidents rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
   }
-  if (!app.data) return { status: 200, body: { count: 0, incidents: [], ...listEnvelope([]) } };
+  if (!app.data) return { status: 200, body: listEnvelope([]) };
   const incidents = await activeIncidents(app.data);
-  return { status: 200, body: { count: incidents.length, incidents, ...listEnvelope(incidents) } };
+  return { status: 200, body: listEnvelope(incidents) };
 });
