@@ -1,3 +1,9 @@
+## [0.211.4](https://github.com/nanobpm/nano-workforce/compare/v0.211.3...v0.211.4) (2026-11-20)
+
+### Bug Fixes
+
+* **openapi:** quote summaries/descriptions containing ' #' so they are not truncated ([#973](https://github.com/nanobpm/nano-workforce/issues/973)) ([3bfc56a](https://github.com/nanobpm/nano-workforce/commit/3bfc56a9ca01c1a89819af5031298b9cafdccb26)), closes [#970](https://github.com/nanobpm/nano-workforce/issues/970) [#970](https://github.com/nanobpm/nano-workforce/issues/970)
+
 ## [0.211.3](https://github.com/nanobpm/nano-workforce/compare/v0.211.2...v0.211.3) (2026-11-20)
 
 ### Bug Fixes
