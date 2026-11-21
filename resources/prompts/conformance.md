@@ -27,7 +27,7 @@ You have `gh` / git authenticated for the target repository.
 
 ## What to do
 
-1. **Read the spec.** `gh issue view <n> --repo <repo>` for the epic issue body, plus every slice's
+1. **Read the spec.** `gh issue view <n> --repo <repo> --comments` for the epic issue body, plus every slice's
    `prompt` in the digest. Together these are the acceptance criteria you are auditing against.
 2. **Examine the ACTUAL implementation.** For every delivered PR in the digest:
    `gh pr diff <n> --repo <repo>`, and read the touched source and tests (clone/checkout if you

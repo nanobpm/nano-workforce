@@ -19,6 +19,7 @@ import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcr
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { derivedTrackingTable } from "./instanceTracking.ts";
+import { issueReadCommand } from "./operatorFeedback.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
 import type { ReadinessProbe } from "./readiness.ts";
 import { requireRepoEnvelopeVars, sliceBranchCreate } from "./repoEnvelope.ts";
@@ -524,7 +525,7 @@ export async function startFeature(
     variables: {
       featureKey: parsed.planKey,
       repo: parsed.repo,
-      // The parent issue reference (`owner/repo#123`) the agent reads for context (`gh issue view`).
+      // The parent issue reference (`owner/repo#123`) the agent reads for context (`issueReadCommand`).
       issue: parsed.planKey,
       issueNumber: parsed.number,
       issueUrl: parsed.url,
@@ -536,7 +537,7 @@ export async function startFeature(
         title: parsed.planKey,
         prompt:
           `Implement the GitHub issue ${parsed.planKey} end to end. Read it in full first ` +
-          `(\`gh issue view ${parsed.number} -R ${parsed.repo}\`), implement it completely, ` +
+          `(\`${issueReadCommand(parsed.number, parsed.repo)}\` — body AND every comment; operator comments are scope), implement it completely, ` +
           `and open exactly one pull request that closes it.`,
       },
       // Follow-on knobs, read by the record/converge workers. `autoMerge` is the canonical
