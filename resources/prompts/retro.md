@@ -21,7 +21,7 @@ The job payload (stdin JSON) carries:
 
 - `variables.planKey` — the epic's key, e.g. `owner/repo#123`.
 - `variables.repo` — the **target repo** `owner/repo` you will open a promotion PR against.
-- `variables.issueUrl` — the epic's source issue, for context (`gh issue view`).
+- `variables.issueUrl` — the epic's source issue, for context (`gh issue view <ref> --comments`).
 - **`variables.retroDigest`** — appended to this prompt below the `---` separator: the epic's
   accumulated knowledge already gathered for you — the `learning` entries agents posted, the
   constraints and contract changes they discovered, and the files they touched beyond their

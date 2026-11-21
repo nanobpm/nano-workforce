@@ -55,6 +55,7 @@ import {
   fetchBranchHead,
   fetchLatestCopilotReview,
   fetchPrHead,
+  fetchPrMeta,
   fetchReviewThreads,
   isAckThread,
   parseAckedAdvisories,
@@ -62,6 +63,16 @@ import {
   parseSuppressedAdvisories,
   type ReviewThread,
 } from "../../app/github.ts";
+import { type IssueComment, listIssueComments } from "../../app/issuePrLink.ts";
+import {
+  deriveOperatorFeedback,
+  type FeedbackThread,
+  isOperatorThread,
+  type OperatorFeedbackItem,
+  parseClosingIssueNumbers,
+  renderOperatorFeedbackBrief,
+  runStartOnIssue,
+} from "../../app/operatorFeedback.ts";
 import { isReviewMissingOrStale } from "../../app/reviewWait.ts";
 import { parsePr } from "../../app/service.ts";
 import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io.d.ts";
@@ -81,6 +92,33 @@ export type ThreadsReader = (repo: string, prNumber: number) => Promise<ReviewTh
 // stale-review detection below (issue #799).
 export type ReviewReader = (repo: string, prNumber: number) => Promise<{ body: string; commitId: string | null } | null>;
 
+// Reads the trusted OPERATOR feedback (issue #985) outstanding on a PR, given its review threads.
+// `null` = unverifiable (fail closed). Throws propagate to the fail-closed catch.
+export type OperatorFeedbackReader = (
+  repo: string,
+  prNumber: number,
+  threads: FeedbackThread[],
+) => Promise<OperatorFeedbackItem[] | null>;
+
+/** The real operator-feedback reader: the PR's title/body (closing issues + creation time), each
+ * closing issue's comments (run start = its earliest claim comment, else the PR's creation), and the
+ * PR's conversation comments — all paged by the ONE issue-comments pager — fed to the ONE
+ * `deriveOperatorFeedback`. */
+export const defaultReadOperatorFeedback: OperatorFeedbackReader = async (repo, prNumber, threads) => {
+  const token = process.env.GITHUB_TOKEN ?? "";
+  const meta = await fetchPrMeta(repo, prNumber, token);
+  if (meta === null) return null;
+  const prComments = await listIssueComments(repo, prNumber, token);
+  if (prComments === null) return null;
+  const issues: { number: number; comments: IssueComment[]; since: string | null }[] = [];
+  for (const n of parseClosingIssueNumbers(`${meta.title ?? ""}\n${meta.body}`, repo)) {
+    const comments = await listIssueComments(repo, n, token);
+    if (comments === null) return null;
+    issues.push({ number: n, comments, since: runStartOnIssue(comments, meta.createdAt ?? null) });
+  }
+  return deriveOperatorFeedback({ repo, issues, prComments, threads });
+};
+
 const defaultReadThreads: ThreadsReader = (repo, prNumber) =>
   fetchReviewThreads(repo, prNumber, process.env.GITHUB_TOKEN ?? "");
 const defaultReadReview: ReviewReader = (repo, prNumber) =>
@@ -99,6 +137,8 @@ export function makeHandler(deps: {
   readThreads: ThreadsReader;
   readReview: ReviewReader;
   readHeadSha?: HeadReader;
+  /** Omitted ⇒ no operator-feedback read (unit fixtures); the bound default handler wires the real one. */
+  readOperatorFeedback?: OperatorFeedbackReader;
 }): AppJobHandler<In, Out> {
   const readHeadSha = deps.readHeadSha ?? defaultReadHead;
   return async (job) => {
@@ -113,6 +153,7 @@ export function makeHandler(deps: {
     }
 
     let result: ConvergeGateResult;
+    let operatorFeedbackBrief = "";
     try {
       const threadsRead = await deps.readThreads(ghRepo, ghNumber);
       // A null threads read is an unverifiable gate — fail closed. (An empty ARRAY is a verified
@@ -189,15 +230,32 @@ export function makeHandler(deps: {
       // away — is what makes the root-marker classifier fail-CLOSED: a mislabelled substantive thread
       // still blocks (as ack-only) instead of finalizing with the finding open, and the bounded retry
       // cannot ack a non-advisory, so it escalates to a human on exhaustion.
+      // OPERATOR FEEDBACK (issue #985): trusted-human feedback — post-start issue comments on the
+      // closed issue(s), PR conversation comments, and unresolved review threads rooted by a trusted
+      // human — is derived ONCE here and both gates convergence (recoverable, ack-only route) and is
+      // injected into the round agent's prompt (`operatorFeedbackBrief`). An unreadable feedback
+      // state fails CLOSED like every other read in this gate.
+      let feedback: OperatorFeedbackItem[] = [];
+      if (deps.readOperatorFeedback) {
+        const read = await deps.readOperatorFeedback(ghRepo, ghNumber, threadsRead);
+        if (read === null) {
+          return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false, reviewStale: false };
+        }
+        feedback = read;
+      }
+      operatorFeedbackBrief = renderOperatorFeedbackBrief(feedback);
       const unresolved = threadsRead.filter((t) => !t.isResolved);
       const unresolvedAckThreadCount = unresolved.filter((t) => isAckThread(t)).length;
-      const unresolvedThreadCount = unresolved.length - unresolvedAckThreadCount;
+      // An operator thread is counted ONCE, as operator feedback (recoverable), never also substantive.
+      const unresolvedThreadCount = unresolved.length - unresolvedAckThreadCount - unresolved.filter((t) => !isAckThread(t) && isOperatorThread(t)).length;
+      // (`isOperatorThread` excludes `nano-ack:`-rooted threads, so the two counts never overlap.)
       const advisories = parseSuppressedAdvisories(review.body);
       result = evaluateConvergeGate({
         unresolvedThreadCount,
         unresolvedAckThreadCount,
         suppressedAdvisories: advisories.map((a) => ({ key: a.key, label: a.label })),
         acknowledgedKeys: parseAckedAdvisories(threadsRead),
+        operatorFeedback: feedback.map((f) => ({ label: f.label })),
       });
     } catch {
       return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE, convergeAckOnly: false, reviewStale: false };
@@ -212,6 +270,9 @@ export function makeHandler(deps: {
       // the review-round agent before escalating to a human.
       convergeAckOnly: result.ackOnly,
       reviewStale: false,
+      // Only emitted when there IS outstanding feedback; an empty brief is set explicitly so a
+      // stale brief from an earlier gate run never lingers into the next round's prompt.
+      ...(operatorFeedbackBrief !== "" || deps.readOperatorFeedback ? { operatorFeedbackBrief } : {}),
     };
   };
 }
@@ -220,5 +281,6 @@ const handler = makeHandler({
   readThreads: defaultReadThreads,
   readReview: defaultReadReview,
   readHeadSha: defaultReadHead,
+  readOperatorFeedback: defaultReadOperatorFeedback,
 });
 export default handler;
