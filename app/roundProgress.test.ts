@@ -208,6 +208,9 @@ function fakeApp(
   return { app, updates };
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: test-only PR-state double (#988).
+let readPrStateForTest: ((repo: string, n: number) => Promise<any>) | undefined;
+
 async function makeUnderTest(
   readHead: (repo: string, n: number) => Promise<string | null>,
   readAgentWork?: (
@@ -239,7 +242,17 @@ async function makeUnderTest(
   // table double (which implements only get/update, not find).
   const rounds = readRounds ?? (async () => []);
   // biome-ignore lint/suspicious/noExplicitAny: test double for the injectable worker deps.
-  return makeHandler({ readHead, ...(readAgentWork ? { readAgentWork } : {}), selfHeal: heal as any, readRounds: rounds as any });
+  // Default the live PR-state read (#988) to UNREADABLE (null → fail open) so no test hits GitHub;
+  // the #988 tests pass their own via makeUnderTestWithState.
+  return makeHandler({
+    readHead,
+    ...(readAgentWork ? { readAgentWork } : {}),
+    // biome-ignore lint/suspicious/noExplicitAny: test double for the injectable worker deps.
+    selfHeal: heal as any,
+    // biome-ignore lint/suspicious/noExplicitAny: test double for the injectable worker deps.
+    readRounds: rounds as any,
+    readPrState: readPrStateForTest ?? (async () => null),
+  });
 }
 
 test("progress-check: a non-addressed round records the baseline and consumes the attempt watermark but never escalates", async () => {
@@ -265,7 +278,7 @@ test("progress-check: a non-addressed round records the baseline and consumes th
   );
   const { app, updates } = fakeApp({ last_round_head: "sha-1" });
   const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "waiting", repo: "o/r", prNumber: 1 } } as any, app as any);
-  assertEquals(out, { progressed: true, huskRetries: 0 });
+  assertEquals(out, { progressed: true, huskRetries: 0, ciRed: false, prGone: "" });
   assertEquals(called, true, "a waiting round reads the head to seed the baseline");
   assertEquals(agentReads, 1, "and consults the agent-work channel to consume its own review instance");
   // ONE atomic write now (Copilot #789): the baseline head advance, the review-wait PARK, and the
@@ -310,7 +323,7 @@ test("progress-check: a review-stale re-entry parks with waiting_since at the ga
     } as any,
     app as any,
   );
-  assertEquals(out, { progressed: true, huskRetries: 0 });
+  assertEquals(out, { progressed: true, huskRetries: 0, ciRed: false, prGone: "" });
   assertEquals(updates.length, 1, "one atomic park write");
   assertEquals(updates[0]!.patch.status, "waiting_review", "the round parks for review");
   assertEquals(
@@ -417,7 +430,7 @@ test("progress-check: a no-advance round self-heals to a reachable push-checkpoi
     { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0 } } as any,
     app as any,
   );
-  assertEquals(out, { progressed: true, huskRetries: 0 }, "a healed round continues as real progress");
+  assertEquals(out, { progressed: true, huskRetries: 0, ciRed: false, prGone: "" }, "a healed round continues as real progress");
   assertEquals(
     healArgs,
     ["o/r", 1, "o/r#1", "sha-1", 3, "pik"],
@@ -1348,4 +1361,114 @@ test("makeDefaultReadHead: an unresolvable head repository (deleted fork) fails 
   });
   assertEquals(await read("o/r", 1), null, "a null head repo fails open rather than falling back to the base repo");
   assertEquals(branchReads, 0, "no base-repo branch read is attempted when the head repo is unresolvable");
+});
+
+// ── #988: the plugin's IDLE agent-instance status (c8ctl-plugin-nano#318) means "the agent ran" ──
+test("progress-check default reader: an IDLE completing attempt (plugin #318 lifecycle) ⇒ no-advance, NOT a false husk (#988)", async () => {
+  // Since c8ctl-plugin-nano#318 a finished job leaves its AgentInstance IDLE (no COMPLETED, no
+  // completionDate). Reading only terminal statuses mis-classified every no-commit round as a husk,
+  // burning MAX_HUSK_RETRIES fresh workers and then escalating "the worker likely died".
+  const handler = await makeUnderTest(async () => "sha-1");
+  const { app } = fakeApp({ last_round_head: "sha-1" }, async () => [
+    {
+      status: "IDLE",
+      completionDate: null,
+      elementInstanceKeys: ["200"],
+      metrics: { inputTokens: 10, outputTokens: 10, modelCalls: 3, toolCalls: 2 },
+    },
+  ]);
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, false);
+  assertEquals(out.huskRetry, false, "an IDLE (finished) agent instance is not a husk");
+  assertEquals(out.noProgressReason, "no-advance");
+});
+
+// ── #988: merged/closed mid-round ends the loop; clean review + red CI routes to fix-ci ─────────
+function prStateFixture(over: Record<string, unknown>) {
+  return {
+    merged: false,
+    state: "open",
+    mergeStateStatus: "BLOCKED",
+    failingChecks: 0,
+    failingCheckNames: [],
+    totalChecks: 3,
+    presentCheckNames: [],
+    pendingCheckNames: [],
+    checkGateConclusions: {},
+    isDraft: false,
+    headRefOid: "sha-1",
+    mergeQueueEntry: null,
+    unresolvedThreads: 0,
+    ...over,
+  };
+}
+
+async function withPrState<T>(state: unknown, fn: () => Promise<T>): Promise<T> {
+  readPrStateForTest = async () => state;
+  try {
+    return await fn();
+  } finally {
+    readPrStateForTest = undefined;
+  }
+}
+
+test("progress-check: a PR MERGED mid-round ends the loop (prGone=merged) instead of escalating (#988)", async () => {
+  await withPrState(prStateFixture({ merged: true, state: "merged" }), async () => {
+    const handler = await makeUnderTest(async () => "sha-1", async () => true);
+    const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+    const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0 } } as any, app as any);
+    assertEquals(out.prGone, "merged");
+    assertEquals(out.progressed, true, "never routes to the no-progress escalation");
+    assertEquals(out.noProgressQuestion, undefined);
+    assertEquals(updates.at(-1)?.patch.status, "merged");
+  });
+});
+
+test("progress-check: an OPEN PR always emits cleared route flags (no stale ciRed/prGone) (#988)", async () => {
+  await withPrState(prStateFixture({}), async () => {
+    const handler = await makeUnderTest(async () => "sha-2");
+    const { app } = fakeApp({ last_round_head: "sha-1" });
+    const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, roundEntryHead: "sha-1" } } as any, app as any);
+    assertEquals(out.progressed, true);
+    assertEquals(out.ciRed, false);
+    assertEquals(out.prGone, "");
+  });
+});
+
+test("progress-check: a no-advance round with a clean review but red CI routes to fix-ci, not a human (#988)", async () => {
+  await withPrState(prStateFixture({ failingChecks: 1, failingCheckNames: ["generation-drift"] }), async () => {
+    const handler = await makeUnderTest(async () => "sha-1", async () => true);
+    const { app } = fakeApp({ last_round_head: "sha-1" });
+    const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0, ciFixRound: 0 } } as any, app as any);
+    assertEquals(out.progressed, false);
+    assertEquals(out.huskRetry, false);
+    assertEquals(out.ciRed, true);
+    assertEquals(out.failingChecksList, "generation-drift");
+    assertEquals(out.noProgressQuestion, undefined, "no human escalation question");
+  });
+});
+
+test("progress-check: red CI with the fix budget spent, or unresolved threads, still escalates (#988)", async () => {
+  for (const [state, ciFixRound] of [
+    [prStateFixture({ failingChecks: 1, failingCheckNames: ["x"] }), 2],
+    [prStateFixture({ failingChecks: 1, failingCheckNames: ["x"], unresolvedThreads: 1 }), 0],
+  ] as const) {
+    await withPrState(state, async () => {
+      const handler = await makeUnderTest(async () => "sha-1", async () => true);
+      const { app } = fakeApp({ last_round_head: "sha-1" });
+      const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0, ciFixRound } } as any, app as any);
+      assertEquals(out.ciRed, false);
+      assertEquals(out.noProgressReason, "no-advance");
+    });
+  }
+});
+
+test("convergence-loop BPMN: gw-progress ends on prGone and gw-husk routes ciRed to senior:fix-ci (#988)", () => {
+  const xml = readFileSync(new URL("../resources/processes/convergence-loop.bpmn", import.meta.url), "utf8");
+  assertStringIncludes(xml, 'sourceRef="gw-progress" targetRef="EndPrGone"');
+  assertStringIncludes(xml, '=prGone = "merged" or prGone = "closed"');
+  assertStringIncludes(xml, 'sourceRef="gw-husk" targetRef="converge-fix-ci"');
+  assertStringIncludes(xml, "=ciRed = true");
+  assertStringIncludes(xml, 'sourceRef="converge-fix-ci" targetRef="gw-guard"');
+  assert(/id="converge-fix-ci"[\s\S]*?type="senior:fix-ci"/.test(xml), "converge-fix-ci is a senior:fix-ci agent task");
 });
