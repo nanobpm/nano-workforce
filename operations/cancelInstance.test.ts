@@ -302,3 +302,44 @@ test("PR#944: operator-cancel provenance is recorded even when the record fails 
   assertEquals(rows[0].termination_process_key, "400", "provenance is stamped once the engine confirms termination");
   assert(typeof rows[0].termination_reason === "string" && rows[0].termination_reason.length > 0);
 });
+
+// --- Operator-cancel provenance → the `cancelled` terminal status (issue #994) -------------------
+
+test("issue #994 — cancelling a delivery graph records the actor + reason so its read model reports `cancelled`, not `failed`", async () => {
+  const stores = {
+    delivery_graph_runs: {
+      rows: [{ run_key: "103f7697d662", process_key: "1206", status: "running", derived_status: "abandoned" }],
+      key: "run_key",
+    },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
+    run_cancellations: { rows: [] as any[], key: "process_key" },
+  };
+  const { app, cancelCalls } = makeRecordApp(stores, { readBackState: "TERMINATED" });
+  const res = await call(app, { processInstanceKey: "1206", actor: "jwulf", reason: "gate can never open (#992)" });
+  assertEquals(res.status, 200);
+  assertEquals(cancelCalls, ["1206"]);
+  assertEquals(stores.run_cancellations.rows.length, 1);
+  const cx = stores.run_cancellations.rows[0];
+  assertEquals(cx.process_key, "1206");
+  assertEquals(cx.run_table, "delivery_graph_runs");
+  assertEquals(cx.cancelled_by, "jwulf");
+  assertEquals(cx.cancel_reason, "gate can never open (#992)");
+  assert(typeof cx.cancelled_at === "string" && cx.cancelled_at.length > 0, "stamps when");
+  // A re-cancel keeps the FIRST record (idempotent).
+  await call(app, { processInstanceKey: "1206", actor: "someone-else" });
+  assertEquals(stores.run_cancellations.rows.length, 1);
+  assertEquals(stores.run_cancellations.rows[0].cancelled_by, "jwulf");
+});
+
+test("issue #994 — a cancel with no actor/reason defaults to `operator` and names the door", async () => {
+  const stores = {
+    feature_runs: { rows: [{ feature_key: "o/r#9", process_key: "77", status: "running", derived_status: "abandoned" }], key: "feature_key" },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
+    run_cancellations: { rows: [] as any[], key: "process_key" },
+  };
+  const { app } = makeRecordApp(stores, { readBackState: "TERMINATED" });
+  await call(app, { processInstanceKey: "77" });
+  assertEquals(stores.run_cancellations.rows[0].cancelled_by, "operator");
+  assertEquals(stores.run_cancellations.rows[0].cancel_reason, "operator cancel (/actions/cancel)");
+  assertEquals(stores.run_cancellations.rows[0].run_table, "feature_runs");
+});

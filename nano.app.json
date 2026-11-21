@@ -91,7 +91,7 @@
       ],
       "onTerminated": {
         "set": {
-          "status": "failed"
+          "status": "abandoned"
         }
       },
       "pollMs": 5000

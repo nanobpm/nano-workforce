@@ -40,6 +40,7 @@
 import type { AppApi } from "@nanobpm/urban";
 import { cancelInstanceReconciling } from "@nanobpm/urban";
 import { engineBackedBindings, resolveTrackedInstance } from "../app/instanceTracking.ts";
+import { recordRunCancellation } from "../app/runTerminal.ts";
 import { closeCancelledRunEscalations, recordOperatorCancelProvenance } from "../app/service.ts";
 import { envVar } from "../app/version.ts";
 import type { CancelInstanceResponse } from "../nano-generated/api-io.d.ts";
@@ -84,6 +85,7 @@ export async function cancelTrackedRun(
   // a readable default source; without one (e.g. a `mount.data:false` deployment) there is no derived
   // view to resolve against, so fall through to the primitive-only path below (behaviour unchanged).
   const canResolveRecord = app.data.hasDefaultSource();
+  let resolvedTable: string | null = null;
   if (canResolveRecord) {
     const record = await resolveTrackedInstance(app.data, processInstanceKey);
     if (!record) {
@@ -102,6 +104,24 @@ export async function cancelTrackedRun(
           error: "no tracked record for processInstanceKey",
         },
       };
+    }
+    resolvedTable = record.table;
+  }
+
+  // Operator-cancel provenance (issue #994): record WHO/WHEN/WHY BEFORE the engine cancel, so a crash
+  // between the two still leaves it. It only ever reads as `cancelled` once the instance is actually
+  // TERMINATED (the read models fold it over the canonical terminated edge, app/runTerminal.ts), so a
+  // cancel the engine refuses never mislabels a live run. Best-effort — never blocks the cancel.
+  if (canResolveRecord) {
+    try {
+      await recordRunCancellation(app.data, {
+        processKey: processInstanceKey,
+        runTable: resolvedTable,
+        cancelledBy: optionalText(body, "actor") ?? "operator",
+        reason: optionalText(body, "reason") ?? `operator cancel (${door})`,
+      });
+    } catch (err) {
+      app.log.warn("cancelInstance: could not record the run cancellation", { processInstanceKey, error: String(err) });
     }
   }
 
@@ -197,3 +217,10 @@ export async function cancelTrackedRun(
   return { status: 200, body: responseBody };
 }
 
+
+/** A trimmed, non-blank optional string field off the request body, else undefined. */
+function optionalText(body: unknown, field: "actor" | "reason"): string | undefined {
+  if (!body || typeof body !== "object" || !(field in body)) return undefined;
+  const v: unknown = Reflect.get(body, field);
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}

@@ -578,7 +578,7 @@ test("parseHumanLabels: round-trips a stored map and tolerates null/blank/corrup
 // ── deriveDeliveryPhase ───────────────────────────────────────────────────────
 test("deriveDeliveryPhase: COMPLETED → done, TERMINATED → failed", () => {
   assertEquals(deriveDeliveryPhase("COMPLETED", [], {}), { status: "done", phase: DELIVERY_PHASE.COMPLETED, phase_node_id: null });
-  assertEquals(deriveDeliveryPhase("TERMINATED", [], {}), { status: "failed", phase: DELIVERY_PHASE.FAILED, phase_node_id: null });
+  assertEquals(deriveDeliveryPhase("TERMINATED", [], {}), { status: "abandoned", phase: DELIVERY_PHASE.TERMINATED, phase_node_id: null });
 });
 
 test("deriveDeliveryPhase: ACTIVE with an open human task → parked on that node with its label", () => {
