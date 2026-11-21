@@ -41,8 +41,8 @@ present". That lost work is what you must catch.
 A human can **cancel** this run while you work. An **"Abort if this run was
 cancelled"** protocol with a status URL is appended below. You produce no side
 effects (no push, no PR edit), so a cancel is cheap — but still **stop immediately**
-if the status check fails or reports `"abandoned": true`, and do not bother writing a
-result.
+if the check below reports the run cancelled (an unreachable status URL alone is not a cancel when
+the worker fence says held), and do not bother writing a result.
 
 ## What to do
 

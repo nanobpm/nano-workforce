@@ -11,9 +11,9 @@ waiting for the next review.
 A human can **cancel** this run while you work. If it is cancelled, the orchestration instance is
 gone and any commit, push, PR update, or review you produce is an orphaned side effect. An **"Abort
 if this run was cancelled"** protocol with a status URL is appended to these instructions below:
-**before you push, update the PR, or request a review, curl that URL** (with `-fsS`) and stop
-immediately if the check **fails** or reports `"abandoned": true`. Re-check right before the push — a
-cancel can land anytime.
+**before you push, update the PR, or request a review, run that check** (the worker's `fence-check`
+first, then the status URL) and stop immediately if it reports the run cancelled — follow its rules
+for an unreachable URL. Re-check right before the push — a cancel can land anytime.
 
 ## Job input (`job.variables`)
 
