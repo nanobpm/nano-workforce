@@ -1,3 +1,9 @@
+## [0.216.0](https://github.com/nanobpm/nano-workforce/compare/v0.215.0...v0.216.0) (2026-11-21)
+
+### Features
+
+* **abandon:** make the worker lease fence the primary cancel check; app URLs advisory ([#984](https://github.com/nanobpm/nano-workforce/issues/984)) ([b5358ea](https://github.com/nanobpm/nano-workforce/commit/b5358ea5ad7b7c610c30a5689875cb1f23b299d1)), closes [c8ctl-plugin-nano#320](https://github.com/nanobpm/c8ctl-plugin-nano/issues/320) [#981](https://github.com/nanobpm/nano-workforce/issues/981)
+
 ## [0.215.0](https://github.com/nanobpm/nano-workforce/compare/v0.214.0...v0.215.0) (2026-11-20)
 
 ### Features
