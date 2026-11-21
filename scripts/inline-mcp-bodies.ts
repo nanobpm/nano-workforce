@@ -72,7 +72,11 @@ const HTTP_METHODS = ["get", "put", "post", "delete", "patch"] as const;
  *  - a `$ref` is replaced by the (recursively dereferenced) target component;
  *  - an `allOf` is MERGED into one object (union of `properties`/`required`) so a node variant
  *    like `DeliveryNodeAgent` (allOf [DeliveryNodeCommon, {inline}]) becomes one flat `type: object`;
- *  - `oneOf`/`anyOf` members are dereferenced but kept as a union;
+ *  - `oneOf`/`anyOf` members are dereferenced but kept as a union — EXCEPT when the node carries
+ *    `x-mcp-inline: false`, which drops the union from the projected tool body entirely (the
+ *    canonical component keeps it for the CLI/spec readers; the MCP projection substitutes the
+ *    node's own scalar keywords — `type`/`description` — so a large per-kind variant union does
+ *    not re-inflate the serialized `tools/list` past the #715 byte budget);
  *  - `discriminator` is dropped (its `mapping` values are `#/components/...` pointers that would
  *    dangle once inlined, and MCP clients do not need it);
  *  - every other keyword is copied through, recursing into `properties`/`items`/arrays.
@@ -121,8 +125,15 @@ function deref(node: unknown, comps: Record<string, unknown>, seen: ReadonlySet<
   }
 
   const out: Schema = {};
+  // `x-mcp-inline: false` on a node drops its `oneOf`/`anyOf` union from the PROJECTED tool body
+  // (the canonical component still carries it for spec/CLI readers). The node's own scalar keywords
+  // (`type`, `description`, …) survive, so the projected body stays self-contained and `$ref`-free
+  // — just without the per-kind variant enumeration a large union would cost on the wire.
+  const dropUnion = node["x-mcp-inline"] === false;
   for (const [k, v] of Object.entries(node)) {
     if (k === "discriminator") continue;
+    if (k === "x-mcp-inline") continue;
+    if (dropUnion && (k === "oneOf" || k === "anyOf")) continue;
     out[k] = deref(v, comps, seen);
   }
   return out;

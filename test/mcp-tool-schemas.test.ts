@@ -125,3 +125,35 @@ test("operator-only delivery-graph doors stay withheld from the MCP tool surface
     assert(excluded.has(door), `${door} must remain x-mcp-excluded (operator-only dispatch gate)`);
   }
 });
+
+test("x-mcp-inline:false drops the per-kind variant union from the PROJECTED body, not the spec (issue #989)", () => {
+  // The canonical `EscalationAnswerRequest.variables` keeps its 13-variant `anyOf` for CLI/spec
+  // readers (d8ctl `--help` lists the fields per kind), but flags it `x-mcp-inline: false` so the
+  // projected `completeUserTask` tool body stays compact — inlining the union cost ~11 KB and blew
+  // the #715 surface byte budget. Both halves are pinned here: the spec component KEEPS the union,
+  // the projected tool body OMITS it (staying self-contained with `type: object`).
+  const component = (SPEC.components?.schemas as Record<string, Record<string, unknown>>)
+    .EscalationAnswerRequest;
+  const variables = (component.properties as Record<string, Record<string, unknown>>).variables;
+  assert(
+    Array.isArray(variables.anyOf) && variables.anyOf.length > 0,
+    "EscalationAnswerRequest.variables must keep its per-kind anyOf union (the CLI documents it)",
+  );
+  assert(
+    variables["x-mcp-inline"] === false,
+    "EscalationAnswerRequest.variables must carry x-mcp-inline: false so the MCP projection drops the union",
+  );
+
+  const op = collectOperations(SPEC).find((o) => o.operationId === "completeUserTask");
+  assert(op, "completeUserTask must be a projected operation");
+  const body = op.requestBodySchema as Record<string, unknown>;
+  const projectedVars = (body.properties as Record<string, Record<string, unknown>>).variables;
+  assert(
+    !("anyOf" in projectedVars) && !("oneOf" in projectedVars),
+    "the projected completeUserTask body must NOT inline the per-kind variant union (x-mcp-inline: false)",
+  );
+  assert(
+    projectedVars.type === "object",
+    "the projected variables must keep an explicit `type: object` so a client passes an object, not a string",
+  );
+});

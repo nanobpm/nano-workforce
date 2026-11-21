@@ -3420,6 +3420,14 @@ components:
             form, selected by the open escalation's `formKey` (its kind). `escalations list` returns
             each escalation's `expectedFields`, so the answer can be built from the listing. The
             completer validates the submitted variables against that form's contract.
+          type: object
+          additionalProperties: true
+          # The per-kind variant union is the CLI/spec documentation (d8ctl `--help` lists the fields
+          # per kind); it is NOT inlined into the projected MCP tool body — 13 variants × ~850 B would
+          # add ~11 KB to `completeUserTask` alone and blow the #715 surface byte budget
+          # (app/mcpToolSurface.ts). `scripts/inline-mcp-bodies.ts` honours this flag by dropping the
+          # `anyOf` from the projection; the union below stays the canonical contract.
+          x-mcp-inline: false
           anyOf:
             - $ref: "#/components/schemas/EscalationAnswerConformanceEscalation"
             - $ref: "#/components/schemas/EscalationAnswerDeliveryEscalation"
@@ -7988,185 +7996,8 @@ paths:
                   description: The parked escalation user-task key (user_tasks.user_task_key).
                 variables:
                   description: The typed form variables the parked task's `.form` expects — one shape per escalation form, selected by the open escalation's `formKey` (its kind). `escalations list` returns each escalation's `expectedFields`, so the answer can be built from the listing. The completer validates the submitted variables against that form's contract.
-                  anyOf:
-                    - title: conformance-escalation
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `conformance-escalation` (see Escalation.formKey / expectedFields).
-                      properties:
-                        note:
-                          type: string
-                          description: Disposition note (what you decided / follow-up — recorded on the review)
-                    - title: delivery-escalation
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `delivery-escalation` (see Escalation.formKey / expectedFields).
-                      properties:
-                        decision:
-                          type: string
-                          enum:
-                            - continue
-                            - retry
-                          description: 'Resolution — Escalation of an agent or connector step: Retry re-runs the step (for an agent step, the note below is passed to the agent as guidance; a connector step ignores the note). Continue completes it as resolved — supply the emitted value if the step was finished out of band.'
-                        value:
-                          type: string
-                          description: 'Emitted value (only when this step emits exactly one fact) — The typed value this step hands forward to its downstream dependents, applied on Continue. It is applied ONLY when the step emits exactly one fact AND that fact is actually consumed downstream: leave it blank for a click-done step that emits nothing (or whose sole emit is routing-only/unconsumed, where any entry is discarded — nothing reads it), and for a step emitting more than one fact any entry here is discarded (a single value cannot satisfy several distinct facts) — choose "Retry this step" to actually produce those facts.'
-                        escalationNote:
-                          type: string
-                          description: Note (optional) — Optional. On Retry of an AGENT step, passed to the agent as guidance for the next attempt. A connector-step retry ignores this note.
-                    - title: delivery-human-ack
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `delivery-human-ack` (see Escalation.formKey / expectedFields).
-                      properties:
-                        prompt:
-                          type: string
-                          description: Now do this — The scheduled human step this delivery graph is waiting on. Complete it once done — this node emits nothing (the degenerate click-done case) and simply unblocks its dependents.
-                        note:
-                          type: string
-                          description: Note (optional)
-                    - title: delivery-human-generic
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `delivery-human-generic` (see Escalation.formKey / expectedFields).
-                      properties:
-                        value:
-                          type: string
-                          description: "Emitted value (the single value this step hands forward) — The typed value this task hands forward to its downstream dependents. For a human step it is the one value-emitting fact; for a timed-out wait gate it is the awaited value — which may be an artifact handle (entered here and mapped onto the gate's resolved value). Leave it blank when the step emits nothing. One field carries at most one value: a human step that must emit several facts is refused at authoring time, and a wait gate with more than one emit leaves this field inert — Continue simply acknowledges this escalation and proceeds without those facts."
-                        note:
-                          type: string
-                          description: Note (optional) — Optional operator note.
-                    - title: delivery-human-publish
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `delivery-human-publish` (see Escalation.formKey / expectedFields).
-                      required:
-                        - resolvedArtifact
-                      properties:
-                        prompt:
-                          type: string
-                          description: Now do this (manual publish) — The manual step no automation can cross — e.g. an OTP publish + OIDC trusted-publishing setup. Complete it once the artifact is published.
-                        resolvedArtifact:
-                          type: string
-                          description: Resolved artifact (pkg@version) — The exact published handle to hand forward, e.g. @nanobpm/urban@0.54.0. A downstream capability/npm/pr edge binds and pins this.
-                        note:
-                          type: string
-                          description: Note (optional)
-                    - title: empty-plan-escalation
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `empty-plan-escalation` (see Escalation.formKey / expectedFields).
-                      required:
-                        - directive
-                      properties:
-                        directive:
-                          type: string
-                          enum:
-                            - accept
-                            - revise
-                          description: Directive
-                        notes:
-                          type: string
-                          description: Revision guidance for the planner
-                    - title: feature-blocked
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `feature-blocked` (see Escalation.formKey / expectedFields).
-                      properties:
-                        note:
-                          type: string
-                          description: Disposition note (what you did / why — recorded on the run)
-                    - title: feature-escalation
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `feature-escalation` (see Escalation.formKey / expectedFields).
-                      required:
-                        - resolution
-                      properties:
-                        resolution:
-                          type: string
-                          enum:
-                            - answer
-                            - abandon
-                          description: Resolution
-                        answer:
-                          type: string
-                          description: Answer / guidance for the implementation agent Required when resolution == "answer".
-                    - title: merge-approval
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `merge-approval` (see Escalation.formKey / expectedFields).
-                      required:
-                        - mergeDecision
-                      properties:
-                        mergeDecision:
-                          type: string
-                          enum:
-                            - approve
-                            - revise
-                          description: Decision
-                        answer:
-                          type: string
-                          description: Guidance for the agent — What should change before this PR merges? The agent implements it on the same PR. Required when mergeDecision == "revise".
-                    - title: plan-review-decision
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `plan-review-decision` (see Escalation.formKey / expectedFields).
-                      required:
-                        - directive
-                      properties:
-                        directive:
-                          type: string
-                          enum:
-                            - proceed
-                            - revise
-                          description: Directive
-                        notes:
-                          type: string
-                          description: Revision guidance for the planner
-                    - title: pr-escalation
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `pr-escalation` (see Escalation.formKey / expectedFields).
-                      required:
-                        - answer
-                      properties:
-                        answer:
-                          type: string
-                          description: Your answer — Your reply resumes the PR process and is handed to its next step. Answer the request shown in Decision context above.
-                    - title: readiness-escalation
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `readiness-escalation` (see Escalation.formKey / expectedFields).
-                      required:
-                        - resolution
-                      properties:
-                        resolution:
-                          type: string
-                          enum:
-                            - acknowledge
-                            - abandon
-                          description: Resolution
-                        answer:
-                          type: string
-                          description: Notes for the operator
-                    - title: trial-merge-decision
-                      type: object
-                      additionalProperties: true
-                      description: Answer variables for an escalation whose form is `trial-merge-decision` (see Escalation.formKey / expectedFields).
-                      required:
-                        - action
-                      properties:
-                        action:
-                          type: string
-                          enum:
-                            - proceed
-                            - rebase
-                            - abandon
-                          description: Action
-                        notes:
-                          type: string
-                          description: Notes
+                  type: object
+                  additionalProperties: true
                 operator:
                   type: string
                   description: Optional operator handle recorded in the attribution ledger; defaults to "operator".
