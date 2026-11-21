@@ -172,27 +172,30 @@ moment, so re-check right before the push):
    connection:
    - exit **0** → the job is still held; continue to step 2.
    - exit **1** → the job is lost (the run was cancelled): **abort**.
-   - exit **75** (or any other code) → unknown/transient; fall back to step 3 as a fail-closed check.
+   - exit **75** (or any other code) → inconclusive (e.g. this job has no checker socket/token,
+     as in a container job). If \`$NANO_FENCE\` is set, use the fence file instead (below);
+     otherwise treat the fence as inconclusive. Either way **still run step 2**.
 
-   If no \`fence-check\` is available but \`$NANO_FENCE\` is set, the fence is still in use: **abort** if
+   If no usable \`fence-check\` is available but \`$NANO_FENCE\` is set, the fence is still in use: **abort** if
    the file \`$NANO_FENCE\` exists, otherwise treat the job as held.
 2. **The PR (when you have one).** Run \`gh pr view <number> --repo <repo> --json state\` and
    **abort** if it reports \`CLOSED\` (a PR closed on GitHub without merging is abandoned even though
    the engine run is still alive).
 3. **The app status URL:**
 
-       curl -sS -o /tmp/nwf-abandon.json -w '%{http_code}' "${url}"
+       curl -sS -w '\\nHTTP %{http_code}\\n' "${url}"
 
-   It returns \`{ "prKey": "...", "status": "...", "abandoned": true|false }\`.
+   Read the body and status straight from this command's output (never via a shared temp file —
+   concurrent jobs on the host would overwrite it). It returns \`{ "prKey": "...", "status": "...", "abandoned": true|false }\`.
    - It **answers** with \`"abandoned": true\`, or with HTTP **404** (token unknown: the run was torn
      down) → **abort**.
    - It answers with \`"abandoned": false\` → proceed.
    - It **cannot connect** (DNS failure, connection refused, timeout — e.g. this worker is off the
      app's LAN) or returns another error:
-     - **with the fence in use** (\`fence-check\` available or \`$NANO_FENCE\` set) and the fence said
-       *held* → **proceed**. The URL is only an extra check; the fence and \`gh\` are authoritative.
-     - **without the fence** (an older worker, neither available) or when \`fence-check\` was
-       inconclusive → **abort** (fail closed, as before).
+     - **with the fence in use** (\`fence-check\` exit 0, or the \`$NANO_FENCE\` file absent) and
+       the fence said *held* → **proceed**. The URL is only an extra check; the fence and \`gh\` are authoritative.
+     - **without the fence** (an older worker, neither available) or when the fence was
+       inconclusive with no \`$NANO_FENCE\` file to consult → **abort** (fail closed, as before).
 
 To **abort**: make no commits, push nothing, open no PR, request no review. Leave the working tree
 as-is and exit. A failure when you later try to complete the job is EXPECTED after a cancel — do not

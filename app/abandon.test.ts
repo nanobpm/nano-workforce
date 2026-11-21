@@ -99,6 +99,18 @@ test("renderAbandonBrief makes the worker fence primary and the URL non-gating (
   assertEquals(brief.includes("curl -fsS"), false);
 });
 
+test("renderAbandonBrief: inconclusive fence still checks the PR, uses $NANO_FENCE, no shared temp file (#984 review)", () => {
+  const brief = renderAbandonBrief("https://host/app/api/hooks/abandon?token=tok");
+  // An inconclusive fence must not skip the GitHub PR-state check.
+  assertEquals(/exit \*\*75\*\*[\s\S]*?still run step 2/.test(brief), true);
+  assertEquals(/exit \*\*75\*\*[^\n]*\n?[^\n]*fall back to step 3/.test(brief), false);
+  // A checker without socket/token (container job) falls back to the $NANO_FENCE file.
+  assertEquals(/exit \*\*75\*\*[\s\S]*?\$NANO_FENCE\\?` is set, use the fence file/.test(brief), true);
+  // No shared host path for the response: concurrent jobs would race on it.
+  assertEquals(/-o\s+\/tmp\//.test(brief), false);
+  assertEquals(brief.includes("/tmp/"), false);
+});
+
 test("renderAbandonBrief forbids delegating the check to a sub-agent (issue #678)", () => {
   // A non-Claude agent (e.g. qwen) that hands this shell command to a shell-less
   // `general-purpose` sub-agent deadlocks: the sub-agent has no shell, produces no
