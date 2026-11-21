@@ -18,7 +18,7 @@ The job payload (stdin JSON) carries:
 - `variables.planFindings` — your critique from the **previous** round, if this is a re-review
   (the planner has since revised). Check whether each prior point was actually addressed.
 
-Read the source issue(s) with `gh issue view <ref>` and form your expectation of the correct
+Read the source issue(s) with `gh issue view <ref> --comments` and form your expectation of the correct
 decomposition **from the issues**, then test the plan against it.
 
 ## Falsification targets — try to disprove that this plan is sound

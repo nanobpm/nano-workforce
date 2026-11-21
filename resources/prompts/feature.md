@@ -10,7 +10,8 @@ The job payload (stdin JSON) carries:
 - `variables.task` — your slice: `{ id, title, prompt }`. **`task.prompt` is your
   primary instruction.**
 - `variables.issue` — the parent issue reference, e.g. `owner/repo#123`, for
-  context (`gh issue view`).
+  context (`gh issue view <n> -R <repo> --comments` — always pass `--comments`:
+  without it, the command shows only a comment COUNT, and operator comments carry scope).
 - `variables.repo` — `owner/repo`.
 - `variables.answer` — **present only when you are resuming after an escalation**
   (see below): the human's answer to the question you asked. It is null/empty on a
