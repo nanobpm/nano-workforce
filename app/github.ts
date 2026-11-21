@@ -153,6 +153,11 @@ export interface ReviewThread {
   isResolved: boolean;
   path: string | null;
   bodies: string[];
+  /** The ROOT comment's author login / `authorAssociation` (issue #985: a trusted human's thread is
+   * operator feedback, routed to the round agent rather than straight to a human). Optional — absent
+   * on reads/fixtures that don't carry it, which classifies the thread as non-operator (unchanged). */
+  rootLogin?: string | null;
+  rootAssociation?: string | null;
 }
 
 /** A suppressed / low-confidence Copilot advisory parsed out of a review body. Its `key` is the
@@ -562,7 +567,11 @@ export interface ReviewThreadsResponse {
       pullRequest?: {
         reviewThreads?: {
           pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
-          nodes?: { isResolved?: boolean; path?: string | null; comments?: { nodes?: { body?: string }[] } }[];
+          nodes?: {
+            isResolved?: boolean;
+            path?: string | null;
+            comments?: { nodes?: { body?: string; authorAssociation?: string | null; author?: { login?: string | null } | null }[] };
+          }[];
         };
       };
     };
@@ -590,11 +599,17 @@ export function parseReviewThreadsPage(payload: ReviewThreadsResponse): ReviewTh
   if (!block || typeof block.pageInfo?.hasNextPage !== "boolean") return null;
   const nodes = block.nodes ?? [];
   return {
-    threads: nodes.map((t) => ({
-      isResolved: !!t.isResolved,
-      path: t.path ?? null,
-      bodies: (t.comments?.nodes ?? []).map((c) => c.body ?? ""),
-    })),
+    threads: nodes.map((t) => {
+      const comments = t.comments?.nodes ?? [];
+      const root = comments[0];
+      return {
+        isResolved: !!t.isResolved,
+        path: t.path ?? null,
+        bodies: comments.map((c) => c.body ?? ""),
+        rootLogin: root?.author?.login ?? null,
+        rootAssociation: root?.authorAssociation ?? null,
+      };
+    }),
     hasNextPage: block.pageInfo.hasNextPage,
     endCursor: block.pageInfo.endCursor ?? null,
   };
@@ -616,7 +631,7 @@ export async function fetchReviewThreads(
   const [owner, name] = repo.split("/");
   const query =
     "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){pullRequest(number:$n){" +
-    "reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{isResolved path comments(first:100){nodes{body}}}}}}}";
+    "reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{isResolved path comments(first:100){nodes{body authorAssociation author{login}}}}}}}}";
   const mode = githubTransport();
   const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
   if (!useGh && !token) return null;
@@ -866,6 +881,8 @@ export interface PrMeta {
    * harness fetches the base tip alongside the single-branch head clone, keeping `git diff
    * origin/<base>...HEAD` (the review 3-dot diff) computable. `null` when GitHub doesn't return it. */
   baseRef: string | null;
+  /** The PR's creation time (ISO) — the operator-feedback run-start fallback (issue #985). */
+  createdAt?: string | null;
 }
 
 export async function fetchPrMeta(
@@ -876,12 +893,24 @@ export async function fetchPrMeta(
 ): Promise<PrMeta | null> {
   if (await useGh()) {
     const out = await runGh(
-      ["pr", "view", String(number), "--repo", repo, "--json", "title,body,headRefName,baseRefName"],
+      ["pr", "view", String(number), "--repo", repo, "--json", "title,body,headRefName,baseRefName,createdAt"],
       timeoutMs === undefined ? undefined : { timeoutMs },
     );
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const j = JSON.parse(out) as { title?: string; body?: string; headRefName?: string | null; baseRefName?: string | null };
-    return { title: j.title ?? null, body: j.body ?? "", headRef: j.headRefName ?? null, baseRef: j.baseRefName ?? null };
+    const j = JSON.parse(out) as {
+      title?: string;
+      body?: string;
+      headRefName?: string | null;
+      baseRefName?: string | null;
+      createdAt?: string | null;
+    };
+    return {
+      title: j.title ?? null,
+      body: j.body ?? "",
+      headRef: j.headRefName ?? null,
+      baseRef: j.baseRefName ?? null,
+      createdAt: j.createdAt ?? null,
+    };
   }
   if (!token) return null;
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
@@ -890,8 +919,20 @@ export async function fetchPrMeta(
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const j = (await r.json()) as { title?: string; body?: string; head?: { ref?: string | null }; base?: { ref?: string | null } };
-  return { title: j.title ?? null, body: j.body ?? "", headRef: j.head?.ref ?? null, baseRef: j.base?.ref ?? null };
+  const j = (await r.json()) as {
+    title?: string;
+    body?: string;
+    head?: { ref?: string | null };
+    base?: { ref?: string | null };
+    created_at?: string | null;
+  };
+  return {
+    title: j.title ?? null,
+    body: j.body ?? "",
+    headRef: j.head?.ref ?? null,
+    baseRef: j.base?.ref ?? null,
+    createdAt: j.created_at ?? null,
+  };
 }
 
 /** Fetch an issue's title via the configured transport, mirroring `fetchPrMeta` (both `gh` and

@@ -92,18 +92,42 @@ const PAGE_SIZE = 100;
  *  is treated as UNREADABLE (fail closed: never post blind). */
 const MAX_PAGES = 100;
 
-/** List the bodies of EVERY comment on an issue, across all pages. `null` when no transport is
- *  usable; THROWS on a transport failure (or an over-long thread) so the caller can distinguish
- *  "unreadable" (post nothing) from "empty". */
-async function listIssueCommentBodies(
+/** One issue (or PR-conversation) comment as the REST comments endpoint returns it, narrowed to
+ *  the fields the host reads. */
+export interface IssueComment {
+  id: number;
+  body: string;
+  login: string;
+  /** GitHub `author_association` (OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR / NONE …). */
+  association: string;
+  createdAt: string;
+}
+
+function narrowComment(c: unknown): IssueComment {
+  const o: Record<string, unknown> = c !== null && typeof c === "object" ? { ...c } : {};
+  const user: Record<string, unknown> = o.user !== null && typeof o.user === "object" ? { ...o.user } : {};
+  return {
+    id: typeof o.id === "number" ? o.id : 0,
+    body: typeof o.body === "string" ? o.body : "",
+    login: typeof user.login === "string" ? user.login : "",
+    association: typeof o.author_association === "string" ? o.author_association : "NONE",
+    createdAt: typeof o.created_at === "string" ? o.created_at : "",
+  };
+}
+
+/** The ONE issue-comments pager (issue #907, reused by the operator-feedback gate #985): list EVERY
+ *  comment on an issue — or on a PR's conversation, which is the same endpoint — across all pages.
+ *  `null` when no transport is usable; THROWS on a transport failure (or an over-long thread) so the
+ *  caller can distinguish "unreadable" from "empty". */
+export async function listIssueComments(
   repo: string,
   issueNumber: number,
   token: string,
-  timeoutMs: number,
-): Promise<string[] | null> {
+  timeoutMs: number = ISSUE_PR_LINK_IO_TIMEOUT_MS,
+): Promise<IssueComment[] | null> {
   const ghMode = await useGh();
   if (!ghMode && !token) return null;
-  const bodies: string[] = [];
+  const comments: IssueComment[] = [];
   for (let page = 1; page <= MAX_PAGES; page++) {
     const path = `repos/${repo}/issues/${issueNumber}/comments?per_page=${PAGE_SIZE}&page=${page}`;
     let arr: unknown;
@@ -118,13 +142,21 @@ async function listIssueCommentBodies(
       arr = await r.json();
     }
     if (!Array.isArray(arr)) throw new Error("github: unexpected comments payload");
-    for (const c of arr) {
-      const body = c !== null && typeof c === "object" && "body" in c ? c.body : "";
-      bodies.push(typeof body === "string" ? body : "");
-    }
-    if (arr.length < PAGE_SIZE) return bodies;
+    for (const c of arr) comments.push(narrowComment(c));
+    if (arr.length < PAGE_SIZE) return comments;
   }
   throw new Error(`github: issue ${repo}#${issueNumber} has more than ${MAX_PAGES * PAGE_SIZE} comments`);
+}
+
+/** List the bodies of EVERY comment on an issue (see {@link listIssueComments}). */
+async function listIssueCommentBodies(
+  repo: string,
+  issueNumber: number,
+  token: string,
+  timeoutMs: number,
+): Promise<string[] | null> {
+  const all = await listIssueComments(repo, issueNumber, token, timeoutMs);
+  return all === null ? null : all.map((c) => c.body);
 }
 
 /** Post one comment on an issue. Returns whether GitHub accepted it; `false` when no transport is
