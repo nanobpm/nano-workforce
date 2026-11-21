@@ -948,6 +948,9 @@ export interface EpicObservation {
   /** Count of slice PRs on the epic — bound downstream as a fact (parity with the `pr` kind's
    * `mergedSha`), so a consumer can pin how many PRs the epic landed. */
   readonly prCount: number;
+  /** The lineage thread's root kind (`epic` for a plan-fanout epic, `feature`/`pr`/… otherwise; `""`
+   * when absent). A known plan-fanout epic must satisfy the AGGREGATE — never the GitHub issue fallback. */
+  readonly kind: string;
 }
 
 /** Parse a raw `/lineage?root=<planKey>` response (already JSON-decoded) into an {@link EpicObservation}
@@ -960,13 +963,14 @@ export function parseEpicLineage(payload: unknown, planKey: string): EpicObserva
   const threads = Array.isArray(j.threads) ? j.threads : [];
   const key = planKey.trim();
   const thread = threads.find((t) => isRecord(t) && str(t.rootRequestKey).trim() === key);
-  if (!isRecord(thread)) return { present: false, stage: "", active: false, prCount: 0 };
+  if (!isRecord(thread)) return { present: false, stage: "", active: false, prCount: 0, kind: "" };
   const prCount = num(thread.prCount);
   return {
     present: true,
     stage: str(thread.stage).trim().toLowerCase(),
     active: thread.active === true,
     prCount: typeof prCount === "number" ? prCount : 0,
+    kind: str(thread.kind).trim().toLowerCase(),
   };
 }
 
@@ -1085,16 +1089,24 @@ export async function probeOnce(
       if (!key) return { ready: false, detail: "epic: unresolved/unparseable planKey (not ready)" };
       const url = epicLineageUrl(key.planKey, readEnvOr("NANO_WORKFORCE_BASE_URL", "", env));
       let lineage: ProbeResult;
+      let observed: EpicObservation | null = null;
       try {
         const resp = await exec.httpGet(url, { accept: "application/json" });
-        lineage =
-          resp.status < 200 || resp.status >= 300
-            ? { ready: false, detail: `epic: lineage read HTTP ${resp.status} (not ready)` }
-            : matchEpic(probe.match, parseEpicLineage(parseJson(resp.body), key.planKey));
+        if (resp.status < 200 || resp.status >= 300) {
+          lineage = { ready: false, detail: `epic: lineage read HTTP ${resp.status} (not ready)` };
+        } else {
+          observed = parseEpicLineage(parseJson(resp.body), key.planKey);
+          lineage = matchEpic(probe.match, observed);
+        }
       } catch (e) {
-        lineage = { ready: false, detail: `epic: lineage read failed (${e instanceof Error ? e.message : String(e)})` };
+        // Error CLASS only — never the raw message (it may carry URL/credential detail), matching the
+        // worker's `errorDetail` sanitisation.
+        lineage = { ready: false, detail: `epic: lineage read failed (${e instanceof Error ? e.name : "Error"})` };
       }
       if (lineage.ready) return lineage;
+      // A KNOWN plan-fanout epic keeps the aggregate guarantee: a closed parent issue does not mean
+      // every slice merged, so never let the issue-closure fallback bypass `matchEpic` for it.
+      if (observed?.present && observed.kind === "epic") return lineage;
       // #992: nwf lineage only records merges nwf itself drove. A dependency that landed any other
       // way (Mergify/human merge after the loop was cancelled, work done outside nwf, nwf reset) is
       // only visible as GitHub truth — the issue CLOSED as COMPLETED. Accept that route too.
@@ -1103,8 +1115,10 @@ export async function probeOnce(
       const out = await exec.run(issueViewCommand(ref.repo, String(ref.number)), env);
       if (out.code !== 0) return lineage;
       const gh = matchIssueClosed(parseJson(out.stdout));
-      // Keep the epic kind's `prCount` fact contract (#572) — nwf recorded no slice PRs on this route.
-      return gh.ready ? { ...gh, bind: { prCount: "0" } } : { ...lineage, detail: `${lineage.detail}; ${gh.detail}` };
+      // Keep the epic kind's `prCount` fact contract (#572): retain a known lineage count; zero only
+      // when lineage is absent/unreadable.
+      const prCount = observed?.present ? observed.prCount : 0;
+      return gh.ready ? { ...gh, bind: { prCount: String(prCount) } } : { ...lineage, detail: `${lineage.detail}; ${gh.detail}` };
     }
   }
 }

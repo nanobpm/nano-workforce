@@ -786,7 +786,7 @@ test("parseProbe: a fact-bound epic target is REJECTED without the delivery-grap
 
 // ── matchEpic (pure — operates on an already-fetched epic observation) ────────────────────────────
 function epicObs(over: Partial<EpicObservation> = {}): EpicObservation {
-  return { present: true, stage: "converging", active: true, prCount: 3, ...over };
+  return { present: true, stage: "converging", active: true, prCount: 3, kind: "", ...over };
 }
 
 test("matchEpic: green once the epic settles on a fully-merged aggregate, binding prCount", () => {
@@ -811,19 +811,19 @@ test("matchEpic: a failed/abandoned epic is NOT ready (routes via onTimeout, nev
 });
 
 test("matchEpic: an as-yet-unobserved planKey is not ready (keep waiting)", () => {
-  const r = matchEpic(undefined, { present: false, stage: "", active: false, prCount: 0 });
+  const r = matchEpic(undefined, { present: false, stage: "", active: false, prCount: 0, kind: "" });
   assert(!r.ready);
 });
 
 test("parseEpicLineage: reads the matching thread from a `/lineage?root=` response", () => {
   const payload = { count: 1, threads: [{ rootRequestKey: "o/r#7", stage: "merged", active: false, prCount: 4 }] };
   const obs = parseEpicLineage(payload, "o/r#7");
-  assertEquals(obs, { present: true, stage: "merged", active: false, prCount: 4 });
+  assertEquals(obs, { present: true, stage: "merged", active: false, prCount: 4, kind: "" });
 });
 
 test("parseEpicLineage: an unknown/empty root yields an absent observation (not ready, no throw)", () => {
-  assertEquals(parseEpicLineage({ count: 0, threads: [] }, "o/r#9"), { present: false, stage: "", active: false, prCount: 0 });
-  assertEquals(parseEpicLineage("garbage", "o/r#9"), { present: false, stage: "", active: false, prCount: 0 });
+  assertEquals(parseEpicLineage({ count: 0, threads: [] }, "o/r#9"), { present: false, stage: "", active: false, prCount: 0, kind: "" });
+  assertEquals(parseEpicLineage("garbage", "o/r#9"), { present: false, stage: "", active: false, prCount: 0, kind: "" });
 });
 
 test("epicLineageUrl: builds the app lineage read-model URL from the base + planKey", () => {
@@ -1210,7 +1210,32 @@ test("#992 probeOnce epic: a dependency issue closed COMPLETED outside nwf (no l
 test("#992 probeOnce epic: a lineage thread stuck non-merged still opens when GitHub says closed-completed", async () => {
   const lineage = { status: 200, body: JSON.stringify({ count: 1, threads: [{ rootRequestKey: "o/r#3", stage: "converging", active: true, prCount: 1 }] }) };
   const exec = epic992Exec(lineage, { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) });
-  assert((await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {})).ready);
+  const r = await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {});
+  assert(r.ready);
+  assertEquals(r.bind?.prCount, "1", "a known lineage prCount must be retained, not overwritten with 0");
+});
+
+test("#992 probeOnce epic: a known plan-fanout epic with unmerged slices stays shut even if its issue is closed", async () => {
+  const lineage = { status: 200, body: JSON.stringify({ count: 1, threads: [{ rootRequestKey: "o/r#3", kind: "epic", stage: "converging", active: true, prCount: 3 }] }) };
+  const calls: string[] = [];
+  const exec = epic992Exec(lineage, { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) }, calls);
+  assert(!(await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {})).ready);
+  assertEquals(calls.length, 0);
+});
+
+test("#992 probeOnce epic: a thrown lineage read reports only the error class, never the message", async () => {
+  const exec: ProbeExec = {
+    async httpGet() {
+      throw new TypeError("fetch failed https://u:secret@host/x");
+    },
+    async run() {
+      return { code: 1, stdout: "", stderr: "" };
+    },
+  };
+  const r = await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {});
+  assert(!r.ready);
+  assert(!r.detail.includes("secret"), r.detail);
+  assertStringIncludes(r.detail, "TypeError");
 });
 
 test("#992 probeOnce epic: a lineage read failure (nwf reset/unreachable) still falls back to GitHub truth", async () => {
