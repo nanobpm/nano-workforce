@@ -31,7 +31,7 @@ import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
  * merge loop (`app/mergeProtocol.ts` / `app/github.ts`) into a first-class probe so "watch an
  * in-flight PR reach a declared state" is a graph edge, not logic buried in the merge-loop node
  * body — the ACTION (landing the PR) stays in that node body; this kind only OBSERVES. */
-export type ProbeKind = "http" | "command" | "npm" | "github-check" | "capability" | "pr" | "epic";
+export type ProbeKind = "http" | "command" | "npm" | "github-check" | "capability" | "pr" | "epic" | "issue";
 
 /** The declared PR state a `pr` probe waits for (ADR 0005 §2). Each is a discovered fact about an
  * in-flight PR, read from its live GitHub state and evaluated by {@link matchPr}:
@@ -51,6 +51,17 @@ export type PrCondition = "ready" | "merged" | "mergeable" | "checks-green";
  * ready and the bounded wait routes to `onTimeout` rather than hanging. */
 export type EpicCondition = "merged" | "done";
 
+/** The declared GitHub-ISSUE state an `issue` probe waits for (issue #997) — a closed vocabulary,
+ * read from GitHub truth only (never nwf lineage), so the gate opens however the issue landed (nwf,
+ * Mergify, a human):
+ *   • `closed`             — the issue is CLOSED for any reason (a NOT_PLANNED close counts).
+ *   • `completed`          — the issue is CLOSED with `stateReason: COMPLETED` (a NOT_PLANNED close
+ *                            does not count). The DEFAULT.
+ *   • `closed-by-pr-merged`— the issue is CLOSED as completed AND at least one PR in its
+ *                            `closedByPullRequestsReferences` is MERGED; the closing PR is then
+ *                            bound as a `pr`-typed fact for a downstream `wait[pr]`/agent. */
+export type IssueCondition = "closed" | "completed" | "closed-by-pr-merged";
+
 /** What the gate does when the bounded wait times out (the engine timer arm fires). */
 export type OnTimeout = "escalate" | "fail" | "continue";
 
@@ -62,7 +73,7 @@ export type Backoff = "fixed" | "exponential";
 // delivery-graph vocabulary surface (`app/deliveryGraphVocabulary.ts`, S3/#609) DERIVES its
 // structured description from these exact arrays and a drift test fails the build if a kind/condition
 // is added here without a matching vocabulary entry (AGENTS.md: no drift surfaces).
-export const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check", "capability", "pr", "epic"];
+export const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check", "capability", "pr", "epic", "issue"];
 export const ON_TIMEOUTS: readonly OnTimeout[] = ["escalate", "fail", "continue"];
 // The DEFAULT `onTimeout` an omitted value takes — the single source of truth `parseProbe` fills in and
 // the compiler's display drops as an effective default (writing it explicitly is behaviourally identical
@@ -72,6 +83,7 @@ export const DEFAULT_ON_TIMEOUT: OnTimeout = "escalate";
 export const BACKOFFS: readonly Backoff[] = ["fixed", "exponential"];
 export const PR_CONDITIONS: readonly PrCondition[] = ["ready", "merged", "mergeable", "checks-green"];
 export const EPIC_CONDITIONS: readonly EpicCondition[] = ["merged", "done"];
+export const ISSUE_CONDITIONS: readonly IssueCondition[] = ["closed", "completed", "closed-by-pr-merged"];
 
 /** The per-kind readiness predicate. Every field is optional; each kind reads only the ones it
  * understands and applies a sensible default when a field is absent (see the matchers below). */
@@ -109,6 +121,11 @@ export interface ProbeMatch {
    * One of {@link EpicCondition} — `merged`/`done` both mean "fully merged" (every opened slice
    * landed). Issue #568. */
   readonly epicState?: EpicCondition;
+  /** issue: the declared GitHub-issue state the probe waits for (default `completed`). One of
+   * {@link IssueCondition} — `closed` (any reason), `completed` (stateReason COMPLETED), or
+   * `closed-by-pr-merged` (completed AND a closing PR is MERGED, bound downstream as a `pr` fact).
+   * Issue #997. */
+  readonly issueState?: IssueCondition;
 }
 
 /** The poll cadence: how often to re-probe, how long to keep trying, and the backoff shape. */
@@ -293,6 +310,16 @@ export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean
       `readiness probe (epic): 'target' ('${target}') must be an 'owner/repo#<number>' planKey (the epic issue, e.g. 'nanobpm/nano-workforce#374')`,
     );
   }
+  // An issue edge (issue #997) is keyed by the ISSUE reference `owner/repo#<number>` (or a GitHub
+  // issue URL) — validated like `pr` via the canonical {@link parsePrTarget} grammar (an issue and a
+  // PR share the `owner/repo#N` shape), with the same #548 fact-bound late-binding exemption (gated on
+  // `allowLateBoundTarget`) as `pr`/`epic`. Fail loudly at parse rather than surface a never-resolvable
+  // target as a timeout much later.
+  if (kind === "issue" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePrTarget(target)) {
+    throw new Error(
+      `readiness probe (issue): 'target' ('${target}') must be an 'owner/repo#<number>' issue reference or a GitHub issue URL (e.g. 'nanobpm/nano-workforce#997')`,
+    );
+  }
   const poll = isRecord(raw.poll) ? parsePoll(raw.poll) : undefined;
   const credentialEnv = str(raw.credentialEnv).trim() || undefined;
   if (credentialEnv !== undefined && !isEnvKey(credentialEnv)) {
@@ -347,7 +374,25 @@ function parseMatch(raw: Record<string, unknown>): ProbeMatch {
     verifyCommand: str(raw.verifyCommand).trim() || undefined,
     prState: parsePrCondition(raw.prState),
     epicState: parseEpicCondition(raw.epicState),
+    issueState: parseIssueCondition(raw.issueState),
   };
+}
+
+/** Narrow a raw `match.issueState` to an {@link IssueCondition}, throwing on a non-empty unknown value
+ * so a mistyped state fails loudly at parse rather than waiting forever. An absent/blank value yields
+ * undefined — {@link matchIssue} then applies the `completed` default. */
+function parseIssueCondition(raw: unknown): IssueCondition | undefined {
+  const s = str(raw).trim();
+  if (s === "") return undefined;
+  if (!isIssueCondition(s)) {
+    throw new Error(`readiness probe (issue): invalid match.issueState '${s}' (expected one of ${ISSUE_CONDITIONS.join(", ")})`);
+  }
+  return s;
+}
+
+function isIssueCondition(v: string): v is IssueCondition {
+  for (const c of ISSUE_CONDITIONS) if (c === v) return true;
+  return false;
 }
 
 /** Narrow a raw `match.epicState` to an {@link EpicCondition}, throwing on a non-empty unknown value so
@@ -998,23 +1043,87 @@ export function matchEpic(match: ProbeMatch | undefined, epic: EpicObservation):
   };
 }
 
-/** Build the `gh issue view` command reading an issue's closure state (#992). `gh` reads its token
- * from the ambient env, like the `pr` kind. */
+/** Build the `gh issue view` command reading an issue's closure state (#992) — extended with
+ * `closedByPullRequestsReferences` so the ONE issue-state reader also serves the `issue` kind's
+ * `closed-by-pr-merged` condition (#997): the `issue` probe and the `epic` kind's GitHub fallback
+ * share this command rather than adding a parallel reader. `gh` reads its token from the ambient
+ * env, like the `pr` kind. */
 export function issueViewCommand(repo: string, number: string): string {
-  return `gh issue view ${shellQuote(number)} --repo ${shellQuote(repo)} --json ${shellQuote("state,stateReason")}`;
+  return `gh issue view ${shellQuote(number)} --repo ${shellQuote(repo)} --json ${shellQuote("state,stateReason,closedByPullRequestsReferences")}`;
 }
 
-/** GitHub-truth "landed" check for an issue (#992): ready EXACTLY when the issue is CLOSED with
- * `stateReason: COMPLETED` — independent of who/what closed it (nwf, Mergify, a human). PURE; a
- * malformed payload is simply not ready. A NOT_PLANNED closure never counts as landed. */
-export function matchIssueClosed(payload: unknown): ProbeResult {
+/** issue readiness (issue #997): does the observed issue satisfy the declared `match.issueState`
+ * (default `completed`)? PURE — it operates on an already-fetched `gh issue view` payload and NEVER
+ * throws, so a failed/garbled `gh` read is simply "not ready yet" (the bounded wait routes to
+ * `onTimeout`). Reads GitHub truth ONLY (never nwf lineage), so the gate opens however the issue
+ * landed (nwf, Mergify, a human).
+ *
+ * `closed-by-pr-merged` additionally requires at least one MERGED PR in
+ * `closedByPullRequestsReferences` and binds it as `{ pr: "owner/repo#N" }` — a `pr`-typed fact a
+ * downstream `wait[pr]`/agent consumes, mirroring how the canonical
+ * `agent → connector[converge] → wait[pr]` shape hands its PR on. The repo half comes from
+ * `targetRepo` (the probe target's `owner/repo`) since the payload's references carry only the
+ * number/state/url. */
+export function matchIssue(match: ProbeMatch | undefined, payload: unknown, targetRepo?: string): ProbeResult {
+  const want: IssueCondition = match?.issueState ?? "completed";
   const j = isRecord(payload) ? payload : {};
   const state = str(j.state).trim().toUpperCase();
   const reason = str(j.stateReason).trim().toUpperCase();
-  if (state === "CLOSED" && reason === "COMPLETED") {
-    return { ready: true, detail: "issue closed as completed on GitHub (landed outside nwf lineage)" };
+  const closed = state === "CLOSED";
+  const completed = closed && reason === "COMPLETED";
+  const base = `issue state=${state || "unknown"} reason=${reason || "none"}`;
+  switch (want) {
+    case "closed":
+      return closed
+        ? { ready: true, detail: `issue closed (${reason || "no reason"}) on GitHub` }
+        : { ready: false, detail: `${base} (not closed)` };
+    case "completed":
+      return completed
+        ? { ready: true, detail: "issue closed as completed on GitHub" }
+        : { ready: false, detail: `${base} (not closed-completed)` };
+    case "closed-by-pr-merged": {
+      if (!completed) return { ready: false, detail: `${base} (not closed-completed)` };
+      const merged = mergedClosingPr(j, targetRepo);
+      if (merged === null) {
+        return { ready: false, detail: `${base} (no merged closing PR observed)` };
+      }
+      return { ready: true, detail: `issue closed by merged PR ${merged}`, bind: { pr: merged } };
+    }
   }
-  return { ready: false, detail: `issue state=${state || "unknown"} reason=${reason || "none"} (not landed)` };
+}
+
+/** The first MERGED PR in a `gh issue view` payload's `closedByPullRequestsReferences`, rendered as
+ * the canonical `owner/repo#N` fact (the repo from `targetRepo`, falling back to the reference URL's
+ * `/pull/` path when the target carried none). Returns null when no reference is MERGED. PURE /
+ * tolerant — a malformed references list simply yields null (not ready). */
+function mergedClosingPr(j: Record<string, unknown>, targetRepo: string | undefined): string | null {
+  const refs = Array.isArray(j.closedByPullRequestsReferences) ? j.closedByPullRequestsReferences : [];
+  for (const r of refs) {
+    if (!isRecord(r)) continue;
+    if (str(r.state).trim().toUpperCase() !== "MERGED") continue;
+    const number = num(r.number);
+    if (number === undefined) continue;
+    const repo = (targetRepo ?? "").trim() || repoFromPrUrl(str(r.url));
+    if (repo === "") continue;
+    return `${repo}#${number}`;
+  }
+  return null;
+}
+
+/** The `owner/repo` of a GitHub PR URL (`https://github.com/owner/repo/pull/N`), else "". */
+function repoFromPrUrl(url: string): string {
+  const m = /github\.com\/([^/]+\/[^/]+)\/pull\/\d+/.exec(url.trim());
+  return m ? m[1] : "";
+}
+
+/** GitHub-truth "landed" check for an issue (#992): ready EXACTLY when the issue is CLOSED with
+ * `stateReason: COMPLETED` — independent of who/what closed it (nwf, Mergify, a human). A thin
+ * adapter over the ONE issue-state matcher ({@link matchIssue} with the `completed` condition), so
+ * the `epic` fallback and the first-class `issue` kind (#997) can never drift on what "closed" means.
+ * PURE; a malformed payload is simply not ready. A NOT_PLANNED closure never counts as landed. */
+export function matchIssueClosed(payload: unknown): ProbeResult {
+  const r = matchIssue({ issueState: "completed" }, payload);
+  return r.ready ? { ready: true, detail: "issue closed as completed on GitHub (landed outside nwf lineage)" } : r;
 }
 
 /** Build the app's lineage read-model URL for an epic's `planKey`. The app mounts its OpenAPI paths
@@ -1076,6 +1185,18 @@ export async function probeOnce(
       // injected executor.
       await enrichPrViewEvents(exec, env, ref.repo, ref.number, payload);
       return matchPr(probe.match, parsePrView(payload));
+    }
+    case "issue": {
+      // GitHub truth only (never nwf lineage) — the gate opens however the issue landed (nwf,
+      // Mergify, a human). A fact-bound target that is still unresolved (`<node>.<fact>`) is not a
+      // literal issue ref, so treat it as "not ready" and keep waiting rather than issue a malformed
+      // request. A failed/garbled `gh` read is "not ready" (the bounded wait routes to `onTimeout`),
+      // never a throw.
+      const ref = parsePrTarget(probe.target);
+      if (!ref) return { ready: false, detail: "issue: unparseable/unresolved target (not ready)" };
+      const out = await exec.run(issueViewCommand(ref.repo, ref.number), env);
+      if (out.code !== 0) return { ready: false, detail: "issue: gh issue view failed (not ready)" };
+      return matchIssue(probe.match, parseJson(out.stdout), ref.repo);
     }
     case "epic": {
       // "Fully merged" is the app's AGGREGATE, not a GitHub read — observe it over the app's own

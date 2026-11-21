@@ -42,6 +42,8 @@ import {
   parseRepoRef,
   probeBudgetMs,
   probeOnce,
+  ISSUE_CONDITIONS,
+  matchIssue,
   matchIssueClosed,
   type ProbeKind,
   type ProbeExec,
@@ -1342,4 +1344,128 @@ test("#992 class guard: every 'work landed' probe kind accepts landing by any ro
   assertEquals(matchIssueClosed({ state: "closed", stateReason: "completed" }).ready, true);
   assertEquals(matchIssueClosed({ state: "CLOSED", stateReason: "NOT_PLANNED" }).ready, false);
   assertEquals(matchIssueClosed(null).ready, false);
+});
+
+// ── Issue probe (issue #997 — a first-class `issue` wait kind reading GitHub truth only) ────────
+
+test("parseProbe: an `issue` probe accepts an owner/repo#N target and defaults issueState to completed", () => {
+  const p = parseProbe({ kind: "issue", target: "nanobpm/nano-workforce#997" });
+  assertEquals(p.kind, "issue");
+  assertEquals(p.target, "nanobpm/nano-workforce#997");
+  assertEquals(p.match?.issueState, undefined, "an omitted issueState stays undefined — matchIssue applies the completed default");
+});
+
+test("parseProbe: an `issue` probe rejects a bad target (never resolvable → fail loudly at submit)", () => {
+  assertThrows(() => parseProbe({ kind: "issue", target: "not-an-issue" }), Error, "issue");
+  assertThrows(() => parseProbe({ kind: "issue", target: "owner/repo" }), Error, "issue");
+});
+
+test("parseProbe: an `issue` probe rejects an unknown match.issueState (closed vocabulary)", () => {
+  assertThrows(
+    () => parseProbe({ kind: "issue", target: "o/r#1", match: { issueState: "landed" } }),
+    Error,
+    "invalid match.issueState",
+  );
+});
+
+test("parseProbe: an `issue` probe accepts every declared issueState", () => {
+  for (const issueState of ISSUE_CONDITIONS) {
+    const p = parseProbe({ kind: "issue", target: "o/r#1", match: { issueState } });
+    assertEquals(p.match?.issueState, issueState);
+  }
+});
+
+test("parseProbe: a fact-bound `issue` target resolves only with the delivery-graph opt-in (like pr/epic)", () => {
+  const p = parseProbe({ kind: "issue", target: "gate.issue" }, { allowLateBoundTarget: true });
+  assertEquals(p.target, "gate.issue");
+  assertThrows(() => parseProbe({ kind: "issue", target: "gate.issue" }), Error, "issue");
+});
+
+// ── matchIssue (pure — operates on an already-fetched `gh issue view` payload) ─────────────────
+
+const OPEN_ISSUE = { state: "OPEN", stateReason: "", closedByPullRequestsReferences: [] };
+const CLOSED_COMPLETED = { state: "CLOSED", stateReason: "COMPLETED", closedByPullRequestsReferences: [] };
+const CLOSED_NOT_PLANNED = { state: "CLOSED", stateReason: "NOT_PLANNED", closedByPullRequestsReferences: [] };
+const CLOSED_BY_MERGED_PR = {
+  state: "CLOSED",
+  stateReason: "COMPLETED",
+  closedByPullRequestsReferences: [{ number: 432, state: "MERGED", url: "https://github.com/o/r/pull/432" }],
+};
+const CLOSED_BY_UNMERGED_PR = {
+  state: "CLOSED",
+  stateReason: "COMPLETED",
+  closedByPullRequestsReferences: [{ number: 432, state: "OPEN", url: "https://github.com/o/r/pull/432" }],
+};
+
+test("matchIssue: issueState 'closed' is ready on any CLOSED issue, whatever the reason", () => {
+  assert(!matchIssue({ issueState: "closed" }, OPEN_ISSUE).ready);
+  assert(matchIssue({ issueState: "closed" }, CLOSED_COMPLETED).ready);
+  assert(matchIssue({ issueState: "closed" }, CLOSED_NOT_PLANNED).ready, "a NOT_PLANNED close still counts as closed");
+});
+
+test("matchIssue: issueState 'completed' (the default) requires stateReason COMPLETED", () => {
+  assert(!matchIssue({ issueState: "completed" }, OPEN_ISSUE).ready);
+  assert(matchIssue({ issueState: "completed" }, CLOSED_COMPLETED).ready);
+  assert(!matchIssue({ issueState: "completed" }, CLOSED_NOT_PLANNED).ready, "a NOT_PLANNED close does not count as completed");
+  // `completed` is the default when no issueState is declared.
+  assert(!matchIssue(undefined, OPEN_ISSUE).ready);
+  assert(matchIssue(undefined, CLOSED_COMPLETED).ready);
+  assert(!matchIssue(undefined, CLOSED_NOT_PLANNED).ready);
+});
+
+test("matchIssue: issueState 'closed-by-pr-merged' needs a MERGED closing PR and binds it as a pr fact", () => {
+  assert(!matchIssue({ issueState: "closed-by-pr-merged" }, OPEN_ISSUE).ready);
+  assert(!matchIssue({ issueState: "closed-by-pr-merged" }, CLOSED_COMPLETED).ready, "no closing PR at all → not ready");
+  assert(!matchIssue({ issueState: "closed-by-pr-merged" }, CLOSED_NOT_PLANNED).ready, "NOT_PLANNED never counts");
+  assert(!matchIssue({ issueState: "closed-by-pr-merged" }, CLOSED_BY_UNMERGED_PR).ready, "an unmerged closing PR does not count");
+  const r = matchIssue({ issueState: "closed-by-pr-merged" }, CLOSED_BY_MERGED_PR, "o/r");
+  assert(r.ready);
+  assertEquals(r.bind?.pr, "o/r#432", "the merged closing PR is bound as a pr-typed fact for a downstream wait[pr]/agent");
+});
+
+test("matchIssue: a garbled/gh-failure-shaped payload is not ready, never a throw", () => {
+  for (const bad of [null, {}, "nope", { state: 42 }]) {
+    for (const issueState of ISSUE_CONDITIONS) {
+      assert(!matchIssue({ issueState }, bad).ready, `${issueState} on ${JSON.stringify(bad)} must be not ready`);
+    }
+  }
+  // A malformed references list only defeats the `closed-by-pr-merged` condition (it can never
+  // confirm a merged closing PR); the plain `closed`/`completed` states still read state/reason.
+  assert(!matchIssue({ issueState: "closed-by-pr-merged" }, { state: "CLOSED", stateReason: "COMPLETED", closedByPullRequestsReferences: "x" }).ready);
+});
+
+test("probeOnce issue: builds a quoted `gh issue view` command (reading closedByPullRequestsReferences) and matches", async () => {
+  const capture: { cmd?: string } = {};
+  const exec = stubExec({ command: { code: 0, stdout: JSON.stringify(CLOSED_BY_MERGED_PR), stderr: "" }, capture });
+  const r = await probeOnce(parseProbe({ kind: "issue", target: "o/r#9", match: { issueState: "closed-by-pr-merged" } }), exec, {});
+  assert(r.ready);
+  assertStringIncludes(capture.cmd ?? "", "gh issue view");
+  assertStringIncludes(capture.cmd ?? "", "'9'");
+  assertStringIncludes(capture.cmd ?? "", "--repo 'o/r'");
+  assertStringIncludes(capture.cmd ?? "", "closedByPullRequestsReferences");
+  assertEquals(r.bind?.pr, "o/r#432");
+});
+
+test("probeOnce issue: a failed `gh issue view` is not-ready (bounded wait routes to onTimeout), never a throw", async () => {
+  const exec = stubExec({ command: { code: 1, stdout: "", stderr: "boom" } });
+  const r = await probeOnce(parseProbe({ kind: "issue", target: "o/r#9" }), exec, {});
+  assert(!r.ready);
+});
+
+test("probeOnce issue: an OPEN issue is not ready on every issueState", async () => {
+  const exec = stubExec({ command: { code: 0, stdout: JSON.stringify(OPEN_ISSUE), stderr: "" } });
+  for (const issueState of ISSUE_CONDITIONS) {
+    const r = await probeOnce(parseProbe({ kind: "issue", target: "o/r#9", match: { issueState } }), exec, {});
+    assert(!r.ready, `${issueState} must stay not ready on an OPEN issue`);
+  }
+});
+
+test("#997 issueViewCommand is the ONE issue-state reader: the epic fallback reads closedByPullRequestsReferences through the same command", async () => {
+  // Derive, don't duplicate: the epic kind's #992 GitHub fallback and the new `issue` kind share
+  // `issueViewCommand`, which must fetch the closing-PR references both readers consume.
+  const calls: string[] = [];
+  const exec = epic992Exec(noLineage992, { code: 0, stdout: JSON.stringify(CLOSED_COMPLETED) }, calls);
+  const r = await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {});
+  assert(r.ready);
+  assertStringIncludes(calls[0] ?? "", "closedByPullRequestsReferences");
 });

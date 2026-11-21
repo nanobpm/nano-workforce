@@ -30,6 +30,7 @@
           <nano:extend name="package" type="string" optional="true" />
           <nano:extend name="verifyCommand" type="string" optional="true" />
           <nano:extend name="prState" type="string" optional="true" />
+          <nano:extend name="issueState" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="ReadinessProbePoll" name="Readiness probe — poll policy">
           <nano:extend name="everyMs" type="integer" optional="true" />
@@ -57,6 +58,7 @@
           <nano:extend name="detail" type="string" optional="true" />
           <nano:extend name="resolvedArtifact" type="string" optional="true" />
           <nano:extend name="mergedSha" type="string" optional="true" />
+          <nano:extend name="pr" type="string" optional="true" />
           <nano:extend name="observed" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="ReadinessReady" name="readiness-ready message payload">
@@ -64,6 +66,7 @@
           <nano:extend name="detail" type="string" optional="true" />
           <nano:extend name="resolvedArtifact" type="string" optional="true" />
           <nano:extend name="mergedSha" type="string" optional="true" />
+          <nano:extend name="pr" type="string" optional="true" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>

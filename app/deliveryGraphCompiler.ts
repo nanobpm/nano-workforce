@@ -392,9 +392,10 @@ function byCodeUnit(a: string, b: string): number {
 /** The engine variable a producer node's OUTPUT mapping reads to publish a declared emitted `fact`
  * (S4 late-binding). Each node kind's real body exposes the observed value under a canonical name:
  *   • `wait` (readiness-gate) — a `mergedSha` fact reads the merge oid; a `prCount` fact reads the
- *     epic-match `prCount` bind (how many slice PRs a `wait[epic]` landed); an `artifact` fact reads
- *     the `resolvedArtifact` bind (mirroring the `capability`/`pr` probe binds); anything else reads
- *     the probe's `detail`.
+ *     epic-match `prCount` bind (how many slice PRs a `wait[epic]` landed); a `pr` fact reads the
+ *     `pr` bind (the closing PR a `wait[issue, closed-by-pr-merged]` gate hands downstream, #997);
+ *     an `artifact` fact reads the `resolvedArtifact` bind (mirroring the `capability`/`pr` probe
+ *     binds); anything else reads the probe's `detail`.
  *   • `human` (delivery-human) — an `artifact` fact reads `humanEmitArtifact`; anything else reads
  *     `humanEmitValue` (the generic typed-emit form's captured value).
  *   • `agent`/`connector` — the body's job worker returns the value under the fact's own name.
@@ -406,9 +407,11 @@ function factSourceVar(kind: DeliveryNode["kind"], fact: DeliveryFact): string {
         ? "mergedSha"
         : fact.name === "prCount"
           ? "prCount"
-          : fact.type === "artifact"
-            ? "resolvedArtifact"
-            : "detail";
+          : fact.type === "pr"
+            ? "pr"
+            : fact.type === "artifact"
+              ? "resolvedArtifact"
+              : "detail";
     case "human":
       return fact.type === "artifact" ? "humanEmitArtifact" : "humanEmitValue";
     case "agent":
@@ -1252,6 +1255,7 @@ const DECLARED_MATCH_FIELDS: ReadonlySet<string> = new Set([
   "verifyCommand",
   "prState",
   "epicState",
+  "issueState",
 ]);
 
 /** The declared `wait.match` fields `parseMatch` (`app/readiness.ts`) reads through `num()` — a value of
@@ -1285,6 +1289,7 @@ function matchValueTypeMismatch(key: string, value: unknown): boolean {
 const EFFECTIVE_MATCH_DEFAULT: ReadonlyMap<string, { field: string; value: string | number }> = new Map([
   ["pr", { field: "prState", value: "merged" }],
   ["epic", { field: "epicState", value: "merged" }],
+  ["issue", { field: "issueState", value: "completed" }],
   ["github-check", { field: "conclusion", value: "success" }],
   ["command", { field: "exitCode", value: 0 }],
 ]);
@@ -2637,6 +2642,10 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
     '            <zeebe:output source="=if (is defined(resolvedArtifact)) then resolvedArtifact else null" target="resolvedArtifact" />',
     '            <zeebe:output source="=if (is defined(mergedSha)) then mergedSha else null" target="mergedSha" />',
     '            <zeebe:output source="=if (is defined(prCount)) then prCount else null" target="prCount" />',
+    // The `issue` kind's `closed-by-pr-merged` match (#997) binds the closing PR as a `pr`-typed
+    // fact — lift it out of the gate scope exactly like `mergedSha`/`prCount` so a downstream
+    // `wait[pr]`/agent can consume it (the canonical "hand the PR on" shape).
+    '            <zeebe:output source="=if (is defined(pr)) then pr else null" target="pr" />',
     '            <zeebe:output source="=if (is defined(observed)) then observed else null" target="observed" />',
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",

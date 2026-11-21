@@ -301,6 +301,83 @@ test("#572 epic prCount emit: a wait[epic] node's `prCount` fact publishes from 
   );
 });
 
+test("#997 issue wait kind: an `issue` wait node compiles to the shared readiness gate, seeding its probe verbatim", async () => {
+  // The `issue` wait kind (issue #997) gates a graph on GitHub ISSUE truth (closed / completed /
+  // closed-by-merged-PR), reusing the SAME readiness-gate machinery as `pr`/`epic` — never a second
+  // wait loop: it delegates to `pr.readiness-probe` and seeds `nodeInputs.<el>.probe` verbatim.
+  const graph = {
+    name: "issue gate",
+    nodes: [
+      { id: "gate-issue", kind: "wait", wait: { kind: "issue", target: "nanobpm/nano-workforce#997", match: { issueState: "closed-by-pr-merged" }, onTimeout: "escalate" } },
+      { id: "start-b", kind: "agent", agent: { jobType: "senior:feature", prompt: "implement #996" } },
+    ],
+    edges: [{ from: "gate-issue", to: "start-b" }],
+  };
+  const r = await compileOk(graph);
+  const types = new Set([...r.bpmn.matchAll(/<zeebe:taskDefinition type="([^"]+)"/g)].map((m) => m[1]));
+  assert(types.has("pr.readiness-probe"), "the issue wait delegates to the shared readiness-probe gate");
+  // The issue wait's element (n0 — sorted node id `gate-issue` precedes `start-b`) seeds its probe.
+  assert(r.bpmn.includes('source="=nodeInputs.n0.probe" target="probe"'), "the issue wait seeds its probe descriptor verbatim");
+});
+
+test("#997 issue wait kind: issue wait nodes compile as branches of a parallel join (AND-join over several issues)", async () => {
+  // The motivating shape: join on issues A, B and C landing — three `issue` waits fan out in
+  // parallel and a downstream agent starts only once every gate is green.
+  const graph = {
+    name: "issue join",
+    nodes: [
+      { id: "wait-a", kind: "wait", wait: { kind: "issue", target: "o/r#1", match: { issueState: "completed" } } },
+      { id: "wait-b", kind: "wait", wait: { kind: "issue", target: "o/r#2" } },
+      { id: "wait-c", kind: "wait", wait: { kind: "issue", target: "o/r#3", match: { issueState: "closed" } } },
+      { id: "build", kind: "agent", agent: { jobType: "senior:feature", prompt: "integrate" } },
+    ],
+    edges: [
+      { from: "wait-a", to: "build" },
+      { from: "wait-b", to: "build" },
+      { from: "wait-c", to: "build" },
+    ],
+  };
+  const r = await compileOk(graph);
+  // Each wait body carries exactly two `pr.readiness-probe` activations (the poll task + its
+  // last-attempt twin) — so three parallel issue waits yield six, and the count SCALES with the
+  // number of joined issue gates (the AND-join shape compiles).
+  const probes = r.bpmn.match(/<zeebe:taskDefinition type="pr\.readiness-probe"/g) ?? [];
+  assertEquals(probes.length, 6, "each issue wait compiles to its own readiness-probe branch of the join");
+});
+
+test("#997 issue wait kind: a wait[issue] node's emitted `pr` fact is consumable by a downstream pr-typed node", async () => {
+  // `closed-by-pr-merged` binds the closing PR as a `pr`-typed fact (mirroring how the canonical
+  // agent -> connector[converge] -> wait[pr] shape hands its PR on): the probe loop must lift the
+  // `pr` bind out of the gate scope, factSourceVar must source a `pr` emit from it, and a downstream
+  // `wait[pr]` must late-bind it.
+  const graph = {
+    name: "issue -> pr hand-off",
+    nodes: [
+      {
+        id: "gate-issue",
+        kind: "wait",
+        wait: { kind: "issue", target: "o/r#9", match: { issueState: "closed-by-pr-merged" }, onTimeout: "escalate" },
+        emits: [{ name: "pr", type: "pr" }],
+      },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: "gate-issue.pr", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "gate-issue.pr", to: "merged" }],
+  };
+  const r = await compileOk(graph);
+  // The probe-loop subProcess must lift the `pr` bind out of the gate scope (alongside mergedSha/prCount).
+  assert(
+    r.bpmn.includes('source="=if (is defined(pr)) then pr else null" target="pr"'),
+    "the probe loop lifts the issue probe's `pr` bind out of the gate scope",
+  );
+  // The wait node's emit output must SOURCE the pr fact from the `pr` bind variable, not `detail`.
+  assert(
+    r.bpmn.includes('source="=if (is defined(pr)) then pr else null" target="n0_pr"'),
+    "the pr emit publishes from the pr bind variable, not the probe detail",
+  );
+  // The downstream wait[pr] late-binds its target from the threaded fact.
+  assert(r.bpmn.includes("target=\"boundFacts\""), "the downstream wait receives the threaded pr fact");
+});
+
 test("#499 human context: the human user-task seeds prompt/nodeId/emit context so its generic form is not contextless", async () => {
   const r = await compileOk(RELEASE_RUNBOOK);
   // The human node's subProcess ioMapping must thread the authored prompt + node identity + emit

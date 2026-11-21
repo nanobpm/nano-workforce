@@ -31,6 +31,7 @@ import {
   DEFAULT_READINESS_TIMEOUT,
   DEFAULT_TIMEOUT_MS,
   EPIC_CONDITIONS,
+  ISSUE_CONDITIONS,
   ON_TIMEOUTS,
   PR_CONDITIONS,
   PROBE_KINDS,
@@ -228,6 +229,26 @@ const WAIT_PROBE_DETAIL: Record<string, Omit<WaitProbeEntry, "kind">> = {
       "falsely releases the gate — the bounded wait routes via `onTimeout` instead of hanging.",
     ready: "the lineage thread reaches `stage:\"merged\" && active:false` (every opened slice/PR landed). `match.epicState` (default `merged`; `done` is a synonym) both mean \"fully merged\".",
     binds: ["prCount"],
+  },
+  issue: {
+    target:
+      "an `owner/repo#N` ISSUE reference (or a GitHub issue URL; may also be a `<node>.fact` " +
+      "late-binding reference the compiler rewrites at dispatch)",
+    matchFields: ["issueState"],
+    conditions: [...ISSUE_CONDITIONS],
+    observes:
+      "GitHub truth ONLY (never nwf lineage): the issue's `state`/`stateReason` and, for " +
+      "`closed-by-pr-merged`, its `closedByPullRequestsReferences` — via the ONE shared " +
+      "`issueViewCommand` reader the `epic` kind's GitHub fallback also uses. The gate therefore " +
+      "opens however the issue landed (nwf, Mergify, a human), which is what makes a parallel " +
+      "AND-join over several issues (\"join on issues A, B and C landing\") expressible without a " +
+      "raw `command` probe. A failed/garbled `gh` read is \"not ready\" (the bounded wait routes to " +
+      "`onTimeout`), never a throw.",
+    ready:
+      "the issue reaches `match.issueState` (default `completed`): `closed` = CLOSED for any reason; " +
+      "`completed` = CLOSED with stateReason COMPLETED (a NOT_PLANNED close does not count); " +
+      "`closed-by-pr-merged` = completed AND at least one closing PR is MERGED.",
+    binds: ["pr"],
   },
 };
 
