@@ -1,3 +1,9 @@
+## [0.218.2](https://github.com/nanobpm/nano-workforce/compare/v0.218.1...v0.218.2) (2026-11-21)
+
+### Bug Fixes
+
+* **layout:** pin bpmn-auto-layout to the uncapped [#162](https://github.com/nanobpm/nano-workforce/issues/162) fork build ([#1004](https://github.com/nanobpm/nano-workforce/issues/1004)) ([09e58c7](https://github.com/nanobpm/nano-workforce/commit/09e58c7bd610bcd6f56ee766922ebc1a7f751f73)), closes [#1003](https://github.com/nanobpm/nano-workforce/issues/1003)
+
 ## [0.218.1](https://github.com/nanobpm/nano-workforce/compare/v0.218.0...v0.218.1) (2026-11-21)
 
 ### Bug Fixes
