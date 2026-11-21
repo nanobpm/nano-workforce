@@ -1,3 +1,13 @@
+## [0.217.0](https://github.com/nanobpm/nano-workforce/compare/v0.216.1...v0.217.0) (2026-11-21)
+
+### Features
+
+* **feature:** agents see post-start operator feedback; gate convergence until acknowledged ([#987](https://github.com/nanobpm/nano-workforce/issues/987)) ([ec56fb5](https://github.com/nanobpm/nano-workforce/commit/ec56fb534dd19fe9b98cb87ff8c89c83eba0cec5)), closes [#985](https://github.com/nanobpm/nano-workforce/issues/985)
+
+### Bug Fixes
+
+* **readiness:** open epic/--behind gates on GitHub issue closure, not only nwf lineage ([#993](https://github.com/nanobpm/nano-workforce/issues/993)) ([0d01035](https://github.com/nanobpm/nano-workforce/commit/0d01035500d9a787b2108222cd6bd22bfc7c2c84)), closes [#992](https://github.com/nanobpm/nano-workforce/issues/992) [#992](https://github.com/nanobpm/nano-workforce/issues/992) [#992](https://github.com/nanobpm/nano-workforce/issues/992) [#992](https://github.com/nanobpm/nano-workforce/issues/992) [#992](https://github.com/nanobpm/nano-workforce/issues/992)
+
 ## [0.216.1](https://github.com/nanobpm/nano-workforce/compare/v0.216.0...v0.216.1) (2026-11-21)
 
 ### Bug Fixes
