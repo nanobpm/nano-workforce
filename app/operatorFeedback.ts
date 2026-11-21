@@ -93,9 +93,13 @@ export function isRunOwnComment(body: string): boolean {
   );
 }
 
-/** The run's start on an issue: the earliest claim comment, else the fallback (the PR's creation). */
+/** The run's start on an issue: the earliest TRUSTED claim comment, else the fallback (the PR's
+ *  creation). An untrusted/bot comment carrying the claim prefix is ignored, so an outsider cannot
+ *  move the cutoff forward and hide a maintainer's post-start feedback from the brief and the gate. */
 export function runStartOnIssue(comments: IssueComment[], fallbackIso: string | null): string | null {
-  const claims = comments.filter((c) => c.body.trimStart().startsWith(CLAIM_COMMENT_PREFIX)).map((c) => c.createdAt);
+  const claims = comments
+    .filter((c) => c.body.trimStart().startsWith(CLAIM_COMMENT_PREFIX) && isTrustedAuthor(c.association, c.login))
+    .map((c) => c.createdAt);
   claims.sort();
   return claims[0] ?? fallbackIso;
 }

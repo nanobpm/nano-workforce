@@ -168,3 +168,14 @@ test("URL-form closing references are parsed through the issue grammar", () => {
     [9],
   );
 });
+
+test("runStartOnIssue ignores claim-prefixed comments from untrusted authors and bots (fallback wins)", () => {
+  const fallback = "2026-11-21T09:00:00Z";
+  const late = "2026-11-21T12:00:00Z";
+  const body = `${CLAIM_COMMENT_PREFIX} — branch \`feat/issue-9\`.`;
+  assertEquals(runStartOnIssue([c(5, "outsider", "NONE", late, body)], fallback), fallback);
+  assertEquals(runStartOnIssue([c(6, "someone", "CONTRIBUTOR", late, body)], fallback), fallback);
+  assertEquals(runStartOnIssue([c(7, "github-actions[bot]", "MEMBER", late, body)], fallback), fallback);
+  // A trusted claim still sets the cutoff, even alongside an untrusted one.
+  assertEquals(runStartOnIssue([c(5, "outsider", "NONE", START, body), c(1, "jwulf", "OWNER", late, body)], fallback), late);
+});
