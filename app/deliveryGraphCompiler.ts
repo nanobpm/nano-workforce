@@ -56,6 +56,7 @@ import {
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_CONTRACT_TWIN_SUFFIX, DELIVERY_ESCALATION_TWIN_SUFFIX, DELIVERY_HUMAN_ELEMENT, DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX, ESCALATION_FORM, GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
+import { ESCALATION_ASSIGNEE_FEEL } from "./escalationAssignee.ts";
 import { layoutBpmnOffThread } from "./layoutOffThread.ts";
 import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactString } from "./readiness.ts";
 // `redactFreeText` now lives in the low-level `redactText.ts` helper (both this compiler and
@@ -2745,8 +2746,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
  * would never match (PR #863 thread r4189815989). */
 function humanBodyLines(el: string, displayName: string, formId: string, singleEmit?: DeliveryFact, preferFactName = false, requiredEmit = false): string[] {
   const task = humanTaskElement(el);
-  const assignee =
-    '=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != "") then escalationAssignee else null';
+  const assignee = ESCALATION_ASSIGNEE_FEEL;
   // The canonical capture key for the single emit's TYPE (artifact → the publish form's
   // `resolvedArtifact`; anything else → the generic form's `value`). `selectExpr(canonical)` is a bare
   // (no leading `=`) null-safe FEEL expression; when `preferFactName` (an EXPLICIT bespoke form only) it
