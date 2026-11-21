@@ -25,7 +25,9 @@ function producersIn(path: string, src: string): string[] {
   const lines = src.split("\n");
   let current = "<module>";
   for (const line of lines) {
-    const m = /^(?:export\s+)?(?:async\s+)?(?:function\s+(\w+)|const\s+(\w+)\s*=)/.exec(line);
+    // A producer may be a `function name(` or a `const name =` / `const name: Type =` arrow — the
+    // type annotation between the name and `=` is optional, so a typed const still re-keys `current`.
+    const m = /^(?:export\s+)?(?:async\s+)?(?:function\s+(\w+)|const\s+(\w+)\s*(?::[^=]*)?=)/.exec(line);
     if (m) current = m[1] ?? m[2] ?? current;
     if (/\bpublicBaseUrl\(/.test(line) && !/function\s+publicBaseUrl\b/.test(line)) out.push(`${path}::${current}`);
   }
@@ -54,6 +56,12 @@ test("every module minting an app URL from publicBaseUrl() is a classified agent
 
 test("a second unclassified URL producer in an already-listed module is detected", () => {
   const src = "export function blackboardUrl(t: string, base = publicBaseUrl()) {}\nexport function sneakyUrl(base = publicBaseUrl()) {}\n";
+  assertEquals(producersIn("app/blackboard.ts", src), ["app/blackboard.ts::blackboardUrl", "app/blackboard.ts::sneakyUrl"]);
+});
+
+test("a typed const URL producer (const name: Type = ...) is detected, not attributed to the prior producer", () => {
+  const src =
+    "export function blackboardUrl(t: string, base = publicBaseUrl()) {}\nexport const sneakyUrl: () => string = () => publicBaseUrl();\n";
   assertEquals(producersIn("app/blackboard.ts", src), ["app/blackboard.ts::blackboardUrl", "app/blackboard.ts::sneakyUrl"]);
 });
 
