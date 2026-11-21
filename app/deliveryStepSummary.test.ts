@@ -48,3 +48,37 @@ test("a human step without a formKey reports the canonically resolved form, not 
   assert.equal(typeof s?.target, "string");
   assert.notEqual(s?.target, "");
 });
+
+test("a string guard equals literal with embedded credentials is redacted in the rendered gate", () => {
+  const s = summarizeDeliverySteps({
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "senior:feature" } },
+      { id: "b", kind: "agent", agent: { jobType: "senior:feature" } },
+    ],
+    edges: [{ from: "a", to: "b", when: "a.url", equals: "https://user:pa55@host/path?token=t0k" }],
+  }).find((step) => step.id === "b");
+  assert.doesNotMatch(JSON.stringify(s), /pa55|t0k/);
+  assert.match(s?.gate ?? "", /\*\*\*/);
+});
+
+test("a credential-free string guard equals literal renders verbatim", () => {
+  const s = summarizeDeliverySteps({
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "senior:feature" } },
+      { id: "b", kind: "agent", agent: { jobType: "senior:feature" } },
+    ],
+    edges: [{ from: "a", to: "b", when: "a.env", equals: "prod" }],
+  }).find((step) => step.id === "b");
+  assert.equal(s?.gate, 'a.env == "prod"');
+});
+
+test("a non-string guard equals literal renders verbatim (no redaction surface)", () => {
+  const s = summarizeDeliverySteps({
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "senior:feature" } },
+      { id: "b", kind: "agent", agent: { jobType: "senior:feature" } },
+    ],
+    edges: [{ from: "a", to: "b", when: "a.count", equals: 42 }],
+  }).find((step) => step.id === "b");
+  assert.equal(s?.gate, "a.count == 42");
+});

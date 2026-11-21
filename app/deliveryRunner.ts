@@ -703,8 +703,18 @@ export function summarizeDeliverySteps(graph: DeliveryGraph): DeliveryStepSummar
   const edges = graph.edges ?? [];
   return graph.nodes.map((node): DeliveryStepSummary => {
     const incoming = edges.filter((e) => e.to === node.id);
+    // Render a guard's `equals` literal through the SAME redactor every other display field uses
+    // (agent repository, wait target, connector target/pr): a string literal may embed a credential
+    // (`https://user:pass@host/path?token=…`) and the gate field is operator-facing output. Display
+    // redaction ONLY — the stored graph and the executable comparison keep the verbatim value.
     const guards = incoming
-      .map((e) => (e.when !== undefined ? `${e.when} == ${JSON.stringify(e.equals)}` : e.default === true ? "default" : null))
+      .map((e) =>
+        e.when !== undefined
+          ? `${e.when} == ${JSON.stringify(typeof e.equals === "string" ? redactConnectorValue(e.equals) : e.equals)}`
+          : e.default === true
+            ? "default"
+            : null,
+      )
       .filter((g): g is string => g !== null);
     const base = {
       id: node.id,
