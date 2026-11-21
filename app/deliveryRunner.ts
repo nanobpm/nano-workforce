@@ -663,3 +663,94 @@ function buildNodeInput(
       return assertNever(node, "buildNodeInput");
   }
 }
+
+/** One step of a staged delivery graph as an operator reviews it before dispatch (issue #989). */
+export interface DeliveryStepSummary {
+  id: string;
+  /** The node kind from the closed allowlist (agent / wait / human / connector). */
+  kind: DeliveryNode["kind"];
+  /** A finer type: the agent job type, `wait:<probe kind>`, `human`, or the connector target
+   *  (e.g. `converge`, `converge-merge`). */
+  type: string;
+  /** What the step acts on: the agent repository, the wait/connector target (issue/PR/epic), or null. */
+  target: string | null;
+  /** The upstream endpoints this step waits on (`<nodeId>` or `<nodeId>.<fact>`). */
+  dependsOn: string[];
+  /** The guard on each incoming guarded edge, rendered `<fact> == <value>` (or `default`). */
+  gate: string | null;
+  /** The effective time limit (ISO-8601) at the run defaults — a dispatch-time override replaces the
+   *  run defaults for steps that do not declare their own. */
+  timeLimit: string | null;
+  /** True when `timeLimit` is the run default rather than declared on the node. */
+  timeLimitDefaulted: boolean;
+  /** Wait steps: what happens when the time limit elapses (escalate / continue / fail). */
+  onTimeout: string | null;
+  /** Agent steps: hand the opened PR to the convergence loop. */
+  converge: boolean;
+  /** Agent steps: drive the merge loop after convergence. */
+  autoMerge: boolean;
+}
+
+/** Summarise each node of a delivery graph for pre-dispatch review (issue #989). Derives the time
+ *  limits from the SAME defaults + per-kind rules {@link buildNodeInput} seeds, so what the operator
+ *  reads is what dispatch would run (at the run defaults). Pure. */
+export function summarizeDeliverySteps(graph: DeliveryGraph): DeliveryStepSummary[] {
+  const edges = graph.edges ?? [];
+  return graph.nodes.map((node): DeliveryStepSummary => {
+    const incoming = edges.filter((e) => e.to === node.id);
+    const guards = incoming
+      .map((e) => (e.when !== undefined ? `${e.when} == ${JSON.stringify(e.equals)}` : e.default === true ? "default" : null))
+      .filter((g): g is string => g !== null);
+    const base = {
+      id: node.id,
+      kind: node.kind,
+      dependsOn: incoming.map((e) => e.from),
+      gate: guards.length > 0 ? guards.join("; ") : null,
+      onTimeout: null,
+      converge: false,
+      autoMerge: false,
+    };
+    switch (node.kind) {
+      case "agent": {
+        const policy = agentEnrollmentTarget(node.agent);
+        const declared = typeof node.agent.timeout === "string" && node.agent.timeout.trim() !== "";
+        return {
+          ...base,
+          type: node.agent.jobType,
+          target: node.agent.repository ?? null,
+          timeLimit: isoDuration(node.agent.timeout, DEFAULTS.nodeTimeout),
+          timeLimitDefaulted: !declared,
+          converge: policy !== null,
+          autoMerge: node.agent.merge === true,
+        };
+      }
+      case "wait": {
+        const probe = parseProbe(node.wait, { allowLateBoundTarget: true });
+        const declared = typeof probe.poll?.timeoutMs === "number" && probe.poll.timeoutMs >= 1;
+        return {
+          ...base,
+          type: `wait:${node.wait.kind}`,
+          target: node.wait.target.trim(),
+          timeLimit: declared ? readinessTimeout(probe, {}) : DEFAULTS.probeTimeout,
+          timeLimitDefaulted: !declared,
+          onTimeout: node.wait.onTimeout ?? "escalate",
+        };
+      }
+      case "human":
+        return { ...base, type: "human", target: node.human?.formKey ?? null, timeLimit: DEFAULTS.escalationSlaTimeout, timeLimitDefaulted: true };
+      case "connector": {
+        const declared = typeof node.connector.timeout === "string" && node.connector.timeout.trim() !== "";
+        const pr = node.connector.payload && typeof node.connector.payload === "object" && "pr" in node.connector.payload ? node.connector.payload.pr : undefined;
+        return {
+          ...base,
+          type: node.connector.target,
+          target: typeof pr === "string" ? pr.trim() : null,
+          timeLimit: isoDuration(node.connector.timeout, DEFAULTS.nodeTimeout),
+          timeLimitDefaulted: !declared,
+        };
+      }
+      default:
+        return assertNever(node, "summarizeDeliverySteps");
+    }
+  });
+}
