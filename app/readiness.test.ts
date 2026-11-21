@@ -1257,6 +1257,20 @@ test("#992 probeOnce epic: a thrown lineage read FAILS CLOSED — no GitHub issu
   assertEquals(calls.length, 0, "the GitHub issue read must not even be attempted");
 });
 
+test("#992 probeOnce epic: a malformed 2xx lineage envelope FAILS CLOSED — no GitHub fallback on a blind read", async () => {
+  // A 2xx whose body is not the lineage list envelope (`{}`, or a body with no `items` array) cannot
+  // distinguish "no such thread" from "a known epic whose slices are unmerged" — it is as blind as a
+  // thrown/401 read. The GitHub issue-closure fallback must stay shut (fail closed) and the GitHub
+  // read must not even be attempted.
+  for (const body of ["{}", JSON.stringify({ page: { totalItems: 0 } }), "not json", ""]) {
+    const calls: string[] = [];
+    const exec = epic992Exec({ status: 200, body }, { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) }, calls);
+    const r = await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {});
+    assert(!r.ready, `a malformed 2xx lineage body (${JSON.stringify(body)}) must fail closed, not open via the GitHub fallback`);
+    assertEquals(calls.length, 0, "the GitHub issue read must not be attempted on a malformed lineage envelope");
+  }
+});
+
 test("#992 probeOnce epic: a non-2xx lineage read (401 unauthenticated / 5xx) FAILS CLOSED — no GitHub fallback", async () => {
   // 401 is the protected-deployment case: NANO_PR_WEBHOOK_SECRET set on the app but the probe read
   // unauthenticated. The blind read must not let a closed epic parent with unmerged slices open.

@@ -1105,9 +1105,19 @@ export async function probeOnce(
         if (resp.status < 200 || resp.status >= 300) {
           lineage = { ready: false, detail: `epic: lineage read HTTP ${resp.status} (not ready)` };
         } else {
-          observed = parseEpicLineage(parseJson(resp.body), key.planKey);
-          lineage = matchEpic(probe.match, observed);
-          lineageRead = true;
+          const body = parseJson(resp.body);
+          // Validate the envelope BEFORE enabling the #992 fallback: only a well-formed lineage list
+          // (`{ items: [] }`) proves the thread is genuinely absent/non-epic. A malformed 2xx (`{}`,
+          // no `items` array, unparseable) is as blind as a thrown/401 read — it cannot tell "no such
+          // thread" from "a known epic whose slices are unmerged" — so it must fail closed, never open
+          // the gate via GitHub issue closure.
+          if (isRecord(body) && Array.isArray(body.items)) {
+            observed = parseEpicLineage(body, key.planKey);
+            lineage = matchEpic(probe.match, observed);
+            lineageRead = true;
+          } else {
+            lineage = { ready: false, detail: "epic: lineage read malformed (no items envelope) (not ready)" };
+          }
         }
       } catch (e) {
         // Error CLASS only — never the raw message (it may carry URL/credential detail), matching the
