@@ -242,5 +242,5 @@ export default defineOperation("startFeature", async ({ body }, app) => {
       },
     };
   }
-  return { status: 202, body: { ...withProcessInstanceKey(result), baseBranch: normalizedBase } };
+  return { status: 202, body: withProcessInstanceKey(result) };
 });

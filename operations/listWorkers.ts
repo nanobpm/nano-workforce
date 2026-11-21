@@ -9,11 +9,19 @@ import { agentActivations } from "../app/agentActivationLedger.ts";
 import { currentPresenceRegistry } from "../app/agentic/families/presence.family.ts";
 import { crewResolver } from "../app/agentic/vocab/crew-vocab.ts";
 import { envVar } from "../app/version.ts";
-import { buildWorkersView, deployedJobTypes, type WorkersViewJob } from "../app/workersView.ts";
+import {
+  buildWorkersView,
+  collectCreatedJobs,
+  deployedJobTypes,
+  type FirstSeenEntry,
+  registeredWorkerTypes,
+  type WorkersViewJob,
+} from "../app/workersView.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 const JOB_TYPES = deployedJobTypes();
+const INTERNAL_TYPES = registeredWorkerTypes();
 
 export default defineOperation("listWorkers", async ({ req }, app) => {
   if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
@@ -23,22 +31,34 @@ export default defineOperation("listWorkers", async ({ req }, app) => {
   const includeInternal = (req.query.get("internal") ?? "").trim().toLowerCase() === "true";
   let jobs: WorkersViewJob[] = [];
   if (app.engine) {
+    const engine = app.engine;
     try {
-      jobs = (await app.engine.searchJobs({ state: "CREATED" })).map((j) => ({
-        type: j.type,
-        processInstanceKey: j.processInstanceKey,
-        ...(j.worker ? { worker: j.worker } : {}),
-      }));
+      jobs = await collectCreatedJobs(
+        async (filter) =>
+          (await engine.searchJobs(filter)).map((j) => ({
+            type: j.type,
+            processInstanceKey: j.processInstanceKey,
+            jobKey: j.jobKey,
+            ...(j.worker ? { worker: j.worker } : {}),
+          })),
+        JOB_TYPES,
+      );
     } catch (err) {
-      app.log.warn("listWorkers: engine job search failed — reporting workers without queue depth", { err: String(err) });
+      // Never report an unreadable queue as an empty one (zero depth, nothing starved).
+      app.log.warn("listWorkers: engine job search failed", { err: String(err) });
+      return { status: 502, body: { error: "engine job search failed — queue depth is unknown; retry, or check the engine" } };
     }
   }
-  const firstSeen = new Map<string, string>();
+  const firstSeen = new Map<string, FirstSeenEntry>();
   if (app.data) {
-    for (const row of await agentActivations(app.data).all()) firstSeen.set(row.id, row.first_seen_at);
+    for (const row of await agentActivations(app.data).all()) {
+      firstSeen.set(row.id, { jobKey: row.job_key, firstSeenAt: row.first_seen_at });
+    }
   }
   const resolver = crewResolver();
-  const workers = (currentPresenceRegistry()?.snapshot().workers ?? []).map((w) => ({
+  // No presence registry (agentic channel off) → supply is UNKNOWN (null), not "no workers".
+  const registry = currentPresenceRegistry();
+  const workers = registry === undefined ? null : registry.snapshot().workers.map((w) => ({
     instance: w.instance,
     identity: w.identity,
     ...(w.host !== undefined ? { host: w.host } : {}),
@@ -52,6 +72,6 @@ export default defineOperation("listWorkers", async ({ req }, app) => {
       ...(w.host !== undefined ? { host: w.host } : {}),
     }).tokens,
   }));
-  const body = buildWorkersView({ jobTypes: JOB_TYPES, jobs, workers, firstSeen, now: Date.now(), includeInternal });
+  const body = buildWorkersView({ jobTypes: JOB_TYPES, internalTypes: INTERNAL_TYPES, jobs, workers, firstSeen, now: Date.now(), includeInternal });
   return { status: 200, body };
 });

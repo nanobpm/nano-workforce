@@ -2277,7 +2277,7 @@ components:
           description: True iff a non-terminal feature run for this issue already existed and short-circuited the start (outcome `already-active`); no new instance was started.
         baseBranch:
           type: string
-          description: The admitted base branch the run targets — the repository default branch when the request omitted `baseBranch` (issue 989).
+          description: The base branch the run actually targets — for `already-active`, the live run's persisted base (not the request's); otherwise the admitted request base, the repository default branch when the request omitted `baseBranch` (issue 989).
     EpicSetStart:
       description: >-
         The set/batch admission request body (issue #292, slice S2). Submits a SET of epics plus the
@@ -3440,8 +3440,13 @@ components:
     WorkersView:
       type: object
       description: Per-job-type worker supply and demand (issue 989), in the list envelope.
-      required: [items, page, internal]
+      required: [items, page, internal, supplyVisible]
       properties:
+        supplyVisible:
+          type: boolean
+          description: >-
+            Whether worker supply is observable — the agentic presence channel is running. When false
+            (e.g. `NANO_AGENTIC=off`) per-type `workers` is empty (unknown, not absent) and `starved` is null; `inProgress` still shows leased jobs.
         page:
           $ref: "#/components/schemas/ListPage"
         items:
@@ -3475,10 +3480,13 @@ components:
         oldestWaitingAgeMs:
           type: integer
           nullable: true
-          description: Age in ms of the oldest waiting job, when the activation ledger tracks it; else null.
+          description: Age in ms of the oldest waiting job, when the activation ledger tracks that exact job (matching job key); else null.
         starved:
           type: boolean
-          description: True when jobs are waiting and no live worker can pick them up.
+          nullable: true
+          description: >-
+            True when jobs are waiting, none is leased, and no live worker visible on the presence channel
+            serves the type; null when worker supply is not observable (`supplyVisible` false).
     ConnectedWorker:
       type: object
       required: [workerId, host, transport, lastSeen, live, status, busy]
@@ -3570,7 +3578,7 @@ components:
     StagedProposalStep:
       type: object
       additionalProperties: false
-      required: [id, kind, type, target, dependsOn, gate, timeLimit, timeLimitDefaulted, onTimeout, converge, autoMerge]
+      required: [id, kind, type, target, dependsOn, gate, timeLimit, timeLimitDefaulted, onTimeout, converge, autoMerge, problem]
       properties:
         id:
           type: string
@@ -3583,7 +3591,7 @@ components:
         target:
           type: string
           nullable: true
-          description: The agent repository, the wait target (issue / PR / epic / URL …), the connector's PR, or a human step's form.
+          description: The agent repository, the wait target (issue / PR / epic / URL …), the connector's PR, or a human step's form — redacted for display (credentials and command probe targets are never echoed).
         dependsOn:
           type: array
           items:
@@ -3610,6 +3618,10 @@ components:
         autoMerge:
           type: boolean
           description: Agent steps drive the merge loop after convergence.
+        problem:
+          type: string
+          nullable: true
+          description: Why this step would fail at runtime (e.g. an invalid wait probe); null when none.
     StagedProposalList:
       description: "The live staged delivery-graph proposals awaiting dispatch (issue #511), newest first."
       type: object
@@ -5211,6 +5223,12 @@ paths:
                 $ref: "#/components/schemas/WorkersView"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "502":
+          description: The engine job search failed — queue depth is unknown, so no (misleadingly empty) view is returned.
           content:
             application/json:
               schema:

@@ -20,7 +20,8 @@ import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generate
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { isPlausibleBranchName } from "./baseBranch.ts";
-import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText, requiredEmitsByNodeId } from "./deliveryGraphCompiler.ts";
+import { redactConnectorValue } from "./deliveryGraph.ts";
+import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText, redactProbeTargetForDisplay, requiredEmitsByNodeId } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -689,6 +690,9 @@ export interface DeliveryStepSummary {
   converge: boolean;
   /** Agent steps: drive the merge loop after convergence. */
   autoMerge: boolean;
+  /** Why this step would fail at runtime (e.g. a wait probe `parseProbe` rejects), else null — a
+   *  read projection reports it rather than failing the whole review. */
+  problem: string | null;
 }
 
 /** Summarise each node of a delivery graph for pre-dispatch review (issue #989). Derives the time
@@ -709,6 +713,7 @@ export function summarizeDeliverySteps(graph: DeliveryGraph): DeliveryStepSummar
       onTimeout: null,
       converge: false,
       autoMerge: false,
+      problem: null,
     };
     switch (node.kind) {
       case "agent": {
@@ -717,7 +722,7 @@ export function summarizeDeliverySteps(graph: DeliveryGraph): DeliveryStepSummar
         return {
           ...base,
           type: node.agent.jobType,
-          target: node.agent.repository ?? null,
+          target: node.agent.repository !== undefined ? redactConnectorValue(node.agent.repository) : null,
           timeLimit: isoDuration(node.agent.timeout, DEFAULTS.nodeTimeout),
           timeLimitDefaulted: !declared,
           converge: policy !== null,
@@ -725,15 +730,22 @@ export function summarizeDeliverySteps(graph: DeliveryGraph): DeliveryStepSummar
         };
       }
       case "wait": {
-        const probe = parseProbe(node.wait, { allowLateBoundTarget: true });
+        // Display ONLY the redacted target (a command probe or URL may embed a secret) — the SAME
+        // redactor the compiler's preview uses. Staging validation does not run parseProbe, so a staged
+        // probe can still be invalid: report it on the step rather than failing the whole read.
+        const shown = { ...base, type: `wait:${redactConnectorValue(node.wait.kind)}`, target: redactProbeTargetForDisplay(node.wait), onTimeout: node.wait.onTimeout ?? "escalate" };
+        let probe: ReturnType<typeof parseProbe>;
+        try {
+          probe = parseProbe(node.wait, { allowLateBoundTarget: true });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { ...shown, timeLimit: DEFAULTS.probeTimeout, timeLimitDefaulted: true, problem: redactFreeText(msg) };
+        }
         const declared = typeof probe.poll?.timeoutMs === "number" && probe.poll.timeoutMs >= 1;
         return {
-          ...base,
-          type: `wait:${node.wait.kind}`,
-          target: node.wait.target.trim(),
+          ...shown,
           timeLimit: declared ? readinessTimeout(probe, {}) : DEFAULTS.probeTimeout,
           timeLimitDefaulted: !declared,
-          onTimeout: node.wait.onTimeout ?? "escalate",
         };
       }
       case "human":
@@ -743,8 +755,8 @@ export function summarizeDeliverySteps(graph: DeliveryGraph): DeliveryStepSummar
         const pr = node.connector.payload && typeof node.connector.payload === "object" && "pr" in node.connector.payload ? node.connector.payload.pr : undefined;
         return {
           ...base,
-          type: node.connector.target,
-          target: typeof pr === "string" ? pr.trim() : null,
+          type: redactConnectorValue(node.connector.target),
+          target: typeof pr === "string" ? redactConnectorValue(pr.trim()) : null,
           timeLimit: isoDuration(node.connector.timeout, DEFAULTS.nodeTimeout),
           timeLimitDefaulted: !declared,
         };

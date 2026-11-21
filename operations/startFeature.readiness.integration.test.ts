@@ -26,7 +26,7 @@ function githubFetch(repo: string) {
     const refPrefix = `/repos/${repo}/git/ref/heads/`;
     if (method === "GET" && path.startsWith(refPrefix)) {
       const branch = decodeURIComponent(path.slice(refPrefix.length));
-      if (branch !== "main") return Promise.resolve(new Response("Not Found", { status: 404 }));
+      if (branch !== "main" && branch !== "epic/integration") return Promise.resolve(new Response("Not Found", { status: 404 }));
       return Promise.resolve(json({ ref: `refs/heads/${branch}`, object: { sha: `${branch}-sha` } }));
     }
     return Promise.resolve(new Response(`unexpected ${method} ${path}`, { status: 500 }));
@@ -244,6 +244,20 @@ test("explicitly naming the default branch still needs confirmDefaultBase — ac
     const ok = (await startFeature(input({ issue: `${REPO}#990`, ...GATED_BASE }), app)) as any;
     assertEquals(ok.status, 202);
     assertEquals(ok.body.baseBranch, "main");
+  });
+});
+
+test("already-active echoes the LIVE run's persisted base, not the re-request's resolved default", async () => {
+  await withGithub(REPO, async () => {
+    const { app, started } = makeApp();
+    const first = (await startFeature(input({ issue: `${REPO}#991`, baseBranch: "epic/integration" }), app)) as any;
+    assertEquals(first.status, 202);
+    assertEquals(first.body.baseBranch, "epic/integration");
+    const again = (await startFeature(input({ issue: `${REPO}#991` }), app)) as any;
+    assertEquals(again.status, 202);
+    assertEquals(again.body.outcome, "already-active");
+    assertEquals(again.body.baseBranch, "epic/integration");
+    assertEquals(started.length, 1);
   });
 });
 
