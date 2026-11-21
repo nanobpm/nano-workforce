@@ -3423,10 +3423,10 @@ components:
           type: object
           additionalProperties: true
           # The per-kind variant union is the CLI/spec documentation (d8ctl `--help` lists the fields
-          # per kind); it is NOT inlined into the projected MCP tool body — 13 variants × ~850 B would
+          # per kind); it is COMPACTED (structure only, no prose) in the inline operation body — 13 described variants would
           # add ~11 KB to `completeUserTask` alone and blow the #715 surface byte budget
-          # (app/mcpToolSurface.ts). `scripts/inline-mcp-bodies.ts` honours this flag by dropping the
-          # `anyOf` from the projection; the union below stays the canonical contract.
+          # (app/mcpToolSurface.ts). `scripts/inline-mcp-bodies.ts` honours this flag by compacting the
+          # `anyOf` members in the operation body; the full prose union below stays the canonical contract.
           x-mcp-inline: false
           anyOf:
             - $ref: "#/components/schemas/EscalationAnswerConformanceEscalation"
@@ -7998,6 +7998,134 @@ paths:
                   description: The typed form variables the parked task's `.form` expects — one shape per escalation form, selected by the open escalation's `formKey` (its kind). `escalations list` returns each escalation's `expectedFields`, so the answer can be built from the listing. The completer validates the submitted variables against that form's contract.
                   type: object
                   additionalProperties: true
+                  anyOf:
+                    - title: conformance-escalation
+                      type: object
+                      properties:
+                        note:
+                          type: string
+                    - title: delivery-escalation
+                      type: object
+                      properties:
+                        decision:
+                          type: string
+                          enum:
+                            - continue
+                            - retry
+                        value:
+                          type: string
+                        escalationNote:
+                          type: string
+                    - title: delivery-human-ack
+                      type: object
+                      properties:
+                        prompt:
+                          type: string
+                        note:
+                          type: string
+                    - title: delivery-human-generic
+                      type: object
+                      properties:
+                        value:
+                          type: string
+                        note:
+                          type: string
+                    - title: delivery-human-publish
+                      type: object
+                      required:
+                        - resolvedArtifact
+                      properties:
+                        prompt:
+                          type: string
+                        resolvedArtifact:
+                          type: string
+                        note:
+                          type: string
+                    - title: empty-plan-escalation
+                      type: object
+                      required:
+                        - directive
+                      properties:
+                        directive:
+                          type: string
+                          enum:
+                            - accept
+                            - revise
+                        notes:
+                          type: string
+                    - title: feature-blocked
+                      type: object
+                      properties:
+                        note:
+                          type: string
+                    - title: feature-escalation
+                      type: object
+                      required:
+                        - resolution
+                      properties:
+                        resolution:
+                          type: string
+                          enum:
+                            - answer
+                            - abandon
+                        answer:
+                          type: string
+                    - title: merge-approval
+                      type: object
+                      required:
+                        - mergeDecision
+                      properties:
+                        mergeDecision:
+                          type: string
+                          enum:
+                            - approve
+                            - revise
+                        answer:
+                          type: string
+                    - title: plan-review-decision
+                      type: object
+                      required:
+                        - directive
+                      properties:
+                        directive:
+                          type: string
+                          enum:
+                            - proceed
+                            - revise
+                        notes:
+                          type: string
+                    - title: pr-escalation
+                      type: object
+                      required:
+                        - answer
+                      properties:
+                        answer:
+                          type: string
+                    - title: readiness-escalation
+                      type: object
+                      required:
+                        - resolution
+                      properties:
+                        resolution:
+                          type: string
+                          enum:
+                            - acknowledge
+                            - abandon
+                        answer:
+                          type: string
+                    - title: trial-merge-decision
+                      type: object
+                      required:
+                        - action
+                      properties:
+                        action:
+                          type: string
+                          enum:
+                            - proceed
+                            - rebase
+                            - abandon
+                        notes:
+                          type: string
                 operator:
                   type: string
                   description: Optional operator handle recorded in the attribution ledger; defaults to "operator".
