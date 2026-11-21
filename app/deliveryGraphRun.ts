@@ -29,6 +29,7 @@ import { isUniqueConstraintFence } from "./dbFence.ts";
 import { redactFreeText } from "./deliveryGraphCompiler.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement, stripDeliveryEscalationTwinSuffix } from "./deliveryHuman.ts";
 import { derivedTrackingTable } from "./instanceTracking.ts";
+import { RUN_TERMINAL_STATUS } from "./runTerminal.ts";
 
 const now = () => new Date().toISOString();
 
@@ -104,6 +105,8 @@ export const DELIVERY_PHASE = {
   RUNNING: "Running",
   COMPLETED: "Completed",
   FAILED: "Failed",
+  /** Terminated in the engine — neutral, never a failure (issue #994; cancel reads `cancelled`). */
+  TERMINATED: "Terminated",
 } as const;
 
 /** The `delivery_graph_runs` aggregate accessor — the durable run store keyed by `run_key`. */
@@ -467,7 +470,8 @@ export function parseHumanLabels(raw: string | null | undefined): Record<string,
 /** The derived (status, phase, parked-node) projection for a RUNNING run, from engine truth. PURE —
  * the poller supplies the instance state + open user tasks, this maps them to the stored projection:
  *   • COMPLETED  → `done`   (instanceTracking does NOT reconcile COMPLETED — this poller owns it).
- *   • TERMINATED → `failed` (a safety net; the instanceTracking `onTerminated` edge also flips it).
+ *   • TERMINATED → `abandoned` (a safety net mirroring the canonical out-of-band-terminate edge,
+ *     app/runTerminal.ts — a termination is NOT a failure; an operator cancel derives `cancelled`).
  *   • ACTIVE parked on a human node → `running`, phase `Parked on human node: <label>`.
  *   • ACTIVE otherwise (watching a wait/agent node) → `running`, phase `Running`. */
 export interface DeliveryPhaseProjection {
@@ -482,7 +486,9 @@ export function deriveDeliveryPhase(
   humanLabels: Record<string, string>,
 ): DeliveryPhaseProjection {
   if (state === "COMPLETED") return { status: "done", phase: DELIVERY_PHASE.COMPLETED, phase_node_id: null };
-  if (state === "TERMINATED") return { status: "failed", phase: DELIVERY_PHASE.FAILED, phase_node_id: null };
+  if (state === "TERMINATED") {
+    return { status: RUN_TERMINAL_STATUS.outOfBandTerminate, phase: DELIVERY_PHASE.TERMINATED, phase_node_id: null };
+  }
   const parkedOn = openUserTasks
     .map((t) => t.elementId)
     .filter((id): id is string => typeof id === "string" && isDeliveryHumanElement(id))
