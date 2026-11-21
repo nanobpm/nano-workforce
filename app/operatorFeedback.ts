@@ -226,3 +226,8 @@ export function renderOperatorFeedbackBrief(items: OperatorFeedbackItem[]): stri
   }
   return lines.join("\n");
 }
+
+/** The ONE list of points at which a running implementation agent re-reads post-start issue comments
+ *  (issue #986), so a course correction lands before the PR exists. `resources/prompts/feature.md`
+ *  renders exactly these ids, in this order (guarded by app/operatorFeedback.test.ts). */
+export const IMPLEMENT_FEEDBACK_CHECKPOINTS = ["after-planning", "before-first-push", "before-pr-open"] as const;

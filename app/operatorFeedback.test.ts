@@ -8,6 +8,8 @@ import { type IssueComment, listIssueComments } from "./issuePrLink.ts";
 import {
   CLAIM_COMMENT_PREFIX,
   deriveOperatorFeedback,
+  feedbackAckMarker,
+  IMPLEMENT_FEEDBACK_CHECKPOINTS,
   issueReadCommand,
   parseClosingIssueNumbers,
   renderOperatorFeedbackBrief,
@@ -178,4 +180,21 @@ test("runStartOnIssue ignores claim-prefixed comments from untrusted authors and
   assertEquals(runStartOnIssue([c(7, "github-actions[bot]", "MEMBER", late, body)], fallback), fallback);
   // A trusted claim still sets the cutoff, even alongside an untrusted one.
   assertEquals(runStartOnIssue([c(5, "outsider", "NONE", START, body), c(1, "jwulf", "OWNER", late, body)], fallback), late);
+});
+
+// Issue #986: a running implementation agent re-reads the issue at fixed checkpoints, before the PR.
+test("feature prompt renders exactly the canonical implement-feedback checkpoints, with the ack marker", () => {
+  const md = readFileSync("resources/prompts/feature.md", "utf8");
+  const block = md.slice(md.indexOf("<!-- checkpoints:begin -->"), md.indexOf("<!-- checkpoints:end -->"));
+  const ids = [...block.matchAll(/\*\*([a-z-]+)\*\*/g)].map((m) => m[1]);
+  assertEquals(ids, [...IMPLEMENT_FEEDBACK_CHECKPOINTS]);
+  assertStringIncludes(md, feedbackAckMarker(0).replace("0", "<id>"));
+  assertStringIncludes(md, "author_association");
+});
+
+test("a comment posted mid-implement and acked on the issue before the PR opens does not gate", () => {
+  const mid = c(60, "jwulf", "OWNER", "2026-11-21T10:30:00Z", "stop — X already exists, reuse it");
+  assertEquals(derive([mid]).map((i) => i.id), [60]);
+  const ack = c(61, "jwulf", "OWNER", "2026-11-21T10:40:00Z", `${feedbackAckMarker(60)}\nreused X`);
+  assertEquals(derive([mid, ack]), []);
 });

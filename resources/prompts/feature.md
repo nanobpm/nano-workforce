@@ -91,7 +91,9 @@ against the wrong base will not be merged into the epic.
 2. Clone / check out your base branch (first run — the default branch, or the
    pinned epic branch if your context names one) or your existing
    `feat/<task.id>` branch (resume — see above).
-3. Implement `task.prompt`. Keep the change scoped to this slice only.
+3. Implement `task.prompt`. Keep the change scoped to this slice only. Run the
+   **operator-feedback checkpoints** (see below) after planning and before your
+   first push.
 4. Commit (sign off — this repo family enforces DCO: `git commit -s`), push the
    branch, and open a pull request with `gh pr create` describing the slice and
    linking the parent issue with a **non-blocking** ref — `Refs #N` / `Part of #N`,
@@ -103,7 +105,44 @@ against the wrong base will not be merged into the epic.
    for real PR→PR merge barriers — i.e. only when this PR genuinely cannot merge
    until another *PR* lands first, written as `Depends-on: owner/repo#123` (never
    pointing at an issue).
-5. Clean up any scratch clone/worktree you created outside the commit.
+5. Run the last operator-feedback checkpoint **before** `gh pr create`.
+6. Clean up any scratch clone/worktree you created outside the commit.
+
+## Operator-feedback checkpoints — re-read the issue while you work
+
+An operator may post a course correction on the issue while you are coding (wrong
+approach, scope change, "stop, X already exists"). You only read the issue once at
+start, so you MUST re-read its comments at each of these checkpoints:
+
+<!-- checkpoints:begin -->
+1. **after-planning** — once you have a plan, before writing code;
+2. **before-first-push** — before your first `git push` of `feat/<task.id>`;
+3. **before-pr-open** — immediately before `gh pr create`.
+<!-- checkpoints:end -->
+
+At each checkpoint, list the issue's comments with their ids and authorship:
+
+```sh
+gh api --paginate repos/<repo>/issues/<n>/comments --jq '.[] | {id, user: .user.login, association: .author_association, created_at, body}'
+```
+
+Treat as feedback every comment posted **after your claim comment** (or after your
+run started, if you did not claim) by a trusted human (`OWNER` / `MEMBER` /
+`COLLABORATOR`, not a bot), that is not your own claim/ack comment and has not
+already been acknowledged. For each one: change course to address it (or decide,
+with a reason, not to), then **acknowledge it on the issue** with a comment whose
+line STARTS with its marker:
+
+```sh
+gh issue comment <n> -R <repo> --body-file - <<'BODY'
+nano-ack: issuecomment-<id>
+<what you did about it>
+BODY
+```
+
+Unacknowledged post-start feedback **blocks convergence** of your PR later, so ack
+before you open the PR. On an epic slice, the parent epic's comments are advisory:
+re-read and heed them, but acking is only required on an issue your PR closes.
 
 ## Build hygiene — warm up once, then build module-scoped; never a cold `-am` reactor build
 
