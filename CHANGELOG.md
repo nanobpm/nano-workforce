@@ -1,3 +1,9 @@
+## [0.216.1](https://github.com/nanobpm/nano-workforce/compare/v0.216.0...v0.216.1) (2026-11-21)
+
+### Bug Fixes
+
+* **converge:** stop false husk escalations (IDLE agents, mid-round merges, red CI, cancel) ([#990](https://github.com/nanobpm/nano-workforce/issues/990)) ([0f78a8d](https://github.com/nanobpm/nano-workforce/commit/0f78a8d87a21bde4c1d41396ac478cdcdbcc8135)), closes [c8ctl-plugin-nano#318](https://github.com/nanobpm/c8ctl-plugin-nano/issues/318) [#988](https://github.com/nanobpm/nano-workforce/issues/988)
+
 ## [0.216.0](https://github.com/nanobpm/nano-workforce/compare/v0.215.0...v0.216.0) (2026-11-21)
 
 ### Features
