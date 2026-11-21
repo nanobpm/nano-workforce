@@ -125,9 +125,32 @@ export async function abandonStatusForToken(
   return { prKey: row.pr_key, status, abandoned: isAbandoned(status) || ownerTerminated };
 }
 
+/** How an agent-facing URL behaves when the worker cannot reach the app (issue #981). The app's
+ * address is one global string (`NANO_WORKFORCE_BASE_URL`) baked into job variables, but the engine
+ * endpoint is per-worker — so an off-LAN worker can take a job whose URLs it cannot reach. Every URL
+ * handed to an agent must therefore be either DISPLAY-only (never called by the agent) or ADVISORY
+ * with a defined unreachable behaviour: no agent step may need an app URL to succeed. */
+export type AgentUrlReachability = "display-only" | "advisory";
+
+/** The ONE registry of every app URL handed to an agent (via a process variable or a brief), and its
+ * reachability class. `app/agentUrls.test.ts` asserts every `*Url`/`*UrlBase` variable seeded for
+ * an agent is declared here and that each advisory brief states its unreachable behaviour. */
+export const AGENT_FACING_URLS: Readonly<Record<string, AgentUrlReachability>> = {
+  abandonUrl: "advisory", // cancel check — fence-check + `gh pr view` are the primary signal
+  blackboardUrl: "advisory", // sibling coordination — off-LAN agents just lose it
+  transcriptUrlBase: "display-only", // linked from PR comments / UI, never fetched by the agent
+  proposalReviewUrl: "display-only", // human review link for a delivery-graph proposal
+};
+
 /** The instruction block appended (verbatim, via `appendPrompt`) to each side-effecting agent's
  * prompt. It owns its own leading rule (the FEEL that injects it concatenates with no separator),
- * and carries the concrete, curl-able URL for THIS run plus the abort contract. */
+ * and carries the concrete, curl-able URL for THIS run plus the abort contract.
+ *
+ * Issue #981: the PRIMARY cancel signal is the worker's lease fence (`fence-check` / `$NANO_FENCE`,
+ * c8ctl-plugin-nano#320), which goes through the worker's own authenticated engine connection, plus
+ * `gh pr view` for a PR closed on GitHub. The app URL is an extra check: honoured when it answers,
+ * ignored when it cannot connect. Only a worker WITHOUT the fence falls back to the fail-closed URL
+ * check, so LAN workers on older plugins behave exactly as before. */
 export function renderAbandonBrief(url: string): string {
   return `
 
@@ -140,32 +163,51 @@ gone and your eventual job completion will fail — so any commit, PR, or review
 an **orphaned side effect** on a run nobody is waiting for.
 
 **Before every irreversible action — before you \`git push\`, open or update a PR, request a review,
-or merge — check whether the run is still wanted:**
+or merge — check whether the run is still wanted**, as late as possible (a cancel can land at any
+moment, so re-check right before the push):
 
-    curl -fsS "${url}"
+1. **The worker fence (primary).** If the \`fence-check\` command is available (\`command -v
+   fence-check\`, else \`node "$NANO_FENCE_CHECK"\` when that variable is set, else
+   \`c8 nano fence-check\`), run it. It re-checks your job through the worker's own engine
+   connection:
+   - exit **0** → the job is still held; continue to step 2.
+   - exit **1** → the job is lost (the run was cancelled): **abort**.
+   - exit **75** (or any other code) → unknown/transient; fall back to step 3 as a fail-closed check.
 
-On success it returns \`{ "prKey": "...", "status": "...", "abandoned": true|false }\`. The \`-f\` is
-important: it makes \`curl\` **exit non-zero on an HTTP error** (e.g. a 404 when the run has been torn
-down), instead of silently printing an error body with exit 0.
+   If no \`fence-check\` is available but \`$NANO_FENCE\` is set, the fence is still in use: **abort** if
+   the file \`$NANO_FENCE\` exists, otherwise treat the job as held.
+2. **The PR (when you have one).** Run \`gh pr view <number> --repo <repo> --json state\` and
+   **abort** if it reports \`CLOSED\` (a PR closed on GitHub without merging is abandoned even though
+   the engine run is still alive).
+3. **The app status URL:**
 
-- **Abort** — make no commits, push nothing, open no PR, request no review — if EITHER the command
-  **fails** (non-zero exit: the run was cancelled/torn down or the endpoint is unreachable) OR the
-  JSON reports \`"abandoned": true\`. Leave the working tree as-is and exit. A failure when you later
-  try to complete the job is EXPECTED after a cancel — do not treat it as an error to retry.
-- **Proceed** only when the command **succeeds** AND reports \`"abandoned": false\` — and re-check
-  right before the push, since a cancel can land at any moment. Checking as late as possible keeps
-  the window tiny.
+       curl -sS -o /tmp/nwf-abandon.json -w '%{http_code}' "${url}"
 
-**Run this check yourself, inline, with your own shell tool.** Do **not** delegate it to a
+   It returns \`{ "prKey": "...", "status": "...", "abandoned": true|false }\`.
+   - It **answers** with \`"abandoned": true\`, or with HTTP **404** (token unknown: the run was torn
+     down) → **abort**.
+   - It answers with \`"abandoned": false\` → proceed.
+   - It **cannot connect** (DNS failure, connection refused, timeout — e.g. this worker is off the
+     app's LAN) or returns another error:
+     - **with the fence in use** (\`fence-check\` available or \`$NANO_FENCE\` set) and the fence said
+       *held* → **proceed**. The URL is only an extra check; the fence and \`gh\` are authoritative.
+     - **without the fence** (an older worker, neither available) or when \`fence-check\` was
+       inconclusive → **abort** (fail closed, as before).
+
+To **abort**: make no commits, push nothing, open no PR, request no review. Leave the working tree
+as-is and exit. A failure when you later try to complete the job is EXPECTED after a cancel — do not
+treat it as an error to retry.
+
+**Run these checks yourself, inline, with your own shell tool.** Do **not** delegate it to a
 sub-agent, helper, or a separate "run this command" task: a sub-agent may have **no shell**, in which
 case it cannot run \`curl\`, produces no output, and the worker's idle timeout will kill the round.
-One inline \`curl\` in your own turn is all this needs.
+A few inline commands in your own turn are all this needs.
 
 **Having no way to run a shell command at all is NOT a failed check — SKIP this check and proceed.**
-The "abort on non-zero exit" rule above is about \`curl\` *running and reporting* a torn-down run; it
-does **not** mean "abort because you have no shell to run \`curl\` with". This check is a best-effort
-optimisation, not a hard gate: the harness that runs your job also fences a cancelled run's
-completion, so a skipped check only widens a tiny race — it does not by itself create an orphaned
-run. Never stall, thrash, hang, or fail the round trying to run \`curl\` through a tool you do not
-have; a skipped check is strictly better than a hung one.`;
+The abort rules above are about the checks *running and reporting* a torn-down run; they do **not**
+mean "abort because you have no shell to run them with". This check is a best-effort optimisation,
+not a hard gate: the harness that runs your job also fences a cancelled run's completion, so a
+skipped check only widens a tiny race — it does not by itself create an orphaned run.
+Never stall, thrash, hang, or fail the round trying to run \`curl\` through a tool you do not have;
+a skipped check is strictly better than a hung one.`;
 }

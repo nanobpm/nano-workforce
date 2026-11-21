@@ -78,9 +78,25 @@ test("renderAbandonBrief embeds the concrete URL and the stop contract", () => {
   assertEquals(brief.includes("https://host/app/api/hooks/abandon?token=tok"), true);
   assertEquals(brief.includes("abandoned"), true);
   assertEquals(brief.includes("Abort"), true);
-  // Must use `curl -f` so a 404 (torn-down run) fails the command instead of exiting 0 with an
-  // error body the agent would parse as "not abandoned".
-  assertEquals(brief.includes("curl -fsS"), true);
+  // A 404 (torn-down run) must still abort: the brief captures the HTTP status explicitly.
+  assertEquals(brief.includes("%{http_code}"), true);
+  assertEquals(/HTTP \*\*404\*\*[^\n]*\n?[^\n]*\*\*abort\*\*/.test(brief), true, "a 404 still aborts");
+});
+
+test("renderAbandonBrief makes the worker fence primary and the URL non-gating (issue #981)", () => {
+  const brief = renderAbandonBrief("https://host/app/api/hooks/abandon?token=tok");
+  // Fence first, via the plugin's contract (c8ctl-plugin-nano#320): fence-check exit codes + $NANO_FENCE.
+  assertEquals(brief.indexOf("fence-check") < brief.indexOf("https://host/app/api/hooks/abandon"), true);
+  assertEquals(/exit \*\*1\*\*[^\n]*\*\*abort\*\*/.test(brief), true, "lost lease aborts");
+  assertEquals(brief.includes("exit **75**"), true, "transient fence result is defined");
+  assertEquals(brief.includes("$NANO_FENCE"), true);
+  // A PR closed on GitHub doesn't cancel the engine run, so gh is checked too.
+  assertEquals(/gh pr view <number>[^\n]*--json state/.test(brief), true);
+  // Unreachable URL + fence held -> proceed; no fence (older worker) -> fail closed as before.
+  assertEquals(/cannot connect[\s\S]*with the fence in use[\s\S]*\*\*proceed\*\*/.test(brief), true);
+  assertEquals(/without the fence[\s\S]*\*\*abort\*\* \(fail closed/.test(brief), true);
+  // The old fail-closed-on-any-curl-failure gate must be gone.
+  assertEquals(brief.includes("curl -fsS"), false);
 });
 
 test("renderAbandonBrief forbids delegating the check to a sub-agent (issue #678)", () => {

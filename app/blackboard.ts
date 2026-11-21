@@ -129,7 +129,9 @@ export function renderCoordinationBrief(url: string): string {
 
 You are one of several agents implementing tasks for this epic in parallel. A shared, per-epic
 **blackboard** lets you coordinate with your siblings without a human relay. It is ADVISORY: read it
-for heads-ups, and post when your work affects others. It never blocks you.
+for heads-ups, and post when your work affects others. It never blocks you. **If the endpoint is
+unreachable** from your worker (DNS failure, connection refused, timeout — e.g. an off-LAN worker),
+carry on without it: you only lose sibling coordination; never fail, retry-loop, or escalate over it.
 
 Your blackboard endpoint (already scoped to this epic — no auth header needed):
 

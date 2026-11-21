@@ -34,8 +34,9 @@ the change catches these in minutes. That reader is you.
 
 A human can **cancel** this run while you work. An **"Abort if this run was
 cancelled"** protocol with a status URL is appended below. You produce no side
-effects, so a cancel is cheap, but still **stop immediately** if the status check
-fails or reports `"abandoned": true`, and do not write a result.
+effects, so a cancel is cheap, but still **stop immediately** if the check below
+reports the run cancelled (an unreachable status URL alone is not a cancel when the worker fence
+says held), and do not write a result.
 
 ## Workspace
 
