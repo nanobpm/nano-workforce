@@ -22,6 +22,7 @@ import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { isPlausibleBranchName } from "./baseBranch.ts";
 import { redactConnectorValue } from "./deliveryGraph.ts";
 import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText, redactProbeTargetForDisplay, requiredEmitsByNodeId } from "./deliveryGraphCompiler.ts";
+import { GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -749,7 +750,7 @@ export function summarizeDeliverySteps(graph: DeliveryGraph): DeliveryStepSummar
         };
       }
       case "human":
-        return { ...base, type: "human", target: node.human?.formKey ?? null, timeLimit: DEFAULTS.escalationSlaTimeout, timeLimitDefaulted: true };
+        return { ...base, type: "human", target: resolveHumanForm(node).formKey ?? GENERIC_HUMAN_FORM, timeLimit: DEFAULTS.escalationSlaTimeout, timeLimitDefaulted: true };
       case "connector": {
         const declared = typeof node.connector.timeout === "string" && node.connector.timeout.trim() !== "";
         const pr = node.connector.payload && typeof node.connector.payload === "object" && "pr" in node.connector.payload ? node.connector.payload.pr : undefined;

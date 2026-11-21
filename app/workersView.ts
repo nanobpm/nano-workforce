@@ -144,9 +144,7 @@ export function buildWorkersView(input: WorkersViewInput): WorkersView {
         const row = input.firstSeen.get(`${j.processInstanceKey}:${jobType}`);
         return row && j.jobKey && row.jobKey === j.jobKey ? row.firstSeenAt : undefined;
       })
-      .filter((iso): iso is string => typeof iso === "string")
-      .map((iso) => input.now - Date.parse(iso))
-      .filter((ms) => Number.isFinite(ms));
+      .map((iso) => (typeof iso === "string" ? input.now - Date.parse(iso) : Number.NaN));
     const liveWorkers = workers.filter((w) => w.live).length;
     return {
       jobType,
@@ -154,14 +152,17 @@ export function buildWorkersView(input: WorkersViewInput): WorkersView {
       liveWorkers,
       queueDepth: waiting.length,
       inProgress: jobs.length - waiting.length,
-      oldestWaitingAgeMs: ages.length > 0 ? Math.max(0, ...ages) : null,
+            // Unknown when ANY waiting job's age is untracked: a partial max is only a lower bound.
+      oldestWaitingAgeMs: ages.length > 0 && ages.every((ms) => Number.isFinite(ms)) ? Math.max(0, ...ages) : null,
       // Starvation is only asserted when worker supply is visible: with the presence channel off it is
       // unknown (null). A type some worker is actively leasing is being served, so it is not starved.
       starved: supplyVisible ? waiting.length > 0 && liveWorkers === 0 && jobs.length === waiting.length : null,
     };
   });
   // Internal `pr.*` workers run in THIS process: they are live exactly while the app serves this request.
-  const internalTypes = sorted.filter((t) => !isExternalJobType(t, internalSet));
+  // Derived from the REGISTERED set (plus any observed internal type), independent of current demand,
+  // so an idle handler used only by compiled graphs still appears.
+  const internalTypes = [...new Set([...internalSet, ...sorted.filter((t) => !isExternalJobType(t, internalSet))])].sort();
   const internal: WorkersView["internal"] = {
     total: internalTypes.length,
     live: internalTypes.length,

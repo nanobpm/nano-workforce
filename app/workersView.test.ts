@@ -171,3 +171,33 @@ test("waiting jobs with no live worker are starved; internal=true lists internal
   assert.equal(custom?.workers[0]?.status, "stale");
   assert.deepEqual(view.internal.workers, [{ jobType: "pr.finalize", status: "live", queueDepth: 1, inProgress: 0 }]);
 });
+
+test("age: unknown (null) when ANY waiting job is untracked — a partial max is only a lower bound", () => {
+  const view = buildWorkersView({
+    jobTypes: ["senior:feature"],
+    internalTypes: INTERNAL,
+    jobs: [
+      { type: "senior:feature", processInstanceKey: "1", jobKey: "11" },
+      { type: "senior:feature", processInstanceKey: "2", jobKey: "22" },
+    ],
+    workers: [],
+    firstSeen: new Map([["1:senior:feature", { jobKey: "11", firstSeenAt: new Date(NOW - 60_000).toISOString() }]]),
+    now: NOW,
+    includeInternal: false,
+  });
+  assert.equal(view.items[0]?.oldestWaitingAgeMs, null);
+});
+
+test("internal inventory lists every REGISTERED handler, even idle and undeployed", () => {
+  const view = buildWorkersView({
+    jobTypes: [],
+    internalTypes: ["pr.finalize", "pr.delivery-connector"],
+    jobs: [],
+    workers: [],
+    firstSeen: new Map(),
+    now: NOW,
+    includeInternal: true,
+  });
+  assert.equal(view.internal.total, 2);
+  assert.deepEqual(view.internal.workers?.map((w) => w.jobType), ["pr.delivery-connector", "pr.finalize"]);
+});

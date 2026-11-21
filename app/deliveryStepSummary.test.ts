@@ -42,3 +42,9 @@ test("a staged probe parseProbe rejects is reported on the step, not thrown", ()
 test("a valid step reports no problem", () => {
   assert.equal(one({ nodes: [{ id: "w", kind: "wait", wait: { kind: "epic", target: "owner/repo#1" } }] })?.problem, null);
 });
+
+test("a human step without a formKey reports the canonically resolved form, not null", () => {
+  const s = one({ nodes: [{ id: "h", kind: "human" }] });
+  assert.equal(typeof s?.target, "string");
+  assert.notEqual(s?.target, "");
+});
