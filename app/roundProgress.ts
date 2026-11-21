@@ -218,3 +218,82 @@ export function decideProgress(
     question: noProgressQuestion(round, reason, reason === "husk" && retries >= maxHuskRetries),
   };
 }
+
+// ── Agent-instance "ran" vocabulary (issue #988) ──────────────────────────────────────────────────
+// The husk split asks one question of the COMPLETING `review-round` agent-instance: did the agent
+// actually run to the end of its turn? The answer depends on the agent-instance lifecycle the WORKER
+// plugin (c8ctl-plugin-nano) drives, which changed under us: since jwulf/c8ctl-plugin-nano#318 a
+// finished job leaves its instance in `IDLE` ("engine completes on process end") instead of sending
+// `COMPLETED`. Reading only terminal statuses therefore classified EVERY no-commit round as a husk.
+// This is the ONE canonical vocabulary; `agentInstanceRanStatuses.test.ts` pins it against what the
+// plugin emits so the next lifecycle change fails CI instead of escalating in production.
+
+/** Statuses meaning the agent run SETTLED — terminal states, plus `IDLE` (plugin #318: the agent
+ * finished its turn and is parked until the engine completes it on process end). */
+export const AGENT_INSTANCE_SETTLED_STATUSES: readonly string[] = [
+  "COMPLETED",
+  "COMPLETE",
+  "DONE",
+  "FINISHED",
+  "FAILED",
+  "TERMINATED",
+  "IDLE",
+];
+
+/** Statuses meaning the agent is still mid-run. A husked instance is stuck in one of these with null
+ * dates (jwulf/c8ctl-plugin-nano#230) — they never count as "the agent ran". */
+export const AGENT_INSTANCE_IN_FLIGHT_STATUSES: readonly string[] = ["INITIALIZING", "THINKING", "TOOL_CALLING"];
+
+/** The projection of an AgentInstance the classifier reads (structurally a subset of urban's
+ * `AgentInstanceSummary`). */
+export interface AgentInstanceRunView {
+  readonly status?: string | null;
+  readonly completionDate?: string | null;
+  readonly metrics?: { readonly modelCalls?: number } | null;
+}
+
+/** Whether the COMPLETING attempt's agent-instance shows the agent RAN (→ `no-advance`, a human
+ * question) rather than husked (→ bounded auto-retry). True when it carries a `completionDate`, or
+ * a settled status. `IDLE` is only "ran" when the instance did real work: when the engine reports
+ * metrics it must show at least one model call (an IDLE instance that never called the model never
+ * took a turn — still a husk); absent metrics, the settled job that triggered this check is the
+ * corroboration. */
+export function agentInstanceRan(s: AgentInstanceRunView): boolean {
+  if (typeof s.completionDate === "string" && s.completionDate.trim() !== "") return true;
+  const status = (s.status ?? "").trim().toUpperCase();
+  if (!AGENT_INSTANCE_SETTLED_STATUSES.includes(status)) return false;
+  if (status === "IDLE") {
+    const calls = s.metrics?.modelCalls;
+    if (typeof calls === "number" && calls <= 0) return false;
+  }
+  return true;
+}
+
+// ── Red CI on a clean review (issue #988) ─────────────────────────────────────────────────────────
+/** How many times a convergence loop auto-routes a clean-review/red-CI round to `senior:fix-ci`
+ * before falling back to the human escalation. */
+export const CONVERGE_CI_FIX_MAX = 2;
+
+/** The CI picture {@link redCiRoute} reads (a structural subset of `PrState`). */
+export interface CiView {
+  readonly failingChecks: number;
+  readonly failingCheckNames: readonly string[];
+  readonly unresolvedThreads: number;
+}
+
+/** Whether a NO-ADVANCE round should route to `senior:fix-ci` instead of escalating: the review has
+ * nothing left to address (zero unresolved threads, positively read) but at least one CI check is
+ * failing, and the fix budget is not spent. `failingChecksList` is the `\n`-joined names (message /
+ * envelope payloads are scalar-only) appended to the fix-ci prompt. An unreadable state, an unknown
+ * thread count, or an unknown check count never routes — the human escalation stays the fallback. */
+export function redCiRoute(
+  state: CiView | null,
+  ciFixRound: number | null | undefined,
+  max: number = CONVERGE_CI_FIX_MAX,
+): { route: boolean; failingChecksList: string } {
+  const used = typeof ciFixRound === "number" && Number.isFinite(ciFixRound) && ciFixRound > 0 ? Math.floor(ciFixRound) : 0;
+  if (!state || used >= max) return { route: false, failingChecksList: "" };
+  if (state.unresolvedThreads !== 0) return { route: false, failingChecksList: "" };
+  if (!(state.failingChecks > 0)) return { route: false, failingChecksList: "" };
+  return { route: true, failingChecksList: state.failingCheckNames.join("\n") };
+}

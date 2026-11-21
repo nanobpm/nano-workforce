@@ -40,7 +40,7 @@
 import type { AppApi } from "@nanobpm/urban";
 import { cancelInstanceReconciling } from "@nanobpm/urban";
 import { engineBackedBindings, resolveTrackedInstance } from "../app/instanceTracking.ts";
-import { recordOperatorCancelProvenance } from "../app/service.ts";
+import { closeCancelledRunEscalations, recordOperatorCancelProvenance } from "../app/service.ts";
 import { envVar } from "../app/version.ts";
 import type { CancelInstanceResponse } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -146,6 +146,13 @@ export async function cancelTrackedRun(
       await recordOperatorCancelProvenance(app.data, processInstanceKey, door);
     } catch (err) {
       app.log.warn("cancelInstance: could not record termination reason", { processInstanceKey, error: String(err) });
+    }
+    // A cancelled run can never consume an answer: retire its open escalations so they drop out of the
+    // inbox / `escalations list` immediately instead of lingering until an `ack pr` (issue #988).
+    try {
+      await closeCancelledRunEscalations(app.data, processInstanceKey);
+    } catch (err) {
+      app.log.warn("cancelInstance: could not close the run's open escalations", { processInstanceKey, error: String(err) });
     }
   }
 

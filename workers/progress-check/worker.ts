@@ -17,10 +17,18 @@
 // transient GitHub hiccup can never fabricate a no-progress escalation.
 import type { AgentInstanceSummary, AppApi, AppJobHandler } from "@nanobpm/urban";
 import { type HeadReader, makeDefaultReadHead } from "../../app/currentHead.ts";
-import { compareCommits, fetchBranchHead, fetchPrHead, updateBranchRef } from "../../app/github.ts";
+import {
+  classifyPrLiveness,
+  compareCommits,
+  fetchBranchHead,
+  fetchPrHead,
+  fetchPrState,
+  type PrState,
+  updateBranchRef,
+} from "../../app/github.ts";
 import { CHURN_WINDOW, type ChurnRound, detectChurn } from "../../app/roundChurn.ts";
-import { decideProgress, isAddressedStatus } from "../../app/roundProgress.ts";
-import { parsePr } from "../../app/service.ts";
+import { agentInstanceRan, CONVERGE_CI_FIX_MAX, decideProgress, isAddressedStatus, redCiRoute } from "../../app/roundProgress.ts";
+import { abandonClosedPr, parsePr } from "../../app/service.ts";
 import { WorldStore } from "../../app/world/index.ts";
 import { attemptNoAdvanceSelfHeal, type SelfHealResult } from "../../app/world/selfHeal.ts";
 import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io.d.ts";
@@ -116,14 +124,6 @@ const defaultSelfHeal: SelfHealFn = (app, repo, prNumber, prKey, currentHead, ro
     processKey,
   );
 };
-
-/** An agent-instance is "durable work" for husk purposes once it has reached a terminal state — it
- * carries a `completionDate`, or a terminal lifecycle status. A husked instance never closes (it is
- * stuck `THINKING` with null dates — jwulf/c8ctl-plugin-nano#230), so it is NOT counted. */
-function isTerminalInstance(s: AgentInstanceSummary): boolean {
-  if (typeof s.completionDate === "string" && s.completionDate.trim() !== "") return true;
-  return /^(completed|complete|done|finished|failed|terminated)$/i.test(s.status ?? "");
-}
 
 /** Parse a 64-bit engine key string to a `BigInt` for monotonic ordering; an absent/blank/malformed
  * key sorts oldest (`0n`). Engine keys are 64-bit, so a numeric `parseInt`/`Number` compare would
@@ -230,14 +230,22 @@ function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
       if (newestKey <= prior) {
         return { work: false, consumedKey: priorWatermark ?? null };
       }
-      // A fresh attempt registered: classify it (terminal ⇒ no-advance, non-terminal ⇒ husk) and
+      // A fresh attempt registered: classify it (ran — terminal or IDLE, #988 — ⇒ no-advance, in-flight ⇒ husk) and
       // consume it so the next round can distinguish the attempt AFTER it from this one.
-      return { work: isTerminalInstance(newest), consumedKey: newestKey.toString() };
+      return { work: agentInstanceRan(newest), consumedKey: newestKey.toString() };
     } catch {
       return { work: null };
     }
   };
 }
+
+/** Reads a PR's live GitHub state (#988): its lifecycle (merged / closed mid-round) and its CI +
+ * unresolved-thread picture (a clean review blocked only by red CI routes to fix-ci). Injectable so
+ * tests never touch GitHub; a `null` (unreadable) state fails OPEN to the pre-#988 behaviour. */
+export type PrStateReader = (repo: string, prNumber: number) => Promise<PrState | null>;
+
+const defaultReadPrState: PrStateReader = (repo, prNumber) =>
+  fetchPrState(repo, prNumber, process.env.GITHUB_TOKEN ?? "", { withReviewThreads: true });
 
 /** Reads a PR's durable round history (its `rounds` rows) projected to the fields {@link detectChurn}
  * consumes, SCOPED to one convergence run. Injectable so churn tests never touch the datasource; the
@@ -294,9 +302,11 @@ export function makeHandler(deps: {
   readAgentWork?: AgentWorkReader;
   selfHeal?: SelfHealFn;
   readRounds?: RoundsReader;
+  readPrState?: PrStateReader;
 }): AppJobHandler<In, Out> {
   return async (job, app) => {
-    const { prKey, status, repo, prNumber, round, huskRetries, roundEntryHead, reviewWaitCutoff } = job.variables;
+    const { prKey, status, repo, prNumber, round, huskRetries, roundEntryHead, reviewWaitCutoff, ciFixRound } =
+      job.variables;
     const jobKey = job.jobKey;
 
     const prs = app.data.table<{
@@ -350,10 +360,10 @@ export function makeHandler(deps: {
       return currentOwner !== null && jobOwner !== null && String(currentOwner) !== String(jobOwner);
     };
     const commit = async (
-      out: Out,
+      rawOut: Out,
       opts: {
         head?: string | null;
-        status?: "waiting_review" | "converging";
+        status?: "waiting_review" | "converging" | "merged";
         agentWatermark?: string | null;
         churnEscalatedRound?: number;
         /** The review-wait start to stamp instead of "now" (issue #923 review): the converge-gate
@@ -365,6 +375,9 @@ export function makeHandler(deps: {
         waitingSince?: string;
       },
     ): Promise<Out> => {
+      // Always emit the #988 route flags so a prior round's `ciRed`/`prGone` can never linger in
+      // process scope and mis-route this round at `gw-progress`/`gw-husk`.
+      const out: Out = { ciRed: false, prGone: "", ...rawOut };
       const ts = new Date().toISOString();
       // Re-check ownership immediately before the write and drop it when this job no longer owns the
       // row — acking without persisting is correct (the straggler's token is in a terminated instance).
@@ -379,6 +392,7 @@ export function makeHandler(deps: {
           ? { status: "waiting_review", waiting_since: opts.waitingSince ?? ts }
           : {}),
         ...(opts.status === "converging" ? { status: "converging" } : {}),
+        ...(opts.status === "merged" ? { status: "merged" } : {}),
         // Advance the attempt watermark ONLY when an agent-work read consumed a `review-round`
         // instance (Copilot #789); `undefined` leaves the persisted watermark untouched (an
         // unreadable head, a non-addressed round, or an injected bare-verdict reader), so the next
@@ -421,6 +435,25 @@ export function makeHandler(deps: {
     // exit head into `last_round_head` still matters as the FALLBACK baseline for an older in-flight
     // instance whose fixed flow predates capture-head, or when a capture read failed open to null.
     const currentHead = await deps.readHead(ghRepo, ghNumber).catch(() => null);
+    // PR LIVENESS (#988). A human can merge or close the PR while a round is running; the loop must
+    // then END (merged → converged/merged, closed → abandoned), never husk-retry or escalate against
+    // a non-open PR. Re-read the live state every round; an unreadable state fails OPEN (null → open).
+    const prState = await (deps.readPrState ?? defaultReadPrState)(ghRepo, ghNumber).catch(() => null);
+    const liveness = classifyPrLiveness(prState);
+    if (liveness === "merged" || liveness === "closed") {
+      app.log.info(`PR ${liveness} mid-round — ending the convergence loop without escalating (#988)`, {
+        prKey,
+        round,
+      });
+      if (liveness === "closed" && !(await isSuperseded())) {
+        await abandonClosedPr(app.data, prKey, "PR closed without merging during a convergence round").catch(() => {});
+      }
+      return commit(
+        { progressed: true, huskRetries: 0, prGone: liveness },
+        { head: currentHead, ...(liveness === "merged" ? { status: "merged" as const } : {}) },
+      );
+    }
+
     // Baseline = the head captured by `pr.capture-head` at THIS round's entry, BEFORE `review-round`
     // ran (the `roundEntryHead` process variable). It is a within-round baseline, so it structurally
     // closes the no-baseline gap: a real push advances `currentHead` past it (→ progress, never a
@@ -613,6 +646,24 @@ export function makeHandler(deps: {
             },
           );
         }
+      }
+    }
+
+    // RED CI, CLEAN REVIEW (#988). A no-op review round can't fix a failing required check: when the
+    // review has nothing left (no unresolved threads) but CI is red, route to `senior:fix-ci` (bounded
+    // by CONVERGE_CI_FIX_MAX) instead of escalating a no-progress round. A husk keeps its own path.
+    if (decision.reason === "no-advance") {
+      const ci = redCiRoute(prState, typeof ciFixRound === "number" ? ciFixRound : null, CONVERGE_CI_FIX_MAX);
+      if (ci.route) {
+        app.log.info("clean review blocked by red CI — routing to fix-ci instead of escalating (#988)", {
+          prKey,
+          round: roundNo,
+          failing: ci.failingChecksList,
+        });
+        return commit(
+          { progressed: false, huskRetries: 0, huskRetry: false, ciRed: true, failingChecksList: ci.failingChecksList },
+          { head: currentHead, status: "waiting_review", agentWatermark, ...(waitCutoff ? { waitingSince: waitCutoff } : {}) },
+        );
       }
     }
 

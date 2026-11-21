@@ -953,6 +953,9 @@ async function submitPrCritical(
       // solely on unacked ones, before escalating to a human. `ackRetryRound` counts those passes.
       ackRetryRound: 0,
       ackRetryMax: MAX_ACK_RETRIES,
+      // Clean-review / red-CI fix budget (issue #988): counts `converge-fix-ci` passes, bounded by
+      // CONVERGE_CI_FIX_MAX in `pr.progress-check` (the BPMN also guards a missing seed).
+      ciFixRound: 0,
       // Local adversarial review (issue #844): `advPass` counts this round's adversarial passes (reset
       // by `capture-head` each round); `advMax` bounds them. 0 skips the stage.
       advPass: 0,
@@ -2539,6 +2542,22 @@ export async function recordOperatorCancelProvenance(data: DataLayer, processKey
   for (const row of await prs(data).find({ process_key: processKey })) {
     await recordTerminationProvenance(data, row.pr_key, processKey, `operator cancel (${door})`);
   }
+}
+
+/** Close the open escalations a cancelled run leaves behind (issue #988). A cancelled run can never
+ * consume an answer, yet its `open` `escalations` audit rows (and the projected `user_tasks` inbox
+ * rows) kept showing in `escalations list` until an operator `ack pr`'d them. Retire every `open`
+ * escalation of each PR the cancelled instance owns to `stale` (the existing "no answer recorded"
+ * vocabulary, same as the poller's heal) and drop the inbox rows that instance projected. Idempotent:
+ * a re-run finds nothing `open`. Returns how many escalation rows were retired. */
+export async function closeCancelledRunEscalations(data: DataLayer, processKey: string): Promise<number> {
+  const db = data.open();
+  const r = await db.exec(
+    `UPDATE "escalations" SET "status" = 'stale' WHERE "status" = 'open' AND "pr_key" IN (SELECT "pr_key" FROM "pull_requests" WHERE "process_key" = ?)`,
+    [processKey],
+  );
+  await db.exec(`DELETE FROM "user_tasks" WHERE "process_key" = ?`, [processKey]);
+  return r.changed;
 }
 
 /** THE canonical door for an app-initiated cancel of a PR's convergence/merge loop (issue #943).
