@@ -67,7 +67,7 @@
   "dependencies": {
     "@nanobpm/agentic": "^0.16.0",
     "@nanobpm/urban": "^0.99.0",
-    "bpmn-auto-layout": "^2.0.0-alpha.2"
+    "bpmn-auto-layout": "git+https://github.com/jwulf/bpmn-auto-layout.git#25251a2ac5802c74d9a00f8d087052091530a0f5"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",
@@ -86,6 +86,7 @@
   },
   "overrides": {
     "@nanobpm/engine-wasm": "^0.11.1",
-    "@semantic-release/npm": "^13.1.5"
+    "@semantic-release/npm": "^13.1.5",
+    "bpmn-auto-layout": "$bpmn-auto-layout"
   }
 }
