@@ -125,11 +125,56 @@ export async function listIssueComments(
   token: string,
   timeoutMs: number = ISSUE_PR_LINK_IO_TIMEOUT_MS,
 ): Promise<IssueComment[] | null> {
+  return pageAll(`repos/${repo}/issues/${issueNumber}/comments`, token, timeoutMs, narrowComment);
+}
+
+/** One submitted PR review (top-level body + state), narrowed from `GET /pulls/{n}/reviews`. */
+export interface PrReview {
+  id: number;
+  body: string;
+  login: string;
+  association: string;
+  /** APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED / PENDING. */
+  state: string;
+  submittedAt: string;
+}
+
+function narrowReview(c: unknown): PrReview {
+  const o: Record<string, unknown> = c !== null && typeof c === "object" ? { ...c } : {};
+  const base = narrowComment(c);
+  return {
+    id: base.id,
+    body: base.body,
+    login: base.login,
+    association: base.association,
+    state: typeof o.state === "string" ? o.state.toUpperCase() : "",
+    submittedAt: typeof o.submitted_at === "string" ? o.submitted_at : "",
+  };
+}
+
+/** List EVERY submitted review on a PR (same transport/paging/fail-closed contract as
+ *  {@link listIssueComments}). */
+export async function listPullReviews(
+  repo: string,
+  prNumber: number,
+  token: string,
+  timeoutMs: number = ISSUE_PR_LINK_IO_TIMEOUT_MS,
+): Promise<PrReview[] | null> {
+  return pageAll(`repos/${repo}/pulls/${prNumber}/reviews`, token, timeoutMs, narrowReview);
+}
+
+/** The ONE REST pager behind both lists. */
+async function pageAll<T>(
+  base: string,
+  token: string,
+  timeoutMs: number,
+  narrow: (c: unknown) => T,
+): Promise<T[] | null> {
   const ghMode = await useGh();
   if (!ghMode && !token) return null;
-  const comments: IssueComment[] = [];
+  const out: T[] = [];
   for (let page = 1; page <= MAX_PAGES; page++) {
-    const path = `repos/${repo}/issues/${issueNumber}/comments?per_page=${PAGE_SIZE}&page=${page}`;
+    const path = `${base}?per_page=${PAGE_SIZE}&page=${page}`;
     let arr: unknown;
     if (ghMode) {
       arr = JSON.parse(await runGh(["api", path], { timeoutMs }));
@@ -141,11 +186,11 @@ export async function listIssueComments(
       if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
       arr = await r.json();
     }
-    if (!Array.isArray(arr)) throw new Error("github: unexpected comments payload");
-    for (const c of arr) comments.push(narrowComment(c));
-    if (arr.length < PAGE_SIZE) return comments;
+    if (!Array.isArray(arr)) throw new Error("github: unexpected list payload");
+    for (const c of arr) out.push(narrow(c));
+    if (arr.length < PAGE_SIZE) return out;
   }
-  throw new Error(`github: issue ${repo}#${issueNumber} has more than ${MAX_PAGES * PAGE_SIZE} comments`);
+  throw new Error(`github: ${base} has more than ${MAX_PAGES * PAGE_SIZE} entries`);
 }
 
 /** List the bodies of EVERY comment on an issue (see {@link listIssueComments}). */

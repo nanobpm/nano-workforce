@@ -95,7 +95,7 @@ export function evaluateConvergeGate(input: ConvergeGateInput): ConvergeGateResu
   }
   return {
     convergeBlocked: true,
-    convergeBlockReason: `Convergence blocked: ${reasons.join("; ")}. Resolve every review thread and reply-and-resolve an ack thread (nano-ack: <path> :: <verbatim advisory text>) for each suppressed advisory before converging.${feedback.length > 0 ? " Address each operator feedback item and acknowledge it (reply with nano-ack: issuecomment-<id>, or resolve the thread)." : ""}`,
+    convergeBlockReason: `Convergence blocked: ${reasons.join("; ")}. Resolve every review thread and reply-and-resolve an ack thread (nano-ack: <path> :: <verbatim advisory text>) for each suppressed advisory before converging.${feedback.length > 0 ? " Address each operator feedback item and acknowledge it (reply with nano-ack: issuecomment-<id> or nano-ack: review-<id>, or resolve the thread)." : ""}`,
     // Ack-only iff NO substantive (non-ack) reviewer thread is open — the only remaining causes are
     // recoverable by re-dispatching the review-round agent (#796): unacked suppressed advisories
     // and/or a partially-completed (unresolved) ack thread it can re-post and resolve. A substantive

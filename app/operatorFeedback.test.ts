@@ -179,3 +179,54 @@ test("runStartOnIssue ignores claim-prefixed comments from untrusted authors and
   // A trusted claim still sets the cutoff, even alongside an untrusted one.
   assertEquals(runStartOnIssue([c(5, "outsider", "NONE", START, body), c(1, "jwulf", "OWNER", late, body)], fallback), late);
 });
+
+test("a trusted top-level PR review body (no inline thread) is operator feedback until acked or approved", () => {
+  const rv = (id: number, login: string, assoc: string, state: string, at: string, body: string) => ({
+    id,
+    login,
+    association: assoc,
+    state,
+    submittedAt: at,
+    body,
+  });
+  const ask = rv(900, "maint", "MEMBER", "CHANGES_REQUESTED", "2026-11-21T11:00:00Z", "also handle X");
+  const commented = rv(901, "maint", "OWNER", "COMMENTED", "2026-11-21T11:01:00Z", "and Y please");
+  const base = { repo: "o/r", issues: [], prComments: [], threads: [] };
+  const items = deriveOperatorFeedback({
+    ...base,
+    reviews: [
+      ask,
+      commented,
+      rv(902, "Copilot", "NONE", "COMMENTED", "2026-11-21T11:02:00Z", "bot review"),
+      rv(903, "rando", "NONE", "CHANGES_REQUESTED", "2026-11-21T11:02:00Z", "drive-by"),
+      rv(904, "maint", "MEMBER", "COMMENTED", "2026-11-21T11:03:00Z", "   "),
+      rv(905, "maint", "MEMBER", "DISMISSED", "2026-11-21T11:03:00Z", "dismissed ask"),
+    ],
+  });
+  assertEquals(
+    items.map((i) => [i.source, i.id]),
+    [
+      ["review", 900],
+      ["review", 901],
+    ],
+  );
+  assertStringIncludes(renderOperatorFeedbackBrief(items), "nano-ack: review-900");
+  // Acked by a trusted dedicated line; a forged untrusted ack does not count.
+  const ackd = deriveOperatorFeedback({
+    ...base,
+    prComments: [
+      c(60, "jwulf", "OWNER", "2026-11-21T12:00:00Z", "Done.\nnano-ack: review-900"),
+      c(61, "rando", "NONE", "2026-11-21T12:00:00Z", "nano-ack: review-901"),
+    ],
+    reviews: [ask, commented],
+  });
+  assertEquals(ackd.map((i) => i.id), [901]);
+  // Superseded by a later approval from the same reviewer.
+  assertEquals(
+    deriveOperatorFeedback({
+      ...base,
+      reviews: [ask, commented, rv(906, "maint", "MEMBER", "APPROVED", "2026-11-21T13:00:00Z", "")],
+    }),
+    [],
+  );
+});

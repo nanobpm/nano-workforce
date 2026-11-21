@@ -63,7 +63,7 @@ import {
   parseSuppressedAdvisories,
   type ReviewThread,
 } from "../../app/github.ts";
-import { type IssueComment, listIssueComments } from "../../app/issuePrLink.ts";
+import { type IssueComment, listIssueComments, listPullReviews } from "../../app/issuePrLink.ts";
 import {
   deriveOperatorFeedback,
   type FeedbackThread,
@@ -102,7 +102,7 @@ export type OperatorFeedbackReader = (
 
 /** The real operator-feedback reader: the PR's title/body (closing issues + creation time), each
  * closing issue's comments (run start = its earliest claim comment, else the PR's creation), and the
- * PR's conversation comments — all paged by the ONE issue-comments pager — fed to the ONE
+ * PR's conversation comments and submitted reviews — all paged by the ONE issue-comments pager — fed to the ONE
  * `deriveOperatorFeedback`. */
 export const defaultReadOperatorFeedback: OperatorFeedbackReader = async (repo, prNumber, threads) => {
   const token = process.env.GITHUB_TOKEN ?? "";
@@ -110,13 +110,16 @@ export const defaultReadOperatorFeedback: OperatorFeedbackReader = async (repo, 
   if (meta === null) return null;
   const prComments = await listIssueComments(repo, prNumber, token);
   if (prComments === null) return null;
+  // Top-level review bodies (a "Request changes" with no inline comment makes no thread/comment).
+  const reviews = await listPullReviews(repo, prNumber, token);
+  if (reviews === null) return null;
   const issues: { number: number; comments: IssueComment[]; since: string | null }[] = [];
   for (const n of parseClosingIssueNumbers(`${meta.title ?? ""}\n${meta.body}`, repo)) {
     const comments = await listIssueComments(repo, n, token);
     if (comments === null) return null;
     issues.push({ number: n, comments, since: runStartOnIssue(comments, meta.createdAt ?? null) });
   }
-  return deriveOperatorFeedback({ repo, issues, prComments, threads });
+  return deriveOperatorFeedback({ repo, issues, prComments, threads, reviews });
 };
 
 const defaultReadThreads: ThreadsReader = (repo, prNumber) =>
