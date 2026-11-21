@@ -15,7 +15,7 @@
 import { withProcessInstanceKey } from "../app/apiShape.ts";
 import { startFeature } from "../app/feature.ts";
 import { type FeatureReadiness, parseFeatureReadiness } from "../app/featureReadiness.ts";
-import { BaseBranchMustExistError } from "../app/github.ts";
+import { BaseBranchMustExistError, fetchDefaultBranch } from "../app/github.ts";
 import {
   admitPlan,
   DefaultBaseNotConfirmedError,
@@ -49,10 +49,29 @@ export default defineOperation("startFeature", async ({ body }, app) => {
   // Base branch (ADR 0003): admit the launch through the same fail-fast `admitPlan` gate the epic
   // path uses BEFORE starting the run. A feature run also raises a PR against a base, so it honors
   // the identical admission policy and error → HTTP mapping.
-  const rawBase = "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch : null;
   const allowSharedBase = "allowSharedBase" in body && body.allowSharedBase === true;
-  const confirmDefaultBase = "confirmDefaultBase" in body && body.confirmDefaultBase === true;
   const token = process.env.GITHUB_TOKEN ?? "";
+  // Issue #989: an OMITTED `baseBranch` resolves to the repository default branch in ONE call.
+  // Omitting the base IS the operator's default-branch choice, so the confirm-default guard is
+  // satisfied implicitly; explicitly NAMING the default still needs `confirmDefaultBase` (one call).
+  const explicitBase = "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch : null;
+  const omittedBase = explicitBase === null || explicitBase.trim() === "";
+  // `fetchDefaultBranch` THROWS on any GitHub error (a non-ok fetch for an unknown/private repo, a
+  // GitHub outage, or a gh/JSON.parse failure on the gh path). Catch → null so the failure degrades
+  // into admitPlan's MissingBaseBranchError → the 400 below, instead of escaping as an unhandled 500.
+  let resolvedDefault: string | null = null;
+  if (omittedBase) {
+    try {
+      resolvedDefault = await fetchDefaultBranch(parsed.repo, token);
+    } catch (err) {
+      app.log.warn("start-feature: default branch lookup failed — treating as unresolvable", {
+        repo: parsed.repo,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  const rawBase = omittedBase ? resolvedDefault : explicitBase;
+  const confirmDefaultBase = omittedBase || ("confirmDefaultBase" in body && body.confirmDefaultBase === true);
   let normalizedBase: string;
   try {
     // No `selfPlanKey`: a feature run creates a `feature_runs` row, NOT a `plans` row, so there is no
@@ -68,7 +87,11 @@ export default defineOperation("startFeature", async ({ body }, app) => {
       app.log.warn("start-feature rejected: missing base branch");
       return {
         status: 400,
-        body: { error: "baseBranch is required (name the branch the PR targets, e.g. main or epic/agent-protocol)" },
+        body: {
+          error:
+            "baseBranch was omitted and the repository default branch could not be resolved — name the " +
+            "branch the PR targets (e.g. main or epic/agent-protocol)",
+        },
       };
     }
     if (err instanceof InvalidBaseBranchError) {

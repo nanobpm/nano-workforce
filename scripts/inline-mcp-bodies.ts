@@ -72,7 +72,10 @@ const HTTP_METHODS = ["get", "put", "post", "delete", "patch"] as const;
  *  - a `$ref` is replaced by the (recursively dereferenced) target component;
  *  - an `allOf` is MERGED into one object (union of `properties`/`required`) so a node variant
  *    like `DeliveryNodeAgent` (allOf [DeliveryNodeCommon, {inline}]) becomes one flat `type: object`;
- *  - `oneOf`/`anyOf` members are dereferenced but kept as a union;
+ *  - `oneOf`/`anyOf` members are dereferenced but kept as a union — when the node carries
+ *    `x-mcp-inline: false` each member is COMPACTED to its structural contract (see `compact`), so
+ *    the operation body (served to HTTP/CLI and MCP alike) keeps the per-kind variants without a
+ *    large described union re-inflating `tools/list` past the #715 byte budget;
  *  - `discriminator` is dropped (its `mapping` values are `#/components/...` pointers that would
  *    dangle once inlined, and MCP clients do not need it);
  *  - every other keyword is copied through, recursing into `properties`/`items`/arrays.
@@ -121,9 +124,36 @@ function deref(node: unknown, comps: Record<string, unknown>, seen: ReadonlySet<
   }
 
   const out: Schema = {};
+  // `x-mcp-inline: false` on a node keeps its `oneOf`/`anyOf` union in the inline operation body but
+  // compacts each member to its structural contract (prose stays in the canonical component).
+  const compactUnion = node["x-mcp-inline"] === false;
   for (const [k, v] of Object.entries(node)) {
     if (k === "discriminator") continue;
-    out[k] = deref(v, comps, seen);
+    if (k === "x-mcp-inline") continue;
+    const d = deref(v, comps, seen);
+    out[k] = compactUnion && (k === "oneOf" || k === "anyOf") && Array.isArray(d) ? d.map(compact) : d;
+  }
+  return out;
+}
+
+/**
+ * Strip a (dereferenced) union member down to its STRUCTURAL contract — `title`, `type`,
+ * `required`, `enum`, and `properties` (recursively) — dropping prose (`description`, `example`, …).
+ * Used for an `x-mcp-inline: false` union: the inline operation body is the ONE document both the
+ * HTTP/CLI spec handler and the MCP projector serve, so the variants must stay reachable from the
+ * operation (field names, types, enums, required-ness per kind) while costing only a fraction of the
+ * fully-described union on the #715 byte budget. The canonical component keeps the full prose.
+ */
+const COMPACT_KEYS = new Set(["title", "type", "required", "enum", "properties", "items"]);
+function compact(node: unknown): unknown {
+  if (!isRecord(node)) return node;
+  const out: Schema = {};
+  for (const [k, v] of Object.entries(node)) {
+    if (!COMPACT_KEYS.has(k)) continue;
+    if (k === "properties" && isRecord(v)) {
+      out[k] = Object.fromEntries(Object.entries(v).map(([n, s]) => [n, compact(s)]));
+    } else if (k === "items") out[k] = compact(v);
+    else out[k] = v;
   }
   return out;
 }

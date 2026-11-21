@@ -211,6 +211,23 @@ interface FormContract {
   allowed: Record<string, string[]>;
   /** Field key → its `conditional.hide` rule (only for fields whose visibility is conditional). */
   hideWhen: Record<string, HideRule>;
+  /** Every answerable field, in form order — the documented answer shape (issue #989). */
+  fields: ExpectedField[];
+}
+
+/** One answer field an escalation's `.form` expects, derived from the canonical `.form` (issue #989)
+ *  so `listEscalations` can tell a caller exactly which `variables` to submit, with no second list. */
+export interface ExpectedField {
+  name: string;
+  type: "string";
+  /** True when the field is `validate.required` AND unconditionally shown. A conditionally-required
+   *  field (e.g. `answer` only when `resolution=answer`) is `false` here; see `requiredWhen`. */
+  required: boolean;
+  /** For a conditionally-shown required field: the condition under which it becomes required. */
+  requiredWhen?: string;
+  /** The allowed values of a `select` field. */
+  enum?: string[];
+  description: string;
 }
 
 const formContractCache = new Map<string, FormContract>();
@@ -241,6 +258,8 @@ function formContract(formId: string): FormContract {
   const raw: {
     components?: {
       key?: string;
+      label?: string;
+      description?: string;
       validate?: { required?: boolean };
       values?: { value?: string }[];
       conditional?: { hide?: string };
@@ -249,6 +268,7 @@ function formContract(formId: string): FormContract {
   const required: string[] = [];
   const allowed: Record<string, string[]> = {};
   const hideWhen: Record<string, HideRule> = {};
+  const fields: ExpectedField[] = [];
   for (const c of raw.components ?? []) {
     if (!c.key) continue;
     if (c.validate?.required) required.push(c.key);
@@ -257,10 +277,45 @@ function formContract(formId: string): FormContract {
     }
     const hide = parseHide(c.conditional?.hide);
     if (hide) hideWhen[c.key] = hide;
+    const field: ExpectedField = {
+      name: c.key,
+      type: "string",
+      required: c.validate?.required === true && !hide,
+      description: [c.label, c.description].filter((t): t is string => typeof t === "string" && t !== "").join(" — "),
+    };
+    // A hidden-unless rule `x != "v"` means the field is shown (and so required) when x == "v".
+    if (c.validate?.required === true && hide) {
+      field.requiredWhen = `${hide.ref} ${hide.op === "!=" ? "==" : "!="} "${hide.value}"`;
+    }
+    if (allowed[c.key]) field.enum = allowed[c.key];
+    fields.push(field);
   }
-  const contract: FormContract = { required, allowed, hideWhen };
+  const contract: FormContract = { required, allowed, hideWhen, fields };
   formContractCache.set(formId, contract);
   return contract;
+}
+
+/** The answer fields a deployed `.form` expects (issue #989), derived from the canonical `.form`. */
+export function formExpectedFields(formId: string): ExpectedField[] {
+  return formContract(formId).fields;
+}
+
+/** The answer fields an open escalation of BPMN `elementId` expects — the SAME `.form` contract
+ *  {@link validateEscalationVariables} enforces, so the listing and the completer cannot disagree.
+ *  Empty when the element has no linked form contract (nothing is enforced). */
+export function escalationExpectedFields(elementId: string, formKey?: string | null): ExpectedField[] {
+  const formId = escalationFormId(elementId);
+  if (formId) return formExpectedFields(formId);
+  // A per-node form (the delivery `human` step) carries its resolved form id on the row; describe it
+  // when it is one of this app's deployed `.form`s, otherwise there is no static contract to offer.
+  if (formKey && /^[a-z0-9-]+$/.test(formKey)) {
+    try {
+      return formExpectedFields(formKey);
+    } catch {
+      return [];
+    }
+  }
+  return [];
 }
 
 /** Validate completion `variables` against the escalation's `.form` contract (required fields present
