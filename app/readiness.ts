@@ -994,6 +994,25 @@ export function matchEpic(match: ProbeMatch | undefined, epic: EpicObservation):
   };
 }
 
+/** Build the `gh issue view` command reading an issue's closure state (#992). `gh` reads its token
+ * from the ambient env, like the `pr` kind. */
+export function issueViewCommand(repo: string, number: string): string {
+  return `gh issue view ${shellQuote(number)} --repo ${shellQuote(repo)} --json ${shellQuote("state,stateReason")}`;
+}
+
+/** GitHub-truth "landed" check for an issue (#992): ready EXACTLY when the issue is CLOSED with
+ * `stateReason: COMPLETED` — independent of who/what closed it (nwf, Mergify, a human). PURE; a
+ * malformed payload is simply not ready. A NOT_PLANNED closure never counts as landed. */
+export function matchIssueClosed(payload: unknown): ProbeResult {
+  const j = isRecord(payload) ? payload : {};
+  const state = str(j.state).trim().toUpperCase();
+  const reason = str(j.stateReason).trim().toUpperCase();
+  if (state === "CLOSED" && reason === "COMPLETED") {
+    return { ready: true, detail: "issue closed as completed on GitHub (landed outside nwf lineage)" };
+  }
+  return { ready: false, detail: `issue state=${state || "unknown"} reason=${reason || "none"} (not landed)` };
+}
+
 /** Build the app's lineage read-model URL for an epic's `planKey`. The app mounts its OpenAPI paths
  * under `/app/api` (mirroring `abandonUrl`/`blackboardUrl` in `app/blackboard.ts`), and `?root=`
  * accepts a `plan_key`. `base` is the ONE `NANO_WORKFORCE_BASE_URL` env contract (never a second
@@ -1065,9 +1084,27 @@ export async function probeOnce(
       const key = parsePlanKey(probe.target);
       if (!key) return { ready: false, detail: "epic: unresolved/unparseable planKey (not ready)" };
       const url = epicLineageUrl(key.planKey, readEnvOr("NANO_WORKFORCE_BASE_URL", "", env));
-      const resp = await exec.httpGet(url, { accept: "application/json" });
-      if (resp.status < 200 || resp.status >= 300) return { ready: false, detail: `epic: lineage read HTTP ${resp.status} (not ready)` };
-      return matchEpic(probe.match, parseEpicLineage(parseJson(resp.body), key.planKey));
+      let lineage: ProbeResult;
+      try {
+        const resp = await exec.httpGet(url, { accept: "application/json" });
+        lineage =
+          resp.status < 200 || resp.status >= 300
+            ? { ready: false, detail: `epic: lineage read HTTP ${resp.status} (not ready)` }
+            : matchEpic(probe.match, parseEpicLineage(parseJson(resp.body), key.planKey));
+      } catch (e) {
+        lineage = { ready: false, detail: `epic: lineage read failed (${e instanceof Error ? e.message : String(e)})` };
+      }
+      if (lineage.ready) return lineage;
+      // #992: nwf lineage only records merges nwf itself drove. A dependency that landed any other
+      // way (Mergify/human merge after the loop was cancelled, work done outside nwf, nwf reset) is
+      // only visible as GitHub truth — the issue CLOSED as COMPLETED. Accept that route too.
+      const ref = parsePr(key.planKey);
+      if (!ref) return lineage;
+      const out = await exec.run(issueViewCommand(ref.repo, String(ref.number)), env);
+      if (out.code !== 0) return lineage;
+      const gh = matchIssueClosed(parseJson(out.stdout));
+      // Keep the epic kind's `prCount` fact contract (#572) — nwf recorded no slice PRs on this route.
+      return gh.ready ? { ...gh, bind: { prCount: "0" } } : { ...lineage, detail: `${lineage.detail}; ${gh.detail}` };
     }
   }
 }

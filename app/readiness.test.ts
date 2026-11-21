@@ -42,6 +42,8 @@ import {
   parseRepoRef,
   probeBudgetMs,
   probeOnce,
+  matchIssueClosed,
+  type ProbeKind,
   type ProbeExec,
   type PrObservation,
   prViewCommand,
@@ -1180,4 +1182,65 @@ test("defaultProbeExec.httpGet: a hung endpoint aborts at the attempt timeout in
 
 test("DEFAULT_ATTEMPT_TIMEOUT_MS is a sane bounded default", () => {
   assert(DEFAULT_ATTEMPT_TIMEOUT_MS > 0 && DEFAULT_ATTEMPT_TIMEOUT_MS <= 5 * 60_000);
+});
+
+// ── #992: an epic/`--behind` gate opens on GitHub truth (issue CLOSED as COMPLETED), not only nwf lineage ──
+function epic992Exec(lineage: { status: number; body: string }, issue: { code: number; stdout: string }, calls: string[] = []): ProbeExec {
+  return {
+    async httpGet() {
+      return lineage;
+    },
+    async run(command) {
+      calls.push(command);
+      return { code: issue.code, stdout: issue.stdout, stderr: "" };
+    },
+  };
+}
+const noLineage992 = { status: 200, body: JSON.stringify({ count: 0, threads: [] }) };
+
+test("#992 probeOnce epic: a dependency issue closed COMPLETED outside nwf (no lineage) opens the gate", async () => {
+  const calls: string[] = [];
+  const exec = epic992Exec(noLineage992, { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) }, calls);
+  const r = await probeOnce(parseProbe({ kind: "epic", target: "nanobpm/nano-bpm#1730", match: { epicState: "merged" } }), exec, {});
+  assert(r.ready, "an issue closed as completed by a PR merged via Mergify/human must open the gate");
+  assertStringIncludes(calls[0] ?? "", "gh issue view");
+  assertStringIncludes(calls[0] ?? "", "nanobpm/nano-bpm");
+});
+
+test("#992 probeOnce epic: a lineage thread stuck non-merged still opens when GitHub says closed-completed", async () => {
+  const lineage = { status: 200, body: JSON.stringify({ count: 1, threads: [{ rootRequestKey: "o/r#3", stage: "converging", active: true, prCount: 1 }] }) };
+  const exec = epic992Exec(lineage, { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) });
+  assert((await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {})).ready);
+});
+
+test("#992 probeOnce epic: a lineage read failure (nwf reset/unreachable) still falls back to GitHub truth", async () => {
+  const exec = epic992Exec({ status: 503, body: "" }, { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) });
+  assert((await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {})).ready);
+});
+
+test("#992 probeOnce epic: an OPEN, NOT_PLANNED-closed, or unreadable issue keeps the gate shut", async () => {
+  for (const issue of [
+    { code: 0, stdout: JSON.stringify({ state: "OPEN", stateReason: "" }) },
+    { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "NOT_PLANNED" }) },
+    { code: 1, stdout: "" },
+  ]) {
+    const r = await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), epic992Exec(noLineage992, issue), {});
+    assert(!r.ready, `must stay shut for ${issue.stdout || "gh failure"}`);
+  }
+});
+
+test("#992 class guard: every 'work landed' probe kind accepts landing by any route, not only nwf lineage", async () => {
+  // `pr` reads GitHub directly (MERGED regardless of who merged). `epic` is the only kind backed by
+  // nwf's own lineage, so it must ALSO accept GitHub truth with no lineage at all. A new lineage-backed
+  // "landed" kind must be added here and pass the same no-lineage check.
+  const lineageBacked: readonly ProbeKind[] = ["epic"];
+  const closedDone = { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) };
+  for (const kind of lineageBacked) {
+    const r = await probeOnce(parseProbe({ kind, target: "o/r#1" }), epic992Exec({ status: 404, body: "" }, closedDone), {});
+    assert(r.ready, `${kind} must open on a GitHub-closed-completed target with no nwf lineage`);
+  }
+  assertEquals(matchIssueClosed({ state: "CLOSED", stateReason: "COMPLETED" }).ready, true);
+  assertEquals(matchIssueClosed({ state: "closed", stateReason: "completed" }).ready, true);
+  assertEquals(matchIssueClosed({ state: "CLOSED", stateReason: "NOT_PLANNED" }).ready, false);
+  assertEquals(matchIssueClosed(null).ready, false);
 });
