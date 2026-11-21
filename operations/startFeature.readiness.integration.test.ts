@@ -222,3 +222,27 @@ test("non-boolean autoMerge → 400 at the edge (never silently review-only)", a
     assertEquals(started.length, 0, "a rejected door never starts a run");
   });
 });
+
+// ── issue #989: an omitted baseBranch resolves to the repository default branch in ONE call ───────
+
+test("omitted baseBranch → 202 on the default branch with no confirm round trip, resolved base echoed", async () => {
+  await withGithub(REPO, async () => {
+    const { app, started } = makeApp();
+    const res = (await startFeature(input({ issue: `${REPO}#989` }), app)) as any;
+    assertEquals(res.status, 202);
+    assertEquals(res.body.baseBranch, "main");
+    assertEquals(started.length, 1);
+    assertEquals((started[0].variables as Record<string, unknown>).baseBranch, "main");
+  });
+});
+
+test("explicitly naming the default branch still needs confirmDefaultBase — accepted in the first call", async () => {
+  await withGithub(REPO, async () => {
+    const { app } = makeApp();
+    const refused = (await startFeature(input({ issue: `${REPO}#989`, baseBranch: "main" }), app)) as any;
+    assertEquals(refused.status, 400);
+    const ok = (await startFeature(input({ issue: `${REPO}#990`, ...GATED_BASE }), app)) as any;
+    assertEquals(ok.status, 202);
+    assertEquals(ok.body.baseBranch, "main");
+  });
+});

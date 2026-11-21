@@ -13,6 +13,7 @@
 // The optional shared-secret guard stays HERE (the runtime does not enforce OpenAPI `security`):
 // when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the x-hook-secret header. Unset →
 // open (unchanged default), mirroring `listActivePrs`.
+import { escalationExpectedFields } from "../app/agentCompletion.ts";
 import { listEnvelope, withProcessInstanceKey } from "../app/apiShape.ts";
 import { toEscalationView, userTasks } from "../app/userTasks.ts";
 import { envVar } from "../app/version.ts";
@@ -28,6 +29,11 @@ export default defineOperation("listEscalations", async ({ req }, app) => {
   const rows = await userTasks(app.data).all();
   const escalations = rows
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0))
-    .map((row) => withProcessInstanceKey(toEscalationView(row)));
+    .map((row) => ({
+      ...withProcessInstanceKey(toEscalationView(row)),
+      // Issue #989: the answer fields this escalation's `.form` expects (the SAME contract the
+      // completer enforces), so a caller can build `escalations answer` variables from the listing.
+      expectedFields: escalationExpectedFields(row.element_id, row.form_key),
+    }));
   return { status: 200, body: listEnvelope(escalations) };
 });

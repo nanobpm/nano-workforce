@@ -414,6 +414,7 @@ components:
         - question
         - formKey
         - formVariables
+        - expectedFields
         - processInstanceKey
       properties:
         processInstanceKey:
@@ -461,6 +462,207 @@ components:
             The denormalised decision/form context the Tasks inbox renders for this task (the same
             question + subject the deployed form is seeded with). The typed answer fields an agent
             submits depend on `kind` (e.g. a PR `{ answer }`, a plan-review `{ directive, notes }`).
+        expectedFields:
+          type: array
+          description: >-
+            The answer fields this escalation's deployed `.form` expects (issue 989) — exactly the
+            `variables` to submit via `escalations answer` (completeUserTask). Derived from the same
+            `.form` contract the completer validates against. Empty when the kind has no form contract.
+          items:
+            $ref: "#/components/schemas/EscalationExpectedField"
+    EscalationExpectedField:
+      type: object
+      additionalProperties: false
+      required: [name, type, required, description]
+      properties:
+        name:
+          type: string
+          description: The `variables` key to submit.
+        type:
+          type: string
+          description: The value type (form fields are strings).
+        required:
+          type: boolean
+          description: True when the field is always required.
+        requiredWhen:
+          type: string
+          description: For a conditionally-required field, the condition (e.g. `resolution == "answer"`) under which it is required.
+        enum:
+          type: array
+          items:
+            type: string
+          description: The allowed values of a select field.
+        description:
+          type: string
+          description: The form's label/help text for the field.
+    EscalationAnswerConformanceEscalation:
+      title: conformance-escalation
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `conformance-escalation` (see Escalation.formKey / expectedFields)."
+      properties:
+        note:
+          type: string
+          description: "Disposition note (what you decided / follow-up — recorded on the review)"
+    EscalationAnswerDeliveryEscalation:
+      title: delivery-escalation
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `delivery-escalation` (see Escalation.formKey / expectedFields)."
+      properties:
+        decision:
+          type: string
+          enum: [continue, retry]
+          description: "Resolution — Escalation of an agent or connector step: Retry re-runs the step (for an agent step, the note below is passed to the agent as guidance; a connector step ignores the note). Continue completes it as resolved — supply the emitted value if the step was finished out of band."
+        value:
+          type: string
+          description: "Emitted value (only when this step emits exactly one fact) — The typed value this step hands forward to its downstream dependents, applied on Continue. It is applied ONLY when the step emits exactly one fact AND that fact is actually consumed downstream: leave it blank for a click-done step that emits nothing (or whose sole emit is routing-only/unconsumed, where any entry is discarded — nothing reads it), and for a step emitting more than one fact any entry here is discarded (a single value cannot satisfy several distinct facts) — choose \"Retry this step\" to actually produce those facts."
+        escalationNote:
+          type: string
+          description: "Note (optional) — Optional. On Retry of an AGENT step, passed to the agent as guidance for the next attempt. A connector-step retry ignores this note."
+    EscalationAnswerDeliveryHumanAck:
+      title: delivery-human-ack
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `delivery-human-ack` (see Escalation.formKey / expectedFields)."
+      properties:
+        prompt:
+          type: string
+          description: "Now do this — The scheduled human step this delivery graph is waiting on. Complete it once done — this node emits nothing (the degenerate click-done case) and simply unblocks its dependents."
+        note:
+          type: string
+          description: "Note (optional)"
+    EscalationAnswerDeliveryHumanGeneric:
+      title: delivery-human-generic
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `delivery-human-generic` (see Escalation.formKey / expectedFields)."
+      properties:
+        value:
+          type: string
+          description: "Emitted value (the single value this step hands forward) — The typed value this task hands forward to its downstream dependents. For a human step it is the one value-emitting fact; for a timed-out wait gate it is the awaited value — which may be an artifact handle (entered here and mapped onto the gate's resolved value). Leave it blank when the step emits nothing. One field carries at most one value: a human step that must emit several facts is refused at authoring time, and a wait gate with more than one emit leaves this field inert — Continue simply acknowledges this escalation and proceeds without those facts."
+        note:
+          type: string
+          description: "Note (optional) — Optional operator note."
+    EscalationAnswerDeliveryHumanPublish:
+      title: delivery-human-publish
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `delivery-human-publish` (see Escalation.formKey / expectedFields)."
+      required: [resolvedArtifact]
+      properties:
+        prompt:
+          type: string
+          description: "Now do this (manual publish) — The manual step no automation can cross — e.g. an OTP publish + OIDC trusted-publishing setup. Complete it once the artifact is published."
+        resolvedArtifact:
+          type: string
+          description: "Resolved artifact (pkg@version) — The exact published handle to hand forward, e.g. @nanobpm/urban@0.54.0. A downstream capability/npm/pr edge binds and pins this."
+        note:
+          type: string
+          description: "Note (optional)"
+    EscalationAnswerEmptyPlanEscalation:
+      title: empty-plan-escalation
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `empty-plan-escalation` (see Escalation.formKey / expectedFields)."
+      required: [directive]
+      properties:
+        directive:
+          type: string
+          enum: [accept, revise]
+          description: "Directive"
+        notes:
+          type: string
+          description: "Revision guidance for the planner"
+    EscalationAnswerFeatureBlocked:
+      title: feature-blocked
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `feature-blocked` (see Escalation.formKey / expectedFields)."
+      properties:
+        note:
+          type: string
+          description: "Disposition note (what you did / why — recorded on the run)"
+    EscalationAnswerFeatureEscalation:
+      title: feature-escalation
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `feature-escalation` (see Escalation.formKey / expectedFields)."
+      required: [resolution]
+      properties:
+        resolution:
+          type: string
+          enum: [answer, abandon]
+          description: "Resolution"
+        answer:
+          type: string
+          description: "Answer / guidance for the implementation agent Required when resolution == \"answer\"."
+    EscalationAnswerMergeApproval:
+      title: merge-approval
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `merge-approval` (see Escalation.formKey / expectedFields)."
+      required: [mergeDecision]
+      properties:
+        mergeDecision:
+          type: string
+          enum: [approve, revise]
+          description: "Decision"
+        answer:
+          type: string
+          description: "Guidance for the agent — What should change before this PR merges? The agent implements it on the same PR. Required when mergeDecision == \"revise\"."
+    EscalationAnswerPlanReviewDecision:
+      title: plan-review-decision
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `plan-review-decision` (see Escalation.formKey / expectedFields)."
+      required: [directive]
+      properties:
+        directive:
+          type: string
+          enum: [proceed, revise]
+          description: "Directive"
+        notes:
+          type: string
+          description: "Revision guidance for the planner"
+    EscalationAnswerPrEscalation:
+      title: pr-escalation
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `pr-escalation` (see Escalation.formKey / expectedFields)."
+      required: [answer]
+      properties:
+        answer:
+          type: string
+          description: "Your answer — Your reply resumes the PR process and is handed to its next step. Answer the request shown in Decision context above."
+    EscalationAnswerReadinessEscalation:
+      title: readiness-escalation
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `readiness-escalation` (see Escalation.formKey / expectedFields)."
+      required: [resolution]
+      properties:
+        resolution:
+          type: string
+          enum: [acknowledge, abandon]
+          description: "Resolution"
+        answer:
+          type: string
+          description: "Notes for the operator"
+    EscalationAnswerTrialMergeDecision:
+      title: trial-merge-decision
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `trial-merge-decision` (see Escalation.formKey / expectedFields)."
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [proceed, rebase, abandon]
+          description: "Action"
+        notes:
+          type: string
+          description: "Notes"
     IncidentList:
       type: object
       additionalProperties: false
@@ -2073,6 +2275,9 @@ components:
         alreadyRunning:
           type: boolean
           description: True iff a non-terminal feature run for this issue already existed and short-circuited the start (outcome `already-active`); no new instance was started.
+        baseBranch:
+          type: string
+          description: The admitted base branch the run targets — the repository default branch when the request omitted `baseBranch` (issue 989).
     EpicSetStart:
       description: >-
         The set/batch admission request body (issue #292, slice S2). Submits a SET of epics plus the
@@ -3197,6 +3402,214 @@ components:
         expiresAt:
           type: string
           description: When the proposal ages out of its TTL if never dispatched (ISO-8601).
+    EscalationAnswerRequest:
+      description: The escalation answer — the parked user task and the typed variables its form expects.
+      type: object
+      additionalProperties: false
+      required:
+        - userTaskKey
+        - variables
+      properties:
+        userTaskKey:
+          type: string
+          minLength: 1
+          description: The parked escalation user-task key (user_tasks.user_task_key).
+        variables:
+          description: >-
+            The typed form variables the parked task's `.form` expects — one shape per escalation
+            form, selected by the open escalation's `formKey` (its kind). `escalations list` returns
+            each escalation's `expectedFields`, so the answer can be built from the listing. The
+            completer validates the submitted variables against that form's contract.
+          anyOf:
+            - $ref: "#/components/schemas/EscalationAnswerConformanceEscalation"
+            - $ref: "#/components/schemas/EscalationAnswerDeliveryEscalation"
+            - $ref: "#/components/schemas/EscalationAnswerDeliveryHumanAck"
+            - $ref: "#/components/schemas/EscalationAnswerDeliveryHumanGeneric"
+            - $ref: "#/components/schemas/EscalationAnswerDeliveryHumanPublish"
+            - $ref: "#/components/schemas/EscalationAnswerEmptyPlanEscalation"
+            - $ref: "#/components/schemas/EscalationAnswerFeatureBlocked"
+            - $ref: "#/components/schemas/EscalationAnswerFeatureEscalation"
+            - $ref: "#/components/schemas/EscalationAnswerMergeApproval"
+            - $ref: "#/components/schemas/EscalationAnswerPlanReviewDecision"
+            - $ref: "#/components/schemas/EscalationAnswerPrEscalation"
+            - $ref: "#/components/schemas/EscalationAnswerReadinessEscalation"
+            - $ref: "#/components/schemas/EscalationAnswerTrialMergeDecision"
+        operator:
+          type: string
+          description: Optional operator handle recorded in the attribution ledger; defaults to "operator".
+    WorkersView:
+      type: object
+      description: Per-job-type worker supply and demand (issue 989), in the list envelope.
+      required: [items, page, internal]
+      properties:
+        page:
+          $ref: "#/components/schemas/ListPage"
+        items:
+          type: array
+          description: One row per external job type, sorted by job type.
+          items:
+            $ref: "#/components/schemas/WorkersJobType"
+        internal:
+          $ref: "#/components/schemas/InternalWorkersSummary"
+    WorkersJobType:
+      type: object
+      required: [jobType, workers, liveWorkers, queueDepth, inProgress, oldestWaitingAgeMs, starved]
+      properties:
+        jobType:
+          type: string
+          description: The job type (e.g. `senior:feature`).
+        workers:
+          type: array
+          description: Connected workers that serve this job type or currently hold one of its jobs.
+          items:
+            $ref: "#/components/schemas/ConnectedWorker"
+        liveWorkers:
+          type: integer
+          description: How many of `workers` are live.
+        queueDepth:
+          type: integer
+          description: Activatable jobs of this type waiting for a worker.
+        inProgress:
+          type: integer
+          description: Jobs of this type a worker has picked up and not yet completed.
+        oldestWaitingAgeMs:
+          type: integer
+          nullable: true
+          description: Age in ms of the oldest waiting job, when the activation ledger tracks it; else null.
+        starved:
+          type: boolean
+          description: True when jobs are waiting and no live worker can pick them up.
+    ConnectedWorker:
+      type: object
+      required: [workerId, host, transport, lastSeen, live, status, busy]
+      properties:
+        workerId:
+          type: string
+          description: The worker instance id.
+        host:
+          type: string
+          nullable: true
+          description: The host the worker declared, if any.
+        transport:
+          type: string
+          enum: [agentic-channel]
+          description: How the worker is connected.
+        lastSeen:
+          type: string
+          description: Last liveness refresh, ISO-8601.
+        live:
+          type: boolean
+          description: Whether the worker's connection is still open.
+        status:
+          type: string
+          enum: [live, stale]
+          description: "`live` while connected, else `stale`."
+        busy:
+          type: boolean
+          description: True when the worker currently holds a job of this type.
+    InternalWorkersSummary:
+      type: object
+      description: One health line for nwf's own in-process `pr.*` workers.
+      required: [total, live, stale, summary]
+      properties:
+        total:
+          type: integer
+          description: How many internal job types nwf serves in-process.
+        live:
+          type: integer
+          description: How many are live (in-process workers are live while the app serves).
+        stale:
+          type: integer
+          description: How many are stale.
+        summary:
+          type: string
+          description: One-line health summary.
+        workers:
+          type: array
+          description: Present only with `internal=true`.
+          items:
+            $ref: "#/components/schemas/InternalWorker"
+    InternalWorker:
+      type: object
+      required: [jobType, status, queueDepth, inProgress]
+      properties:
+        jobType:
+          type: string
+          description: The internal job type (e.g. `pr.finalize`).
+        status:
+          type: string
+          enum: [live]
+          description: In-process workers are live.
+        queueDepth:
+          type: integer
+          description: Jobs of this type waiting.
+        inProgress:
+          type: integer
+          description: Jobs of this type being processed.
+    StagedProposalDetail:
+      type: object
+      additionalProperties: false
+      required: [digest, title, nodeCount, createdAt, expiresAt, steps]
+      properties:
+        digest:
+          type: string
+        title:
+          type: string
+          nullable: true
+        nodeCount:
+          type: integer
+        createdAt:
+          type: string
+        expiresAt:
+          type: string
+          nullable: true
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/StagedProposalStep"
+    StagedProposalStep:
+      type: object
+      additionalProperties: false
+      required: [id, kind, type, target, dependsOn, gate, timeLimit, timeLimitDefaulted, onTimeout, converge, autoMerge]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [agent, wait, human, connector]
+        type:
+          type: string
+          description: The agent job type, `wait:<probe kind>`, `human`, or the connector target (e.g. `converge`).
+        target:
+          type: string
+          nullable: true
+          description: The agent repository, the wait target (issue / PR / epic / URL …), the connector's PR, or a human step's form.
+        dependsOn:
+          type: array
+          items:
+            type: string
+          description: The upstream endpoints (`<nodeId>` or `<nodeId>.<fact>`) this step waits on.
+        gate:
+          type: string
+          nullable: true
+          description: The guard(s) on incoming guarded edges (`<fact> == <value>` or `default`); null when unguarded.
+        timeLimit:
+          type: string
+          nullable: true
+          description: The effective ISO-8601 time limit (agent/connector SLA, wait budget, human escalation SLA).
+        timeLimitDefaulted:
+          type: boolean
+          description: True when `timeLimit` is the run default (a dispatch-time override would replace it).
+        onTimeout:
+          type: string
+          nullable: true
+          description: "Wait steps: what happens when the time limit elapses (escalate / continue / fail)."
+        converge:
+          type: boolean
+          description: Agent steps hand their PR to the convergence loop.
+        autoMerge:
+          type: boolean
+          description: Agent steps drive the merge loop after convergence.
     StagedProposalList:
       description: "The live staged delivery-graph proposals awaiting dispatch (issue #511), newest first."
       type: object
@@ -3890,8 +4303,8 @@ components:
           description: The path-qualified validation failures (at least one).
     FeatureStart:
       description: The start-feature request body — a SINGLE-issue feature run. Names the target issue
-        by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a
-        REQUIRED `baseBranch` (ADR 0003, same admission as the epic path), and the two optional
+        by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus an
+        optional `baseBranch` (defaults to the repository default branch; ADR 0003 admission), and the two optional
         follow-on knobs `converge` / `autoMerge`. May also carry an intake-time readiness gate
         (`readiness` and/or `blockedOn` + `consumerPackage`, per issue 295) that parks the run until
         the declared upstreams land. Modeled as `oneOf` named variants (Camunda REST v2 pattern) so an
@@ -3904,7 +4317,6 @@ components:
       additionalProperties: false
       required:
         - issue
-        - baseBranch
       properties:
         issue:
           type: string
@@ -3915,10 +4327,13 @@ components:
           maxLength: 255
           pattern: '\S'
           description: >-
-            REQUIRED target branch the agent branches off and opens its PR against. Admitted through
-            the same ADR 0003 policy as the epic path (`admitPlan`): a missing `epic/*` base is
-            auto-created off default HEAD; a non-`epic/*` base must already exist; naming the default
-            branch requires `confirmDefaultBase`.
+            Target branch the agent branches off and opens its PR against. OPTIONAL (issue 989): when
+            omitted, the repository's default branch is resolved and used directly (omitting it IS the
+            default-branch choice, so no `confirmDefaultBase` round trip), and the resolved branch is
+            returned as `baseBranch` in the response. When given, it is admitted through the same ADR
+            0003 policy as the epic path (`admitPlan`): a missing `epic/*` base is auto-created off
+            default HEAD; a non-`epic/*` base must already exist; explicitly naming the default branch
+            requires `confirmDefaultBase` in the same call.
         converge:
           type: boolean
           description: >-
@@ -3991,7 +4406,6 @@ components:
       additionalProperties: false
       required:
         - url
-        - baseBranch
       properties:
         url:
           type: string
@@ -4002,7 +4416,7 @@ components:
           maxLength: 255
           pattern: '\S'
           description: >-
-            REQUIRED target branch the agent branches off and opens its PR against. See
+            Optional target branch (defaults to the repository default branch). See
             `FeatureStartByIssue.baseBranch`.
         converge:
           type: boolean
@@ -4764,6 +5178,43 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+  /workers:
+    get:
+      operationId: listWorkers
+      x-cli:
+        command: [workers, list]
+      summary: "List, per job type nwf issues, the connected workers, queue depth and starvation (issue 989)."
+      description: >-
+        Answers "are workers picking up my nwf work?" in one call. For every external job type nwf
+        issues (the deployed models' agent tasks, plus any type seen on a waiting job): the connected
+        workers (id, host, transport, last-seen, live/stale, busy), the activatable queue depth, the
+        in-progress count, the age of the oldest waiting job (when the activation ledger tracks it), and
+        a `starved` flag (jobs waiting with no live worker). nwf's own in-process `pr.*` workers are
+        summarised as one health line; pass `internal=true` to list them. Read-only and advisory.
+      parameters:
+        - name: internal
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["true", "false"]
+          description: "`true` lists nwf's in-process internal workers individually."
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The workers view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkersView"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
   /agentic/supply:
     get:
       operationId: getAgenticSupply
@@ -5374,9 +5825,13 @@ paths:
     post:
       operationId: startConvergenceLoop
       x-cli:
-        command: [converge]
+        command: [start, pr]
+        aliases: [[converge]]
         positional: [pr]
-      summary: Register/refresh a PR aggregate (idempotent on prKey) and start its convergence loop.
+      summary: "Start a PR review/convergence loop: review, fix, re-review until it converges, optionally merge."
+      description: >-
+        Registers/refreshes the PR aggregate (idempotent on prKey) and starts its convergence loop.
+        CLI: `start pr owner/repo#1` (alias `converge`, issue 989).
       requestBody:
         required: true
         content:
@@ -6562,6 +7017,53 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+  /delivery-graph/staged/{digest}:
+    get:
+      operationId: getStagedProposal
+      x-cli:
+        command: [graph, show]
+        positional: [digest]
+      summary: "Show one LIVE staged delivery-graph proposal step by step, for review before dispatch (issue 989)."
+      description: >-
+        The per-step summary an operator reviews before `graph dispatch`: for every node of the staged
+        graph — its id, kind and finer type (agent job type, `wait:<probe kind>`, human, connector
+        target such as `converge`/`converge-merge`), target (repository / issue / PR / epic),
+        dependencies, edge guard, effective time limit (and whether it is the run default), the wait's
+        on-timeout behaviour, and the converge / auto-merge settings. Time limits are derived from the
+        SAME defaults the dispatch runner seeds, so a dispatch with no timeout overrides runs exactly
+        these. The escalation-steward opt-in (`autoResolveEscalations`) and timeout overrides are
+        dispatch-time options, not part of the staged graph. Read-only; an unknown / expired /
+        dispatched digest is a 404.
+      parameters:
+        - name: digest
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: The staged proposal's digest (the id `graph staged` lists).
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The staged proposal and its per-step summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StagedProposalDetail"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: No live staged proposal for this digest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
   /delivery-graph/vocabulary:
     get:
       operationId: getDeliveryGraphVocabulary
@@ -7051,13 +7553,12 @@ paths:
           application/json:
             schema:
               # BEGIN generated:mcp-body source=#/components/schemas/FeatureStart (scripts/inline-mcp-bodies.ts — do not hand-edit)
-              description: The start-feature request body — a SINGLE-issue feature run. Names the target issue by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a REQUIRED `baseBranch` (ADR 0003, same admission as the epic path), and the two optional follow-on knobs `converge` / `autoMerge`. May also carry an intake-time readiness gate (`readiness` and/or `blockedOn` + `consumerPackage`, per issue 295) that parks the run until the declared upstreams land. Modeled as `oneOf` named variants (Camunda REST v2 pattern) so an ambiguous or empty target is a 400 at the edge.
+              description: The start-feature request body — a SINGLE-issue feature run. Names the target issue by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus an optional `baseBranch` (defaults to the repository default branch; ADR 0003 admission), and the two optional follow-on knobs `converge` / `autoMerge`. May also carry an intake-time readiness gate (`readiness` and/or `blockedOn` + `consumerPackage`, per issue 295) that parks the run until the declared upstreams land. Modeled as `oneOf` named variants (Camunda REST v2 pattern) so an ambiguous or empty target is a 400 at the edge.
               oneOf:
                 - type: object
                   additionalProperties: false
                   required:
                     - issue
-                    - baseBranch
                   properties:
                     issue:
                       type: string
@@ -7067,7 +7568,7 @@ paths:
                       minLength: 1
                       maxLength: 255
                       pattern: \S
-                      description: 'REQUIRED target branch the agent branches off and opens its PR against. Admitted through the same ADR 0003 policy as the epic path (`admitPlan`): a missing `epic/*` base is auto-created off default HEAD; a non-`epic/*` base must already exist; naming the default branch requires `confirmDefaultBase`.'
+                      description: "Target branch the agent branches off and opens its PR against. OPTIONAL (issue 989): when omitted, the repository's default branch is resolved and used directly (omitting it IS the default-branch choice, so no `confirmDefaultBase` round trip), and the resolved branch is returned as `baseBranch` in the response. When given, it is admitted through the same ADR 0003 policy as the epic path (`admitPlan`): a missing `epic/*` base is auto-created off default HEAD; a non-`epic/*` base must already exist; explicitly naming the default branch requires `confirmDefaultBase` in the same call."
                     converge:
                       type: boolean
                       description: When true, hand the opened PR to the convergence loop (review rounds) as a follow-on step. When false (default) the run ends at "PR raised, not reviewed".
@@ -7208,7 +7709,6 @@ paths:
                   additionalProperties: false
                   required:
                     - url
-                    - baseBranch
                   properties:
                     url:
                       type: string
@@ -7218,7 +7718,7 @@ paths:
                       minLength: 1
                       maxLength: 255
                       pattern: \S
-                      description: REQUIRED target branch the agent branches off and opens its PR against. See `FeatureStartByIssue.baseBranch`.
+                      description: Optional target branch (defaults to the repository default branch). See `FeatureStartByIssue.baseBranch`.
                     converge:
                       type: boolean
                       description: When true, hand the opened PR to the convergence loop. See `FeatureStartByIssue.converge`.
@@ -7456,6 +7956,8 @@ paths:
         content:
           application/json:
             schema:
+              # BEGIN generated:mcp-body source=#/components/schemas/EscalationAnswerRequest (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: The escalation answer — the parked user task and the typed variables its form expects.
               type: object
               additionalProperties: false
               required:
@@ -7467,12 +7969,190 @@ paths:
                   minLength: 1
                   description: The parked escalation user-task key (user_tasks.user_task_key).
                 variables:
-                  type: object
-                  additionalProperties: true
-                  description: The typed form variables the parked task's `.form` expects (kind-specific).
+                  description: The typed form variables the parked task's `.form` expects — one shape per escalation form, selected by the open escalation's `formKey` (its kind). `escalations list` returns each escalation's `expectedFields`, so the answer can be built from the listing. The completer validates the submitted variables against that form's contract.
+                  anyOf:
+                    - title: conformance-escalation
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `conformance-escalation` (see Escalation.formKey / expectedFields).
+                      properties:
+                        note:
+                          type: string
+                          description: Disposition note (what you decided / follow-up — recorded on the review)
+                    - title: delivery-escalation
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `delivery-escalation` (see Escalation.formKey / expectedFields).
+                      properties:
+                        decision:
+                          type: string
+                          enum:
+                            - continue
+                            - retry
+                          description: 'Resolution — Escalation of an agent or connector step: Retry re-runs the step (for an agent step, the note below is passed to the agent as guidance; a connector step ignores the note). Continue completes it as resolved — supply the emitted value if the step was finished out of band.'
+                        value:
+                          type: string
+                          description: 'Emitted value (only when this step emits exactly one fact) — The typed value this step hands forward to its downstream dependents, applied on Continue. It is applied ONLY when the step emits exactly one fact AND that fact is actually consumed downstream: leave it blank for a click-done step that emits nothing (or whose sole emit is routing-only/unconsumed, where any entry is discarded — nothing reads it), and for a step emitting more than one fact any entry here is discarded (a single value cannot satisfy several distinct facts) — choose "Retry this step" to actually produce those facts.'
+                        escalationNote:
+                          type: string
+                          description: Note (optional) — Optional. On Retry of an AGENT step, passed to the agent as guidance for the next attempt. A connector-step retry ignores this note.
+                    - title: delivery-human-ack
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `delivery-human-ack` (see Escalation.formKey / expectedFields).
+                      properties:
+                        prompt:
+                          type: string
+                          description: Now do this — The scheduled human step this delivery graph is waiting on. Complete it once done — this node emits nothing (the degenerate click-done case) and simply unblocks its dependents.
+                        note:
+                          type: string
+                          description: Note (optional)
+                    - title: delivery-human-generic
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `delivery-human-generic` (see Escalation.formKey / expectedFields).
+                      properties:
+                        value:
+                          type: string
+                          description: "Emitted value (the single value this step hands forward) — The typed value this task hands forward to its downstream dependents. For a human step it is the one value-emitting fact; for a timed-out wait gate it is the awaited value — which may be an artifact handle (entered here and mapped onto the gate's resolved value). Leave it blank when the step emits nothing. One field carries at most one value: a human step that must emit several facts is refused at authoring time, and a wait gate with more than one emit leaves this field inert — Continue simply acknowledges this escalation and proceeds without those facts."
+                        note:
+                          type: string
+                          description: Note (optional) — Optional operator note.
+                    - title: delivery-human-publish
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `delivery-human-publish` (see Escalation.formKey / expectedFields).
+                      required:
+                        - resolvedArtifact
+                      properties:
+                        prompt:
+                          type: string
+                          description: Now do this (manual publish) — The manual step no automation can cross — e.g. an OTP publish + OIDC trusted-publishing setup. Complete it once the artifact is published.
+                        resolvedArtifact:
+                          type: string
+                          description: Resolved artifact (pkg@version) — The exact published handle to hand forward, e.g. @nanobpm/urban@0.54.0. A downstream capability/npm/pr edge binds and pins this.
+                        note:
+                          type: string
+                          description: Note (optional)
+                    - title: empty-plan-escalation
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `empty-plan-escalation` (see Escalation.formKey / expectedFields).
+                      required:
+                        - directive
+                      properties:
+                        directive:
+                          type: string
+                          enum:
+                            - accept
+                            - revise
+                          description: Directive
+                        notes:
+                          type: string
+                          description: Revision guidance for the planner
+                    - title: feature-blocked
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `feature-blocked` (see Escalation.formKey / expectedFields).
+                      properties:
+                        note:
+                          type: string
+                          description: Disposition note (what you did / why — recorded on the run)
+                    - title: feature-escalation
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `feature-escalation` (see Escalation.formKey / expectedFields).
+                      required:
+                        - resolution
+                      properties:
+                        resolution:
+                          type: string
+                          enum:
+                            - answer
+                            - abandon
+                          description: Resolution
+                        answer:
+                          type: string
+                          description: Answer / guidance for the implementation agent Required when resolution == "answer".
+                    - title: merge-approval
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `merge-approval` (see Escalation.formKey / expectedFields).
+                      required:
+                        - mergeDecision
+                      properties:
+                        mergeDecision:
+                          type: string
+                          enum:
+                            - approve
+                            - revise
+                          description: Decision
+                        answer:
+                          type: string
+                          description: Guidance for the agent — What should change before this PR merges? The agent implements it on the same PR. Required when mergeDecision == "revise".
+                    - title: plan-review-decision
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `plan-review-decision` (see Escalation.formKey / expectedFields).
+                      required:
+                        - directive
+                      properties:
+                        directive:
+                          type: string
+                          enum:
+                            - proceed
+                            - revise
+                          description: Directive
+                        notes:
+                          type: string
+                          description: Revision guidance for the planner
+                    - title: pr-escalation
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `pr-escalation` (see Escalation.formKey / expectedFields).
+                      required:
+                        - answer
+                      properties:
+                        answer:
+                          type: string
+                          description: Your answer — Your reply resumes the PR process and is handed to its next step. Answer the request shown in Decision context above.
+                    - title: readiness-escalation
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `readiness-escalation` (see Escalation.formKey / expectedFields).
+                      required:
+                        - resolution
+                      properties:
+                        resolution:
+                          type: string
+                          enum:
+                            - acknowledge
+                            - abandon
+                          description: Resolution
+                        answer:
+                          type: string
+                          description: Notes for the operator
+                    - title: trial-merge-decision
+                      type: object
+                      additionalProperties: true
+                      description: Answer variables for an escalation whose form is `trial-merge-decision` (see Escalation.formKey / expectedFields).
+                      required:
+                        - action
+                      properties:
+                        action:
+                          type: string
+                          enum:
+                            - proceed
+                            - rebase
+                            - abandon
+                          description: Action
+                        notes:
+                          type: string
+                          description: Notes
                 operator:
                   type: string
                   description: Optional operator handle recorded in the attribution ledger; defaults to "operator".
+              # END generated:mcp-body
       responses:
         "200":
           description: The escalation user task was completed and the process resumed.
