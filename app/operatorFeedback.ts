@@ -17,8 +17,8 @@
 //   • issue comments on each issue the PR CLOSES (closing keyword), posted after the run started;
 //   • PR conversation comments (the PR is created by the run, so every one post-dates the start);
 //   • unresolved PR review THREADS whose root author is a trusted human (not a bot such as Copilot).
-// An item is acknowledged by an `nano-ack: issuecomment-<id>` marker in any trusted-or-self reply on
-// the issue or the PR conversation (a review thread is acknowledged by RESOLVING it). An
+// An item is acknowledged by a line STARTING with `nano-ack: issuecomment-<id>` in a trusted-author
+// comment on the issue or the PR conversation (a review thread is acknowledged by RESOLVING it). An
 // unacknowledged item blocks convergence on the RECOVERABLE (ack-only) route: re-enter the round
 // agent within the existing `ackRetryMax` budget, then escalate to a human.
 //
@@ -28,8 +28,8 @@
 // convergence (a single epic comment cannot sensibly block N unrelated slices; an operator who needs
 // a slice to change comments on its PR, which IS gated).
 
+import { parseIssue } from "./issueParse.ts";
 import { ISSUE_PR_LINK_MARKER_PREFIX, type IssueComment } from "./issuePrLink.ts";
-import { parsePr } from "./prParse.ts";
 
 /** The ONE agent-facing issue-read command: reads the body AND every comment. Plain `gh issue view`
  *  prints only a comment count, which is how operator comments were silently dropped (#985). */
@@ -46,12 +46,24 @@ export function feedbackAckMarker(commentId: number): string {
   return `nano-ack: issuecomment-${commentId}`;
 }
 
-const ACK_RE = /nano-ack:\s*issuecomment-(\d+)/g;
+// A DEDICATED acknowledgement line: the marker must START a (non-quoted) line. A marker merely
+// mentioned mid-sentence ("You posted nano-ack: issuecomment-42, but …") or quoted (`> nano-ack: …`)
+// is NOT an ack — that is corrective feedback and must still gate.
+const ACK_LINE_RE = /^nano-ack:\s*issuecomment-(\d+)\b/;
 
-/** Every comment id acknowledged by a `nano-ack: issuecomment-<id>` marker in the given bodies. */
+function ackLineIds(body: string): number[] {
+  const out: number[] = [];
+  for (const line of body.split("\n")) {
+    const m = line.trim().match(ACK_LINE_RE);
+    if (m) out.push(Number(m[1]));
+  }
+  return out;
+}
+
+/** Every comment id acknowledged by a dedicated `nano-ack: issuecomment-<id>` line in the bodies. */
 export function parseFeedbackAcks(bodies: string[]): Set<number> {
   const out = new Set<number>();
-  for (const b of bodies) for (const m of b.matchAll(ACK_RE)) out.add(Number(m[1]));
+  for (const b of bodies) for (const id of ackLineIds(b)) out.add(id);
   return out;
 }
 
@@ -75,7 +87,9 @@ export function isRunOwnComment(body: string): boolean {
   return (
     body.trimStart().startsWith(CLAIM_COMMENT_PREFIX) ||
     body.includes(ISSUE_PR_LINK_MARKER_PREFIX) ||
-    /nano-ack:/.test(body)
+    ackLineIds(body).length > 0 ||
+    // A Copilot-advisory ack thread root (`<verdict>. nano-ack: <path> :: <text>`, app/github.ts).
+    /nano-ack:\s*\S+\s+::\s+\S/.test(body)
   );
 }
 
@@ -90,14 +104,15 @@ export function runStartOnIssue(comments: IssueComment[], fallbackIso: string | 
  *  its title and body. Non-closing refs (`Part of #N`, `Refs #N`) are excluded by construction. */
 export function parseClosingIssueNumbers(text: string, repo: string): number[] {
   // The keyword is followed by one reference token; a bare `#N` is this repo, and a qualified
-  // `owner/repo#N` is resolved through the ONE `owner/repo#N` grammar (`parsePr`) — no second shape regex.
+  // `owner/repo#N` is or an `/issues/` URL is resolved through the ONE issue grammar (`parseIssue`) — no second shape regex.
   const re = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+(\S+)/gi;
   const out = new Set<number>();
   for (const m of text.matchAll(re)) {
     const token = m[1].replace(/[.,;:)]+$/, "");
     if (/^#\d+$/.test(token)) out.add(Number(token.slice(1)));
     else {
-      const ref = parsePr(token);
+      // `owner/repo#N` AND `https://github.com/owner/repo/issues/N` — the ONE issue grammar.
+      const ref = parseIssue(token);
       if (ref && ref.repo.toLowerCase() === repo.toLowerCase()) out.add(ref.number);
     }
   }
@@ -144,9 +159,13 @@ export interface OperatorFeedbackInput {
  *  issue/PR comments lacking a `nano-ack: issuecomment-<id>` marker, and UNRESOLVED review threads
  *  rooted by a trusted human. Pure. */
 export function deriveOperatorFeedback(input: OperatorFeedbackInput): OperatorFeedbackItem[] {
-  const allBodies = [...input.prComments.map((c) => c.body), ...input.issues.flatMap((i) => i.comments.map((c) => c.body))];
-  for (const t of input.threads) allBodies.push(...t.bodies);
-  const acked = parseFeedbackAcks(allBodies);
+  // Acks count ONLY from trusted human issue/PR comments: an untrusted commenter must not be able to
+  // forge `nano-ack: issuecomment-<id>` and clear a maintainer's feedback. Review-thread replies carry
+  // no per-reply authorship here, so they are not an ack source (a thread is acked by resolving it).
+  const ackBodies = [...input.prComments, ...input.issues.flatMap((i) => i.comments)]
+    .filter((c) => isTrustedAuthor(c.association, c.login))
+    .map((c) => c.body);
+  const acked = parseFeedbackAcks(ackBodies);
   const items: OperatorFeedbackItem[] = [];
   const consider = (c: IssueComment, source: "issue" | "pr", label: string) => {
     if (!isTrustedAuthor(c.association, c.login)) return;
@@ -191,7 +210,7 @@ export function renderOperatorFeedbackBrief(items: OperatorFeedbackItem[]): stri
     "change the code to address it, or reply explaining why not. Convergence is BLOCKED until each item",
     "is acknowledged:",
     "",
-    "- an issue / PR comment: reply (on the same issue or on this PR) with a line containing its marker",
+    "- an issue / PR comment: reply (on the same issue or on this PR) with a line STARTING with its marker",
     "  `nano-ack: issuecomment-<id>` (shown below), stating what you did;",
     "- a review thread: address it, reply, and RESOLVE the thread.",
     "",
