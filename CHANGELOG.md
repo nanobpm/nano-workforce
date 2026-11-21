@@ -1,3 +1,9 @@
+## [0.218.0](https://github.com/nanobpm/nano-workforce/compare/v0.217.0...v0.218.0) (2026-11-21)
+
+### Features
+
+* **api:** cli ergonomics — start pr, workers list, graph show, typed escalation answers, default base ([#991](https://github.com/nanobpm/nano-workforce/issues/991)) ([b9cb2b9](https://github.com/nanobpm/nano-workforce/commit/b9cb2b9e869c0c4308b3f8d3475167f401acff58)), closes [#989](https://github.com/nanobpm/nano-workforce/issues/989) [#989](https://github.com/nanobpm/nano-workforce/issues/989) [#715](https://github.com/nanobpm/nano-workforce/issues/715)
+
 ## [0.217.0](https://github.com/nanobpm/nano-workforce/compare/v0.216.1...v0.217.0) (2026-11-21)
 
 ### Features
