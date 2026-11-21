@@ -246,3 +246,55 @@ test("explicitly naming the default branch still needs confirmDefaultBase — ac
     assertEquals(ok.body.baseBranch, "main");
   });
 });
+
+// ── adversarial-review regression: a THROWING default-branch lookup is the missing-base 400 ─────
+// When `baseBranch` is omitted the operation resolves the repo default branch itself — but
+// `fetchDefaultBranch` THROWS on any GitHub error (a non-ok fetch for an unknown/private repo, a
+// GitHub outage, or a gh/JSON.parse failure on the gh path). The lookup ran OUTSIDE the admitPlan
+// try/catch, so that throw escaped the delegate as an unhandled 500 instead of falling into the
+// existing "default branch could not be resolved" 400. The lookup must catch → null (+ warn), so
+// admitPlan's MissingBaseBranchError path produces the 400. Both GitHub-failure variants (an HTTP
+// error status and a network-level reject) must degrade the same way — never a 500, never a run.
+
+async function withGithubFailure<T>(statusOrReject: number | "reject", fn: () => Promise<T>): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevTok = process.env["GITHUB_TOKEN"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  process.env["GITHUB_TOKEN"] = "tok";
+  resetDefaultBranchCache();
+  globalThis.fetch = (() =>
+    statusOrReject === "reject"
+      ? Promise.reject(new Error("network unreachable"))
+      : Promise.resolve(new Response("Not Found", { status: statusOrReject }))) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    resetDefaultBranchCache();
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    if (prevTok === undefined) delete process.env["GITHUB_TOKEN"];
+    else process.env["GITHUB_TOKEN"] = prevTok;
+  }
+}
+
+for (const [label, failure] of [
+  ["an HTTP error status (unknown/private repo)", 404],
+  ["a network-level reject (GitHub outage)", "reject"],
+] as const) {
+  test(`omitted baseBranch + default-branch lookup fails with ${label} → 400, never a 500 or a started run`, async () => {
+    await withGithubFailure(failure, async () => {
+      const { app, started } = makeApp();
+      const res = (await startFeature(input({ issue: `${REPO}#989` }), app)) as any;
+      assertEquals(res.status, 400);
+      assertEquals(typeof res.body.error, "string");
+      assertEquals(
+        (res.body.error as string).includes("default branch could not be resolved"),
+        true,
+        `expected the missing-base 400 message, got: ${res.body.error}`,
+      );
+      assertEquals(started.length, 0, "a rejected door never starts a run");
+    });
+  });
+}

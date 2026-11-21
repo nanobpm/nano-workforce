@@ -56,7 +56,21 @@ export default defineOperation("startFeature", async ({ body }, app) => {
   // satisfied implicitly; explicitly NAMING the default still needs `confirmDefaultBase` (one call).
   const explicitBase = "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch : null;
   const omittedBase = explicitBase === null || explicitBase.trim() === "";
-  const rawBase = omittedBase ? await fetchDefaultBranch(parsed.repo, token) : explicitBase;
+  // `fetchDefaultBranch` THROWS on any GitHub error (a non-ok fetch for an unknown/private repo, a
+  // GitHub outage, or a gh/JSON.parse failure on the gh path). Catch → null so the failure degrades
+  // into admitPlan's MissingBaseBranchError → the 400 below, instead of escaping as an unhandled 500.
+  let resolvedDefault: string | null = null;
+  if (omittedBase) {
+    try {
+      resolvedDefault = await fetchDefaultBranch(parsed.repo, token);
+    } catch (err) {
+      app.log.warn("start-feature: default branch lookup failed — treating as unresolvable", {
+        repo: parsed.repo,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  const rawBase = omittedBase ? resolvedDefault : explicitBase;
   const confirmDefaultBase = omittedBase || ("confirmDefaultBase" in body && body.confirmDefaultBase === true);
   let normalizedBase: string;
   try {
