@@ -139,7 +139,7 @@ Your blackboard endpoint (already scoped to this epic — no auth header needed)
 
 **On start — READ it** to see what siblings have claimed, changed, or **learned**:
 
-    curl -s "${url}"
+    curl -s --connect-timeout 5 --max-time 15 "${url}"
 
 Returns \`{ "planKey": "...", "cursor": <head-entry-id>, "items": [ { "id", "author_task", "kind", "files", "body", "wave", "created_at" }, ... ], "page": { "totalItems": <n> } }\` (\`cursor\` is the head entry id, or \`0\` for an empty plan). Read the entries from \`items\` (\`page.totalItems\` is their count).
 If an entry overlaps your slice (same file, a changed contract/constraint), adapt: coordinate,
@@ -150,7 +150,7 @@ from re-discovering it the hard way.
 
 **When your work affects others — POST an entry** (do this as soon as it's true, not only at the end):
 
-    curl -s -X POST "${url}" -H 'content-type: application/json' \\
+    curl -s --connect-timeout 5 --max-time 15 -X POST "${url}" -H 'content-type: application/json' \\
       -d '{"author_task":"<your-task-id>","kind":"file-claim","files":["path/to/file"],"body":"why"}'
 
 \`kind\` is one of: \`file-claim\` (you now edit a file outside your original slice),
@@ -169,7 +169,7 @@ or \`AGENTS.md\`. Keep the \`body\` concrete and actionable (the exact command /
 give it a stable \`"dedupe_key"\` (e.g. a short slug of the gotcha) so the same learning collapses to
 one entry across retries and siblings:
 
-    curl -s -X POST "${url}" -H 'content-type: application/json' \\
+    curl -s --connect-timeout 5 --max-time 15 -X POST "${url}" -H 'content-type: application/json' \\
       -d '{"author_task":"<your-task-id>","kind":"learning","dedupe_key":"regen-before-build","body":"Run \`make generate\` before \`cargo build --features console\` — a stale generated surface fails the build with a confusing error."}'
 
 A \`learning\` is advisory and never blocks anyone; it is knowledge for the fleet, not a claim on a file.
@@ -190,7 +190,7 @@ Prevent it:
 - **When you introduce OR consume a cross-cutting contract, POST a \`contract\` entry** so siblings see
   it before they reinvent it, and add the durable declaration to \`app/contracts.ts\`:
 
-      curl -s -X POST "${url}" -H 'content-type: application/json' \\
+      curl -s --connect-timeout 5 --max-time 15 -X POST "${url}" -H 'content-type: application/json' \\
         -d '{"author_task":"<your-task-id>","kind":"contract","dedupe_key":"env:NANO_X","body":"introducing env key NANO_X — <owner> — <semantics + default>"}'
 
 The write-time guard reports a \`contractConflicts\` array on a \`contract\` POST when your declaration looks
@@ -202,7 +202,7 @@ response includes a \`"cursor"\`. Re-read incrementally — before you start eac
 least every few minutes on long tasks — passing the last cursor back as \`since\` so you fetch only
 what's new:
 
-    curl -s "${url}&since=<cursor>"
+    curl -s --connect-timeout 5 --max-time 15 "${url}&since=<cursor>"
 
 **React to a file-claim conflict.** When you POST a \`file-claim\`, the response includes
 \`"conflicts"\`: any prior claims by siblings on the same file(s). First claim wins (advisory). If a

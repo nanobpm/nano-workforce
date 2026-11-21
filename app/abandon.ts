@@ -180,10 +180,12 @@ moment, so re-check right before the push):
    the file \`$NANO_FENCE\` exists, otherwise treat the job as held.
 2. **The PR (when you have one).** Run \`gh pr view <number> --repo <repo> --json state\` and
    **abort** if it reports \`CLOSED\` (a PR closed on GitHub without merging is abandoned even though
-   the engine run is still alive).
+   the engine run is still alive). If \`gh\` **fails** or returns no readable state, the PR check is
+   *inconclusive*: the fence cannot see a GitHub-side close, so you then **require** a successful
+   app check in step 3 (an unreachable URL → **abort**).
 3. **The app status URL:**
 
-       curl -sS -w '\\nHTTP %{http_code}\\n' "${url}"
+       curl -sS --connect-timeout 5 --max-time 15 -w '\\nHTTP %{http_code}\\n' "${url}"
 
    Read the body and status straight from this command's output (never via a shared temp file —
    concurrent jobs on the host would overwrite it). It returns \`{ "prKey": "...", "status": "...", "abandoned": true|false }\`.
@@ -192,10 +194,11 @@ moment, so re-check right before the push):
    - It answers with \`"abandoned": false\` → proceed.
    - It **cannot connect** (DNS failure, connection refused, timeout — e.g. this worker is off the
      app's LAN) or returns another error:
-     - **with the fence in use** (\`fence-check\` exit 0, or the \`$NANO_FENCE\` file absent) and
-       the fence said *held* → **proceed**. The URL is only an extra check; the fence and \`gh\` are authoritative.
+     - **with the fence in use** (\`fence-check\` exit 0, or the \`$NANO_FENCE\` file absent),
+       the PR check conclusive (or there is no PR yet), and the fence said *held* → **proceed**. The URL is only an extra check; the fence and \`gh\` are authoritative.
      - **without the fence** (an older worker, neither available) or when the fence was
-       inconclusive with no \`$NANO_FENCE\` file to consult → **abort** (fail closed, as before).
+       inconclusive with no \`$NANO_FENCE\` file to consult, or the PR check was inconclusive →
+       **abort** (fail closed, as before).
 
 To **abort**: make no commits, push nothing, open no PR, request no review. Leave the working tree
 as-is and exit. A failure when you later try to complete the job is EXPECTED after a cancel — do not

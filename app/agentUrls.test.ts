@@ -9,13 +9,28 @@ import { blackboardUrl, renderCoordinationBrief } from "./blackboard.ts";
 import { proposalReviewUrl } from "./deliveryGraphProposals.ts";
 import { transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 
-/** Each URL minter that builds from `publicBaseUrl()` and the registry entry it feeds. */
+/** Each URL-producing SYMBOL (`file::function`) that builds from `publicBaseUrl()` and the registry
+ * entry it feeds — keyed per producer, not per module, so a second producer in a listed module fails. */
 const MINTERS: Record<string, string> = {
-  "app/abandon.ts": "abandonUrl",
-  "app/blackboard.ts": "blackboardUrl",
-  "app/deliveryGraphProposals.ts": "proposalReviewUrl",
-  "app/agentic/transcript-url.ts": "transcriptUrlBase",
+  "app/abandon.ts::abandonUrl": "abandonUrl",
+  "app/blackboard.ts::blackboardUrl": "blackboardUrl",
+  "app/deliveryGraphProposals.ts::proposalReviewUrl": "proposalReviewUrl",
+  "app/agentic/transcript-url.ts::transcriptUrlBaseFor": "transcriptUrlBase",
+  "app/agentic/transcript-url.ts::transcriptUrlForJob": "transcriptUrlBase",
 };
+
+/** Every `file::symbol` whose body calls `publicBaseUrl(` (the definition itself excluded). */
+function producersIn(path: string, src: string): string[] {
+  const out: string[] = [];
+  const lines = src.split("\n");
+  let current = "<module>";
+  for (const line of lines) {
+    const m = /^(?:export\s+)?(?:async\s+)?(?:function\s+(\w+)|const\s+(\w+)\s*=)/.exec(line);
+    if (m) current = m[1] ?? m[2] ?? current;
+    if (/\bpublicBaseUrl\(/.test(line) && !/function\s+publicBaseUrl\b/.test(line)) out.push(`${path}::${current}`);
+  }
+  return [...new Set(out)];
+}
 
 function sources(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -28,13 +43,29 @@ function sources(dir: string, out: string[] = []): string[] {
 
 test("every module minting an app URL from publicBaseUrl() is a classified agent-facing URL", () => {
   const users = sources("app")
-    .filter((p) => /\bpublicBaseUrl\(/.test(readFileSync(p, "utf8")))
+    .flatMap((p) => producersIn(p, readFileSync(p, "utf8")))
     .sort();
   assertEquals(users, Object.keys(MINTERS).sort(), "a new app-URL minter must be classified in AGENT_FACING_URLS");
   for (const key of Object.values(MINTERS)) {
     assertEquals(key in AGENT_FACING_URLS, true, `${key} is classified`);
   }
-  assertEquals(Object.keys(AGENT_FACING_URLS).sort(), Object.values(MINTERS).sort());
+  assertEquals(Object.keys(AGENT_FACING_URLS).sort(), [...new Set(Object.values(MINTERS))].sort());
+});
+
+test("a second unclassified URL producer in an already-listed module is detected", () => {
+  const src = "export function blackboardUrl(t: string, base = publicBaseUrl()) {}\nexport function sneakyUrl(base = publicBaseUrl()) {}\n";
+  assertEquals(producersIn("app/blackboard.ts", src), ["app/blackboard.ts::blackboardUrl", "app/blackboard.ts::sneakyUrl"]);
+});
+
+test("app-URL curls are bounded and an inconclusive PR check requires the app check", () => {
+  const ab = renderAbandonBrief(abandonUrl("t", "http://x"));
+  const bb = renderCoordinationBrief(blackboardUrl("t", "http://x"));
+  for (const brief of [ab, bb]) {
+    for (const line of brief.split("\n").filter((l) => /\bcurl -s/.test(l))) {
+      assertEquals(/--connect-timeout \d+ --max-time \d+/.test(line), true, line);
+    }
+  }
+  assertEquals(/PR check was inconclusive →\s+\*\*abort\*\*/.test(ab), true);
 });
 
 test("every minted agent-facing URL is built on the single public base", () => {
