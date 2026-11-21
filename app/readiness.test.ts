@@ -680,7 +680,7 @@ test("#857 probeOnce epic: the lineage read is keyed by the CANONICAL planKey ev
   const exec: ProbeExec = {
     async httpGet(url) {
       capture.url = url;
-      return { status: 200, body: JSON.stringify({ count: 1, threads: [{ rootRequestKey: "o/r#7", stage: "merged", active: false, prCount: 1 }] }) };
+      return { status: 200, body: JSON.stringify({ items: [{ rootRequestKey: "o/r#7", stage: "merged", active: false, prCount: 1 }], page: { totalItems: 1 } }) };
     },
     async run() {
       return { code: 0, stdout: "", stderr: "" };
@@ -816,13 +816,13 @@ test("matchEpic: an as-yet-unobserved planKey is not ready (keep waiting)", () =
 });
 
 test("parseEpicLineage: reads the matching thread from a `/lineage?root=` response", () => {
-  const payload = { count: 1, threads: [{ rootRequestKey: "o/r#7", stage: "merged", active: false, prCount: 4 }] };
+  const payload = { items: [{ rootRequestKey: "o/r#7", stage: "merged", active: false, prCount: 4 }], page: { totalItems: 1 } };
   const obs = parseEpicLineage(payload, "o/r#7");
   assertEquals(obs, { present: true, stage: "merged", active: false, prCount: 4, kind: "" });
 });
 
 test("parseEpicLineage: an unknown/empty root yields an absent observation (not ready, no throw)", () => {
-  assertEquals(parseEpicLineage({ count: 0, threads: [] }, "o/r#9"), { present: false, stage: "", active: false, prCount: 0, kind: "" });
+  assertEquals(parseEpicLineage({ items: [], page: { totalItems: 0 } }, "o/r#9"), { present: false, stage: "", active: false, prCount: 0, kind: "" });
   assertEquals(parseEpicLineage("garbage", "o/r#9"), { present: false, stage: "", active: false, prCount: 0, kind: "" });
 });
 
@@ -835,7 +835,7 @@ test("probeOnce: an epic probe reads the app lineage endpoint and goes green whe
   const exec: ProbeExec = {
     async httpGet(url) {
       capture.url = url;
-      return { status: 200, body: JSON.stringify({ count: 1, threads: [{ rootRequestKey: "o/r#7", stage: "merged", active: false, prCount: 2 }] }) };
+      return { status: 200, body: JSON.stringify({ items: [{ rootRequestKey: "o/r#7", stage: "merged", active: false, prCount: 2 }], page: { totalItems: 1 } }) };
     },
     async run() {
       return { code: 0, stdout: "", stderr: "" };
@@ -1196,7 +1196,7 @@ function epic992Exec(lineage: { status: number; body: string }, issue: { code: n
     },
   };
 }
-const noLineage992 = { status: 200, body: JSON.stringify({ count: 0, threads: [] }) };
+const noLineage992 = { status: 200, body: JSON.stringify({ items: [], page: { totalItems: 0 } }) };
 
 test("#992 probeOnce epic: a dependency issue closed COMPLETED outside nwf (no lineage) opens the gate", async () => {
   const calls: string[] = [];
@@ -1208,7 +1208,7 @@ test("#992 probeOnce epic: a dependency issue closed COMPLETED outside nwf (no l
 });
 
 test("#992 probeOnce epic: a lineage thread stuck non-merged still opens when GitHub says closed-completed", async () => {
-  const lineage = { status: 200, body: JSON.stringify({ count: 1, threads: [{ rootRequestKey: "o/r#3", stage: "converging", active: true, prCount: 1 }] }) };
+  const lineage = { status: 200, body: JSON.stringify({ items: [{ rootRequestKey: "o/r#3", stage: "converging", active: true, prCount: 1 }], page: { totalItems: 1 } }) };
   const exec = epic992Exec(lineage, { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) });
   const r = await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {});
   assert(r.ready);
@@ -1216,7 +1216,7 @@ test("#992 probeOnce epic: a lineage thread stuck non-merged still opens when Gi
 });
 
 test("#992 probeOnce epic: a known plan-fanout epic with unmerged slices stays shut even if its issue is closed", async () => {
-  const lineage = { status: 200, body: JSON.stringify({ count: 1, threads: [{ rootRequestKey: "o/r#3", kind: "epic", stage: "converging", active: true, prCount: 3 }] }) };
+  const lineage = { status: 200, body: JSON.stringify({ items: [{ rootRequestKey: "o/r#3", kind: "epic", stage: "converging", active: true, prCount: 3 }], page: { totalItems: 1 } }) };
   const calls: string[] = [];
   const exec = epic992Exec(lineage, { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) }, calls);
   assert(!(await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {})).ready);
@@ -1238,9 +1238,68 @@ test("#992 probeOnce epic: a thrown lineage read reports only the error class, n
   assertStringIncludes(r.detail, "TypeError");
 });
 
-test("#992 probeOnce epic: a lineage read failure (nwf reset/unreachable) still falls back to GitHub truth", async () => {
-  const exec = epic992Exec({ status: 503, body: "" }, { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) });
-  assert((await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {})).ready);
+test("#992 probeOnce epic: a thrown lineage read FAILS CLOSED — no GitHub issue-closure fallback on a blind read", async () => {
+  // The fallback is only safe when lineage was READ successfully and the thread is genuinely absent
+  // or non-epic there. A thrown read cannot tell "no such thread" from "a known epic whose slices are
+  // unmerged", so the gate must stay shut even when GitHub reports the parent issue closed-completed.
+  const calls: string[] = [];
+  const exec: ProbeExec = {
+    async httpGet() {
+      throw new TypeError("fetch failed");
+    },
+    async run(command) {
+      calls.push(command);
+      return { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }), stderr: "" };
+    },
+  };
+  const r = await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {});
+  assert(!r.ready, "a blind lineage read must not open the gate via the GitHub fallback");
+  assertEquals(calls.length, 0, "the GitHub issue read must not even be attempted");
+});
+
+test("#992 probeOnce epic: a non-2xx lineage read (401 unauthenticated / 5xx) FAILS CLOSED — no GitHub fallback", async () => {
+  // 401 is the protected-deployment case: NANO_PR_WEBHOOK_SECRET set on the app but the probe read
+  // unauthenticated. The blind read must not let a closed epic parent with unmerged slices open.
+  for (const status of [401, 503]) {
+    const calls: string[] = [];
+    const exec = epic992Exec({ status, body: "" }, { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) }, calls);
+    const r = await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {});
+    assert(!r.ready, `HTTP ${status} lineage read must fail closed`);
+    assertStringIncludes(r.detail, `HTTP ${status}`);
+    assertEquals(calls.length, 0, "no GitHub issue read on a failed lineage read");
+  }
+});
+
+test("#992 probeOnce epic: the lineage read authenticates with the configured NANO_PR_WEBHOOK_SECRET", async () => {
+  const capture: { secret?: string } = {};
+  const exec: ProbeExec = {
+    async httpGet(_url, headers) {
+      capture.secret = headers["x-hook-secret"];
+      return { status: 200, body: JSON.stringify({ items: [{ rootRequestKey: "o/r#3", stage: "merged", active: false, prCount: 2 }], page: { totalItems: 1 } }) };
+    },
+    async run() {
+      return { code: 1, stdout: "", stderr: "" };
+    },
+  };
+  const r = await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, { NANO_PR_WEBHOOK_SECRET: "s3cr3t" });
+  assert(r.ready, "an authenticated read of a fully-merged epic goes green");
+  assertEquals(capture.secret, "s3cr3t", "the configured hook secret must be sent as x-hook-secret");
+});
+
+test("#992 probeOnce epic: no x-hook-secret header is sent when NANO_PR_WEBHOOK_SECRET is unset", async () => {
+  const capture: { hasSecret?: boolean } = {};
+  const exec: ProbeExec = {
+    async httpGet(_url, headers) {
+      capture.hasSecret = "x-hook-secret" in headers;
+      return { status: 200, body: JSON.stringify({ items: [{ rootRequestKey: "o/r#3", stage: "merged", active: false, prCount: 1 }], page: { totalItems: 1 } }) };
+    },
+    async run() {
+      return { code: 1, stdout: "", stderr: "" };
+    },
+  };
+  const r = await probeOnce(parseProbe({ kind: "epic", target: "o/r#3" }), exec, {});
+  assert(r.ready);
+  assertEquals(capture.hasSecret, false, "no secret configured → no header (an empty header must not be sent)");
 });
 
 test("#992 probeOnce epic: an OPEN, NOT_PLANNED-closed, or unreadable issue keeps the gate shut", async () => {
@@ -1256,13 +1315,14 @@ test("#992 probeOnce epic: an OPEN, NOT_PLANNED-closed, or unreadable issue keep
 
 test("#992 class guard: every 'work landed' probe kind accepts landing by any route, not only nwf lineage", async () => {
   // `pr` reads GitHub directly (MERGED regardless of who merged). `epic` is the only kind backed by
-  // nwf's own lineage, so it must ALSO accept GitHub truth with no lineage at all. A new lineage-backed
-  // "landed" kind must be added here and pass the same no-lineage check.
+  // nwf's own lineage, so it must ALSO accept GitHub truth — but only once the lineage read-model
+  // answered successfully with no thread (a failed read fails closed, never falls back blind). A new
+  // lineage-backed "landed" kind must be added here and pass the same no-lineage check.
   const lineageBacked: readonly ProbeKind[] = ["epic"];
   const closedDone = { code: 0, stdout: JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED" }) };
   for (const kind of lineageBacked) {
-    const r = await probeOnce(parseProbe({ kind, target: "o/r#1" }), epic992Exec({ status: 404, body: "" }, closedDone), {});
-    assert(r.ready, `${kind} must open on a GitHub-closed-completed target with no nwf lineage`);
+    const r = await probeOnce(parseProbe({ kind, target: "o/r#1" }), epic992Exec(noLineage992, closedDone), {});
+    assert(r.ready, `${kind} must open on a GitHub-closed-completed target whose lineage read found no thread`);
   }
   assertEquals(matchIssueClosed({ state: "CLOSED", stateReason: "COMPLETED" }).ready, true);
   assertEquals(matchIssueClosed({ state: "closed", stateReason: "completed" }).ready, true);
