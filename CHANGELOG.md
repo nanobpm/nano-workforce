@@ -1,3 +1,9 @@
+## [0.218.1](https://github.com/nanobpm/nano-workforce/compare/v0.218.0...v0.218.1) (2026-11-21)
+
+### Bug Fixes
+
+* **processes:** unassigned escalations create the task instead of an incident ([#999](https://github.com/nanobpm/nano-workforce/issues/999)) ([ea918f2](https://github.com/nanobpm/nano-workforce/commit/ea918f287155e4f9f1cd7b9819bd4d2f5e3c766f)), closes [#1421](https://github.com/nanobpm/nano-workforce/issues/1421) [#998](https://github.com/nanobpm/nano-workforce/issues/998)
+
 ## [0.218.0](https://github.com/nanobpm/nano-workforce/compare/v0.217.0...v0.218.0) (2026-11-21)
 
 ### Features
