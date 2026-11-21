@@ -56,8 +56,8 @@ import {
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_CONTRACT_TWIN_SUFFIX, DELIVERY_ESCALATION_TWIN_SUFFIX, DELIVERY_HUMAN_ELEMENT, DELIVERY_WAIT_ESCALATION_TWIN_SUFFIX, ESCALATION_FORM, GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
+import { type DeliveryLayoutInfo, type DeliveryLayoutResult, type LayoutWithFallbackOptions, layoutWithFallback } from "./deliveryLayout.ts";
 import { ESCALATION_ASSIGNEE_FEEL } from "./escalationAssignee.ts";
-import { layoutBpmnOffThread } from "./layoutOffThread.ts";
 import { DEFAULT_BACKOFF, DEFAULT_EVERY_MS, DEFAULT_ON_TIMEOUT, DEFAULT_TIMEOUT_MS, isProbeKind, normalizePoll, redactString } from "./readiness.ts";
 // `redactFreeText` now lives in the low-level `redactText.ts` helper (both this compiler and
 // `deliveryHuman.ts` import it there) to break the former `compiler ⇄ deliveryHuman` import cycle
@@ -521,7 +521,11 @@ export interface CompiledDeliveryGraphSemantic {
 
 /** A fully-compiled graph — the generated wire result (`diagram`, laid-out `bpmn`, …) PLUS the
  * pre-layout `semanticBpmn` the content digest is taken over. */
-export type CompiledDeliveryGraph = CompileDeliveryGraphResult & { semanticBpmn: string };
+export type CompiledDeliveryGraph = CompileDeliveryGraphResult & {
+  semanticBpmn: string;
+  /** How the DI was laid out — `expanded`, a `collapsed` fallback, or `none` (grid DI) (issue #1005). */
+  layout: DeliveryLayoutInfo;
+};
 
 /**
  * Validate + compile a delivery graph into a PURE preview WITHOUT the CPU-bound diagram-interchange
@@ -814,11 +818,12 @@ export async function compileDeliveryGraphSemantic(
  */
 export async function compileDeliveryGraph(
   graph: unknown,
+  layoutOptions: LayoutWithFallbackOptions = {},
 ): Promise<CompiledDeliveryGraph | CompileDeliveryGraphErrors> {
   const semantic = await compileDeliveryGraphSemantic(graph);
   if (!semantic.ok) return semantic;
-  const bpmn = await layoutDeliveryDiagram(semantic.semanticBpmn);
-  return { ...semantic, bpmn };
+  const { bpmn, layout } = await layoutDeliveryDiagram(semantic.semanticBpmn, layoutOptions);
+  return { ...semantic, bpmn, layout };
 }
 
 /** Attach diagram interchange (`bpmndi:BPMNDiagram`) to the semantic-only compiled BPMN via the
@@ -845,28 +850,13 @@ export async function compileDeliveryGraph(
  * and, run inline here, blocked the whole app (no HTTP, no poll passes) for the entire layout — a hard
  * lock-up on a large graph (#852). This is the ONE place the layout runs, so hoisting it off-thread
  * covers BOTH the dispatch and preview paths that funnel through `compileDeliveryGraph`. */
-async function layoutDeliveryDiagram(semanticBpmn: string): Promise<string> {
-  const laidOut = await layoutBpmnOffThread(semanticBpmn);
-  const start = laidOut.indexOf("<bpmndi:BPMNDiagram");
-  const endTag = "</bpmndi:BPMNDiagram>";
-  const end = laidOut.lastIndexOf(endTag);
-  if (start === -1 || end === -1) {
-    throw new Error(
-      "compileDeliveryGraph: layoutBpmn produced no bpmndi:BPMNDiagram, so the compiled graph would " +
-        "deploy DI-less and render positionless in the process explorer (#440). This usually means the " +
-        "`bpmn-auto-layout` toolkit peer is missing (the toolkit then silently no-ops layout), but it " +
-        "can also indicate a change in `layoutBpmn` output (different namespace prefix/serialization) or " +
-        "an internal layout failure returning semantic-only XML. Ensure `bpmn-auto-layout` is installed " +
-        "as a runtime dependency and that `layoutBpmn` still emits a `<bpmndi:BPMNDiagram>` block.",
-    );
-  }
-  const diagram = laidOut.slice(start, end + endTag.length);
-  const closing = "</bpmn:definitions>";
-  const insertAt = semanticBpmn.lastIndexOf(closing);
-  if (insertAt === -1) {
-    throw new Error("compileDeliveryGraph: compiled BPMN has no </bpmn:definitions> to graft DI into");
-  }
-  return `${semanticBpmn.slice(0, insertAt)}  ${diagram}\n${semanticBpmn.slice(insertAt)}`;
+async function layoutDeliveryDiagram(
+  semanticBpmn: string,
+  options: LayoutWithFallbackOptions = {},
+): Promise<DeliveryLayoutResult> {
+  // Degrades expanded → collapsed → grid DI on a layout timeout / LayoutError (issue #1005): a diagram
+  // is for humans, so layout alone never fails a preview or a launch.
+  return layoutWithFallback(semanticBpmn, options);
 }
 
 /** Push `value` into `list` (may be undefined for a dangling target, already reported by the

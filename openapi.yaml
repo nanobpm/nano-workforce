@@ -3365,7 +3365,29 @@ components:
           description: >-
             The compiled BPMN 2.0 XML INCLUDING diagram interchange (`bpmndi:BPMNDiagram`), recompiled
             deterministically from the staged graph — byte-identical to what a dispatch would deploy.
-            Rendered read-only in the host explorer's definition preview. Nothing is deployed.
+            Rendered read-only in the host explorer's definition preview. Nothing is deployed. When no
+            diagram could be laid out (`layout.mode` = `none`), this is the semantic BPMN WITHOUT DI.
+        layout:
+          type: object
+          additionalProperties: false
+          required:
+            - mode
+            - message
+          description: >-
+            How the diagram was laid out (issue #1005). Layout never fails the preview: on a layout
+            timeout or LayoutError it degrades to `collapsed` (sub-processes collapsed) and then to
+            `none` (no diagram), with the reason.
+          properties:
+            mode:
+              type: string
+              enum: [expanded, collapsed, none]
+            reason:
+              type: string
+              description: Why the richer layout(s) failed. Absent for `expanded`.
+            message:
+              type: string
+              description: >-
+                Operator-facing summary, e.g. "layout: collapsed (expanded layout failed: …)".
     StagedProposalSummary:
       description: >-
         One LIVE staged delivery-graph proposal (issue #511) — the metadata the staged App-View renders

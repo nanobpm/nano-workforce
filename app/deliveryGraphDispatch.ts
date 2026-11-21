@@ -374,7 +374,16 @@ export async function dispatchDeliveryGraphRun(
     const { run_key, created_at, ...patch } = running;
     await runs.update(runKey, patch);
   }
-  app.log.info("delivery graph dispatched", { runKey, processInstanceKey: launched.handle.processInstanceKey });
+  // Layout never refuses a launch (issue #1005): a degraded diagram is recorded on the run's log instead.
+  const { layout } = launched.handle;
+  if (layout.mode !== "expanded") {
+    app.log.warn("delivery graph dispatched with degraded layout", { runKey, mode: layout.mode, reason: layout.reason });
+  }
+  app.log.info("delivery graph dispatched", {
+    runKey,
+    processInstanceKey: launched.handle.processInstanceKey,
+    layout: layout.mode,
+  });
   return {
     ok: true,
     status: "running",
