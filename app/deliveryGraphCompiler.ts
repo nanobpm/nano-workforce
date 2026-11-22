@@ -399,9 +399,10 @@ function byCodeUnit(a: string, b: string): number {
 /** The engine variable a producer node's OUTPUT mapping reads to publish a declared emitted `fact`
  * (S4 late-binding). Each node kind's real body exposes the observed value under a canonical name:
  *   • `wait` (readiness-gate) — a `mergedSha` fact reads the merge oid; a `prCount` fact reads the
- *     epic-match `prCount` bind (how many slice PRs a `wait[epic]` landed); an `artifact` fact reads
- *     the `resolvedArtifact` bind (mirroring the `capability`/`pr` probe binds); anything else reads
- *     the probe's `detail`.
+ *     epic-match `prCount` bind (how many slice PRs a `wait[epic]` landed); a `pr` fact reads the
+ *     dedicated `closingPr` bind (the closing PR a `wait[issue, closed-by-pr-merged]` gate hands downstream, #997);
+ *     an `artifact` fact reads the `resolvedArtifact` bind (mirroring the `capability`/`pr` probe
+ *     binds); anything else reads the probe's `detail`.
  *   • `human` (delivery-human) — an `artifact` fact reads `humanEmitArtifact`; anything else reads
  *     `humanEmitValue` (the generic typed-emit form's captured value).
  *   • `agent`/`connector` — the body's job worker returns the value under the fact's own name.
@@ -413,9 +414,11 @@ function factSourceVar(kind: DeliveryNode["kind"], fact: DeliveryFact): string {
         ? "mergedSha"
         : fact.name === "prCount"
           ? "prCount"
-          : fact.type === "artifact"
-            ? "resolvedArtifact"
-            : "detail";
+          : fact.type === "pr"
+            ? "closingPr"
+            : fact.type === "artifact"
+              ? "resolvedArtifact"
+              : "detail";
     case "human":
       return fact.type === "artifact" ? "humanEmitArtifact" : "humanEmitValue";
     case "agent":
@@ -1259,6 +1262,7 @@ const DECLARED_MATCH_FIELDS: ReadonlySet<string> = new Set([
   "verifyCommand",
   "prState",
   "epicState",
+  "issueState",
 ]);
 
 /** The declared `wait.match` fields `parseMatch` (`app/readiness.ts`) reads through `num()` — a value of
@@ -1292,6 +1296,7 @@ function matchValueTypeMismatch(key: string, value: unknown): boolean {
 const EFFECTIVE_MATCH_DEFAULT: ReadonlyMap<string, { field: string; value: string | number }> = new Map([
   ["pr", { field: "prState", value: "merged" }],
   ["epic", { field: "epicState", value: "merged" }],
+  ["issue", { field: "issueState", value: "completed" }],
   ["github-check", { field: "conclusion", value: "success" }],
   ["command", { field: "exitCode", value: 0 }],
 ]);
@@ -2103,8 +2108,23 @@ function agentContractProceedCondition(requiredEmits: readonly DeliveryFact[]): 
   const statusList = `[${AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => feelStr(s)).join(", ")}]`;
   const statusOk = `(not(is defined(status)) or status = null or list contains(${statusList}, status))`;
   const emitClauses = requiredEmits.map((f) => `(is defined(${f.name}) and ${f.name} != null)`);
-  return `=${[statusOk, ...emitClauses].join(" and ")}`;
+  return `=${[statusOk, AGENT_GOAL_MET_CLAUSE, ...emitClauses].join(" and ")}`;
 }
+
+/** The adopt-guard clause of the producer gate (issue #1014). The idempotency preflight lets an agent
+ * ADOPT an existing PR instead of opening a duplicate — but "a matching PR exists" is not "the goal is
+ * met" (release run 60007 adopted a months-stale PR pinned to an old version, pushed nothing, and the
+ * node completed anyway). So the gate fails — escalating AT the node — when the agent says the goal is
+ * NOT met (`goalMet = false`), or when it adopted a PR (`adopted = true`) WITHOUT pushing
+ * (`pushed` is not true — false, null, or omitted) and without affirming `goalMet = true`. Absent fields pass (a plain implementation
+ * node is unaffected). Null-safe: every comparison is guarded so a missing var never errors the FEEL. */
+/** Fail-closed stale-adoption predicate: an adoption must be backed by `pushed = true` OR
+ * `goalMet = true`; an omitted/null `pushed` does NOT exempt it. Shared by the gate and the escalation
+ * context line so the two cannot drift. */
+export const AGENT_STALE_ADOPTION =
+  "is defined(adopted) and adopted = true and not((is defined(pushed) and pushed = true) or (is defined(goalMet) and goalMet = true))";
+export const AGENT_GOAL_MET_CLAUSE =
+  `(not(is defined(goalMet) and goalMet = false) and not(${AGENT_STALE_ADOPTION}))`;
 
 /** The read-only context line seeded onto an `agent` node's producer-contract escalation (issue #731),
  * so the human/agent unsticking it sees WHY it parked — the node, its job type, the actual reported
@@ -2115,10 +2135,13 @@ function agentContractContextFeel(nodeId: string, descriptor: string, requiredEm
   const head = feelStr(
     `Node ${nodeId} (${descriptor}) completed but did not satisfy its producer contract — when a producer ` +
       `reports a status it must be a terminal-success status (${statuses}; an absent/null status is accepted), ` +
+      `it must not report goalMet=false or adopt an existing PR unchanged without goalMet=true, ` +
       `and it must populate every emit a downstream node requires ` +
       "before its result routes onward. Reported status=",
   );
   let feel = `=${head} + (if (is defined(status) and status != null) then string(status) else "(none)") + "."`;
+  feel += ` + (if is defined(goalMet) and goalMet = false then " The agent reported goalMet=false (the node's goal is NOT met)." else "")`;
+  feel += ` + (if ${AGENT_STALE_ADOPTION} then " The agent adopted an existing PR without pushing and without confirming it meets the node's goal." else "")`;
   for (const f of requiredEmits) {
     const present = `(is defined(${f.name}) and ${f.name} != null)`;
     feel += ` + " Required emit '${f.name}': " + (if ${present} then "present" else "MISSING (null)") + "."`;
@@ -2734,6 +2757,14 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
     '            <zeebe:output source="=if (is defined(resolvedArtifact)) then resolvedArtifact else null" target="resolvedArtifact" />',
     '            <zeebe:output source="=if (is defined(mergedSha)) then mergedSha else null" target="mergedSha" />',
     '            <zeebe:output source="=if (is defined(prCount)) then prCount else null" target="prCount" />',
+    // The `issue` kind's `closed-by-pr-merged` match (#997) binds the closing PR as a `pr`-typed
+    // fact — lift it out of the gate scope exactly like `mergedSha`/`prCount` so a downstream
+    // `wait[pr]`/agent can consume it (the canonical "hand the PR on" shape). Lifted ONLY for an `issue` wait under a DEDICATED name (`closingPr`, never the bare shared `pr`
+    // that agents/converge connectors and parallel siblings also write), so a non-issue wait cannot
+    // clobber an enclosing `pr` and the emit can only read this probe's own bind.
+    ...(node.wait.kind.trim() === "issue"
+      ? ['            <zeebe:output source="=if (is defined(closingPr)) then closingPr else null" target="closingPr" />']
+      : []),
     '            <zeebe:output source="=if (is defined(observed)) then observed else null" target="observed" />',
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",

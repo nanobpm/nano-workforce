@@ -75,7 +75,14 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
   }
   async function rootVars(app: TestApp, pik: string): Promise<Map<string, unknown>> {
     const vars = await app.engine.searchVariables({ processInstanceKey: pik } as never);
-    return new Map(vars.filter((v) => String(v.scopeKey) === pik).map((v) => [v.name, JSON.parse(v.value) as unknown]));
+    // A search row's value is clipped (`isTruncated`) past the engine's preview limit — e.g. a long
+    // prompt var — so it is not valid JSON. Keep the NAME (presence is what the scope asserts check)
+    // and never parse a clipped value.
+    return new Map(
+      vars
+        .filter((v) => String(v.scopeKey) === pik)
+        .map((v) => [v.name, v.isTruncated ? { truncated: true } : (JSON.parse(v.value) as unknown)]),
+    );
   }
   async function openTask(app: TestApp, suffix: string) {
     const open = await app.engine.searchUserTasks({ state: "CREATED" });

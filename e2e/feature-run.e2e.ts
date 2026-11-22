@@ -452,6 +452,73 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
     }
   });
 
+  test("keyless opened: an `opened` result with no pr key reconciles the PR from GitHub and still converges (issue #1011)", async () => {
+    // The #1011 defect: the agent opened its PR with `gh pr create` and reported `status: "opened"` but
+    // left `pr` out of the envelope. `ic_gw` used to treat that as a clean finish → `pr: null` → no
+    // converge-cell. Now the keyless `opened` routes through reconcile-implement, which recovers the key.
+    githubState.openPrs.set("feat/issue-7", { number: 1010, base: "epic/e2e" });
+    try {
+      await withApp(
+        { "senior:feature": () => ({ status: "opened", summary: "opened the PR but omitted the pr key" }) },
+        { baseBranch: "epic/e2e", converge: true },
+        async ({ app, featureKey }) => {
+          const flows = takenFlows(app);
+          assert.ok(!flows.includes("ic_gw->ic_end"), `the keyless opened was NOT a clean finish (flows: ${flows.join(", ")})`);
+          assert.ok(flows.includes("ic_reconcile_gw->ic_end"), `the keyless opened was reconciled (flows: ${flows.join(", ")})`);
+          assert.ok(flows.includes("gw-converge->converge"), `the recovered PR converged (flows: ${flows.join(", ")})`);
+          const run = await featureRow(app, featureKey);
+          assert.equal(run.pr_key, "owner/repo#1010", "the recovered PR key is recorded on the run");
+          const prs = await app.db.table<PrRow>("pull_requests", "pr_key").find({ pr_key: "owner/repo#1010" });
+          assert.equal(prs.length, 1, "the recovered PR was enrolled into the convergence loop");
+        },
+      );
+    } finally {
+      githubState.openPrs.delete("feat/issue-7");
+    }
+  });
+
+  test("keyless opened: no PR on the branch escalates with lookup evidence instead of passing pr: null (issue #1011)", async () => {
+    await withApp(
+      { "senior:feature": () => ({ status: "opened", summary: "said it opened a PR" }) },
+      { baseBranch: "epic/e2e", converge: true },
+      async ({ app, featureKey }) => {
+        const flows = takenFlows(app);
+        assert.ok(flows.includes("ic_reconcile_gw->record-escalation"), `escalated (flows: ${flows.join(", ")})`);
+        assert.ok(!flows.includes("gw-converge->converge"), "never converged a null PR");
+        const run = await featureRow(app, featureKey);
+        assert.equal(run.status, "escalated", "the run parked for a human");
+        const rows = await app.db
+          .table<{ feature_key: string; question: string }>("feature_escalations", "id")
+          .find({ feature_key: featureKey });
+        const q = rows.at(-1)?.question ?? "";
+        assert.ok(q.includes("reported opened but no PR from feat/issue-7 into epic/e2e"), `evidence in the question: ${q}`);
+      },
+    );
+  });
+
+  test("keyless opened + abandon: the abandoned run is recorded NON-success, never `opened` with no PR (issue #1011 review)", async () => {
+    // Abandon (and the escalation-SLA auto-abandon, which leaves human-escalation the same way and
+    // takes the same ic_gw_answer default flow) ends the cell straight from the escalation. The
+    // reconcile step must have rewritten the unreconciled keyless `opened` to `blocked`, so the terminal
+    // record-feature never persists a delivered-looking `opened` row with `pr_key: null`.
+    await withApp(
+      { "senior:feature": () => ({ status: "opened", summary: "said it opened a PR" }) },
+      { baseBranch: "epic/e2e" },
+      async ({ app, featureKey, processKey }) => {
+        const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: processKey });
+        const task = tasks.find((t) => t.elementId === "escalation") as InboxTask | undefined;
+        assert.ok(task?.userTaskKey, "the keyless opened parked an escalation");
+        await app.engine.completeUserTask(task!.userTaskKey, { resolution: "abandon" });
+        await settleFully(app);
+        const flows = takenFlows(app);
+        assert.ok(flows.includes("ic_gw_answer->ic_end"), `abandon flow taken (flows: ${flows.join(", ")})`);
+        const run = await featureRow(app, featureKey);
+        assert.notEqual(run.status, "opened", "an abandoned keyless run is never recorded as delivered");
+        assert.equal(run.pr_key, null);
+      },
+    );
+  });
+
   test("blocked reconcile: a blocked report whose branch IS pushed + ahead opens the PR itself and converges (issue #967)", async () => {
     // The #967 defect, end to end: the agent reports `blocked` ("complete and committed LOCALLY …
     // cut off before I could push") but the branch IS on the remote (at the agent's own reported

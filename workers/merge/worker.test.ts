@@ -454,6 +454,7 @@ test("pr.merge #923: a head-current review whose summary reports OPEN findings b
     const backstop = makeHandler({
       readReview: async () => ({ body: "### 🟡 Changes recommended\n<summary>2 open issues</summary>", commitId: "h1" }),
       readHeadSha: async () => "h1",
+      readThreads: async () => [],
     });
     const out = (await backstop({ variables: { prKey: "acme/widgets#29", repo: "acme/widgets", prNumber: 29 } } as any, app)) as Record<string, unknown>;
     // Issue #939: findings on a head-current review re-enter convergence, never a human.
@@ -559,3 +560,42 @@ for (const [label, review, head] of [
     });
   });
 }
+
+const FROZEN_RESOLVED_BODY = [
+  "### 🟡 Changes recommended",
+  "<details open>",
+  "<summary><strong>1 open issue</strong></summary>",
+  "",
+  "- [Fix A](https://github.com/acme/widgets/pull/30#discussion_r11) · New",
+  "</details>",
+].join("\n");
+
+test("pr.merge #1018: a frozen summary whose linked threads are all resolved does not bounce to convergence", async () => {
+  await withGithub(backstopRoutes, async () => {
+    const { app, stores } = fakeApp();
+    const backstop = makeHandler({
+      readReview: async () => ({ body: FROZEN_RESOLVED_BODY, commitId: "h1" }),
+      readHeadSha: async () => "h1",
+      readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["x"], commentIds: ["11"] }],
+    });
+    const out = (await backstop({ variables: { prKey: "acme/widgets#30", repo: "acme/widgets", prNumber: 30 } } as any, app)) as Record<string, unknown>;
+    assertEquals(out.mergeStatus === "review-findings", false);
+    assertEquals(stores.merges.some((m: any) => m.outcome === "review-findings"), false);
+  });
+});
+
+test("pr.merge #1018: an unreadable thread set keeps the frozen findings blocking (fail closed)", async () => {
+  await withGithub(backstopRoutes, async (calls) => {
+    const { app } = fakeApp();
+    const backstop = makeHandler({
+      readReview: async () => ({ body: FROZEN_RESOLVED_BODY, commitId: "h1" }),
+      readHeadSha: async () => "h1",
+      readThreads: async () => {
+        throw new Error("boom");
+      },
+    });
+    const out = (await backstop({ variables: { prKey: "acme/widgets#30", repo: "acme/widgets", prNumber: 30 } } as any, app)) as Record<string, unknown>;
+    assertEquals(out, { mergeStatus: "review-findings" });
+    assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+  });
+});

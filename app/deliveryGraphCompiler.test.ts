@@ -17,6 +17,7 @@ import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { missingExternalMarkerAgentTaskTypes } from "./agentic/vocab/job-types.ts";
 import { AGENT_TERMINAL_SUCCESS_STATUSES, compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText, resumeValidVar } from "./deliveryGraphCompiler.ts";
 import { isDeliveryEscalationTwin } from "./deliveryHuman.ts";
+import { validateDeliveryGraph } from "./deliveryGraph.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
 async function compileOk(graph: unknown) {
@@ -300,6 +301,125 @@ test("#572 epic prCount emit: a wait[epic] node's `prCount` fact publishes from 
     r.bpmn.includes('source="=if (is defined(prCount)) then prCount else null" target="n0_prCount"'),
     "the prCount emit publishes from the prCount bind variable, not the probe detail",
   );
+});
+
+test("#997 issue wait kind: an `issue` wait node compiles to the shared readiness gate, seeding its probe verbatim", async () => {
+  // The `issue` wait kind (issue #997) gates a graph on GitHub ISSUE truth (closed / completed /
+  // closed-by-merged-PR), reusing the SAME readiness-gate machinery as `pr`/`epic` — never a second
+  // wait loop: it delegates to `pr.readiness-probe` and seeds `nodeInputs.<el>.probe` verbatim.
+  const graph = {
+    name: "issue gate",
+    nodes: [
+      { id: "gate-issue", kind: "wait", wait: { kind: "issue", target: "nanobpm/nano-workforce#997", match: { issueState: "closed-by-pr-merged" }, onTimeout: "escalate" } },
+      { id: "start-b", kind: "agent", agent: { jobType: "senior:feature", prompt: "implement #996" } },
+    ],
+    edges: [{ from: "gate-issue", to: "start-b" }],
+  };
+  const r = await compileOk(graph);
+  const types = new Set([...r.bpmn.matchAll(/<zeebe:taskDefinition type="([^"]+)"/g)].map((m) => m[1]));
+  assert(types.has("pr.readiness-probe"), "the issue wait delegates to the shared readiness-probe gate");
+  // The issue wait's element (n0 — sorted node id `gate-issue` precedes `start-b`) seeds its probe.
+  assert(r.bpmn.includes('source="=nodeInputs.n0.probe" target="probe"'), "the issue wait seeds its probe descriptor verbatim");
+});
+
+test("#997 issue wait kind: issue wait nodes compile as branches of a parallel join (AND-join over several issues)", async () => {
+  // The motivating shape: join on issues A, B and C landing — three `issue` waits fan out in
+  // parallel and a downstream agent starts only once every gate is green.
+  const graph = {
+    name: "issue join",
+    nodes: [
+      { id: "wait-a", kind: "wait", wait: { kind: "issue", target: "o/r#1", match: { issueState: "completed" } } },
+      { id: "wait-b", kind: "wait", wait: { kind: "issue", target: "o/r#2" } },
+      { id: "wait-c", kind: "wait", wait: { kind: "issue", target: "o/r#3", match: { issueState: "closed" } } },
+      { id: "build", kind: "agent", agent: { jobType: "senior:feature", prompt: "integrate" } },
+    ],
+    edges: [
+      { from: "wait-a", to: "build" },
+      { from: "wait-b", to: "build" },
+      { from: "wait-c", to: "build" },
+    ],
+  };
+  const r = await compileOk(graph);
+  // Each wait body carries exactly two `pr.readiness-probe` activations (the poll task + its
+  // last-attempt twin) — so three parallel issue waits yield six, and the count SCALES with the
+  // number of joined issue gates (the AND-join shape compiles).
+  const probes = r.bpmn.match(/<zeebe:taskDefinition type="pr\.readiness-probe"/g) ?? [];
+  assertEquals(probes.length, 6, "each issue wait compiles to its own readiness-probe branch of the join");
+});
+
+test("#997 issue wait kind: a pr-typed emit on a wait that cannot bind a PR is rejected at compile", () => {
+  const variants: unknown[] = [
+    { kind: "issue", target: "o/r#9", match: { issueState: "completed" } },
+    { kind: "issue", target: "o/r#9", match: { issueState: "closed" } },
+    { kind: "issue", target: "o/r#9" },
+    { kind: "pr", target: "o/r#9" },
+    { kind: "epic", target: "o/r#9" },
+  ];
+  for (const wait of variants) {
+    const errs = validateDeliveryGraph({ name: "bad", nodes: [{ id: "w", kind: "wait", wait, emits: [{ name: "pr", type: "pr" }] }], edges: [] });
+    assert(errs.some((e) => e.path === "nodes[0].emits" && e.code === "invalid-fact-type"), `rejects pr emit on ${JSON.stringify(wait)}`);
+  }
+  const ok = validateDeliveryGraph({
+    name: "ok",
+    nodes: [{ id: "w", kind: "wait", wait: { kind: "issue", target: "o/r#9", match: { issueState: "closed-by-pr-merged" } }, emits: [{ name: "pr", type: "pr" }] }],
+    edges: [],
+  });
+  assert(!ok.some((e) => e.path === "nodes[0].emits"), "closed-by-pr-merged issue wait may emit a pr fact");
+});
+
+test("#997 issue wait kind: the closing-PR bind never writes the shared `pr` name; parallel issue waits each emit their own bind", async () => {
+  const issueWait = (id: string, n: number) => ({
+    id,
+    kind: "wait",
+    wait: { kind: "issue", target: `o/r#${n}`, match: { issueState: "closed-by-pr-merged" } },
+    emits: [{ name: "pr", type: "pr" }],
+  });
+  const graph = {
+    name: "two-branch join",
+    nodes: [issueWait("wa", 1), issueWait("wb", 2), { id: "gate-pr", kind: "wait", wait: { kind: "pr", target: "o/r#3" } }, { id: "build", kind: "agent", agent: { jobType: "senior:feature", prompt: "x" } }],
+    edges: [{ from: "wa", to: "build" }, { from: "wb", to: "build" }, { from: "gate-pr", to: "build" }],
+  };
+  const r = await compileOk(graph);
+  assert(!r.bpmn.includes('then pr else null" target="pr"'), "no wait body lifts into the bare shared `pr` variable");
+  const lifts = r.bpmn.match(/then closingPr else null" target="closingPr"/g) ?? [];
+  assertEquals(lifts.length, 2, "only the two issue waits lift closingPr (the pr wait does not)");
+  // Each branch declares closingPr node-local, so its emit reads its OWN probe's bind.
+  for (const el of ["n2", "n3"]) {
+    assert(r.bpmn.includes(`source="=if (is defined(closingPr)) then closingPr else null" target="${el}_pr"`), `${el} emits from its own closingPr`);
+  }
+});
+
+test("#997 issue wait kind: a wait[issue] node's emitted `pr` fact is consumable by a downstream pr-typed node", async () => {
+  // `closed-by-pr-merged` binds the closing PR as a `pr`-typed fact (mirroring how the canonical
+  // agent -> connector[converge] -> wait[pr] shape hands its PR on): the probe loop must lift the
+  // `pr` bind out of the gate scope, factSourceVar must source a `pr` emit from it, and a downstream
+  // `wait[pr]` must late-bind it.
+  const graph = {
+    name: "issue -> pr hand-off",
+    nodes: [
+      {
+        id: "gate-issue",
+        kind: "wait",
+        wait: { kind: "issue", target: "o/r#9", match: { issueState: "closed-by-pr-merged" }, onTimeout: "escalate" },
+        emits: [{ name: "pr", type: "pr" }],
+      },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: "gate-issue.pr", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "gate-issue.pr", to: "merged" }],
+  };
+  const r = await compileOk(graph);
+  // The probe-loop subProcess must lift the `pr` bind out of the gate scope (alongside mergedSha/prCount).
+  assert(
+    r.bpmn.includes('source="=if (is defined(closingPr)) then closingPr else null" target="closingPr"'),
+    "the probe loop lifts the issue probe's `pr` bind out of the gate scope",
+  );
+  // The wait node's emit output must SOURCE the pr fact from the `pr` bind variable, not `detail`.
+  assert(
+    r.bpmn.includes('source="=if (is defined(closingPr)) then closingPr else null" target="n0_pr"'),
+    "the pr emit publishes from the pr bind variable, not the probe detail",
+  );
+  // The downstream wait[pr] late-binds its target from the threaded fact.
+  assert(r.bpmn.includes("target=\"boundFacts\""), "the downstream wait receives the threaded pr fact");
 });
 
 test("#499 human context: the human user-task seeds prompt/nodeId/emit context so its generic form is not contextless", async () => {
@@ -2185,6 +2305,15 @@ test("#932 producer status gate: the compiled contract gate accepts a `completed
   // The escalation context line names the SAME derived vocabulary (never a stale hand-typed list).
   const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
   assert(esc.includes("completed"), "the escalation context names the widened vocabulary");
+});
+
+test("#1014 adopt guard: the producer gate carries the goalMet/adopted-without-push clause and the escalation explains it", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const cond = contractMetExpr(r.bpmn, el);
+  assert(cond.includes("goalMet = false") && cond.includes("adopted = true") && cond.includes("pushed = true") && !cond.includes("pushed = false"), `the gate (fail-closed: only an affirmative push exempts an adoption) rejects an unmet/stale adoption, got: ${cond}`);
+  const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  assert(esc.includes("goalMet=false"), "the escalation context explains the adopt guard");
 });
 
 test("#731 required-emit gate: a producer's declared emit consumed as a required data dependency adds a non-null gate clause and a resumable escalation NAMING the fact", async () => {

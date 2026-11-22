@@ -18,6 +18,7 @@ import { fetchPrFiles, fetchPrHead } from "../../app/github.ts";
 import { deriveExclusions, recordExclusions } from "../../app/mergeExclusion.ts";
 import { loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import {
+  KEYLESS_OPENED_SUMMARY,
   type PlanTask,
   type PlanTaskStatus,
   plans,
@@ -133,7 +134,12 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     const noResultSummary = !rawStatus
       ? "The implementation agent returned no machine-readable result"
       : `The implementation agent did not return a clean terminal result (reported status "${rawStatus}"), so the slice was treated as blocked`;
-    const effectiveSummary = summary ?? (unreadable ? noResultSummary : undefined);
+    // Issue #1011: a keyless `opened` (demoted to blocked above) is stamped with the shared marker so
+    // the finalizer can NAME it rather than lumping it into "blocked or skipped".
+    const keylessOpened = status === "opened" && !parsed;
+    const effectiveSummary = keylessOpened
+      ? (summary ? `${KEYLESS_OPENED_SUMMARY} — ${summary}` : KEYLESS_OPENED_SUMMARY)
+      : summary ?? (unreadable ? noResultSummary : undefined);
 
     const row = byTaskId.get(taskId);
     if (row) {

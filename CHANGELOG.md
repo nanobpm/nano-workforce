@@ -1,3 +1,31 @@
+## [0.221.0](https://github.com/nanobpm/nano-workforce/compare/v0.220.0...v0.221.0) (2026-11-22)
+
+### Features
+
+* **feature:** implement agents re-read operator feedback at checkpoints before the PR exists ([#1002](https://github.com/nanobpm/nano-workforce/issues/1002)) ([3082796](https://github.com/nanobpm/nano-workforce/commit/3082796f8c125007225c4b45d497de9502de4557)), closes [#986](https://github.com/nanobpm/nano-workforce/issues/986) [#986](https://github.com/nanobpm/nano-workforce/issues/986)
+
+## [0.220.0](https://github.com/nanobpm/nano-workforce/compare/v0.219.2...v0.220.0) (2026-11-22)
+
+### Features
+
+* **readiness:** first-class `issue` wait-probe kind for delivery graphs ([#1000](https://github.com/nanobpm/nano-workforce/issues/1000)) ([98465d4](https://github.com/nanobpm/nano-workforce/commit/98465d45fd6414c61615112515861b6a6fd41acf)), closes [#548](https://github.com/nanobpm/nano-workforce/issues/548) [#992](https://github.com/nanobpm/nano-workforce/issues/992) [#997](https://github.com/nanobpm/nano-workforce/issues/997)
+
+### Bug Fixes
+
+* **upgrade:** reinstall dependencies after overlaying a release ([#1009](https://github.com/nanobpm/nano-workforce/issues/1009)) ([64ebba9](https://github.com/nanobpm/nano-workforce/commit/64ebba9fd23ddcd2a740bde486965799df671d7e)), closes [#1008](https://github.com/nanobpm/nano-workforce/issues/1008)
+
+## [0.219.2](https://github.com/nanobpm/nano-workforce/compare/v0.219.1...v0.219.2) (2026-11-22)
+
+### Bug Fixes
+
+* **delivery-graph:** stale adopted PR no longer completes an agent node ([#1015](https://github.com/nanobpm/nano-workforce/issues/1015)) ([7ebbf1a](https://github.com/nanobpm/nano-workforce/commit/7ebbf1afeb9f7d90f6d46d957fbf707ad938cea8)), closes [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014)
+
+## [0.219.1](https://github.com/nanobpm/nano-workforce/compare/v0.219.0...v0.219.1) (2026-11-22)
+
+### Bug Fixes
+
+* **convergence:** merge converged PRs instead of escalating 'head did not advance' ([#1019](https://github.com/nanobpm/nano-workforce/issues/1019)) ([c8d18a0](https://github.com/nanobpm/nano-workforce/commit/c8d18a0e0b201f768ba4dfffc9d93de28a71edd7)), closes [#1018](https://github.com/nanobpm/nano-workforce/issues/1018)
+
 ## [0.219.0](https://github.com/nanobpm/nano-workforce/compare/v0.218.3...v0.219.0) (2026-11-22)
 
 ### Features

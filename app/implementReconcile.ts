@@ -21,6 +21,7 @@
 import { hasAnswerableQuestion } from "./escalationTaxonomy.ts";
 import type { HeadPr } from "./github.ts";
 import { isClaimedCompletion } from "./implementEscalationReason.ts";
+import { KEYLESS_OPENED_SUMMARY } from "./plan.ts";
 import { parsePr } from "./prParse.ts";
 import { sliceBranchCreate } from "./repoEnvelope.ts";
 
@@ -42,10 +43,18 @@ export interface ReconcileImplementInput {
   /** The agent's own question. An answerable question means a GENUINE escalation even under an
    *  off-vocabulary status — honour it (escalate), never auto-reconcile/auto-retry over it. */
   question?: unknown;
+  /** The agent's own summary — passed through unchanged, except on the keyless-`opened` fail-closed arm
+   *  where it is stamped with `KEYLESS_OPENED_SUMMARY` so the provenance survives an Abandon/SLA
+   *  auto-abandon into record-feature / record-wave / the finalizer (issue #1011 review). */
+  summary?: unknown;
   /** Whether this slice has ALREADY consumed its one automatic retry (the `implementRetried` process
    *  variable). A claimed-completion-without-delivery is auto-retried ONCE (issue #865) before it
    *  escalates; this flag bounds that race to a single retry. */
   retried?: unknown;
+  /** The branch the agent reported it actually pushed (its result's `branch` key, when present) —
+   *  issue #1011. Looked up FIRST, then the deterministic `feat/<task.id>` fallback, so an agent that
+   *  pushed a non-deterministic branch is still reconcilable. */
+  branch?: unknown;
 }
 
 /** The reconcile decision. `reconciled` is the `ic_reconcile_gw` gate: true → adopt-and-converge (with
@@ -65,6 +74,12 @@ export interface ReconcileImplementResult {
   retryNudge: string | null;
   retried: boolean;
   deliveryVerified: boolean;
+  /** Human-readable lookup evidence for a keyless `opened` that could NOT be reconciled (issue #1011):
+   *  "reported opened but no PR from <branch> into <base>". Present ONLY on that arm (omitted
+   *  otherwise) so the escalation reason can name exactly what was looked for. */
+  evidence?: string;
+  /** The (possibly provenance-stamped) summary — see `ReconcileImplementInput.summary`. */
+  summary: string | null;
 }
 
 /** The injected GitHub read — the canonical `listPrsForHead(repo, headBranch, token)` (so this module
@@ -86,13 +101,25 @@ export function shouldReconcileImplement(status: unknown, question?: unknown, pr
   return str(status) === undefined || isClaimedCompletion(status) || isKeylessOpened(status, pr);
 }
 
-/** A KEYLESS `opened` (issue #1007): the agent reported `status: "opened"` but no `pr` key reached the
- *  cell (e.g. the agent opened the PR itself and never echoed its key). The cell's `ic_done` gate only
- *  routes an `opened` WITH a PR key straight to done; a keyless one comes here so the PR is resolved
- *  from the deterministic slice branch — otherwise the caller records `opened, pr: null`, never
- *  converges it, and an epic's dependants are never dispatched (`NO_WORK_DISPATCHED`). */
+/** True iff the agent reported the clean `opened` terminal but its result carried NO `pr` key (issue
+ *  #1011) — it opened the PR itself with `gh pr create` and left `pr` out of the envelope. Downstream
+ *  (the wave gate, `converge-cell`) keys entirely on `pr`, so this is NOT a clean finish: the cell
+ *  routes it through the reconcile step (mirror of the `ic_done` guard in implement-cell.bpmn) to
+ *  recover the key from GitHub, or escalate with evidence — never pass `pr: null` downstream. */
 export function isKeylessOpened(status: unknown, pr: unknown): boolean {
   return str(status) === "opened" && str(pr) === undefined;
+}
+
+/** The head branches to look up, in priority order (issue #1011): the branch the agent REPORTED it
+ *  pushed (feature runs may use e.g. `feat/issue-<N>`), then the deterministic `feat/<task.id>`
+ *  fallback — de-duplicated. */
+export function reconcileBranches(taskId: string, reportedBranch?: unknown): string[] {
+  const out: string[] = [];
+  const reported = str(reportedBranch);
+  if (reported) out.push(reported);
+  const det = implementCellBranch(taskId);
+  if (!out.includes(det)) out.push(det);
+  return out;
 }
 
 /** The nudge appended to the implement agent's prompt on its one automatic retry (issue #865), naming
@@ -119,18 +146,31 @@ export function implementCellBranch(taskId: string): string {
   return sliceBranchCreate(taskId) ?? `feat/${taskId}`;
 }
 
-/** The adoptable PR from a head-branch listing: the first OPEN one (a merged/closed PR on the branch is
- *  not an in-flight result to converge). When `baseBranch` is given, only an open PR whose `baseRef`
- *  matches it is adoptable — GitHub can carry multiple open PRs from one head branch to different bases,
- *  so adopting blind to the base could converge a stale/unrelated PR; with no base known, fall back to
- *  the first open PR (unchanged best-effort behaviour). `null` when the listing is absent (no transport)
- *  or has no adoptable PR. */
-export function pickAdoptablePr(prs: HeadPr[] | null, baseBranch?: string): HeadPr | null {
-  if (!prs) return null;
-  const open = prs.filter((p) => p.state === "open");
+/** The adoptable-PR verdict for a head-branch listing. Only OPEN PRs are candidates (a merged/closed PR
+ *  is not an in-flight result to converge); when `baseBranch` is given, only an open PR whose `baseRef`
+ *  matches it is a candidate. Adoption requires EXACTLY ONE candidate: GitHub can carry several open PRs
+ *  from one head branch (a stale one from an earlier attempt plus a fresh one, or one per base), and
+ *  adopting whichever the API lists first could converge the stale/unrelated PR — so more than one
+ *  candidate is `ambiguous`, never silently resolved. `none` covers an absent listing (no transport) too. */
+export type AdoptableVerdict =
+  | { kind: "none" }
+  | { kind: "one"; pr: HeadPr }
+  | { kind: "ambiguous"; prs: HeadPr[] };
+
+export function classifyAdoptablePrs(prs: HeadPr[] | null, baseBranch?: string): AdoptableVerdict {
+  if (!prs) return { kind: "none" };
   const base = typeof baseBranch === "string" ? baseBranch.trim() : "";
-  if (base) return open.find((p) => p.baseRef === base) ?? null;
-  return open[0] ?? null;
+  const candidates = prs.filter((p) => p.state === "open" && (!base || p.baseRef === base));
+  if (candidates.length === 0) return { kind: "none" };
+  if (candidates.length === 1) return { kind: "one", pr: candidates[0] };
+  return { kind: "ambiguous", prs: candidates };
+}
+
+/** The single adoptable PR from a head-branch listing, or `null` when there is none OR the listing is
+ *  ambiguous (see `classifyAdoptablePrs`). */
+export function pickAdoptablePr(prs: HeadPr[] | null, baseBranch?: string): HeadPr | null {
+  const v = classifyAdoptablePrs(prs, baseBranch);
+  return v.kind === "one" ? v.pr : null;
 }
 
 /** The canonical implement-cell reconcile decision (mirror of `ic_reconcile_gw`). Best-effort: any
@@ -142,8 +182,47 @@ export async function reconcileImplement(
   lookup: OpenPrLookup,
   token: string,
 ): Promise<ReconcileImplementResult> {
+  const res = await reconcileImplementCore(input, lookup, token);
+  const summary = str(input.summary) ?? null;
+  // A keyless `opened` that could NOT be reconciled (verified absence, ambiguous listing, failed/null
+  // lookup, missing inputs, or an answerable question) must NEVER leave the cell with the SUCCESS status
+  // `opened` and no PR (issue #1011 review): an operator Abandon or the escalation-SLA auto-abandon ends
+  // the cell straight from the escalation, and `record-feature` would persist a terminal `opened` row with
+  // `pr_key: null` — read as delivered. Fail closed: rewrite to the non-success `blocked`, and always
+  // carry lookup evidence so the escalation reason names what happened.
+  if (!res.reconciled && isKeylessOpened(input.status, input.pr)) {
+    return {
+      ...res,
+      status: "blocked",
+      summary: stampKeylessOpened(summary),
+      evidence: !res.evidence
+        ? "reported opened but its PR could not be looked up on GitHub"
+        : res.evidence.startsWith("reported opened")
+          ? res.evidence
+          : `reported opened but ${res.evidence}`,
+    };
+  }
+  return { ...res, summary };
+}
+
+/** Prefix the shared keyless-`opened` marker onto a summary (idempotent). The marker is the ONE
+ *  provenance channel downstream consumers key on: record-feature refuses blocked-delivery recovery for
+ *  it, and record-wave / the finalizer name it instead of "blocked or skipped". */
+export function stampKeylessOpened(summary: string | null): string {
+  if (!summary) return KEYLESS_OPENED_SUMMARY;
+  if (summary.startsWith(KEYLESS_OPENED_SUMMARY)) return summary;
+  return `${KEYLESS_OPENED_SUMMARY} — ${summary}`;
+}
+
+type CoreResult = Omit<ReconcileImplementResult, "summary">;
+
+async function reconcileImplementCore(
+  input: ReconcileImplementInput,
+  lookup: OpenPrLookup,
+  token: string,
+): Promise<CoreResult> {
   const alreadyRetried = input.retried === true;
-  const escalate: ReconcileImplementResult = {
+  const escalate: CoreResult = {
     reconciled: false,
     status: str(input.status) ?? null,
     // Carry any existing PR key through unchanged — the reconcile step's `pr` output is mapped back
@@ -163,20 +242,42 @@ export async function reconcileImplement(
   // `subjectKey` shares the `owner/repo#N` shape parsePr validates; we use only its `repo` half.
   const parsed = parsePr(input.subjectKey);
   if (!taskId || !parsed) return escalate;
-  const branch = implementCellBranch(taskId);
-  let prs: HeadPr[] | null;
-  try {
-    prs = await lookup(parsed.repo, branch, token);
-  } catch {
-    // GitHub is unavailable — a failed lookup does NOT establish that delivery is missing, so it must
-    // never consume the one automatic retry (issue #865 review). Escalate (best-effort, unchanged from
-    // the pre-#865 no-result behaviour); the next reconcile pass can retry/adopt once GitHub recovers.
-    return escalate;
+  const branches = reconcileBranches(taskId, input.branch);
+  const base = str(input.baseBranch);
+  let adopt: HeadPr | null = null;
+  let ambiguous: { branch: string; prs: HeadPr[] } | null = null;
+  for (const branch of branches) {
+    let prs: HeadPr[] | null;
+    try {
+      prs = await lookup(parsed.repo, branch, token);
+    } catch {
+      // GitHub is unavailable — a failed lookup does NOT establish that delivery is missing, so it must
+      // never consume the one automatic retry (issue #865 review). Escalate (best-effort, unchanged from
+      // the pre-#865 no-result behaviour); the next reconcile pass can retry/adopt once GitHub recovers.
+      return escalate;
+    }
+    // A `null` listing is an unavailable transport (no token), not a confirmed "no PR" — same reasoning
+    // as the thrown case: escalate rather than retry on unconfirmed state.
+    if (prs === null) return escalate;
+    const verdict = classifyAdoptablePrs(prs, base);
+    if (verdict.kind === "ambiguous") {
+      ambiguous = { branch, prs: verdict.prs };
+      break;
+    }
+    if (verdict.kind === "one") {
+      adopt = verdict.pr;
+      break;
+    }
   }
-  // A `null` listing is an unavailable transport (no token), not a confirmed "no PR" — same reasoning as
-  // the thrown case: escalate rather than retry on unconfirmed state.
-  if (prs === null) return escalate;
-  const adopt = pickAdoptablePr(prs, str(input.baseBranch));
+  if (ambiguous) {
+    // Several open PRs match — adopting any one could converge a stale PR. Escalate with the ambiguity
+    // diagnostics (no auto-retry: a retry would not make the listing less ambiguous).
+    const nums = ambiguous.prs.map((p) => `#${p.number}`).join(", ");
+    return {
+      ...escalate,
+      evidence: `ambiguous: ${ambiguous.prs.length} open PRs (${nums}) from ${ambiguous.branch} into ${base ?? "any base"}`,
+    };
+  }
   if (adopt) {
     return {
       reconciled: true,
@@ -191,7 +292,14 @@ export async function reconcileImplement(
   }
   // The lookup SUCCEEDED and confirmed no adoptable PR — delivery is verified (absent), so the
   // escalation reason may say "none was found"; only now may a claimed completion auto-retry.
-  return maybeRetry(input, alreadyRetried, { ...escalate, deliveryVerified: true });
+  const verifiedAbsent: CoreResult = { ...escalate, deliveryVerified: true };
+  if (isKeylessOpened(input.status, input.pr)) {
+    // Issue #1011: the agent CLAIMED `opened` but no PR exists on any candidate branch — carry the
+    // lookup evidence (never pass `pr: null` downstream). Like a claimed completion it is retried once
+    // first (issue #1007, main), then escalates.
+    verifiedAbsent.evidence = `reported opened but no PR from ${branches.join(" or ")} into ${base ?? "any base"}`;
+  }
+  return maybeRetry(input, alreadyRetried, verifiedAbsent);
 }
 
 /** No adoptable PR was found on a SUCCESSFUL lookup. A claimed-completion-without-delivery (an
@@ -201,8 +309,8 @@ export async function reconcileImplement(
 function maybeRetry(
   input: ReconcileImplementInput,
   alreadyRetried: boolean,
-  escalate: ReconcileImplementResult,
-): ReconcileImplementResult {
+  escalate: CoreResult,
+): CoreResult {
   const status = str(input.status);
   if (!alreadyRetried && status !== undefined && (isClaimedCompletion(status) || isKeylessOpened(status, input.pr))) {
     return {

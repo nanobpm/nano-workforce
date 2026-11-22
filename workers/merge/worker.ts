@@ -30,8 +30,11 @@ import {
   fetchLatestCopilotReview,
   fetchPrHead,
   fetchPrState,
+  fetchReviewThreads,
   mergePr,
   parseReviewOpenFindings,
+  type ReviewThread,
+  reconcileReviewOpenFindings,
 } from "../../app/github.ts";
 import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { isReviewMissingOrStale } from "../../app/reviewWait.ts";
@@ -58,6 +61,11 @@ const defaultReadReview: MergeReviewReader = (repo, prNumber) =>
 // bind (#786/#799), so the backstop's staleness comparison sees the exact head the gate did.
 const defaultReadHead: HeadReader = makeDefaultReadHead({ fetchPrHead, fetchBranchHead });
 
+/** Live review-thread reader for the backstop's summary reconciliation (issue #1018). */
+export type MergeThreadsReader = (repo: string, prNumber: number) => Promise<ReviewThread[] | null>;
+const defaultReadThreads: MergeThreadsReader = (repo, prNumber) =>
+  fetchReviewThreads(repo, prNumber, process.env.GITHUB_TOKEN ?? "");
+
 const BLOCK_UNVERIFIABLE_REVIEW =
   "the PR's Copilot review state or current HEAD could not be read, so a head-current reviewer verdict cannot be verified (the backstop fails CLOSED on an unverifiable read)";
 
@@ -66,8 +74,13 @@ const BLOCK_NO_HEAD_CURRENT_REVIEW =
 
 /** Build the handler with injectable GitHub readers. The default export binds the real readers;
  * tests inject stubs for the backstop matrix. */
-export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: HeadReader }): AppJobHandler<In, Out> {
+export function makeHandler(deps: {
+  readReview: MergeReviewReader;
+  readHeadSha: HeadReader;
+  readThreads?: MergeThreadsReader;
+}): AppJobHandler<In, Out> {
   const { readReview, readHeadSha } = deps;
+  const readThreads = deps.readThreads ?? defaultReadThreads;
   const handler: AppJobHandler<In, Out> = async (job, app) => {
   const { prKey, repo, prNumber, round, abandonUrl } = job.variables;
   const token = process.env.GITHUB_TOKEN ?? "";
@@ -184,7 +197,14 @@ export function makeHandler(deps: { readReview: MergeReviewReader; readHeadSha: 
   // verdict parser the converge-gate uses) must block too: a summary-only "Changes recommended"
   // review that landed after convergence has no unresolved thread for mergeability polling to see.
   // Head-currentness is VERIFIED at this point (the fail-closed check above returned otherwise).
-  const openFindings = parseReviewOpenFindings(backstopReview.body);
+  // Reconciled against LIVE thread resolution exactly like the converge-gate (issue #1018), so a
+  // frozen summary whose linked threads are all resolved doesn't bounce a converged PR back into
+  // convergence forever. An unreadable thread set keeps the raw findings (fail CLOSED).
+  let openFindings = parseReviewOpenFindings(backstopReview.body);
+  if (openFindings.length > 0) {
+    const threads = await readThreads(repo, prNumber).catch(() => null);
+    if (threads !== null) openFindings = reconcileReviewOpenFindings(backstopReview.body, threads);
+  }
   if (openFindings.length > 0) {
     const detail = `the head-current Copilot review reports open findings (${openFindings.join(", ")})`;
     await app.data.table("merges", "id").insert({

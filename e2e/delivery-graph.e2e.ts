@@ -434,6 +434,113 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the completed producer's result reaches End");
   });
 
+  test("#1014 adopt guard: an agent that ADOPTS a stale existing PR without pushing escalates AT the node instead of completing", async () => {
+    const app = track(await boot(freshDir()));
+    // Release run 60007: the idempotency preflight found a months-stale open PR, the agent returned it
+    // UNCHANGED (`pushed: false`, zero commits) with a success status, and the node completed as if the
+    // goal were met. The adopt guard in the producer gate must route this to the __contract escalation.
+    let agentFired = 0;
+    await app.engine.registerWorker("senior:demo", async () => {
+      agentFired++;
+      return { status: "opened", pr: "owner/repo#9", adopted: true, pushed: false, commits: 0, summary: "Adopted PR #9; it needs to be moved forward to ^0.99.1 before merging." };
+    });
+    let connectorFired = 0;
+    await app.engine.registerWorker("pr.delivery-connector", async () => {
+      connectorFired++;
+      return { connectorOutcome: "delivered" };
+    });
+    const graph: DeliveryGraph = {
+      name: "e2e adopt guard stale",
+      nodes: [
+        { id: "open", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "land", kind: "connector", connector: { target: "slack", payload: { pr: "open.pr" }, dedupeKey: "land-1014" } },
+      ],
+      edges: [{ from: "open.pr", to: "land" }],
+    };
+    const run = await runDeliveryGraph(app.engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+    assert.equal(agentFired, 1, "the agent node's job fired and completed");
+    const createdTasks = await app.engine.searchUserTasks({ state: "CREATED" });
+    const contract = createdTasks.find((t) => t.elementId?.startsWith("delivery-human-task__") && t.elementId?.endsWith("__contract"));
+    assert.ok(contract, `a stale adopted PR (pushed:false, no goalMet) must escalate, got ${JSON.stringify(createdTasks.map((t) => t.elementId))}`);
+    assert.equal(connectorFired, 0, "the unmet goal never threads downstream");
+    assert.ok(!takenFlows(app).some((f) => f.endsWith("->End")), "the node did NOT complete the graph");
+  });
+
+  test("#1014 adopt guard (fail closed): an adoption with `pushed` OMITTED and no goalMet escalates AT the node", async () => {
+    const app = track(await boot(freshDir()));
+    await app.engine.registerWorker("senior:demo", async () => ({ status: "opened", pr: "owner/repo#9", adopted: true, summary: "Adopted PR #9." }));
+    let connectorFired = 0;
+    await app.engine.registerWorker("pr.delivery-connector", async () => {
+      connectorFired++;
+      return { connectorOutcome: "delivered" };
+    });
+    const graph: DeliveryGraph = {
+      name: "e2e adopt guard omitted pushed",
+      nodes: [
+        { id: "open", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "land", kind: "connector", connector: { target: "slack", payload: { pr: "open.pr" }, dedupeKey: "land-1014c" } },
+      ],
+      edges: [{ from: "open.pr", to: "land" }],
+    };
+    const run = await runDeliveryGraph(app.engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+    const createdTasks = await app.engine.searchUserTasks({ state: "CREATED" });
+    assert.ok(createdTasks.some((t) => t.elementId?.startsWith("delivery-human-task__") && t.elementId?.endsWith("__contract")), "an adoption without an affirmative push must escalate");
+    assert.equal(connectorFired, 0, "the unproven adoption never threads downstream");
+  });
+
+  test("#1014 adopt guard: an adopted PR the agent affirms already meets the goal (goalMet:true) routes onward", async () => {
+    const app = track(await boot(freshDir()));
+    await app.engine.registerWorker("senior:demo", async () => ({ status: "opened", pr: "owner/repo#9", adopted: true, pushed: false, goalMet: true, summary: "Adopted PR #9; already pins the target." }));
+    let connectorFired = 0;
+    await app.engine.registerWorker("pr.delivery-connector", async () => {
+      connectorFired++;
+      return { connectorOutcome: "delivered" };
+    });
+    const graph: DeliveryGraph = {
+      name: "e2e adopt guard met",
+      nodes: [
+        { id: "open", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "land", kind: "connector", connector: { target: "slack", payload: { pr: "open.pr" }, dedupeKey: "land-1014b" } },
+      ],
+      edges: [{ from: "open.pr", to: "land" }],
+    };
+    const run = await runDeliveryGraph(app.engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+    const createdTasks = await app.engine.searchUserTasks({ state: "CREATED" });
+    assert.deepEqual(createdTasks.map((t) => t.elementId), [], "a goal-meeting adoption never parks a human task");
+    assert.equal(connectorFired, 1, "the adopted PR threads downstream");
+  });
+
+  test("#1014 adopt guard: an adoption that pushed but reports goalMet:false escalates AT the node (goal check independent of staleness)", async () => {
+    const app = track(await boot(freshDir()));
+    await app.engine.registerWorker("senior:demo", async () => ({ status: "opened", pr: "owner/repo#9", adopted: true, pushed: true, goalMet: false, summary: "Adopted PR #9; pushed, goal not met." }));
+    let connectorFired = 0;
+    await app.engine.registerWorker("pr.delivery-connector", async () => {
+      connectorFired++;
+      return { connectorOutcome: "delivered" };
+    });
+    const graph: DeliveryGraph = {
+      name: "e2e adopt guard goal unmet",
+      nodes: [
+        { id: "open", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "land", kind: "connector", connector: { target: "slack", payload: { pr: "open.pr" }, dedupeKey: "land-1014d" } },
+      ],
+      edges: [{ from: "open.pr", to: "land" }],
+    };
+    const run = await runDeliveryGraph(app.engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+    const createdTasks = await app.engine.searchUserTasks({ state: "CREATED" });
+    assert.ok(createdTasks.some((t) => t.elementId?.startsWith("delivery-human-task__") && t.elementId?.endsWith("__contract")), "goalMet:false must escalate even with an affirmative push");
+    assert.ok(!takenFlows(app).some((f) => f.endsWith("->End")), "the unmet goal never reaches End");
+    assert.equal(connectorFired, 0, "the unmet goal never threads downstream");
+  });
+
   test("resume never double-fires: an at-least-once redelivery of the connector dedupes", async () => {
     const app = track(await boot(freshDir()));
     // The connector fired once above's-style; here prove the idempotency directly against the ledger a
