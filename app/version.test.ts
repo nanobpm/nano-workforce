@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { buildVersionInfo } from "./version.ts";
+import { buildVersionInfo, dependencyDrift } from "./version.ts";
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 // A build-info.json the release pipeline would have baked (scripts/write-build-info.ts shape).
@@ -200,5 +200,93 @@ test("a build-info.json with a valid SHA but an unparseable builtAt is rejected 
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dependencyDrift reports no drift for the repo's own satisfied, comparable specs", () => {
+  // The repo just ran `npm install`, so every comparable direct-dependency spec (the ^x.y.z
+  // registry deps) resolves to an installed version satisfying it. Non-registry specs (the git
+  // fork of bpmn-auto-layout) are skipped by the satisfies() guard. Any drift reported here would
+  // mean a genuinely stale node_modules — exactly what the tripwire exists to name — so an empty
+  // result is the correct, non-flaky assertion on a freshly-installed tree.
+  const drift = dependencyDrift();
+  assertEquals(drift, [], `a freshly-installed tree must show no drift, got: ${JSON.stringify(drift)}`);
+});
+
+/** Lay out a controlled app dir (package.json + a fake node_modules) and import a
+ *  version.ts copy rooted there, so dependencyDrift reads the fixture, not the repo. */
+async function driftFixture(
+  declared: Record<string, string>,
+  installed: Record<string, string>,
+): Promise<{ drift: import("./version.ts").DependencyDrift[]; cleanup: () => void }> {
+  const dir = mkdtempSync(join(tmpdir(), "nwf-drift-"));
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ name: "x", version: "1.0.0", type: "module", dependencies: declared }),
+  );
+  for (const [name, version] of Object.entries(installed)) {
+    const depDir = join(dir, "node_modules", ...name.split("/"));
+    mkdirSync(depDir, { recursive: true });
+    writeFileSync(join(depDir, "package.json"), JSON.stringify({ name, version }));
+  }
+  const mod = await importFrom(dir);
+  return { drift: mod.dependencyDrift(), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("dependencyDrift flags a stale installed version that violates a caret range", async () => {
+  // The #1008 case: package.json bumped to ^2.0.0 but node_modules still holds 1.x.
+  const { drift, cleanup } = await driftFixture({ a: "^2.0.0" }, { a: "1.4.0" });
+  try {
+    assertEquals(drift, [{ name: "a", declared: "^2.0.0", installed: "1.4.0" }]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("dependencyDrift accepts a newer minor within a caret range (no false positive)", async () => {
+  // ^2.4.11 must be satisfied by 2.5.10 — the regression my first major.minor compare tripped on.
+  const { drift, cleanup } = await driftFixture({ a: "^2.4.11" }, { a: "2.5.10" });
+  try {
+    assertEquals(drift, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("dependencyDrift respects tilde (same major.minor) and exact pins", async () => {
+  const okTilde = await driftFixture({ a: "~1.2.0" }, { a: "1.2.9" });
+  try {
+    assertEquals(okTilde.drift, [], "~1.2.0 is satisfied by 1.2.9");
+  } finally {
+    okTilde.cleanup();
+  }
+  const badTilde = await driftFixture({ a: "~1.2.0" }, { a: "1.3.0" });
+  try {
+    assertEquals(badTilde.drift.length, 1, "~1.2.0 is NOT satisfied by 1.3.0 (minor moved)");
+  } finally {
+    badTilde.cleanup();
+  }
+  const badExact = await driftFixture({ a: "1.2.3" }, { a: "1.2.4" });
+  try {
+    assertEquals(badExact.drift.length, 1, "an exact 1.2.3 pin is not satisfied by 1.2.4");
+  } finally {
+    badExact.cleanup();
+  }
+});
+
+test("dependencyDrift skips non-registry specs and flags a missing comparable dep", async () => {
+  // A git spec (the bpmn-auto-layout fork) is not comparable — never flagged even when absent.
+  const git = await driftFixture({ a: "git+https://github.com/x/y.git#abc" }, {});
+  try {
+    assertEquals(git.drift, [], "a git spec is skipped, not flagged missing");
+  } finally {
+    git.cleanup();
+  }
+  // A comparable registry dep absent from node_modules is drift (installed: null).
+  const missing = await driftFixture({ a: "^2.0.0" }, {});
+  try {
+    assertEquals(missing.drift, [{ name: "a", declared: "^2.0.0", installed: null }]);
+  } finally {
+    missing.cleanup();
   }
 });

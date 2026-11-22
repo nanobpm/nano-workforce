@@ -101,6 +101,109 @@ function urbanVersion(): string | null {
 }
 
 /**
+ * Dependency-drift hardening (issue #1008, optional). After an upgrade overlays a new
+ * release's files WITHOUT reinstalling deps (a `--skip-install`, or a pre-#1008
+ * upgrade), `package.json` names the new specs while `node_modules/` still holds the
+ * old tree — so `/version` reports the new release while loading stale code. This is a
+ * cheap boot-time tripwire: for each DIRECT dependency it reads
+ * `node_modules/<dep>/package.json` and reports any whose installed version does not
+ * satisfy the declared spec. It never throws and never blocks boot — drift surfaces as
+ * a WARN the operator can act on (run `npm install`).
+ *
+ * Satisfaction is a SMALL semver subset — enough for the common registry range forms
+ * (`^x.y.z`, `~x.y.z`, `x.y.z`, `>=x.y.z`) without shipping a full semver parser:
+ *   - `^x.y.z`  — same major (for x≥1), installed >= declared.
+ *   - `~x.y.z`  — same major.minor, installed >= declared.
+ *   - `x.y.z` / `=x.y.z` — exact match.
+ *   - `>=x.y.z` — installed >= declared.
+ * Non-registry / non-semver specs (git, file:, workspace:, URLs, dist-tags like
+ * `latest`, `*`) are skipped — their installed version string is not comparable to the
+ * spec, and the git fork (bpmn-auto-layout) is exactly such a case.
+ */
+export interface DependencyDrift {
+  name: string;
+  declared: string;
+  installed: string | null;
+}
+
+interface Semver {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+function parseSemver(v: string): Semver | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
+  if (!m) return null;
+  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) };
+}
+
+function cmp(a: Semver, b: Semver): number {
+  if (a.major !== b.major) return a.major - b.major;
+  if (a.minor !== b.minor) return a.minor - b.minor;
+  return a.patch - b.patch;
+}
+
+/** True when `installed` satisfies the declared registry range `spec`. Returns null
+ *  when the spec is not a comparable registry semver range (git/file/URL/tag) — the
+ *  caller skips those. */
+function satisfies(spec: string, installed: string): boolean | null {
+  const s = spec.trim();
+  if (!s) return null;
+  if (/^(git|file:|workspace:|https?:|npm:|link:)/i.test(s)) return null;
+  const inst = parseSemver(installed);
+  if (inst == null) return null;
+
+  const caret = s.startsWith("^");
+  const tilde = s.startsWith("~");
+  const gte = s.startsWith(">=");
+  const bare = s.replace(/^[<>=~^=\s]+/, "");
+  const decl = parseSemver(bare);
+  if (decl == null) return null; // "*", "latest", unparseable — not comparable
+
+  if (caret) {
+    // ^x.y.z: for x≥1, same major and installed >= declared. For 0.y.z, caret pins
+    // major.minor (0.y is treated as breaking per semver), so require both.
+    if (decl.major === 0) return inst.major === 0 && inst.minor === decl.minor && cmp(inst, decl) >= 0;
+    return inst.major === decl.major && cmp(inst, decl) >= 0;
+  }
+  if (tilde) {
+    return inst.major === decl.major && inst.minor === decl.minor && cmp(inst, decl) >= 0;
+  }
+  if (gte) return cmp(inst, decl) >= 0;
+  // Exact (optionally `=`-prefixed).
+  return cmp(inst, decl) === 0;
+}
+
+/** The direct-dependency drift between package.json and node_modules. Pure and
+ *  side-effect-free apart from reads; missing node_modules entries report
+ *  `installed: null`. */
+export function dependencyDrift(): DependencyDrift[] {
+  const pkg = appPackage();
+  if (pkg == null) return [];
+  const out: DependencyDrift[] = [];
+  for (const field of ["dependencies", "devDependencies"] as const) {
+    const section = pkg[field];
+    if (typeof section !== "object" || section == null) continue;
+    for (const [name, spec] of Object.entries(section)) {
+      if (typeof spec !== "string") continue;
+      const installedPkg = readJson(join(REPO_ROOT, "node_modules", ...name.split("/"), "package.json"));
+      const installed =
+        installedPkg && typeof installedPkg.version === "string" ? installedPkg.version : null;
+      if (installed == null) {
+        // Only flag a MISSING dep when the spec is a comparable registry range — a
+        // git/file dep absent from node_modules is a different (and rarer) signal.
+        if (satisfies(spec, "0.0.0") !== null) out.push({ name, declared: spec, installed: null });
+        continue;
+      }
+      const ok = satisfies(spec, installed);
+      if (ok === false) out.push({ name, declared: spec, installed });
+    }
+  }
+  return out;
+}
+
+/**
  * The build identity baked into the release package (`build-info.json` at the package root) by
  * `scripts/write-build-info.ts` during semantic-release's `prepare` step (issue #925). An npm
  * install ships this file but no `.git`, so it is the ONLY source of `gitSha` there. Its `gitSha`
