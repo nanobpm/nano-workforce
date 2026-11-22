@@ -136,6 +136,23 @@ test("currentWatchedJobKey still sees a retry-exhausted (FAILED) or ERROR_THROWN
   }
 });
 
+test("issue #1016 review: a retry's live attempt wins over a historical ERROR_THROWN attempt", async () => {
+  const byState: Record<string, { jobKey: string }[]> = {
+    CREATED: [{ jobKey: "RETRY" }],
+    ERROR_THROWN: [{ jobKey: "OLD1" }, { jobKey: "OLD2" }],
+  };
+  const eng = {
+    searchJobs: async (f: { state?: string }) =>
+      (byState[f.state ?? ""] ?? []).map((j) => ({ type: "senior:feature", state: f.state, processInstanceKey: "PI", elementId: "n0_task", ...j })),
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: minimal engine stub
+  assertEquals(await currentWatchedJobKey(eng as any, "PI", "n0_task"), "RETRY");
+  byState.CREATED = [];
+  // Several historical errored attempts and no live one: not pinnable → null (fail closed).
+  // biome-ignore lint/suspicious/noExplicitAny: minimal engine stub
+  assertEquals(await currentWatchedJobKey(eng as any, "PI", "n0_task"), null);
+});
+
 test("an unchanged re-observation does not rewrite the row (no per-pass write churn)", async () => {
   const { data } = memDataFor(MIG);
   await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:00:00Z" });
