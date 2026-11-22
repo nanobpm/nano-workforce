@@ -563,6 +563,15 @@ test("invalid-fact-name: an agent emit named `slaCheckEvery` is rejected — it 
   assertEquals(hasCode(errs, "invalid-fact-name").path, "nodes[0].emits[0].name", "an agent emitting 'slaCheckEvery' is rejected");
 });
 
+for (const name of ["agentSlaExpired", "agentSlaReason"]) {
+  test(`invalid-fact-name: an agent emit named \`${name}\` is rejected — the SLA check's result would satisfy it (issue #1016)`, () => {
+    const errs = validateDeliveryGraph({
+      nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name, type: "string" }] }],
+    });
+    assertEquals(hasCode(errs, "invalid-fact-name").path, "nodes[0].emits[0].name", `an agent emitting '${name}' is rejected`);
+  });
+}
+
 test("invalid-fact-name: AGENT emits named `adopted`/`goalMet` are reserved — the #1014 adopt guard reads them as completion controls", () => {
   // Regression guard (PR #1015 Copilot "Previously missed"): the adopt guard reads the node-local
   // `adopted`/`goalMet` result fields, so a boolean routing emit with either name would collide —

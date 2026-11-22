@@ -10,15 +10,14 @@
 import type { AppJobHandler, EngineClient } from "@nanobpm/urban";
 import { deliveryNodeActivationJobType } from "../../app/agentActivationLedger.ts";
 import { deliveryNodeSlaCheck } from "../../app/agentSlaEscalation.ts";
+import type { AGENT_SLA_CHECK_RESULT_VARS } from "../../app/deliveryGraph.ts";
 
 interface In extends Record<string, unknown> {
   jobType?: string | null;
   nodeTimeout?: string | null;
 }
-interface Out extends Record<string, unknown> {
-  agentSlaExpired: boolean;
-  agentSlaReason: string;
-}
+// Keys derive from AGENT_SLA_CHECK_RESULT_VARS (reserved agent emit names) so they cannot drift.
+type Out = Record<(typeof AGENT_SLA_CHECK_RESULT_VARS)[0], boolean> & Record<(typeof AGENT_SLA_CHECK_RESULT_VARS)[1], string>;
 
 /** The SLA-check element id is `<el>_slaChk`; the watched agent leaf is `<el>_task`. */
 export function watchedTaskElement(checkElementId: string): string {
