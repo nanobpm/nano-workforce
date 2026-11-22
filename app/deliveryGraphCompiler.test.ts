@@ -142,10 +142,11 @@ test("determinism: the same JSON always yields byte-identical bpmn/diagram/resol
 
 test("trust bound: every node inlines an embedded subProcess delegating to an allowlisted body — no other activity type", async () => {
   const r = await compileOk(RELEASE_RUNBOOK);
-  // Each of the 4 nodes compiles to an EMBEDDED subProcess; wait adds one nested retry-loop subProcess (call activities are a no-op on the pinned
-  // WASM engine, so delegation is an inlined subProcess sharing the parent scope — never a callActivity).
+  // Each of the 4 nodes compiles to an EMBEDDED subProcess; wait adds one nested retry-loop subProcess and
+  // the agent one nested work-SLA subProcess, #1016 (call activities are a no-op on the pinned WASM
+  // engine, so delegation is an inlined subProcess sharing the parent scope — never a callActivity).
   assertEquals((r.bpmn.match(/<bpmn:callActivity/g) ?? []).length, 0);
-  assertEquals((r.bpmn.match(/<bpmn:subProcess /g) ?? []).length, 5);
+  assertEquals((r.bpmn.match(/<bpmn:subProcess /g) ?? []).length, 6);
   assert(!r.bpmn.includes("<bpmn:scriptTask"), "no script task is ever emitted");
   // Each node's inner body delegates to an allowlisted engine-native body: a `serviceTask` typed to a
   // worker (agent → its `senior:*` job; wait → `pr.readiness-probe`; connector → `pr.delivery-connector`)
@@ -1990,7 +1991,8 @@ test("duplicate fact-qualified edges between the same node pair collapse to ONE 
   const srcToB = flows.filter(([, s, t]) => s === "n1" && t === "n0");
   assertEquals(srcToB.length, 1, `expected exactly one src→b flow, got ${JSON.stringify(srcToB.map((m) => m[0]))}`);
   // No parallel gateway is introduced for this de-duplicated pair.
-  assert(!r.bpmn.includes("<bpmn:parallelGateway"), "no gateway for a single de-duplicated producer/consumer pair");
+  // (The agent node's own internal SLA-loop fork `<el>_wfork` is node-local, not a graph gateway.)
+  assert(!/<bpmn:parallelGateway id="(?!n\d+_wfork")/.test(r.bpmn), "no gateway for a single de-duplicated producer/consumer pair");
 });
 
 test("a non-object / empty body is a clean ok:false, never a throw", async () => {
@@ -2239,7 +2241,7 @@ test("#731 producer status gate: an agent node inserts a post-completion contrac
     r.bpmn.includes(`<bpmn:exclusiveGateway id="${el}_gate" name="producer contract met?" default="${el}_g1">`),
     "the agent task feeds a producer-contract exclusive gate",
   );
-  assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_i1" sourceRef="${el}_task" targetRef="${el}_gate" />`), "the task flows into the gate, not straight to end");
+  assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_i1" sourceRef="${el}_work" targetRef="${el}_gate" />`), "the task's work subProcess (#1016) flows into the gate, not straight to end");
   assert(r.bpmn.includes(`<bpmn:userTask id="delivery-human-task__${el}__contract"`), "a producer-contract escalation task exists, distinct from the __esc timeout twin");
   assert(
     r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="delivery-human-task__${el}__contract" />`),
@@ -4388,4 +4390,56 @@ test("#962 the preview's side-effect list includes the implied enrollment for ea
     edges: [],
   });
   assertEquals(none.sideEffects.length, 1, "a policy-less agent lists only its job run");
+});
+
+// PR #1021 review: the #1016 SLA-check controls (`<el>_slaExpired`/`_slaReason`) are root controls exactly
+// like `contractMet` — a same-named agent emit would shadow the expiry flag node-locally, so they must
+// grow collision-free too.
+test("#1016 SLA-check controls grow collision-free against same-named agent emits", async () => {
+  const r = await compileOk({
+    name: "sla-control-collision",
+    nodes: [
+      {
+        id: "open",
+        kind: "agent",
+        agent: { jobType: "senior:demo", prompt: "x" },
+        emits: [
+          { name: "n0_slaExpired", type: "boolean" },
+          { name: "n0_slaReason", type: "string" },
+        ],
+      },
+    ],
+    edges: [],
+  });
+  assertEquals(elementForNode(r.bpmn, "open"), "n0");
+  assert(r.bpmn.includes('source="=agentSlaExpired = true" target="n0_slaExpired_"'), "expiry flag output is grown");
+  assert(r.bpmn.includes('source="=agentSlaReason" target="n0_slaReason_"'), "reason output is grown");
+  assert(r.bpmn.includes(">=n0_slaExpired_ = true</bpmn:condition>"), "the expiry boundary reads the grown flag");
+  assert(!r.bpmn.includes(">=n0_slaExpired = true</bpmn:condition>"), "the expiry boundary must NOT read the shadowed bare flag");
+  assert(r.bpmn.includes("is defined(n0_slaReason_)"), "the escalation context reads the grown reason");
+  assert(r.bpmn.includes("n0_slaExpired_ = true and is defined(n0_slaReason_)"), "the overrun reason is stated only once the SLA has actually expired (a stale within-budget check must not leak into a later enrollment-timeout escalation)");
+});
+
+// PR #1021 review: the work SLA must start on ACTIVATION and never cancel a live job. The agent's SLA
+// boundary is therefore a NON-interrupting cycle that only consults the ledger; the job is interrupted
+// solely by the conditional boundary on the inner work subProcess once the check reports expiry.
+test("#1016 an agent node's SLA boundary is non-interrupting and only an elapsed-since-activation expiry escalates", async () => {
+  const r = await compileOk({
+    name: "sla-shape",
+    nodes: [{ id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" } }],
+    edges: [],
+  });
+  assert(!/<bpmn:boundaryEvent id="n0_be"/.test(r.bpmn) && !r.bpmn.includes("timeCycle"), "no boundary/cycle timer on the job: the SLA check never cancels it and never piles up");
+  assert(r.bpmn.includes('<bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=slaCheckEvery</bpmn:timeDuration>'), "the SLA is re-checked on the capped cadence, not every full nodeTimeout");
+  // Serial loop: the check's ONLY outgoing flow returns to the single timer, so at most one check job
+  // can be pending even when no `pr.agent-sla-check` worker ever completes one.
+  assert(/<bpmn:sequenceFlow id="n0_s0" sourceRef="n0_slaChk" targetRef="n0_be"/.test(r.bpmn), "the check loops back to the one timer");
+  assert(/<bpmn:sequenceFlow id="n0_wl" sourceRef="n0_wfork" targetRef="n0_be"/.test(r.bpmn), "the loop is forked alongside the task");
+  assertEquals((r.bpmn.match(/targetRef="n0_slaChk"/g) ?? []).length, 1, "exactly one path arms a check");
+  assert(/target="slaCheckEvery"/.test(r.bpmn), "the cadence is seeded on the node");
+  assert(/<bpmn:endEvent id="n0_wend">.*<bpmn:terminateEventDefinition/.test(r.bpmn), "agent completion terminates the work scope, cancelling any pending SLA check");
+  assert(/<bpmn:boundaryEvent id="n0_slaBe" [^>]*attachedToRef="n0_work"/.test(r.bpmn), "the escalation is reached via the work subProcess's expiry boundary");
+  assert(!/<bpmn:boundaryEvent id="n0_slaBe"[^>]*cancelActivity="false"/.test(r.bpmn), "the expiry boundary interrupts the work");
+  assert(r.bpmn.includes('sourceRef="n0_retry" targetRef="n0_slaArm"'), "a retry re-arms the SLA before re-entering the work");
+  assert(r.bpmn.includes('<zeebe:output source="=false" target="n0_slaExpired" />'), "arming clears a stale expiry so a Retry cannot re-fire it");
 });

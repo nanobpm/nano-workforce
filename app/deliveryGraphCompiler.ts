@@ -199,6 +199,12 @@ export const DELIVERY_GRAPH_PROCESS_ID = "delivery-graph";
  * never drift to two different "default SLA" values (derivation-over-duplication). */
 export const DELIVERY_NODE_DEFAULT_TIMEOUT = "PT1H";
 
+/** Issue #1016 review: the agent work-SLA check CADENCE is bounded independently of the SLA itself.
+ * Checking only every `nodeTimeout` lets a job activated just after a tick run for almost TWO budgets
+ * before it is caught; re-checking at most every {@link AGENT_SLA_CHECK_MAX_INTERVAL} bounds the
+ * detection delay to that interval (a shorter SLA is checked at its own length). */
+export const AGENT_SLA_CHECK_MAX_INTERVAL = "PT5M";
+
 /** The BPMN element id a `human` node's inlined user task carries. One user task per human node (the
  * compiled one-shot inlines each), so the id is per-node (`delivery-human-task__<element>`) — the
  * `isDeliveryHumanElement` convention (single source of truth in `deliveryHuman.ts`) is what keeps it
@@ -1775,6 +1781,10 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       inputs.push({ source: cfg("jobType"), target: "jobType" });
       inputs.push({ source: cfg("appendPrompt"), target: "appendPrompt" });
       inputs.push({ source: timeoutSource(), target: "nodeTimeout" });
+      // Issue #1016 review: the work-SLA check cadence (`min(timeout, AGENT_SLA_CHECK_MAX_INTERVAL)`,
+      // derived by the runner from the SAME resolved timeout) — falls back to the max interval so a
+      // hand-seeded instance still gets a bounded, non-zero cadence.
+      inputs.push({ source: `=if (is defined(${cfg("slaCheckEvery").slice(1)}) and ${cfg("slaCheckEvery").slice(1)} != null) then ${cfg("slaCheckEvery").slice(1)} else ${feelStr(AGENT_SLA_CHECK_MAX_INTERVAL)}`, target: "slaCheckEvery" });
       // Stage 0 transcript correlation (#543): seed the transcript URL base so the completing fleet
       // worker can append its own jobKey-scoped stream and emit `transcriptUrl` (below). `transcriptUrlBase`
       // is a top-level launch variable (deliveryRunner) — guarded so a hand-seeded instance without it
@@ -2268,17 +2278,25 @@ function serviceBodyLines(
         ...(contractResumable ? [`${contractEsc}Vok`] : []),
       ])
     : [];
+  // Issue #1016: an AGENT node's timeout escalation fires only once the work SLA has elapsed since job
+  // ACTIVATION ({@link agentSlaCheckLines}), and states the activation FACTS (`<el>_slaReason`) instead
+  // of guessing that in-flight work "may already exist". A connector keeps the plain boundary wiring.
+  const slaReasonVar = nodeControlVar(el, "slaReason", reservedFlagTargets);
+  const slaExpiredVar = nodeControlVar(el, "slaExpired", reservedFlagTargets);
+  const timeoutContext = isAgent
+    ? `${escalationContextFeel(nodeId, descriptor, "nodeTimeout", ". ")} + (if (is defined(${slaExpiredVar}) and ${slaExpiredVar} = true and is defined(${slaReasonVar}) and ${slaReasonVar} != null) then string(${slaReasonVar}) + " " else "")`
+    : escalationContextFeel(
+        nodeId,
+        descriptor,
+        "nodeTimeout",
+        "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
+      );
   const timeoutEscalation = escalationTaskLines(
     esc,
     nodeId,
-    [`${el}_i2`, ...(hasEnrollment ? [`${el}_e2`] : [])],
+    [isAgent ? `${el}_s3` : `${el}_i2`, ...(hasEnrollment ? [`${el}_e2`] : [])],
     `${el}_i3`,
-    `${escalationContextFeel(
-      nodeId,
-      descriptor,
-      "nodeTimeout",
-      "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
-    )} + ${feelStr(escalationResolutionHint(nodeEmits, resumeEmits, isAgent))}`,
+    `${timeoutContext} + ${feelStr(escalationResolutionHint(nodeEmits, resumeEmits, isAgent))}`,
     {
       // #863 Retry + #876 Continue/validate, nested: the timeout escalation routes through a retry gate
       // (`retryElement`) and, on Continue with a required emit, a fail-closed validation gate
@@ -2291,20 +2309,76 @@ function serviceBodyLines(
       reservedTargets: reservedFlagTargets,
     },
   );
-  const head = [
-    `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
-    `      <bpmn:serviceTask id="${el}_task" name="${escapeXml(taskName)}">`,
-    ...taskExt,
-    `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
-    `        <bpmn:incoming>${el}_r1</bpmn:incoming>`,
-    `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
-    "      </bpmn:serviceTask>",
-    `      <bpmn:boundaryEvent id="${el}_be" name="Node timed out" attachedToRef="${el}_task">`,
-    `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
-    `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=nodeTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
-    "      </bpmn:boundaryEvent>",
-    ...timeoutEscalation,
+  const taskLines = (incoming: readonly string[], outgoing: string, indent: string) => [
+    `${indent}<bpmn:serviceTask id="${el}_task" name="${escapeXml(taskName)}">`,
+    ...taskExt.map((l) => indent.slice(6) + l),
+    ...incoming.map((id) => `${indent}  <bpmn:incoming>${id}</bpmn:incoming>`),
+    `${indent}  <bpmn:outgoing>${outgoing}</bpmn:outgoing>`,
+    `${indent}</bpmn:serviceTask>`,
   ];
+  // Issue #1016: an AGENT's work SLA must start on job ACTIVATION, not node entry, and must never
+  // cancel a live job. The task therefore sits in an inner `<el>_work` subProcess whose
+  // SERIAL `<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) timer→check loop only CONSULTS the activation ledger
+  // ({@link agentSlaCheckLines}); the job is cancelled solely when the ledger proves the work SLA has
+  // elapsed since activation — the check sets `<el>_slaExpired`, and the INTERRUPTING conditional
+  // boundary `<el>_slaBe` on `<el>_work` fires into the escalation. `<el>_slaArm` re-arms the flag to
+  // `false` on every (re-)entry so a previous expiry can never re-fire on a Retry.
+  // A connector keeps the plain interrupting node-entry boundary.
+  const head = isAgent
+    ? [
+        `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
+        `      <bpmn:intermediateThrowEvent id="${el}_slaArm" name="Arm work SLA">`,
+        "        <bpmn:extensionElements>",
+        "          <zeebe:ioMapping>",
+        `            <zeebe:output source="=false" target="${slaExpiredVar}" />`,
+        "          </zeebe:ioMapping>",
+        "        </bpmn:extensionElements>",
+        `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
+        `        <bpmn:incoming>${el}_r1</bpmn:incoming>`,
+        `        <bpmn:outgoing>${el}_a0</bpmn:outgoing>`,
+        "      </bpmn:intermediateThrowEvent>",
+        flow(`${el}_a0`, `${el}_slaArm`, `${el}_work`),
+        `      <bpmn:subProcess id="${el}_work" name="${escapeXml(taskName)} (work)">`,
+        `        <bpmn:incoming>${el}_a0</bpmn:incoming>`,
+        `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
+        `        <bpmn:startEvent id="${el}_wstart"><bpmn:outgoing>${el}_wf</bpmn:outgoing></bpmn:startEvent>`,
+        // The SLA check is a SERIAL loop (fork → timer → check → timer), not a cycle boundary, so at
+        // most ONE `pr.agent-sla-check` job can ever be pending: a queued/incidented check holds the
+        // loop's single token and no further timer is armed until it completes.
+        `        <bpmn:parallelGateway id="${el}_wfork"><bpmn:incoming>${el}_wf</bpmn:incoming><bpmn:outgoing>${el}_w0</bpmn:outgoing><bpmn:outgoing>${el}_wl</bpmn:outgoing></bpmn:parallelGateway>`,
+        ...taskLines([`${el}_w0`], `${el}_w1`, "        "),
+                // TERMINATE (scoped to `<el>_work`): the agent's completion must cancel any still-pending SLA
+        // check (queued/incidented `pr.agent-sla-check` job), or its live token would keep `<el>_work`
+        // open — blocking the contract gate and possibly escalating already-finished work.
+        `        <bpmn:endEvent id="${el}_wend"><bpmn:incoming>${el}_w1</bpmn:incoming><bpmn:terminateEventDefinition id="${el}_wendTerm" /></bpmn:endEvent>`,
+        `        <bpmn:intermediateCatchEvent id="${el}_be" name="Work SLA check">`,
+        `          <bpmn:incoming>${el}_wl</bpmn:incoming>`,
+        `          <bpmn:incoming>${el}_s0</bpmn:incoming>`,
+        `          <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
+        `          <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=slaCheckEvery</bpmn:timeDuration></bpmn:timerEventDefinition>`,
+        "        </bpmn:intermediateCatchEvent>",
+        ...agentSlaCheckLines(el, reservedFlagTargets),
+        `  ${flow(`${el}_wf`, `${el}_wstart`, `${el}_wfork`)}`,
+        `  ${flow(`${el}_wl`, `${el}_wfork`, `${el}_be`)}`,
+        `  ${flow(`${el}_w0`, `${el}_wfork`, `${el}_task`)}`,
+        `  ${flow(`${el}_w1`, `${el}_task`, `${el}_wend`)}`,
+        "      </bpmn:subProcess>",
+        `      <bpmn:boundaryEvent id="${el}_slaBe" name="Work SLA elapsed" attachedToRef="${el}_work">`,
+        `        <bpmn:outgoing>${el}_s3</bpmn:outgoing>`,
+        `        <bpmn:conditionalEventDefinition id="${el}_slaCond"><bpmn:condition xsi:type="bpmn:tFormalExpression">=${slaExpiredVar} = true</bpmn:condition></bpmn:conditionalEventDefinition>`,
+        "      </bpmn:boundaryEvent>",
+        flow(`${el}_s3`, `${el}_slaBe`, esc),
+        ...timeoutEscalation,
+      ]
+    : [
+        `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
+        ...taskLines([`${el}_i0`, `${el}_r1`], `${el}_i1`, "      "),
+        `      <bpmn:boundaryEvent id="${el}_be" name="Node timed out" attachedToRef="${el}_task">`,
+        `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
+        `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=nodeTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
+        "      </bpmn:boundaryEvent>",
+        ...timeoutEscalation,
+      ];
   // #863 shared reset: both escalations' retry branches (`${esc}Rr` / `${contractEsc}Rr`) loop into ONE
   // reset-throw that clears the node-local scratch (including each escalation's resume-valid flag) then
   // re-enters the task. Per-escalation retry gates (built in `escalationTaskLines`) feed it, so a Continue
@@ -2313,7 +2387,7 @@ function serviceBodyLines(
   if (timeoutResumable) resetFlagVars.push(escalationResumeFlagVar(esc, { kind, emits: resumeEmits }, reservedFlagTargets));
   if (contractResumable) resetFlagVars.push(escalationResumeFlagVar(contractEsc, { kind: "agent", emits: contractEmits }, reservedFlagTargets));
   const retryIncoming = [`${esc}Rr`, ...(isAgent ? [`${contractEsc}Rr`] : [])];
-  const reset = retryResetLines(el, kind, allEmits, resetFlagVars, retryIncoming);
+  const reset = retryResetLines(el, kind, allEmits, resetFlagVars, retryIncoming, isAgent ? `${el}_slaArm` : `${el}_task`);
 
   if (contractGate === undefined) {
     return [
@@ -2373,14 +2447,44 @@ function serviceBodyLines(
     ]
       .map((f) => `<bpmn:incoming>${f}</bpmn:incoming>`)
       .join("")}</bpmn:endEvent>`,
-    flow(`${el}_i0`, `${el}_start`, `${el}_task`),
-    flow(`${el}_i1`, `${el}_task`, `${el}_gate`),
+    flow(`${el}_i0`, `${el}_start`, `${el}_slaArm`),
+    flow(`${el}_i1`, `${el}_work`, `${el}_gate`),
     `      <bpmn:sequenceFlow id="${el}_g0" name="contract met" sourceRef="${el}_gate" targetRef="${enrollTarget}"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${proceedCondition}</bpmn:conditionExpression></bpmn:sequenceFlow>`,
     `      <bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="${contractEsc}" />`,
     flow(`${el}_g2`, contractEsc, `${contractEsc}Rg`),
     ...(hasEnrollment ? [flow(`${el}_e1`, `${el}_enroll`, `${el}_end`), flow(`${el}_e2`, `${el}_enrollBe`, esc)] : []),
-    flow(`${el}_i2`, `${el}_be`, esc),
     flow(`${el}_i3`, esc, `${esc}Rg`),
+  ];
+}
+
+/** The agent-node work-SLA check (issue #1016), on the SERIAL `<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) timer→check loop
+ * inside `<el>_work`. Each fire runs `pr.agent-sla-check`, which reads the durable activation
+ * ledger: while the job is still queued (or its activation is not yet observed) or its work budget
+ * (`activated_at + nodeTimeout`) has not elapsed, it reports `false` and loops back to the single timer to arm the next check — the
+ * LIVE job is never cancelled or re-queued, so a lease racing the check is harmless and queue time never
+ * escalates (queue / capacity alerting is #1020). Once the budget has elapsed since activation it
+ * reports `true` into `<el>_slaExpired`, which fires the interrupting conditional boundary on
+ * `<el>_work` into the timeout escalation, whose context carries `<el>_slaReason` (worker + activation
+ * time). Outputs are node-scoped (root-published, like `contractMet`, so the condition reads them on
+ * either engine semantics) and grown collision-free against the node's emit source vars. */
+function agentSlaCheckLines(el: string, reservedTargets: readonly string[]): string[] {
+  const expiredVar = nodeControlVar(el, "slaExpired", reservedTargets);
+  const reasonVar = nodeControlVar(el, "slaReason", reservedTargets);
+  return [
+    `        <bpmn:serviceTask id="${el}_slaChk" name="Work SLA elapsed since activation?">`,
+    "          <bpmn:extensionElements>",
+    '            <zeebe:taskDefinition type="pr.agent-sla-check" />',
+    "            <zeebe:ioMapping>",
+    `              <zeebe:output source="=agentSlaReason" target="${reasonVar}" />`,
+    `              <zeebe:output source="=agentSlaExpired = true" target="${expiredVar}" />`,
+    "            </zeebe:ioMapping>",
+    "          </bpmn:extensionElements>",
+    `          <bpmn:incoming>${el}_i2</bpmn:incoming>`,
+    `          <bpmn:outgoing>${el}_s0</bpmn:outgoing>`,
+    "        </bpmn:serviceTask>",
+    `  ${flow(`${el}_i2`, `${el}_be`, `${el}_slaChk`)}`,
+    // Loop back to the ONE timer: the next check is armed only after this one completes.
+    `  ${flow(`${el}_s0`, `${el}_slaChk`, `${el}_be`)}`,
   ];
 }
 
@@ -2509,7 +2613,7 @@ function retryRequestedVar(el: string, reservedTargets: readonly string[] = []):
  * would read) — and appends the operator's {@link ESCALATION_NOTE_VAR} to the agent prompt as retry
  * guidance. All targets are node-local (declared on the subProcess by `ioMappingLines`), so nothing
  * leaks to the root. `incoming` is each feeding escalation's retry branch (`${esc}Rr`). */
-function retryResetLines(el: string, kind: "agent" | "connector", emits: readonly DeliveryFact[], resumeFlagVars: readonly string[], incoming: readonly string[]): string[] {
+function retryResetLines(el: string, kind: "agent" | "connector", emits: readonly DeliveryFact[], resumeFlagVars: readonly string[], incoming: readonly string[], target: string): string[] {
   const isAgent = kind === "agent";
   const outputs: { source: string; target: string }[] = [];
   // Clear the node's declared emits for ANY emitting kind (agent or connector) so a retry never
@@ -2568,7 +2672,7 @@ function retryResetLines(el: string, kind: "agent" | "connector", emits: readonl
     ...incoming.map((id) => `        <bpmn:incoming>${id}</bpmn:incoming>`),
     `        <bpmn:outgoing>${el}_r1</bpmn:outgoing>`,
     "      </bpmn:intermediateThrowEvent>",
-    flow(`${el}_r1`, `${el}_retry`, `${el}_task`),
+    flow(`${el}_r1`, `${el}_retry`, target),
   ];
 }
 

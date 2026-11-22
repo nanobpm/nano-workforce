@@ -132,6 +132,9 @@ export async function recordAgentJobObservation(
     patch.worker = worker;
   }
   if (jobKey && !existingKey) patch.job_key = jobKey;
+  // Only write when something changed: `updated_at` is a last-CHANGED stamp (no reader treats it as a
+  // last-observed heartbeat), and the poller re-observes every CREATED job each pass, so an
+  // unconditional bump would rewrite every row on every poll.
   if (Object.keys(patch).length > 0) {
     patch.updated_at = input.now;
     await table.update(id, patch);
@@ -146,4 +149,13 @@ export async function getAgentJobActivation(
   jobType: string,
 ): Promise<AgentJobActivation | undefined> {
   return agentActivations(data).get(agentActivationId(processInstanceKey, jobType));
+}
+
+/** Ledger `job_type` key for a DELIVERY-GRAPH agent node's job (issue #1016). A compiled delivery graph
+ * hosts MANY agent nodes in ONE process instance, often sharing a job type (several `senior:feature`
+ * nodes), so the bare (instance, jobType) key used by the fixed-type cells above would make parallel
+ * nodes clobber each other's row. Qualifying the key with the node's leaf task element id (`<el>_task`)
+ * keeps each node's activation fact distinct. The poller writes it; the node's SLA check reads it. */
+export function deliveryNodeActivationJobType(jobType: string, taskElementId: string): string {
+  return `${jobType}@${taskElementId}`;
 }

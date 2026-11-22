@@ -167,3 +167,51 @@ export async function agentSlaEscalationQuestion(
     recovery: input.recovery,
   });
 }
+
+/** The delivery-graph agent-node work-SLA check (issue #1016). It runs on the node's
+ * serial `<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) timer→check loop, so it never cancels the live job itself: it only decides whether the
+ * work SLA has elapsed SINCE ACTIVATION (`activated_at + sla <= now`, per the durable activation ledger).
+ * `expired: true` sets `<el>_slaExpired`, which fires the node's interrupting conditional SLA boundary
+ * into the timeout escalation (`reason` stating the worker + activation time); otherwise the job keeps
+ * running/queued untouched. A job not yet observed as activated (queued,
+ * or leased after the last poll) is NEVER expired — its work SLA has not provably started, and because
+ * nothing is cancelled a lease racing this read is harmless (the next cycle sees the activation). Queue
+ * time therefore never escalates; queue/capacity alerting is out of scope here (issue #1020). */
+export async function deliveryNodeSlaCheck(
+  data: DataLayer,
+  input: {
+    processInstanceKey: string;
+    activationJobType: string;
+    jobType: string;
+    sla: string;
+    /** The engine job key of the watched task's CURRENT attempt (issue #1016 review). The ledger row is
+     * honoured only when it tracks this exact job: after a Retry, the row still describes the PREVIOUS
+     * attempt until the poller observes the replacement, and reading it would expire a fresh,
+     * never-activated retry with the old worker's facts. `null` (unknown) ⇒ the activation is not
+     * provably this attempt's ⇒ never expired (nothing is cancelled; the next check re-reads). */
+    currentJobKey: string | null;
+    now?: string;
+  },
+): Promise<{ expired: boolean; reason: string }> {
+  const now = input.now ?? new Date().toISOString();
+  const ledgerRow = input.processInstanceKey.length > 0
+    ? await getAgentJobActivation(data, input.processInstanceKey, input.activationJobType)
+    : undefined;
+  // Bind to the current attempt — fail closed on a missing/mismatched job key.
+  const row = ledgerRow && input.currentJobKey !== null && ledgerRow.job_key === input.currentJobKey
+    ? ledgerRow
+    : undefined;
+  const activatedMs = row?.activated_at ? Date.parse(row.activated_at) : Number.NaN;
+  const slaMs = isoDurationToMs(input.sla, "PT0S");
+  const expired = Number.isFinite(activatedMs) && Date.parse(now) - activatedMs >= slaMs;
+  const activation: AgentSlaActivation | null = row
+    ? { activatedAt: row.activated_at, firstSeenAt: row.first_seen_at, worker: row.worker }
+    : null;
+  const recovery = activation?.activatedAt
+    ? `Activated at ${activation.activatedAt}${activation.worker ? ` by worker "${activation.worker}"` : ""} — check that run's branch/draft PR for partial work before retrying or reassigning.`
+    : "Check the job's state before retrying or reassigning.";
+  return {
+    expired,
+    reason: buildAgentSlaEscalationReason({ jobType: input.jobType, sla: input.sla, activation, now, recovery }),
+  };
+}

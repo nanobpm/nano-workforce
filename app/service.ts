@@ -10,7 +10,7 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { matchAdjudication, prAdjudications, resetAdjudications } from "./adjudications.ts";
-import { AGENT_SLA_JOB_TYPES, recordAgentJobObservation } from "./agentActivationLedger.ts";
+import { AGENT_SLA_JOB_TYPES, deliveryNodeActivationJobType, recordAgentJobObservation } from "./agentActivationLedger.ts";
 import { completeEscalationAutoApplied, escalationFormId } from "./agentCompletion.ts";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { maybeUpdateBehindBranch } from "./behindBaseRemedy.ts";
@@ -3057,6 +3057,10 @@ interface JobSearchItem {
   /** The engine job key — the unique id of THIS job attempt. The activation ledger uses it to tell one
    * attempt of a retrying agent task from the next (issue #879 review). */
   jobKey?: string;
+  /** The job's BPMN element — keys a delivery-graph node's ledger row (issue #1016). */
+  elementId?: string;
+  /** The owning process definition — identifies a compiled delivery-graph job (issue #1016). */
+  processDefinitionId?: string;
 }
 
 /** One agent-activation ledger poll pass (issue #879). Unlike {@link pollJobActivationImpl} (which
@@ -3094,7 +3098,6 @@ export async function pollAgentActivationsImpl(
   // long-lived jobs occupy the page on every pass while later jobs time out with their activation never
   // recorded — exactly when the never-started/hung distinction matters most. Mirror the paging contract
   // the other engine sweeps use (`page: { from, limit }`, stop on a short page). (#881 review)
-  const ts = now();
   const limit = 200;
   let from = 0;
   for (let guard = 0; guard < 1000; guard++) {
@@ -3103,14 +3106,12 @@ export async function pollAgentActivationsImpl(
       const res = await fetch(`${base}/jobs/search`, {
         method: "POST",
         headers,
+        // ONE canonical sweep (no type filter): fixed-type agent jobs AND delivery-graph agent leaves
+        // (arbitrary types) are classified per item below, so no job is fetched or recorded twice.
+        // A queued and a leased job both project to CREATED (no ACTIVATED enum); the `worker` field
+        // discriminates them at upsert time.
         body: JSON.stringify({
-          filter: {
-            type: { $in: [...AGENT_SLA_JOB_TYPES] },
-            // A merely-created (queued) AND an activated-but-not-yet-completed job both project to
-            // CREATED on the wire (Camunda has no ACTIVATED enum) — so this one filter captures both,
-            // and the leasing `worker` field discriminates them at upsert time.
-            state: "CREATED",
-          },
+          filter: { state: "CREATED" },
           page: { from, limit },
         }),
       });
@@ -3123,27 +3124,42 @@ export async function pollAgentActivationsImpl(
       return;
     }
     for (const j of items) {
-      const jobType = j.type ?? "";
+      const key = agentActivationLedgerKey(j);
       const pik = j.processInstanceKey ?? "";
-      // Defensively re-filter the wire `$in` type filter and require a process instance to key on.
-      if (pik.length === 0 || !AGENT_SLA_JOB_TYPES.includes(jobType)) continue;
+      if (key == null || pik.length === 0) continue;
       const worker = typeof j.worker === "string" && j.worker.length > 0 ? j.worker : null;
       const jobKey = typeof j.jobKey === "string" && j.jobKey.length > 0 ? j.jobKey : null;
       try {
         await recordAgentJobObservation(data, {
           processInstanceKey: pik,
-          jobType,
+          jobType: key,
           worker,
           jobKey,
-          now: ts,
+          now: now(), // per-observation, never a pass-start stamp
         });
       } catch (err) {
-        console.error(`[poller] agent-activation upsert ${pik}:${jobType}: ${err}`);
+        console.error(`[poller] agent-activation upsert ${pik}:${key}: ${err}`);
       }
     }
     if (items.length < limit) break; // last page
     from += items.length;
   }
+}
+
+/** The activation-ledger key for one open job, or `null` when the job is not SLA-bounded. A
+ * delivery-graph agent leaf (`<el>_task` in a `delivery-graph-<digest>` definition, issue #1016) is
+ * keyed node-qualified via {@link deliveryNodeActivationJobType} — EXCLUSIVELY, even when its type is
+ * also a fixed {@link AGENT_SLA_JOB_TYPES} type — so parallel same-type nodes stay distinct and no job
+ * is recorded under two keys. Any other job is keyed by its type iff that type is a bounded agent type. */
+export function agentActivationLedgerKey(j: JobSearchItem): string | null {
+  const jobType = j.type ?? "";
+  if (jobType.length === 0) return null;
+  const el = j.elementId ?? "";
+  const def = j.processDefinitionId ?? "";
+  if (def.startsWith(`${DELIVERY_GRAPH_PROCESS_ID}-`) && el.endsWith("_task")) {
+    return deliveryNodeActivationJobType(jobType, el);
+  }
+  return AGENT_SLA_JOB_TYPES.includes(jobType) ? jobType : null;
 }
 
 /** One job-activation poll pass. The `converging` status means the process is parked at a

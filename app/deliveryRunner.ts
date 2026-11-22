@@ -21,12 +21,12 @@ import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcr
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { isPlausibleBranchName } from "./baseBranch.ts";
 import { redactConnectorValue } from "./deliveryGraph.ts";
-import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText, redactProbeTargetForDisplay, requiredEmitsByNodeId } from "./deliveryGraphCompiler.ts";
+import { AGENT_REPO_SPEC_HEADER, AGENT_SLA_CHECK_MAX_INTERVAL, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText, redactProbeTargetForDisplay, requiredEmitsByNodeId } from "./deliveryGraphCompiler.ts";
 import { GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
 import type { DeliveryLayoutInfo, LayoutWithFallbackOptions } from "./deliveryLayout.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
-import { isoDuration } from "./reviewWait.ts";
+import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
 
 /** The content digest of a compiled graph — `sha256(semanticBpmn)[:12]` — the single source of truth
  * for the content-addressed deploy id (`delivery-graph-<digest>`) AND the dispatch fence's default
@@ -121,7 +121,7 @@ const EMPTY_REQUIRED_EMITS: ReadonlySet<string> = new Set<string>();
  * union mirrored by the compiler's `ioMappingLines` — the two must agree on field names (a drift here
  * silently seeds `null` into a node body), so both derive from the same node kinds. */
 type NodeInput =
-  | { jobType: string; appendPrompt: string; timeout: string; enrollment?: { target: string; dedupeKey: string } }
+  | { jobType: string; appendPrompt: string; timeout: string; slaCheckEvery: string; enrollment?: { target: string; dedupeKey: string } }
   | { gateKey: string; probe: unknown; probeTimeout: string; probePollEvery: string }
   | { escalationSlaTimeout: string; escalationAssignee: string | null; prompt: string; nodeId: string; emits: DeliveryFact[] }
   | { target: string; dedupeKey: string | null; payload: Record<string, unknown> | null; timeout: string };
@@ -641,7 +641,8 @@ function buildNodeInput(
       // (the worker resolves it from the durable `delivery_graph_runs` row, issue #889).
       const enrollmentTarget = agentEnrollmentTarget(node.agent);
       const enrollment = enrollmentTarget !== null ? { enrollment: { target: enrollmentTarget, dedupeKey: `${ctx.runKey}:${ctx.element}:enrollment` } } : {};
-      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + basePrompt + renderEmitContract(emits) + renderProducerContract(requiredEmits), timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout), ...enrollment };
+      const agentTimeout = isoDuration(node.agent.timeout, ctx.nodeTimeout);
+      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + basePrompt + renderEmitContract(emits) + renderProducerContract(requiredEmits), timeout: agentTimeout, slaCheckEvery: agentSlaCheckEvery(agentTimeout), ...enrollment };
     }
     case "wait": {
       const probe = parseProbe(node.wait, { allowLateBoundTarget: true });
@@ -807,4 +808,15 @@ export function summarizeDeliverySteps(graph: DeliveryGraph): DeliveryStepSummar
         return assertNever(node, "summarizeDeliverySteps");
     }
   });
+}
+
+/** The agent work-SLA check cadence (issue #1016 review): the node's resolved timeout, capped at
+ * {@link AGENT_SLA_CHECK_MAX_INTERVAL}, so an SLA overrun is detected within that interval regardless of
+ * when the job activated relative to a check tick. */
+export function agentSlaCheckEvery(timeout: string): string {
+  const ms = isoDurationToMs(timeout, AGENT_SLA_CHECK_MAX_INTERVAL);
+  // A zero (or non-positive) cadence would re-fire immediately — fall back to the positive cap.
+  return ms > 0 && ms <= isoDurationToMs(AGENT_SLA_CHECK_MAX_INTERVAL, AGENT_SLA_CHECK_MAX_INTERVAL)
+    ? timeout
+    : AGENT_SLA_CHECK_MAX_INTERVAL;
 }

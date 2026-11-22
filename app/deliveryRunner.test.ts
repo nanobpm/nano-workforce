@@ -79,7 +79,7 @@ test("nodeInputs seeds the exact per-kind fields each node's subProcess ioMappin
   // Every agent node's appendPrompt is prefixed with the idempotency preflight (#551), then the
   // authored prompt, then the (emit-less) producer completion contract (#760) — this node declares no
   // emits, so the emit contract adds nothing but the status block still applies.
-  assertEquals(agent, { jobType: "senior:feature", appendPrompt: renderIdempotencyPreamble() + "un-draft + merge #B" + renderEmitContract([]) + renderProducerContract([]), timeout: "PT10M" });
+  assertEquals(agent, { jobType: "senior:feature", appendPrompt: renderIdempotencyPreamble() + "un-draft + merge #B" + renderEmitContract([]) + renderProducerContract([]), timeout: "PT10M", slaCheckEvery: "PT5M" });
 
   const wait = byField((v) => "gateKey" in v);
   assertEquals(wait?.gateKey, "run-7:n3");
