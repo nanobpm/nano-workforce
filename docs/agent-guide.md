@@ -340,7 +340,7 @@ qualified `<nodeId>.<fact>` naming one of that node's `emits`.
 | kind | config | does |
 |---|---|---|
 | `agent` | `agent: { jobType, repository?, baseBranch?, prompt?, converge?, merge?, timeout? }` | runs an agent job in a fresh checkout of `repository`. Side-effecting. `converge`/`merge` (merge requires converge) declare land intent; a raw `senior:converge`/`senior:merge` job is rejected. `timeout` is an ISO-8601 per-node SLA overriding the run's `nodeTimeout` (default `PT1H`). |
-| `wait` | `wait: <ReadinessProbe>` | a durable, bounded, read-only readiness probe `{ kind, target, match?, poll?, onTimeout? }`. Kinds: `http`, `command`, `npm`, `github-check`, `capability`, `pr`, `epic`. |
+| `wait` | `wait: <ReadinessProbe>` | a durable, bounded, read-only readiness probe `{ kind, target, match?, poll?, onTimeout? }`. Kinds: `http`, `command`, `npm`, `github-check`, `capability`, `pr`, `epic`, `issue`. |
 | `human` | `human?: { formKey?, prompt? }` | a user task on the Tasks inbox (§3), answerable by a human or an agent. |
 | `connector` | `connector: { target, dedupeKey?, payload?, timeout? }` | an at-least-once, deduped outbound action. Real targets: `converge`, `converge-merge`, `merge-main` (§9.4). |
 
@@ -485,6 +485,47 @@ epic never reports merged, so the bounded wait routes via `onTimeout`. On a matc
   "wait": { "kind": "epic", "target": "nanobpm/nano-ide#488", "match": { "epicState": "merged" },
             "poll": { "everyMs": 300000, "timeoutMs": 259200000 }, "onTimeout": "escalate" },
   "emits": [ { "name": "prCount", "type": "number" } ] }
+```
+
+### 9.6 Gate a graph on a GitHub issue landing (`wait[issue]`)
+
+`kind: "issue"` waits on a GitHub **issue** — GitHub truth only, never nwf lineage, so the gate
+opens however the issue landed (nwf, Mergify, a human). `target` is the issue key
+`owner/repo#N` (or a `<node>.fact` late-binding reference). `match.issueState` (default
+`completed`) is a closed vocabulary:
+
+- `closed` — CLOSED for any reason.
+- `completed` — CLOSED with `stateReason: COMPLETED` (a NOT_PLANNED close does not count).
+- `closed-by-pr-merged` — CLOSED as completed AND at least one PR in
+  `closedByPullRequestsReferences` is MERGED. On a match it **binds the closing PR as a `pr`
+  fact** — declare `emits: [{ "name": "pr", "type": "pr" }]` and thread it to a downstream
+  `wait[pr]`/agent, exactly like an agent's emitted PR. A `pr`-typed emit on any other wait
+  (another kind, or another `issueState`) is rejected at compile — nothing would bind it.
+
+This is how a graph says "join on issues A, B and C landing" — one `wait[issue]` per issue as
+branches of a parallel AND-join — without a raw `command` probe running `gh issue view`. A
+failed/garbled `gh` read is "not ready" (the bounded wait routes via `onTimeout`), never a throw.
+
+```json
+{
+  "name": "join on issues A+B landing, then integrate",
+  "nodes": [
+    { "id": "wait-a", "kind": "wait",
+      "wait": { "kind": "issue", "target": "acme/repo#101", "match": { "issueState": "closed-by-pr-merged" },
+                "poll": { "everyMs": 300000, "timeoutMs": 259200000 }, "onTimeout": "escalate" },
+      "emits": [ { "name": "pr", "type": "pr" } ] },
+    { "id": "wait-b", "kind": "wait",
+      "wait": { "kind": "issue", "target": "acme/repo#102",
+                "poll": { "everyMs": 300000, "timeoutMs": 259200000 } } },
+    { "id": "integrate", "kind": "agent",
+      "agent": { "jobType": "senior:feature", "repository": "acme/repo",
+                 "prompt": "Integrate the landed work from wait-a.pr." } }
+  ],
+  "edges": [
+    { "from": "wait-a.pr", "to": "integrate" },
+    { "from": "wait-b", "to": "integrate" }
+  ]
+}
 ```
 
 ---

@@ -16,6 +16,7 @@ import {
   DEFAULT_EVERY_MS,
   DEFAULT_TIMEOUT_MS,
   EPIC_CONDITIONS,
+  ISSUE_CONDITIONS,
   ON_TIMEOUTS,
   PR_CONDITIONS,
   PROBE_KINDS,
@@ -41,13 +42,17 @@ test("wait probe kinds cover exactly PROBE_KINDS (add a probe kind ⇒ must add 
   );
 });
 
-test("pr / epic probe conditions match the closed PR_CONDITIONS / EPIC_CONDITIONS", () => {
+test("pr / epic / issue probe conditions match the closed PR_CONDITIONS / EPIC_CONDITIONS / ISSUE_CONDITIONS", () => {
   const vocab = deliveryGraphVocabulary();
   const pr = vocab.waitProbeKinds.find((p) => p.kind === "pr");
   const epic = vocab.waitProbeKinds.find((p) => p.kind === "epic");
-  assert.ok(pr && epic, "pr and epic probe entries must exist");
+  const issue = vocab.waitProbeKinds.find((p) => p.kind === "issue");
+  assert.ok(pr && epic && issue, "pr, epic and issue probe entries must exist");
   assert.deepEqual(sorted(pr.conditions ?? []), sorted(PR_CONDITIONS), "pr conditions drifted from PR_CONDITIONS");
   assert.deepEqual(sorted(epic.conditions ?? []), sorted(EPIC_CONDITIONS), "epic conditions drifted from EPIC_CONDITIONS");
+  assert.deepEqual(sorted(issue.conditions ?? []), sorted(ISSUE_CONDITIONS), "issue conditions drifted from ISSUE_CONDITIONS");
+  // The issue kind's emitted closing PR (a `pr`-typed fact) must be discoverable from the surface.
+  assert.deepEqual(issue.binds ?? [], ["closingPr"], "the issue probe must document its emitted closing-PR `closingPr` bind");
 });
 
 test("every real converge-enrollment target has a real vocab entry (add a target ⇒ must add a vocab entry)", () => {

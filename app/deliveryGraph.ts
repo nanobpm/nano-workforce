@@ -1902,6 +1902,8 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     path: string;
     field: "connector.payload.pr" | "wait.target";
     id: string;
+    // What the reference must name: a PR (converge/wait[pr]) or an ISSUE (wait[issue], #997).
+    expect: "pr" | "issue";
     // The authored PR ref: the connector's `payload.pr` or the wait's `target`. `undefined` when
     // absent (a connector may omit it and auto-bind the single incoming `pr` fact; a wait's `target`
     // is a required field reported missing elsewhere).
@@ -2294,13 +2296,15 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               path,
               field: "connector.payload.pr",
               id,
+              expect: "pr",
               authored: payload !== undefined && typeof payload.pr === "string" ? payload.pr : undefined,
             });
-          } else if (kind === "wait" && config.kind === "pr") {
+          } else if (kind === "wait" && (config.kind === "pr" || config.kind === "issue")) {
             prBindConsumers.push({
               path,
               field: "wait.target",
               id,
+              expect: config.kind === "issue" ? "issue" : "pr",
               authored: typeof config.target === "string" ? config.target : undefined,
             });
           }
@@ -2478,6 +2482,40 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     if (typeof id === "string" && id.length > 0 && !nodeFacts.has(id)) {
       nodeFacts.set(id, facts);
       nodeFactTypes.set(id, factTypes);
+    }
+
+    // A `pr`-typed `wait` emit is sourced from the `closingPr` bind, which ONLY a
+    // `wait[issue]` with `match.issueState: "closed-by-pr-merged"` produces (#997). On any other wait it
+    // would publish null (or, before the dedicated name, a stale enclosing `pr`) — fail closed here.
+    // The reserved names `mergedSha`/`prCount` are sourced from their OWN (non-PR) outputs by
+    // factSourceVar ahead of the declared type, so a `pr`-typed fact under either name would publish
+    // a SHA/count/null as a PR — reject that combination outright, on every wait shape (#1000 review).
+    const prEmits = kind === "wait" ? [...factTypes.entries()].filter(([, t]) => t === "pr") : [];
+    for (const [n] of prEmits) {
+      if (n === "mergedSha" || n === "prCount") {
+        errors.push({
+          path: `${path}.emits`,
+          message:
+            `wait node "${String(id)}" declares the reserved fact "${n}" as \`pr\`-typed, but "${n}" is ` +
+            "always sourced from its own non-PR output — rename the fact or retype it.",
+          code: "invalid-fact-type",
+        });
+      }
+    }
+    if (prEmits.length > 0) {
+      const cfg = isRecord(rawNode.wait) ? rawNode.wait : {};
+      const waitKind = typeof cfg.kind === "string" ? cfg.kind.trim() : "";
+      const issueState = isRecord(cfg.match) && typeof cfg.match.issueState === "string" ? cfg.match.issueState.trim() : "";
+      if (waitKind !== "issue" || issueState !== "closed-by-pr-merged") {
+        errors.push({
+          path: `${path}.emits`,
+          message:
+            `wait node "${String(id)}" emits a \`pr\`-typed fact, but only a \`wait[issue]\` with ` +
+            "`match.issueState: \"closed-by-pr-merged\"` binds a PR — any other wait would publish null. " +
+            "Change the probe to that shape or retype the fact.",
+          code: "invalid-fact-type",
+        });
+      }
     }
 
     // Reject a `human` node whose emits no static form can capture (PR #863 review — threads
@@ -2675,6 +2713,7 @@ function validatePrBindings(
     path: string;
     field: "connector.payload.pr" | "wait.target";
     id: string;
+    expect: "pr" | "issue";
     authored: string | undefined;
   }[],
   incomingFactRefs: ReadonlyMap<string, { ref: string; factName: string; factType: DeliveryFactType | undefined }[]>,
@@ -2685,27 +2724,54 @@ function validatePrBindings(
   for (const c of consumers) {
     const incoming = incomingFactRefs.get(c.id) ?? [];
     const errPath = `${c.path}.${c.field}`;
-    if (c.authored !== undefined) {
+    // Trim exactly as `parseProbe` and the compiler's late-bind lookup do, so validation agrees
+    // with dispatch (#1000 review: `" p.issue "` must resolve like `"p.issue"`).
+    const authored = c.authored?.trim();
+    if (authored !== undefined) {
       // `resolveFrom` returns a `fact` iff the reference's prefix is an existing node — so a real PR
       // literal (`owner/repo#N`, no node-qualified dot) resolves to no fact and passes through.
-      const resolved = resolveFrom(c.authored, nodeFacts);
-      if (resolved.fact === undefined) continue; // a literal — validated at runtime.
+      const resolved = resolveFrom(authored, nodeFacts);
+      if (resolved.fact === undefined) {
+        // A wait[issue] literal is validated HERE with the canonical issue grammar (#997 review), so a
+        // malformed literal never compiles/stages only to be rejected at dispatch. A dot-qualified
+        // value naming no graph node is an unresolvable reference, not a literal — rejected too.
+        if (c.expect === "issue" && !parseIssue(authored)) {
+          errors.push({
+            path: errPath,
+            message:
+              `${c.id}'s issue target "${authored}" is neither an 'owner/repo#<number>' issue reference / ` +
+              "GitHub issue URL nor a `<node>.<fact>` reference to a declared, threaded fact",
+            code: "unbound-pr",
+          });
+        }
+        continue; // a PR literal — validated at runtime.
+      }
       const ref = `${resolved.nodeId}.${resolved.fact}`;
       const declaredType = nodeFactTypes.get(resolved.nodeId)?.get(resolved.fact);
       if (declaredType === undefined) {
         errors.push({
           path: errPath,
           message:
-            `${c.id}'s PR reference "${c.authored}" points at fact "${resolved.fact}" that node ` +
+            `${c.id}'s PR reference "${authored}" points at fact "${resolved.fact}" that node ` +
             `"${resolved.nodeId}" does not declare in its \`emits[]\``,
           code: "unbound-pr",
         });
-      } else if (declaredType !== "pr") {
+      } else if (c.expect === "pr" && declaredType !== "pr") {
         errors.push({
           path: errPath,
           message:
-            `${c.id}'s PR reference "${c.authored}" resolves to a "${declaredType}" fact — a converge/` +
+            `${c.id}'s PR reference "${authored}" resolves to a "${declaredType}" fact — a converge/` +
             "wait PR binding must reference a `pr`-typed fact",
+          code: "unbound-pr",
+        });
+      } else if (c.expect === "issue" && (declaredType === "number" || declaredType === "boolean")) {
+        // A scalar number/boolean can never be an `owner/repo#N` reference or issue URL; accepting
+        // it would compile a wait that silently times out (#1000 review). Fail closed here.
+        errors.push({
+          path: errPath,
+          message:
+            `${c.id}'s issue target "${authored}" resolves to a "${declaredType}" fact — an issue wait ` +
+            "must reference a string-shaped fact carrying an issue reference or URL",
           code: "unbound-pr",
         });
       } else if (!incoming.some((f) => f.ref === ref)) {

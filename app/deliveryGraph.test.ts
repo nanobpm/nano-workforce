@@ -3379,3 +3379,58 @@ test("#858 a typographic-apostrophe possessive still narrows the scope to a part
     );
   }
 });
+
+// ── #1000 review: issue-wait targets are validated at the graph boundary ──
+test("#1000 wait[issue]: a malformed literal target is rejected at validation, a canonical one accepted", () => {
+  const bad = validateDeliveryGraph({ nodes: [{ id: "w", kind: "wait", wait: { kind: "issue", target: "not-an-issue" } }] });
+  assertEquals(hasCode(bad, "unbound-pr").path, "nodes[0].wait.target");
+  for (const target of ["o/r#9", "https://github.com/o/r/issues/9"]) {
+    const ok = validateDeliveryGraph({ nodes: [{ id: "w", kind: "wait", wait: { kind: "issue", target } }] });
+    assert(!ok.some((e) => e.code === "unbound-pr"), `${target}: ${JSON.stringify(ok)}`);
+  }
+});
+
+test("#1000 wait[issue]: a late-bound target must name a declared fact threaded by an incoming edge", () => {
+  const producer = { id: "p", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "issue", type: "string" }] };
+  const unthreaded = validateDeliveryGraph({ nodes: [producer, { id: "w", kind: "wait", wait: { kind: "issue", target: "p.issue" } }] });
+  assert(unthreaded.some((e) => e.code === "unbound-pr" && e.path === "nodes[1].wait.target"), JSON.stringify(unthreaded));
+  const undeclared = validateDeliveryGraph({ nodes: [producer, { id: "w", kind: "wait", wait: { kind: "issue", target: "p.nope" } }] });
+  assert(undeclared.some((e) => e.code === "unbound-pr"), JSON.stringify(undeclared));
+  const threaded = validateDeliveryGraph({
+    nodes: [producer, { id: "w", kind: "wait", wait: { kind: "issue", target: "p.issue" } }],
+    edges: [{ from: "p.issue", to: "w" }],
+  });
+  assert(!threaded.some((e) => e.code === "unbound-pr"), JSON.stringify(threaded));
+});
+
+test("#1000 wait emits: a pr-typed reserved fact (mergedSha/prCount) is rejected on every wait shape", () => {
+  for (const name of ["mergedSha", "prCount"]) {
+    for (const wait of [
+      { kind: "pr", target: "o/r#1" },
+      { kind: "issue", target: "o/r#1", match: { issueState: "closed-by-pr-merged" } },
+    ]) {
+      const errors = validateDeliveryGraph({ nodes: [{ id: "w", kind: "wait", wait, emits: [{ name, type: "pr" }] }] });
+      assert(errors.some((e) => e.code === "invalid-fact-type" && e.message.includes(name)), `${name}/${wait.kind}: ${JSON.stringify(errors)}`);
+    }
+  }
+});
+
+test("#1000 wait[issue]: a whitespace-padded late-bound target resolves like the trimmed one", () => {
+  const producer = { id: "p", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "issue", type: "string" }] };
+  const errors = validateDeliveryGraph({
+    nodes: [producer, { id: "w", kind: "wait", wait: { kind: "issue", target: " p.issue " } }],
+    edges: [{ from: "p.issue", to: "w" }],
+  });
+  assert(!errors.some((e) => e.code === "unbound-pr"), JSON.stringify(errors));
+});
+
+test("#1000 wait[issue]: a threaded number/boolean fact is rejected as an issue target", () => {
+  for (const type of ["number", "boolean"]) {
+    const producer = { id: "p", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "issue", type }] };
+    const errors = validateDeliveryGraph({
+      nodes: [producer, { id: "w", kind: "wait", wait: { kind: "issue", target: "p.issue" } }],
+      edges: [{ from: "p.issue", to: "w" }],
+    });
+    assert(errors.some((e) => e.code === "unbound-pr" && e.message.includes(type)), `${type}: ${JSON.stringify(errors)}`);
+  }
+});
