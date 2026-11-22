@@ -112,12 +112,12 @@ function urbanVersion(): string | null {
  *
  * Satisfaction is a SMALL semver subset — enough for the common registry range forms
  * (`^x.y.z`, `~x.y.z`, `x.y.z`, `>=x.y.z`) without shipping a full semver parser:
- *   - `^x.y.z`  — same major (for x≥1), installed >= declared.
+ *   - `^x.y.z`  — same major (x≥1) / major.minor (0.y) / exact patch (0.0.z), installed >= declared.
  *   - `~x.y.z`  — same major.minor, installed >= declared.
  *   - `x.y.z` / `=x.y.z` — exact match.
  *   - `>=x.y.z` — installed >= declared.
  * Non-registry / non-semver specs (git, file:, workspace:, URLs, dist-tags like
- * `latest`, `*`) are skipped — their installed version string is not comparable to the
+ * `latest`, `*`) and any other range form (`||`, `<`, hyphen, x-ranges) are skipped — their installed version string is not comparable to the
  * spec, and the git fork (bpmn-auto-layout) is exactly such a case.
  */
 export interface DependencyDrift {
@@ -130,49 +130,87 @@ interface Semver {
   major: number;
   minor: number;
   patch: number;
+  /** Prerelease tag (`beta.1` in `1.2.3-beta.1`), or "" for a stable release. */
+  pre: string;
 }
 
+const SEMVER_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+
+/** Parse a COMPLETE semver string (prerelease preserved, build metadata ignored). Any
+ *  trailing junk makes it unparseable — never a partial prefix match. */
 function parseSemver(v: string): Semver | null {
-  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
+  const m = SEMVER_RE.exec(v.trim());
   if (!m) return null;
-  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) };
+  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]), pre: m[4] ?? "" };
 }
 
+/** Compare major.minor.patch, then prerelease per semver §11 (a prerelease sorts
+ *  BELOW its stable release; identifiers compare numerically or lexically). */
 function cmp(a: Semver, b: Semver): number {
   if (a.major !== b.major) return a.major - b.major;
   if (a.minor !== b.minor) return a.minor - b.minor;
-  return a.patch - b.patch;
+  if (a.patch !== b.patch) return a.patch - b.patch;
+  if (a.pre === b.pre) return 0;
+  if (a.pre === "") return 1;
+  if (b.pre === "") return -1;
+  const ai = a.pre.split(".");
+  const bi = b.pre.split(".");
+  for (let i = 0; i < Math.max(ai.length, bi.length); i++) {
+    const x = ai[i];
+    const y = bi[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const xn = /^\d+$/.test(x);
+    const yn = /^\d+$/.test(y);
+    if (xn && yn) {
+      if (Number(x) !== Number(y)) return Number(x) - Number(y);
+    } else if (xn !== yn) {
+      return xn ? -1 : 1;
+    } else if (x !== y) {
+      return x < y ? -1 : 1;
+    }
+  }
+  return 0;
 }
 
+/** The ONLY range grammar understood: an optional single operator (`^`, `~`, `>=`, `=`)
+ *  followed by one complete semver. Anything else (`||`, `<`, hyphen ranges, x-ranges,
+ *  multi-comparator sets) is unsupported and skipped rather than partially read. */
+const SPEC_RE = /^(\^|~|>=|=)?\s*(\S+)$/;
+
 /** True when `installed` satisfies the declared registry range `spec`. Returns null
- *  when the spec is not a comparable registry semver range (git/file/URL/tag) — the
- *  caller skips those. */
-function satisfies(spec: string, installed: string): boolean | null {
-  const s = spec.trim();
-  if (!s) return null;
-  if (/^(git|file:|workspace:|https?:|npm:|link:)/i.test(s)) return null;
+ *  when the spec is not in the supported grammar (git/file/URL/tag/complex range) —
+ *  the caller skips those. Prerelease installs only satisfy a spec whose declared
+ *  version is a prerelease of the same major.minor.patch (npm's rule). */
+export function satisfies(spec: string, installed: string): boolean | null {
+  const m = SPEC_RE.exec(spec.trim());
+  if (!m) return null;
+  const op = m[1] ?? "";
+  const decl = parseSemver(m[2] ?? "");
+  if (decl == null) return null; // "*", "latest", git/URL, unparseable — not comparable
   const inst = parseSemver(installed);
   if (inst == null) return null;
 
-  const caret = s.startsWith("^");
-  const tilde = s.startsWith("~");
-  const gte = s.startsWith(">=");
-  const bare = s.replace(/^[<>=~^=\s]+/, "");
-  const decl = parseSemver(bare);
-  if (decl == null) return null; // "*", "latest", unparseable — not comparable
-
-  if (caret) {
-    // ^x.y.z: for x≥1, same major and installed >= declared. For 0.y.z, caret pins
-    // major.minor (0.y is treated as breaking per semver), so require both.
-    if (decl.major === 0) return inst.major === 0 && inst.minor === decl.minor && cmp(inst, decl) >= 0;
-    return inst.major === decl.major && cmp(inst, decl) >= 0;
+  if (
+    inst.pre !== "" &&
+    !(decl.pre !== "" && inst.major === decl.major && inst.minor === decl.minor && inst.patch === decl.patch)
+  ) {
+    return false;
   }
-  if (tilde) {
+  if (op === "^") {
+    // ^x.y.z: for x≥1, same major. ^0.y.z (y≥1) pins major.minor; ^0.0.z pins the patch.
+    if (inst.major !== decl.major) return false;
+    if (decl.major === 0) {
+      if (inst.minor !== decl.minor) return false;
+      if (decl.minor === 0 && inst.patch !== decl.patch) return false;
+    }
+    return cmp(inst, decl) >= 0;
+  }
+  if (op === "~") {
     return inst.major === decl.major && inst.minor === decl.minor && cmp(inst, decl) >= 0;
   }
-  if (gte) return cmp(inst, decl) >= 0;
-  // Exact (optionally `=`-prefixed).
-  return cmp(inst, decl) === 0;
+  if (op === ">=") return cmp(inst, decl) >= 0;
+  return cmp(inst, decl) === 0; // exact (optionally `=`-prefixed)
 }
 
 /** The direct-dependency drift between package.json and node_modules. Pure and

@@ -306,3 +306,37 @@ test("dependencyDrift ignores devDependencies absent from an --omit=dev install,
     stale.cleanup();
   }
 });
+
+// Review #1009: the satisfaction subset must fail closed on unsupported ranges and
+// honour prerelease + ^0.0.z boundaries.
+test("satisfies: ^0.0.z pins the patch", async () => {
+  const { satisfies } = await import("./version.ts");
+  assertEquals(satisfies("^0.0.3", "0.0.3"), true);
+  assertEquals(satisfies("^0.0.3", "0.0.4"), false);
+  assertEquals(satisfies("^0.2.3", "0.2.9"), true);
+  assertEquals(satisfies("^0.2.3", "0.3.0"), false);
+});
+
+test("satisfies: prerelease installs never satisfy a stable spec", async () => {
+  const { satisfies } = await import("./version.ts");
+  assertEquals(satisfies("1.2.3", "1.2.3-beta.1"), false);
+  assertEquals(satisfies("^1.2.0", "1.3.0-beta.1"), false);
+  assertEquals(satisfies(">=1.0.0", "2.0.0-rc.1"), false);
+  assertEquals(satisfies("^1.2.3-beta.1", "1.2.3-beta.2"), true);
+  assertEquals(satisfies("^1.2.3-beta.2", "1.2.3-beta.1"), false);
+  assertEquals(satisfies("^1.2.3-beta.1", "1.2.3"), true);
+});
+
+test("satisfies: unsupported range syntax is skipped (null), not partially read", async () => {
+  const { satisfies } = await import("./version.ts");
+  assertEquals(satisfies("^1.2.3 || ^2.0.0", "2.1.0"), null);
+  assertEquals(satisfies("<1.2.3", "1.2.3"), null);
+  assertEquals(satisfies("<=1.2.3", "1.0.0"), null);
+  assertEquals(satisfies(">1.2.3", "1.0.0"), null);
+  assertEquals(satisfies("1.2.3 - 2.0.0", "1.5.0"), null);
+  assertEquals(satisfies(">=1.0.0 <2.0.0", "1.5.0"), null);
+  assertEquals(satisfies("1.x", "1.5.0"), null);
+  assertEquals(satisfies("latest", "1.5.0"), null);
+  assertEquals(satisfies("github:foo/bar", "1.5.0"), null);
+  assertEquals(satisfies("=1.2.3", "1.2.3"), true);
+});
