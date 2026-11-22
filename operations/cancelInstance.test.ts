@@ -562,3 +562,109 @@ test("PR #996 — the per-key cancel lock is released (no unbounded map growth) 
   await call(app, { processInstanceKey: "920" });
   assertEquals(cancelKeyLocks.size, 0, "a completed, uncontended cancel leaves no lock entry behind");
 });
+
+/** Wrap a settling record app so the provenance COMMIT (`update … committed:1`) throws `failures` times. */
+function failCommits(app: AppApi, failures: number): void {
+  // biome-ignore lint/suspicious/noExplicitAny: test-only wrapping of the fake data layer.
+  const data = app.data as any;
+  const inner = data.table;
+  let left = failures;
+  data.table = (name: string, key?: string) => {
+    const t = inner(name, key);
+    if (name !== "run_cancellations") return t;
+    return {
+      ...t,
+      get: t.get.bind(t),
+      insert: t.insert.bind(t),
+      delete: t.delete.bind(t),
+      async update(k: string, patch: Record<string, unknown>) {
+        if (patch.committed === 1 && left > 0) {
+          left--;
+          throw new Error("db busy");
+        }
+        return t.update(k, patch);
+      },
+    };
+  };
+}
+
+test("PR #996 — a transient commit failure after a confirmed cancel is recovered, preserving the original actor/reason/time", async () => {
+  const stores = {
+    feature_runs: { rows: [{ feature_key: "o/r#15", process_key: "930", status: "running" }], key: "feature_key" },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
+    run_cancellations: { rows: [] as any[], key: "process_key" },
+  };
+  const { app } = makeSettlingRecordApp(stores, { readBackState: "TERMINATED" });
+  failCommits(app, 2);
+  const res = await call(app, { processInstanceKey: "930", actor: "alice", reason: "why" });
+  assertEquals(res.status, 200);
+  const row = stores.run_cancellations.rows[0];
+  assertEquals(row.committed, 1);
+  assertEquals(row.cancelled_by, "alice");
+  assertEquals(row.cancel_reason, "why");
+});
+
+test("PR #996 — a persistent commit failure after a confirmed cancel is a 502, never a silent 200", async () => {
+  const stores = {
+    feature_runs: { rows: [{ feature_key: "o/r#16", process_key: "940", status: "running" }], key: "feature_key" },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
+    run_cancellations: { rows: [] as any[], key: "process_key" },
+  };
+  const { app } = makeSettlingRecordApp(stores, { readBackState: "TERMINATED" });
+  failCommits(app, 1000);
+  const res = await call(app, { processInstanceKey: "940", actor: "alice" });
+  assertEquals(res.status, 502);
+  assertEquals(res.body.ok, false);
+  assert(/provenance/.test(res.body.error), "names the unfinalized provenance");
+});
+
+test("PR #996 — an unreadable engine liveness probe never commits provenance off a (possibly stale) tracking snapshot", async () => {
+  const stores = {
+    feature_runs: { rows: [{ feature_key: "o/r#17", process_key: "950", status: "running" }], key: "feature_key" },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
+    run_cancellations: { rows: [] as any[], key: "process_key" },
+  };
+  const { app } = makeSettlingRecordApp(stores, { readBackState: "TERMINATED" });
+  // biome-ignore lint/suspicious/noExplicitAny: test-only engine override.
+  const engine = app.engine as any;
+  const search = engine.searchProcessInstances.bind(engine);
+  let first = true;
+  engine.searchProcessInstances = async (q: unknown) => {
+    if (first) {
+      first = false;
+      throw new Error("probe down");
+    }
+    return search(q);
+  };
+  await call(app, { processInstanceKey: "950", actor: "alice" });
+  assertEquals(stores.run_cancellations.rows[0]?.committed ?? 0, 0, "probe failure fails closed");
+});
+
+test("PR #996 — when this request cannot take ownership of the provisional row, it never commits the stale caller's provenance", async () => {
+  const stores = {
+    feature_runs: { rows: [{ feature_key: "o/r#18", process_key: "960", status: "running" }], key: "feature_key" },
+    run_cancellations: {
+      rows: [{ process_key: "960", run_table: null, cancelled_by: "stale-a", cancel_reason: "old", cancelled_at: "2000-01-01T00:00:00.000Z", committed: 0 }],
+      key: "process_key",
+    },
+  };
+  const { app } = makeSettlingRecordApp(stores, { readBackState: "TERMINATED" });
+  // biome-ignore lint/suspicious/noExplicitAny: test-only wrapping of the fake data layer.
+  const data = app.data as any;
+  const inner = data.table;
+  data.table = (name: string, key?: string) => {
+    const t = inner(name, key);
+    if (name !== "run_cancellations") return t;
+    return {
+      get: t.get.bind(t),
+      insert: t.insert.bind(t),
+      delete: t.delete.bind(t),
+      async update(k: string, patch: Record<string, unknown>) {
+        if (patch.committed === 0) throw new Error("re-own failed");
+        return t.update(k, patch);
+      },
+    };
+  };
+  await call(app, { processInstanceKey: "960", actor: "request-b" });
+  assertEquals(stores.run_cancellations.rows[0].committed, 0, "the stale caller's row is never committed");
+});

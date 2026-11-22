@@ -247,13 +247,18 @@ export async function cancelTrackedRun(
     // when the record was still ACTIVE at resolve time (or unresolvable — trust the engine's
     // committed 204 there); a retry over an already-terminal record leaves its row uncommitted and
     // the run keeps its truthful out-of-band `abandoned` status.
-    // `engineLiveBefore === null` (probe unreadable) falls back to the record snapshot alone.
-    if (!canResolveRecord || (resolvedRecordActive && engineLiveBefore !== false)) {
-      try {
-        await commitRunCancellation(app.data, processInstanceKey);
-      } catch (err) {
-        app.log.warn("cancelInstance: could not commit the run cancellation", { processInstanceKey, error: String(err) });
-      }
+    // Fail CLOSED on both ownership and liveness (PR #996 review): commit only when THIS request owns
+    // the provisional row (`cancellationRecorded` — a failed re-own leaves a stale caller's row that
+    // must never be committed under this request) AND the engine POSITIVELY reported ACTIVE before the
+    // cancel (an unreadable probe falls back to nothing: a lagging tracking snapshot alone cannot
+    // distinguish a fresh termination from an out-of-band one).
+    let provenanceUnfinalized = false;
+    if (canResolveRecord && cancellationRecorded && resolvedRecordActive && engineLiveBefore === true) {
+      // The engine already terminated the run, so after this point no retry can prove freshness again:
+      // finalisation must be recovered HERE, in the request that owns the row. Retry the commit a
+      // bounded number of times (the row keeps this request's original actor/time/reason throughout);
+      // if it still fails, surface a 502 rather than a silent 200 over a run that reads `abandoned`.
+      provenanceUnfinalized = !(await commitWithRetry(app, processInstanceKey));
     }
 
     // The engine confirmed termination. Report a TRUTHFUL `reconciled` off the RECORD's derived terminal
@@ -286,6 +291,19 @@ export async function cancelTrackedRun(
       const after = await resolveTrackedInstance(app.data, processInstanceKey);
       recordReconciled = !!after && !after.active;
       reconciled = recordReconciled ? 1 : 0;
+    }
+
+    if (provenanceUnfinalized) {
+      return {
+        status: 502,
+        body: {
+          ok: false,
+          processInstanceKey: result.processInstanceKey,
+          state: result.state,
+          reconciled,
+          error: "instance terminated but cancellation provenance could not be finalized",
+        },
+      };
     }
 
     const responseBody = {
@@ -322,6 +340,26 @@ export async function cancelTrackedRun(
   });
 }
 
+
+/** Attempts made to finalize (commit) a confirmed cancellation's provenance before giving up. */
+export const COMMIT_ATTEMPTS = 3;
+
+/** Commit the provisional cancellation row, retrying transient failures. True once committed. */
+async function commitWithRetry(app: AppApi, processInstanceKey: string): Promise<boolean> {
+  for (let attempt = 1; attempt <= COMMIT_ATTEMPTS; attempt++) {
+    try {
+      await commitRunCancellation(app.data, processInstanceKey);
+      return true;
+    } catch (err) {
+      app.log.warn("cancelInstance: could not commit the run cancellation", {
+        processInstanceKey,
+        attempt,
+        error: String(err),
+      });
+    }
+  }
+  return false;
+}
 
 /** A trimmed, non-blank optional string field off the request body, else undefined. */
 function optionalText(body: unknown, field: "actor" | "reason"): string | undefined {
