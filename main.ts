@@ -26,7 +26,7 @@ import { announceEngine, resolveEngineAddress } from "./app/enginePreflight.ts";
 import { registerPullRequestTrackingReadModel } from "./app/prTrackingReadModel.ts";
 import { runEngineReconcile } from "./app/reconcile.ts";
 import { MAX_ROUNDS, pollOnce } from "./app/service.ts";
-import { envVar } from "./app/version.ts";
+import { dependencyDrift, envVar } from "./app/version.ts";
 
 // Issue #959: register the app-owned, merge-aware `pull_requests__tracking` read model BEFORE the
 // runtime mounts workers/instance-tracking, so the framework provisions THIS derivation (a landed PR
@@ -38,6 +38,27 @@ const POLL_MS = Number(process.env.NANO_PR_POLL_MS ?? 60_000);
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 
 const host = selectHost();
+
+// Dependency-drift tripwire (issue #1008, optional hardening). If an upgrade overlaid
+// a new release WITHOUT reinstalling deps, package.json names the new specs while
+// node_modules still holds the old tree. Surface that as a boot WARN naming each
+// drifted direct dependency, so a stale-install is obvious rather than a silent
+// "new version, old code" mismatch. Best-effort and never blocks boot.
+try {
+  const drift = dependencyDrift();
+  if (drift.length > 0) {
+    const lines = drift
+      .map((d) => `    ${d.name}: declared ${d.declared}, installed ${d.installed ?? "(missing)"}`)
+      .join("\n");
+    host.log(
+      "warn",
+      `dependency drift detected — package.json and node_modules disagree (a previous upgrade ` +
+        `may not have reinstalled deps). Run \`npm install\` and restart:\n${lines}`,
+    );
+  }
+} catch {
+  /* best-effort tripwire — never block boot on a drift probe */
+}
 
 // One engine client, shared by the runtime (surfaces/actions/workers) and the poller. The address
 // resolution (CAMUNDA_REST_ADDRESS wins, else NANOBPMN_BASE_URL + /v2, else localhost:8080) is the

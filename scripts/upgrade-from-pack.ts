@@ -27,8 +27,17 @@
 //   --package <name>    package to fetch (default: "@nanobpm/nano-workforce")
 //   --from <path>       use a local extracted dir OR a .tgz tarball as the source
 //                       (skips `npm pack`; --version/--package are ignored)
+//   --skip-install      overlay the files but do NOT reinstall dependencies, even
+//                       if package.json / package-lock.json changed (offline use)
 //   --force             overlay even if the cwd doesn't look like this app
 //   -h, --help          show this help
+//
+// Dependency reinstall (issue #1008): after --apply overlays the files, if
+// `package.json` or `package-lock.json` changed the script runs
+// `npm install --no-audit --no-fund` in the app dir (incremental — NOT `npm ci`,
+// which deletes node_modules under a running process) and fails the upgrade loudly
+// if it fails. The dry-run plan reports whether a reinstall would run and lists the
+// changed dependency specs. Pass --skip-install to overlay without touching deps.
 
 import { execFileSync } from "node:child_process";
 import {
@@ -40,16 +49,19 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 
-interface Args {
+export interface Args {
   apply: boolean;
   version: string;
   pkg: string;
   from: string | null;
   force: boolean;
+  skipInstall: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -59,6 +71,7 @@ function parseArgs(argv: string[]): Args {
     pkg: "@nanobpm/nano-workforce",
     from: null,
     force: false,
+    skipInstall: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -68,6 +81,9 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--force":
         a.force = true;
+        break;
+      case "--skip-install":
+        a.skipInstall = true;
         break;
       case "--version":
         a.version = req(argv, ++i, arg);
@@ -232,9 +248,121 @@ function packageVersion(dir: string): string {
   }
 }
 
+/* --------------------------------------------------------------------------
+ * Dependency reinstall (issue #1008)
+ *
+ * The overlay preserves `node_modules/` (it must — deleting it under a running
+ * process is fatal), so a release that changes `package.json`/`package-lock.json`
+ * would otherwise boot with the OLD dependency tree: `/version` reports the new
+ * release while the code it loads is stale, and a newly-ADDED dependency crashes on
+ * import. After applying, if either dependency manifest changed we run an
+ * INCREMENTAL `npm install --no-audit --no-fund` (never `npm ci`, which deletes
+ * node_modules) and fail the upgrade loudly if it fails.
+ * ------------------------------------------------------------------------ */
+
+/** The dependency manifests whose change forces a reinstall. */
+const DEPENDENCY_FILES = ["package.json", "package-lock.json"] as const;
+
+/** Read a file as text, or null when it does not exist / cannot be read. */
+function readTextOrNull(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** The dependency spec maps (`dependencies`, `devDependencies`, …) of a parsed
+ *  package.json, as `name → spec`. Only string-valued entries are kept. */
+function depSpecs(pkg: Record<string, unknown> | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (pkg == null) return out;
+  for (const field of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+    const section = pkg[field];
+    if (typeof section !== "object" || section == null) continue;
+    for (const [name, spec] of Object.entries(section)) {
+      if (typeof spec === "string") out[`${field}:${name}`] = spec;
+    }
+  }
+  return out;
+}
+
+function parsePackageJson(text: string | null): Record<string, unknown> | null {
+  if (text == null) return null;
+  try {
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape (parsed JSON)
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** A human-readable list of the dependency specs that differ between the current
+ *  and the incoming package.json (added / removed / changed). Used by the dry-run
+ *  plan so the operator sees WHAT a reinstall would resolve. */
+export function changedDependencySpecs(
+  currentPkgText: string | null,
+  incomingPkgText: string | null,
+): string[] {
+  const before = depSpecs(parsePackageJson(currentPkgText));
+  const after = depSpecs(parsePackageJson(incomingPkgText));
+  const changes: string[] = [];
+  const names = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const name of [...names].sort()) {
+    const b = before[name];
+    const a = after[name];
+    const short = name.replace(/^[a-zA-Z]+Dependencies:/, "");
+    if (b === a) continue;
+    if (b === undefined) changes.push(`+ ${short}@${a}`);
+    else if (a === undefined) changes.push(`- ${short}@${b}`);
+    else changes.push(`~ ${short} ${b} → ${a}`);
+  }
+  return changes;
+}
+
+/** True when any dependency manifest differs between the current app dir and the
+ *  incoming source dir (byte-for-byte). A changed `package-lock.json` with an
+ *  unchanged `package.json` still forces a reinstall (a transitive pin moved). */
+export function dependencyFilesChanged(cwd: string, src: string): boolean {
+  return DEPENDENCY_FILES.some((rel) => {
+    const incoming = readTextOrNull(join(src, rel));
+    // `npm pack` never ships package-lock.json: a source with no lockfile carries no
+    // lock signal, so the app's local lockfile must not register as a change.
+    if (incoming === null && rel === "package-lock.json") return false;
+    return readTextOrNull(join(cwd, rel)) !== incoming;
+  });
+}
+
+/** Marker persisted in the app dir BEFORE overlaying changed dependency manifests and
+ *  removed only after a successful install. Once the overlay lands the manifests
+ *  match, so a retry would otherwise see "unchanged" and skip a reinstall that never
+ *  happened (failed install, or an earlier --skip-install). */
+export const PENDING_INSTALL_MARKER = ".nano-upgrade-pending-install";
+
+/** The runner that performs the install — injectable so tests can capture the
+ *  invocation (and force a failure) without spawning npm. Returns nothing on
+ *  success; throws on failure. */
+export type InstallRunner = (cwd: string) => void;
+
+/** The production runner: an incremental in-place `npm install`. `--no-audit
+ *  --no-fund` keep it fast and quiet; NOT `ci` (which would wipe node_modules). */
+export const npmInstallRunner: InstallRunner = (cwd) => {
+  execFileSync("npm", ["install", "--no-audit", "--no-fund"], { cwd, stdio: "inherit" });
+};
+
+/** The side-effecting seams `run` needs, injectable for tests. */
+export interface UpgradeDeps {
+  /** Runs the dependency install in the app dir. Defaults to a real npm install. */
+  install?: InstallRunner;
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
-  const cwd = process.cwd();
+  run(args, process.cwd(), {});
+}
+
+export function run(args: Args, cwd: string, deps: UpgradeDeps): void {
+  const install = deps.install ?? npmInstallRunner;
 
   if (!existsSync(join(cwd, "nano.app.json")) && !args.force) {
     throw new Error(
@@ -286,7 +414,8 @@ function main(): void {
     const srcSet = new Set(srcFiles);
     const orphans = listFiles(cwd, preservedDirs)
       .filter((rel) => !isPreserved(rel, preservedDirs, preservedFiles))
-      .filter((rel) => !srcSet.has(rel));
+      .filter((rel) => !srcSet.has(rel))
+      .filter((rel) => rel !== PENDING_INSTALL_MARKER);
 
     report("create", created);
     report("overwrite", overwritten);
@@ -296,25 +425,78 @@ function main(): void {
     }
     report("orphan (kept, review)", orphans);
 
+    // Decide BEFORE writing whether the overlay changes the dependency manifests —
+    // that drives both the plan's "will reinstall" line and the post-apply install.
+    const markerPath = join(cwd, PENDING_INSTALL_MARKER);
+    const depsChanged = dependencyFilesChanged(cwd, src);
+    const pendingInstall = existsSync(markerPath);
+    const willInstall = (depsChanged || pendingInstall) && !args.skipInstall;
+    if (pendingInstall && !depsChanged) {
+      console.log(
+        willInstall
+          ? `  a previous upgrade's dependency reinstall never completed — will run npm install after overlay.`
+          : `  a previous upgrade's dependency reinstall never completed — but --skip-install is set, so NOT reinstalling.`,
+      );
+    } else if (depsChanged) {
+      const changed = changedDependencySpecs(
+        readTextOrNull(join(cwd, "package.json")),
+        readTextOrNull(join(src, "package.json")),
+      );
+      if (willInstall) {
+        console.log(`  dependencies changed — will run npm install after overlay:`);
+      } else {
+        console.log(`  dependencies changed — but --skip-install is set, so NOT reinstalling:`);
+      }
+      for (const line of changed) console.log(`    ${line}`);
+      if (!changed.length) console.log(`    (package-lock.json / transitive pins changed)`);
+    } else {
+      console.log(`  dependencies unchanged — no reinstall needed.`);
+    }
+
     if (!args.apply) {
       console.log(
         `\nDRY RUN — nothing written. Re-run with --apply to overlay ` +
-          `${created.length + overwritten.length} file(s).`,
+          `${created.length + overwritten.length} file(s)` +
+          (willInstall ? ` and reinstall dependencies.` : `.`),
       );
       return;
     }
+
+    // Persist the pending-reinstall marker BEFORE overlaying changed manifests, so a
+    // failed (or deliberately skipped) install is still owed on the next run.
+    if (depsChanged) writeFileSync(markerPath, `${srcVersion}\n`);
 
     for (const rel of [...created, ...overwritten]) {
       const dest = join(cwd, rel);
       mkdirSync(dirname(dest), { recursive: true });
       cpSync(join(src, rel), dest, { recursive: false });
     }
+
+    // Reinstall dependencies when a manifest changed, so the overlaid release runs
+    // against its OWN dependency tree, not the previous one (issue #1008). A failure
+    // is loud and non-zero — never leave a half-upgraded install reporting the new
+    // version while loading stale code.
+    if (willInstall) {
+      console.log(`\n• reinstalling dependencies (npm install --no-audit --no-fund) …`);
+      try {
+        install(cwd);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `dependency reinstall failed after overlaying ${srcVersion}: ${message}\n` +
+            `The files are overlaid but node_modules is stale — fix the npm error above and ` +
+            `re-run \`npm install\` in ${cwd} (or re-run this upgrade), then restart.`,
+        );
+      }
+      rmSync(markerPath, { force: true });
+    }
+
     // Guard against a script that overwrote itself mid-run on some platforms: the
     // copy is byte-for-byte, so this is just a friendly confirmation.
     console.log(
-      `\n✔ overlaid ${created.length + overwritten.length} file(s) → now @ ${srcVersion}.\n` +
-        `Next: reinstall deps if package.json changed, then restart the app —\n` +
-        `the runtime re-applies db/migrations on boot, preserving your data.`,
+      `\n✔ overlaid ${created.length + overwritten.length} file(s) → now @ ${srcVersion}` +
+        (willInstall ? `, dependencies reinstalled.` : `.`) +
+        `\nNext: restart the app — the runtime re-applies db/migrations on boot, preserving your data.`,
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -329,10 +511,15 @@ function report(label: string, files: string[]): void {
   if (files.length > show.length) console.log(`    … and ${files.length - show.length} more`);
 }
 
-try {
-  main();
-} catch (err) {
-  const message = err instanceof Error ? err.message : String(err);
-  console.error(`upgrade failed: ${message}`);
-  process.exit(1);
+/* Run the CLI only when executed directly — importing this module (e.g. from the
+ * test) must not parse argv or touch the filesystem. */
+const invokedAs = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
+if (invokedAs === import.meta.url) {
+  try {
+    main();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`upgrade failed: ${message}`);
+    process.exit(1);
+  }
 }
