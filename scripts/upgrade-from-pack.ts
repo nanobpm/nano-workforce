@@ -54,7 +54,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
-interface Args {
+export interface Args {
   apply: boolean;
   version: string;
   pkg: string;
@@ -323,7 +323,13 @@ export function changedDependencySpecs(
  *  incoming source dir (byte-for-byte). A changed `package-lock.json` with an
  *  unchanged `package.json` still forces a reinstall (a transitive pin moved). */
 export function dependencyFilesChanged(cwd: string, src: string): boolean {
-  return DEPENDENCY_FILES.some((rel) => readTextOrNull(join(cwd, rel)) !== readTextOrNull(join(src, rel)));
+  return DEPENDENCY_FILES.some((rel) => {
+    const incoming = readTextOrNull(join(src, rel));
+    // `npm pack` never ships package-lock.json: a source with no lockfile carries no
+    // lock signal, so the app's local lockfile must not register as a change.
+    if (incoming === null && rel === "package-lock.json") return false;
+    return readTextOrNull(join(cwd, rel)) !== incoming;
+  });
 }
 
 /** The runner that performs the install — injectable so tests can capture the

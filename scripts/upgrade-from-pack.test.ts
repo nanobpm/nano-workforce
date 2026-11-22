@@ -181,3 +181,16 @@ test("dry-run reports the reinstall plan but installs nothing", () => {
   assertStringIncludes(out, "will run npm install");
   assertStringIncludes(out, "DRY RUN");
 });
+
+test("dependencyFilesChanged: local lockfile with a lockless pack (npm pack omits it) → false", () => {
+  const pkg = { name: "x", version: "1.0.0", dependencies: { a: "^1.0.0" } };
+  const { cwd, src } = makeAppAndSource(pkg, pkg);
+  try {
+    writeFileSync(join(cwd, "package-lock.json"), "{}");
+    assertEquals(dependencyFilesChanged(cwd, src), false);
+    writeFileSync(join(src, "package-lock.json"), '{"lockfileVersion":3}');
+    assertEquals(dependencyFilesChanged(cwd, src), true);
+  } finally {
+    rmSync(join(cwd, ".."), { recursive: true, force: true });
+  }
+});

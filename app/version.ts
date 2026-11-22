@@ -191,6 +191,9 @@ export function dependencyDrift(): DependencyDrift[] {
       const installed =
         installedPkg && typeof installedPkg.version === "string" ? installedPkg.version : null;
       if (installed == null) {
+        // devDependencies are legitimately absent from a production
+        // (`--omit=dev`) install — only a missing runtime dep is drift.
+        if (field === "devDependencies") continue;
         // Only flag a MISSING dep when the spec is a comparable registry range — a
         // git/file dep absent from node_modules is a different (and rarer) signal.
         if (satisfies(spec, "0.0.0") !== null) out.push({ name, declared: spec, installed: null });

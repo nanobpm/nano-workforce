@@ -218,11 +218,12 @@ test("dependencyDrift reports no drift for the repo's own satisfied, comparable 
 async function driftFixture(
   declared: Record<string, string>,
   installed: Record<string, string>,
+  devDeclared: Record<string, string> = {},
 ): Promise<{ drift: import("./version.ts").DependencyDrift[]; cleanup: () => void }> {
   const dir = mkdtempSync(join(tmpdir(), "nwf-drift-"));
   writeFileSync(
     join(dir, "package.json"),
-    JSON.stringify({ name: "x", version: "1.0.0", type: "module", dependencies: declared }),
+    JSON.stringify({ name: "x", version: "1.0.0", type: "module", dependencies: declared, devDependencies: devDeclared }),
   );
   for (const [name, version] of Object.entries(installed)) {
     const depDir = join(dir, "node_modules", ...name.split("/"));
@@ -288,5 +289,20 @@ test("dependencyDrift skips non-registry specs and flags a missing comparable de
     assertEquals(missing.drift, [{ name: "a", declared: "^2.0.0", installed: null }]);
   } finally {
     missing.cleanup();
+  }
+});
+
+test("dependencyDrift ignores devDependencies absent from an --omit=dev install, but flags stale ones", async () => {
+  const omitted = await driftFixture({}, {}, { d: "^1.0.0" });
+  try {
+    assertEquals(omitted.drift, [], "a missing devDependency is expected under --omit=dev");
+  } finally {
+    omitted.cleanup();
+  }
+  const stale = await driftFixture({}, { d: "1.0.0" }, { d: "^2.0.0" });
+  try {
+    assertEquals(stale.drift, [{ name: "d", declared: "^2.0.0", installed: "1.0.0" }]);
+  } finally {
+    stale.cleanup();
   }
 });
