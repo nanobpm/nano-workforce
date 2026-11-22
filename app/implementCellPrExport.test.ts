@@ -17,11 +17,14 @@ test("implement-cell exports the agent's pr from implement-task into process sco
 // PR review (#1013): after escalation → Answer, `record-implementing` re-enters implement-task with the
 // PREVIOUS attempt's `pr` still in process scope. A keyless `opened` result must not inherit it (the
 // `is defined(pr)` output would re-export the stale key and `ic_done` would skip reconciliation). The
-// task-local `pr` is therefore reset to null on every entry, so only the current attempt's result sets it.
-test("implement-task resets the task-local pr on entry so a re-attempt never inherits a stale key", () => {
+// re-entry reset task (record-implementing) therefore nulls `pr`, so only the current attempt sets it.
+test("record-implementing resets pr before re-entry so a re-attempt never inherits a stale key", () => {
   const xml = readFileSync(new URL("../resources/processes/implement-cell.bpmn", import.meta.url), "utf8");
-  const start = xml.indexOf('<bpmn:serviceTask id="implement-task"');
+  const start = xml.indexOf('<bpmn:serviceTask id="record-implementing"');
   const end = xml.indexOf("</bpmn:serviceTask>", start);
   const body = xml.slice(start, end);
-  assert(/<zeebe:input source="=null" target="pr" \/>/.test(body), "implement-task must shadow pr with null on entry");
+  assert(/<zeebe:output source="=null" target="pr" \/>/.test(body), "record-implementing must reset pr");
+  // A `=null` input seed on implement-task would shadow the job's pr at the following gateway (testkit).
+  const it = xml.slice(xml.indexOf('<bpmn:serviceTask id="implement-task"'));
+  assert(!/<zeebe:input source="=null" target="pr" \/>/.test(it.slice(0, it.indexOf("</bpmn:serviceTask>"))));
 });
