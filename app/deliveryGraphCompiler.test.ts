@@ -2186,6 +2186,15 @@ test("#932 producer status gate: the compiled contract gate accepts a `completed
   assert(esc.includes("completed"), "the escalation context names the widened vocabulary");
 });
 
+test("#1014 adopt guard: the producer gate carries the goalMet/adopted-without-push clause and the escalation explains it", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const cond = contractMetExpr(r.bpmn, el);
+  assert(cond.includes("goalMet = false") && cond.includes("adopted = true") && cond.includes("pushed = true") && !cond.includes("pushed = false"), `the gate (fail-closed: only an affirmative push exempts an adoption) rejects an unmet/stale adoption, got: ${cond}`);
+  const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  assert(esc.includes("goalMet=false"), "the escalation context explains the adopt guard");
+});
+
 test("#731 required-emit gate: a producer's declared emit consumed as a required data dependency adds a non-null gate clause and a resumable escalation NAMING the fact", async () => {
   const r = await compileOk(PRODUCER_GATE);
   const el = elementForNode(r.bpmn, "open");
