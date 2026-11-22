@@ -2468,9 +2468,9 @@ function serviceBodyLines(
 }
 
 /** The agent-node work-SLA check (issue #1016), on the SERIAL `<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) timer→check loop
- * boundary inside `<el>_work`. Each fire runs `pr.agent-sla-check`, which reads the durable activation
+ * inside `<el>_work`. Each fire runs `pr.agent-sla-check`, which reads the durable activation
  * ledger: while the job is still queued (or its activation is not yet observed) or its work budget
- * (`activated_at + nodeTimeout`) has not elapsed, it reports `false` and the branch simply ends — the
+ * (`activated_at + nodeTimeout`) has not elapsed, it reports `false` and loops back to the single timer to arm the next check — the
  * LIVE job is never cancelled or re-queued, so a lease racing the check is harmless and queue time never
  * escalates (queue / capacity alerting is #1020). Once the budget has elapsed since activation it
  * reports `true` into `<el>_slaExpired`, which fires the interrupting conditional boundary on
