@@ -1,4 +1,4 @@
-// Issue #1023: every agent dispatch in the convergence loop (review-round and adversarial-review) is
+// Issue #1023: every agent dispatch in the convergence loop (review-round, adversarial-review and classify-scope) is
 // preceded by a `pr.liveness-check` whose gateway ends the loop at EndPrGone when the PR is merged or
 // closed — so no agent job is ever sent for a branch that may already be deleted.
 import { test } from "node:test";
@@ -15,14 +15,11 @@ const flows = [...flat.matchAll(/<bpmn:sequenceFlow\b([^>]*?)(\/>|>(.*?)<\/bpmn:
 const taskType = (id: string) =>
   new RegExp(`<bpmn:serviceTask\\b[^>]*\\bid="${id}"[\\s\\S]*?<zeebe:taskDefinition type="([^"]+)"`).exec(flat)?.[1];
 
-for (const agent of ["review-round", "adversarial-review"]) {
-  test(`every flow into ${agent} comes from a PR-liveness gate or a same-round agent hop`, () => {
+for (const agent of ["review-round", "adversarial-review", "classify-scope"]) {
+  test(`every flow into ${agent} comes from a PR-liveness gate`, () => {
     const inbound = flows.filter((f) => f.target === agent);
     assert(inbound.length > 0);
     for (const f of inbound) {
-      // The only exception is the adversarial-findings hop back into review-round: it follows a
-      // liveness-gated adversarial pass in the SAME round with no wait in between.
-      if (agent === "review-round" && f.id === "f_advFindings") continue;
       const gw = f.source ?? "";
       const gone = flows.find((g) => g.source === gw && g.target === "EndPrGone");
       assert(gone, `${f.id} into ${agent} must leave a gateway with an EndPrGone arm (#1023)`);

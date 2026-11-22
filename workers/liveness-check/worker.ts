@@ -16,6 +16,7 @@
 // never end a live loop.
 import type { AppApi, AppJobHandler } from "@nanobpm/urban";
 import { classifyPrLiveness, fetchPrState, type PrState } from "../../app/github.ts";
+import { maybeStartRetro } from "../../app/retro.ts";
 import { abandonClosedPr, parsePr } from "../../app/service.ts";
 import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -35,7 +36,13 @@ async function persistGone(
   processInstanceKey: string | number | null | undefined,
   liveness: "merged" | "closed",
 ): Promise<void> {
-  const prs = app.data.table<{ pr_key: string; process_key: string | null; status: string | null; updated_at: string | null }>(
+  const prs = app.data.table<{
+    pr_key: string;
+    process_key: string | null;
+    status: string | null;
+    merged_at: string | null;
+    updated_at: string | null;
+  }>(
     "pull_requests",
     "pr_key",
   );
@@ -44,7 +51,12 @@ async function persistGone(
   const jobOwner = processInstanceKey ?? null;
   if (owner !== null && jobOwner !== null && String(owner) !== String(jobOwner)) return;
   if (liveness === "merged") {
-    if (row) await prs.update(prKey, { status: "merged", updated_at: new Date().toISOString() });
+    if (!row) return;
+    // Same merged-completion side effects as `pr.mark-merged` / `retireTerminalReviewWait`: stamp
+    // `merged_at` and start the plan retrospective if this was its last PR (best-effort, never throws).
+    const ts = new Date().toISOString();
+    await prs.update(prKey, { status: "merged", merged_at: ts, updated_at: ts });
+    await maybeStartRetro(app.data, app.engine, prKey, app.log);
     return;
   }
   await abandonClosedPr(app.data, prKey, "PR closed without merging before an agent dispatch");
@@ -61,9 +73,10 @@ export function makeHandler(deps: { readPrState?: PrStateReader } = {}): AppJobH
     const liveness = classifyPrLiveness(state);
     if (liveness !== "merged" && liveness !== "closed") return { prGone: "" };
     app.log.info(`PR ${liveness} before agent dispatch — ending the convergence loop (#1023)`, { prKey });
-    await persistGone(app, prKey, job.processInstanceKey, liveness).catch((err) => {
-      app.log.warn?.(`liveness-check: persisting ${liveness} for ${prKey} failed: ${err}`);
-    });
+    // A persistence failure PROPAGATES (job fails → retried / incident) rather than ending the loop
+    // with a stale `converging` row no later pass would repair. Fail-open applies only to an
+    // unreadable GitHub state above.
+    await persistGone(app, prKey, job.processInstanceKey, liveness);
     return { prGone: liveness };
   };
 }

@@ -68,3 +68,32 @@ test("liveness-check: a superseded run still ends its own loop but never writes 
   assert.deepEqual(await handler(job({ prKey: "o/r#1" }, "PI-OLD"), app), { prGone: "merged" });
   assert.equal(updates.length, 0);
 });
+
+test("liveness-check: a MERGED exit preserves merged-completion side effects (merged_at stamped)", async () => {
+  const rows: Record<string, unknown>[] = [{ pr_key: "o/r#1", process_key: "PI-1", status: "converging" }];
+  const { app } = fakeApp(rows);
+  const handler = makeHandler({ readPrState: async () => st({ merged: true, state: "closed" }) });
+  await handler(job({ prKey: "o/r#1", repo: "o/r", prNumber: 1 }), app);
+  assert.equal(typeof rows[0].merged_at, "string");
+});
+
+test("liveness-check: a persistence failure PROPAGATES (terminal bookkeeping stays retryable)", async () => {
+  for (const s of [st({ merged: true, state: "closed" }), st({ merged: false, state: "closed" })]) {
+    const handler = makeHandler({ readPrState: async () => s });
+    const table = () => ({
+      get: async () => ({ pr_key: "o/r#1", process_key: "PI-1", status: "converging" }),
+      findOne: async () => null,
+      find: async () => [],
+      insert: async () => {
+        throw new Error("db down");
+      },
+      update: async () => {
+        throw new Error("db down");
+      },
+    });
+    const log = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+    // biome-ignore lint/plugin: minimal failing AppApi test double
+    const app = { data: { table }, log } as never;
+    await assert.rejects(handler(job({ prKey: "o/r#1", repo: "o/r", prNumber: 1 }), app));
+  }
+});
