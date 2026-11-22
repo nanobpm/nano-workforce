@@ -168,11 +168,12 @@ export async function agentSlaEscalationQuestion(
   });
 }
 
-/** The delivery-graph agent-node work-SLA check (issue #1016). It runs on the node's NON-interrupting
+/** The delivery-graph agent-node work-SLA check (issue #1016). It runs on the node's
  * serial `<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) timer→check loop, so it never cancels the live job itself: it only decides whether the
  * work SLA has elapsed SINCE ACTIVATION (`activated_at + sla <= now`, per the durable activation ledger).
- * `expired: true` throws the node's SLA error (escalation, `reason` stating the worker + activation
- * time); otherwise the job keeps running/queued untouched. A job not yet observed as activated (queued,
+ * `expired: true` sets `<el>_slaExpired`, which fires the node's interrupting conditional SLA boundary
+ * into the timeout escalation (`reason` stating the worker + activation time); otherwise the job keeps
+ * running/queued untouched. A job not yet observed as activated (queued,
  * or leased after the last poll) is NEVER expired — its work SLA has not provably started, and because
  * nothing is cancelled a lease racing this read is harmless (the next cycle sees the activation). Queue
  * time therefore never escalates; queue/capacity alerting is out of scope here (issue #1020). */

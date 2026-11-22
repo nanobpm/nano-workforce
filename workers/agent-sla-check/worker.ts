@@ -1,12 +1,14 @@
 // pr.agent-sla-check — the delivery-graph agent-node work-SLA check (issue #1016).
 //
-// Runs on a compiled agent node's NON-interrupting `R/<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) cycle boundary (`<el>_slaChk`,
-// see `agentSlaCheckLines` in app/deliveryGraphCompiler.ts). It never cancels the live job: it reads
-// the durable activation ledger (populated by the poller) and returns
-//   • `agentSlaExpired: true`  — the work SLA has elapsed SINCE ACTIVATION: the node throws its SLA
-//     error and escalates, with `agentSlaReason` stating the worker + activation time;
+// Runs as `<el>_slaChk` on the compiled agent node's SERIAL `<slaCheckEvery>` (min(nodeTimeout,
+// AGENT_SLA_CHECK_MAX_INTERVAL)) timer→check loop inside `<el>_work` (see `agentSlaCheckLines` in
+// app/deliveryGraphCompiler.ts). It never cancels the live job: it reads the durable activation
+// ledger (populated by the poller) and returns
+//   • `agentSlaExpired: true`  — the work SLA has elapsed SINCE ACTIVATION: the expiry sets
+//     `<el>_slaExpired`, firing the INTERRUPTING conditional boundary `<el>_slaBe` on `<el>_work`
+//     into the timeout escalation, with `agentSlaReason` stating the worker + activation time;
 //   • `agentSlaExpired: false` — still queued, activation not yet observed, or within budget: the
-//     boundary branch just ends and the job keeps running.
+//     loop arms the next timer fire and the job keeps running.
 import type { AppJobHandler, EngineClient } from "@nanobpm/urban";
 import { deliveryNodeActivationJobType } from "../../app/agentActivationLedger.ts";
 import { deliveryNodeSlaCheck } from "../../app/agentSlaEscalation.ts";
