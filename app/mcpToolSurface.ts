@@ -151,8 +151,12 @@ export const MCP_TOOL_COUNT_BUDGET = 61;
  * RAISE PROVENANCE — 92_000 → 93_000 (#970): quoting summaries/descriptions containing ' #' so YAML
  * no longer truncates them at the comment marker restores their full text. Measured 92,734 bytes
  * serialized. Deliberate, documented growth of restored description text — not schema fat.
+ *
+ * RAISE PROVENANCE — 93_000 → 95_000 (#997): the first-class `issue` readiness wait-probe kind adds
+ * the `issue` enum value, the `issueState` option, and its target wording to the three inlined probe
+ * schemas. Measured 94,057 bytes serialized. Deliberate, documented growth of a real new probe kind.
  */
-export const MCP_SURFACE_BYTES_BUDGET = 93_000;
+export const MCP_SURFACE_BYTES_BUDGET = 95_000;
 
 /**
  * The eagerly-loaded curated subset MUST stay materially smaller than the full surface — otherwise it
