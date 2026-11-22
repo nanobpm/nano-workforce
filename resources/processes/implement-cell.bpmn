@@ -171,6 +171,8 @@
           <zeebe:output source="=null" target="deliveryVerified" />
           <zeebe:output source="=null" target="reconcileEvidence" />
           <zeebe:output source="=null" target="reportedBranch" />
+          <zeebe:output source="=null" target="branch" />
+          <zeebe:output source="=null" target="evidence" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>ic_answerLoop</bpmn:incoming>

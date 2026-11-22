@@ -109,8 +109,8 @@ export function waveMergeTargets(
   const keys: string[] = [];
   for (const t of tasks) {
     if (t.wave !== gateWave) continue;
-    if ((t.status !== "opened" && t.status !== "waiting-for-lane") || !t.pr_key) continue;
-    keys.push(t.pr_key);
+    if ((t.status !== "opened" && t.status !== "waiting-for-lane") || !t.pr_key?.trim()) continue;
+    keys.push(t.pr_key.trim());
   }
   return keys;
 }
@@ -126,7 +126,7 @@ export function waveUnkeyedOpened(
 ): number {
   let n = 0;
   for (const t of tasks) {
-    if (t.wave === gateWave && t.status === "opened" && !t.pr_key) n++;
+    if (t.wave === gateWave && t.status === "opened" && !t.pr_key?.trim()) n++;
   }
   return n;
 }

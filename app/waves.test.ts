@@ -152,3 +152,13 @@ test("waveUnkeyedOpened: an opened task with no PR key holds the gate; keyed/blo
   // The vacuous-clear hazard: the merge-target set alone would read this wave as merged.
   assertEquals(waveMergeTargets([{ wave: 0, status: "opened", pr_key: null }], 0), []);
 });
+
+test("waveUnkeyedOpened/waveMergeTargets: a whitespace-only PR key is treated as unkeyed (issue #1011)", () => {
+  const tasks: WaveGateTask[] = [
+    { wave: 0, status: "opened", pr_key: "   " },
+    { wave: 0, status: "waiting-for-lane", pr_key: "\t" },
+    { wave: 0, status: "opened", pr_key: " o/r#1 " },
+  ];
+  assertEquals(waveUnkeyedOpened(tasks, 0), 1);
+  assertEquals(waveMergeTargets(tasks, 0), ["o/r#1"]);
+});
