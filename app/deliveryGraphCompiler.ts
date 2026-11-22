@@ -2271,7 +2271,7 @@ function serviceBodyLines(
   const slaReasonVar = nodeControlVar(el, "slaReason", reservedFlagTargets);
   const slaExpiredVar = nodeControlVar(el, "slaExpired", reservedFlagTargets);
   const timeoutContext = isAgent
-    ? `${escalationContextFeel(nodeId, descriptor, "nodeTimeout", ". ")} + (if (is defined(${slaReasonVar}) and ${slaReasonVar} != null) then string(${slaReasonVar}) + " " else "")`
+    ? `${escalationContextFeel(nodeId, descriptor, "nodeTimeout", ". ")} + (if (is defined(${slaExpiredVar}) and ${slaExpiredVar} = true and is defined(${slaReasonVar}) and ${slaReasonVar} != null) then string(${slaReasonVar}) + " " else "")`
     : escalationContextFeel(
         nodeId,
         descriptor,

@@ -403,7 +403,7 @@ export const ESCALATION_LOCAL_VARS = [ESCALATION_DECISION_VAR, "value", ESCALATI
  * runner's `nodeInputs.<el>`. These live in the SAME node-local subProcess scope the emit's source
  * variable occupies (a service-node fact's source is the fact's own name), so an emit named after one
  * collides with the node's own configuration. */
-export const AGENT_CONFIG_VARS = ["jobType", "appendPrompt", "nodeTimeout", TRANSCRIPT_URL_BASE_VAR] as const;
+export const AGENT_CONFIG_VARS = ["jobType", "appendPrompt", "nodeTimeout", "slaCheckEvery", TRANSCRIPT_URL_BASE_VAR] as const;
 
 /** The subProcess **config** variables a `connector` node seeds (see {@link AGENT_CONFIG_VARS}). */
 export const CONNECTOR_CONFIG_VARS = ["target", "dedupeKey", "payload", "nodeTimeout"] as const;

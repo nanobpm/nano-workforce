@@ -556,6 +556,13 @@ test("invalid-fact-name: an AGENT emit named `status` is reserved — the produc
   assertEquals(connector.length, 0, `a connector emitting 'status' validates (no producer gate), got: ${JSON.stringify(connector)}`);
 });
 
+test("invalid-fact-name: an agent emit named `slaCheckEvery` is rejected — it is the seeded SLA cadence (issue #1016)", () => {
+  const errs = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "slaCheckEvery", type: "string" }] }],
+  });
+  assertEquals(hasCode(errs, "invalid-fact-name").path, "nodes[0].emits[0].name", "an agent emitting 'slaCheckEvery' is rejected");
+});
+
 test("invalid-fact-name is KIND-AWARE: an agent may emit a connector-only config name (`target`), and vice versa (r4181322008)", () => {
   // Regression guard (PR #863 Copilot Medium, thread r4181322008): the reserved set reserves only the
   // node's OWN kind's config. An agent seeds no `target`/`payload`/`dedupeKey` (connector-only), so an

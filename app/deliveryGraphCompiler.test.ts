@@ -4287,6 +4287,7 @@ test("#1016 SLA-check controls grow collision-free against same-named agent emit
   assert(r.bpmn.includes(">=n0_slaExpired_ = true</bpmn:condition>"), "the expiry boundary reads the grown flag");
   assert(!r.bpmn.includes(">=n0_slaExpired = true</bpmn:condition>"), "the expiry boundary must NOT read the shadowed bare flag");
   assert(r.bpmn.includes("is defined(n0_slaReason_)"), "the escalation context reads the grown reason");
+  assert(r.bpmn.includes("n0_slaExpired_ = true and is defined(n0_slaReason_)"), "the overrun reason is stated only once the SLA has actually expired (a stale within-budget check must not leak into a later enrollment-timeout escalation)");
 });
 
 // PR #1021 review: the work SLA must start on ACTIVATION and never cancel a live job. The agent's SLA
