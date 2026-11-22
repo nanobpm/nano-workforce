@@ -13,7 +13,12 @@ import type { AppApi } from "@nanobpm/urban";
 import { memBlackboardSource } from "../test/blackboardDb.ts";
 import { noopLog } from "../test/log.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
-import handler from "./cancelInstance.ts";
+import handler, { resetCancelKeyLocks } from "./cancelInstance.ts";
+
+// The cancel door serializes its record/cancel/commit sequence on a PROCESS-WIDE per-key mutex, so a
+// stale queued waiter from an earlier test would see (and roll back) a later test's rows. Start every
+// test with a clean lock map.
+resetCancelKeyLocks();
 
 interface FakeEngineOpts {
   /** Reject the cancel call (an uncommitted termination). */
@@ -207,6 +212,42 @@ function makeRecordApp(
   return { app, cancelCalls };
 }
 
+/** A record-app whose fake engine models the reconciler: the instant the (accepted) cancel lands,
+ * the owning record's derived edge settles to `abandoned` — exactly what the ADR-0065 projection
+ * feed does on a real termination. Use it for the 200-path provenance tests, whose door re-reads the
+ * record after the engine dance. */
+// biome-ignore lint/suspicious/noExplicitAny: test-only store map over dynamic row shapes.
+function makeSettlingRecordApp(
+  stores: Record<string, { rows: any[]; key: string }>,
+  opts: FakeEngineOpts = {},
+): { app: AppApi; cancelCalls: string[] } {
+  const cancelCalls: string[] = [];
+  const engine = {
+    async cancelInstance({ processInstanceKey }: { processInstanceKey: string }) {
+      cancelCalls.push(processInstanceKey);
+      if (opts.cancelThrows) throw new Error("engine refused");
+      // The reconciler folds the terminated instance into the record's derived edge at once.
+      for (const store of Object.values(stores)) {
+        const row = store.rows.find((r) => r.process_key === processInstanceKey);
+        if (row) row.derived_status = "abandoned";
+      }
+    },
+    async searchProcessInstances() {
+      return opts.readBackState ? [{ state: opts.readBackState }] : [];
+    },
+  };
+  const bb = memBlackboardSource();
+  const data = {
+    hasDefaultSource: () => true,
+    source: bb.source,
+    table: withTrackingViews((name: string, key = "id") =>
+      memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    ),
+  };
+  const app = { engine, data, log: noopLog() } as unknown as AppApi;
+  return { app, cancelCalls };
+}
+
 test("a key that maps to NO tracked record → 404 no-op and never touches the engine", async () => {
   // The record-type resolver finds no binding row for this key: a clean 404, NOT a silent
   // reconciled:0 success — and we never terminate an instance we don't track.
@@ -314,13 +355,17 @@ test("PR#944: operator-cancel provenance is recorded even when the record fails 
 test("issue #994 — cancelling a delivery graph records the actor + reason so its read model reports `cancelled`, not `failed`", async () => {
   const stores = {
     delivery_graph_runs: {
-      rows: [{ run_key: "103f7697d662", process_key: "1206", status: "running", derived_status: "abandoned" }],
+      rows: [{ run_key: "103f7697d662", process_key: "1206", status: "running" }],
       key: "run_key",
     },
     // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
     run_cancellations: { rows: [] as any[], key: "process_key" },
   };
-  const { app, cancelCalls } = makeRecordApp(stores, { readBackState: "TERMINATED" });
+  // The engine accepts the cancel and the instance reads back TERMINATED — a FRESH termination of a
+  // live run, so the provenance row is COMMITTED (only a committed row reads as `cancelled`). The
+  // settling fake models the reconciler folding the record's derived edge the instant the cancel
+  // lands (the door re-reads the record after the engine dance).
+  const { app, cancelCalls } = makeSettlingRecordApp(stores, { readBackState: "TERMINATED" });
   const res = await call(app, { processInstanceKey: "1206", actor: "jwulf", reason: "gate can never open (#992)" });
   assertEquals(res.status, 200);
   assertEquals(cancelCalls, ["1206"]);
@@ -331,6 +376,7 @@ test("issue #994 — cancelling a delivery graph records the actor + reason so i
   assertEquals(cx.cancelled_by, "jwulf");
   assertEquals(cx.cancel_reason, "gate can never open (#992)");
   assert(typeof cx.cancelled_at === "string" && cx.cancelled_at.length > 0, "stamps when");
+  assertEquals(cx.committed, 1, "a confirmed cancel of a live run commits its provenance");
   // A re-cancel keeps the FIRST record (idempotent).
   await call(app, { processInstanceKey: "1206", actor: "someone-else" });
   assertEquals(stores.run_cancellations.rows.length, 1);
@@ -339,15 +385,16 @@ test("issue #994 — cancelling a delivery graph records the actor + reason so i
 
 test("issue #994 — a cancel with no actor/reason defaults to `operator` and names the door", async () => {
   const stores = {
-    feature_runs: { rows: [{ feature_key: "o/r#9", process_key: "77", status: "running", derived_status: "abandoned" }], key: "feature_key" },
+    feature_runs: { rows: [{ feature_key: "o/r#9", process_key: "77", status: "running" }], key: "feature_key" },
     // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
     run_cancellations: { rows: [] as any[], key: "process_key" },
   };
-  const { app } = makeRecordApp(stores, { readBackState: "TERMINATED" });
+  const { app } = makeSettlingRecordApp(stores, { readBackState: "TERMINATED" });
   await call(app, { processInstanceKey: "77" });
   assertEquals(stores.run_cancellations.rows[0].cancelled_by, "operator");
   assertEquals(stores.run_cancellations.rows[0].cancel_reason, "operator cancel (/actions/cancel)");
   assertEquals(stores.run_cancellations.rows[0].run_table, "feature_runs");
+  assertEquals(stores.run_cancellations.rows[0].committed, 1);
 });
 
 // --- The provisional cancellation record is transactional (PR #996 adversarial review) ------------
@@ -384,16 +431,18 @@ test("an engine-REFUSED cancel leaves no run_cancellations row — a later out-o
 });
 
 test("an engine-refused RETRY keeps the FIRST committed cancellation record (idempotency is not rolled back)", async () => {
-  // First cancel COMMITS (the engine terminates): the provenance row is genuinely recorded.
+  // First cancel COMMITS (the engine terminates a LIVE run): the provenance row is genuinely recorded
+  // and committed. The record then reads terminal (derived_status `abandoned`).
   const stores = {
-    feature_runs: { rows: [{ feature_key: "o/r#11", process_key: "99", status: "running", derived_status: "abandoned" }], key: "feature_key" },
+    feature_runs: { rows: [{ feature_key: "o/r#11", process_key: "99", status: "running" }], key: "feature_key" },
     // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
     run_cancellations: { rows: [] as any[], key: "process_key" },
   };
-  const { app } = makeRecordApp(stores, { readBackState: "TERMINATED" });
+  const { app } = makeSettlingRecordApp(stores, { readBackState: "TERMINATED" });
   const committed = await call(app, { processInstanceKey: "99", actor: "jwulf", reason: "first" });
   assertEquals(committed.status, 200);
   assertEquals(stores.run_cancellations.rows.length, 1);
+  assertEquals(stores.run_cancellations.rows[0].committed, 1);
   // A later retry whose engine call throws (and reads non-terminal) hits the 502 path — but the row
   // it found was NOT inserted by this call, so the rollback must not delete the first record.
   const { app: refusing } = makeRecordApp(stores, { cancelThrows: true, readBackState: "ACTIVE" });
@@ -402,4 +451,66 @@ test("an engine-refused RETRY keeps the FIRST committed cancellation record (ide
   assertEquals(stores.run_cancellations.rows.length, 1, "a refused retry never deletes the committed record");
   assertEquals(stores.run_cancellations.rows[0].cancelled_by, "jwulf");
   assertEquals(stores.run_cancellations.rows[0].cancel_reason, "first");
+  assertEquals(stores.run_cancellations.rows[0].committed, 1);
+});
+
+// --- Cancellation provenance races (PR #996 Copilot review) ----------------------------------------
+//
+// Two overlapping-request races broke the record/cancel/rollback protocol:
+//  (1) a RETRY over an already-out-of-band-terminated run inserted a row and the shared primitive's
+//      TERMINATED readback confirmed it as idempotent success, attributing the earlier termination to
+//      the retrying caller (`abandoned` → a lying `cancelled`);
+//  (2) request A inserted, request B re-used the row and committed its cancel, then A's refused
+//      cancel rolled the SHARED row back — the operator-cancelled graph lost its actor/time/reason.
+
+test("PR #996 — a cancel over an ALREADY out-of-band-terminated run does NOT attribute the termination to the retrying caller", async () => {
+  // The graph was terminated out of band BEFORE this cancel: its record is already terminal
+  // (`abandoned`) and NO cancellation row exists. The engine cancel throws but reads back TERMINATED,
+  // so the shared primitive reports idempotent success — the exact shape Copilot flagged.
+  const stores = {
+    delivery_graph_runs: {
+      rows: [{ run_key: "g#1", process_key: "700", status: "running", derived_status: "abandoned" }],
+      key: "run_key",
+    },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
+    run_cancellations: { rows: [] as any[], key: "process_key" },
+  };
+  const { app } = makeRecordApp(stores, { cancelThrows: true, readBackState: "TERMINATED" });
+  const res = await call(app, { processInstanceKey: "700", actor: "retrying-caller" });
+  assertEquals(res.status, 200, "the idempotent cancel still reports success");
+  assertEquals(stores.run_cancellations.rows.length, 1, "the attempt is recorded for audit");
+  const row = stores.run_cancellations.rows[0];
+  assertEquals(row.committed, 0, "a retry over an already-terminal run must NOT commit provenance");
+  // …so the read model keeps the truthful out-of-band `abandoned`, not a lying `cancelled` carrying
+  // the retrying caller's identity.
+  const { effectiveTerminalStatus } = await import("../app/runTerminal.ts");
+  assertEquals(effectiveTerminalStatus("abandoned", row.cancelled_at, row.committed === 1), "abandoned");
+});
+
+test("PR #996 — overlapping cancels: a refused request never deletes the provenance a concurrent request committed", async () => {
+  // Request A inserts the provisional row, then request B re-uses it and its cancel commits, then
+  // A's engine call is refused. Without per-key serialization A's rollback deletes B's committed
+  // provenance (Copilot's interleave). The door serializes the whole record/cancel/commit/rollback
+  // sequence per process key, so B's commit lands inside the critical section and A only ever
+  // removes a row IT inserted.
+  const stores = {
+    feature_runs: { rows: [{ feature_key: "o/r#12", process_key: "800", status: "running" }], key: "feature_key" },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
+    run_cancellations: { rows: [] as any[], key: "process_key" },
+  };
+  // B (the first to finish the engine dance) cancels successfully; A's engine call is refused.
+  const { app: okApp } = makeSettlingRecordApp(stores, { readBackState: "TERMINATED" });
+  const { app: refusingApp } = makeRecordApp(stores, { cancelThrows: true, readBackState: "ACTIVE" });
+  const [a, b] = await Promise.all([
+    call(refusingApp, { processInstanceKey: "800", actor: "request-a" }),
+    call(okApp, { processInstanceKey: "800", actor: "request-b" }),
+  ]);
+  assertEquals(b.status, 200);
+  assertEquals(a.status, 502);
+  assertEquals(stores.run_cancellations.rows.length, 1, "exactly one provenance row survives the race");
+  assertEquals(stores.run_cancellations.rows[0].committed, 1, "the committed provenance is never deleted by the refused request");
+  // The record settled terminal through B's committed cancel (the settling fake's reconciler feed).
+  const { effectiveTerminalStatus } = await import("../app/runTerminal.ts");
+  const row = stores.run_cancellations.rows[0];
+  assertEquals(effectiveTerminalStatus("abandoned", row.cancelled_at, row.committed === 1), "cancelled");
 });

@@ -40,7 +40,7 @@ import { applyMigrationSet, readMigrationSetFromDisk } from "../test/migrations.
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const READ_MODEL_MIGRATION = "141_delivery_graph_read_model_cancelled.sql";
+const READ_MODEL_MIGRATION = "143_delivery_graph_read_model_committed_cancel.sql";
 
 // A minimal in-memory DB carrying the base `delivery_graph_runs` / `pull_requests` shapes the VIEW
 // reads, plus stand-ins for the managed `<table>__tracking` derived VIEWs urban provisions at mount
@@ -61,6 +61,7 @@ function viewDb(): DatabaseSync {
        derived_status_override TEXT);`,
   );
   db.exec(MIG("140_run_cancellations.sql"));
+  db.exec(MIG("142_run_cancellations_committed.sql"));
   db.exec(
     `SELECT 1;`,
   );
@@ -216,7 +217,12 @@ test("FRAMEWORK PARITY GUARD: delivery_graph_pr_counts VIEW and TS reduce agree 
 
 test("FRAMEWORK PARITY GUARD: deliveryGraphReadModel's SQL and TS lowerings agree over the status × PR-in-flight matrix (assertReadModelParity)", () => {
   const samples: ParitySample[] = [];
-  const cancellations = [[], [{ process_key: "pk-self", cancelled_at: "2026-11-21T00:00:00Z", cancelled_by: "operator", cancel_reason: "gate can never open" }]];
+  const cancellations = [
+    [],
+    [{ process_key: "pk-self", cancelled_at: "2026-11-21T00:00:00Z", cancelled_by: "operator", cancel_reason: "gate can never open", committed: 1 }],
+    // An UNCOMMITTED (provisional) cancellation must NOT promote the terminated edge (PR #996 review).
+    [{ process_key: "pk-self", cancelled_at: "2026-11-21T00:00:00Z", cancelled_by: "operator", cancel_reason: "provisional", committed: 0 }],
+  ];
   for (const status of ["awaiting-approval", "running", "done", "failed", "abandoned"]) {
     for (const derived_status of [status, "failed", "abandoned"]) {
       for (const prs_in_flight of [0, 1, 3]) {
@@ -310,7 +316,7 @@ test("park_label carries the actionable 'Parked on human node: <label>' text (on
 test("issue #994 — an operator-cancelled graph (terminated + run_cancellations row) reads `cancelled` with actor/reason, neutral — NOT failed", () => {
   const db = viewDb();
   addRun(db, "cx", { status: "running", phase: "Running", derived_status_override: "abandoned" });
-  db.prepare("INSERT INTO run_cancellations (process_key, run_table, cancelled_by, cancel_reason, cancelled_at) VALUES (?, ?, ?, ?, ?)").run(
+  db.prepare("INSERT INTO run_cancellations (process_key, run_table, cancelled_by, cancel_reason, cancelled_at, committed) VALUES (?, ?, ?, ?, ?, 1)").run(
     "pk-cx",
     "delivery_graph_runs",
     "jwulf",
@@ -331,6 +337,28 @@ test("issue #994 — an operator-cancelled graph (terminated + run_cancellations
   addRun(db, "live", { status: "running", phase: "Running" });
   db.prepare("INSERT INTO run_cancellations (process_key, cancelled_by, cancelled_at) VALUES ('pk-live', 'op', 'now')").run();
   assertEquals(projection(db, "live").status, "running");
+  db.close();
+});
+
+test("PR #996 review — an UNCOMMITTED cancellation row (a refused attempt / a retry over an already-terminated run) never reads `cancelled`", () => {
+  const db = viewDb();
+  // Terminated out of band; the retrying cancel's provisional row was never committed.
+  addRun(db, "retry", { status: "running", phase: "Running", derived_status_override: "abandoned" });
+  db.prepare("INSERT INTO run_cancellations (process_key, run_table, cancelled_by, cancel_reason, cancelled_at, committed) VALUES (?, ?, ?, ?, ?, 0)").run(
+    "pk-retry",
+    "delivery_graph_runs",
+    "retrying-caller",
+    "operator cancel (/actions/cancel)",
+    "2026-11-22T10:00:00Z",
+  );
+  const r = db.prepare("SELECT status, cancelled_by, cancelled_at FROM delivery_graph_read_model WHERE run_key = 'retry'").get() as Record<string, unknown>;
+  assertEquals(r.status, "abandoned", "an uncommitted row must not promote the terminated edge");
+  assertEquals(r.cancelled_by, null);
+  assertEquals(r.cancelled_at, null);
+  // A pre-flag row (no committed column value → DEFAULT 1) still folds, preserving the pre-flag behaviour.
+  addRun(db, "legacy", { status: "running", phase: "Running", derived_status_override: "abandoned" });
+  db.prepare("INSERT INTO run_cancellations (process_key, cancelled_by, cancelled_at) VALUES ('pk-legacy', 'op', 'then')").run();
+  assertEquals(projection(db, "legacy").status, "cancelled");
   db.close();
 });
 

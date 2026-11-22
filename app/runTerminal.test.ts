@@ -58,3 +58,13 @@ test("operator cancel folds the terminated edge to `cancelled`; nothing else is 
   assertEquals(effectiveTerminalStatus("done", "t"), "done");
   assertEquals(effectiveTerminalStatus("running", "t"), "running");
 });
+
+test("PR #996 review — only a COMMITTED cancellation promotes the terminated edge; a provisional row never reads `cancelled`", () => {
+  const terminated = RUN_TERMINAL_STATUS.outOfBandTerminate;
+  // An uncommitted (provisional) cancellation record — a refused attempt's leftover or a retry over
+  // an already-terminated run — must NOT promote `abandoned` to `cancelled`.
+  assertEquals(effectiveTerminalStatus(terminated, "2026-11-22T00:00:00Z", false), RUN_TERMINAL_STATUS.outOfBandTerminate);
+  // A committed one does (the default, and explicit).
+  assertEquals(effectiveTerminalStatus(terminated, "2026-11-22T00:00:00Z", true), RUN_TERMINAL_STATUS.operatorCancel);
+  assertEquals(effectiveTerminalStatus(terminated, "2026-11-22T00:00:00Z"), RUN_TERMINAL_STATUS.operatorCancel);
+});

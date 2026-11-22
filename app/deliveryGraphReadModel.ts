@@ -39,7 +39,7 @@
 // per-branch reduction is deferred to S8's element-instance read model. A single-track feature and a
 // single-step graph both reduce trivially to their one branch.
 
-import { and, caseWhen, col, countWhere, defineReadModel, defineRollup, type Expr, eq, fromTable, gt, isNotNull, lit, max, not, or, type ReadModel, type Rollup, rcol, when } from "@nanobpm/urban";
+import { and, caseWhen, col, countWhere, defineReadModel, defineRollup, type Expr, eq, fromTable, gt, isNotNull, lit, minWhere, not, or, type ReadModel, type Rollup, rcol, when } from "@nanobpm/urban";
 import { DELIVERY_GRAPH_TERMINAL_STATUSES } from "./deliveryGraphRun.ts";
 import { TERMINAL_STATUSES } from "./deliveryStatuses.ts";
 import { deriveAckOpenExpr, deriveListBucketExpr } from "./listBucket.ts";
@@ -77,15 +77,18 @@ export const deliveryGraphPrCounts: Rollup = defineRollup({
 
 /** The operator-cancel provenance rollup (issue #994): one row per cancelled `process_key` from the
  * canonical `run_cancellations` table (app/runTerminal.ts), so the read model can fold an operator
- * cancel over the terminated edge into a distinct `cancelled` status with actor / time / reason. */
+ * cancel over the terminated edge into a distinct `cancelled` status with actor / time / reason.
+ * Only a COMMITTED cancellation is folded (PR #996 review): a provisional row whose engine cancel was
+ * never confirmed must not promote the terminated edge, so every aggregate is gated on `committed = 1`
+ * (rows pre-dating the flag default to committed). */
 export const runCancellationByKey: Rollup = defineRollup({
   name: "delivery_graph_cancellations",
   source: fromTable(RUN_CANCELLATIONS_TABLE),
   groupBy: ["process_key"],
   aggregates: {
-    cancelled_at: max("cancelled_at"),
-    cancelled_by: max("cancelled_by"),
-    cancel_reason: max("cancel_reason"),
+    cancelled_at: minWhere("cancelled_at", eq(col("committed"), lit(1))),
+    cancelled_by: minWhere("cancelled_by", eq(col("committed"), lit(1))),
+    cancel_reason: minWhere("cancel_reason", eq(col("committed"), lit(1))),
   },
 });
 

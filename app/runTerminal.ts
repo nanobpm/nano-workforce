@@ -53,13 +53,22 @@ export interface RunCancellation {
   cancelled_by: string;
   cancel_reason: string | null;
   cancelled_at: string;
+  /** 1 once the engine confirmed the cancel this row names; 0 while it is a provisional attempt.
+   * Only a COMMITTED row may promote a terminated edge to `cancelled`. */
+  committed: number;
 }
 
 /** The effective terminal status of a run: the tracking VIEW's terminal-folded `derived_status`, with an
  * out-of-band-terminate edge promoted to `cancelled` when the operator cancel door recorded it. The TS
- * twin of the read-model SQL (`cancelledStatusExpr` users) — keep them on this one rule. */
-export function effectiveTerminalStatus(derivedStatus: string, cancelledAt: string | null | undefined): string {
-  if (derivedStatus === RUN_TERMINAL_STATUS.outOfBandTerminate && cancelledAt) {
+ * twin of the read-model SQL (`cancelledStatusExpr` users) — keep them on this one rule. `committed`
+ * is the cancellation row's committed flag: a row the engine never confirmed (a provisional attempt)
+ * must NOT promote the edge (PR #996 review). */
+export function effectiveTerminalStatus(
+  derivedStatus: string,
+  cancelledAt: string | null | undefined,
+  committed = true,
+): string {
+  if (derivedStatus === RUN_TERMINAL_STATUS.outOfBandTerminate && cancelledAt && committed) {
     return RUN_TERMINAL_STATUS.operatorCancel;
   }
   return derivedStatus;
@@ -70,9 +79,15 @@ export function effectiveTerminalStatus(derivedStatus: string, cancelledAt: stri
  * un-terminated instance never reads `cancelled`: the fold requires the terminated edge). Idempotent:
  * a re-cancel keeps the first record.
  *
+ * The row is written UNCOMMITTED (`committed: 0`); the door flips it with
+ * {@link commitRunCancellation} once the engine confirms the termination. Only a committed row may
+ * promote a terminated edge to `cancelled`, so a cancel over an ALREADY-terminated run can never
+ * attribute that earlier termination to the retrying caller (PR #996 review): the retry's row stays
+ * uncommitted and reads as what it is — an out-of-band `abandoned`.
+ *
  * Returns whether THIS call inserted the row: the cancel door is transactional about its provisional
- * record — when the engine REFUSES the cancel it rolls the row back, but only a row it inserted
- * itself (a refused retry must never delete the first, committed record). */
+ * record — when the engine REFUSES the cancel it deletes the row, but only a row it inserted itself
+ * (a refused retry must never delete another request's record). */
 export async function recordRunCancellation(
   data: DataLayer,
   input: { processKey: string; runTable?: string | null; cancelledBy: string; reason?: string | null; at?: string },
@@ -86,16 +101,25 @@ export async function recordRunCancellation(
     cancelled_by: input.cancelledBy,
     cancel_reason: reason,
     cancelled_at: input.at ?? new Date().toISOString(),
+    committed: 0,
   });
   return true;
 }
 
-/** Roll back a PROVISIONAL cancellation record ({@link recordRunCancellation}) when the engine
- * refused the cancel it preceded — the record is transactional with the cancel it names, so an
- * uncommitted cancel leaves no row for a LATER out-of-band terminate to fold into a lying
- * `cancelled` status (with the refused attempt's stale actor/reason). The caller passes the
- * `inserted` flag its record call returned, so a refused RETRY never deletes the first, committed
- * record. Best-effort, exactly like the write it undoes. */
+/** Mark the cancellation record COMMITTED — the engine confirmed the termination it names. Only a
+ * committed row promotes the run's terminated edge (`abandoned`) to `cancelled`
+ * ({@link effectiveTerminalStatus} and its SQL twin). Best-effort, exactly like the write it
+ * finalises. */
+export async function commitRunCancellation(data: DataLayer, processKey: string): Promise<void> {
+  await data.table<RunCancellation>(RUN_CANCELLATIONS_TABLE, "process_key").update(processKey, { committed: 1 });
+}
+
+/** Delete a PROVISIONAL (uncommitted) cancellation record this call inserted
+ * ({@link recordRunCancellation}) when the engine refused the cancel it preceded. The caller passes
+ * the `inserted` flag its record call returned, so a refused request only ever removes its OWN
+ * provisional write — never another request's row, committed or not (PR #996 review: a failed
+ * overlapping request must not delete the successful request's provenance). Best-effort, exactly
+ * like the write it undoes. */
 export async function removeRunCancellation(data: DataLayer, processKey: string): Promise<void> {
   await data.table<RunCancellation>(RUN_CANCELLATIONS_TABLE, "process_key").delete(processKey);
 }
