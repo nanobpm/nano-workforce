@@ -49,6 +49,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -332,6 +333,12 @@ export function dependencyFilesChanged(cwd: string, src: string): boolean {
   });
 }
 
+/** Marker persisted in the app dir BEFORE overlaying changed dependency manifests and
+ *  removed only after a successful install. Once the overlay lands the manifests
+ *  match, so a retry would otherwise see "unchanged" and skip a reinstall that never
+ *  happened (failed install, or an earlier --skip-install). */
+export const PENDING_INSTALL_MARKER = ".nano-upgrade-pending-install";
+
 /** The runner that performs the install — injectable so tests can capture the
  *  invocation (and force a failure) without spawning npm. Returns nothing on
  *  success; throws on failure. */
@@ -407,7 +414,8 @@ export function run(args: Args, cwd: string, deps: UpgradeDeps): void {
     const srcSet = new Set(srcFiles);
     const orphans = listFiles(cwd, preservedDirs)
       .filter((rel) => !isPreserved(rel, preservedDirs, preservedFiles))
-      .filter((rel) => !srcSet.has(rel));
+      .filter((rel) => !srcSet.has(rel))
+      .filter((rel) => rel !== PENDING_INSTALL_MARKER);
 
     report("create", created);
     report("overwrite", overwritten);
@@ -419,9 +427,17 @@ export function run(args: Args, cwd: string, deps: UpgradeDeps): void {
 
     // Decide BEFORE writing whether the overlay changes the dependency manifests —
     // that drives both the plan's "will reinstall" line and the post-apply install.
+    const markerPath = join(cwd, PENDING_INSTALL_MARKER);
     const depsChanged = dependencyFilesChanged(cwd, src);
-    const willInstall = depsChanged && !args.skipInstall;
-    if (depsChanged) {
+    const pendingInstall = existsSync(markerPath);
+    const willInstall = (depsChanged || pendingInstall) && !args.skipInstall;
+    if (pendingInstall && !depsChanged) {
+      console.log(
+        willInstall
+          ? `  a previous upgrade's dependency reinstall never completed — will run npm install after overlay.`
+          : `  a previous upgrade's dependency reinstall never completed — but --skip-install is set, so NOT reinstalling.`,
+      );
+    } else if (depsChanged) {
       const changed = changedDependencySpecs(
         readTextOrNull(join(cwd, "package.json")),
         readTextOrNull(join(src, "package.json")),
@@ -446,6 +462,10 @@ export function run(args: Args, cwd: string, deps: UpgradeDeps): void {
       return;
     }
 
+    // Persist the pending-reinstall marker BEFORE overlaying changed manifests, so a
+    // failed (or deliberately skipped) install is still owed on the next run.
+    if (depsChanged) writeFileSync(markerPath, `${srcVersion}\n`);
+
     for (const rel of [...created, ...overwritten]) {
       const dest = join(cwd, rel);
       mkdirSync(dirname(dest), { recursive: true });
@@ -465,9 +485,10 @@ export function run(args: Args, cwd: string, deps: UpgradeDeps): void {
         throw new Error(
           `dependency reinstall failed after overlaying ${srcVersion}: ${message}\n` +
             `The files are overlaid but node_modules is stale — fix the npm error above and ` +
-            `re-run \`npm install\` in ${cwd}, then restart.`,
+            `re-run \`npm install\` in ${cwd} (or re-run this upgrade), then restart.`,
         );
       }
+      rmSync(markerPath, { force: true });
     }
 
     // Guard against a script that overwrote itself mid-run on some platforms: the

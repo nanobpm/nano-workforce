@@ -194,3 +194,47 @@ test("dependencyFilesChanged: local lockfile with a lockless pack (npm pack omit
     rmSync(join(cwd, ".."), { recursive: true, force: true });
   }
 });
+
+test("retry after a FAILED install still reinstalls (pending-install marker), then clears it", () => {
+  const { cwd, src } = makeAppAndSource(
+    { name: "x", version: "1.0.0", dependencies: { a: "^1.0.0" } },
+    { name: "x", version: "1.0.1", dependencies: { a: "^2.0.0" } },
+  );
+  const installs: string[] = [];
+  try {
+    assertThrows(
+      () =>
+        run(args({ apply: true, from: src }), cwd, {
+          install: () => {
+            throw new Error("npm exited 1");
+          },
+        }),
+      Error,
+      "dependency reinstall failed",
+    );
+    // Manifests now match, but the install never succeeded — the retry must install.
+    run(args({ apply: true, from: src }), cwd, { install: (dir) => installs.push(dir) });
+    assertEquals(installs, [cwd]);
+    // Marker cleared on success: a third run is a genuine no-op.
+    run(args({ apply: true, from: src }), cwd, { install: (dir) => installs.push(dir) });
+    assertEquals(installs, [cwd]);
+  } finally {
+    rmSync(join(cwd, ".."), { recursive: true, force: true });
+  }
+});
+
+test("retry WITHOUT --skip-install after a skipped install still reinstalls", () => {
+  const { cwd, src } = makeAppAndSource(
+    { name: "x", version: "1.0.0", dependencies: { a: "^1.0.0" } },
+    { name: "x", version: "1.0.1", dependencies: { a: "^2.0.0" } },
+  );
+  const installs: string[] = [];
+  try {
+    run(args({ apply: true, from: src, skipInstall: true }), cwd, { install: (dir) => installs.push(dir) });
+    assertEquals(installs, []);
+    run(args({ apply: true, from: src }), cwd, { install: (dir) => installs.push(dir) });
+    assertEquals(installs, [cwd]);
+  } finally {
+    rmSync(join(cwd, ".."), { recursive: true, force: true });
+  }
+});
