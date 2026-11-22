@@ -1973,6 +1973,8 @@ export async function retireTerminalReviewWait(
   engine: EngineClient,
   pr: PullRequest,
   token: string,
+  /** Which parked state is being retired — the review wait (#927) or an incident (#1023). */
+  parkedOn: "review-wait" | "incident" = "review-wait",
 ): Promise<boolean | null> {
   const st = await fetchPrState(pr.repo, pr.number, token).catch(() => null);
   const liveness = classifyPrLiveness(st);
@@ -1980,7 +1982,7 @@ export async function retireTerminalReviewWait(
   if (pr.process_key != null) {
     const key = String(pr.process_key);
     try {
-      await terminatePrLoop(data, engine, pr.pr_key, key, `review wait retired: PR ${liveness} out-of-band`, true);
+      await terminatePrLoop(data, engine, pr.pr_key, key, `${parkedOn === "incident" ? "incident" : "review wait"} retired: PR ${liveness} out-of-band`, true);
     } catch (err) {
       // Only finalize the row once the instance is confirmed gone/terminal: a transiently-failed
       // cancel would otherwise drop the row from `waiting_review` scans while the live instance's
@@ -2008,9 +2010,15 @@ export async function retireTerminalReviewWait(
     // `maybeStartRetro` is best-effort and never throws.
     await maybeStartRetro(data, engine, pr.pr_key);
   } else {
-    await abandonClosedPr(data, pr.pr_key, "PR was closed on GitHub while awaiting review — retiring the convergence loop");
+    await abandonClosedPr(
+      data,
+      pr.pr_key,
+      parkedOn === "incident"
+        ? "PR was closed on GitHub while its loop was parked on an incident — retiring the convergence loop"
+        : "PR was closed on GitHub while awaiting review — retiring the convergence loop",
+    );
   }
-  console.log(`[poller] ${liveness} while waiting for review -> retired loop ${pr.pr_key}`);
+  console.log(`[poller] ${liveness} while ${parkedOn === "incident" ? "on an incident" : "waiting for review"} -> retired loop ${pr.pr_key}`);
   return true;
 }
 
@@ -3303,11 +3311,12 @@ async function pollIncidents(
   data: DataLayer,
   restAddress: string,
   engineToken: string | undefined,
+  finish?: IncidentPrFinisher,
 ) {
   const base = restAddress.replace(/\/+$/, "");
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (engineToken) headers.authorization = `Bearer ${engineToken}`;
-  await pollIncidentsImpl(data, base, headers);
+  await pollIncidentsImpl(data, base, headers, finish);
 }
 
 /** Testable core of {@link pollIncidents}: given the normalised `base` URL and prepared auth
@@ -3318,8 +3327,9 @@ export async function pollIncidentsImpl(
   data: DataLayer,
   base: string,
   headers: Record<string, string>,
+  finish?: IncidentPrFinisher,
 ) {
-  await reconcilePrIncidents(data, base, headers);
+  await reconcilePrIncidents(data, base, headers, finish);
   await reconcileDeliveryIncidents(data, base, headers);
 }
 
@@ -3329,6 +3339,7 @@ async function reconcilePrIncidents(
   data: DataLayer,
   base: string,
   headers: Record<string, string>,
+  finish?: IncidentPrFinisher,
 ) {
   const all = await prsTracking(data).all();
   for (const pr of all) {
@@ -3353,8 +3364,30 @@ async function reconcilePrIncidents(
     }
     if (active === undefined) continue; // transport unhappy → keep last-known, retry next pass
 
+    // Issue #1023: an incident on a loop whose PR is already merged/closed is not a fault to surface
+    // but a FINISHED PR — typically an agent job that could not provision because the merged PR's
+    // head branch was deleted. End the loop as merged/closed instead of leaving a dead-end incident.
+    // Reuses the ONE terminal-PR retirement (cancel via terminatePrLoop, then merged/abandoned row).
+    if (active && finish) {
+      const retired = await retireTerminalReviewWait(data, finish.engine, pr, finish.token, "incident").catch((err) => {
+        console.error(`[poller] incidents ${pr.pr_key}: retire finished PR failed: ${err}`);
+        return null;
+      });
+      if (retired === true) {
+        await clearIncidentMirror(pr, (patch) => prs(data).update(pr.pr_key, patch));
+        continue;
+      }
+    }
+
     await writeIncidentMirror(pr, active, (patch) => prs(data).update(pr.pr_key, patch));
   }
+}
+
+/** What {@link pollIncidentsImpl} needs to retire an incidented loop whose PR is finished (#1023):
+ * the engine and GitHub token the canonical {@link retireTerminalReviewWait} retirement uses. */
+export interface IncidentPrFinisher {
+  engine: EngineClient;
+  token: string;
 }
 
 /** The delivery-graph half of {@link pollIncidentsImpl} (issue #931): a delivery RUN's instance
@@ -5250,6 +5283,9 @@ export async function pollOnce(
     await pollCapabilityGatesImpl(data, engine, base, headers);
     await pollJobActivation(data, engineRest.restAddress, engineRest.token);
     await pollAgentActivations(data, engineRest.restAddress, engineRest.token);
-    await pollIncidents(data, engineRest.restAddress, engineRest.token);
+    await pollIncidents(data, engineRest.restAddress, engineRest.token, {
+      engine,
+      token,
+    });
   }
 }

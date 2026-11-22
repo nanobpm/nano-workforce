@@ -125,6 +125,10 @@
       "handler": "workers/capture-head/worker.ts"
     },
     {
+      "taskType": "pr.liveness-check",
+      "handler": "workers/liveness-check/worker.ts"
+    },
+    {
       "taskType": "pr.persist-escalation",
       "handler": "workers/persist-escalation/worker.ts"
     },

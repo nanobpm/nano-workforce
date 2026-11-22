@@ -31,6 +31,7 @@ async function boot(vars: Record<string, unknown>, held: string[] = []) {
       return { status: "converged", summary: "done" };
     },
     "pr.capture-head": () => ({ roundEntryHead: "sha" }),
+    "pr.liveness-check": () => ({ prGone: "" }),
     "pr.persist-round": () => ({}),
     "pr.progress-check": () => ({ progressed: true }),
     "pr.converge-gate": () => ({ convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false }),
