@@ -97,6 +97,7 @@ test("watchedTaskElement maps the check element to the agent leaf", () => {
 
 test("poll records delivery-graph agent jobs under a node-qualified key (parallel same-type nodes stay distinct)", async () => {
   const { data } = memDataFor(MIG);
+  let calls = 0;
   const items = [
     { type: "senior:feature", processInstanceKey: "PI", processDefinitionId: "delivery-graph-abc", elementId: "n0_task", jobKey: "A", worker: "w1", state: "CREATED" },
     { type: "senior:feature", processInstanceKey: "PI", processDefinitionId: "delivery-graph-abc", elementId: "n1_task", jobKey: "B", state: "CREATED" },
@@ -106,6 +107,7 @@ test("poll records delivery-graph agent jobs under a node-qualified key (paralle
   globalThis.fetch = ((_u: string, init?: { body?: string }) => {
     const body = init?.body ? JSON.parse(init.body) : {};
     const out = body.filter?.type ? [] : items;
+    calls++;
     return Promise.resolve(new Response(JSON.stringify({ items: out }), { status: 200 }));
   }) as typeof fetch;
   try {
@@ -116,6 +118,22 @@ test("poll records delivery-graph agent jobs under a node-qualified key (paralle
   assertEquals((await getAgentJobActivation(data, "PI", deliveryNodeActivationJobType("senior:feature", "n0_task")))?.worker, "w1");
   assertEquals((await getAgentJobActivation(data, "PI", deliveryNodeActivationJobType("senior:feature", "n1_task")))?.activated_at, null);
   assertEquals(await getAgentJobActivation(data, "PX", deliveryNodeActivationJobType("senior:feature", "x_task")), undefined);
+  // One canonical sweep: a single search, and a fixed-type delivery leaf is NOT also recorded bare.
+  assertEquals(calls, 1);
+  assertEquals(await getAgentJobActivation(data, "PI", "senior:feature"), undefined);
+  // A non-delivery fixed-type job is still recorded under its bare type.
+  assertEquals((await getAgentJobActivation(data, "PX", "senior:feature"))?.job_key, "C");
+});
+
+test("currentWatchedJobKey still sees a retry-exhausted (FAILED) or ERROR_THROWN attempt", async () => {
+  for (const st of ["FAILED", "ERROR_THROWN"]) {
+    const eng = {
+      searchJobs: async (f: { state?: string }) =>
+        f.state === st ? [{ type: "senior:feature", state: st, processInstanceKey: "PI", elementId: "n0_task", jobKey: "J9" }] : [],
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine stub
+    assertEquals(await currentWatchedJobKey(eng as any, "PI", "n0_task"), "J9", st);
+  }
 });
 
 test("an unchanged re-observation does not rewrite the row (no per-pass write churn)", async () => {

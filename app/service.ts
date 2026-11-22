@@ -3056,14 +3056,12 @@ export async function pollAgentActivationsImpl(
       const res = await fetch(`${base}/jobs/search`, {
         method: "POST",
         headers,
+        // ONE canonical sweep (no type filter): fixed-type agent jobs AND delivery-graph agent leaves
+        // (arbitrary types) are classified per item below, so no job is fetched or recorded twice.
+        // A queued and a leased job both project to CREATED (no ACTIVATED enum); the `worker` field
+        // discriminates them at upsert time.
         body: JSON.stringify({
-          filter: {
-            type: { $in: [...AGENT_SLA_JOB_TYPES] },
-            // A merely-created (queued) AND an activated-but-not-yet-completed job both project to
-            // CREATED on the wire (Camunda has no ACTIVATED enum) — so this one filter captures both,
-            // and the leasing `worker` field discriminates them at upsert time.
-            state: "CREATED",
-          },
+          filter: { state: "CREATED" },
           page: { from, limit },
         }),
       });
@@ -3076,83 +3074,42 @@ export async function pollAgentActivationsImpl(
       return;
     }
     for (const j of items) {
-      const jobType = j.type ?? "";
+      const key = agentActivationLedgerKey(j);
       const pik = j.processInstanceKey ?? "";
-      // Defensively re-filter the wire `$in` type filter and require a process instance to key on.
-      if (pik.length === 0 || !AGENT_SLA_JOB_TYPES.includes(jobType)) continue;
+      if (key == null || pik.length === 0) continue;
       const worker = typeof j.worker === "string" && j.worker.length > 0 ? j.worker : null;
       const jobKey = typeof j.jobKey === "string" && j.jobKey.length > 0 ? j.jobKey : null;
       try {
         await recordAgentJobObservation(data, {
           processInstanceKey: pik,
-          jobType,
+          jobType: key,
           worker,
           jobKey,
           now: now(), // per-observation, never a pass-start stamp
         });
       } catch (err) {
-        console.error(`[poller] agent-activation upsert ${pik}:${jobType}: ${err}`);
+        console.error(`[poller] agent-activation upsert ${pik}:${key}: ${err}`);
       }
     }
     if (items.length < limit) break; // last page
     from += items.length;
   }
-  await pollDeliveryNodeActivations(data, base, headers);
 }
 
-/** Delivery-graph agent-node activation pass (issue #1016). A compiled delivery graph's agent nodes run
- * ARBITRARY job types, so the fixed {@link AGENT_SLA_JOB_TYPES} filter above cannot see them. This pass
- * filters by the delivery-graph agent leaf element instead (`<el>_task` in a `delivery-graph-<digest>`
- * definition) and records each under {@link deliveryNodeActivationJobType}, so a node's SLA check
- * (`pr.agent-sla-check`) can tell a never-activated (queued) job from a started one. Best-effort. */
-async function pollDeliveryNodeActivations(
-  data: DataLayer,
-  base: string,
-  headers: Record<string, string>,
-) {
-  const limit = 200;
-  let from = 0;
-  const prefix = `${DELIVERY_GRAPH_PROCESS_ID}-`;
-  for (let guard = 0; guard < 1000; guard++) {
-    let items: JobSearchItem[] = [];
-    try {
-      const res = await fetch(`${base}/jobs/search`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ filter: { state: "CREATED" }, page: { from, limit } }),
-      });
-      if (!res.ok) return;
-      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-      const body = (await res.json()) as { items?: JobSearchItem[] };
-      items = body.items ?? [];
-    } catch (err) {
-      console.error(`[poller] delivery-node activation search: ${err}`);
-      return;
-    }
-    for (const j of items) {
-      const jobType = j.type ?? "";
-      const pik = j.processInstanceKey ?? "";
-      const el = j.elementId ?? "";
-      const def = j.processDefinitionId ?? "";
-      if (pik.length === 0 || jobType.length === 0 || !def.startsWith(prefix) || !el.endsWith("_task")) continue;
-      const worker = typeof j.worker === "string" && j.worker.length > 0 ? j.worker : null;
-      const jobKey = typeof j.jobKey === "string" && j.jobKey.length > 0 ? j.jobKey : null;
-      try {
-        await recordAgentJobObservation(data, {
-          processInstanceKey: pik,
-          jobType: deliveryNodeActivationJobType(jobType, el),
-          worker,
-          jobKey,
-          // Stamp at observation time, not pass start: a slow preceding sweep must not backdate activation.
-          now: now(),
-        });
-      } catch (err) {
-        console.error(`[poller] delivery-node activation upsert ${pik}:${el}: ${err}`);
-      }
-    }
-    if (items.length < limit) break;
-    from += items.length;
+/** The activation-ledger key for one open job, or `null` when the job is not SLA-bounded. A
+ * delivery-graph agent leaf (`<el>_task` in a `delivery-graph-<digest>` definition, issue #1016) is
+ * keyed node-qualified via {@link deliveryNodeActivationJobType} — EXCLUSIVELY, even when its type is
+ * also a fixed {@link AGENT_SLA_JOB_TYPES} type — so parallel same-type nodes stay distinct and no job
+ * is recorded under two keys. Any other job is keyed by its type iff that type is a bounded agent type. */
+export function agentActivationLedgerKey(j: JobSearchItem): string | null {
+  const jobType = j.type ?? "";
+  if (jobType.length === 0) return null;
+  const el = j.elementId ?? "";
+  const def = j.processDefinitionId ?? "";
+  if (def.startsWith(`${DELIVERY_GRAPH_PROCESS_ID}-`) && el.endsWith("_task")) {
+    return deliveryNodeActivationJobType(jobType, el);
   }
+  return AGENT_SLA_JOB_TYPES.includes(jobType) ? jobType : null;
 }
 
 /** One job-activation poll pass. The `converging` status means the process is parked at a

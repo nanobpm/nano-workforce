@@ -24,8 +24,13 @@ export function watchedTaskElement(checkElementId: string): string {
   return `${checkElementId.replace(/_slaChk$/, "")}_task`;
 }
 
-/** The engine job key of the watched agent task's LIVE attempt, or `null` when it cannot be pinned to
- * exactly one job (none, several, or the search failed) — the check then fails closed (never expires). */
+/** Job states an UNFINISHED attempt of the watched task can be in. A retry-exhausted attempt parks in
+ * FAILED (incident) and a thrown-error attempt in ERROR_THROWN — still the node's current attempt, so
+ * it must stay visible or an activated-and-overrun node would never expire (fail-closed on null). */
+export const WATCHED_JOB_STATES = ["CREATED", "FAILED", "ERROR_THROWN"] as const;
+
+/** The engine job key of the watched agent task's current (unfinished) attempt, or `null` when it cannot
+ * be pinned to exactly one job (none, several, or the search failed) — the check then fails closed. */
 export async function currentWatchedJobKey(
   engine: Pick<EngineClient, "searchJobs">,
   processInstanceKey: string,
@@ -33,8 +38,11 @@ export async function currentWatchedJobKey(
 ): Promise<string | null> {
   if (processInstanceKey.length === 0 || elementId.length === 0) return null;
   try {
-    const jobs = await engine.searchJobs({ processInstanceKey, elementId, state: "CREATED" });
-    const live = jobs.filter((j) => j.elementId === undefined || j.elementId === elementId);
+    const jobs = (
+      await Promise.all(WATCHED_JOB_STATES.map((state) => engine.searchJobs({ processInstanceKey, elementId, state })))
+    ).flat();
+    const byKey = new Map(jobs.map((j) => [j.jobKey, j]));
+    const live = [...byKey.values()].filter((j) => j.elementId === undefined || j.elementId === elementId);
     return live.length === 1 && live[0].jobKey.length > 0 ? live[0].jobKey : null;
   } catch {
     return null;
