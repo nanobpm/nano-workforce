@@ -28,6 +28,7 @@ import { deriveDeliveryPhase } from "./deliveryGraphRun.ts";
 import {
   DELIVERY_GRAPH_READ_MODEL_BASE_ALIAS,
   DELIVERY_GRAPH_READ_MODEL_DERIVED,
+  CANCELLATION_LOOKUP,
   DELIVERY_GRAPH_ROLLUPS,
   deliveryGraphPrCounts,
   deliveryGraphReadModel,
@@ -39,7 +40,7 @@ import { applyMigrationSet, readMigrationSetFromDisk } from "../test/migrations.
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const READ_MODEL_MIGRATION = "129_delivery_graph_read_model_incidents.sql";
+const READ_MODEL_MIGRATION = "146_delivery_graph_read_model_committed_cancel.sql";
 
 // A minimal in-memory DB carrying the base `delivery_graph_runs` / `pull_requests` shapes the VIEW
 // reads, plus stand-ins for the managed `<table>__tracking` derived VIEWs urban provisions at mount
@@ -58,6 +59,11 @@ function viewDb(): DatabaseSync {
        derived_status_override TEXT);
      CREATE TABLE pull_requests (pr_key TEXT PRIMARY KEY, root_request_key TEXT, status TEXT,
        derived_status_override TEXT);`,
+  );
+  db.exec(MIG("143_run_cancellations.sql"));
+  db.exec(MIG("145_run_cancellations_committed.sql"));
+  db.exec(
+    `SELECT 1;`,
   );
   db.exec(
     `CREATE VIEW delivery_graph_runs__tracking AS
@@ -174,7 +180,7 @@ test("DRIFT GUARD: migration 087 embeds each derived column VERBATIM from delive
     if (base === "status") continue;
     assert(sql.includes(`dg.${base} AS ${base}`), `087 must pass base column "${base}" through the VIEW (derived from the real delivery_graph_runs schema)`);
   }
-  assert(sql.includes("COALESCE(dg.derived_status, dg.status) AS status"), "087 must expose the effective status so the pages' Active/History filter tracks a terminated run");
+  assert(!sql.includes("dg.status AS status"), "status is DERIVED (effective, cancel-aware — issue #994), never a raw base pass-through");
   assert(sql.includes("AS park_label"), "087 must carry the hand-authored park_label companion column");
   // FROM/JOIN relations are DERIVED from the declaration (baseTable + lookup rollup name + join keys).
   const alias2 = DELIVERY_GRAPH_READ_MODEL_BASE_ALIAS;
@@ -211,14 +217,22 @@ test("FRAMEWORK PARITY GUARD: delivery_graph_pr_counts VIEW and TS reduce agree 
 
 test("FRAMEWORK PARITY GUARD: deliveryGraphReadModel's SQL and TS lowerings agree over the status × PR-in-flight matrix (assertReadModelParity)", () => {
   const samples: ParitySample[] = [];
+  const cancellations = [
+    [],
+    [{ process_key: "pk-self", cancelled_at: "2026-11-21T00:00:00Z", cancelled_by: "operator", cancel_reason: "gate can never open", committed: 1 }],
+    // An UNCOMMITTED (provisional) cancellation must NOT promote the terminated edge (PR #996 review).
+    [{ process_key: "pk-self", cancelled_at: "2026-11-21T00:00:00Z", cancelled_by: "operator", cancel_reason: "provisional", committed: 0 }],
+  ];
   for (const status of ["awaiting-approval", "running", "done", "failed", "abandoned"]) {
-    for (const derived_status of [status, "failed"]) {
+    for (const derived_status of [status, "failed", "abandoned"]) {
       for (const prs_in_flight of [0, 1, 3]) {
         for (const acknowledged_at of [null, "2026-02-02T00:00:00Z"]) {
-          samples.push({
-            baseRow: { run_key: "self", status, derived_status, acknowledged_at },
-            lookups: { [PR_COUNTS_LOOKUP]: [{ root_request_key: "self", prs_in_flight }] },
-          });
+          for (const cx of cancellations) {
+            samples.push({
+              baseRow: { run_key: "self", process_key: "pk-self", status, derived_status, acknowledged_at },
+              lookups: { [PR_COUNTS_LOOKUP]: [{ root_request_key: "self", prs_in_flight }], [CANCELLATION_LOOKUP]: cx },
+            });
+          }
         }
       }
     }
@@ -246,7 +260,8 @@ test("the migration 087 VIEW maps the run lifecycle onto the coarse STAGE_KEYS b
   assertEquals(projection(db, "run-plain"), { stage: "Implementing", stage_state: null, park_label: null, status: "running" });
   assertEquals(projection(db, "done"), { stage: "Done", stage_state: "ok", park_label: null, status: "done" });
   assertEquals(projection(db, "failed"), { stage: "Done", stage_state: "failed", park_label: null, status: "failed" });
-  assertEquals(projection(db, "aband"), { stage: "Done", stage_state: "failed", park_label: null, status: "abandoned" });
+  // abandoned (terminated out of band) is a NEUTRAL terminal — not a failure (issue #994).
+  assertEquals(projection(db, "aband"), { stage: "Done", stage_state: null, park_label: null, status: "abandoned" });
   db.close();
 });
 
@@ -295,6 +310,55 @@ test("park_label carries the actionable 'Parked on human node: <label>' text (on
   // A non-park phase leaves park_label null.
   addRun(db, "run-np", { status: "running", phase: "Running" });
   assertEquals(projection(db, "run-np").park_label, null);
+  db.close();
+});
+
+test("issue #994 — an operator-cancelled graph (terminated + run_cancellations row) reads `cancelled` with actor/reason, neutral — NOT failed", () => {
+  const db = viewDb();
+  addRun(db, "cx", { status: "running", phase: "Running", derived_status_override: "abandoned" });
+  db.prepare("INSERT INTO run_cancellations (process_key, run_table, cancelled_by, cancel_reason, cancelled_at, committed) VALUES (?, ?, ?, ?, ?, 1)").run(
+    "pk-cx",
+    "delivery_graph_runs",
+    "jwulf",
+    "gate can never open (#992)",
+    "2026-11-21T10:00:00Z",
+  );
+  const r = db.prepare("SELECT status, stage, stage_state, cancelled_by, cancel_reason, cancelled_at, list_bucket, ack_open FROM delivery_graph_read_model WHERE run_key = 'cx'").get() as Record<string, unknown>;
+  assertEquals(r.status, "cancelled");
+  assertEquals(r.stage, "Done");
+  assertEquals(r.stage_state, null);
+  assertEquals(r.cancelled_by, "jwulf");
+  assertEquals(r.cancel_reason, "gate can never open (#992)");
+  assertEquals(r.cancelled_at, "2026-11-21T10:00:00Z");
+  // Still terminal: offers Dismiss, stays active until acknowledged.
+  assertEquals(r.list_bucket, "active");
+  assertEquals(r.ack_open, 1);
+  // A cancellation record on a run that is NOT terminated (cancel not committed) never reads cancelled.
+  addRun(db, "live", { status: "running", phase: "Running" });
+  db.prepare("INSERT INTO run_cancellations (process_key, cancelled_by, cancelled_at) VALUES ('pk-live', 'op', 'now')").run();
+  assertEquals(projection(db, "live").status, "running");
+  db.close();
+});
+
+test("PR #996 review — an UNCOMMITTED cancellation row (a refused attempt / a retry over an already-terminated run) never reads `cancelled`", () => {
+  const db = viewDb();
+  // Terminated out of band; the retrying cancel's provisional row was never committed.
+  addRun(db, "retry", { status: "running", phase: "Running", derived_status_override: "abandoned" });
+  db.prepare("INSERT INTO run_cancellations (process_key, run_table, cancelled_by, cancel_reason, cancelled_at, committed) VALUES (?, ?, ?, ?, ?, 0)").run(
+    "pk-retry",
+    "delivery_graph_runs",
+    "retrying-caller",
+    "operator cancel (/actions/cancel)",
+    "2026-11-22T10:00:00Z",
+  );
+  const r = db.prepare("SELECT status, cancelled_by, cancelled_at FROM delivery_graph_read_model WHERE run_key = 'retry'").get() as Record<string, unknown>;
+  assertEquals(r.status, "abandoned", "an uncommitted row must not promote the terminated edge");
+  assertEquals(r.cancelled_by, null);
+  assertEquals(r.cancelled_at, null);
+  // A pre-flag row (no committed column value → DEFAULT 1) still folds, preserving the pre-flag behaviour.
+  addRun(db, "legacy", { status: "running", phase: "Running", derived_status_override: "abandoned" });
+  db.prepare("INSERT INTO run_cancellations (process_key, cancelled_by, cancelled_at) VALUES ('pk-legacy', 'op', 'then')").run();
+  assertEquals(projection(db, "legacy").status, "cancelled");
   db.close();
 });
 
@@ -348,7 +412,7 @@ test("the derived stepper matches TODAY's plain `phase` text (deriveDeliveryPhas
     { key: "running", state: "ACTIVE", tasks: [], expectStage: "Implementing", expectState: null, parked: false },
     { key: "parked", state: "ACTIVE", tasks: [{ elementId: "delivery-human-task__n3" }], expectStage: "Implementing", expectState: null, parked: true },
     { key: "completed", state: "COMPLETED", tasks: [], expectStage: "Done", expectState: "ok", parked: false },
-    { key: "terminated", state: "TERMINATED", tasks: [], expectStage: "Done", expectState: "failed", parked: false },
+    { key: "terminated", state: "TERMINATED", tasks: [], expectStage: "Done", expectState: null, parked: false },
   ];
   for (const c of cases) {
     const proj = deriveDeliveryPhase(c.state, c.tasks, humanLabels);
@@ -428,3 +492,16 @@ for (const pageName of ["delivery-graphs.page.json", "delivery-graph-detail.page
     assertEquals(stages.map((s) => s.key), ["Requested", "Implementing", "PR open", "Converging", "Merging", "Done"]);
   });
 }
+
+test("issue #994 UI — a cancelled graph renders neutral (no failure styling) and the detail page shows who/when/why", () => {
+  // The pipeline's failure styling is driven ONLY by stage_state === "failed"; a cancelled run is null.
+  const db = viewDb();
+  addRun(db, "ui", { status: "running", derived_status_override: "abandoned" });
+  db.prepare("INSERT INTO run_cancellations (process_key, cancelled_by, cancelled_at) VALUES ('pk-ui', 'op', 't')").run();
+  const p = projection(db, "ui");
+  assertEquals(p.status, "cancelled");
+  assert(p.stage_state !== "failed", "a cancelled run must not take the failure styling");
+  db.close();
+  const page = JSON.stringify(PAGE("delivery-graph-detail.page.json"));
+  for (const f of ["cancelled_by", "cancelled_at", "cancel_reason"]) assert(page.includes(`"field":"${f}"`), `detail page shows ${f}`);
+});

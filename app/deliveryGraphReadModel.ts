@@ -39,11 +39,12 @@
 // per-branch reduction is deferred to S8's element-instance read model. A single-track feature and a
 // single-step graph both reduce trivially to their one branch.
 
-import { and, caseWhen, col, countWhere, defineReadModel, defineRollup, type Expr, eq, fromTable, gt, isNotNull, lit, not, or, type ReadModel, type Rollup, rcol, when } from "@nanobpm/urban";
+import { and, caseWhen, col, countWhere, defineReadModel, defineRollup, type Expr, eq, fromTable, gt, isNotNull, lit, minWhere, not, or, type ReadModel, type Rollup, rcol, when } from "@nanobpm/urban";
 import { DELIVERY_GRAPH_TERMINAL_STATUSES } from "./deliveryGraphRun.ts";
 import { TERMINAL_STATUSES } from "./deliveryStatuses.ts";
 import { deriveAckOpenExpr, deriveListBucketExpr } from "./listBucket.ts";
 import { PR_TRACKING_RELATION } from "./planRollups.ts";
+import { RUN_CANCELLATIONS_TABLE, RUN_TERMINAL_STATUS } from "./runTerminal.ts";
 
 /** The slice-PR relation the member-PR rollup folds over: the auto-provisioned
  * `pull_requests__tracking` derived VIEW (ADR-0065), NOT the raw `pull_requests` table — so a member PR
@@ -74,13 +75,30 @@ export const deliveryGraphPrCounts: Rollup = defineRollup({
   },
 });
 
+/** The operator-cancel provenance rollup (issue #994): one row per cancelled `process_key` from the
+ * canonical `run_cancellations` table (app/runTerminal.ts), so the read model can fold an operator
+ * cancel over the terminated edge into a distinct `cancelled` status with actor / time / reason.
+ * Only a COMMITTED cancellation is folded (PR #996 review): a provisional row whose engine cancel was
+ * never confirmed must not promote the terminated edge, so every aggregate is gated on `committed = 1`
+ * (rows pre-dating the flag default to committed). */
+export const runCancellationByKey: Rollup = defineRollup({
+  name: "delivery_graph_cancellations",
+  source: fromTable(RUN_CANCELLATIONS_TABLE),
+  groupBy: ["process_key"],
+  aggregates: {
+    cancelled_at: minWhere("cancelled_at", eq(col("committed"), lit(1))),
+    cancelled_by: minWhere("cancelled_by", eq(col("committed"), lit(1))),
+    cancel_reason: minWhere("cancel_reason", eq(col("committed"), lit(1))),
+  },
+});
+
 /** Every delivery-graph rollup, in managed-VIEW dependency order. The migration emits their VIEW DDL in
  * this order; the parity guard iterates it. */
-export const DELIVERY_GRAPH_ROLLUPS: readonly Rollup[] = [deliveryGraphPrCounts];
+export const DELIVERY_GRAPH_ROLLUPS: readonly Rollup[] = [deliveryGraphPrCounts, runCancellationByKey];
 
 /** The base table the read model reads: the auto-provisioned `delivery_graph_runs__tracking` derived
  * VIEW (ADR-0065), NOT the raw `delivery_graph_runs` table. It re-exports `delivery_graph_runs.*` plus a
- * terminal-folded `derived_status` (an out-of-band-terminated run reads `failed` per the
+ * terminal-folded `derived_status` (a terminated run reads `abandoned` per the canonical
  * `instanceTracking` `onTerminated` edge, else the base `status` — which `pollDeliveryGraphPhase` owns
  * the `COMPLETED → done` reconciliation for). The status-classifying derivation reads `derived_status`,
  * so a terminated run renders `Done` instead of freezing at `Implementing`/`Converging`. */
@@ -93,6 +111,9 @@ export const DELIVERY_GRAPH_READ_MODEL_BASE_ALIAS = "dg";
 /** The rollup-lookup alias `rcol(...)` reads under — the `LEFT JOIN delivery_graph_pr_counts pc ON
  * dg.run_key = pc.root_request_key` target. Pinned so the emitted SQL and the migration's JOIN agree. */
 export const PR_COUNTS_LOOKUP = "pc";
+
+/** The cancellation-lookup alias — `LEFT JOIN delivery_graph_cancellations cx ON dg.process_key = cx.process_key`. */
+export const CANCELLATION_LOOKUP = "cx";
 
 /** The effective (terminal-folded) status column the derivation classifies on — the tracking VIEW's
  * `derived_status`. Single source of truth for the name so the derivation can't drift from it. */
@@ -112,10 +133,27 @@ const memberPrInFlight: Expr = gt(rcol(PR_COUNTS_LOOKUP, "prs_in_flight"), lit(0
  * reads `Converging`, else `Implementing` (the deterministic initial value for a freshly-running graph).
  * `awaiting-approval` (reserved legacy pre-dispatch rows) maps to the initial `Requested` bracket.
  */
+const OUT_OF_BAND = lit(RUN_TERMINAL_STATUS.outOfBandTerminate);
+const CANCELLED = lit(RUN_TERMINAL_STATUS.operatorCancel);
+const FAILED = lit(RUN_TERMINAL_STATUS.incidentFailure);
+
+/** Whether the operator cancel door recorded a cancellation for this run's process key. */
+const operatorCancelled: Expr = isNotNull(rcol(CANCELLATION_LOOKUP, "cancelled_at"));
+
+/**
+ * The effective status the pages render (issue #994) — the SQL twin of `effectiveTerminalStatus`
+ * (app/runTerminal.ts): the terminated edge (`abandoned`) promoted to `cancelled` when the operator
+ * cancel door recorded it, else the terminal-folded `derived_status`.
+ */
+const status: Expr = caseWhen([when(and(eq(ds, OUT_OF_BAND), operatorCancelled), CANCELLED)], ds);
+
+/** A terminal-but-not-failed end — terminated out of band (`abandoned`) or cancelled by an operator. */
+const neutralTerminal: Expr = eq(ds, OUT_OF_BAND);
+
 const stage: Expr = caseWhen(
   [
     when(eq(ds, lit("done")), lit("Done")),
-    when(or(eq(ds, lit("failed")), eq(ds, lit("abandoned"))), lit("Done")),
+    when(or(eq(ds, FAILED), neutralTerminal), lit("Done")),
     when(eq(ds, lit("awaiting-approval")), lit("Requested")),
     when(memberPrInFlight, lit("Converging")),
   ],
@@ -124,23 +162,17 @@ const stage: Expr = caseWhen(
 
 /**
  * The active step's render state in the `pipeline` column's vocabulary (`ok`/`failed`/`blocked`/null):
- * a `done` graph is a success terminal (`ok`), a `failed`/`abandoned` graph is a failed terminal
- * (`failed`), else in progress (`null`). A delivery-graph run has no `blocked` terminal in its lifecycle
- * union, so that tier never arises here. Reuses the canonical terminal tiers (app/stepAxis.ts).
+ * a `done` graph is a success terminal (`ok`), a genuinely `failed` graph is a failed terminal
+ * (`failed`). A cancelled or out-of-band-terminated (`abandoned`) graph is NEUTRAL (`null` — the plain
+ * active marker, no failure styling): a deliberate stop is not a failure (issue #994).
  */
-const stageState: Expr = caseWhen(
-  [
-    when(eq(ds, lit("done")), lit("ok")),
-    when(or(eq(ds, lit("failed")), eq(ds, lit("abandoned"))), lit("failed")),
-  ],
-  lit(null),
-);
+const stageState: Expr = caseWhen([when(eq(ds, lit("done")), lit("ok")), when(eq(ds, FAILED), lit("failed"))], lit(null));
 
 /** The keys of {@link deliveryGraphReadModel}'s DERIVED columns, in the order the migration emits them.
  * Base columns are identity pass-throughs (listed in the migration directly); `park_label` is a
  * hand-authored display column over the base `phase`/`phase_node_id` (no TS twin). `list_bucket`/
  * `ack_open` are the acknowledge-to-dismiss partition + Dismiss-affordance flag (issue #641). */
-export const DELIVERY_GRAPH_READ_MODEL_DERIVED = ["stage", "stage_state", "list_bucket", "ack_open"] as const;
+export const DELIVERY_GRAPH_READ_MODEL_DERIVED = ["status", "stage", "stage_state", "list_bucket", "ack_open", "cancelled_by", "cancelled_at", "cancel_reason"] as const;
 export type DeliveryGraphReadModelDerivedColumn = (typeof DELIVERY_GRAPH_READ_MODEL_DERIVED)[number];
 
 /** The Active/History partition — `history` IFF the run is terminal AND acknowledged, else `active`
@@ -173,11 +205,20 @@ export const deliveryGraphReadModel: ReadModel = defineReadModel({
       on: [{ base: "run_key", rollup: "root_request_key" }],
       defaults: { prs_in_flight: 0 },
     },
+    {
+      as: CANCELLATION_LOOKUP,
+      rollup: runCancellationByKey,
+      on: [{ base: "process_key", rollup: "process_key" }],
+    },
   ],
   derive: {
+    status,
     stage,
     stage_state: stageState,
     list_bucket: listBucket,
     ack_open: ackOpen,
+    cancelled_by: rcol(CANCELLATION_LOOKUP, "cancelled_by"),
+    cancelled_at: rcol(CANCELLATION_LOOKUP, "cancelled_at"),
+    cancel_reason: rcol(CANCELLATION_LOOKUP, "cancel_reason"),
   },
 });

@@ -156,7 +156,10 @@
             { "field": "digest", "label": "Content digest (approval token)" },
             { "field": "side_effecting", "label": "Side-effecting (1 = requires approval)" },
             { "field": "phase_node_id", "label": "Parked human node element" },
-            { "field": "created_at", "label": "Created" }
+            { "field": "created_at", "label": "Created" },
+            { "field": "cancelled_by", "label": "Cancelled by" },
+            { "field": "cancelled_at", "label": "Cancelled at" },
+            { "field": "cancel_reason", "label": "Cancel reason" }
           ]
         }
       }
