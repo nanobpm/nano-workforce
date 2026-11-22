@@ -2094,6 +2094,24 @@ function agentRepoSpecHeaderLines(node: Extract<DeliveryNode, { kind: "agent" }>
  * Reads the job's returned variables from the subProcess scope (the emit source var for an agent fact
  * is the fact's own name — see {@link factSourceVar}). When it is false the split's DEFAULT flow routes
  * to the contract-escalation task instead. */
+/** Issue #1029: the explicit task→node result outputs of an `agent` task (see the call site). Every
+ * {@link AGENT_RESULT_LOCAL_VARS} name plus each declared emit SOURCE var is mapped out guarded (an
+ * omitted field maps to null, never a FEEL error); `pr` is normalised from a GitHub PR URL to the
+ * canonical `owner/repo#N` (mirroring `parsePr`'s URL grammar), a shorthand passes through verbatim.
+ * `skip` excludes the node's own control var (grown collision-free, so never a result name). */
+export function agentResultOutputLines(emitSources: readonly string[], skip: string): string[] {
+  const names = [...new Set([...AGENT_RESULT_LOCAL_VARS, ...emitSources])].filter((n) => n !== skip);
+  return names.map((n) => {
+    const source = n === "pr" ? `=${AGENT_PR_NORMALISE_FEEL}` : `=if (is defined(${n})) then ${n} else null`;
+    return `            <zeebe:output ${attr("source", source)} target="${n}" />`;
+  });
+}
+
+/** FEEL normalising the agent's `pr` result: a `github.com/<owner>/<repo>/pull/<n>` URL (optional
+ * scheme/`www.`, trailing path/query/fragment) becomes `<owner>/<repo>#<n>`; anything else verbatim. */
+export const AGENT_PR_NORMALISE_FEEL =
+  'if not(is defined(pr)) or pr = null then null else if not(pr instance of string) then pr else if matches(pr, "^\\s*(https?://)?(www\\.)?github\\.com/[^/]+/[^/]+/pull/[0-9]+([/?#].*)?\\s*$") then replace(pr, "^\\s*(https?://)?(www\\.)?github\\.com/([^/]+)/([^/]+)/pull/([0-9]+)([/?#].*)?\\s*$", "$3/$4#$5") else pr';
+
 function agentContractProceedCondition(requiredEmits: readonly DeliveryFact[]): string {
   const statusList = `[${AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => feelStr(s)).join(", ")}]`;
   const statusOk = `(not(is defined(status)) or status = null or list contains(${statusList}, status))`;
@@ -2251,6 +2269,15 @@ function serviceBodyLines(
     // sub-process input mapping parks in `activating` and resolving re-evaluates ALL inputs — which
     // nano-bpm#1336 restores; until then we fail loud here rather than risk the #1334 drain-past.
     `            <zeebe:input ${attr("source", nodeInputsPreflightFeel(el))} target="${NODE_INPUTS_PREFLIGHT_VAR}" />`,
+    // Issue #1029: an agent task's job RESULT must reach the node scope EXPLICITLY. Under Zeebe-parity
+    // semantics a task that declares ANY output mapping (the contract gate below) keeps its job
+    // variables TASK-LOCAL and propagates only the mapped outputs — so on the production engine the
+    // agent's `pr` stayed on the task scope, the node-local `pr` the lowered enrollment binds stayed
+    // null, and EVERY converge/merge enroll step incidented (merlin graph ea02c3162926). Map every
+    // node-local result var + declared emit source out of the task (guarded → null when omitted),
+    // so the result reaches the node scope regardless of the engine's propagation default. `pr` is
+    // normalised to `owner/repo#N` (a PR URL is accepted) — the ONE canonical form the fact carries.
+    ...(kind === "agent" ? agentResultOutputLines(nodeEmits.map((f) => factSourceVar(kind, f)), contractMetVar) : []),
     ...(contractGate !== undefined
       ? [`            <zeebe:output ${attr("source", agentContractProceedCondition(contractGate.requiredEmits))} target="${contractMetVar}" />`]
       : []),

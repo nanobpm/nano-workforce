@@ -17,7 +17,7 @@ import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { missingExternalMarkerAgentTaskTypes } from "./agentic/vocab/job-types.ts";
 import { AGENT_TERMINAL_SUCCESS_STATUSES, compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText, resumeValidVar } from "./deliveryGraphCompiler.ts";
 import { isDeliveryEscalationTwin } from "./deliveryHuman.ts";
-import { validateDeliveryGraph } from "./deliveryGraph.ts";
+import { AGENT_RESULT_LOCAL_VARS, validateDeliveryGraph } from "./deliveryGraph.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
 async function compileOk(graph: unknown) {
@@ -107,7 +107,9 @@ test("#543 transcript correlation: only an agent node seeds transcriptUrlBase an
   // non-agent kind carries neither, so splitting the count by source keeps that guarantee sharp.
   assertEquals(
     (r.bpmn.match(/<zeebe:output source="=if \(is defined\(transcriptUrl\)\)[^>]*target="transcriptUrl"/g) ?? []).length,
-    1,
+    // Two, both on the ONE agent node: the agent task → node output (issue #1029 explicit result
+    // propagation) and the node subProcess → instance output.
+    2,
     "only the agent node propagates transcriptUrl out (non-agent kinds do not)",
   );
   assertEquals(
@@ -117,8 +119,8 @@ test("#543 transcript correlation: only an agent node seeds transcriptUrlBase an
   );
   assertEquals(
     (r.bpmn.match(/<zeebe:output [^>]*target="transcriptUrl"/g) ?? []).length,
-    2,
-    "transcriptUrl outputs are exactly the agent node's propagate-out + retry-reset clear",
+    3,
+    "transcriptUrl outputs are exactly the agent node's task→node + node→instance propagate-out + retry-reset clear",
   );
   assertEquals(
     (r.bpmn.match(/target="transcriptUrlBase"/g) ?? []).length,
@@ -4262,6 +4264,29 @@ test("contract escalation context: carries the agent's own report, question, err
 // enrollment INSIDE the agent node's body: a `pr.delivery-connector` service task seated between the
 // producer-contract gate's success flow and the node end, driving the SAME `submitPr` door an authored
 // `connector[converge*]` node drives (no duplicated machinery).
+
+test("#1029 every agent task maps EVERY result var (and declared emit source) out to the node scope explicitly", async () => {
+  // Class guard: an agent task carrying ANY output mapping keeps its job result task-local under
+  // Zeebe-parity semantics, so a result var with no explicit output never reaches the node scope the
+  // enrollment / contract escalation / `<el>_<fact>` publication read (merlin graph ea02c3162926).
+  const graph = {
+    name: "result propagation",
+    nodes: [
+      { id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "Open a PR.", converge: true, merge: true } },
+      { id: "plain", kind: "agent", agent: { jobType: "senior:chore", prompt: "Do it." }, emits: [{ name: "report", type: "string" }] },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  for (const id of ["impl", "plain"]) {
+    const el = elementForNode(r.bpmn, id);
+    const start = r.bpmn.indexOf(`<bpmn:serviceTask id="${el}_task"`);
+    const task = r.bpmn.slice(start, r.bpmn.indexOf("</bpmn:serviceTask>", start));
+    const names = id === "plain" ? [...AGENT_RESULT_LOCAL_VARS, "report"] : AGENT_RESULT_LOCAL_VARS;
+    for (const v of names) assert(task.includes(`target="${v}" />`), `${id}: result var ${v} is mapped out of the agent task`);
+    assert(task.includes("$3/$4#$5"), `${id}: the pr output normalises a PR URL to owner/repo#N`);
+  }
+});
 
 test("#962 converge+merge flags lower to an in-body converge-merge enrollment after the producer-contract gate", async () => {
   const graph = {
