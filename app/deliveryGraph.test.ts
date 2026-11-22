@@ -3396,3 +3396,23 @@ test("#1000 wait emits: a pr-typed reserved fact (mergedSha/prCount) is rejected
     }
   }
 });
+
+test("#1000 wait[issue]: a whitespace-padded late-bound target resolves like the trimmed one", () => {
+  const producer = { id: "p", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "issue", type: "string" }] };
+  const errors = validateDeliveryGraph({
+    nodes: [producer, { id: "w", kind: "wait", wait: { kind: "issue", target: " p.issue " } }],
+    edges: [{ from: "p.issue", to: "w" }],
+  });
+  assert(!errors.some((e) => e.code === "unbound-pr"), JSON.stringify(errors));
+});
+
+test("#1000 wait[issue]: a threaded number/boolean fact is rejected as an issue target", () => {
+  for (const type of ["number", "boolean"]) {
+    const producer = { id: "p", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "issue", type }] };
+    const errors = validateDeliveryGraph({
+      nodes: [producer, { id: "w", kind: "wait", wait: { kind: "issue", target: "p.issue" } }],
+      edges: [{ from: "p.issue", to: "w" }],
+    });
+    assert(errors.some((e) => e.code === "unbound-pr" && e.message.includes(type)), `${type}: ${JSON.stringify(errors)}`);
+  }
+});

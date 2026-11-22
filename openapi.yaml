@@ -6025,11 +6025,12 @@ paths:
                                   - capability
                                   - pr
                                   - epic
-                                description: 'The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR''s merge state (ADR 0005 §2); `epic` gates on an nwf plan-fanout epic reaching "fully merged", keyed by its `planKey` (issue #568).'
+                                  - issue
+                                description: 'The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR''s merge state (ADR 0005 §2); `epic` gates on an nwf plan-fanout epic reaching "fully merged", keyed by its `planKey` (issue #568); `issue` gates on a GitHub issue''s closure (issue #997).'
                               target:
                                 type: string
                                 minLength: 1
-                                description: 'The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference OR a GitHub PR URL (`https://github.com/owner/repo/pull/123`) for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind). For a `pr`/`epic` target used in a **delivery-graph `wait` node** it may instead be a `<nodeId>.<fact>` late-binding reference the delivery-graph compiler resolves at dispatch (issue #548/#570); this rewrite exists ONLY on the delivery-graph dispatch path — other surfaces (e.g. feature-intake readiness) have no such resolver, so they must supply a literal handle.'
+                                description: 'The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference OR a GitHub PR URL (`https://github.com/owner/repo/pull/123`) for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind, or an `owner/repo#N` issue reference OR a GitHub issue URL for the `issue` kind). For a `pr`/`epic`/`issue` target used in a **delivery-graph `wait` node** it may instead be a `<nodeId>.<fact>` late-binding reference the delivery-graph compiler resolves at dispatch (issue #548/#570); this rewrite exists ONLY on the delivery-graph dispatch path — other surfaces (e.g. feature-intake readiness) have no such resolver, so they must supply a literal handle.'
                               onTimeout:
                                 type: string
                                 enum:
@@ -6089,6 +6090,13 @@ paths:
                                       - merged
                                       - done
                                     description: "epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean 'fully merged' (issue #568)."
+                                  issueState:
+                                    type: string
+                                    enum:
+                                      - closed
+                                      - completed
+                                      - closed-by-pr-merged
+                                    description: 'issue: the declared issue state to wait for (default completed) — `closed-by-pr-merged` also binds the merged closing PR as `closingPr` (issue #997).'
                               poll:
                                 type: object
                                 additionalProperties: false
@@ -7109,11 +7117,12 @@ paths:
                               - capability
                               - pr
                               - epic
-                            description: 'The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR''s merge state (ADR 0005 §2); `epic` gates on an nwf plan-fanout epic reaching "fully merged", keyed by its `planKey` (issue #568).'
+                              - issue
+                            description: 'The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR''s merge state (ADR 0005 §2); `epic` gates on an nwf plan-fanout epic reaching "fully merged", keyed by its `planKey` (issue #568); `issue` gates on a GitHub issue''s closure (issue #997).'
                           target:
                             type: string
                             minLength: 1
-                            description: 'The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference OR a GitHub PR URL (`https://github.com/owner/repo/pull/123`) for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind). For a `pr`/`epic` target used in a **delivery-graph `wait` node** it may instead be a `<nodeId>.<fact>` late-binding reference the delivery-graph compiler resolves at dispatch (issue #548/#570); this rewrite exists ONLY on the delivery-graph dispatch path — other surfaces (e.g. feature-intake readiness) have no such resolver, so they must supply a literal handle.'
+                            description: 'The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference OR a GitHub PR URL (`https://github.com/owner/repo/pull/123`) for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind, or an `owner/repo#N` issue reference OR a GitHub issue URL for the `issue` kind). For a `pr`/`epic`/`issue` target used in a **delivery-graph `wait` node** it may instead be a `<nodeId>.<fact>` late-binding reference the delivery-graph compiler resolves at dispatch (issue #548/#570); this rewrite exists ONLY on the delivery-graph dispatch path — other surfaces (e.g. feature-intake readiness) have no such resolver, so they must supply a literal handle.'
                           onTimeout:
                             type: string
                             enum:
@@ -7173,6 +7182,13 @@ paths:
                                   - merged
                                   - done
                                 description: "epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean 'fully merged' (issue #568)."
+                              issueState:
+                                type: string
+                                enum:
+                                  - closed
+                                  - completed
+                                  - closed-by-pr-merged
+                                description: 'issue: the declared issue state to wait for (default completed) — `closed-by-pr-merged` also binds the merged closing PR as `closingPr` (issue #997).'
                           poll:
                             type: object
                             additionalProperties: false
@@ -7260,11 +7276,12 @@ paths:
                               - capability
                               - pr
                               - epic
-                            description: 'The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR''s merge state (ADR 0005 §2); `epic` gates on an nwf plan-fanout epic reaching "fully merged", keyed by its `planKey` (issue #568).'
+                              - issue
+                            description: 'The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR''s merge state (ADR 0005 §2); `epic` gates on an nwf plan-fanout epic reaching "fully merged", keyed by its `planKey` (issue #568); `issue` gates on a GitHub issue''s closure (issue #997).'
                           target:
                             type: string
                             minLength: 1
-                            description: 'The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference OR a GitHub PR URL (`https://github.com/owner/repo/pull/123`) for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind). For a `pr`/`epic` target used in a **delivery-graph `wait` node** it may instead be a `<nodeId>.<fact>` late-binding reference the delivery-graph compiler resolves at dispatch (issue #548/#570); this rewrite exists ONLY on the delivery-graph dispatch path — other surfaces (e.g. feature-intake readiness) have no such resolver, so they must supply a literal handle.'
+                            description: 'The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference OR a GitHub PR URL (`https://github.com/owner/repo/pull/123`) for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind, or an `owner/repo#N` issue reference OR a GitHub issue URL for the `issue` kind). For a `pr`/`epic`/`issue` target used in a **delivery-graph `wait` node** it may instead be a `<nodeId>.<fact>` late-binding reference the delivery-graph compiler resolves at dispatch (issue #548/#570); this rewrite exists ONLY on the delivery-graph dispatch path — other surfaces (e.g. feature-intake readiness) have no such resolver, so they must supply a literal handle.'
                           onTimeout:
                             type: string
                             enum:
@@ -7324,6 +7341,13 @@ paths:
                                   - merged
                                   - done
                                 description: "epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean 'fully merged' (issue #568)."
+                              issueState:
+                                type: string
+                                enum:
+                                  - closed
+                                  - completed
+                                  - closed-by-pr-merged
+                                description: 'issue: the declared issue state to wait for (default completed) — `closed-by-pr-merged` also binds the merged closing PR as `closingPr` (issue #997).'
                           poll:
                             type: object
                             additionalProperties: false

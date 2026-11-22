@@ -2715,19 +2715,22 @@ function validatePrBindings(
   for (const c of consumers) {
     const incoming = incomingFactRefs.get(c.id) ?? [];
     const errPath = `${c.path}.${c.field}`;
-    if (c.authored !== undefined) {
+    // Trim exactly as `parseProbe` and the compiler's late-bind lookup do, so validation agrees
+    // with dispatch (#1000 review: `" p.issue "` must resolve like `"p.issue"`).
+    const authored = c.authored?.trim();
+    if (authored !== undefined) {
       // `resolveFrom` returns a `fact` iff the reference's prefix is an existing node — so a real PR
       // literal (`owner/repo#N`, no node-qualified dot) resolves to no fact and passes through.
-      const resolved = resolveFrom(c.authored, nodeFacts);
+      const resolved = resolveFrom(authored, nodeFacts);
       if (resolved.fact === undefined) {
         // A wait[issue] literal is validated HERE with the canonical issue grammar (#997 review), so a
         // malformed literal never compiles/stages only to be rejected at dispatch. A dot-qualified
         // value naming no graph node is an unresolvable reference, not a literal — rejected too.
-        if (c.expect === "issue" && !parseIssue(c.authored)) {
+        if (c.expect === "issue" && !parseIssue(authored)) {
           errors.push({
             path: errPath,
             message:
-              `${c.id}'s issue target "${c.authored}" is neither an 'owner/repo#<number>' issue reference / ` +
+              `${c.id}'s issue target "${authored}" is neither an 'owner/repo#<number>' issue reference / ` +
               "GitHub issue URL nor a `<node>.<fact>` reference to a declared, threaded fact",
             code: "unbound-pr",
           });
@@ -2740,7 +2743,7 @@ function validatePrBindings(
         errors.push({
           path: errPath,
           message:
-            `${c.id}'s PR reference "${c.authored}" points at fact "${resolved.fact}" that node ` +
+            `${c.id}'s PR reference "${authored}" points at fact "${resolved.fact}" that node ` +
             `"${resolved.nodeId}" does not declare in its \`emits[]\``,
           code: "unbound-pr",
         });
@@ -2748,8 +2751,18 @@ function validatePrBindings(
         errors.push({
           path: errPath,
           message:
-            `${c.id}'s PR reference "${c.authored}" resolves to a "${declaredType}" fact — a converge/` +
+            `${c.id}'s PR reference "${authored}" resolves to a "${declaredType}" fact — a converge/` +
             "wait PR binding must reference a `pr`-typed fact",
+          code: "unbound-pr",
+        });
+      } else if (c.expect === "issue" && (declaredType === "number" || declaredType === "boolean")) {
+        // A scalar number/boolean can never be an `owner/repo#N` reference or issue URL; accepting
+        // it would compile a wait that silently times out (#1000 review). Fail closed here.
+        errors.push({
+          path: errPath,
+          message:
+            `${c.id}'s issue target "${authored}" resolves to a "${declaredType}" fact — an issue wait ` +
+            "must reference a string-shaped fact carrying an issue reference or URL",
           code: "unbound-pr",
         });
       } else if (!incoming.some((f) => f.ref === ref)) {
