@@ -1,3 +1,9 @@
+## [0.221.1](https://github.com/nanobpm/nano-workforce/compare/v0.221.0...v0.221.1) (2026-11-22)
+
+### Bug Fixes
+
+* **implement-cell:** reconcile 'opened' results with no pr key ([#1013](https://github.com/nanobpm/nano-workforce/issues/1013)) ([338d7a2](https://github.com/nanobpm/nano-workforce/commit/338d7a2bba5ca2cc0bc286b615f0def6e745bb02)), closes [#1011](https://github.com/nanobpm/nano-workforce/issues/1011)
+
 ## [0.221.0](https://github.com/nanobpm/nano-workforce/compare/v0.220.0...v0.221.0) (2026-11-22)
 
 ### Features
