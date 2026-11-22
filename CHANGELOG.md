@@ -1,3 +1,9 @@
+## [0.221.0](https://github.com/nanobpm/nano-workforce/compare/v0.220.0...v0.221.0) (2026-11-22)
+
+### Features
+
+* **feature:** implement agents re-read operator feedback at checkpoints before the PR exists ([#1002](https://github.com/nanobpm/nano-workforce/issues/1002)) ([3082796](https://github.com/nanobpm/nano-workforce/commit/3082796f8c125007225c4b45d497de9502de4557)), closes [#986](https://github.com/nanobpm/nano-workforce/issues/986) [#986](https://github.com/nanobpm/nano-workforce/issues/986)
+
 ## [0.220.0](https://github.com/nanobpm/nano-workforce/compare/v0.219.2...v0.220.0) (2026-11-22)
 
 ### Features
