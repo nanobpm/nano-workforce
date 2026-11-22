@@ -55,6 +55,17 @@ export const EXPANDED_BUDGET_SHARE = 0.6;
 const defaultLayout: LayoutFn = (xml, timeoutMs) =>
   layoutBpmnOffThread(xml, timeoutMs, undefined, { deadline: Date.now() + timeoutMs });
 
+/** Bound one attempt with a hard timer so a never-settling layout (an injected `LayoutFn` that ignores
+ * `timeoutMs`) can never hang the fallback chain. The default worker layout keeps its own timeout and
+ * worker teardown; this race only guarantees the chain advances. */
+function bounded(attempt: Promise<string>, ms: number): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`layout timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([attempt, guard]).finally(() => clearTimeout(timer));
+}
+
 function errMessage(err: unknown): string {
   if (err instanceof Error) {
     const code = "code" in err ? err.code : undefined;
@@ -77,7 +88,8 @@ export async function layoutWithFallback(
 
   let expandedReason: string;
   try {
-    const laidOut = await layout(semanticBpmn, Math.max(1, Math.floor(budget * EXPANDED_BUDGET_SHARE)));
+    const share = Math.max(1, Math.floor(budget * EXPANDED_BUDGET_SHARE));
+    const laidOut = await bounded(layout(semanticBpmn, share), share);
     return { bpmn: graftDiagram(semanticBpmn, laidOut), layout: { mode: "expanded", message: "layout: expanded" } };
   } catch (err) {
     expandedReason = errMessage(err);
@@ -89,7 +101,7 @@ export async function layoutWithFallback(
     collapsedReason = "no layout budget left for the collapsed retry";
   } else {
     try {
-      const laidOut = await layout(seedCollapsedSubProcesses(semanticBpmn), remaining);
+      const laidOut = await bounded(layout(seedCollapsedSubProcesses(semanticBpmn), remaining), remaining);
       return {
         bpmn: graftDiagram(semanticBpmn, laidOut),
         layout: {

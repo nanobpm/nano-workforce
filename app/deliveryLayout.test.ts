@@ -164,3 +164,11 @@ test("#1005 regression: a graph with ~38 expanded sub-processes previews success
   assert.notEqual(r.layout.mode, "none", r.layout.message);
   assert.match(r.bpmn, /<bpmndi:BPMNDiagram/);
 });
+
+test("#1005: a genuinely never-settling injected layout is bounded and degrades to the grid", async () => {
+  const layout: LayoutFn = () => new Promise<string>(() => {});
+  const semantic = await semanticOf(SMALL);
+  const res = await layoutWithFallback(semantic, { layout, budgetMs: 50 });
+  assert.equal(res.layout.mode, "none");
+  assert.match(res.layout.reason ?? "", /expanded layout failed: layout timed out.*collapsed layout failed: layout timed out/);
+});
