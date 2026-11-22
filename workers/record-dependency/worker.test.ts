@@ -20,6 +20,21 @@ function fakeApp(seedDeps: DepRow[] = []) {
   return {
     app: {
       data: {
+        // The worker routes through the canonical locked union (`unionDependencies`), which runs
+        // ONE `INSERT … WHERE NOT EXISTS` per edge inside a transaction; emulate exactly that.
+        open: () => ({
+          tx: async (fn: (q: { exec: (sql: string, p: unknown[]) => Promise<void> }) => Promise<void>) =>
+            fn({
+              exec: (sql: string, p: unknown[]) => {
+                if (!/INSERT INTO "pr_dependencies".*WHERE NOT EXISTS/s.test(sql)) throw new Error(`unexpected SQL: ${sql}`);
+                const [pr_key, depends_on_key, created_at] = p as string[];
+                const deps = (stores.pr_dependencies ??= []);
+                if (!deps.some((r) => r.pr_key === pr_key && r.depends_on_key === depends_on_key))
+                  deps.push({ pr_key, depends_on_key, created_at });
+                return Promise.resolve();
+              },
+            }),
+        }),
         table(name: string, key: string) {
           const store = (stores[name] ??= []);
           return {

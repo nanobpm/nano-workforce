@@ -587,12 +587,15 @@ export function parseDependsOn(body: string): string[] {
 async function registerDependencies(data: DataLayer, prKey: string, depKeys: string[]) {
   const ts = now();
   const keys = [...new Set(depKeys)].filter((k) => k !== prKey);
-  const db = data.open();
-  await db.tx(async (q) => {
-    await q.exec(`DELETE FROM "pr_dependencies" WHERE "pr_key" = ?`, [prKey]);
-    for (const depKey of keys) {
-      await q.exec(`INSERT INTO "pr_dependencies" ("pr_key", "depends_on_key", "created_at") VALUES (?, ?, ?)`, [prKey, depKey, ts]);
-    }
+  // Under the PR's dependency lock so a resubmit's replacement is totally ordered with
+  // `pollMerges`' read-then-publish of `deps-cleared` (issue #1007 review, round 7).
+  await withDependencyLock(prKey, async () => {
+    await data.open().tx(async (q) => {
+      await q.exec(`DELETE FROM "pr_dependencies" WHERE "pr_key" = ?`, [prKey]);
+      for (const depKey of keys) {
+        await q.exec(`INSERT INTO "pr_dependencies" ("pr_key", "depends_on_key", "created_at") VALUES (?, ?, ?)`, [prKey, depKey, ts]);
+      }
+    });
   });
 }
 
@@ -600,7 +603,7 @@ async function registerDependencies(data: DataLayer, prKey: string, depKeys: str
  * Adoption uses this so independently declared blockers (a `Depends-on:` PR-body line, a
  * `pr.record-dependency` edge a merge-stage agent discovered) survive a caller whose `dependsOn`
  * omits them (issue #1007 review, round 3). */
-async function unionDependencies(data: DataLayer, prKey: string, keys: string[]) {
+export async function unionDependencies(data: DataLayer, prKey: string, keys: string[]) {
   const ts = now();
   const add = [...new Set(keys)].filter((k) => k !== prKey);
   if (add.length === 0) return;
