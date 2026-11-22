@@ -52,13 +52,23 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // with no process behind it, and `submitPr` refuses to restart it (only `cancel` recovers). On
   // failure we leave the PR terminal as `converged` so a human/operator can (re)start merge.
   //
-  // Merge intent (issue #916): `autoMerge` is the CANONICAL positive variable — read it first and
-  // fall back to the legacy inverted `convergeOnly` only when `autoMerge` is absent, so an in-flight
-  // loop seeded before `autoMerge` existed keeps its behaviour. A review-only intent
-  // (`autoMerge:false`, or legacy `convergeOnly:true`) forces the review-only path for this PR
-  // regardless of the global auto-merge default — the PR rests at `converged` and is never handed
-  // to the merge-loop.
-  const mergeRequested = autoMerge === true || (autoMerge == null && convergeOnly !== true);
+  // Merge intent (issue #916, hardened in #1007 review round 3): the DURABLE `merge_requested`
+  // projection `submitPr` stamps (and adoption narrows) is the authoritative opt-out — an
+  // adoption narrowing that lands while a review/fix agent is live is reverted in the PROCESS
+  // VARIABLES when that agent's completion restores its guard snapshots
+  // (convergence-loop.bpmn's `guardAutoMerge`/`guardConvergeOnly` outputs), but the projection
+  // compare-and-set survives, so reading it here can never un-do an operator's explicit
+  // review-only pin. The process variables (`autoMerge` canonical, `convergeOnly` legacy inverse)
+  // remain the fallback for a legacy row written before the projection existed
+  // (`merge_requested` NULL) — mirroring `mergePolicyFromRow`'s serve path.
+  // biome-ignore lint/plugin: runtime/framework contract boundary for the data-layer row shape
+  const prRow = (await app.data.table("pull_requests", "pr_key").get(prKey)) as
+    | { merge_requested?: number | null }
+    | undefined;
+  const mergeRequested =
+    prRow?.merge_requested != null
+      ? prRow.merge_requested === 1
+      : autoMerge === true || (autoMerge == null && convergeOnly !== true);
   let status = "converged";
   if (AUTO_MERGE && mergeRequested) {
     try {

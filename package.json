@@ -6,7 +6,8 @@
   "main": "main.ts",
   "imports": {
     "#test-assert": "./test/assert.ts",
-    "#test-migrations": "./test/migrations.ts"
+    "#test-migrations": "./test/migrations.ts",
+    "#test-open-tx": "./test/openTx.ts"
   },
   "engines": {
     "node": ">=22.6"

@@ -138,3 +138,48 @@ test("finalize prefers autoMerge over the legacy convergeOnly mirror when they d
     assertEquals(stores.pull_requests[0].status, "waiting_deps");
   });
 });
+
+// Issue #1007 review round 3: an adoption narrowing (`submitPr` stamping `merge_requested = 0`)
+// that lands while a review/fix agent is live is REVERTED in the process variables when that
+// agent's completion restores its guard snapshots (convergence-loop.bpmn's guardAutoMerge /
+// guardConvergeOnly outputs) — but the durable projection's compare-and-set survives. `pr.finalize`
+// must read the projection as the authoritative opt-out so the restored stale `autoMerge: true`
+// can never force a merge the operator explicitly pinned off.
+test("finalize honours the durable merge_requested=0 projection over a restored stale autoMerge=true (#1007 round 3)", async () => {
+  await withRetroOff(async () => {
+    const { app, stores, createdProcesses } = fakeApp();
+    // The PR row already exists (submitPr stamped it), narrowed to review-only by adoption.
+    stores.pull_requests.push({ pr_key: BASE_VARS.prKey, merge_requested: 0 });
+    // biome-ignore lint/plugin: constructing the framework's job envelope for the handler under test
+    await handler({ variables: { ...BASE_VARS, autoMerge: true, convergeOnly: false } } as never, app as never);
+    assertEquals(createdProcesses.includes(MERGE_PROCESS_ID), false, "no merge-loop — the projection's opt-out wins over the restored variable");
+    assertEquals(stores.pull_requests[0].status, "converged");
+  });
+});
+
+// The projection also pins the POSITIVE intent: a row stamped merge_requested=1 merges even if the
+// variables were narrowed after the stamp (the loop's own converge-only retry is not undone by a
+// later guard restore either — the projection is the single durable intent).
+test("finalize honours the durable merge_requested=1 projection over a restored stale autoMerge=false (#1007 round 3)", async () => {
+  await withRetroOff(async () => {
+    const { app, stores, createdProcesses } = fakeApp();
+    stores.pull_requests.push({ pr_key: BASE_VARS.prKey, merge_requested: 1 });
+    // biome-ignore lint/plugin: constructing the framework's job envelope for the handler under test
+    await handler({ variables: { ...BASE_VARS, autoMerge: false, convergeOnly: true } } as never, app as never);
+    assertEquals(createdProcesses.includes(MERGE_PROCESS_ID), true);
+    assertEquals(stores.pull_requests[0].status, "waiting_deps");
+  });
+});
+
+// A legacy row written before the projection existed (`merge_requested` NULL) keeps the
+// variable-derived behaviour — the fallback mirrors `mergePolicyFromRow`'s serve path.
+test("finalize falls back to the process variables for a legacy row with merge_requested NULL (#1007 round 3)", async () => {
+  await withRetroOff(async () => {
+    const { app, stores, createdProcesses } = fakeApp();
+    stores.pull_requests.push({ pr_key: BASE_VARS.prKey, merge_requested: null });
+    // biome-ignore lint/plugin: constructing the framework's job envelope for the handler under test
+    await handler({ variables: { ...BASE_VARS, autoMerge: false } } as never, app as never);
+    assertEquals(createdProcesses.includes(MERGE_PROCESS_ID), false);
+    assertEquals(stores.pull_requests[0].status, "converged");
+  });
+});

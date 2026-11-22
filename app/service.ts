@@ -580,16 +580,35 @@ export function parseDependsOn(body: string): string[] {
 }
 
 /** Replace a PR's dependency set (idempotent on resubmit). Self-references are dropped so a PR
- * can never wait on itself. */
+ * can never wait on itself. The whole replacement runs in ONE transaction: a concurrent
+ * `pollMerges` dependency read can never observe the transiently EMPTY set a DELETE-then-INSERTs
+ * sequence would otherwise expose and publish a spurious `deps-cleared` ahead of unmerged
+ * prerequisites (issue #1007 review, round 3). */
 async function registerDependencies(data: DataLayer, prKey: string, depKeys: string[]) {
-  const table = deps(data);
-  // The gateway keys this table on `pr_key`, so a single delete clears the PR's whole dep set
-  // (DELETE ... WHERE pr_key = ?) — then we re-insert the current set.
-  await table.delete(prKey);
   const ts = now();
-  for (const depKey of new Set(depKeys)) {
-    if (depKey === prKey) continue;
+  const keys = [...new Set(depKeys)].filter((k) => k !== prKey);
+  const db = data.open();
+  await db.tx(async (q) => {
+    await q.exec(`DELETE FROM "pr_dependencies" WHERE "pr_key" = ?`, [prKey]);
+    for (const depKey of keys) {
+      await q.exec(`INSERT INTO "pr_dependencies" ("pr_key", "depends_on_key", "created_at") VALUES (?, ?, ?)`, [prKey, depKey, ts]);
+    }
+  });
+}
+
+/** Union `keys` into `prKey`'s dependency set — never deleting an edge another channel recorded.
+ * Adoption uses this so independently declared blockers (a `Depends-on:` PR-body line, a
+ * `pr.record-dependency` edge a merge-stage agent discovered) survive a caller whose `dependsOn`
+ * omits them (issue #1007 review, round 3). */
+async function unionDependencies(data: DataLayer, prKey: string, keys: string[]) {
+  const table = deps(data);
+  const existing = await table.find({ pr_key: prKey });
+  const have = new Set(existing.map((d) => d.depends_on_key));
+  const ts = now();
+  for (const depKey of new Set(keys)) {
+    if (depKey === prKey || have.has(depKey)) continue;
     await table.insert({ pr_key: prKey, depends_on_key: depKey, created_at: ts });
+    have.add(depKey);
   }
 }
 
@@ -820,11 +839,16 @@ async function submitPrCritical(
     }
     // Adoption reconciliation (issue #1007 review, F2): an adopted live loop must take on THIS caller's
     // merge policy, lineage root, and dependencies — not silently keep whatever an earlier submit set.
-    //   • Dependencies: idempotent delete+re-insert of the current set (same canonical write a fresh
-    //     submit does), so an adopted loop's merge-ordering DAG matches this caller's task DAG.
-    //   • Lineage: coalesce a NULL `root_request_key` onto this caller's root (a self-rooted loop an
-    //     operator started joins the epic); an existing root is kept (a loop already under an epic is
-    //     not silently re-parented).
+    //   • Dependencies: UNION this caller's set (plus any `Depends-on:` refs the PR body declares —
+    //     the same canonical body resolution a fresh submit does) INTO the recorded set, never
+    //     deleting an edge another channel recorded (a prior submit's deps, a `pr.record-dependency`
+    //     edge a merge-stage agent discovered). A repeated adoption whose `dependsOn` omits a
+    //     prerequisite must not clear it and let the PR merge early (issue #1007 review, round 3).
+    //   • Lineage: coalesce onto this caller's root when the loop has no OTHER root — a NULL root,
+    //     or a SELF-root (`root_request_key = pr_key`, which every operator-started loop stamps at
+    //     `effectiveRoot` below) both mean "not part of another request", so the adopted loop joins
+    //     the epic. A root naming a DIFFERENT request is kept (a loop already under an epic is not
+    //     silently re-parented).
     //   • Merge policy: a review-only caller (`mergeIntent` false) NARROWS an auto-merging live loop to
     //     converge-only — the operator's opt-out must win over an adopted loop's stale auto-merge. The
     //     widening direction (a review-only live loop adopted by an auto-merge caller) is deliberately
@@ -833,8 +857,17 @@ async function submitPrCritical(
     //     is terminal, so it never reaches this branch — it reopens below with the fresh run's intent.)
     {
       const depKeys = new Set(dependsOn.map((d) => parsePr(d)?.prKey).filter((k): k is string => !!k));
-      await registerDependencies(data, parsed.prKey, [...depKeys]);
-      if (rootRequestKey != null && existing.root_request_key == null) {
+      try {
+        const meta = await fetchPrMeta(parsed.repo, parsed.number, process.env.GITHUB_TOKEN ?? "");
+        if (meta) for (const k of parseDependsOn(meta.body)) depKeys.add(k);
+      } catch (err) {
+        console.warn(`[submit] ${parsed.prKey} adopt meta fetch: ${err}`);
+      }
+      await unionDependencies(data, parsed.prKey, [...depKeys]);
+      if (
+        rootRequestKey != null &&
+        (existing.root_request_key == null || existing.root_request_key === parsed.prKey)
+      ) {
         await table.update(parsed.prKey, { root_request_key: rootRequestKey });
       }
       if (!mergeIntent && existing.converged_at == null && existing.merge_requested !== 0) {
