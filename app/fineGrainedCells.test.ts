@@ -215,3 +215,53 @@ test("plan-fanout.bpmn composes its per-wave implement step via a callActivity t
     "plan-fanout.bpmn must not keep the inlined record-wave-escalation recorder (folded into the cell's recorder)",
   );
 });
+
+test("plan-fanout.bpmn converges each opened slice PR inside the epic via a callActivity to converge-cell (issue #1007)", () => {
+  // Without this composition an epic parked at `wait-wave-merged` forever: nothing converged the slice
+  // PRs (no review/fix loop, no auto-merge) unless an operator ran `nwf converge` per PR by hand.
+  const xml = flat("plan-fanout");
+  const implementSub =
+    xml.match(/<bpmn:subProcess\b[^>]*\bid="implement"[\s\S]*?<\/bpmn:subProcess>/)?.[0] ?? "";
+  const convergeCall =
+    implementSub.match(/<bpmn:callActivity\b[^>]*\bid="converge-cell-call"[\s\S]*?<\/bpmn:callActivity>/)?.[0] ?? "";
+  assert(convergeCall.length > 0, "the wave body must hold a converge-cell-call callActivity");
+  assert(
+    /<zeebe:calledElement\b[^>]*\bprocessId="converge-cell"/.test(convergeCall),
+    "converge-cell-call must call the shared converge-cell",
+  );
+  for (const field of ["planKey", "taskId", "prKey", "autoMerge"]) {
+    assert(
+      new RegExp(`<zeebe:input\\b[^>]*\\btarget="${field}"`).test(convergeCall),
+      `converge-cell-call must explicitly map ${field} into the child scope`,
+    );
+  }
+  // Only an `opened` slice WITH a PR key converges; everything else ends the slice untouched.
+  assert(
+    /<bpmn:sequenceFlow\b[^>]*\bid="w_toConvergeGw"[^>]*\bsourceRef="implement-cell-call"[^>]*\btargetRef="w_gw_converge"/.test(implementSub),
+    "the implement cell must flow into the converge gateway",
+  );
+  const toConverge =
+    implementSub.match(/<bpmn:sequenceFlow\b[^>]*\bid="w_toConverge"[\s\S]*?<\/bpmn:sequenceFlow>/)?.[0] ?? "";
+  assert(/targetRef="converge-cell-call"/.test(toConverge), "w_toConverge targets the converge cell");
+  assert(/status = "opened" and pr != null/.test(toConverge), "only an opened slice with a PR key converges");
+  assert(
+    /<bpmn:exclusiveGateway\b[^>]*\bid="w_gw_converge"[^>]*\bdefault="w_toEnd"/.test(implementSub),
+    "a slice with no PR defaults straight to the task-done end",
+  );
+  // The wave gate is unchanged — it now releases because the cell merged the PRs.
+  assert(/<bpmn:intermediateCatchEvent\b[^>]*\bid="wait-wave-merged"/.test(xml), "the wave gate stays as is");
+});
+
+test("converge-cell routes an epic slice to pr.converge-slice and a feature run to pr.converge-feature (issue #1007)", () => {
+  const xml = flat("converge-cell");
+  assert(/<bpmn:exclusiveGateway\b[^>]*\bid="cc_gw_kind"[^>]*\bdefault="cc_toConverge"/.test(xml), "feature runs take the default arm");
+  const sliceFlow = xml.match(/<bpmn:sequenceFlow\b[^>]*\bid="cc_toConvergeSlice"[\s\S]*?<\/bpmn:sequenceFlow>/)?.[0] ?? "";
+  assert(/targetRef="converge-slice"/.test(sliceFlow) && /planKey != null/.test(sliceFlow), "a planKey routes to the slice arm");
+  assert(/<zeebe:taskDefinition\b[^>]*\btype="pr.converge-slice"/.test(xml), "the slice arm hands off via pr.converge-slice");
+});
+
+test("implement-cell sends a keyless 'opened' to reconcile rather than straight to done (issue #1007)", () => {
+  const xml = flat("implement-cell");
+  const done = xml.match(/<bpmn:sequenceFlow\b[^>]*\bid="ic_done"[\s\S]*?<\/bpmn:sequenceFlow>/)?.[0] ?? "";
+  assert(/status = "opened" and is defined\(pr\) and pr != null/.test(done), "ic_done requires a PR key for an opened slice");
+});

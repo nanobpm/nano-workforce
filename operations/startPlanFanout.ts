@@ -52,7 +52,9 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
   }
   // Opt-in escalation steward (issue #889): propagate to every child the epic spawns.
   const autoResolveEscalations = "autoResolveEscalations" in body && body.autoResolveEscalations === true;
-  const result = await startPlan(app.data, app.engine, parsed, normalizedBase, { autoResolveEscalations });
+  // Slice merge policy (issue #1007): slice PRs auto-merge into the epic base unless explicitly false.
+  const autoMerge = !("autoMerge" in body && body.autoMerge === false);
+  const result = await startPlan(app.data, app.engine, parsed, normalizedBase, { autoResolveEscalations, autoMerge });
   const alreadyRunning = "alreadyRunning" in result && result.alreadyRunning === true;
   app.log.info("plan fan-out started", {
     planKey: parsed.planKey,
@@ -62,6 +64,7 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     requestedBaseBranch: normalizedBase,
     alreadyRunning,
     autoResolveEscalations,
+    autoMerge,
   });
   return { status: 202, body: withProcessInstanceKey(result) };
 });

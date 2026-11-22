@@ -788,4 +788,46 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
       },
     );
   });
+  test("issue #1007: a two-wave plan converges each slice PR INSIDE the epic (converge-cell) and runs through to record-results", async () => {
+    // Wave 1 = t1, wave 2 = t2 (dependsOn t1). Each slice that opens a PR must be enrolled into the
+    // convergence loop by the wave body's converge-cell call — rooted under the epic, merge intent =
+    // the epic's auto-merge policy, t2 declaring t1's PR as its merge dependency — with NO manual
+    // `nwf converge`. The wave gate is released by publishing `wave-merged` (what the poller does once
+    // the cell-driven loops have merged the wave's PRs on GitHub).
+    const twoWavePlan: Stub = () => ({
+      tasks: [
+        { id: "t1", title: "T1", prompt: "do t1" },
+        { id: "t2", title: "T2", prompt: "do t2", dependsOn: ["t1"] },
+      ],
+    });
+    await withApp(
+      {
+        "senior:plan": twoWavePlan,
+        "senior:plan-review": approveReview,
+        "senior:feature": openBothPrs,
+      },
+      async ({ app, planKey }) => {
+        const prs = app.db.table<{ pr_key: string; root_request_key: string | null }>("pull_requests", "pr_key");
+        const deps = app.db.table<{ pr_key: string; depends_on_key: string }>("pr_dependencies", "pr_key");
+        const wave1 = await prs.findOne({ pr_key: "owner/repo#101" });
+        assert.ok(wave1, "wave 1's slice PR was enrolled into a convergence loop with no manual converge");
+        assert.equal(wave1?.root_request_key, planKey, "the slice loop rolls up under the epic");
+        assert.equal(await prs.findOne({ pr_key: "owner/repo#102" }), undefined, "wave 2 has not run yet");
+        const flows = takenFlows(app);
+        assert.ok(flows.includes("w_gw_converge->converge-cell-call"), `the wave body called converge-cell (flows: ${flows.join(", ")})`);
+        assert.ok(flows.includes("cc_gw_kind->converge-slice"), "converge-cell took the epic-slice arm");
+        assert.ok(flows.includes("gw-more->wait-wave-merged"), "the epic parks at the wave gate");
+
+        await app.engine.publishMessage({ name: "wave-merged", correlationKey: planKey, variables: {} });
+        await settleFully(app);
+
+        const wave2 = await prs.findOne({ pr_key: "owner/repo#102" });
+        assert.ok(wave2, "wave 2's slice PR was enrolled too");
+        assert.equal(wave2?.root_request_key, planKey);
+        const dep = await deps.findOne({ pr_key: "owner/repo#102" });
+        assert.equal(dep?.depends_on_key, "owner/repo#101", "t2's loop declares t1's PR as its merge dependency");
+        assert.ok(takenFlows(app).includes("gw-more->record-results"), "the epic reaches record-results");
+      },
+    );
+  });
 });

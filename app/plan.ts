@@ -888,6 +888,10 @@ export interface StartPlanOptions {
   /** Opt-in escalation steward (issue #889): when true, this epic's escalations — and every child
    * convergence/merge loop it spawns — become eligible for steward auto-resolution. Default false. */
   autoResolveEscalations?: boolean;
+  /** The epic's merge policy for its slice PRs (issue #1007): each slice PR is converged inside the
+   * epic (`converge-cell`), and auto-merged into the epic base branch unless this is `false`. Default
+   * true. */
+  autoMerge?: boolean;
 }
 
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
@@ -1021,6 +1025,9 @@ export async function startPlan(
       // AND persisted on the `plans` row (the durable source the steward's eligibility reads), so an
       // agent-completion clobber of the variable can never silently opt an epic in or out (#887/#888).
       autoResolveEscalations: opts.autoResolveEscalations === true,
+      // Slice merge policy (issue #1007): read by the wave body's `converge-cell-call`, which converges
+      // each opened slice PR inside the epic and (unless false) auto-merges it into `baseBranch`.
+      autoMerge: opts.autoMerge !== false,
       // Agent-task liveness SLA (issue #849): PRE-SEED the canonical bound for the fan-out's
       // external agent tasks. Each slice's implementation agent (via the implement-cell
       // callActivity's explicit `agentSlaTimeout` input mapping) is bounded today; the wave's own
