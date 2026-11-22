@@ -1960,14 +1960,6 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
   }
 }
 
-/** Review-wait out-of-band terminal check (issue #927). nano-bpm#1467 landed while its convergence
- * loop was parked at `wait-review`; the poller then kept re-requesting Copilot reviews on the MERGED
- * PR for six rounds and finally escalated a review timeout no human could act on. Before any
- * re-solicitation, read the PR's live state: if it is terminal (merged or closed) the review wait is
- * moot, so RETIRE the parked convergence instance (`process_key`) and close the row out — `merged`
- * (with `merged_at`) for a landed PR, the canonical `abandonClosedPr` for a closed-unmerged one.
- * Conservative: an unreadable/open state returns `false` and the caller re-solicits as before.
- * Exported for tests. */
 /** Marker embedded in the termination reason of an out-of-band terminal-PR retirement — the
  * persisted finalization intent {@link retryPendingTerminalFinalization} reconciles. */
 export const RETIRE_REASON_MARK = " retired: PR ";
@@ -2001,6 +1993,14 @@ export async function retryPendingTerminalFinalization(
   return retireTerminalReviewWait(data, engine, pr, token, "incident");
 }
 
+/** Review-wait out-of-band terminal check (issue #927). nano-bpm#1467 landed while its convergence
+ * loop was parked at `wait-review`; the poller then kept re-requesting Copilot reviews on the MERGED
+ * PR for six rounds and finally escalated a review timeout no human could act on. Before any
+ * re-solicitation, read the PR's live state: if it is terminal (merged or closed) the review wait is
+ * moot, so RETIRE the parked convergence instance (`process_key`) and close the row out — `merged`
+ * (with `merged_at`) for a landed PR, the canonical `abandonClosedPr` for a closed-unmerged one.
+ * Conservative: an unreadable/open state returns `false` and the caller re-solicits as before.
+ * Exported for tests. */
 export async function retireTerminalReviewWait(
   data: DataLayer,
   engine: EngineClient,
