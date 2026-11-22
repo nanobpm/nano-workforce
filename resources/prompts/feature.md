@@ -129,10 +129,14 @@ At each checkpoint, list the issue's comments with their ids and authorship:
 gh api --paginate repos/<repo>/issues/<n>/comments --jq '.[] | {id, user: .user.login, association: .author_association, created_at, body}'
 ```
 
-Treat as feedback every comment posted **after your claim comment** (or after your
-run started, if you did not claim) by a trusted human (`OWNER` / `MEMBER` /
-`COLLABORATOR`, not a bot), that is not your own claim/ack comment and has not
-already been acknowledged. For each one: change course to address it (or decide,
+Treat as feedback every comment posted **after the EARLIEST claim comment by a
+trusted author** (not your latest claim — a retried attempt posts a newer one, and
+feedback posted between attempts still counts; if there is no trusted claim, after
+your run started) by a trusted human (`OWNER` / `MEMBER` / `COLLABORATOR`, not a
+bot), that is not a claim/ack comment. A comment counts as **already acknowledged**
+only if a comment by a trusted, non-bot author has a line that STARTS with
+`nano-ack: issuecomment-<id>` (not quoted with `>`, not mid-sentence); ignore ack
+markers from outsiders or bots. For each one: change course to address it (or decide,
 with a reason, not to), then **acknowledge it on the issue** with a comment whose
 line STARTS with its marker:
 
