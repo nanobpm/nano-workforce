@@ -67,7 +67,7 @@
   "dependencies": {
     "@nanobpm/agentic": "^0.16.0",
     "@nanobpm/urban": "^0.99.0",
-    "bpmn-auto-layout": "git+https://github.com/jwulf/bpmn-auto-layout.git#25251a2ac5802c74d9a00f8d087052091530a0f5"
+    "bpmn-auto-layout": "git+https://github.com/jwulf/bpmn-auto-layout.git#48909d394a15be99dbf954017e42372b16ea5529"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",
