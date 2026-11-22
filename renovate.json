@@ -1,19 +1,40 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
+  "extends": [
+    "config:recommended"
+  ],
   "packageRules": [
     {
-      "description": "Auto-merge non-major @nanobpm/* updates once CI is green. These are first-party packages we publish from nano-ide; CI (typecheck + test) is the gate. For 0.x pins a caret range locks the minor, so Renovate's range bump is what actually pulls a new minor through; automerging it keeps nwf on the latest agentic/urban without manual PRs. platformAutomerge is ON because main is now protected by an active ruleset with a GitHub merge queue (merge_queue rule): a direct self-merge is rejected by the queue, so Renovate must enable GitHub-native auto-merge, which ENQUEUES the PR and lets it land when the queue's speculative checks pass. (Historically this was false when main was unprotected; leaving it false silently wedged green update PRs open — e.g. the agentic 0.11->0.12 bump sat unmerged for weeks.)",
-      "matchPackageNames": ["/^@nanobpm//"],
-      "matchUpdateTypes": ["minor", "patch"],
+      "description": "Auto-merge non-major @nanobpm/* updates once CI is green. These are first-party packages we publish from nano-ide; CI (typecheck + test) is the gate. For 0.x pins a caret range locks the minor, so Renovate's range bump is what actually pulls a new minor through; automerging it keeps nwf on the latest agentic/urban without manual PRs. platformAutomerge is ON because main is now protected by an active ruleset with a GitHub merge queue (merge_queue rule): a direct self-merge is rejected by the queue, so Renovate must enable GitHub-native auto-merge, which ENQUEUES the PR and lets it land when the queue's speculative checks pass. (Historically this was false when main was unprotected; leaving it false silently wedged green update PRs open \u2014 e.g. the agentic 0.11->0.12 bump sat unmerged for weeks.)",
+      "matchPackageNames": [
+        "/^@nanobpm//"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
       "automerge": true,
       "platformAutomerge": true
     },
     {
       "description": "Major @nanobpm/* updates may be breaking - require a human to review and merge.",
-      "matchPackageNames": ["/^@nanobpm//"],
-      "matchUpdateTypes": ["major"],
+      "matchPackageNames": [
+        "/^@nanobpm//"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
       "automerge": false
+    },
+    {
+      "description": "bpmn-auto-layout is pinned to a commit on the jwulf fork (nano/uncapped-routing, 25251a2) that removes the 4096-point routing cap; large delivery graphs fail with ROUTING_FAILED without it (nanobpm/nano-workforce#1003, #1008). The fork's main is BEHIND that pin, so Renovate digest 'updates' are downgrades (see #1012). Remove this rule when the uncapped-routing fix ships upstream in bpmn-io/bpmn-auto-layout and we move back to a release.",
+      "matchPackageNames": [
+        "bpmn-auto-layout"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "enabled": false
     }
   ]
 }
