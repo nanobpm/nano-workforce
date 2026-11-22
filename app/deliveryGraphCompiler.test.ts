@@ -4260,3 +4260,33 @@ test("#962 the preview's side-effect list includes the implied enrollment for ea
   });
   assertEquals(none.sideEffects.length, 1, "a policy-less agent lists only its job run");
 });
+
+// PR #1021 review: the #1016 SLA-check controls (`<el>_slaRequeue`/`_slaReason`/`_slaRequeues`) are root
+// controls exactly like `contractMet` — a same-named agent emit would shadow the requeue flag or have the
+// retry reset clear the requeue counter (defeating the cap), so they must grow collision-free too.
+test("#1016 SLA-check controls grow collision-free against same-named agent emits", async () => {
+  const r = await compileOk({
+    name: "sla-control-collision",
+    nodes: [
+      {
+        id: "open",
+        kind: "agent",
+        agent: { jobType: "senior:demo", prompt: "x" },
+        emits: [
+          { name: "n0_slaRequeue", type: "boolean" },
+          { name: "n0_slaReason", type: "string" },
+          { name: "n0_slaRequeues", type: "number" },
+        ],
+      },
+    ],
+    edges: [],
+  });
+  assertEquals(elementForNode(r.bpmn, "open"), "n0");
+  assert(r.bpmn.includes('source="=agentSlaRequeue" target="n0_slaRequeue_"'), "requeue flag output is grown");
+  assert(r.bpmn.includes('source="=agentSlaReason" target="n0_slaReason_"'), "reason output is grown");
+  assert(r.bpmn.includes('source="=agentSlaRequeues" target="n0_slaRequeues_"'), "requeue counter output is grown");
+  assert(r.bpmn.includes("=n0_slaRequeue_ = true"), "the requeue gateway reads the grown flag");
+  assert(!r.bpmn.includes("=n0_slaRequeue = true"), "the gateway must NOT read the shadowed bare flag");
+  assert(r.bpmn.includes('target="agentSlaPriorRequeues"') && r.bpmn.includes("then n0_slaRequeues_ else 0"), "the worker's prior count is bound from the grown counter");
+  assert(r.bpmn.includes("is defined(n0_slaReason_)"), "the escalation context reads the grown reason");
+});

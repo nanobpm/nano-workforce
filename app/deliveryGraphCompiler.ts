@@ -2260,7 +2260,7 @@ function serviceBodyLines(
   // agentSlaCheckLines}): a never-activated job re-enters the task (no escalation — the work SLA has not
   // started), and an escalation states the activation FACTS (`<el>_slaReason`) instead of guessing that
   // in-flight work "may already exist". A connector keeps the plain boundary → escalation wiring.
-  const slaReasonVar = `${el}_slaReason`;
+  const slaReasonVar = nodeControlVar(el, "slaReason", reservedFlagTargets);
   const timeoutContext = isAgent
     ? `${escalationContextFeel(nodeId, descriptor, "nodeTimeout", ". ")} + (if (is defined(${slaReasonVar}) and ${slaReasonVar} != null) then string(${slaReasonVar}) + " " else "")`
     : escalationContextFeel(
@@ -2299,7 +2299,7 @@ function serviceBodyLines(
     `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
     `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=nodeTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
     "      </bpmn:boundaryEvent>",
-    ...(isAgent ? agentSlaCheckLines(el) : []),
+    ...(isAgent ? agentSlaCheckLines(el, reservedFlagTargets) : []),
     ...timeoutEscalation,
   ];
   // #863 shared reset: both escalations' retry branches (`${esc}Rr` / `${contractEsc}Rr`) loop into ONE
@@ -2391,15 +2391,21 @@ function serviceBodyLines(
  * (the activation facts). Re-queues are BOUNDED: the check counts them in `<el>_slaRequeues` and, at
  * {@link MAX_SLA_REQUEUES}, stops re-queueing and escalates "never picked up after N × SLA" — so a
  * job type no worker serves can never loop the boundary forever. Outputs are node-scoped (`<el>_…`) so parallel nodes never share them. */
-function agentSlaCheckLines(el: string): string[] {
+function agentSlaCheckLines(el: string, reservedTargets: readonly string[]): string[] {
+  // Grown collision-free against the node's emit source vars (PR #1021 review): a same-named emit would
+  // otherwise shadow the requeue flag node-locally or be cleared by the retry reset, defeating the cap.
+  const requeueVar = nodeControlVar(el, "slaRequeue", reservedTargets);
+  const reasonVar = nodeControlVar(el, "slaReason", reservedTargets);
+  const countVar = nodeControlVar(el, "slaRequeues", reservedTargets);
   return [
     `      <bpmn:serviceTask id="${el}_slaChk" name="Was the job ever activated?">`,
     "        <bpmn:extensionElements>",
     '          <zeebe:taskDefinition type="pr.agent-sla-check" />',
     "          <zeebe:ioMapping>",
-    `            <zeebe:output source="=agentSlaRequeue" target="${el}_slaRequeue" />`,
-    `            <zeebe:output source="=agentSlaReason" target="${el}_slaReason" />`,
-    `            <zeebe:output source="=agentSlaRequeues" target="${el}_slaRequeues" />`,
+    `            <zeebe:input source="=if (is defined(${countVar}) and ${countVar} != null) then ${countVar} else 0" target="agentSlaPriorRequeues" />`,
+    `            <zeebe:output source="=agentSlaRequeue" target="${requeueVar}" />`,
+    `            <zeebe:output source="=agentSlaReason" target="${reasonVar}" />`,
+    `            <zeebe:output source="=agentSlaRequeues" target="${countVar}" />`,
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
     `        <bpmn:incoming>${el}_i2</bpmn:incoming>`,
@@ -2411,7 +2417,7 @@ function agentSlaCheckLines(el: string): string[] {
     `        <bpmn:outgoing>${el}_s2</bpmn:outgoing>`,
     "      </bpmn:exclusiveGateway>",
     flow(`${el}_s0`, `${el}_slaChk`, `${el}_slaGw`),
-    `      <bpmn:sequenceFlow id="${el}_s1" name="never activated — re-queue" sourceRef="${el}_slaGw" targetRef="${el}_retry"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${el}_slaRequeue = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+    `      <bpmn:sequenceFlow id="${el}_s1" name="never activated — re-queue" sourceRef="${el}_slaGw" targetRef="${el}_retry"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${requeueVar} = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
     flow(`${el}_s2`, `${el}_slaGw`, escalationTaskElement(el)),
   ];
 }

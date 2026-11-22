@@ -16,6 +16,8 @@ import { deliveryNodeSlaCheck } from "../../app/agentSlaEscalation.ts";
 interface In extends Record<string, unknown> {
   jobType?: string | null;
   nodeTimeout?: string | null;
+  /** The node's prior re-queue count, bound by the check task's ioMapping from its collision-free control var. */
+  agentSlaPriorRequeues?: number | null;
 }
 interface Out extends Record<string, unknown> {
   agentSlaRequeue: boolean;
@@ -33,7 +35,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const sla = typeof job.variables.nodeTimeout === "string" ? job.variables.nodeTimeout : "";
   const pik = job.processInstanceKey != null ? String(job.processInstanceKey) : "";
   const el = typeof job.elementId === "string" ? job.elementId : "";
-  const priorRaw = job.variables[`${el.replace(/_slaChk$/, "")}_slaRequeues`];
+  const priorRaw = job.variables.agentSlaPriorRequeues;
   const priorRequeues = typeof priorRaw === "number" && Number.isInteger(priorRaw) && priorRaw > 0 ? priorRaw : 0;
   const { requeue, reason, requeues } = await deliveryNodeSlaCheck(app.data, {
     priorRequeues,
