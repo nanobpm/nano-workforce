@@ -544,11 +544,19 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
     );
   });
 
-  test("trial-merge escalation: abandon finalizes the plan", async () => {
+  test("trial-merge escalation: abandon enrolls the wave converge-only, then finalizes the plan (#1007 round 3)", async () => {
     const flows = await driveToTrialDecision("abandon");
+    // Round 3 (#1007 review): abandon no longer short-circuits to record-results — that left the
+    // wave's opened PRs unenrolled (their missing pull_requests rows wedged the delivery rollup at
+    // "converging" forever). It routes THROUGH the wave-converge gate, which enrolls every opened
+    // slice (converge-only, the operator's merge opt-out), then on toward gw-more → record-results.
     assert.ok(
-      flows.includes("gw-trial-answer->record-results"),
-      `abandon routed to record-results (flows: ${flows.join(", ")})`,
+      flows.includes("gw-trial-answer->gw-converge-wave"),
+      `abandon routed to the wave-converge gate (flows: ${flows.join(", ")})`,
+    );
+    assert.ok(
+      !flows.includes("gw-trial-answer->record-results"),
+      `abandon no longer short-circuits record-results (flows: ${flows.join(", ")})`,
     );
   });
 

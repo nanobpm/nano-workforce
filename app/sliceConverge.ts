@@ -64,11 +64,13 @@ export async function convergeSlice(
     return { enrolled: false, prKey: null, dependsOn: [], autoMerge: sliceMergeIntent(input.autoMerge), autoResolveEscalations: false };
   }
   const planRow = await plans(data).get(planKey);
-  // Merge policy (issue #1007 review): read the OPERATOR's intent from the durable `plans.auto_merge`
-  // column — NEVER from the `autoMerge` process variable, which an agent completion can clobber. The
-  // row is authoritative so an operator's explicit `false` opt-out survives any agent output. A
-  // missing row (or a pre-#1007 row, whose column DEFAULTs to 1) falls back to the input's intent.
-  const autoMerge = planRow != null ? planRow.auto_merge !== 0 : sliceMergeIntent(input.autoMerge);
+  // Merge policy (issue #1007 review): the OPERATOR's intent is the durable `plans.auto_merge`
+  // column — NEVER a clobberable process variable an agent completion can echo. The caller's
+  // `autoMerge` input can only NARROW that intent (the trial-merge Abandon arm passes `false` —
+  // the operator's explicit merge opt-out for the wave, round 3); it can never WIDEN an opted-out
+  // epic back to auto-merge. A missing row (or a pre-#1007 row, whose column DEFAULTs to 1) reads
+  // as the historical default (auto-merge on), still narrowable by the input.
+  const autoMerge = (planRow != null ? planRow.auto_merge !== 0 : true) && sliceMergeIntent(input.autoMerge);
   const dependsOn: string[] = [];
   if (taskId) {
     const depIds = (await planTaskDeps(data).find({ plan_key: planKey, task_id: taskId }))

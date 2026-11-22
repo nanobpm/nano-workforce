@@ -130,6 +130,7 @@
         </nano:shape>
         <nano:shape id="RecordResultsIn" name="Finalize plan — input">
           <nano:extend name="planKey" type="string" />
+          <nano:extend name="action" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="CapsResolved" name="caps-resolved message payload (issue #289)">
           <nano:extend name="resolvedDepsBrief" type="string" optional="true" />
@@ -697,6 +698,7 @@
           <zeebe:input source="=planKey" target="planKey" />
           <zeebe:input source="=pr.taskId" target="taskId" />
           <zeebe:input source="=pr.prKey" target="prKey" />
+          <zeebe:input source="=not (action = &#34;abandon&#34;)" target="autoMerge" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toConvergeWave</bpmn:incoming>
@@ -785,7 +787,7 @@
     <bpmn:sequenceFlow id="f_trialAnswerProceed" name="proceed" sourceRef="gw-trial-answer" targetRef="gw-converge-wave">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=action = "proceed"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
-    <bpmn:sequenceFlow id="f_trialAnswerAbandon" name="abandon" sourceRef="gw-trial-answer" targetRef="record-results">
+    <bpmn:sequenceFlow id="f_trialAnswerAbandon" name="abandon" sourceRef="gw-trial-answer" targetRef="gw-converge-wave">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=action = "abandon"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_trialAnswerRerun" name="rebase" sourceRef="gw-trial-answer" targetRef="trial-merge" />
@@ -927,7 +929,7 @@
       <bpmndi:BPMNShape id="BPMNShape_gw-converge-wave" bpmnElement="gw-converge-wave" isMarkerVisible="true">
         <dc:Bounds x="5654" y="615" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5577" y="670" width="85" height="28" />
+          <dc:Bounds x="5637" y="582" width="85" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_converge-cell-call" bpmnElement="converge-cell-call">
@@ -936,7 +938,7 @@
       <bpmndi:BPMNShape id="BPMNShape_gw-more" bpmnElement="gw-more" isMarkerVisible="true">
         <dc:Bounds x="6004" y="615" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5927" y="670" width="84" height="14" />
+          <dc:Bounds x="5987" y="596" width="84" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_wait-wave-merged" bpmnElement="wait-wave-merged">
@@ -1049,7 +1051,7 @@
         <di:waypoint x="6054" y="640" />
         <di:waypoint x="6154" y="640" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="6078" y="618" width="32" height="14" />
+          <dc:Bounds x="6088" y="618" width="32" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toEnd" bpmnElement="f_toEnd">
@@ -1165,17 +1167,15 @@
         <di:waypoint x="5529" y="640" />
         <di:waypoint x="5654" y="640" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5471" y="701" width="53" height="14" />
+          <dc:Bounds x="5534" y="701" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_trialAnswerAbandon" bpmnElement="f_trialAnswerAbandon">
         <di:waypoint x="5529" y="775" />
-        <di:waypoint x="5529" y="605" />
-        <di:waypoint x="6134" y="605" />
-        <di:waypoint x="6134" y="640" />
-        <di:waypoint x="6154" y="640" />
+        <di:waypoint x="5529" y="640" />
+        <di:waypoint x="5654" y="640" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5805" y="583" width="53" height="14" />
+          <dc:Bounds x="5471" y="701" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_moreWaves" bpmnElement="f_moreWaves">

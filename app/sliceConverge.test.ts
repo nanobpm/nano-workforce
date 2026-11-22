@@ -78,6 +78,21 @@ test("convergeSlice falls back to the input intent when the plan row is absent",
   assertEquals(calls[0]?.autoMerge, false);
 });
 
+// Round 3 (#1007 review): the trial-merge Abandon arm maps `autoMerge=false` onto converge-cell-call
+// — the operator's explicit merge opt-out for the wave. The input NARROWS the epic's merge policy
+// even when the durable row auto-merges; it never WIDENS an opted-out epic.
+test("convergeSlice lets the abandon arm NARROW an auto-merging epic to converge-only (#1007 round 3)", async () => {
+  const { calls, submit } = recorder();
+  await convergeSlice(memData(stores(1), keys), { planKey: "o/r#1", taskId: "a", prKey: "o/r#10", autoMerge: false }, submit);
+  assertEquals(calls[0]?.autoMerge, false, "the abandon arm's autoMerge=false narrows the auto-merging epic");
+});
+
+test("convergeSlice never lets an input autoMerge=true WIDEN an opted-out epic (#1007 round 3)", async () => {
+  const { calls, submit } = recorder();
+  await convergeSlice(memData(stores(0), keys), { planKey: "o/r#1", taskId: "a", prKey: "o/r#10", autoMerge: true }, submit);
+  assertEquals(calls[0]?.autoMerge, false, "the durable opt-out survives an input autoMerge=true");
+});
+
 test("convergeSlice never enrolls a phantom PR", async () => {
   const { calls, submit } = recorder();
   const res = await convergeSlice(memData(stores(), keys), { planKey: "o/r#1", taskId: "a", prKey: null }, submit);

@@ -233,8 +233,10 @@ test("plan-fanout.bpmn converges each opened slice PR inside the epic via a call
     "the per-slice wave body must NOT hold converge-cell-call — convergence is a wave-scoped step after record-wave (F3)",
   );
   // The wave-scoped converge-cell-call is a multi-instance over record-wave's `openedPrs`, mapping each
-  // slice's taskId + prKey into the child scope. Merge policy is NOT mapped here — `pr.converge-slice`
-  // reads the durable `plans.auto_merge` (F1), so an agent-clobbered `autoMerge` variable can't reach it.
+  // slice's taskId + prKey into the child scope. Merge policy is NARROW-ONLY mapped (round 3): the
+  // trial-merge Abandon arm maps `autoMerge=false` (the operator's merge opt-out for the wave); every
+  // other arm leaves the epic's durable `plans.auto_merge` governing (F1) — an input `true` can never
+  // widen an opted-out epic (converge-slice ANDs the two).
   const convergeCall =
     xml.match(/<bpmn:callActivity\b[^>]*\bid="converge-cell-call"[\s\S]*?<\/bpmn:callActivity>/)?.[0] ?? "";
   assert(convergeCall.length > 0, "the wave body must hold a converge-cell-call callActivity");
@@ -252,7 +254,17 @@ test("plan-fanout.bpmn converges each opened slice PR inside the epic via a call
       `converge-cell-call must map ${source} into the child scope as ${target}`,
     );
   }
-  assert(!/<zeebe:input\b[^>]*\btarget="autoMerge"/.test(convergeCall), "merge policy is read from the durable plans row, not mapped (F1)");
+  // Round 3 (#1007 review): the ONLY autoMerge mapping is the narrow-only abandon signal — never a
+  // bare `=autoMerge` variable forward (an agent-clobbered variable must not reach the policy). The
+  // quote entity is serializer-dependent (`&quot;` vs `&#34;`), so match either.
+  assert(
+    /<zeebe:input\b[^>]*\bsource="=not \(action = (&quot;|&#34;)abandon\1\)"[^>]*\btarget="autoMerge"/.test(convergeCall),
+    "converge-cell-call maps the narrow-only abandon signal to autoMerge (round 3)",
+  );
+  assert(
+    !/<zeebe:input\b[^>]*\bsource="=autoMerge"/.test(convergeCall),
+    "the raw autoMerge variable is never forwarded — the durable plans row governs (F1)",
+  );
   // It runs only when record-wave emitted opened PRs, and only after the trial-merge gate.
   const toConverge =
     xml.match(/<bpmn:sequenceFlow\b[^>]*\bid="f_toConvergeWave"[\s\S]*?<\/bpmn:sequenceFlow>/)?.[0] ?? "";

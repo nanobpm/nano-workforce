@@ -15,6 +15,7 @@
           <nano:extend name="planKey" type="string" />
           <nano:extend name="taskId" type="string" optional="true" />
           <nano:extend name="prKey" type="string" />
+          <nano:extend name="autoMerge" type="boolean" optional="true" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>

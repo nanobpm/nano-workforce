@@ -10,11 +10,13 @@ import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 type In = WorkerInputs["pr.converge-slice"];
 
 const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
-  // No `autoMerge` is passed: `convergeSlice` reads the operator's intent from the durable
-  // `plans.auto_merge` column (issue #1007 review, F1), never from a clobberable process variable.
+  // `autoMerge` is forwarded as a NARROW-ONLY signal (issue #1007 review, round 3): the trial-merge
+  // Abandon arm maps `autoMerge=false` (the operator's explicit merge opt-out for the wave), while
+  // every other arm leaves it unset so the epic's durable `plans.auto_merge` row governs. An input
+  // `true` never widens an opted-out epic — `convergeSlice` ANDs the two.
   const res = await convergeSlice(
     app.data,
-    { planKey: job.variables.planKey, taskId: job.variables.taskId, prKey: job.variables.prKey },
+    { planKey: job.variables.planKey, taskId: job.variables.taskId, prKey: job.variables.prKey, autoMerge: job.variables.autoMerge },
     submitPrAsSliceSubmit(app.data, app.engine, submitPr, MAX_ROUNDS),
   );
   if (res.enrolled) app.log.info("converge-slice: enrolled slice PR into convergence loop", { planKey: job.variables.planKey, ...res });
