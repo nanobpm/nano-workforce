@@ -1,3 +1,10 @@
+## [0.222.0](https://github.com/nanobpm/nano-workforce/compare/v0.221.1...v0.222.0) (2026-11-22)
+
+### Features
+
+* **cancel:** distinct neutral cancelled terminal status + one canonical terminal mapping across run kinds ([#996](https://github.com/nanobpm/nano-workforce/issues/996)) ([28df9c4](https://github.com/nanobpm/nano-workforce/commit/28df9c4de9e5a308194888d968dcdd23b9315b85)), closes [#994](https://github.com/nanobpm/nano-workforce/issues/994) [#995](https://github.com/nanobpm/nano-workforce/issues/995)
+* **delivery-graph:** degrade gracefully when layout fails or times out ([#1006](https://github.com/nanobpm/nano-workforce/issues/1006)) ([af73fc1](https://github.com/nanobpm/nano-workforce/commit/af73fc106e1e2e4d80a245d6622d63f38577b513)), closes [#1005](https://github.com/nanobpm/nano-workforce/issues/1005)
+
 ## [0.221.1](https://github.com/nanobpm/nano-workforce/compare/v0.221.0...v0.221.1) (2026-11-22)
 
 ### Bug Fixes
