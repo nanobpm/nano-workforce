@@ -19,6 +19,7 @@
 // declared {@link EnvKey}; ADR 0004 pinned decision 2) and is redacted from every log line.
 import { isEnvKey, readEnv, readEnvOr } from "./contracts.ts";
 import { allCheckNames, applyRollupEvents, CHECK_EVENTS_QUERY, checkGateConclusions, classifyMergeability, failingCheckNames, type PrState, pendingCheckNames } from "./github.ts";
+import { parseIssue } from "./issueParse.ts";
 import { parsePr } from "./prParse.ts";
 import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
 
@@ -311,11 +312,11 @@ export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean
     );
   }
   // An issue edge (issue #997) is keyed by the ISSUE reference `owner/repo#<number>` (or a GitHub
-  // issue URL) — validated like `pr` via the canonical {@link parsePrTarget} grammar (an issue and a
-  // PR share the `owner/repo#N` shape), with the same #548 fact-bound late-binding exemption (gated on
+  // issue URL) — validated via the canonical {@link parseIssue} grammar (`owner/repo#N` or a
+  // `/issues/N` URL), with the same #548 fact-bound late-binding exemption (gated on
   // `allowLateBoundTarget`) as `pr`/`epic`. Fail loudly at parse rather than surface a never-resolvable
   // target as a timeout much later.
-  if (kind === "issue" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePrTarget(target)) {
+  if (kind === "issue" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parseIssue(target)) {
     throw new Error(
       `readiness probe (issue): 'target' ('${target}') must be an 'owner/repo#<number>' issue reference or a GitHub issue URL (e.g. 'nanobpm/nano-workforce#997')`,
     );
@@ -1061,9 +1062,9 @@ export function issueViewCommand(repo: string, number: string): string {
  * `closed-by-pr-merged` additionally requires at least one MERGED PR in
  * `closedByPullRequestsReferences` and binds it as `{ closingPr: "owner/repo#N" }` — a `pr`-typed fact a
  * downstream `wait[pr]`/agent consumes, mirroring how the canonical
- * `agent → connector[converge] → wait[pr]` shape hands its PR on. The repo half comes from
- * `targetRepo` (the probe target's `owner/repo`) since the payload's references carry only the
- * number/state/url. */
+ * `agent → connector[converge] → wait[pr]` shape hands its PR on. The repo half is the reference's
+ * OWN repository (a closing PR may be cross-repo), falling back to `targetRepo`. Each reference's
+ * `state` is NOT in the CLI payload — {@link probeOnce} enriches it before matching. */
 export function matchIssue(match: ProbeMatch | undefined, payload: unknown, targetRepo?: string): ProbeResult {
   const want: IssueCondition = match?.issueState ?? "completed";
   const j = isRecord(payload) ? payload : {};
@@ -1093,21 +1094,62 @@ export function matchIssue(match: ProbeMatch | undefined, payload: unknown, targ
 }
 
 /** The first MERGED PR in a `gh issue view` payload's `closedByPullRequestsReferences`, rendered as
- * the canonical `owner/repo#N` fact (the repo from `targetRepo`, falling back to the reference URL's
- * `/pull/` path when the target carried none). Returns null when no reference is MERGED. PURE /
+ * the canonical `owner/repo#N` fact (the reference's own repository or `/pull/` URL, falling back
+ * to `targetRepo`). Returns null when no reference is MERGED. PURE /
  * tolerant — a malformed references list simply yields null (not ready). */
 function mergedClosingPr(j: Record<string, unknown>, targetRepo: string | undefined): string | null {
-  const refs = Array.isArray(j.closedByPullRequestsReferences) ? j.closedByPullRequestsReferences : [];
-  for (const r of refs) {
-    if (!isRecord(r)) continue;
+  for (const r of closingRefs(j)) {
     if (str(r.state).trim().toUpperCase() !== "MERGED") continue;
-    const number = num(r.number);
-    if (number === undefined) continue;
-    const repo = (targetRepo ?? "").trim() || repoFromPrUrl(str(r.url));
-    if (repo === "") continue;
-    return `${repo}#${number}`;
+    const ref = closingRefTarget(r, targetRepo);
+    if (ref !== null) return `${ref.repo}#${ref.number}`;
   }
   return null;
+}
+
+/** The record-shaped entries of a `gh issue view` payload's `closedByPullRequestsReferences`. */
+function closingRefs(j: Record<string, unknown>): Record<string, unknown>[] {
+  const refs = Array.isArray(j.closedByPullRequestsReferences) ? j.closedByPullRequestsReferences : [];
+  return refs.filter(isRecord);
+}
+
+/** The `owner/repo` + number of ONE closing-PR reference. A closing PR may live in a DIFFERENT repo
+ * than its issue, so the reference's OWN repo wins (its `repository{owner{login},name}` — the shape
+ * the `gh` CLI emits — else its `/pull/` URL); the issue's `targetRepo` is only a fallback. */
+function closingRefTarget(r: Record<string, unknown>, targetRepo: string | undefined): { repo: string; number: number } | null {
+  const number = num(r.number);
+  if (number === undefined) return null;
+  const rr = isRecord(r.repository) ? r.repository : undefined;
+  const owner = rr && isRecord(rr.owner) ? str(rr.owner.login).trim() : "";
+  const name = rr ? str(rr.name).trim() : "";
+  const repo = (owner && name ? `${owner}/${name}` : "") || repoFromPrUrl(str(r.url)) || (targetRepo ?? "").trim();
+  return repo === "" ? null : { repo, number };
+}
+
+/** The read of ONE PR's state, used to enrich `closedByPullRequestsReferences` — the `gh issue view`
+ * CLI selects only identity/URL/repository for those references, never `state`. */
+export function prStateCommand(repo: string, number: string): string {
+  return `gh pr view ${shellQuote(number)} --repo ${shellQuote(repo)} --json ${shellQuote("state")}`;
+}
+
+/** Fill in each closing reference's `state` by reading the PR itself (the CLI payload never carries
+ * it — #1000 review). Mutates `payload` in place. A failed/garbled read leaves that reference
+ * state-less (not MERGED → not ready), never a throw. */
+async function enrichClosingPrStates(
+  exec: ProbeExec,
+  env: Record<string, string | undefined>,
+  payload: unknown,
+  issueRepo: string,
+): Promise<void> {
+  if (!isRecord(payload)) return;
+  for (const r of closingRefs(payload)) {
+    if (str(r.state).trim() !== "") continue;
+    const ref = closingRefTarget(r, issueRepo);
+    if (ref === null) continue;
+    const out = await exec.run(prStateCommand(ref.repo, String(ref.number)), env);
+    if (out.code !== 0) continue;
+    const pr = parseJson(out.stdout);
+    if (isRecord(pr)) r.state = str(pr.state);
+  }
 }
 
 /** The `owner/repo` of a GitHub PR URL (`https://github.com/owner/repo/pull/N`), else "". */
@@ -1192,11 +1234,15 @@ export async function probeOnce(
       // literal issue ref, so treat it as "not ready" and keep waiting rather than issue a malformed
       // request. A failed/garbled `gh` read is "not ready" (the bounded wait routes to `onTimeout`),
       // never a throw.
-      const ref = parsePrTarget(probe.target);
+      const ref = parseIssue(probe.target);
       if (!ref) return { ready: false, detail: "issue: unparseable/unresolved target (not ready)" };
-      const out = await exec.run(issueViewCommand(ref.repo, ref.number), env);
+      const out = await exec.run(issueViewCommand(ref.repo, String(ref.number)), env);
       if (out.code !== 0) return { ready: false, detail: "issue: gh issue view failed (not ready)" };
-      return matchIssue(probe.match, parseJson(out.stdout), ref.repo);
+      const payload = parseJson(out.stdout);
+      if ((probe.match?.issueState ?? "completed") === "closed-by-pr-merged" && matchIssue({ issueState: "completed" }, payload).ready) {
+        await enrichClosingPrStates(exec, env, payload, ref.repo);
+      }
+      return matchIssue(probe.match, payload, ref.repo);
     }
     case "epic": {
       // "Fully merged" is the app's AGGREGATE, not a GitHub read — observe it over the app's own

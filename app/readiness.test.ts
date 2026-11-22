@@ -1469,3 +1469,67 @@ test("#997 issueViewCommand is the ONE issue-state reader: the epic fallback rea
   assert(r.ready);
   assertStringIncludes(calls[0] ?? "", "closedByPullRequestsReferences");
 });
+
+// ── #1000 review: real `gh` CLI shape — closing references carry NO state, and may be cross-repo ──
+const CLI_CLOSED_BY_PR = (repo: { owner: string; name: string }, number: number) => ({
+  state: "CLOSED",
+  stateReason: "COMPLETED",
+  closedByPullRequestsReferences: [
+    { id: "PR_x", number, url: `https://github.com/${repo.owner}/${repo.name}/pull/${number}`, repository: { id: "R_x", name: repo.name, owner: { id: "U_x", login: repo.owner } } },
+  ],
+});
+
+function routedExec(issue: unknown, prStates: Record<string, string | null>, calls: string[]): ProbeExec {
+  return {
+    async httpGet() {
+      return { status: 0, body: "" };
+    },
+    async run(command) {
+      calls.push(command);
+      if (command.startsWith("gh issue view")) return { code: 0, stdout: JSON.stringify(issue), stderr: "" };
+      for (const [key, state] of Object.entries(prStates)) {
+        const [repo, n] = key.split("#");
+        if (command.includes(`'${n}' --repo '${repo}'`)) {
+          return state === null ? { code: 1, stdout: "", stderr: "boom" } : { code: 0, stdout: JSON.stringify({ state }), stderr: "" };
+        }
+      }
+      return { code: 1, stdout: "", stderr: "unexpected" };
+    },
+  };
+}
+
+test("#1000 probeOnce issue closed-by-pr-merged: fetches each closing PR's state (the CLI payload omits it)", async () => {
+  const calls: string[] = [];
+  const probe = parseProbe({ kind: "issue", target: "o/r#9", match: { issueState: "closed-by-pr-merged" } });
+  const r = await probeOnce(probe, routedExec(CLI_CLOSED_BY_PR({ owner: "o", name: "r" }, 432), { "o/r#432": "MERGED" }, calls), {});
+  assert(r.ready, r.detail);
+  assertEquals(r.bind?.closingPr, "o/r#432");
+  assert(calls.some((c) => c.startsWith("gh pr view '432' --repo 'o/r'")), "the PR state is read explicitly");
+  const open = await probeOnce(probe, routedExec(CLI_CLOSED_BY_PR({ owner: "o", name: "r" }, 432), { "o/r#432": "OPEN" }, []), {});
+  assert(!open.ready);
+  const failed = await probeOnce(probe, routedExec(CLI_CLOSED_BY_PR({ owner: "o", name: "r" }, 432), { "o/r#432": null }, []), {});
+  assert(!failed.ready, "a failed PR-state read is not ready, never a throw");
+});
+
+test("#1000 probeOnce issue closed-by-pr-merged: a cross-repo closing PR binds ITS repo, not the issue's", async () => {
+  const calls: string[] = [];
+  const probe = parseProbe({ kind: "issue", target: "acme/issues#9", match: { issueState: "closed-by-pr-merged" } });
+  const r = await probeOnce(probe, routedExec(CLI_CLOSED_BY_PR({ owner: "acme", name: "code" }, 432), { "acme/code#432": "MERGED" }, calls), {});
+  assert(r.ready, r.detail);
+  assertEquals(r.bind?.closingPr, "acme/code#432");
+  // The URL-only shape (no `repository`) also resolves the cross-repo owner.
+  const urlOnly = matchIssue(
+    { issueState: "closed-by-pr-merged" },
+    { state: "CLOSED", stateReason: "COMPLETED", closedByPullRequestsReferences: [{ number: 5, state: "MERGED", url: "https://github.com/acme/code/pull/5" }] },
+    "acme/issues",
+  );
+  assertEquals(urlOnly.bind?.closingPr, "acme/code#5");
+});
+
+test("#1000 parseProbe/probeOnce issue: a canonical /issues/ URL target is accepted and probed; a /pull/ URL is not", async () => {
+  const p = parseProbe({ kind: "issue", target: "https://github.com/o/r/issues/9" });
+  const capture: { cmd?: string } = {};
+  await probeOnce(p, stubExec({ command: { code: 0, stdout: JSON.stringify(OPEN_ISSUE), stderr: "" }, capture }), {});
+  assertStringIncludes(capture.cmd ?? "", "gh issue view '9' --repo 'o/r'");
+  assertThrows(() => parseProbe({ kind: "issue", target: "https://github.com/o/r/pull/9" }), Error, "issue");
+});
