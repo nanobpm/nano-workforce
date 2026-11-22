@@ -86,6 +86,18 @@ async function activateParkedAgentJob(app: TestApp, processInstanceKey: string, 
   });
 }
 
+/** Advance the virtual clock in 1s steps (each followed by a `settle()`) until the SLA check has
+ * escalated the parked node, or `maxMs` elapses. The SLA check runs on its own timer loop and compares
+ * against the injected (virtual) clock, so its verdict can land a step after the budget boundary;
+ * stepping keeps the assertion exact without guessing that cadence. */
+async function advanceUntilEscalated(app: TestApp, maxMs: number): Promise<void> {
+  for (let t = 0; t < maxMs; t += 1_000) {
+    await app.advanceTime(1_000);
+    await app.settle();
+    if ((await app.engine.searchUserTasks({ state: "CREATED" })).some((u) => u.elementId?.endsWith("__esc"))) return;
+  }
+}
+
 /** Boot a fresh app per scenario (the WASM engine's taken-flow snapshot is engine-global cumulative). */
 async function boot(dir: string): Promise<TestApp> {
   return bootTestApp(APP_ROOT, { env: { ...GITHUB_ENV, NANO_APP_DB_URL: `file:${join(dir, "app.db")}` } });
@@ -672,7 +684,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     await activateParkedAgentJob(app, run.handle.processInstanceKey, "senior:demo");
 
     // Elapse the node SLA → the `=nodeTimeout` boundary fires and parks the node on its timeout `__esc`.
-    await app.advanceTime(2_100);
+    await advanceUntilEscalated(app, 10_000);
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
     assert.ok(esc, "the timed-out agent parks on its timeout escalation task");
     assert.equal(connectorFired, 0, "the downstream connector has not fired before the escalation resolves");
@@ -737,7 +749,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // Issue #1016: activation-anchored work SLA — record the parked job's activation (the poller's
     // role; the testkit runs no poll loop) so the elapsed budget escalates.
     await activateParkedAgentJob(app, run.handle.processInstanceKey, "senior:demo");
-    await app.advanceTime(2_100);
+    await advanceUntilEscalated(app, 10_000);
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
     assert.ok(esc, "the timed-out agent parks on its timeout escalation task");
 
@@ -806,7 +818,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // Issue #1016: activation-anchored work SLA — record the parked job's activation (the poller's
     // role; the testkit runs no poll loop) so the elapsed budget escalates.
     await activateParkedAgentJob(app, run.handle.processInstanceKey, "senior:demo");
-    await app.advanceTime(2_100);
+    await advanceUntilEscalated(app, 10_000);
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
     assert.ok(esc, "the timed-out agent parks on its timeout escalation task");
 
@@ -865,7 +877,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // Issue #1016: activation-anchored work SLA — record the parked job's activation (the poller's
     // role; the testkit runs no poll loop) so the elapsed budget escalates.
     await activateParkedAgentJob(app, run.handle.processInstanceKey, "senior:demo");
-    await app.advanceTime(2_100);
+    await advanceUntilEscalated(app, 10_000);
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
     assert.ok(esc, "the timed-out agent parks on its timeout escalation task");
 
@@ -922,7 +934,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // Issue #1016: activation-anchored work SLA — record the parked job's activation (the poller's
     // role; the testkit runs no poll loop) so the elapsed budget escalates.
     await activateParkedAgentJob(app, run.handle.processInstanceKey, "senior:demo");
-    await app.advanceTime(2_100);
+    await advanceUntilEscalated(app, 10_000);
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
     assert.ok(esc, "the timed-out agent parks on its timeout escalation task");
 
@@ -982,7 +994,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // Issue #1016: activation-anchored work SLA — record the parked job's activation (the poller's
     // role; the testkit runs no poll loop) so the elapsed budget escalates.
     await activateParkedAgentJob(app, run.handle.processInstanceKey, "senior:demo");
-    await app.advanceTime(2_100);
+    await advanceUntilEscalated(app, 10_000);
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
     assert.ok(esc, "the timed-out agent parks on its timeout escalation task");
 
@@ -1052,6 +1064,33 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     assert.ok(esc.length >= 1, `the unresolved-target gate escalates (bounded), got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`);
   });
 
+  test("#1016 the REAL SLA check measures elapsed work on the injected clock: within budget it does NOT escalate", async () => {
+    const app = track(await boot(freshDir()));
+    const graph: DeliveryGraph = {
+      name: "e2e sla within budget",
+      nodes: [{ id: "solo", kind: "agent", agent: { jobType: "senior:within-budget" } }],
+      edges: [],
+    };
+    const run = await runDeliveryGraph(app.engine, graph, { nodeTimeout: "PT2S", escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+    const escalated = async (): Promise<boolean> =>
+      (await app.engine.searchUserTasks({ state: "CREATED" })).some((t) => t.elementId?.endsWith("__esc"));
+
+    // Activate 1s in, so the check that runs next sees only ~1s of work — inside the PT2S budget.
+    // (A wall-clock `now` in the check would see decades elapsed and escalate here.)
+    await app.advanceTime(1_000);
+    await activateParkedAgentJob(app, run.handle.processInstanceKey, "senior:within-budget");
+    await app.advanceTime(1_100);
+    await app.settle();
+    assert.equal(await escalated(), false, "a job still within its work budget since activation must NOT escalate");
+
+    // The next check (t=4s) sees ~3s since activation — past budget → escalates.
+    await advanceUntilEscalated(app, 10_000);
+    await app.settle();
+    assert.equal(await escalated(), true, "once the work budget since activation elapses, the check escalates");
+  });
+
   test("#872 a node released with NO per-node timeout gets the default SLA — not a zero-length timer that fires instantly", async () => {
     const app = track(await boot(freshDir()));
 
@@ -1094,7 +1133,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     await activateParkedAgentJob(app, inst.processInstanceKey, "never-registered-so-it-parks");
 
     // Elapse the fallback SLA → the boundary fires exactly as a real PT2S timer would.
-    await app.advanceTime(2_100);
+    await advanceUntilEscalated(app, 10_000);
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.endsWith("__esc"));
     assert.ok(esc.length >= 1, `the fallback SLA eventually escalates the parked node, got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`);
   });
@@ -1150,7 +1189,12 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     await activateParkedAgentJob(app, inst.processInstanceKey, "never-registered-so-it-parks");
 
     // Elapse past the literal PT1H → the boundary fires exactly as a real hour-long timer would.
-    await app.advanceTime(3_600_000);
+    await app.advanceTime(3_600_000 - 5_000);
+    assert.ok(
+      (await app.engine.searchUserTasks({ state: "CREATED" })).every((t) => !t.elementId?.endsWith("__esc")),
+      "still within the PT1H work budget since activation — no escalation yet",
+    );
+    await advanceUntilEscalated(app, 15_000);
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.endsWith("__esc"));
     assert.ok(esc.length >= 1, `the literal PT1H default eventually escalates the parked node, got ${JSON.stringify((await app.engine.searchUserTasks({ state: "CREATED" })).map((t) => t.elementId))}`);
   });
@@ -1378,7 +1422,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // Issue #1016: activation-anchored work SLA — record the parked job's activation (the poller's
     // role; the testkit runs no poll loop) so the elapsed budget escalates.
     await activateParkedAgentJob(app, run.handle.processInstanceKey, "senior:never");
-    await app.advanceTime(2_100);
+    await advanceUntilEscalated(app, 10_000);
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
     assert.ok(esc, "the timed-out policy agent parks on its timeout escalation");
     assert.equal(seen.length, 0, "nothing enrolled before the resume");

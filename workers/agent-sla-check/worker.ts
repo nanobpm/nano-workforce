@@ -69,6 +69,9 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     activationJobType: deliveryNodeActivationJobType(jobType, watchedTaskElement(el)),
     jobType,
     sla,
+    // The injected app clock (virtual under the testkit, live in production) — never wall-clock, so
+    // `now` shares the time base of the ledger's `activated_at` and the engine's timers.
+    now: new Date(app.now()).toISOString(),
   });
   app.log.info("agent-sla-check", { pik, el, jobType, expired });
   return { agentSlaExpired: expired, agentSlaReason: reason };
