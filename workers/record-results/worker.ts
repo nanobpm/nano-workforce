@@ -24,7 +24,10 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const ts = new Date().toISOString();
 
   const rows = await planTasks(app.data).find({ plan_key: planKey });
-  const opened = rows.filter((r) => r.status === "opened").length;
+  // Only KEYED opened rows count as dispatched (issue #1011): a keyless `opened` row has no PR to
+  // converge, so it must reach the no-work guard (and be named there), not be reported as success.
+  const hasKey = (k: unknown): boolean => typeof k === "string" && k.trim() !== "";
+  const opened = rows.filter((r) => r.status === "opened" && hasKey(r.pr_key)).length;
 
   // Categorical no-work guard (issue #86): the epic reached its finalizer having opened ZERO PRs —
   // an empty plan (e.g. the planner agent could not persist its result), or every task
@@ -40,7 +43,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
     // skipped" work, and the generic message hid that their PRs may actually exist.
     const keyless = rows
       .filter((r) =>
-        (r.status === "opened" && !r.pr_key) ||
+        (r.status === "opened" && !hasKey(r.pr_key)) ||
         (r.status === "blocked" && (r.summary ?? "").startsWith(KEYLESS_OPENED_SUMMARY))
       )
       .map((r) => r.task_id);

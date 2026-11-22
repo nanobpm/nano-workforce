@@ -99,6 +99,19 @@ test("keyless-opened slices are NAMED in the no-work error, not lumped into bloc
   );
 });
 
+for (const pr_key of [null, "", "   "]) {
+  test(`an undemoted keyless opened row (pr_key=${JSON.stringify(pr_key)}) is NOT counted as dispatched (issue #1011)`, async () => {
+    const app = fakeApp([{ id: 1, plan_key: "o/r#1", task_id: "a", status: "opened", pr_key }]);
+    const err = await assertRejects(() => call(app), BpmnError);
+    assertEquals((err as BpmnError).errorCode, "NO_WORK_DISPATCHED");
+    const plan = app._plans.at(-1) as Record<string, unknown>;
+    assertEquals(
+      plan.outcome,
+      'no work dispatched — task(s) a reported "opened" with no PR key (pr: null); the rest were blocked or skipped',
+    );
+  });
+}
+
 test("tasks present but none opened (all skipped/blocked) hard-fails", async () => {
   const app = fakeApp([
     { id: 1, plan_key: "o/r#1", task_id: "a", status: "skipped" },
@@ -113,7 +126,7 @@ test("tasks present but none opened (all skipped/blocked) hard-fails", async () 
 
 test("at least one opened PR finalizes cleanly (no throw)", async () => {
   const app = fakeApp([
-    { id: 1, plan_key: "o/r#1", task_id: "a", status: "opened" },
+    { id: 1, plan_key: "o/r#1", task_id: "a", status: "opened", pr_key: "o/r#9" },
     { id: 2, plan_key: "o/r#1", task_id: "b", status: "skipped" },
   ]);
   await call(app);

@@ -186,7 +186,7 @@
     <bpmn:sequenceFlow id="ic_toImplement" sourceRef="slice-branch" targetRef="implement-task" />
     <bpmn:sequenceFlow id="ic_toGw" sourceRef="implement-task" targetRef="ic_gw" />
     <bpmn:sequenceFlow id="ic_done" name="done" sourceRef="ic_gw" targetRef="ic_end">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=(status = "opened" and is defined(pr) and pr != null and pr != "") or status = "blocked" or status = "skipped"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=(status = "opened" and is defined(pr) and pr != null and trim(string(pr)) != "") or status = "blocked" or status = "skipped"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="ic_escalate" name="reconcile" sourceRef="ic_gw" targetRef="reconcile-implement" />
     <bpmn:sequenceFlow id="ic_toReconcileGw" sourceRef="reconcile-implement" targetRef="ic_reconcile_gw" />

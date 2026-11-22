@@ -113,3 +113,12 @@ test("claimed-completion (off-vocabulary status) + no PR → auto-retry once wit
     else process.env.NANO_PR_GITHUB_TRANSPORT = prevTransport;
   }
 });
+
+test("resolveReportedBranch falls back to the harness io.nanobpm.agentResult.branch (issue #1011)", async () => {
+  const { resolveReportedBranch } = await import("./worker.ts");
+  assertEquals(resolveReportedBranch({ reportedBranch: " feat/x " }), "feat/x");
+  assertEquals(resolveReportedBranch({ reportedBranch: "  ", "io.nanobpm.agentResult": { branch: "feat/pushed" } }), "feat/pushed");
+  assertEquals(resolveReportedBranch({ reportedBranch: null, "io.nanobpm.agentResult": { branch: "feat/pushed" } }), "feat/pushed");
+  assertEquals(resolveReportedBranch({ "io.nanobpm.agentResult": { branch: "" } }), undefined);
+  assertEquals(resolveReportedBranch({}), undefined);
+});

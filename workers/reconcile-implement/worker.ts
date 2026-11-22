@@ -41,6 +41,20 @@ function taskId(task: unknown): unknown {
   return undefined;
 }
 
+/** The harness reports the branch it pushed under the reserved `io.nanobpm.agentResult.branch`
+ *  envelope (c8ctl default-branch output contract). Use it when the agent's own top-level `branch`
+ *  is blank, so a pushed non-deterministic branch is still looked up before `feat/<task.id>`. */
+export function resolveReportedBranch(vars: Record<string, unknown>): string | undefined {
+  const top = vars.reportedBranch;
+  if (typeof top === "string" && top.trim() !== "") return top.trim();
+  const env = vars["io.nanobpm.agentResult"];
+  if (env !== null && typeof env === "object" && "branch" in env) {
+    const b = env.branch;
+    if (typeof b === "string" && b.trim() !== "") return b.trim();
+  }
+  return undefined;
+}
+
 const handler: AppJobHandler<In, ReconcileImplementResult> = async (job, app) => {
   const res = await reconcileImplement(
     {
@@ -51,7 +65,7 @@ const handler: AppJobHandler<In, ReconcileImplementResult> = async (job, app) =>
       baseBranch: job.variables.baseBranch,
       question: job.variables.question,
       retried: job.variables.implementRetried,
-      branch: job.variables.reportedBranch,
+      branch: resolveReportedBranch(job.variables),
     },
     listPrsForHead,
     process.env.GITHUB_TOKEN ?? "",
