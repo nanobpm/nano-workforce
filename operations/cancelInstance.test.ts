@@ -13,7 +13,7 @@ import type { AppApi } from "@nanobpm/urban";
 import { memBlackboardSource } from "../test/blackboardDb.ts";
 import { noopLog } from "../test/log.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
-import handler, { resetCancelKeyLocks } from "./cancelInstance.ts";
+import handler, { cancelKeyLocks, resetCancelKeyLocks } from "./cancelInstance.ts";
 
 // The cancel door serializes its record/cancel/commit sequence on a PROCESS-WIDE per-key mutex, so a
 // stale queued waiter from an earlier test would see (and roll back) a later test's rows. Start every
@@ -25,6 +25,9 @@ interface FakeEngineOpts {
   cancelThrows?: boolean;
   /** The state `searchProcessInstances` reads back for the key. `undefined` ⇒ "gone" (empty). */
   readBackState?: "ACTIVE" | "COMPLETED" | "TERMINATED" | undefined;
+  /** Record-app fakes only: the state read BEFORE the cancel lands (the door's engine liveness
+   * probe). Defaults to ACTIVE — a live run. `undefined`-as-explicit is not used; "gone" ⇒ empty. */
+  preState?: "ACTIVE" | "COMPLETED" | "TERMINATED" | "gone";
 }
 
 function makeApp(opts: FakeEngineOpts = {}): { app: AppApi; cancelCalls: string[] } {
@@ -197,6 +200,10 @@ function makeRecordApp(
       if (opts.cancelThrows) throw new Error("engine refused");
     },
     async searchProcessInstances() {
+      if (cancelCalls.length === 0) {
+        const pre = opts.preState ?? "ACTIVE";
+        return pre === "gone" ? [] : [{ state: pre }];
+      }
       return opts.readBackState ? [{ state: opts.readBackState }] : [];
     },
   };
@@ -233,6 +240,10 @@ function makeSettlingRecordApp(
       }
     },
     async searchProcessInstances() {
+      if (cancelCalls.length === 0) {
+        const pre = opts.preState ?? "ACTIVE";
+        return pre === "gone" ? [] : [{ state: pre }];
+      }
       return opts.readBackState ? [{ state: opts.readBackState }] : [];
     },
   };
@@ -513,4 +524,41 @@ test("PR #996 — overlapping cancels: a refused request never deletes the prove
   const { effectiveTerminalStatus } = await import("../app/runTerminal.ts");
   const row = stores.run_cancellations.rows[0];
   assertEquals(effectiveTerminalStatus("abandoned", row.cancelled_at, row.committed === 1), "cancelled");
+});
+
+test("PR #996 — a record still ACTIVE in tracking but already TERMINATED in the engine does NOT commit the retrying caller's provenance", async () => {
+  // Out-of-band terminate landed between tracking polls: the record snapshot still reads live, but
+  // the engine already reports TERMINATED before this cancel — so this call did not end the run.
+  const stores = {
+    feature_runs: { rows: [{ feature_key: "o/r#13", process_key: "900", status: "running" }], key: "feature_key" },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
+    run_cancellations: { rows: [] as any[], key: "process_key" },
+  };
+  const { app } = makeSettlingRecordApp(stores, { cancelThrows: true, readBackState: "TERMINATED", preState: "TERMINATED" });
+  await call(app, { processInstanceKey: "900", actor: "late-caller" });
+  assertEquals(stores.run_cancellations.rows[0]?.committed ?? 0, 0, "an engine-terminal-before-cancel run is never attributed");
+});
+
+test("PR #996 — a stale UNCOMMITTED row from an earlier attempt is re-owned by the fresh cancel, so the commit names the new caller", async () => {
+  const stores = {
+    feature_runs: { rows: [{ feature_key: "o/r#14", process_key: "910", status: "running" }], key: "feature_key" },
+    run_cancellations: {
+      rows: [{ process_key: "910", run_table: null, cancelled_by: "stale-a", cancel_reason: "old", cancelled_at: "2000-01-01T00:00:00.000Z", committed: 0 }],
+      key: "process_key",
+    },
+  };
+  const { app } = makeSettlingRecordApp(stores, { readBackState: "TERMINATED" });
+  const res = await call(app, { processInstanceKey: "910", actor: "request-b", reason: "new" });
+  assertEquals(res.status, 200);
+  const row = stores.run_cancellations.rows[0];
+  assertEquals(row.committed, 1);
+  assertEquals(row.cancelled_by, "request-b", "the committed provenance names the fresh caller, not the stale attempt");
+  assertEquals(row.cancel_reason, "new");
+});
+
+test("PR #996 — the per-key cancel lock is released (no unbounded map growth) after a cancel completes", async () => {
+  resetCancelKeyLocks();
+  const { app } = makeApp({ readBackState: "TERMINATED" });
+  await call(app, { processInstanceKey: "920" });
+  assertEquals(cancelKeyLocks.size, 0, "a completed, uncontended cancel leaves no lock entry behind");
 });

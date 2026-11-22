@@ -94,15 +94,24 @@ export async function recordRunCancellation(
 ): Promise<boolean> {
   const reason = typeof input.reason === "string" && input.reason.trim() ? input.reason.trim() : null;
   const table = data.table<RunCancellation>(RUN_CANCELLATIONS_TABLE, "process_key");
-  if (await table.get(input.processKey)) return false;
-  await table.insert({
-    process_key: input.processKey,
+  const fresh = {
     run_table: input.runTable ?? null,
     cancelled_by: input.cancelledBy,
     cancel_reason: reason,
     cancelled_at: input.at ?? new Date().toISOString(),
     committed: 0,
-  });
+  };
+  const existing = await table.get(input.processKey);
+  // A COMMITTED cancellation is final — keep it idempotently. A leftover UNCOMMITTED row is a stale
+  // attempt (a request that stopped early or whose rollback failed); this fresh attempt takes
+  // ownership of it, so a later commit names THIS caller, never the stale one (PR #996 review).
+  // Callers serialize per key (the cancel door's per-key lock), so ownership is unambiguous.
+  if (existing?.committed === 1) return false;
+  if (existing) {
+    await table.update(input.processKey, fresh);
+    return true;
+  }
+  await table.insert({ process_key: input.processKey, ...fresh });
   return true;
 }
 

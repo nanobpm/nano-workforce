@@ -66,13 +66,29 @@ async function withCancelKeyLock<T>(key: string, fn: () => Promise<T>): Promise<
   const mine = new Promise<void>((resolve) => {
     release = resolve;
   });
-  cancelKeyLocks.set(key, prior.then(() => mine));
+  // Store and compare the SAME queued promise: comparing against `mine` (never the stored value) left
+  // every key in the map forever (unbounded growth; PR #996 review). A newer waiter replaces the entry,
+  // so the identity check also preserves its chain.
+  const queued = prior.then(() => mine);
+  cancelKeyLocks.set(key, queued);
   await prior;
   try {
     return await fn();
   } finally {
     release();
-    if (cancelKeyLocks.get(key) === mine) cancelKeyLocks.delete(key);
+    if (cancelKeyLocks.get(key) === queued) cancelKeyLocks.delete(key);
+  }
+}
+
+/** Engine truth for "is this instance still running": true = ACTIVE, false = positively not running
+ * (TERMINATED / COMPLETED / gone), null = the probe failed (caller falls back to its record snapshot). */
+async function readEngineLiveness(app: AppApi, processInstanceKey: string): Promise<boolean | null> {
+  try {
+    const [snapshot] = await app.engine.searchProcessInstances({ processInstanceKeys: [processInstanceKey] });
+    return snapshot ? snapshot.state === "ACTIVE" : false;
+  } catch (err) {
+    app.log.warn("cancelInstance: could not probe engine liveness before cancel", { processInstanceKey, error: String(err) });
+    return null;
   }
 }
 
@@ -172,6 +188,12 @@ export async function cancelTrackedRun(
       }
     }
 
+    // Engine-truth liveness BEFORE the cancel (PR #996 review): the tracking snapshot can lag an
+    // out-of-band terminate between polls, and the shared primitive reports a throw + TERMINATED
+    // readback as idempotent success, so neither alone proves THIS call ended the run. Only an
+    // instance the engine itself reports ACTIVE right before our cancel is a fresh termination.
+    const engineLiveBefore = canResolveRecord ? await readEngineLiveness(app, processInstanceKey) : null;
+
     const result = await cancelInstanceReconciling(
       app,
       [...engineBackedBindings()],
@@ -225,7 +247,8 @@ export async function cancelTrackedRun(
     // when the record was still ACTIVE at resolve time (or unresolvable — trust the engine's
     // committed 204 there); a retry over an already-terminal record leaves its row uncommitted and
     // the run keeps its truthful out-of-band `abandoned` status.
-    if (!canResolveRecord || resolvedRecordActive) {
+    // `engineLiveBefore === null` (probe unreadable) falls back to the record snapshot alone.
+    if (!canResolveRecord || (resolvedRecordActive && engineLiveBefore !== false)) {
       try {
         await commitRunCancellation(app.data, processInstanceKey);
       } catch (err) {
