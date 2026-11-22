@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
-import { decideProgress, MAX_HUSK_RETRIES, noProgressQuestion, routeProgress } from "./roundProgress.ts";
+import { convergedHeadRoute, decideProgress, MAX_HUSK_RETRIES, noProgressQuestion, routeProgress } from "./roundProgress.ts";
 
 // ── The canonical router ────────────────────────────────────────────────────
 
@@ -278,7 +278,7 @@ test("progress-check: a non-addressed round records the baseline and consumes th
   );
   const { app, updates } = fakeApp({ last_round_head: "sha-1" });
   const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "waiting", repo: "o/r", prNumber: 1 } } as any, app as any);
-  assertEquals(out, { progressed: true, huskRetries: 0, ciRed: false, prGone: "" });
+  assertEquals(out, { progressed: true, huskRetries: 0, ciRed: false, convergedHead: false, prGone: "" });
   assertEquals(called, true, "a waiting round reads the head to seed the baseline");
   assertEquals(agentReads, 1, "and consults the agent-work channel to consume its own review instance");
   // ONE atomic write now (Copilot #789): the baseline head advance, the review-wait PARK, and the
@@ -323,7 +323,7 @@ test("progress-check: a review-stale re-entry parks with waiting_since at the ga
     } as any,
     app as any,
   );
-  assertEquals(out, { progressed: true, huskRetries: 0, ciRed: false, prGone: "" });
+  assertEquals(out, { progressed: true, huskRetries: 0, ciRed: false, convergedHead: false, prGone: "" });
   assertEquals(updates.length, 1, "one atomic park write");
   assertEquals(updates[0]!.patch.status, "waiting_review", "the round parks for review");
   assertEquals(
@@ -430,7 +430,7 @@ test("progress-check: a no-advance round self-heals to a reachable push-checkpoi
     { processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0 } } as any,
     app as any,
   );
-  assertEquals(out, { progressed: true, huskRetries: 0, ciRed: false, prGone: "" }, "a healed round continues as real progress");
+  assertEquals(out, { progressed: true, huskRetries: 0, ciRed: false, convergedHead: false, prGone: "" }, "a healed round continues as real progress");
   assertEquals(
     healArgs,
     ["o/r", 1, "o/r#1", "sha-1", 3, "pik"],
@@ -1471,4 +1471,43 @@ test("convergence-loop BPMN: gw-progress ends on prGone and gw-husk routes ciRed
   assertStringIncludes(xml, "=ciRed = true");
   assertStringIncludes(xml, 'sourceRef="converge-fix-ci" targetRef="gw-guard"');
   assert(/id="converge-fix-ci"[\s\S]*?type="senior:fix-ci"/.test(xml), "converge-fix-ci is a senior:fix-ci agent task");
+});
+
+test("progress-check: an addressed no-advance round on a converged head (0 threads, green) routes to merge, not a human (#1018)", async () => {
+  await withPrState(prStateFixture({ unresolvedThreads: 0, failingChecks: 0 }), async () => {
+    const handler = await makeUnderTest(async () => "sha-1", async () => true);
+    const { app } = fakeApp({ last_round_head: "sha-1" });
+    const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0, roundEntryHead: "sha-1" } } as any, app as any);
+    assertEquals(out.progressed, false);
+    assertEquals(out.huskRetry, false);
+    assertEquals(out.convergedHead, true);
+    assertEquals(out.ciRed, false);
+    assertEquals(out.noProgressQuestion, undefined, "no human escalation question");
+  });
+});
+
+test("progress-check: the same no-advance round with an open thread still escalates (#1018)", async () => {
+  await withPrState(prStateFixture({ unresolvedThreads: 1, failingChecks: 0 }), async () => {
+    const handler = await makeUnderTest(async () => "sha-1", async () => true);
+    const { app } = fakeApp({ last_round_head: "sha-1" });
+    const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0, roundEntryHead: "sha-1" } } as any, app as any);
+    assertEquals(out.convergedHead, false);
+    assertEquals(out.noProgressReason, "no-advance");
+    assertStringIncludes(String(out.noProgressQuestion), "PR head did not advance");
+  });
+});
+
+test("convergedHeadRoute: only 0 open threads and no red check route to merge (#1018)", () => {
+  const base = { failingChecks: 0, failingCheckNames: [], unresolvedThreads: 0 };
+  assertEquals(convergedHeadRoute(base), true);
+  assertEquals(convergedHeadRoute({ ...base, unresolvedThreads: 1 }), false);
+  assertEquals(convergedHeadRoute({ ...base, unresolvedThreads: -1 }), false);
+  assertEquals(convergedHeadRoute({ ...base, failingChecks: 1 }), false);
+  assertEquals(convergedHeadRoute(null), false);
+});
+
+test("convergence-loop BPMN: gw-husk routes convergedHead to the converge gate (#1018)", () => {
+  const xml = readFileSync(new URL("../resources/processes/convergence-loop.bpmn", import.meta.url), "utf8");
+  assertStringIncludes(xml, 'sourceRef="gw-husk" targetRef="check-converge"');
+  assertStringIncludes(xml, "=convergedHead = true");
 });
