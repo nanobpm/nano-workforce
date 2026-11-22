@@ -1461,3 +1461,24 @@ test("reconcileReviewOpenFindings: comment ids above 2^31-1 via fullDatabaseId r
   assertEquals(page?.threads[0].commentIds, [big]);
   assertEquals(reconcileReviewOpenFindings(body, page?.threads ?? []), []);
 });
+
+test("reconcileReviewOpenFindings: an unresolved thread ABSENT from the frozen summary keeps findings (fail closed)", () => {
+  const out = reconcileReviewOpenFindings(V2_OPEN_TWO, [thread(true, [11]), thread(true, [22]), thread(false, [99])]);
+  assertEquals(out.length > 0, true);
+});
+
+test("reconcileReviewOpenFindings: a nested count section inside an open-issues section fails closed", () => {
+  const body = [
+    "### 🟡 Changes recommended",
+    "<details open>",
+    "<summary><strong>1 open issue</strong></summary>",
+    "",
+    "- [Fix A](https://github.com/o/r/pull/1#discussion_r11) · New",
+    "<details>",
+    "<summary><strong>1 open issue</strong></summary>",
+    "Hidden prose finding with no thread",
+    "</details>",
+    "</details>",
+  ].join("\n");
+  assertEquals(reconcileReviewOpenFindings(body, [thread(true, [11])]).length > 0, true);
+});

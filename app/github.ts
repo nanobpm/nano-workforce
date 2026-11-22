@@ -338,7 +338,8 @@ export function parseReviewOpenFindings(reviewBody: string | null | undefined): 
  * to an inline thread (`#discussion_r<id>`), and every linked thread is resolved. The verdict line
  * ("changes recommended") is dropped only when at least one count section exists and all count
  * sections reconciled. Anything else — a summary-only finding with no thread link, a count/list
- * mismatch, an unknown or unresolved thread, a verdict with no itemised section — stays blocking
+ * mismatch, an unknown or unresolved thread, ANY unresolved live thread (even one the summary does
+ * not link), a nested details/summary section inside a count section, a verdict with no itemised section — stays blocking
  * (fail-CLOSED, preserving the #923 summary-only-finding safeguard). Pure; unit-tested. */
 export function reconcileReviewOpenFindings(
   reviewBody: string | null | undefined,
@@ -346,6 +347,9 @@ export function reconcileReviewOpenFindings(
 ): string[] {
   const findings = parseReviewOpenFindings(reviewBody);
   if (findings.length === 0) return findings;
+  // FAIL CLOSED on ANY unresolved live thread (issue #1018 review): a thread opened AFTER the frozen
+  // summary (absent from it) must never be masked by clearing the summary's own resolved links.
+  if (threads.some((t) => !t.isResolved)) return findings;
   const body = reviewBody ?? "";
   const resolvedIds = new Set<string>();
   for (const t of threads) if (t.isResolved) for (const id of t.commentIds ?? []) resolvedIds.add(id);
@@ -357,6 +361,12 @@ export function reconcileReviewOpenFindings(
     const n = Number(m[1] ?? m[2]);
     if (!(n > 0)) continue;
     sections++;
+    // A nested <details>/<summary> inside the section could hide further (unlinked) findings that the
+    // lazy match swallowed up to the FIRST </details> — fail closed rather than reconcile it away.
+    if (/<details\b|<summary\b/i.test(m[3])) {
+      allReconciled = false;
+      continue;
+    }
     const items = m[3].split(/\r?\n/).filter((l) => /^\s*[-*]\s+\S/.test(l));
     const ok =
       items.length === n &&
