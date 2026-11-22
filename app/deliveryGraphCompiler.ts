@@ -2388,7 +2388,9 @@ function serviceBodyLines(
  * agent task — re-queued, no escalation,
  * because the work SLA only starts once a worker picks the job up — and everything else (activated, or
  * activation unknown) onward to the timeout escalation, whose context line carries `<el>_slaReason`
- * (the activation facts). Outputs are node-scoped (`<el>_…`) so parallel nodes never share them. */
+ * (the activation facts). Re-queues are BOUNDED: the check counts them in `<el>_slaRequeues` and, at
+ * {@link MAX_SLA_REQUEUES}, stops re-queueing and escalates "never picked up after N × SLA" — so a
+ * job type no worker serves can never loop the boundary forever. Outputs are node-scoped (`<el>_…`) so parallel nodes never share them. */
 function agentSlaCheckLines(el: string): string[] {
   return [
     `      <bpmn:serviceTask id="${el}_slaChk" name="Was the job ever activated?">`,
@@ -2397,6 +2399,7 @@ function agentSlaCheckLines(el: string): string[] {
     "          <zeebe:ioMapping>",
     `            <zeebe:output source="=agentSlaRequeue" target="${el}_slaRequeue" />`,
     `            <zeebe:output source="=agentSlaReason" target="${el}_slaReason" />`,
+    `            <zeebe:output source="=agentSlaRequeues" target="${el}_slaRequeues" />`,
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
     `        <bpmn:incoming>${el}_i2</bpmn:incoming>`,

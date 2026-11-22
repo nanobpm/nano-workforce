@@ -20,6 +20,7 @@ interface In extends Record<string, unknown> {
 interface Out extends Record<string, unknown> {
   agentSlaRequeue: boolean;
   agentSlaReason: string;
+  agentSlaRequeues: number;
 }
 
 /** The SLA-check element id is `<el>_slaChk`; the watched agent leaf is `<el>_task`. */
@@ -32,14 +33,17 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const sla = typeof job.variables.nodeTimeout === "string" ? job.variables.nodeTimeout : "";
   const pik = job.processInstanceKey != null ? String(job.processInstanceKey) : "";
   const el = typeof job.elementId === "string" ? job.elementId : "";
-  const { requeue, reason } = await deliveryNodeSlaCheck(app.data, {
+  const priorRaw = job.variables[`${el.replace(/_slaChk$/, "")}_slaRequeues`];
+  const priorRequeues = typeof priorRaw === "number" && Number.isInteger(priorRaw) && priorRaw > 0 ? priorRaw : 0;
+  const { requeue, reason, requeues } = await deliveryNodeSlaCheck(app.data, {
+    priorRequeues,
     processInstanceKey: pik,
     activationJobType: deliveryNodeActivationJobType(jobType, watchedTaskElement(el)),
     jobType,
     sla,
   });
   app.log.info("agent-sla-check", { pik, el, jobType, requeue });
-  return { agentSlaRequeue: requeue, agentSlaReason: reason };
+  return { agentSlaRequeue: requeue, agentSlaReason: reason, agentSlaRequeues: requeues };
 };
 
 export default handler;

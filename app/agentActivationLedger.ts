@@ -132,10 +132,11 @@ export async function recordAgentJobObservation(
     patch.worker = worker;
   }
   if (jobKey && !existingKey) patch.job_key = jobKey;
-  if (Object.keys(patch).length > 0) {
-    patch.updated_at = input.now;
-    await table.update(id, patch);
-  }
+  // ALWAYS bump `updated_at`: it is the row's last-observed timestamp, which the delivery-node SLA
+  // check (issue #1016) uses to tell a FRESH "still queued" observation from a stale one — a job leased
+  // after the last pass must not be read as never-activated on a stale row.
+  patch.updated_at = input.now;
+  await table.update(id, patch);
 }
 
 /** Read the activation record for a (process instance, job type), or `undefined` when the poller never

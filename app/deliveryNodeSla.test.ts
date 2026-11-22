@@ -15,8 +15,10 @@ const key = deliveryNodeActivationJobType("senior:feature", "n0_task");
 test("never-activated delivery node job → re-queue, no escalation", async () => {
   const { data } = memDataFor(MIG);
   await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:00:00Z" });
+  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:59:00Z" });
   const r = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T01:00:00Z" });
   assertEquals(r.requeue, true);
+  assertEquals(r.requeues, 1);
 });
 
 test("activated delivery node job → escalate with worker + activation time, not 'may already exist'", async () => {
@@ -62,4 +64,30 @@ test("poll records delivery-graph agent jobs under a node-qualified key (paralle
   assertEquals((await getAgentJobActivation(data, "PI", deliveryNodeActivationJobType("senior:feature", "n0_task")))?.worker, "w1");
   assertEquals((await getAgentJobActivation(data, "PI", deliveryNodeActivationJobType("senior:feature", "n1_task")))?.activated_at, null);
   assertEquals(await getAgentJobActivation(data, "PX", deliveryNodeActivationJobType("senior:feature", "x_task")), undefined);
+});
+
+test("never-activated re-queues are capped → escalate 'never picked up' (no infinite loop)", async () => {
+  const { data } = memDataFor(MIG);
+  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:59:30Z" });
+  const ok = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T01:00:00Z", priorRequeues: 2, maxRequeues: 3 });
+  assertEquals(ok.requeue, true);
+  assertEquals(ok.requeues, 3);
+  const r = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T01:00:00Z", priorRequeues: 3, maxRequeues: 3 });
+  assertEquals(r.requeue, false);
+  assertStringIncludes(r.reason, "Never picked up");
+});
+
+test("stale unleased observation → escalate as 'unknown', never re-queue", async () => {
+  const { data } = memDataFor(MIG);
+  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:00:00Z" });
+  const r = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T01:00:00Z", freshWithinMs: 120_000 });
+  assertEquals(r.requeue, false);
+  assertStringIncludes(r.reason, "cannot confirm");
+});
+
+test("re-observation refreshes updated_at so a polled-queued job stays fresh", async () => {
+  const { data } = memDataFor(MIG);
+  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:00:00Z" });
+  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:59:00Z" });
+  assertEquals((await getAgentJobActivation(data, "PI", key))?.updated_at, "2026-11-22T00:59:00Z");
 });
