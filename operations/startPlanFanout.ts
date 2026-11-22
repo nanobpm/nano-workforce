@@ -52,7 +52,15 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
   }
   // Opt-in escalation steward (issue #889): propagate to every child the epic spawns.
   const autoResolveEscalations = "autoResolveEscalations" in body && body.autoResolveEscalations === true;
-  // Slice merge policy (issue #1007): slice PRs auto-merge into the epic base unless explicitly false.
+  // Slice merge policy (issue #1007): slice PRs auto-merge into the epic base unless explicitly
+  // false. A PRESENT-but-non-boolean `autoMerge` (e.g. the string "false") is a 400 (the issue #916
+  // guard the sibling startFeature/startConvergenceLoop doors already carry): this flag DEFAULTS TO
+  // ON, so a mistyped value would otherwise silently read as auto-merge ON — the unsafe direction
+  // for a merge-policy flag.
+  if ("autoMerge" in body && typeof body.autoMerge !== "boolean") {
+    app.log.warn("start-plan rejected: autoMerge must be a boolean", { autoMerge: body.autoMerge });
+    return { status: 400, body: { error: "autoMerge must be a boolean (true or false)" } };
+  }
   const autoMerge = !("autoMerge" in body && body.autoMerge === false);
   const result = await startPlan(app.data, app.engine, parsed, normalizedBase, { autoResolveEscalations, autoMerge });
   const alreadyRunning = "alreadyRunning" in result && result.alreadyRunning === true;
