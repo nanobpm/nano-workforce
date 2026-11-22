@@ -159,8 +159,10 @@ export interface ReviewThread {
   rootLogin?: string | null;
   rootAssociation?: string | null;
   /** Every comment's REST `databaseId` (issue #1018: links a review-summary finding's
-   * `#discussion_r<id>` anchor to its live thread). Optional — absent on fixtures that don't carry it. */
-  commentIds?: number[];
+   * `#discussion_r<id>` anchor to its live thread). Decimal STRINGS sourced from GraphQL
+   * `fullDatabaseId` (a BigInt scalar) so ids above 2^31-1 — which the deprecated `Int` `databaseId`
+   * cannot represent — still match. Optional — absent on fixtures that don't carry it. */
+  commentIds?: string[];
 }
 
 /** A suppressed / low-confidence Copilot advisory parsed out of a review body. Its `key` is the
@@ -345,7 +347,7 @@ export function reconcileReviewOpenFindings(
   const findings = parseReviewOpenFindings(reviewBody);
   if (findings.length === 0) return findings;
   const body = reviewBody ?? "";
-  const resolvedIds = new Set<number>();
+  const resolvedIds = new Set<string>();
   for (const t of threads) if (t.isResolved) for (const id of t.commentIds ?? []) resolvedIds.add(id);
   const sectionRe =
     /<summary>(?:<strong>)?\s*(?:(\d+)\s+open\s+issues?|Open\s*\((\d+)\))\s*(?:<\/strong>)?\s*<\/summary>([\s\S]*?)(?:<\/details>|$)/gi;
@@ -359,13 +361,31 @@ export function reconcileReviewOpenFindings(
     const ok =
       items.length === n &&
       items.every((l) => {
-        const ids = [...l.matchAll(/#discussion_r(\d+)/g)].map((x) => Number(x[1]));
+        const ids = discussionLinkIds(l);
         return ids.length > 0 && ids.every((id) => resolvedIds.has(id));
       });
     if (!ok) allReconciled = false;
   }
   if (sections === 0 || !allReconciled) return findings;
   return [];
+}
+
+/** Thread comment ids linked from ONE summary item — taken ONLY from real markdown link
+ * DESTINATIONS (`](…#discussion_r<id>)`), never from literal prose or code spans: a summary-only item
+ * that merely MENTIONS `#discussion_r11` must not borrow thread 11's resolution (fail closed). Code
+ * spans are stripped first so a backticked `[x](…#discussion_r11)` is literal text too. Ids are
+ * normalised decimal strings (no leading zeros) to match `fullDatabaseId`. */
+export function discussionLinkIds(item: string): string[] {
+  const text = item.replace(/(`+)[\s\S]*?\1/g, "");
+  return [...text.matchAll(/\]\(\s*<?[^()\s<>]*#discussion_r(\d+)>?(?:\s+"[^"]*")?\s*\)/g)].map((x) => normaliseCommentId(x[1]));
+}
+
+/** Canonical decimal-string form of a comment id (number, BigInt-as-string, or digits); `""` when
+ * the value is not a non-negative integer id. */
+export function normaliseCommentId(v: unknown): string {
+  const s = typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? String(v) : typeof v === "string" ? v.trim() : "";
+  if (!/^\d+$/.test(s)) return "";
+  return s.replace(/^0+(?=\d)/, "");
 }
 
 /** A finding clause's trailing `(<severity>, N vote[s])` tag in the ccr-overview-v2 file table. */
@@ -612,7 +632,7 @@ export interface ReviewThreadsResponse {
           nodes?: {
             isResolved?: boolean;
             path?: string | null;
-            comments?: { nodes?: { databaseId?: number | null; body?: string; authorAssociation?: string | null; author?: { login?: string | null } | null }[] };
+            comments?: { nodes?: { databaseId?: number | null; fullDatabaseId?: string | number | null; body?: string; authorAssociation?: string | null; author?: { login?: string | null } | null }[] };
           }[];
         };
       };
@@ -649,7 +669,10 @@ export function parseReviewThreadsPage(payload: ReviewThreadsResponse): ReviewTh
         path: t.path ?? null,
         bodies: comments.map((c) => c.body ?? ""),
         ...(() => {
-          const ids = comments.flatMap((c) => (typeof c.databaseId === "number" ? [c.databaseId] : []));
+          const ids = comments.flatMap((c) => {
+            const id = normaliseCommentId(c.fullDatabaseId ?? c.databaseId);
+            return id === "" ? [] : [id];
+          });
           return ids.length > 0 ? { commentIds: ids } : {};
         })(),
         ...(root?.author?.login ? { rootLogin: root.author.login } : {}),
@@ -677,7 +700,7 @@ export async function fetchReviewThreads(
   const [owner, name] = repo.split("/");
   const query =
     "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){pullRequest(number:$n){" +
-    "reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{isResolved path comments(first:100){nodes{databaseId body authorAssociation author{login}}}}}}}}";
+    "reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{isResolved path comments(first:100){nodes{fullDatabaseId databaseId body authorAssociation author{login}}}}}}}}";
   const mode = githubTransport();
   const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
   if (!useGh && !token) return null;

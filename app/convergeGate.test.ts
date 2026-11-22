@@ -1391,7 +1391,7 @@ const V2_OPEN_TWO = [
   "- [Fix B](https://github.com/o/r/pull/1#discussion_r22) · New",
   "</details>",
 ].join("\n");
-const thread = (isResolved: boolean, ids: number[]) => ({ isResolved, path: "a.ts", bodies: ["x"], commentIds: ids });
+const thread = (isResolved: boolean, ids: number[]) => ({ isResolved, path: "a.ts", bodies: ["x"], commentIds: ids.map(String) });
 
 test("reconcileReviewOpenFindings: every itemised finding's thread resolved → no open findings", () => {
   assertEquals(reconcileReviewOpenFindings(V2_OPEN_TWO, [thread(true, [11, 12]), thread(true, [22])]), []);
@@ -1440,4 +1440,24 @@ test("converge-gate #1018: the same review with one finding's thread still open 
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
   assertEquals(out.convergeBlocked, true);
+});
+
+test("reconcileReviewOpenFindings: a literal (unlinked) #discussion_r id does not borrow a resolved thread", () => {
+  for (const item of ["- Fix parsing of the literal #discussion_r11", "- Fix `[x](https://x/pull/1#discussion_r11)` handling"]) {
+    const body = V2_OPEN_TWO.replace("- [Fix A](https://github.com/o/r/pull/1#discussion_r11) · New", item);
+    assertEquals(reconcileReviewOpenFindings(body, [thread(true, [11]), thread(true, [22])]).length > 0, true);
+  }
+});
+
+test("reconcileReviewOpenFindings: comment ids above 2^31-1 via fullDatabaseId reconcile end-to-end", () => {
+  const big = "4657696246123";
+  const body = V2_OPEN_TWO.replace("discussion_r11", `discussion_r${big}`);
+  const page = parseReviewThreadsPage({
+    data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+      { isResolved: true, path: "a.ts", comments: { nodes: [{ fullDatabaseId: big, databaseId: null, body: "x" }] } },
+      { isResolved: true, path: "a.ts", comments: { nodes: [{ fullDatabaseId: "22", databaseId: 22, body: "y" }] } },
+    ] } } } },
+  });
+  assertEquals(page?.threads[0].commentIds, [big]);
+  assertEquals(reconcileReviewOpenFindings(body, page?.threads ?? []), []);
 });
