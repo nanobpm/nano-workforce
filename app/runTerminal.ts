@@ -68,14 +68,18 @@ export function effectiveTerminalStatus(derivedStatus: string, cancelledAt: stri
 /** Record an operator cancel of `processKey` — the ONE writer of cancellation provenance, called by
  * every cancel door BEFORE the engine cancel so a crash in between still leaves the record (an
  * un-terminated instance never reads `cancelled`: the fold requires the terminated edge). Idempotent:
- * a re-cancel keeps the first record. */
+ * a re-cancel keeps the first record.
+ *
+ * Returns whether THIS call inserted the row: the cancel door is transactional about its provisional
+ * record — when the engine REFUSES the cancel it rolls the row back, but only a row it inserted
+ * itself (a refused retry must never delete the first, committed record). */
 export async function recordRunCancellation(
   data: DataLayer,
   input: { processKey: string; runTable?: string | null; cancelledBy: string; reason?: string | null; at?: string },
-): Promise<void> {
+): Promise<boolean> {
   const reason = typeof input.reason === "string" && input.reason.trim() ? input.reason.trim() : null;
   const table = data.table<RunCancellation>(RUN_CANCELLATIONS_TABLE, "process_key");
-  if (await table.get(input.processKey)) return;
+  if (await table.get(input.processKey)) return false;
   await table.insert({
     process_key: input.processKey,
     run_table: input.runTable ?? null,
@@ -83,6 +87,17 @@ export async function recordRunCancellation(
     cancel_reason: reason,
     cancelled_at: input.at ?? new Date().toISOString(),
   });
+  return true;
+}
+
+/** Roll back a PROVISIONAL cancellation record ({@link recordRunCancellation}) when the engine
+ * refused the cancel it preceded — the record is transactional with the cancel it names, so an
+ * uncommitted cancel leaves no row for a LATER out-of-band terminate to fold into a lying
+ * `cancelled` status (with the refused attempt's stale actor/reason). The caller passes the
+ * `inserted` flag its record call returned, so a refused RETRY never deletes the first, committed
+ * record. Best-effort, exactly like the write it undoes. */
+export async function removeRunCancellation(data: DataLayer, processKey: string): Promise<void> {
+  await data.table<RunCancellation>(RUN_CANCELLATIONS_TABLE, "process_key").delete(processKey);
 }
 
 /** Read the recorded operator cancellation for a process key, if any. */

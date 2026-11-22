@@ -40,7 +40,7 @@
 import type { AppApi } from "@nanobpm/urban";
 import { cancelInstanceReconciling } from "@nanobpm/urban";
 import { engineBackedBindings, resolveTrackedInstance } from "../app/instanceTracking.ts";
-import { recordRunCancellation } from "../app/runTerminal.ts";
+import { recordRunCancellation, removeRunCancellation } from "../app/runTerminal.ts";
 import { closeCancelledRunEscalations, recordOperatorCancelProvenance } from "../app/service.ts";
 import { envVar } from "../app/version.ts";
 import type { CancelInstanceResponse } from "../nano-generated/api-io.d.ts";
@@ -111,10 +111,13 @@ export async function cancelTrackedRun(
   // Operator-cancel provenance (issue #994): record WHO/WHEN/WHY BEFORE the engine cancel, so a crash
   // between the two still leaves it. It only ever reads as `cancelled` once the instance is actually
   // TERMINATED (the read models fold it over the canonical terminated edge, app/runTerminal.ts), so a
-  // cancel the engine refuses never mislabels a live run. Best-effort — never blocks the cancel.
+  // cancel the engine refuses never mislabels a live run. Best-effort — never blocks the cancel. The
+  // record is TRANSACTIONAL with the cancel it names: `inserted` marks whether THIS call wrote the
+  // row, so the !ok path below can roll back exactly its own provisional write (PR #996 review).
+  let cancellationRecorded = false;
   if (canResolveRecord) {
     try {
-      await recordRunCancellation(app.data, {
+      cancellationRecorded = await recordRunCancellation(app.data, {
         processKey: processInstanceKey,
         runTable: resolvedTable,
         cancelledBy: optionalText(body, "actor") ?? "operator",
@@ -134,7 +137,23 @@ export async function cancelTrackedRun(
   // A !ok result means the engine did NOT stop the instance (the cancel was not committed); the run
   // may still be live, so surface 502 — the same non-committed-cancel signal the built-in page
   // action returns. Report it before we assert anything about the record (nothing was reconciled).
+  // Roll back THIS call's provisional provenance row first: left behind, it would fold a LATER
+  // out-of-band terminate of the still-live run into a lying `cancelled` status carrying this
+  // refused attempt's stale actor/reason (PR #996 adversarial review). Only a row THIS call inserted
+  // is removed — a refused retry must never delete the first, committed record. Best-effort, exactly
+  // like the write it undoes: a failed rollback only re-exposes the stale-row case, it never blocks
+  // the truthful 502.
   if (!result.ok) {
+    if (cancellationRecorded) {
+      try {
+        await removeRunCancellation(app.data, processInstanceKey);
+      } catch (err) {
+        app.log.warn("cancelInstance: could not roll back the provisional run cancellation", {
+          processInstanceKey,
+          error: String(err),
+        });
+      }
+    }
     app.log.warn("cancelInstance: engine did not confirm termination", {
       processInstanceKey,
       state: result.state,

@@ -171,6 +171,12 @@ function memTable(rows: any[], key: string) {
       if (r) Object.assign(r, patch);
       return Promise.resolve(r);
     },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only.
+    delete: (k: any) => {
+      const i = rows.findIndex((x) => x[key] === k);
+      if (i >= 0) rows.splice(i, 1);
+      return Promise.resolve(i >= 0 ? 1 : 0);
+    },
   };
 }
 
@@ -342,4 +348,58 @@ test("issue #994 — a cancel with no actor/reason defaults to `operator` and na
   assertEquals(stores.run_cancellations.rows[0].cancelled_by, "operator");
   assertEquals(stores.run_cancellations.rows[0].cancel_reason, "operator cancel (/actions/cancel)");
   assertEquals(stores.run_cancellations.rows[0].run_table, "feature_runs");
+});
+
+// --- The provisional cancellation record is transactional (PR #996 adversarial review) ------------
+//
+// The door writes `run_cancellations` BEFORE the engine cancel so a crash in between still leaves
+// the provenance. But the write used to survive an engine-REFUSED cancel (the !ok → 502 path): the
+// still-live run then carried a `run_cancellations` row, and a LATER out-of-band terminate folded
+// the `abandoned` edge with that stale record into a lying `cancelled` status (with the refused
+// attempt's actor/reason). The record must be as transactional as the cancel it names: an
+// uncommitted cancel leaves NO row behind.
+
+test("an engine-REFUSED cancel leaves no run_cancellations row — a later out-of-band terminate reads `abandoned`, not `cancelled`", async () => {
+  const stores = {
+    feature_runs: { rows: [{ feature_key: "o/r#10", process_key: "88", status: "running" }], key: "feature_key" },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
+    run_cancellations: { rows: [] as any[], key: "process_key" },
+  };
+  // The engine refuses the cancel and the instance is still ACTIVE → the door's 502 not-ok path.
+  const { app } = makeRecordApp(stores, { cancelThrows: true, readBackState: "ACTIVE" });
+  const res = await call(app, { processInstanceKey: "88", actor: "jwulf", reason: "wedged gate" });
+  assertEquals(res.status, 502, "an unconfirmed termination is not ok");
+  assertEquals(res.body.ok, false);
+  assertEquals(
+    stores.run_cancellations.rows.length,
+    0,
+    "the provisional provenance row is rolled back when the engine refuses the cancel",
+  );
+  // …so when the still-live run is later terminated OUT OF BAND, its derived terminal edge
+  // (`abandoned`) has no stale cancellation to fold with — it must NOT be promoted to `cancelled`.
+  const { effectiveTerminalStatus } = await import("../app/runTerminal.ts");
+  const derived = "abandoned"; // the ADR-0065 terminated edge every run binding folds to
+  const cancelledAt = stores.run_cancellations.rows[0]?.cancelled_at ?? null;
+  assertEquals(effectiveTerminalStatus(derived, cancelledAt), "abandoned");
+});
+
+test("an engine-refused RETRY keeps the FIRST committed cancellation record (idempotency is not rolled back)", async () => {
+  // First cancel COMMITS (the engine terminates): the provenance row is genuinely recorded.
+  const stores = {
+    feature_runs: { rows: [{ feature_key: "o/r#11", process_key: "99", status: "running", derived_status: "abandoned" }], key: "feature_key" },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only rows over a dynamic shape.
+    run_cancellations: { rows: [] as any[], key: "process_key" },
+  };
+  const { app } = makeRecordApp(stores, { readBackState: "TERMINATED" });
+  const committed = await call(app, { processInstanceKey: "99", actor: "jwulf", reason: "first" });
+  assertEquals(committed.status, 200);
+  assertEquals(stores.run_cancellations.rows.length, 1);
+  // A later retry whose engine call throws (and reads non-terminal) hits the 502 path — but the row
+  // it found was NOT inserted by this call, so the rollback must not delete the first record.
+  const { app: refusing } = makeRecordApp(stores, { cancelThrows: true, readBackState: "ACTIVE" });
+  const retried = await call(refusing, { processInstanceKey: "99", actor: "someone-else", reason: "second" });
+  assertEquals(retried.status, 502);
+  assertEquals(stores.run_cancellations.rows.length, 1, "a refused retry never deletes the committed record");
+  assertEquals(stores.run_cancellations.rows[0].cancelled_by, "jwulf");
+  assertEquals(stores.run_cancellations.rows[0].cancel_reason, "first");
 });
