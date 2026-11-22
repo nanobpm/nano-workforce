@@ -71,18 +71,30 @@ export interface JobCorrelation {
   /**
    * The engine element-instance key the job's token occupies (#544), if resolved. Unlike
    * {@link elementId} (the static id, ambiguous across a looping / retried activity) this names the
-   * specific occupancy. Best-effort: it is enriched asynchronously via {@link CorrelationRegistry.attachElementInstance}
+   * specific occupancy. Best-effort: it is enriched asynchronously via {@link CorrelationRegistry.attachPlacement}
    * after the link, so it may be absent for a just-linked job and stays absent if resolution never lands.
    */
   readonly elementInstanceKey?: string;
   /** The plan / epic key this job is part of (e.g. `owner/repo#142`), if known. */
   readonly planKey?: string;
+  /**
+   * The ROOT process instance of the call hierarchy the job runs in (#948), if resolved — equal to
+   * {@link processInstanceKey} for a top-level instance. Lets the cockpit's process focus (which names
+   * the root run) follow a job running in a callActivity child. Best-effort, enriched like
+   * {@link elementInstanceKey}.
+   */
+  readonly rootProcessInstanceKey?: string;
   /** The relay stream id the job's terminal is relayed on (`composeStreamId(instance, jobKey)`). */
   readonly stream: string;
 }
 
 /** The context an orchestrator supplies when a worker picks up a job (jobKey excluded — it is the key). */
 export type JobContext = Omit<JobCorrelation, "jobKey" | "stream">;
+
+/** The engine-resolved placement fields {@link CorrelationRegistry.attachPlacement} enriches (#948). */
+export type JobPlacementContext = Partial<
+  Pick<JobCorrelation, "elementInstanceKey" | "processInstanceKey" | "elementId" | "rootProcessInstanceKey">
+>;
 
 /** The read-only correlation snapshot: every currently-linked job, sorted by jobKey. */
 export interface CorrelationSnapshot {
@@ -139,17 +151,20 @@ export class CorrelationRegistry {
   }
 
   /**
-   * Enrich a still-linked job's context with the engine element-instance key it occupies (#544),
-   * resolved asynchronously after the link (the element-instance read is an engine round-trip the
-   * synchronous link path cannot await). Best-effort and idempotent: a no-op if the job is no longer
-   * linked (it completed and released before resolution returned — the durable backfill covers that
-   * case instead) or if the key is empty. Preserves every other context field.
+   * Enrich a still-linked job's context with its engine placement (#544, #948) — element instance,
+   * owning process instance, element id, root process instance — resolved asynchronously after the
+   * link (the engine read is a round-trip the synchronous link path cannot await; the relay's link
+   * itself knows only the jobKey). Best-effort and idempotent: a no-op if the job is no longer linked
+   * (the durable backfill covers that race) or the jobKey is empty. Empty/absent fields are ignored, so
+   * a partial placement never clears a field; every other context field is preserved.
    */
-  attachElementInstance(jobKey: string, elementInstanceKey: string): void {
-    if (jobKey === "" || elementInstanceKey === "") return;
+  attachPlacement(jobKey: string, placement: JobPlacementContext): void {
+    if (jobKey === "") return;
     const existing = this.#context.get(jobKey);
     if (existing === undefined) return;
-    this.#context.set(jobKey, { ...existing, elementInstanceKey });
+    const fields: Record<string, string> = {};
+    for (const [k, v] of Object.entries(placement)) if (typeof v === "string" && v !== "") fields[k] = v;
+    this.#context.set(jobKey, { ...existing, ...fields });
   }
 
   /** Release one job (it finished / moved on). No-op if it was never linked. */
@@ -219,13 +234,14 @@ export class CorrelationRegistry {
 
 /** Drop `undefined`-valued keys so the stored context never materializes an explicit `{ key: undefined }` hole. */
 function stripUndefined(context: JobContext): JobContext {
-  const { processInstanceKey, bpmnProcessId, elementId, elementInstanceKey, planKey } = context;
+  const { processInstanceKey, bpmnProcessId, elementId, elementInstanceKey, planKey, rootProcessInstanceKey } = context;
   return {
     ...(processInstanceKey !== undefined ? { processInstanceKey } : {}),
     ...(bpmnProcessId !== undefined ? { bpmnProcessId } : {}),
     ...(elementId !== undefined ? { elementId } : {}),
     ...(elementInstanceKey !== undefined ? { elementInstanceKey } : {}),
     ...(planKey !== undefined ? { planKey } : {}),
+    ...(rootProcessInstanceKey !== undefined ? { rootProcessInstanceKey } : {}),
   };
 }
 

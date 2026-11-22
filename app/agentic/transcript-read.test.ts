@@ -134,7 +134,7 @@ test("#544: the durable element-instance key surfaces on the read projection and
 test("#544: the live correlation's element-instance key takes precedence over the durable row on read", () => {
   const registry = new CorrelationRegistry();
   registry.link("worker-A", "k1", { elementId: "agent" });
-  registry.attachElementInstance("k1", "ei-live");
+  registry.attachPlacement("k1", { elementInstanceKey: "ei-live" });
   const durable = new AgenticCorrelationStore(memoryStore());
   durable.record({ jobKey: "k1", stream: s("k1"), instance: "worker-A", elementInstanceKey: "ei-old", completedAt: mid });
 

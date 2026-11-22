@@ -10,7 +10,9 @@ import type { ElementInstanceWaitState, ElementInstanceWaitStateFilter } from "@
 import { assertEquals } from "#test-assert";
 import {
   type ElementInstanceWaitStateReader,
+  makeElementInstanceResolver,
   resolveElementInstanceKey,
+  resolveJobPlacement,
 } from "./element-instance.ts";
 
 /** A fake engine wait-state read model: returns the configured parks, honouring the filter. */
@@ -108,4 +110,68 @@ test("ignores a non-JOB park that happens to share the process instance", async 
     searchElementInstanceWaitStates: () => Promise.resolve(parks),
   };
   assertEquals(await resolveElementInstanceKey(reader, "job-x"), "ei-job");
+});
+
+// ── #948: the full job placement (process instance + element + root) ────────────────────────────
+
+test("#948 resolveJobPlacement returns the park's process instance and element alongside the element instance", async () => {
+  const reader = fakeReader([
+    jobPark({ elementInstanceKey: "ei-9", jobKey: "job-9", processInstanceKey: "pi-child", elementId: "implement" }),
+  ]);
+  assertEquals(await resolveJobPlacement(reader, "job-9"), {
+    elementInstanceKey: "ei-9",
+    processInstanceKey: "pi-child",
+    elementId: "implement",
+  });
+  assertEquals(await resolveJobPlacement(reader, "job-gone"), undefined);
+});
+
+test("#948 resolveJobPlacement resolves the ROOT process instance of a callActivity child via the engine", async () => {
+  const parks = [jobPark({ elementInstanceKey: "ei-9", jobKey: "job-9", processInstanceKey: "pi-child", elementId: "implement" })];
+  const seen: unknown[] = [];
+  const reader = {
+    ...fakeReader(parks),
+    searchProcessInstances: (filter?: { processInstanceKeys?: string[] }) => {
+      seen.push(filter);
+      return Promise.resolve([
+        { processInstanceKey: "pi-child", rootProcessInstanceKey: "pi-root", parentProcessInstanceKey: "pi-root", state: "ACTIVE" },
+      ] as never);
+    },
+  };
+  const placement = await resolveJobPlacement(reader, "job-9");
+  assertEquals(placement?.rootProcessInstanceKey, "pi-root");
+  assertEquals(placement?.processInstanceKey, "pi-child");
+  assertEquals(seen, [{ processInstanceKeys: ["pi-child"] }]);
+});
+
+test("#948 a failing root lookup is advisory — the placement still resolves without a root", async () => {
+  const reader = {
+    ...fakeReader([jobPark({ elementInstanceKey: "ei-9", jobKey: "job-9", processInstanceKey: "pi-child" })]),
+    searchProcessInstances: () => Promise.reject(new Error("engine down")),
+  };
+  const placement = await resolveJobPlacement(reader, "job-9");
+  assertEquals(placement?.processInstanceKey, "pi-child");
+  assertEquals(placement?.rootProcessInstanceKey, undefined);
+});
+
+test("#948 makeElementInstanceResolver yields the placement", async () => {
+  const resolve = makeElementInstanceResolver(
+    fakeReader([jobPark({ elementInstanceKey: "ei-1", jobKey: "job-1", processInstanceKey: "pi-1", elementId: "agent" })]),
+  );
+  assertEquals(await resolve("job-1"), { elementInstanceKey: "ei-1", processInstanceKey: "pi-1", elementId: "agent" });
+});
+
+test("#948 the bound resolver caches an instance's (immutable) root — one engine read per process instance", async () => {
+  let reads = 0;
+  const reader = {
+    ...fakeReader([jobPark({ elementInstanceKey: "ei-1", jobKey: "job-1", processInstanceKey: "pi-child" })]),
+    searchProcessInstances: () => {
+      reads++;
+      return Promise.resolve([{ processInstanceKey: "pi-child", rootProcessInstanceKey: "pi-root", state: "ACTIVE" }] as never);
+    },
+  };
+  const resolve = makeElementInstanceResolver(reader);
+  assertEquals((await resolve("job-1"))?.rootProcessInstanceKey, "pi-root");
+  assertEquals((await resolve("job-1"))?.rootProcessInstanceKey, "pi-root");
+  assertEquals(reads, 1);
 });

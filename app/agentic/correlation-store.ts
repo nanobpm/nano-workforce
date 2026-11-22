@@ -123,10 +123,10 @@ export class AgenticCorrelationStore {
   }
 
   /**
-   * Upsert a completed job's attribution (last write wins on jobKey). One exception: the async
-   * `element_instance_key` (#544) is written MONOTONICALLY — a re-record that omits it (a common
-   * best-effort enrichment, or a value already set via {@link setElementInstanceKey}) preserves the
-   * stored key via COALESCE rather than clobbering it back to NULL.
+   * Upsert a completed job's attribution (last write wins on jobKey). Exception: the async engine
+   * placement (`element_instance_key` #544, `process_instance_key` / `element_id` #948) is written
+   * MONOTONICALLY — a re-record that omits it (a best-effort enrichment, or a value already set via
+   * {@link setPlacement}) preserves the stored value via COALESCE rather than clobbering it to NULL.
    */
   record(entry: DurableCorrelation): void {
     this.#db.run(
@@ -138,9 +138,9 @@ export class AgenticCorrelationStore {
          instance = excluded.instance,
          identity = excluded.identity,
          host = excluded.host,
-         process_instance_key = excluded.process_instance_key,
+         process_instance_key = COALESCE(excluded.process_instance_key, agentic_correlation.process_instance_key),
          bpmn_process_id = excluded.bpmn_process_id,
-         element_id = excluded.element_id,
+         element_id = COALESCE(excluded.element_id, agentic_correlation.element_id),
          plan_key = excluded.plan_key,
          linked_at = excluded.linked_at,
          completed_at = excluded.completed_at,
@@ -163,18 +163,26 @@ export class AgenticCorrelationStore {
   }
 
   /**
-   * Backfill the element-instance key onto an ALREADY-RECORDED row (#544), for the race where the
-   * asynchronous element-instance resolution returns AFTER the job completed and its attribution was
-   * persisted (the live correlation is gone, so it can no longer be enriched in memory). A no-op when
-   * no row exists yet (the resolution won the race — {@link record} will carry the key) or the key is
-   * empty. Advisory, like the rest of the store — never keyed on for control flow.
+   * Backfill the engine placement (#544, #948) onto an ALREADY-RECORDED row, for the race where the
+   * asynchronous placement resolution returns AFTER the job completed and its attribution was persisted
+   * (the live correlation is gone, so it can no longer be enriched in memory). A no-op when no row exists
+   * yet (the resolution won the race — {@link record} carries it). Absent/empty fields never clear a
+   * stored value. Advisory, like the rest of the store — never keyed on for control flow.
    */
-  setElementInstanceKey(jobKey: string, elementInstanceKey: string): void {
-    if (jobKey === "" || elementInstanceKey === "") return;
-    this.#db.run("UPDATE agentic_correlation SET element_instance_key = ? WHERE job_key = ?", [
-      elementInstanceKey,
-      jobKey,
-    ]);
+  setPlacement(
+    jobKey: string,
+    placement: { elementInstanceKey?: string; processInstanceKey?: string; elementId?: string },
+  ): void {
+    if (jobKey === "") return;
+    const v = (x: string | undefined) => (x === undefined || x === "" ? null : x);
+    this.#db.run(
+      `UPDATE agentic_correlation SET
+         element_instance_key = COALESCE(?, element_instance_key),
+         process_instance_key = COALESCE(?, process_instance_key),
+         element_id = COALESCE(?, element_id)
+       WHERE job_key = ?`,
+      [v(placement.elementInstanceKey), v(placement.processInstanceKey), v(placement.elementId), jobKey],
+    );
   }
 
   /** The durable attribution for a jobKey, or undefined when none was recorded. */

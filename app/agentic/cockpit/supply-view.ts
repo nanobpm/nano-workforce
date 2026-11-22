@@ -70,6 +70,8 @@ export interface SupplyCorrelationReport {
   readonly elementId?: string;
   /** The plan / epic key, if known. */
   readonly planKey?: string;
+  /** The root process instance of the job's call hierarchy (#948), if resolved. */
+  readonly rootProcessInstanceKey?: string;
 }
 
 /** The supply-only report the cockpit polls (no demand fields — those are enrolment epic #152). */

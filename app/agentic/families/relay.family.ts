@@ -38,9 +38,9 @@ import {
   type TranscriptVocab,
 } from "@nanobpm/agentic/transcript";
 import type { Logger } from "@nanobpm/urban";
-import { currentCorrelation, type JobContext, type JobCorrelation } from "../correlation.ts";
+import { currentCorrelation, type JobContext, type JobCorrelation, type JobPlacementContext } from "../correlation.ts";
 import { AgenticCorrelationStore } from "../correlation-store.ts";
-import type { ElementInstanceResolver } from "../element-instance.ts";
+import type { ElementInstanceResolver, JobPlacement } from "../element-instance.ts";
 import type { AgenticContext, AgenticFamily } from "../registry.ts";
 import { currentPresenceRegistry } from "./presence.family.ts";
 
@@ -222,6 +222,9 @@ interface StreamState {
    * enriched-and-released, and so a resolution that returns after completion can still be recognised.
    */
   elementInstanceKey?: string;
+  /** The owning process instance / element id from the same resolution (#948), stashed alongside. */
+  processInstanceKey?: string;
+  elementId?: string;
 }
 
 /**
@@ -233,11 +236,12 @@ export interface CorrelationLink {
   link(instance: string, jobKey: string, context?: JobContext): void;
   releaseJob(jobKey: string): void;
   /**
-   * Enrich a still-linked job's context with the engine element-instance key it occupies (#544),
-   * resolved asynchronously after the link. Optional so the minimal double in tests need not implement
-   * it; the real {@link CorrelationRegistry} does. A no-op once the job is released.
+   * Enrich a still-linked job's context with its engine placement (#544, #948) — element instance,
+   * process instance, element id, root — resolved asynchronously after the link. Optional so the
+   * minimal double in tests need not implement it; the real {@link CorrelationRegistry} does. A no-op
+   * once the job is released.
    */
-  attachElementInstance?(jobKey: string, elementInstanceKey: string): void;
+  attachPlacement?(jobKey: string, placement: JobPlacementContext): void;
   /**
    * The (still-live) engine context for a jobKey, when the write-side exposes it. Optional so the
    * minimal double in tests need not implement it; the real {@link CorrelationRegistry} does, and the
@@ -669,7 +673,7 @@ export class RelayTranscriptService {
     // Self-contained advisory: a synchronous throw (a misbehaving resolver) is swallowed here rather
     // than surfacing in `#link`'s catch as a misleading "link failed", and the async rejection path is
     // handled by `.catch`. Either way this never throws into the synchronous frame handler.
-    let pending: Promise<string | undefined>;
+    let pending: Promise<JobPlacement | undefined>;
     try {
       pending = resolve(jobKey, processInstanceKey);
     } catch (err) {
@@ -681,14 +685,19 @@ export class RelayTranscriptService {
       return;
     }
     void pending
-      .then((elementInstanceKey) => {
-        if (elementInstanceKey === undefined || elementInstanceKey === "") return;
+      .then((placement) => {
+        if (placement === undefined || placement.elementInstanceKey === "") return;
+        const { elementInstanceKey, processInstanceKey, elementId } = placement;
         state.elementInstanceKey = elementInstanceKey;
+        if (processInstanceKey !== "") state.processInstanceKey = processInstanceKey;
+        if (elementId !== "") state.elementId = elementId;
         // Enrich the live context if still linked (a no-op once released), and backfill the durable
         // row if it was already persisted (a no-op before completion) — the two are complementary, so
         // exactly one lands depending on whether resolution beat completion.
-        this.#correlation()?.attachElementInstance?.(jobKey, elementInstanceKey);
-        this.#correlationStore?.setElementInstanceKey(jobKey, elementInstanceKey);
+        // #948: the placement also names the owning process instance (+ root), which the relay's bare
+        // link never knew — without it the cockpit's process focus cannot follow a RUNNING job.
+        this.#correlation()?.attachPlacement?.(jobKey, placement);
+        this.#correlationStore?.setPlacement(jobKey, { elementInstanceKey, processInstanceKey, elementId });
       })
       .catch((err: unknown) => {
         this.#log.warn("agentic relay element-instance resolution failed — session left un-keyed", {
@@ -750,6 +759,8 @@ export class RelayTranscriptService {
       // resolution may have landed after the context was released, or the context write-side may not
       // carry it). Either source is the same resolved value.
       const elementInstanceKey = context?.elementInstanceKey ?? state.elementInstanceKey;
+      const processInstanceKey = context?.processInstanceKey ?? state.processInstanceKey;
+      const elementId = context?.elementId ?? state.elementId;
       store.record({
         jobKey,
         stream,
@@ -757,9 +768,9 @@ export class RelayTranscriptService {
         completedAt: this.#now(),
         ...(attribution.identity !== undefined ? { identity: attribution.identity } : {}),
         ...(attribution.host !== undefined ? { host: attribution.host } : {}),
-        ...(context?.processInstanceKey !== undefined ? { processInstanceKey: context.processInstanceKey } : {}),
+        ...(processInstanceKey !== undefined ? { processInstanceKey } : {}),
         ...(context?.bpmnProcessId !== undefined ? { bpmnProcessId: context.bpmnProcessId } : {}),
-        ...(context?.elementId !== undefined ? { elementId: context.elementId } : {}),
+        ...(elementId !== undefined ? { elementId } : {}),
         ...(context?.planKey !== undefined ? { planKey: context.planKey } : {}),
         ...(elementInstanceKey !== undefined ? { elementInstanceKey } : {}),
       });
@@ -901,7 +912,7 @@ export class RelayTranscriptService {
     const jobKey = parseStreamId(stream)?.stream;
     if (jobKey === undefined) return;
     const processInstanceKey = this.#correlation()?.resolve?.(jobKey)?.processInstanceKey;
-    let activeKey: string | undefined;
+    let activeKey: JobPlacement | undefined;
     try {
       activeKey = await resolve(jobKey, processInstanceKey);
     } catch (err) {
@@ -914,7 +925,7 @@ export class RelayTranscriptService {
       });
       return;
     }
-    // A live JOB park (a resolved element-instance key) means the job is genuinely active — keep it.
+    // A live JOB park (a resolved placement) means the job is genuinely active — keep it.
     // This is what spares a mid-job RECONNECT: the harness still holds the engine lease, so the job is
     // still parked even though the old producer connection dropped.
     if (activeKey !== undefined) return;
