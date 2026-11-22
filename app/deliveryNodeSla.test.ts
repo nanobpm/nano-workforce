@@ -116,9 +116,9 @@ test("poll records delivery-graph agent jobs under a node-qualified key (paralle
   assertEquals(await getAgentJobActivation(data, "PX", deliveryNodeActivationJobType("senior:feature", "x_task")), undefined);
 });
 
-test("re-observation refreshes updated_at so a polled-queued job stays fresh", async () => {
+test("an unchanged re-observation does not rewrite the row (no per-pass write churn)", async () => {
   const { data } = memDataFor(MIG);
   await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:00:00Z" });
   await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:59:00Z" });
-  assertEquals((await getAgentJobActivation(data, "PI", key))?.updated_at, "2026-11-22T00:59:00Z");
+  assertEquals((await getAgentJobActivation(data, "PI", key))?.updated_at, "2026-11-22T00:00:00Z");
 });
