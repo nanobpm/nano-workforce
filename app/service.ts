@@ -2177,11 +2177,14 @@ export async function abandonClosedPr(data: DataLayer, prKey: string, detail: st
       if (!isUniqueConstraintFence(err)) throw err;
     }
   }
-  await prs(data).update(prKey, { status: ABANDONED_STATUS, updated_at: ts });
+  // Task rows FIRST, the PR row LAST: the PR row's `abandoned` status is the completion marker
+  // {@link hasPendingTerminalFinalization} keys on, so it must only land once every dependent
+  // write has succeeded — a failed task update then leaves the row non-final and a later pass retries.
   const tasks = planTasks(data);
   for (const t of await tasks.find({ pr_key: prKey })) {
     await tasks.update(t.id, { status: ABANDONED_STATUS, updated_at: ts });
   }
+  await prs(data).update(prKey, { status: ABANDONED_STATUS, updated_at: ts });
 }
 
 /** Classify a wave-merge target PR against GitHub ground truth for the wave gate (#352):
