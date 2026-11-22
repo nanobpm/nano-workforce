@@ -16,19 +16,16 @@
 // The fallback NEVER doubles the timeout budget: the expanded attempt gets a share of the single
 // `layoutTimeoutMs()` budget and the collapsed retry gets whatever remains.
 
+import type { DeliveryGraphProposalBpmnResult } from "../nano-generated/api-io.d.ts";
 import { layoutBpmnOffThread, layoutTimeoutMs } from "./layoutOffThread.ts";
 
-/** Which layout produced the attached DI. */
-export type DeliveryLayoutMode = "expanded" | "collapsed" | "none";
-
+// The layout shape is the OpenAPI contract (`DeliveryGraphProposalBpmnResult.layout`, openapi.yaml) —
+// derived from the generated type, never re-declared, so a schema change reaches every consumer.
 /** How the delivery diagram was laid out — surfaced by the preview and recorded on dispatch. */
-export interface DeliveryLayoutInfo {
-  mode: DeliveryLayoutMode;
-  /** Why the expanded (and, for `none`, the collapsed) layout failed. Absent for `expanded`. */
-  reason?: string;
-  /** Operator-facing one-liner, e.g. "layout: collapsed (expanded layout failed: …)". */
-  message: string;
-}
+export type DeliveryLayoutInfo = NonNullable<DeliveryGraphProposalBpmnResult["layout"]>;
+
+/** Which layout produced the attached DI. */
+export type DeliveryLayoutMode = DeliveryLayoutInfo["mode"];
 
 /** The laid-out BPMN plus how it was laid out. */
 export interface DeliveryLayoutResult {
