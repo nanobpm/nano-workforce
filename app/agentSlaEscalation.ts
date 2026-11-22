@@ -169,7 +169,7 @@ export async function agentSlaEscalationQuestion(
 }
 
 /** The delivery-graph agent-node work-SLA check (issue #1016). It runs on the node's NON-interrupting
- * `R/<nodeTimeout>` cycle boundary, so it never cancels the live job itself: it only decides whether the
+ * `R/<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) cycle boundary, so it never cancels the live job itself: it only decides whether the
  * work SLA has elapsed SINCE ACTIVATION (`activated_at + sla <= now`, per the durable activation ledger).
  * `expired: true` throws the node's SLA error (escalation, `reason` stating the worker + activation
  * time); otherwise the job keeps running/queued untouched. A job not yet observed as activated (queued,
@@ -183,12 +183,22 @@ export async function deliveryNodeSlaCheck(
     activationJobType: string;
     jobType: string;
     sla: string;
+    /** The engine job key of the watched task's CURRENT attempt (issue #1016 review). The ledger row is
+     * honoured only when it tracks this exact job: after a Retry, the row still describes the PREVIOUS
+     * attempt until the poller observes the replacement, and reading it would expire a fresh,
+     * never-activated retry with the old worker's facts. `null` (unknown) ⇒ the activation is not
+     * provably this attempt's ⇒ never expired (nothing is cancelled; the next check re-reads). */
+    currentJobKey: string | null;
     now?: string;
   },
 ): Promise<{ expired: boolean; reason: string }> {
   const now = input.now ?? new Date().toISOString();
-  const row = input.processInstanceKey.length > 0
+  const ledgerRow = input.processInstanceKey.length > 0
     ? await getAgentJobActivation(data, input.processInstanceKey, input.activationJobType)
+    : undefined;
+  // Bind to the current attempt — fail closed on a missing/mismatched job key.
+  const row = ledgerRow && input.currentJobKey !== null && ledgerRow.job_key === input.currentJobKey
+    ? ledgerRow
     : undefined;
   const activatedMs = row?.activated_at ? Date.parse(row.activated_at) : Number.NaN;
   const slaMs = isoDurationToMs(input.sla, "PT0S");

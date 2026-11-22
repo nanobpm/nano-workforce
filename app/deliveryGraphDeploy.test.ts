@@ -229,6 +229,34 @@ test("issue #1016: a NEVER-ACTIVATED (or within-budget) agent job is never escal
   }
 });
 
+test("issue #1016 review: agent completion while an SLA check is still PENDING cancels the check and completes the node", async () => {
+  const engine = await createWasmEngineClient();
+  try {
+    const graph: DeliveryGraph = {
+      name: "pending check graph",
+      nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "do it" } }],
+      edges: [],
+    };
+    // No `pr.agent-sla-check` worker: the check fires and its job stays QUEUED (as on a starved fleet).
+    const run = await runDeliveryGraph(engine, graph, { nodeTimeout: "PT1M", escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+    await engine.drain();
+    await engine.advanceTime(60_000);
+    await engine.drain();
+    const pending = await engine.searchJobs({ processInstanceKey: key, type: "pr.agent-sla-check", state: "CREATED" });
+    assert(pending.length >= 1, "precondition: an SLA check job is pending");
+    // Now the agent completes.
+    await engine.registerWorker("senior:feature", async () => ({}));
+    await engine.drain();
+    const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+    assertEquals(pi?.state, "COMPLETED", "the pending SLA check must not hold the node open after the agent completes");
+    assertEquals((await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" })).length, 0, "finished work is never escalated");
+  } finally {
+    await engine.close();
+  }
+});
+
 /** Every BPMN flow-node tag that must carry a `bpmndi:BPMNShape` to be rendered by human tooling. */
 const FLOW_NODE_TAGS = [
   "startEvent",

@@ -199,6 +199,12 @@ export const DELIVERY_GRAPH_PROCESS_ID = "delivery-graph";
  * never drift to two different "default SLA" values (derivation-over-duplication). */
 export const DELIVERY_NODE_DEFAULT_TIMEOUT = "PT1H";
 
+/** Issue #1016 review: the agent work-SLA check CADENCE is bounded independently of the SLA itself.
+ * Checking only every `nodeTimeout` lets a job activated just after a tick run for almost TWO budgets
+ * before it is caught; re-checking at most every {@link AGENT_SLA_CHECK_MAX_INTERVAL} bounds the
+ * detection delay to that interval (a shorter SLA is checked at its own length). */
+export const AGENT_SLA_CHECK_MAX_INTERVAL = "PT5M";
+
 /** The BPMN element id a `human` node's inlined user task carries. One user task per human node (the
  * compiled one-shot inlines each), so the id is per-node (`delivery-human-task__<element>`) — the
  * `isDeliveryHumanElement` convention (single source of truth in `deliveryHuman.ts`) is what keeps it
@@ -1780,6 +1786,10 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       inputs.push({ source: cfg("jobType"), target: "jobType" });
       inputs.push({ source: cfg("appendPrompt"), target: "appendPrompt" });
       inputs.push({ source: timeoutSource(), target: "nodeTimeout" });
+      // Issue #1016 review: the work-SLA check cadence (`min(timeout, AGENT_SLA_CHECK_MAX_INTERVAL)`,
+      // derived by the runner from the SAME resolved timeout) — falls back to the max interval so a
+      // hand-seeded instance still gets a bounded, non-zero cadence.
+      inputs.push({ source: `=if (is defined(${cfg("slaCheckEvery").slice(1)}) and ${cfg("slaCheckEvery").slice(1)} != null) then ${cfg("slaCheckEvery").slice(1)} else ${feelStr(AGENT_SLA_CHECK_MAX_INTERVAL)}`, target: "slaCheckEvery" });
       // Stage 0 transcript correlation (#543): seed the transcript URL base so the completing fleet
       // worker can append its own jobKey-scoped stream and emit `transcriptUrl` (below). `transcriptUrlBase`
       // is a top-level launch variable (deliveryRunner) — guarded so a hand-seeded instance without it
@@ -2295,7 +2305,7 @@ function serviceBodyLines(
   ];
   // Issue #1016: an AGENT's work SLA must start on job ACTIVATION, not node entry, and must never
   // cancel a live job. The task therefore sits in an inner `<el>_work` subProcess whose
-  // NON-interrupting `R/<nodeTimeout>` cycle boundary only CONSULTS the activation ledger
+  // NON-interrupting `R/<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) cycle boundary only CONSULTS the activation ledger
   // ({@link agentSlaCheckLines}); the job is cancelled solely when the ledger proves the work SLA has
   // elapsed since activation — the check sets `<el>_slaExpired`, and the INTERRUPTING conditional
   // boundary `<el>_slaBe` on `<el>_work` fires into the escalation. `<el>_slaArm` re-arms the flag to
@@ -2320,10 +2330,13 @@ function serviceBodyLines(
         `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
         `        <bpmn:startEvent id="${el}_wstart"><bpmn:outgoing>${el}_w0</bpmn:outgoing></bpmn:startEvent>`,
         ...taskLines([`${el}_w0`], `${el}_w1`, "        "),
-        `        <bpmn:endEvent id="${el}_wend"><bpmn:incoming>${el}_w1</bpmn:incoming></bpmn:endEvent>`,
+                // TERMINATE (scoped to `<el>_work`): the agent's completion must cancel any still-pending SLA
+        // check (queued/incidented `pr.agent-sla-check` job), or its live token would keep `<el>_work`
+        // open — blocking the contract gate and possibly escalating already-finished work.
+        `        <bpmn:endEvent id="${el}_wend"><bpmn:incoming>${el}_w1</bpmn:incoming><bpmn:terminateEventDefinition id="${el}_wendTerm" /></bpmn:endEvent>`,
         `        <bpmn:boundaryEvent id="${el}_be" name="Work SLA check" cancelActivity="false" attachedToRef="${el}_task">`,
         `          <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
-        `          <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeCycle xsi:type="bpmn:tFormalExpression">="R/" + nodeTimeout</bpmn:timeCycle></bpmn:timerEventDefinition>`,
+        `          <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeCycle xsi:type="bpmn:tFormalExpression">="R/" + slaCheckEvery</bpmn:timeCycle></bpmn:timerEventDefinition>`,
         "        </bpmn:boundaryEvent>",
         ...agentSlaCheckLines(el, reservedFlagTargets),
         `  ${flow(`${el}_w0`, `${el}_wstart`, `${el}_task`)}`,
@@ -2423,7 +2436,7 @@ function serviceBodyLines(
   ];
 }
 
-/** The agent-node work-SLA check (issue #1016), on the NON-interrupting `R/<nodeTimeout>` cycle
+/** The agent-node work-SLA check (issue #1016), on the NON-interrupting `R/<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) cycle
  * boundary inside `<el>_work`. Each fire runs `pr.agent-sla-check`, which reads the durable activation
  * ledger: while the job is still queued (or its activation is not yet observed) or its work budget
  * (`activated_at + nodeTimeout`) has not elapsed, it reports `false` and the branch simply ends — the

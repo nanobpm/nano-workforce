@@ -4299,7 +4299,9 @@ test("#1016 an agent node's SLA boundary is non-interrupting and only an elapsed
     edges: [],
   });
   assert(/<bpmn:boundaryEvent id="n0_be"[^>]*cancelActivity="false"[^>]*attachedToRef="n0_task"/.test(r.bpmn), "the SLA timer must not cancel the job");
-  assert(r.bpmn.includes('<bpmn:timeCycle xsi:type="bpmn:tFormalExpression">="R/" + nodeTimeout</bpmn:timeCycle>'), "the SLA is re-checked every nodeTimeout");
+  assert(r.bpmn.includes('<bpmn:timeCycle xsi:type="bpmn:tFormalExpression">="R/" + slaCheckEvery</bpmn:timeCycle>'), "the SLA is re-checked on the capped cadence, not every full nodeTimeout");
+  assert(/target="slaCheckEvery"/.test(r.bpmn), "the cadence is seeded on the node");
+  assert(/<bpmn:endEvent id="n0_wend">.*<bpmn:terminateEventDefinition/.test(r.bpmn), "agent completion terminates the work scope, cancelling any pending SLA check");
   assert(/<bpmn:boundaryEvent id="n0_slaBe" [^>]*attachedToRef="n0_work"/.test(r.bpmn), "the escalation is reached via the work subProcess's expiry boundary");
   assert(!/<bpmn:boundaryEvent id="n0_slaBe"[^>]*cancelActivity="false"/.test(r.bpmn), "the expiry boundary interrupts the work");
   assert(r.bpmn.includes('sourceRef="n0_retry" targetRef="n0_slaArm"'), "a retry re-arms the SLA before re-entering the work");
