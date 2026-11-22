@@ -818,6 +818,45 @@ async function submitPrCritical(
     if (autoResolveEscalations && existing.auto_resolve_escalations !== 1) {
       await table.update(parsed.prKey, { auto_resolve_escalations: 1 });
     }
+    // Adoption reconciliation (issue #1007 review, F2): an adopted live loop must take on THIS caller's
+    // merge policy, lineage root, and dependencies — not silently keep whatever an earlier submit set.
+    //   • Dependencies: idempotent delete+re-insert of the current set (same canonical write a fresh
+    //     submit does), so an adopted loop's merge-ordering DAG matches this caller's task DAG.
+    //   • Lineage: coalesce a NULL `root_request_key` onto this caller's root (a self-rooted loop an
+    //     operator started joins the epic); an existing root is kept (a loop already under an epic is
+    //     not silently re-parented).
+    //   • Merge policy: a review-only caller (`mergeIntent` false) NARROWS an auto-merging live loop to
+    //     converge-only — the operator's opt-out must win over an adopted loop's stale auto-merge. The
+    //     widening direction (a review-only live loop adopted by an auto-merge caller) is deliberately
+    //     NOT done here: that loop's `pr.finalize` already read converge-only, so flipping its variable
+    //     could force a merge the operator never approved. (A review-only loop that already CONVERGED
+    //     is terminal, so it never reaches this branch — it reopens below with the fresh run's intent.)
+    {
+      const depKeys = new Set(dependsOn.map((d) => parsePr(d)?.prKey).filter((k): k is string => !!k));
+      await registerDependencies(data, parsed.prKey, [...depKeys]);
+      if (rootRequestKey != null && existing.root_request_key == null) {
+        await table.update(parsed.prKey, { root_request_key: rootRequestKey });
+      }
+      if (!mergeIntent && existing.converged_at == null && existing.merge_requested !== 0) {
+        const loopKey = existing.process_key;
+        const match = (await engine.searchProcessInstances({ processInstanceKeys: [loopKey] })).find(
+          (s) => String(s.processInstanceKey) === loopKey,
+        );
+        const state = match ? String(match.state ?? "").trim().toUpperCase() : null;
+        const isConvergenceLoop = match?.processDefinitionId == null || match.processDefinitionId === PROCESS_ID;
+        if (state !== null && !ENGINE_TERMINAL_STATES.has(state) && isConvergenceLoop) {
+          // Serialized with merge-approval completion on this loop (same lock the gated-adopt uses), so
+          // the variable write and the projection stamp land as one pair.
+          await withMergePolicyLock(loopKey, async () => {
+            await engine.setVariables({ scopeKey: loopKey, variables: { autoMerge: false, convergeOnly: true } });
+            await data.open().exec(
+              `UPDATE "pull_requests" SET "merge_requested" = 0 WHERE "pr_key" = ? AND "process_key" = ? AND "converged_at" IS NULL`,
+              [parsed.prKey, loopKey],
+            );
+          });
+        }
+      }
+    }
     return { prKey: parsed.prKey, alreadyRunning: true };
   }
 

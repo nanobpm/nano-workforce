@@ -526,11 +526,13 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
     return flows;
   }
 
-  test("trial-merge escalation: proceed routes to the more-waves gate", async () => {
+  test("trial-merge escalation: proceed routes through the wave-converge gate toward the more-waves gate", async () => {
     const flows = await driveToTrialDecision("proceed");
+    // F3 (#1007 review): proceed now routes to the wave-converge gate (which enrolls the wave's opened
+    // PRs after the trial-merge gate), then on toward gw-more — no longer directly to gw-more.
     assert.ok(
-      flows.includes("gw-trial-answer->gw-more"),
-      `proceed routed to gw-more (flows: ${flows.join(", ")})`,
+      flows.includes("gw-trial-answer->gw-converge-wave"),
+      `proceed routed to the wave-converge gate (flows: ${flows.join(", ")})`,
     );
   });
 
@@ -814,7 +816,9 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         assert.equal(wave1?.root_request_key, planKey, "the slice loop rolls up under the epic");
         assert.equal(await prs.findOne({ pr_key: "owner/repo#102" }), undefined, "wave 2 has not run yet");
         const flows = takenFlows(app);
-        assert.ok(flows.includes("w_gw_converge->converge-cell-call"), `the wave body called converge-cell (flows: ${flows.join(", ")})`);
+        // F3 (#1007 review): the converge-cell call is a wave-scoped step after record-wave + the
+        // trial-merge gate, not a per-slice inline step. Assert the wave-converge gate fed it.
+        assert.ok(flows.includes("gw-converge-wave->converge-cell-call"), `the wave body called converge-cell after record-wave (flows: ${flows.join(", ")})`);
         assert.ok(flows.includes("cc_gw_kind->converge-slice"), "converge-cell took the epic-slice arm");
         assert.ok(flows.includes("gw-more->wait-wave-merged"), "the epic parks at the wave gate");
 

@@ -140,6 +140,7 @@ test("record-wave retries the same wave when a task is still pending", async () 
     runTrialMerge: false,
     trialMergeWave: 1,
     trialMergeSkipReason: "wave-still-pending",
+    openedPrs: [],
   });
   assertEquals((planUpdates[0].patch as Record<string, unknown>).gate_wave, 1);
   // Wave progress (current_wave/wave_label) was retired as a stored projection (epic #412) — derived

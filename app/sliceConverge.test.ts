@@ -34,8 +34,8 @@ function recorder() {
   return { calls, submit };
 }
 
-const stores = () => ({
-  plans: [{ plan_key: "o/r#1", auto_resolve_escalations: 1 }],
+const stores = (autoMerge = 1) => ({
+  plans: [{ plan_key: "o/r#1", auto_resolve_escalations: 1, auto_merge: autoMerge }],
   plan_tasks: [
     { plan_key: "o/r#1", task_id: "a", pr_key: "o/r#10" },
     { plan_key: "o/r#1", task_id: "b", pr_key: null },
@@ -55,11 +55,27 @@ test("convergeSlice enrolls the slice PR under the epic with its dependency PRs 
   assertEquals(calls, [{ prKey: "o/r#12", dependsOn: ["o/r#10"], root: "o/r#1", autoResolve: true, autoMerge: true }]);
 });
 
+test("convergeSlice reads the merge policy from the durable plans row, not the (clobberable) input variable", async () => {
+  // Issue #1007 review (F1): the operator's `autoMerge: false` lives on `plans.auto_merge = 0`. An
+  // agent completion echoing `autoMerge: true` into the process scope must NOT re-enable merging —
+  // the row is authoritative and overrides the input variable.
+  const { calls, submit } = recorder();
+  await convergeSlice(memData(stores(0), keys), { planKey: "o/r#1", taskId: "a", prKey: "o/r#10", autoMerge: true }, submit);
+  assertEquals(calls[0]?.autoMerge, false, "the durable plans.auto_merge=0 opt-out wins over an agent-echoed autoMerge=true");
+});
+
 test("convergeSlice honours an explicit autoMerge=false (converge only)", async () => {
   const { calls, submit } = recorder();
-  await convergeSlice(memData(stores(), keys), { planKey: "o/r#1", taskId: "a", prKey: "o/r#10", autoMerge: false }, submit);
+  await convergeSlice(memData(stores(0), keys), { planKey: "o/r#1", taskId: "a", prKey: "o/r#10", autoMerge: false }, submit);
   assertEquals(calls[0]?.autoMerge, false);
   assertEquals(calls[0]?.dependsOn, []);
+});
+
+test("convergeSlice falls back to the input intent when the plan row is absent", async () => {
+  const { calls, submit } = recorder();
+  const data = memData({ plans: [], plan_tasks: [], plan_task_deps: [] }, keys);
+  await convergeSlice(data, { planKey: "o/r#1", taskId: "a", prKey: "o/r#10", autoMerge: false }, submit);
+  assertEquals(calls[0]?.autoMerge, false);
 });
 
 test("convergeSlice never enrolls a phantom PR", async () => {

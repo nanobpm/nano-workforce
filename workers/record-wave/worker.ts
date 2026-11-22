@@ -33,6 +33,14 @@ import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 // `RecordWaveResult` shapes (`list="true"`), so they resolve to `<Shape>[]` with no hand-written
 // interface.
 type In = WorkerInputs["pr.record-wave"];
+/** One opened slice PR the wave enrolls into convergence (issue #1007 review, F3): the wave body
+ *  hands these to the `converge-cell-call` MI AFTER `record-wave` has recorded every `pr_key` and
+ *  computed the trial-merge decision — so no slice auto-merges before its wave's associations and
+ *  trial-merge gate are settled. */
+export interface OpenedPr {
+  taskId: string;
+  prKey: string;
+}
 interface Out extends Record<string, unknown> {
   currentWave: number;
   hasMoreWaves: boolean;
@@ -40,6 +48,7 @@ interface Out extends Record<string, unknown> {
   runTrialMerge: boolean;
   trialMergeWave: number;
   trialMergeSkipReason?: string;
+  openedPrs: OpenedPr[];
 }
 
 const str = (v: unknown): string | undefined =>
@@ -81,6 +90,10 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // Retained drafts are scanned but NEVER handed off (not ready for review).
   const openedThisWave: { taskId: string; repo: string; number: number | string }[] = [];
   const readyHeadsThisWave: { repo: string; number: number | string }[] = [];
+  // The wave's opened, handoff-ready slice PRs (taskId + key) — the set the wave body's
+  // `converge-cell-call` MI enrolls into convergence AFTER this worker has recorded every `pr_key`
+  // and computed the trial-merge decision (issue #1007 review, F3).
+  const openedPrs: OpenedPr[] = [];
 
   for (let i = 0; i < waveTasks.length; i++) {
     const taskId = str(waveTasks[i]?.id);
@@ -194,8 +207,10 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     }
     if (parsed) readyHeadsThisWave.push({ repo: parsed.repo, number: parsed.number });
     // Handoff (issue #1007): enrollment no longer happens here. Each opened slice PR is converged
-    // INSIDE the epic by the wave body's `converge-cell-call` (`pr.converge-slice`, app/sliceConverge.ts)
-    // the moment its implement cell finishes — the ONE enrollment path, so there is no second handoff.
+    // INSIDE the epic by the wave body's `converge-cell-call` (`pr.converge-slice`, app/sliceConverge.ts).
+    // F3 (review): that call now runs AFTER this worker (it reads `openedPrs`), so every `pr_key` and
+    // the trial-merge decision are settled before any slice's loop can auto-merge.
+    if (parsed) openedPrs.push({ taskId, prKey: parsed.prKey });
   }
 
   // D3 trial-merge gate (issue #69): expose the concurrently-open READY PR heads for the BPMN
@@ -306,6 +321,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     runTrialMerge,
     trialMergeWave: currentWave,
     trialMergeSkipReason,
+    openedPrs,
   };
 };
 

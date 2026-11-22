@@ -59,11 +59,16 @@ export async function convergeSlice(
   const planKey = str(input.planKey);
   const taskId = str(input.taskId);
   const parsed = parsePr(str(input.prKey));
-  const autoMerge = sliceMergeIntent(input.autoMerge);
   if (!planKey || !parsed) {
     // The wave body only routes here for an `opened` slice WITH a PR key, but never enroll a phantom.
-    return { enrolled: false, prKey: null, dependsOn: [], autoMerge, autoResolveEscalations: false };
+    return { enrolled: false, prKey: null, dependsOn: [], autoMerge: sliceMergeIntent(input.autoMerge), autoResolveEscalations: false };
   }
+  const planRow = await plans(data).get(planKey);
+  // Merge policy (issue #1007 review): read the OPERATOR's intent from the durable `plans.auto_merge`
+  // column — NEVER from the `autoMerge` process variable, which an agent completion can clobber. The
+  // row is authoritative so an operator's explicit `false` opt-out survives any agent output. A
+  // missing row (or a pre-#1007 row, whose column DEFAULTs to 1) falls back to the input's intent.
+  const autoMerge = planRow != null ? planRow.auto_merge !== 0 : sliceMergeIntent(input.autoMerge);
   const dependsOn: string[] = [];
   if (taskId) {
     const depIds = (await planTaskDeps(data).find({ plan_key: planKey, task_id: taskId }))
@@ -76,7 +81,6 @@ export async function convergeSlice(
       }
     }
   }
-  const planRow = await plans(data).get(planKey);
   const autoResolveEscalations = planRow?.auto_resolve_escalations === 1;
   await submit(parsed, dependsOn, planKey, autoResolveEscalations, autoMerge);
   return { enrolled: true, prKey: parsed.prKey, dependsOn, autoMerge, autoResolveEscalations };
