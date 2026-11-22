@@ -106,3 +106,23 @@ test("sliceMergeIntent defaults to auto-merge unless explicitly false", () => {
   assertEquals(sliceMergeIntent(true), true);
   assertEquals(sliceMergeIntent(false), false);
 });
+
+test("convergeSlice rejects a keyless enrollment so the worker stays retryable (#1007 round 4)", async () => {
+  for (const result of [{ processKey: null }, { processKey: undefined }]) {
+    const submit = async () => result;
+    let threw = false;
+    try {
+      await convergeSlice(memData(stores(), keys), { planKey: "o/r#1", taskId: "a", prKey: "o/r#10" }, submit);
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true, "a null processKey must fail the job, not report enrolled");
+  }
+});
+
+test("plan-fanout: an abandoned wave never re-enters the wave-merge barrier (#1007 round 4)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const xml = await readFile(new URL("../resources/processes/plan-fanout.bpmn", import.meta.url), "utf8");
+  const more = /<bpmn:sequenceFlow id="f_moreWaves"[\s\S]*?<\/bpmn:sequenceFlow>/.exec(xml)?.[0] ?? "";
+  assertEquals(/abandon/.test(more), true, "f_moreWaves must exclude the trial-merge abandon decision");
+});

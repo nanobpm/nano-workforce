@@ -793,7 +793,7 @@
     <bpmn:sequenceFlow id="f_trialAnswerRerun" name="rebase" sourceRef="gw-trial-answer" targetRef="trial-merge" />
     <bpmn:sequenceFlow id="f_trial_sla" name="SLA auto-rerun" sourceRef="be_trial_sla" targetRef="trial-merge" />
     <bpmn:sequenceFlow id="f_moreWaves" name="more" sourceRef="gw-more" targetRef="wait-wave-merged">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=hasMoreWaves</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=hasMoreWaves and not(is defined(action) and action = "abandon")</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_toConvergeWave" name="opened PRs" sourceRef="gw-converge-wave" targetRef="converge-cell-call">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=is defined(openedPrs) and openedPrs != null and count(openedPrs) &gt; 0</bpmn:conditionExpression>

@@ -84,7 +84,13 @@ export async function convergeSlice(
     }
   }
   const autoResolveEscalations = planRow?.auto_resolve_escalations === 1;
-  await submit(parsed, dependsOn, planKey, autoResolveEscalations, autoMerge);
+  const result = await submit(parsed, dependsOn, planKey, autoResolveEscalations, autoMerge);
+  // `submitPr` can resolve `{ processKey: null }` (no convergence instance started) after rewriting
+  // the row to `converging` with no owner — a keyless PR no pass re-enrolls. Fail closed so the job
+  // is retried, exactly like `pr.reconverge` (issue #1007 review, round 4).
+  if (result != null && typeof result === "object" && "processKey" in result && result.processKey == null) {
+    throw new Error(`converge-slice: submitPr returned a null processKey for ${parsed.prKey} — no convergence instance was started; failing so the enrollment is retried`);
+  }
   return { enrolled: true, prKey: parsed.prKey, dependsOn, autoMerge, autoResolveEscalations };
 }
 

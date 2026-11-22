@@ -63,6 +63,9 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // a `failed` epic is deliberately never labelled Dispatched.
   await plans(app.data).update(planKey, {
     status: "done",
+    // An abandoned non-final wave reaches here with `gate_wave` still armed by record-wave
+    // (hasMoreWaves) — clear the barrier marker so no poller pass publishes into a finished plan.
+    gate_wave: null,
     outcome: abandoned
       ? `${opened} PR(s) enrolled converge-only — wave abandoned at the trial-merge gate (operator merge opt-out)`
       : `${opened} PR(s) dispatched to convergence`,
