@@ -1,3 +1,9 @@
+## [0.222.1](https://github.com/nanobpm/nano-workforce/compare/v0.222.0...v0.222.1) (2026-11-22)
+
+### Bug Fixes
+
+* **converge:** stop dispatching agent jobs once the PR is merged or closed ([#1027](https://github.com/nanobpm/nano-workforce/issues/1027)) ([df57889](https://github.com/nanobpm/nano-workforce/commit/df57889a62581d0157898d6a63c4c35e93fbba84)), closes [#1023](https://github.com/nanobpm/nano-workforce/issues/1023)
+
 ## [0.222.0](https://github.com/nanobpm/nano-workforce/compare/v0.221.1...v0.222.0) (2026-11-22)
 
 ### Features
