@@ -1,3 +1,9 @@
+## [0.218.3](https://github.com/nanobpm/nano-workforce/compare/v0.218.2...v0.218.3) (2026-11-22)
+
+### Bug Fixes
+
+* **deps:** adopt @nanobpm/urban ^0.99.1, urban-testkit ^1.7.1, workflow ^0.20.0 ([#1017](https://github.com/nanobpm/nano-workforce/issues/1017)) ([916ad83](https://github.com/nanobpm/nano-workforce/commit/916ad830de727b6b561b417ccbcabb1731ecaaa9))
+
 ## [0.218.2](https://github.com/nanobpm/nano-workforce/compare/v0.218.1...v0.218.2) (2026-11-21)
 
 ### Bug Fixes
