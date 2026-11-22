@@ -169,7 +169,7 @@ export async function agentSlaEscalationQuestion(
 }
 
 /** The delivery-graph agent-node work-SLA check (issue #1016). It runs on the node's NON-interrupting
- * `R/<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) cycle boundary, so it never cancels the live job itself: it only decides whether the
+ * serial `<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) timer→check loop, so it never cancels the live job itself: it only decides whether the
  * work SLA has elapsed SINCE ACTIVATION (`activated_at + sla <= now`, per the durable activation ledger).
  * `expired: true` throws the node's SLA error (escalation, `reason` stating the worker + activation
  * time); otherwise the job keeps running/queued untouched. A job not yet observed as activated (queued,

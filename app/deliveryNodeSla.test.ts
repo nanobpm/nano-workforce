@@ -87,6 +87,8 @@ test("issue #1016 review: the SLA check cadence is capped independently of the S
   assertEquals(agentSlaCheckEvery("PT2H"), AGENT_SLA_CHECK_MAX_INTERVAL);
   assertEquals(agentSlaCheckEvery("PT1M"), "PT1M");
   assertEquals(agentSlaCheckEvery(AGENT_SLA_CHECK_MAX_INTERVAL), AGENT_SLA_CHECK_MAX_INTERVAL);
+  // Zero-length budgets must never become a zero-delay re-firing cadence.
+  for (const zero of ["PT0S", "P0D", "PT0M", "PT0H"]) assertEquals(agentSlaCheckEvery(zero), AGENT_SLA_CHECK_MAX_INTERVAL, zero);
 });
 
 test("watchedTaskElement maps the check element to the agent leaf", () => {

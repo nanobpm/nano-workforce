@@ -797,7 +797,9 @@ export function summarizeDeliverySteps(graph: DeliveryGraph): DeliveryStepSummar
  * {@link AGENT_SLA_CHECK_MAX_INTERVAL}, so an SLA overrun is detected within that interval regardless of
  * when the job activated relative to a check tick. */
 export function agentSlaCheckEvery(timeout: string): string {
-  return isoDurationToMs(timeout, AGENT_SLA_CHECK_MAX_INTERVAL) <= isoDurationToMs(AGENT_SLA_CHECK_MAX_INTERVAL, AGENT_SLA_CHECK_MAX_INTERVAL)
+  const ms = isoDurationToMs(timeout, AGENT_SLA_CHECK_MAX_INTERVAL);
+  // A zero (or non-positive) cadence would re-fire immediately — fall back to the positive cap.
+  return ms > 0 && ms <= isoDurationToMs(AGENT_SLA_CHECK_MAX_INTERVAL, AGENT_SLA_CHECK_MAX_INTERVAL)
     ? timeout
     : AGENT_SLA_CHECK_MAX_INTERVAL;
 }

@@ -1991,7 +1991,8 @@ test("duplicate fact-qualified edges between the same node pair collapse to ONE 
   const srcToB = flows.filter(([, s, t]) => s === "n1" && t === "n0");
   assertEquals(srcToB.length, 1, `expected exactly one src→b flow, got ${JSON.stringify(srcToB.map((m) => m[0]))}`);
   // No parallel gateway is introduced for this de-duplicated pair.
-  assert(!r.bpmn.includes("<bpmn:parallelGateway"), "no gateway for a single de-duplicated producer/consumer pair");
+  // (The agent node's own internal SLA-loop fork `<el>_wfork` is node-local, not a graph gateway.)
+  assert(!/<bpmn:parallelGateway id="(?!n\d+_wfork")/.test(r.bpmn), "no gateway for a single de-duplicated producer/consumer pair");
 });
 
 test("a non-object / empty body is a clean ok:false, never a throw", async () => {
@@ -4428,8 +4429,13 @@ test("#1016 an agent node's SLA boundary is non-interrupting and only an elapsed
     nodes: [{ id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "x" } }],
     edges: [],
   });
-  assert(/<bpmn:boundaryEvent id="n0_be"[^>]*cancelActivity="false"[^>]*attachedToRef="n0_task"/.test(r.bpmn), "the SLA timer must not cancel the job");
-  assert(r.bpmn.includes('<bpmn:timeCycle xsi:type="bpmn:tFormalExpression">="R/" + slaCheckEvery</bpmn:timeCycle>'), "the SLA is re-checked on the capped cadence, not every full nodeTimeout");
+  assert(!/<bpmn:boundaryEvent id="n0_be"/.test(r.bpmn) && !r.bpmn.includes("timeCycle"), "no boundary/cycle timer on the job: the SLA check never cancels it and never piles up");
+  assert(r.bpmn.includes('<bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=slaCheckEvery</bpmn:timeDuration>'), "the SLA is re-checked on the capped cadence, not every full nodeTimeout");
+  // Serial loop: the check's ONLY outgoing flow returns to the single timer, so at most one check job
+  // can be pending even when no `pr.agent-sla-check` worker ever completes one.
+  assert(/<bpmn:sequenceFlow id="n0_s0" sourceRef="n0_slaChk" targetRef="n0_be"/.test(r.bpmn), "the check loops back to the one timer");
+  assert(/<bpmn:sequenceFlow id="n0_wl" sourceRef="n0_wfork" targetRef="n0_be"/.test(r.bpmn), "the loop is forked alongside the task");
+  assertEquals((r.bpmn.match(/targetRef="n0_slaChk"/g) ?? []).length, 1, "exactly one path arms a check");
   assert(/target="slaCheckEvery"/.test(r.bpmn), "the cadence is seeded on the node");
   assert(/<bpmn:endEvent id="n0_wend">.*<bpmn:terminateEventDefinition/.test(r.bpmn), "agent completion terminates the work scope, cancelling any pending SLA check");
   assert(/<bpmn:boundaryEvent id="n0_slaBe" [^>]*attachedToRef="n0_work"/.test(r.bpmn), "the escalation is reached via the work subProcess's expiry boundary");

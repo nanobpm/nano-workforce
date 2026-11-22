@@ -3048,7 +3048,6 @@ export async function pollAgentActivationsImpl(
   // long-lived jobs occupy the page on every pass while later jobs time out with their activation never
   // recorded — exactly when the never-started/hung distinction matters most. Mirror the paging contract
   // the other engine sweeps use (`page: { from, limit }`, stop on a short page). (#881 review)
-  const ts = now();
   const limit = 200;
   let from = 0;
   for (let guard = 0; guard < 1000; guard++) {
@@ -3089,7 +3088,7 @@ export async function pollAgentActivationsImpl(
           jobType,
           worker,
           jobKey,
-          now: ts,
+          now: now(), // per-observation, never a pass-start stamp
         });
       } catch (err) {
         console.error(`[poller] agent-activation upsert ${pik}:${jobType}: ${err}`);
@@ -3098,7 +3097,7 @@ export async function pollAgentActivationsImpl(
     if (items.length < limit) break; // last page
     from += items.length;
   }
-  await pollDeliveryNodeActivations(data, base, headers, ts);
+  await pollDeliveryNodeActivations(data, base, headers);
 }
 
 /** Delivery-graph agent-node activation pass (issue #1016). A compiled delivery graph's agent nodes run
@@ -3110,7 +3109,6 @@ async function pollDeliveryNodeActivations(
   data: DataLayer,
   base: string,
   headers: Record<string, string>,
-  ts: string,
 ) {
   const limit = 200;
   let from = 0;
@@ -3145,7 +3143,8 @@ async function pollDeliveryNodeActivations(
           jobType: deliveryNodeActivationJobType(jobType, el),
           worker,
           jobKey,
-          now: ts,
+          // Stamp at observation time, not pass start: a slow preceding sweep must not backdate activation.
+          now: now(),
         });
       } catch (err) {
         console.error(`[poller] delivery-node activation upsert ${pik}:${el}: ${err}`);

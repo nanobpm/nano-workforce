@@ -2328,7 +2328,7 @@ function serviceBodyLines(
   ];
   // Issue #1016: an AGENT's work SLA must start on job ACTIVATION, not node entry, and must never
   // cancel a live job. The task therefore sits in an inner `<el>_work` subProcess whose
-  // NON-interrupting `R/<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) cycle boundary only CONSULTS the activation ledger
+  // SERIAL `<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) timer→check loop only CONSULTS the activation ledger
   // ({@link agentSlaCheckLines}); the job is cancelled solely when the ledger proves the work SLA has
   // elapsed since activation — the check sets `<el>_slaExpired`, and the INTERRUPTING conditional
   // boundary `<el>_slaBe` on `<el>_work` fires into the escalation. `<el>_slaArm` re-arms the flag to
@@ -2351,18 +2351,26 @@ function serviceBodyLines(
         `      <bpmn:subProcess id="${el}_work" name="${escapeXml(taskName)} (work)">`,
         `        <bpmn:incoming>${el}_a0</bpmn:incoming>`,
         `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
-        `        <bpmn:startEvent id="${el}_wstart"><bpmn:outgoing>${el}_w0</bpmn:outgoing></bpmn:startEvent>`,
+        `        <bpmn:startEvent id="${el}_wstart"><bpmn:outgoing>${el}_wf</bpmn:outgoing></bpmn:startEvent>`,
+        // The SLA check is a SERIAL loop (fork → timer → check → timer), not a cycle boundary, so at
+        // most ONE `pr.agent-sla-check` job can ever be pending: a queued/incidented check holds the
+        // loop's single token and no further timer is armed until it completes.
+        `        <bpmn:parallelGateway id="${el}_wfork"><bpmn:incoming>${el}_wf</bpmn:incoming><bpmn:outgoing>${el}_w0</bpmn:outgoing><bpmn:outgoing>${el}_wl</bpmn:outgoing></bpmn:parallelGateway>`,
         ...taskLines([`${el}_w0`], `${el}_w1`, "        "),
                 // TERMINATE (scoped to `<el>_work`): the agent's completion must cancel any still-pending SLA
         // check (queued/incidented `pr.agent-sla-check` job), or its live token would keep `<el>_work`
         // open — blocking the contract gate and possibly escalating already-finished work.
         `        <bpmn:endEvent id="${el}_wend"><bpmn:incoming>${el}_w1</bpmn:incoming><bpmn:terminateEventDefinition id="${el}_wendTerm" /></bpmn:endEvent>`,
-        `        <bpmn:boundaryEvent id="${el}_be" name="Work SLA check" cancelActivity="false" attachedToRef="${el}_task">`,
+        `        <bpmn:intermediateCatchEvent id="${el}_be" name="Work SLA check">`,
+        `          <bpmn:incoming>${el}_wl</bpmn:incoming>`,
+        `          <bpmn:incoming>${el}_s0</bpmn:incoming>`,
         `          <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
-        `          <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeCycle xsi:type="bpmn:tFormalExpression">="R/" + slaCheckEvery</bpmn:timeCycle></bpmn:timerEventDefinition>`,
-        "        </bpmn:boundaryEvent>",
+        `          <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=slaCheckEvery</bpmn:timeDuration></bpmn:timerEventDefinition>`,
+        "        </bpmn:intermediateCatchEvent>",
         ...agentSlaCheckLines(el, reservedFlagTargets),
-        `  ${flow(`${el}_w0`, `${el}_wstart`, `${el}_task`)}`,
+        `  ${flow(`${el}_wf`, `${el}_wstart`, `${el}_wfork`)}`,
+        `  ${flow(`${el}_wl`, `${el}_wfork`, `${el}_be`)}`,
+        `  ${flow(`${el}_w0`, `${el}_wfork`, `${el}_task`)}`,
         `  ${flow(`${el}_w1`, `${el}_task`, `${el}_wend`)}`,
         "      </bpmn:subProcess>",
         `      <bpmn:boundaryEvent id="${el}_slaBe" name="Work SLA elapsed" attachedToRef="${el}_work">`,
@@ -2459,7 +2467,7 @@ function serviceBodyLines(
   ];
 }
 
-/** The agent-node work-SLA check (issue #1016), on the NON-interrupting `R/<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) cycle
+/** The agent-node work-SLA check (issue #1016), on the SERIAL `<slaCheckEvery>` (min(nodeTimeout, AGENT_SLA_CHECK_MAX_INTERVAL)) timer→check loop
  * boundary inside `<el>_work`. Each fire runs `pr.agent-sla-check`, which reads the durable activation
  * ledger: while the job is still queued (or its activation is not yet observed) or its work budget
  * (`activated_at + nodeTimeout`) has not elapsed, it reports `false` and the branch simply ends — the
@@ -2484,9 +2492,9 @@ function agentSlaCheckLines(el: string, reservedTargets: readonly string[]): str
     `          <bpmn:incoming>${el}_i2</bpmn:incoming>`,
     `          <bpmn:outgoing>${el}_s0</bpmn:outgoing>`,
     "        </bpmn:serviceTask>",
-    `        <bpmn:endEvent id="${el}_slaDone"><bpmn:incoming>${el}_s0</bpmn:incoming></bpmn:endEvent>`,
     `  ${flow(`${el}_i2`, `${el}_be`, `${el}_slaChk`)}`,
-    `  ${flow(`${el}_s0`, `${el}_slaChk`, `${el}_slaDone`)}`,
+    // Loop back to the ONE timer: the next check is armed only after this one completes.
+    `  ${flow(`${el}_s0`, `${el}_slaChk`, `${el}_be`)}`,
   ];
 }
 
