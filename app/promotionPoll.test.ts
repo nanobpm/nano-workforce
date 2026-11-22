@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import { assert, assertEquals } from "#test-assert";
+import { memOpenWithDepsTx } from "#test-open-tx";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { resetDefaultBranchCache } from "./github.ts";
 import { pollPromotion } from "./service.ts";
@@ -43,6 +44,9 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
     };
   }
   const data = { table: withTrackingViews((n: string, pk?: string) => tbl(n, pk)) } as any as DataLayer;
+  // submitPr's registerDependencies runs its DELETE+INSERTs through `open().tx` since the round-3
+  // atomicity fix (issue #1007 review).
+  (data as any).open = memOpenWithDepsTx(stores as never);
   return { data, stores };
 }
 

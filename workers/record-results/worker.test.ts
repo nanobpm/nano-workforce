@@ -110,3 +110,16 @@ test("at least one opened PR finalizes cleanly (no throw)", async () => {
   // it must not vanish (#298). Cross-checked against the pure `deriveEpicBucket` oracle.
   assertEquals(deriveEpicBucket(plan.status as string, null, plan.acknowledged_at as string | null), "active");
 });
+
+// Round 3 (#1007 review): the trial-merge Abandon arm reaches this finalizer having enrolled its
+// opened slices converge-only — record the abandoned outcome honestly, not a dispatched success.
+test("a trial-merge abandon records a converge-only (abandoned) outcome, not dispatched success (#1007 round 3)", async () => {
+  const app = fakeApp([
+    { id: 1, plan_key: "o/r#1", task_id: "a", status: "opened" },
+    { id: 2, plan_key: "o/r#1", task_id: "b", status: "opened" },
+  ]);
+  await handler({ variables: { planKey: "o/r#1", action: "abandon" } } as any, app as any);
+  const plan = app._plans.at(-1) as Record<string, unknown>;
+  assertEquals(plan.status, "done");
+  assertEquals(plan.outcome, "2 PR(s) enrolled converge-only — wave abandoned at the trial-merge gate (operator merge opt-out)");
+});

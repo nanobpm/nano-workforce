@@ -526,11 +526,13 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
     return flows;
   }
 
-  test("trial-merge escalation: proceed routes to the more-waves gate", async () => {
+  test("trial-merge escalation: proceed routes through the wave-converge gate toward the more-waves gate", async () => {
     const flows = await driveToTrialDecision("proceed");
+    // F3 (#1007 review): proceed now routes to the wave-converge gate (which enrolls the wave's opened
+    // PRs after the trial-merge gate), then on toward gw-more — no longer directly to gw-more.
     assert.ok(
-      flows.includes("gw-trial-answer->gw-more"),
-      `proceed routed to gw-more (flows: ${flows.join(", ")})`,
+      flows.includes("gw-trial-answer->gw-converge-wave"),
+      `proceed routed to the wave-converge gate (flows: ${flows.join(", ")})`,
     );
   });
 
@@ -542,11 +544,19 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
     );
   });
 
-  test("trial-merge escalation: abandon finalizes the plan", async () => {
+  test("trial-merge escalation: abandon enrolls the wave converge-only, then finalizes the plan (#1007 round 3)", async () => {
     const flows = await driveToTrialDecision("abandon");
+    // Round 3 (#1007 review): abandon no longer short-circuits to record-results — that left the
+    // wave's opened PRs unenrolled (their missing pull_requests rows wedged the delivery rollup at
+    // "converging" forever). It routes THROUGH the wave-converge gate, which enrolls every opened
+    // slice (converge-only, the operator's merge opt-out), then on toward gw-more → record-results.
     assert.ok(
-      flows.includes("gw-trial-answer->record-results"),
-      `abandon routed to record-results (flows: ${flows.join(", ")})`,
+      flows.includes("gw-trial-answer->gw-converge-wave"),
+      `abandon routed to the wave-converge gate (flows: ${flows.join(", ")})`,
+    );
+    assert.ok(
+      !flows.includes("gw-trial-answer->record-results"),
+      `abandon no longer short-circuits record-results (flows: ${flows.join(", ")})`,
     );
   });
 
@@ -785,6 +795,50 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
           `the retry re-entered the implement task (flows: ${flows.join(", ")})`,
         );
         assert.equal(featureCalls, 2, "the auto-retry re-dispatched the implement agent exactly once");
+      },
+    );
+  });
+  test("issue #1007: a two-wave plan converges each slice PR INSIDE the epic (converge-cell) and runs through to record-results", async () => {
+    // Wave 1 = t1, wave 2 = t2 (dependsOn t1). Each slice that opens a PR must be enrolled into the
+    // convergence loop by the wave body's converge-cell call — rooted under the epic, merge intent =
+    // the epic's auto-merge policy, t2 declaring t1's PR as its merge dependency — with NO manual
+    // `nwf converge`. The wave gate is released by publishing `wave-merged` (what the poller does once
+    // the cell-driven loops have merged the wave's PRs on GitHub).
+    const twoWavePlan: Stub = () => ({
+      tasks: [
+        { id: "t1", title: "T1", prompt: "do t1" },
+        { id: "t2", title: "T2", prompt: "do t2", dependsOn: ["t1"] },
+      ],
+    });
+    await withApp(
+      {
+        "senior:plan": twoWavePlan,
+        "senior:plan-review": approveReview,
+        "senior:feature": openBothPrs,
+      },
+      async ({ app, planKey }) => {
+        const prs = app.db.table<{ pr_key: string; root_request_key: string | null }>("pull_requests", "pr_key");
+        const deps = app.db.table<{ pr_key: string; depends_on_key: string }>("pr_dependencies", "pr_key");
+        const wave1 = await prs.findOne({ pr_key: "owner/repo#101" });
+        assert.ok(wave1, "wave 1's slice PR was enrolled into a convergence loop with no manual converge");
+        assert.equal(wave1?.root_request_key, planKey, "the slice loop rolls up under the epic");
+        assert.equal(await prs.findOne({ pr_key: "owner/repo#102" }), undefined, "wave 2 has not run yet");
+        const flows = takenFlows(app);
+        // F3 (#1007 review): the converge-cell call is a wave-scoped step after record-wave + the
+        // trial-merge gate, not a per-slice inline step. Assert the wave-converge gate fed it.
+        assert.ok(flows.includes("gw-converge-wave->converge-cell-call"), `the wave body called converge-cell after record-wave (flows: ${flows.join(", ")})`);
+        assert.ok(flows.includes("cc_gw_kind->converge-slice"), "converge-cell took the epic-slice arm");
+        assert.ok(flows.includes("gw-more->wait-wave-merged"), "the epic parks at the wave gate");
+
+        await app.engine.publishMessage({ name: "wave-merged", correlationKey: planKey, variables: {} });
+        await settleFully(app);
+
+        const wave2 = await prs.findOne({ pr_key: "owner/repo#102" });
+        assert.ok(wave2, "wave 2's slice PR was enrolled too");
+        assert.equal(wave2?.root_request_key, planKey);
+        const dep = await deps.findOne({ pr_key: "owner/repo#102" });
+        assert.equal(dep?.depends_on_key, "owner/repo#101", "t2's loop declares t1's PR as its merge dependency");
+        assert.ok(takenFlows(app).includes("gw-more->record-results"), "the epic reaches record-results");
       },
     );
   });

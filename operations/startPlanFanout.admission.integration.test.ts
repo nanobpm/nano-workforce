@@ -262,3 +262,52 @@ test("edge: two plans sharing the DEFAULT branch → 202 (default is exempt from
     assertEquals(started.length, 1);
   });
 });
+
+// ── autoMerge merge-policy validation (issue #916 pattern) ────────────────────
+
+// The plan-fanout door's `autoMerge` DEFAULTS TO ON (`!(present && === false)`), so a
+// present-but-mistyped value (the string "false", 0, …) silently reads as auto-merge ON — the
+// UNSAFE direction for a merge-policy flag. The sibling doors (startFeature, startConvergenceLoop,
+// issue #916) already reject a non-boolean `autoMerge` with a 400; this door must do the same.
+// Table-drive the mistyped variants so the whole class is pinned, not one instance.
+for (const [label, mistyped] of [
+  ['string "false"', "false"],
+  ['string "true"', "true"],
+  ["zero", 0],
+  ["one", 1],
+] as const) {
+  test(`edge: non-boolean autoMerge (${label}) → 400, never silently ON`, async () => {
+    const gh = freshGithub("owner/repo");
+    await withGithub(gh, async () => {
+      const { app, started } = makeApp();
+      const res = (await startPlanFanout(
+        input({ issue: "owner/repo#9", baseBranch: "main", confirmDefaultBase: true, autoMerge: mistyped }),
+        app,
+      )) as any;
+      assertEquals(res.status, 400);
+      assertEquals(typeof res.body.error, "string");
+      assertEquals(started.length, 0); // rejected before any fan-out
+    });
+  });
+}
+
+// The boolean variants keep their meaning end to end: explicit `false` reaches the engine as
+// `false` (review-only slices); explicit `true` and an omitted flag both default to ON.
+for (const [label, value, expected] of [
+  ["explicit false", false, false],
+  ["explicit true", true, true],
+  ["omitted (default ON)", undefined, true],
+] as const) {
+  test(`edge: ${label} autoMerge → 202, engine variable ${expected}`, async () => {
+    const gh = freshGithub("owner/repo");
+    await withGithub(gh, async () => {
+      const { app, started } = makeApp();
+      const body: Record<string, unknown> = { issue: "owner/repo#10", baseBranch: "main", confirmDefaultBase: true };
+      if (value !== undefined) body.autoMerge = value;
+      const res = (await startPlanFanout(input(body), app)) as any;
+      assertEquals(res.status, 202);
+      assertEquals(started.length, 1);
+      assertEquals(started[0]?.variables?.autoMerge, expected);
+    });
+  });
+}

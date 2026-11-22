@@ -34,6 +34,7 @@
           <nano:extend name="escalationSlaTimeout" type="string" />
           <nano:extend name="escalationAssignee" type="string" optional="true" />
           <nano:extend name="autoResolveEscalations" type="boolean" optional="true" />
+          <nano:extend name="autoMerge" type="boolean" optional="true" />
           <nano:extend name="agentSlaTimeout" type="string" />
           <nano:extend name="capsWaitTimeout" type="string" />
           <nano:extend name="blackboardUrl" type="string" optional="true" />
@@ -89,6 +90,10 @@
           <nano:reference name="waveTasks" ref="RecordWaveTaskRef" list="true" />
           <nano:reference name="waveResults" ref="RecordWaveResult" list="true" />
         </nano:shape>
+        <nano:shape id="ConvergeWavePr" name="Converge wave — one opened slice PR">
+          <nano:extend name="taskId" type="string" />
+          <nano:extend name="prKey" type="string" />
+        </nano:shape>
         <nano:shape id="RecordTrialMergeHead" name="Record trial merge — open head">
           <nano:extend name="repo" type="string" />
           <nano:extend name="prNumber" type="integer" />
@@ -125,6 +130,7 @@
         </nano:shape>
         <nano:shape id="RecordResultsIn" name="Finalize plan — input">
           <nano:extend name="planKey" type="string" />
+          <nano:extend name="action" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="CapsResolved" name="caps-resolved message payload (issue #289)">
           <nano:extend name="resolvedDepsBrief" type="string" optional="true" />
@@ -585,7 +591,7 @@
       <bpmn:sequenceFlow id="w_capsTimeout" name="caps SLA" sourceRef="wait-caps-timeout" targetRef="feature-escalation" />
       <bpmn:sequenceFlow id="w_noNeeds" name="none" sourceRef="w_gw_needs" targetRef="implement-cell-call" />
       <bpmn:sequenceFlow id="w_capsResolved" sourceRef="wait-caps-resolved" targetRef="implement-cell-call" />
-      <bpmn:sequenceFlow id="w_toEnd" sourceRef="implement-cell-call" targetRef="w_end" />
+      <bpmn:sequenceFlow id="w_toEnd" name="implemented" sourceRef="implement-cell-call" targetRef="w_end" />
       <bpmn:sequenceFlow id="w_toAnswerGw" sourceRef="feature-escalation" targetRef="w_gw_answer" />
       <bpmn:sequenceFlow id="w_answerLoop" name="answer" sourceRef="w_gw_answer" targetRef="record-task-implementing">
         <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "answer"</bpmn:conditionExpression>
@@ -678,10 +684,34 @@
       <bpmn:outgoing>f_trialAnswerAbandon</bpmn:outgoing>
       <bpmn:outgoing>f_trialAnswerRerun</bpmn:outgoing>
     </bpmn:exclusiveGateway>
-    <bpmn:exclusiveGateway id="gw-more" name="more waves?" default="f_done">
+    <bpmn:exclusiveGateway id="gw-converge-wave" name="opened PRs to converge?" default="f_noConverge">
       <bpmn:incoming>f_skipTrialMerge</bpmn:incoming>
       <bpmn:incoming>f_trialProceed</bpmn:incoming>
       <bpmn:incoming>f_trialAnswerProceed</bpmn:incoming>
+      <bpmn:outgoing>f_toConvergeWave</bpmn:outgoing>
+      <bpmn:outgoing>f_noConverge</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:callActivity id="converge-cell-call" name="Converge wave slice PRs">
+      <bpmn:extensionElements>
+        <zeebe:calledElement processId="converge-cell" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=planKey" target="planKey" />
+          <zeebe:input source="=pr.taskId" target="taskId" />
+          <zeebe:input source="=pr.prKey" target="prKey" />
+          <zeebe:input source="=not (action = &#34;abandon&#34;)" target="autoMerge" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_toConvergeWave</bpmn:incoming>
+      <bpmn:outgoing>f_convergedToMore</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics>
+        <bpmn:extensionElements>
+          <zeebe:loopCharacteristics inputCollection="=openedPrs" inputElement="pr" />
+        </bpmn:extensionElements>
+      </bpmn:multiInstanceLoopCharacteristics>
+    </bpmn:callActivity>
+    <bpmn:exclusiveGateway id="gw-more" name="more waves?" default="f_done">
+      <bpmn:incoming>f_noConverge</bpmn:incoming>
+      <bpmn:incoming>f_convergedToMore</bpmn:incoming>
       <bpmn:outgoing>f_moreWaves</bpmn:outgoing>
       <bpmn:outgoing>f_done</bpmn:outgoing>
     </bpmn:exclusiveGateway>
@@ -745,26 +775,31 @@
     <bpmn:sequenceFlow id="f_runTrialMerge" name="run" sourceRef="gw-trial-needed" targetRef="trial-merge">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=runTrialMerge</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
-    <bpmn:sequenceFlow id="f_skipTrialMerge" name="skip" sourceRef="gw-trial-needed" targetRef="gw-more" />
+    <bpmn:sequenceFlow id="f_skipTrialMerge" name="skip" sourceRef="gw-trial-needed" targetRef="gw-converge-wave" />
     <bpmn:sequenceFlow id="f_toRecordTrialMerge" sourceRef="trial-merge" targetRef="record-trial-merge" />
     <bpmn:sequenceFlow id="f_toGwTrial" sourceRef="record-trial-merge" targetRef="gw-trial" />
     <bpmn:sequenceFlow id="f_trialEscalate" name="suite failed" sourceRef="gw-trial" targetRef="trial-merge-decision">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=trialMergeRed</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
-    <bpmn:sequenceFlow id="f_trialProceed" name="proceed" sourceRef="gw-trial" targetRef="gw-more" />
+    <bpmn:sequenceFlow id="f_trialProceed" name="proceed" sourceRef="gw-trial" targetRef="gw-converge-wave" />
     <bpmn:sequenceFlow id="f_toGwTrialAnswer" sourceRef="trial-merge-decision" targetRef="resolve-trial-attention" />
     <bpmn:sequenceFlow id="f_resolveToTrialAnswer" sourceRef="resolve-trial-attention" targetRef="gw-trial-answer" />
-    <bpmn:sequenceFlow id="f_trialAnswerProceed" name="proceed" sourceRef="gw-trial-answer" targetRef="gw-more">
+    <bpmn:sequenceFlow id="f_trialAnswerProceed" name="proceed" sourceRef="gw-trial-answer" targetRef="gw-converge-wave">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=action = "proceed"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
-    <bpmn:sequenceFlow id="f_trialAnswerAbandon" name="abandon" sourceRef="gw-trial-answer" targetRef="record-results">
+    <bpmn:sequenceFlow id="f_trialAnswerAbandon" name="abandon" sourceRef="gw-trial-answer" targetRef="gw-converge-wave">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=action = "abandon"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_trialAnswerRerun" name="rebase" sourceRef="gw-trial-answer" targetRef="trial-merge" />
     <bpmn:sequenceFlow id="f_trial_sla" name="SLA auto-rerun" sourceRef="be_trial_sla" targetRef="trial-merge" />
     <bpmn:sequenceFlow id="f_moreWaves" name="more" sourceRef="gw-more" targetRef="wait-wave-merged">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=hasMoreWaves</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=hasMoreWaves and not(is defined(action) and action = "abandon")</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_toConvergeWave" name="opened PRs" sourceRef="gw-converge-wave" targetRef="converge-cell-call">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=is defined(openedPrs) and openedPrs != null and count(openedPrs) &gt; 0</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_noConverge" name="none" sourceRef="gw-converge-wave" targetRef="gw-more" />
+    <bpmn:sequenceFlow id="f_convergedToMore" sourceRef="converge-cell-call" targetRef="gw-more" />
     <bpmn:sequenceFlow id="f_waveMerged" sourceRef="wait-wave-merged" targetRef="select-wave" />
     <bpmn:sequenceFlow id="f_done" name="done" sourceRef="gw-more" targetRef="record-results" />
     <bpmn:sequenceFlow id="f_toEnd" sourceRef="record-results" targetRef="End" />
@@ -868,15 +903,15 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_trial-merge" bpmnElement="trial-merge">
-        <dc:Bounds x="4554" y="1240" width="100" height="80" />
+        <dc:Bounds x="4554" y="1400" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record-trial-merge" bpmnElement="record-trial-merge">
-        <dc:Bounds x="4754" y="1240" width="100" height="80" />
+        <dc:Bounds x="4754" y="1400" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-trial" bpmnElement="gw-trial" isMarkerVisible="true">
-        <dc:Bounds x="4954" y="1255" width="50" height="50" />
+        <dc:Bounds x="4954" y="1415" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="4944" y="1310" width="71" height="14" />
+          <dc:Bounds x="4944" y="1470" width="71" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_trial-merge-decision" bpmnElement="trial-merge-decision">
@@ -891,25 +926,34 @@
           <dc:Bounds x="5503" y="830" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="BPMNShape_gw-more" bpmnElement="gw-more" isMarkerVisible="true">
+      <bpmndi:BPMNShape id="BPMNShape_gw-converge-wave" bpmnElement="gw-converge-wave" isMarkerVisible="true">
         <dc:Bounds x="5654" y="615" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5577" y="670" width="84" height="14" />
+          <dc:Bounds x="5637" y="582" width="85" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_converge-cell-call" bpmnElement="converge-cell-call">
+        <dc:Bounds x="5804" y="920" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-more" bpmnElement="gw-more" isMarkerVisible="true">
+        <dc:Bounds x="6004" y="615" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="5987" y="596" width="84" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_wait-wave-merged" bpmnElement="wait-wave-merged">
-        <dc:Bounds x="5836" y="782" width="36" height="36" />
+        <dc:Bounds x="6186" y="782" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5815" y="749" width="78" height="28" />
+          <dc:Bounds x="6165" y="749" width="78" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record-results" bpmnElement="record-results">
-        <dc:Bounds x="5804" y="600" width="100" height="80" />
+        <dc:Bounds x="6154" y="600" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_End" bpmnElement="End">
-        <dc:Bounds x="6004" y="622" width="36" height="36" />
+        <dc:Bounds x="6354" y="622" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5985" y="663" width="74" height="28" />
+          <dc:Bounds x="6335" y="663" width="74" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_be_plan_sla" bpmnElement="be_plan_sla">
@@ -921,7 +965,7 @@
       <bpmndi:BPMNShape id="BPMNShape_be_trial_sla" bpmnElement="be_trial_sla">
         <dc:Bounds x="5136" y="822" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5052" y="863" width="84" height="14" />
+          <dc:Bounds x="5112" y="883" width="84" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toReadinessGw" bpmnElement="f_toReadinessGw">
@@ -996,16 +1040,23 @@
           <dc:Bounds x="4976" y="618" width="32" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_done" bpmnElement="f_done">
+      <bpmndi:BPMNEdge id="BPMNEdge_f_noConverge" bpmnElement="f_noConverge">
         <di:waypoint x="5704" y="640" />
-        <di:waypoint x="5804" y="640" />
+        <di:waypoint x="6004" y="640" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5738" y="618" width="32" height="14" />
+          <dc:Bounds x="5838" y="618" width="32" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_done" bpmnElement="f_done">
+        <di:waypoint x="6054" y="640" />
+        <di:waypoint x="6154" y="640" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="6088" y="618" width="32" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toEnd" bpmnElement="f_toEnd">
-        <di:waypoint x="5904" y="640" />
-        <di:waypoint x="6004" y="640" />
+        <di:waypoint x="6254" y="640" />
+        <di:waypoint x="6354" y="640" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_empty_revise" bpmnElement="f_empty_revise">
         <di:waypoint x="1616" y="985" />
@@ -1035,26 +1086,26 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toRecordTrialMerge" bpmnElement="f_toRecordTrialMerge">
-        <di:waypoint x="4654" y="1280" />
-        <di:waypoint x="4754" y="1280" />
+        <di:waypoint x="4654" y="1440" />
+        <di:waypoint x="4754" y="1440" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toGwTrial" bpmnElement="f_toGwTrial">
-        <di:waypoint x="4854" y="1280" />
-        <di:waypoint x="4954" y="1280" />
+        <di:waypoint x="4854" y="1440" />
+        <di:waypoint x="4954" y="1440" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_trialProceed" bpmnElement="f_trialProceed">
-        <di:waypoint x="5004" y="1280" />
-        <di:waypoint x="5679" y="1280" />
+        <di:waypoint x="5004" y="1440" />
+        <di:waypoint x="5679" y="1440" />
         <di:waypoint x="5679" y="665" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5315" y="1258" width="53" height="14" />
+          <dc:Bounds x="5315" y="1418" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_trialAnswerRerun" bpmnElement="f_trialAnswerRerun">
         <di:waypoint x="5529" y="775" />
         <di:waypoint x="5529" y="740" />
         <di:waypoint x="4604" y="740" />
-        <di:waypoint x="4604" y="1240" />
+        <di:waypoint x="4604" y="1400" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="5044" y="718" width="46" height="14" />
         </bpmndi:BPMNLabel>
@@ -1097,18 +1148,18 @@
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_runTrialMerge" bpmnElement="f_runTrialMerge">
         <di:waypoint x="4429" y="665" />
-        <di:waypoint x="4429" y="1280" />
-        <di:waypoint x="4554" y="1280" />
+        <di:waypoint x="4429" y="1440" />
+        <di:waypoint x="4554" y="1440" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="4434" y="966" width="25" height="14" />
+          <dc:Bounds x="4434" y="1046" width="25" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_trialEscalate" bpmnElement="f_trialEscalate">
-        <di:waypoint x="4979" y="1255" />
+        <di:waypoint x="4979" y="1415" />
         <di:waypoint x="4979" y="800" />
         <di:waypoint x="5104" y="800" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="4984" y="1021" width="85" height="14" />
+          <dc:Bounds x="4984" y="1101" width="85" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_trialAnswerProceed" bpmnElement="f_trialAnswerProceed">
@@ -1121,26 +1172,26 @@
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_trialAnswerAbandon" bpmnElement="f_trialAnswerAbandon">
         <di:waypoint x="5529" y="775" />
-        <di:waypoint x="5529" y="605" />
-        <di:waypoint x="5784" y="605" />
-        <di:waypoint x="5784" y="640" />
-        <di:waypoint x="5804" y="640" />
+        <di:waypoint x="5529" y="640" />
+        <di:waypoint x="5654" y="640" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5630" y="583" width="53" height="14" />
+          <dc:Bounds x="5471" y="701" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_moreWaves" bpmnElement="f_moreWaves">
-        <di:waypoint x="5704" y="640" />
-        <di:waypoint x="5724" y="640" />
-        <di:waypoint x="5724" y="665" />
-        <di:waypoint x="5758" y="665" />
-        <di:waypoint x="5758" y="820" />
-        <di:waypoint x="5836" y="820" />
-        <di:waypoint x="5836" y="838" />
-        <di:waypoint x="5854" y="838" />
-        <di:waypoint x="5854" y="818" />
+        <di:waypoint x="6029" y="665" />
+        <di:waypoint x="6029" y="800" />
+        <di:waypoint x="6186" y="800" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="5763" y="736" width="35" height="14" />
+          <dc:Bounds x="6034" y="726" width="35" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toConvergeWave" bpmnElement="f_toConvergeWave">
+        <di:waypoint x="5704" y="640" />
+        <di:waypoint x="5854" y="640" />
+        <di:waypoint x="5854" y="920" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="5742" y="618" width="75" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_readiness_done" bpmnElement="f_readiness_done">
@@ -1171,10 +1222,15 @@
         <di:waypoint x="5404" y="800" />
         <di:waypoint x="5504" y="800" />
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_convergedToMore" bpmnElement="f_convergedToMore">
+        <di:waypoint x="5854" y="920" />
+        <di:waypoint x="5854" y="640" />
+        <di:waypoint x="6004" y="640" />
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_waveMerged" bpmnElement="f_waveMerged">
-        <di:waypoint x="5854" y="818" />
-        <di:waypoint x="5854" y="1340" />
-        <di:waypoint x="2316" y="1340" />
+        <di:waypoint x="6204" y="818" />
+        <di:waypoint x="6204" y="1020" />
+        <di:waypoint x="2316" y="1020" />
         <di:waypoint x="2316" y="680" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_plan_sla" bpmnElement="f_plan_sla">
@@ -1188,11 +1244,12 @@
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_trial_sla" bpmnElement="f_trial_sla">
         <di:waypoint x="5154" y="858" />
-        <di:waypoint x="5154" y="1220" />
-        <di:waypoint x="4604" y="1220" />
-        <di:waypoint x="4604" y="1240" />
+        <di:waypoint x="5154" y="878" />
+        <di:waypoint x="4674" y="878" />
+        <di:waypoint x="4674" y="1440" />
+        <di:waypoint x="4654" y="1440" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="4842" y="1187" width="74" height="28" />
+          <dc:Bounds x="4877" y="845" width="74" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNShape id="BPMNShape_w_start" bpmnElement="w_start">
@@ -1273,6 +1330,9 @@
       <bpmndi:BPMNEdge id="BPMNEdge_w_toEnd" bpmnElement="w_toEnd">
         <di:waypoint x="3928" y="400" />
         <di:waypoint x="4028" y="400" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3925" y="458" width="87" height="14" />
+        </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_capsToWait" bpmnElement="w_capsToWait">
         <di:waypoint x="3042" y="560" />

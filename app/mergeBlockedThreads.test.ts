@@ -81,6 +81,29 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
         const rows = (stores[m[1]] ??= [] as any[]);
         for (let i = rows.length - 1; i >= 0; i--) if (rows[i][m[2]] === params[0]) rows.splice(i, 1);
       },
+      // submitPr's registerDependencies runs its DELETE+INSERTs through `tx` since the round-3
+      // atomicity fix (issue #1007 review).
+      tx: async (fn: (q: { exec: (sql: string, params?: any[]) => Promise<{ changed: number }> }) => Promise<unknown>) =>
+        fn({
+          exec: async (sql: string, params: any[] = []) => {
+            if (/^DELETE FROM "pr_dependencies" WHERE "pr_key" = \?$/.test(sql)) {
+              const rows = (stores.pr_dependencies ??= [] as any[]);
+              let changed = 0;
+              for (let i = rows.length - 1; i >= 0; i--) {
+                if (rows[i].pr_key === params[0]) {
+                  rows.splice(i, 1);
+                  changed++;
+                }
+              }
+              return { changed };
+            }
+            if (/^INSERT INTO "pr_dependencies"/.test(sql)) {
+              (stores.pr_dependencies ??= [] as any[]).push({ pr_key: params[0], depends_on_key: params[1], created_at: params[2] });
+              return { changed: 1 };
+            }
+            throw new Error(`memData.open().tx: unsupported statement: ${sql}`);
+          },
+        }),
     }),
   } as any as DataLayer;
   return { data, stores };

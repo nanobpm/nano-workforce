@@ -1,0 +1,13 @@
+-- Durable epic merge policy (issue #1007, PR #1010 review): the epic's `autoMerge` intent is the
+-- OPERATOR's, set once at `start/plan-fanout`. Until now it lived ONLY as a process variable seeded
+-- on the plan-fanout instance, which the wave body's `converge-cell-call` read — but the plan and
+-- plan-review agent tasks complete into that same scope, so an agent completion echoing
+-- `autoMerge: true` could clobber an operator's explicit `autoMerge: false` opt-out and silently
+-- re-enable automatic merging. Persist the intent on the canonical `plans` row (the durable source
+-- of truth, mirroring `auto_resolve_escalations` / issue #889) so `pr.converge-slice` reads it from
+-- the row — a value no agent completion can reach — instead of from the clobberable process scope.
+--
+-- DEFAULT 1 (auto-merge on) matches the door's default (`autoMerge !== false`); the column is NOT
+-- NULL so a pre-#1007 epic row reads as the historical default. The writer (`startPlan`) stamps the
+-- operator's explicit `false` as 0.
+ALTER TABLE plans ADD COLUMN auto_merge INTEGER NOT NULL DEFAULT 1;

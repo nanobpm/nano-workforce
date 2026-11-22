@@ -209,6 +209,10 @@
       "handler": "workers/converge-feature/worker.ts"
     },
     {
+      "taskType": "pr.converge-slice",
+      "handler": "workers/converge-slice/worker.ts"
+    },
+    {
       "taskType": "pr.record-trial-merge",
       "handler": "workers/record-trial-merge/worker.ts"
     },
