@@ -1,3 +1,9 @@
+## [0.219.0](https://github.com/nanobpm/nano-workforce/compare/v0.218.3...v0.219.0) (2026-11-22)
+
+### Features
+
+* **plan-fanout:** converge each slice PR inside the epic via converge-cell ([#1010](https://github.com/nanobpm/nano-workforce/issues/1010)) ([422bb4b](https://github.com/nanobpm/nano-workforce/commit/422bb4b08c030bdae6fad8e97aef74664f3ed53b)), closes [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#916](https://github.com/nanobpm/nano-workforce/issues/916) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#889](https://github.com/nanobpm/nano-workforce/issues/889) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#test-open-tx](https://github.com/nanobpm/nano-workforce/issues/test-open-tx) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007)
+
 ## [0.218.3](https://github.com/nanobpm/nano-workforce/compare/v0.218.2...v0.218.3) (2026-11-22)
 
 ### Bug Fixes
