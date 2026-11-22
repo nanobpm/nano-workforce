@@ -50,7 +50,10 @@ export interface LayoutWithFallbackOptions {
 /** Share of the total budget the expanded attempt may use; the collapsed retry gets the remainder. */
 export const EXPANDED_BUDGET_SHARE = 0.6;
 
-const defaultLayout: LayoutFn = (xml, timeoutMs) => layoutBpmnOffThread(xml, timeoutMs);
+// The bound is an ABSOLUTE deadline carried through semaphore admission AND worker execution, so time
+// spent queued behind other layouts is charged against this attempt's share (issue #1005 review).
+const defaultLayout: LayoutFn = (xml, timeoutMs) =>
+  layoutBpmnOffThread(xml, timeoutMs, undefined, { deadline: Date.now() + timeoutMs });
 
 function errMessage(err: unknown): string {
   if (err instanceof Error) {

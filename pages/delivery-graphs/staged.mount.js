@@ -49,6 +49,41 @@ const DEFAULT_SAVE_LIBRARY_URL = new URL("../app/api/actions/delivery-graph/libr
 // (or drops off) without a manual refresh — mirrors the 5s cadence the old declarative grid used.
 const DEFAULT_REFRESH_MS = 5000;
 
+/** Decide what a proposal-bpmn preview response means for the operator (issue #1005). Pure, so it is
+ * unit-tested directly. Returns `{ navigate, xml?, message, kind }`:
+ *  - a `none` layout carries DI-less XML, so we do NOT open the diagram view — we show the server's
+ *    no-diagram message instead (the proposal listing stays usable);
+ *  - a `collapsed` layout opens the diagram but surfaces the fallback reason;
+ *  - an `expanded` (or legacy, layout-less) response opens the diagram as before;
+ *  - anything else is an error message. */
+export function previewDiOutcome(status, body) {
+  if (!(status === 200 && body && body.ok && typeof body.bpmn === "string" && body.bpmn.trim() !== "")) {
+    return {
+      navigate: false,
+      kind: "err",
+      message: body && body.error ? String(body.error) : "Could not compile the DI for this proposal.",
+    };
+  }
+  const layout = body.layout && typeof body.layout === "object" ? body.layout : null;
+  const layoutMsg = layout && typeof layout.message === "string" && layout.message.trim() !== "" ? layout.message : "";
+  if (layout && layout.mode === "none") {
+    return {
+      navigate: false,
+      kind: "err",
+      message: layoutMsg || "No diagram could be laid out for this graph. It is still valid and can be dispatched.",
+    };
+  }
+  if (layout && layout.mode === "collapsed") {
+    return {
+      navigate: true,
+      xml: body.bpmn,
+      kind: "ok",
+      message: `\u2713 Opening the generated DI in the process explorer (${layoutMsg || "layout: collapsed"})…`,
+    };
+  }
+  return { navigate: true, xml: body.bpmn, kind: "ok", message: "\u2713 Opening the generated DI in the process explorer…" };
+}
+
 // A bounded timeout for every door request. Without it a hung door leaves the fetch promise pending
 // forever, so the busy() lock never clears and the UI is stranded; on timeout the AbortController
 // rejects the fetch, surfacing as an error banner and re-enabling the controls via the finally blocks.
@@ -360,15 +395,14 @@ export function mountStagedProposals(host, config = {}) {
     setStatus("Compiling DI…");
     try {
       const { status, body } = await post(proposalBpmnUrl, { digest: staged });
-      if (status === 200 && body.ok && typeof body.bpmn === "string" && body.bpmn.trim() !== "") {
+      const outcome = previewDiOutcome(status, body);
+      if (outcome.navigate) {
         window.parent.postMessage(
-          { type: "nano-navigate", target: "definitionPreview", params: { xml: body.bpmn } },
+          { type: "nano-navigate", target: "definitionPreview", params: { xml: outcome.xml } },
           window.location.origin,
         );
-        setStatus("\u2713 Opening the generated DI in the process explorer…", "ok");
-      } else {
-        setStatus(body && body.error ? body.error : "Could not compile the DI for this proposal.", "err");
       }
+      setStatus(outcome.message, outcome.kind);
     } catch (err) {
       setStatus(err && err.message ? err.message : "DI preview request failed.", "err");
     } finally {
