@@ -94,9 +94,13 @@ against the wrong base will not be merged into the epic.
 3. Implement `task.prompt`. Keep the change scoped to this slice only. Run the
    **operator-feedback checkpoints** (see below) after planning and before your
    first push.
-4. Commit (sign off — this repo family enforces DCO: `git commit -s`), push the
-   branch, and open a pull request with `gh pr create` describing the slice and
-   linking the parent issue with a **non-blocking** ref — `Refs #N` / `Part of #N`,
+4. Commit (sign off — this repo family enforces DCO: `git commit -s`) and push the
+   branch.
+5. Run the last operator-feedback checkpoint (**before-pr-open**). If it surfaces
+   feedback that requires code changes, make those changes, commit (`git commit
+   -s`), and push again before continuing.
+6. Open a pull request with `gh pr create` describing the slice and linking the
+   parent issue with a **non-blocking** ref — `Refs #N` / `Part of #N`,
    or `Closes #N` when you delivered its full scope (but read the scope-split rule
    below before you reach for `Closes`). **Never link a parent issue with
    `Depends-on:`** — that keyword is a merge barrier (scraped into the PR's
@@ -105,8 +109,7 @@ against the wrong base will not be merged into the epic.
    for real PR→PR merge barriers — i.e. only when this PR genuinely cannot merge
    until another *PR* lands first, written as `Depends-on: owner/repo#123` (never
    pointing at an issue).
-5. Run the last operator-feedback checkpoint **before** `gh pr create`.
-6. Clean up any scratch clone/worktree you created outside the commit.
+7. Clean up any scratch clone/worktree you created outside the commit.
 
 ## Operator-feedback checkpoints — re-read the issue while you work
 
