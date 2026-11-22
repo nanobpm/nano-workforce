@@ -1,8 +1,8 @@
-// Issue #1023: every agent dispatch in the convergence loop (review-round, adversarial-review and classify-scope) is
+// Issue #1023: every agent dispatch in the convergence loop (review-round, adversarial-review, classify-scope and converge-fix-ci) is
 // preceded by a `pr.liveness-check` whose gateway ends the loop at EndPrGone when the PR is merged or
 // closed — so no agent job is ever sent for a branch that may already be deleted.
 import { test } from "node:test";
-import { assert } from "#test-assert";
+import { assert, assertEquals } from "#test-assert";
 import { readFileSync } from "node:fs";
 
 const flat = readFileSync("resources/processes/convergence-loop.bpmn", "utf8").replace(/\s+/g, " ");
@@ -15,7 +15,7 @@ const flows = [...flat.matchAll(/<bpmn:sequenceFlow\b([^>]*?)(\/>|>(.*?)<\/bpmn:
 const taskType = (id: string) =>
   new RegExp(`<bpmn:serviceTask\\b[^>]*\\bid="${id}"[\\s\\S]*?<zeebe:taskDefinition type="([^"]+)"`).exec(flat)?.[1];
 
-for (const agent of ["review-round", "adversarial-review", "classify-scope"]) {
+for (const agent of ["review-round", "adversarial-review", "classify-scope", "converge-fix-ci"]) {
   test(`every flow into ${agent} comes from a PR-liveness gate`, () => {
     const inbound = flows.filter((f) => f.target === agent);
     assert(inbound.length > 0);
@@ -29,3 +29,10 @@ for (const agent of ["review-round", "adversarial-review", "classify-scope"]) {
     }
   });
 }
+
+test("the liveness invariant covers every senior:* agent task in the convergence loop", () => {
+  const agents = [...flat.matchAll(/<bpmn:serviceTask\b[^>]*\bid="([^"]+)"[^>]*>\s*<bpmn:extensionElements>\s*<zeebe:taskDefinition type="senior:/g)]
+    .map((m) => m[1])
+    .sort();
+  assertEquals(agents, ["adversarial-review", "classify-scope", "converge-fix-ci", "review-round"]);
+});

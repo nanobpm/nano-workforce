@@ -1473,7 +1473,8 @@ test("convergence-loop BPMN: gw-progress ends on prGone and gw-husk routes ciRed
   const xml = readFileSync(new URL("../resources/processes/convergence-loop.bpmn", import.meta.url), "utf8");
   assertStringIncludes(xml, 'sourceRef="gw-progress" targetRef="EndPrGone"');
   assertStringIncludes(xml, '=prGone = "merged" or prGone = "closed"');
-  assertStringIncludes(xml, 'sourceRef="gw-husk" targetRef="converge-fix-ci"');
+  assertStringIncludes(xml, 'sourceRef="gw-husk" targetRef="liveness-fixci"');
+  assertStringIncludes(xml, 'sourceRef="gw-fixci-live" targetRef="converge-fix-ci"');
   assertStringIncludes(xml, "=ciRed = true");
   assertStringIncludes(xml, 'sourceRef="converge-fix-ci" targetRef="gw-guard"');
   assert(/id="converge-fix-ci"[\s\S]*?type="senior:fix-ci"/.test(xml), "converge-fix-ci is a senior:fix-ci agent task");
