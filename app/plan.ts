@@ -186,6 +186,12 @@ export interface PlanTask {
   updated_at: string;
 }
 
+/** Issue #1011: the summary prefix `record-wave` stamps on a slice that reported `opened` with NO usable
+ * PR key (demoted to `blocked`). `record-results` keys on it to NAME such slices in its no-work error
+ * instead of the misleading "every task was blocked or skipped". One shared constant — writer and
+ * reader can never drift. */
+export const KEYLESS_OPENED_SUMMARY = 'reported status "opened" but its result carried no PR key';
+
 export const PLAN_TASK_STATUSES = [
   "pending",
   "opened",

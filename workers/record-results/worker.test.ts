@@ -12,7 +12,7 @@ import { BpmnError } from "@nanobpm/urban";
 import { deriveEpicBucket } from "../../app/delivery.ts";
 import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
-import type { PlanTaskStatus } from "../../app/plan.ts";
+import { KEYLESS_OPENED_SUMMARY, type PlanTaskStatus } from "../../app/plan.ts";
 
 interface Row {
   id: number;
@@ -85,6 +85,33 @@ test("no opened PRs (empty plan) hard-fails with NO_WORK_DISPATCHED", async () =
   assertEquals(deriveEpicBucket(plan.status as string, null, plan.acknowledged_at as string | null), "active");
 });
 
+test("keyless-opened slices are NAMED in the no-work error, not lumped into blocked/skipped (issue #1011)", async () => {
+  const app = fakeApp([
+    { id: 1, plan_key: "o/r#1", task_id: "a", status: "blocked", summary: `${KEYLESS_OPENED_SUMMARY} — did it` },
+    { id: 2, plan_key: "o/r#1", task_id: "b", status: "skipped" },
+  ]);
+  const err = await assertRejects(() => call(app), BpmnError);
+  assertEquals((err as BpmnError).errorCode, "NO_WORK_DISPATCHED");
+  const plan = app._plans.at(-1) as Record<string, unknown>;
+  assertEquals(
+    plan.outcome,
+    'no work dispatched — task(s) a reported "opened" with no PR key (pr: null); the rest were blocked or skipped',
+  );
+});
+
+for (const pr_key of [null, "", "   "]) {
+  test(`an undemoted keyless opened row (pr_key=${JSON.stringify(pr_key)}) is NOT counted as dispatched (issue #1011)`, async () => {
+    const app = fakeApp([{ id: 1, plan_key: "o/r#1", task_id: "a", status: "opened", pr_key }]);
+    const err = await assertRejects(() => call(app), BpmnError);
+    assertEquals((err as BpmnError).errorCode, "NO_WORK_DISPATCHED");
+    const plan = app._plans.at(-1) as Record<string, unknown>;
+    assertEquals(
+      plan.outcome,
+      'no work dispatched — task(s) a reported "opened" with no PR key (pr: null); the rest were blocked or skipped',
+    );
+  });
+}
+
 test("tasks present but none opened (all skipped/blocked) hard-fails", async () => {
   const app = fakeApp([
     { id: 1, plan_key: "o/r#1", task_id: "a", status: "skipped" },
@@ -99,7 +126,7 @@ test("tasks present but none opened (all skipped/blocked) hard-fails", async () 
 
 test("at least one opened PR finalizes cleanly (no throw)", async () => {
   const app = fakeApp([
-    { id: 1, plan_key: "o/r#1", task_id: "a", status: "opened" },
+    { id: 1, plan_key: "o/r#1", task_id: "a", status: "opened", pr_key: "o/r#9" },
     { id: 2, plan_key: "o/r#1", task_id: "b", status: "skipped" },
   ]);
   await call(app);
@@ -115,8 +142,8 @@ test("at least one opened PR finalizes cleanly (no throw)", async () => {
 // opened slices converge-only — record the abandoned outcome honestly, not a dispatched success.
 test("a trial-merge abandon records a converge-only (abandoned) outcome, not dispatched success (#1007 round 3)", async () => {
   const app = fakeApp([
-    { id: 1, plan_key: "o/r#1", task_id: "a", status: "opened" },
-    { id: 2, plan_key: "o/r#1", task_id: "b", status: "opened" },
+    { id: 1, plan_key: "o/r#1", task_id: "a", status: "opened", pr_key: "o/r#11" },
+    { id: 2, plan_key: "o/r#1", task_id: "b", status: "opened", pr_key: "o/r#12" },
   ]);
   await handler({ variables: { planKey: "o/r#1", action: "abandon" } } as any, app as any);
   const plan = app._plans.at(-1) as Record<string, unknown>;

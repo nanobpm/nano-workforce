@@ -34,6 +34,7 @@ import { type FeatureRunStatus, featureRuns } from "../../app/feature.ts";
 import { reconcileBlockedFeature, shouldReconcileBlockedFeature } from "../../app/featureReconcile.ts";
 import { compareCommits, createPullRequest, fetchBranchHead, listPrsForHead } from "../../app/github.ts";
 import { requestIssuePrLink } from "../../app/issuePrLink.ts";
+import { KEYLESS_OPENED_SUMMARY } from "../../app/plan.ts";
 import { parsePr } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -60,7 +61,12 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // (and routed to `feature-blocked`). The branch/headSha the agent reported ride the reserved
   // `io.nanobpm.agentResult` envelope; the remote lookup is the authority. Only a `blocked` report
   // triggers the reconcile — every other status routes untouched (no GitHub I/O).
-  if (shouldReconcileBlockedFeature(rawStatus)) {
+  // Issue #1011 review: a `blocked` that is really a keyless `opened` the implement-cell could NOT
+  // reconcile (stamped with KEYLESS_OPENED_SUMMARY by `reconcileImplement`) reaches here only via an
+  // Abandon / escalation-SLA auto-abandon. That human/SLA decision must stand — never let the blocked
+  // recovery adopt/create a PR over it and proceed to convergence.
+  const abandonedKeyless = (str(job.variables.summary) ?? "").startsWith(KEYLESS_OPENED_SUMMARY);
+  if (!abandonedKeyless && shouldReconcileBlockedFeature(rawStatus)) {
     // Framework-injected (`io.nanobpm.agentResult`) — read through the Record-typed seam, like the
     // other agent-result consumers (workers/persist-escalation et al.); it is not an envelope field.
     // biome-ignore lint/plugin: runtime/framework contract boundary for the reserved agent-result envelope

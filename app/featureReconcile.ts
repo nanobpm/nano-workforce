@@ -33,7 +33,7 @@
 // worse than the pre-fix behaviour, and idempotent (a re-run re-adopts the SAME open PR rather than
 // opening a second one, because the adoption lookup runs before any create).
 import type { HeadPr } from "./github.ts";
-import { pickAdoptablePr } from "./implementReconcile.ts";
+import { classifyAdoptablePrs } from "./implementReconcile.ts";
 import { parsePr } from "./prParse.ts";
 import { sliceBranchCreate } from "./repoEnvelope.ts";
 
@@ -167,8 +167,11 @@ export async function reconcileBlockedFeature(
     return escalate;
   }
   if (prs === null) return escalate;
-  const adopt = pickAdoptablePr(prs, base);
-  if (adopt) return { featureStatus: "opened", prKey: `${parsed.repo}#${adopt.number}` };
+  const verdict = classifyAdoptablePrs(prs, base);
+  // Several open PRs on the branch into base: adopting one could converge a stale PR, and creating
+  // another would add a duplicate — escalate.
+  if (verdict.kind === "ambiguous") return escalate;
+  if (verdict.kind === "one") return { featureStatus: "opened", prKey: `${parsed.repo}#${verdict.pr.number}` };
 
   // 3. No open PR. Deliver only when the branch observably carries commits base lacks
   //    (`aheadBy > 0` — GitHub's three-dot compare counts commits on head since the merge-base, so a

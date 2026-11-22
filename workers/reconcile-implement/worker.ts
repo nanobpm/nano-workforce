@@ -29,13 +29,30 @@ interface In extends Record<string, unknown> {
   pr?: unknown;
   baseBranch?: unknown;
   question?: unknown;
+  summary?: unknown;
   implementRetried?: unknown;
+  /** The branch the agent's result reported it pushed (issue #1011) — looked up before `feat/<task.id>`. */
+  reportedBranch?: unknown;
 }
 
 /** The cell's deterministic branch is `feat/<task.id>`; `task` is the implement-cell's slice object.
  *  Read it defensively (the process variable is untyped at the engine seam). */
 function taskId(task: unknown): unknown {
   if (task !== null && typeof task === "object" && "id" in task) return task.id;
+  return undefined;
+}
+
+/** The harness reports the branch it pushed under the reserved `io.nanobpm.agentResult.branch`
+ *  envelope (c8ctl default-branch output contract). Use it when the agent's own top-level `branch`
+ *  is blank, so a pushed non-deterministic branch is still looked up before `feat/<task.id>`. */
+export function resolveReportedBranch(vars: Record<string, unknown>): string | undefined {
+  const top = vars.reportedBranch;
+  if (typeof top === "string" && top.trim() !== "") return top.trim();
+  const env = vars["io.nanobpm.agentResult"];
+  if (env !== null && typeof env === "object" && "branch" in env) {
+    const b = env.branch;
+    if (typeof b === "string" && b.trim() !== "") return b.trim();
+  }
   return undefined;
 }
 
@@ -48,7 +65,9 @@ const handler: AppJobHandler<In, ReconcileImplementResult> = async (job, app) =>
       pr: job.variables.pr,
       baseBranch: job.variables.baseBranch,
       question: job.variables.question,
+      summary: job.variables.summary,
       retried: job.variables.implementRetried,
+      branch: resolveReportedBranch(job.variables),
     },
     listPrsForHead,
     process.env.GITHUB_TOKEN ?? "",

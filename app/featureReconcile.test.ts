@@ -260,3 +260,26 @@ test("a `diverged`/`behind` comparison still delivers when the branch carries co
   assertEquals(res.featureStatus, "opened");
   assert(res.prKey === "owner/repo#901");
 });
+
+test("blocked + several open PRs on the branch into base → stays blocked; no compare and no PR create (ambiguous)", async () => {
+  let compared = 0;
+  let created = 0;
+  const res = await reconcileBlockedFeature(
+    { ...BASE, status: "blocked" },
+    {
+      branch: branchPushed,
+      compare: async () => {
+        compared++;
+        return { status: "ahead", aheadBy: 2, behindBy: 0 };
+      },
+      listPrs: async () => [openPr(555), openPr(556)],
+      createPr: async () => {
+        created++;
+        return createdPr;
+      },
+    },
+  );
+  assertEquals(res, { featureStatus: "blocked", prKey: null });
+  assertEquals(compared, 0, "ambiguity must short-circuit before the comparison");
+  assertEquals(created, 0, "ambiguity must never create another PR");
+});

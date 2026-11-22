@@ -214,3 +214,13 @@ test("implementEscalationQuestion: default (no evidence supplied) stays unverifi
   const q = implementEscalationQuestion({ status: "completed" });
   assertEquals(q.includes("no adoptable pull request"), false);
 });
+
+test("implementEscalationQuestion: a keyless `opened` leads with the reconcile lookup evidence (issue #1011)", () => {
+  const q = implementEscalationQuestion({
+    status: "opened",
+    deliveryVerified: true,
+    evidence: "reported opened but no PR from feat/t1 into main",
+  });
+  assertEquals(q.startsWith('The implementation agent reported status "opened" but its result carried no pull-request key'), true);
+  assertEquals(q.includes("reported opened but no PR from feat/t1 into main"), true);
+});
