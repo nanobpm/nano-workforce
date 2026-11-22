@@ -185,17 +185,21 @@ export function implementEscalationQuestion(input: ImplementEscalationReasonInpu
   const pr = str(input.pr);
   const deliveryVerified = input.deliveryVerified === true;
   const evidence = str(input.evidence);
-  if (evidence && !pr) {
-    // Issue #1011: the agent reported `opened` with no `pr` key and the GitHub lookup found no PR on the
-    // reported/deterministic branch into the run's base — lead with that verified evidence.
+  if (evidence && !pr && evidence.startsWith("reported opened")) {
+    // Issue #1011: the agent reported `opened` with no `pr` key and the GitHub reconcile could not
+    // recover one (none found, several ambiguous candidates, or the lookup was unavailable) — lead with
+    // that evidence.
     const lead =
-      `The implementation agent reported status "opened" but its result carried no pull-request key, and a GitHub lookup found none (${evidence}).`;
+      `The implementation agent reported status "opened" but its result carried no pull-request key, and it could not be recovered from GitHub (${evidence}).`;
     const parts = withContext([lead], summary, transcriptUrl);
     parts.push(recoveryTail(pr, deliveryVerified));
     return parts.join(" ");
   }
   const delivery = deliveryClause(pr, deliveryVerified);
-  const parts = withContext([leadForKind(classifyImplementEscalation(status), status, delivery)], summary, transcriptUrl);
+  const leads = [leadForKind(classifyImplementEscalation(status), status, delivery)];
+  // Any other reconcile evidence (e.g. several ambiguous open PRs on the branch) is surfaced verbatim.
+  if (evidence) leads.push(`GitHub reconcile: ${evidence}.`);
+  const parts = withContext(leads, summary, transcriptUrl);
   parts.push(recoveryTail(pr, deliveryVerified));
   return parts.join(" ");
 }

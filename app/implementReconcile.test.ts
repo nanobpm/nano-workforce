@@ -11,6 +11,7 @@ import {
   isKeylessOpened,
   reconcileBranches,
   pickAdoptablePr,
+  classifyAdoptablePrs,
   reconcileImplement,
   retryNudgeFor,
   shouldReconcileImplement,
@@ -56,7 +57,7 @@ test("shouldReconcileImplement: blank or a claimed-completion (off-vocabulary) s
   assertEquals(shouldReconcileImplement("completed", "Which API should I use?"), false);
 });
 
-test("pickAdoptablePr: the first OPEN PR wins; merged/closed are not adoptable", () => {
+test("pickAdoptablePr: the single OPEN PR wins; merged/closed are not adoptable", () => {
   assertEquals(pickAdoptablePr(null), null);
   assertEquals(pickAdoptablePr([]), null);
   assertEquals(pickAdoptablePr([{ ...openPr(1), state: "merged" }]), null);
@@ -390,11 +391,57 @@ test("reconcileImplement: opened + no pr + NO PR → escalates with evidence (no
   );
   assertEquals(res, {
     reconciled: false,
-    status: "opened",
+    status: "blocked",
     pr: null,
     ...verified,
     evidence: "reported opened but no PR from feat/t1 into epic/x",
   });
+});
+
+// Issue #1011 review: an unreconciled keyless `opened` must never leave the cell with the SUCCESS status
+// `opened` + `pr: null` — an Abandon / SLA auto-abandon would record it as delivered. Every
+// non-reconciled variant fails closed to `blocked`.
+test("reconcileImplement: unreconciled keyless opened always fails closed to blocked (every variant)", async () => {
+  const base = { status: "opened", subjectKey: "owner/repo#7", taskId: "t1", baseBranch: "main" };
+  const thrown = await reconcileImplement(base, async () => {
+    throw new Error("down");
+  }, "t");
+  assertEquals(thrown.status, "blocked");
+  assertEquals(thrown.evidence, "reported opened but its PR could not be looked up on GitHub");
+  const nullListing = await reconcileImplement(base, async () => null, "t");
+  assertEquals(nullListing.status, "blocked");
+  const noTask = await reconcileImplement({ ...base, taskId: "" }, async () => [openPr(1)], "t");
+  assertEquals(noTask.status, "blocked");
+  const question = await reconcileImplement({ ...base, question: "Which base should I target?" }, async () => [openPr(1)], "t");
+  assertEquals(question.status, "blocked");
+  assertEquals(question.reconciled, false);
+});
+
+test("pickAdoptablePr / classifyAdoptablePrs: two matching open PRs are AMBIGUOUS, never first-wins", () => {
+  const prs = [openPr(1), openPr(2)];
+  assertEquals(pickAdoptablePr(prs, "main"), null);
+  assertEquals(classifyAdoptablePrs(prs, "main").kind, "ambiguous");
+  assertEquals(classifyAdoptablePrs([openPr(1), openPr(2, "other")], "main").kind, "one");
+});
+
+test("reconcileImplement: two open PRs on the branch into base → escalates with ambiguity evidence", async () => {
+  const keyless = await reconcileImplement(
+    { status: "opened", subjectKey: "owner/repo#7", taskId: "t1", baseBranch: "main" },
+    async () => [openPr(3), openPr(4)],
+    "t",
+  );
+  assertEquals(keyless.reconciled, false);
+  assertEquals(keyless.status, "blocked");
+  assertEquals(keyless.pr, null);
+  assertEquals(keyless.evidence, "reported opened but ambiguous: 2 open PRs (#3, #4) from feat/t1 into main");
+  const noResult = await reconcileImplement(
+    { status: null, subjectKey: "owner/repo#7", taskId: "t1", baseBranch: "main" },
+    async () => [openPr(3), openPr(4)],
+    "t",
+  );
+  assertEquals(noResult.reconciled, false);
+  assertEquals(noResult.retry, false);
+  assertEquals(noResult.evidence, "ambiguous: 2 open PRs (#3, #4) from feat/t1 into main");
 });
 
 test("reconcileImplement: opened + pr set is unchanged (no lookup)", async () => {

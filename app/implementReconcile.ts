@@ -139,18 +139,31 @@ export function implementCellBranch(taskId: string): string {
   return sliceBranchCreate(taskId) ?? `feat/${taskId}`;
 }
 
-/** The adoptable PR from a head-branch listing: the first OPEN one (a merged/closed PR on the branch is
- *  not an in-flight result to converge). When `baseBranch` is given, only an open PR whose `baseRef`
- *  matches it is adoptable — GitHub can carry multiple open PRs from one head branch to different bases,
- *  so adopting blind to the base could converge a stale/unrelated PR; with no base known, fall back to
- *  the first open PR (unchanged best-effort behaviour). `null` when the listing is absent (no transport)
- *  or has no adoptable PR. */
-export function pickAdoptablePr(prs: HeadPr[] | null, baseBranch?: string): HeadPr | null {
-  if (!prs) return null;
-  const open = prs.filter((p) => p.state === "open");
+/** The adoptable-PR verdict for a head-branch listing. Only OPEN PRs are candidates (a merged/closed PR
+ *  is not an in-flight result to converge); when `baseBranch` is given, only an open PR whose `baseRef`
+ *  matches it is a candidate. Adoption requires EXACTLY ONE candidate: GitHub can carry several open PRs
+ *  from one head branch (a stale one from an earlier attempt plus a fresh one, or one per base), and
+ *  adopting whichever the API lists first could converge the stale/unrelated PR — so more than one
+ *  candidate is `ambiguous`, never silently resolved. `none` covers an absent listing (no transport) too. */
+export type AdoptableVerdict =
+  | { kind: "none" }
+  | { kind: "one"; pr: HeadPr }
+  | { kind: "ambiguous"; prs: HeadPr[] };
+
+export function classifyAdoptablePrs(prs: HeadPr[] | null, baseBranch?: string): AdoptableVerdict {
+  if (!prs) return { kind: "none" };
   const base = typeof baseBranch === "string" ? baseBranch.trim() : "";
-  if (base) return open.find((p) => p.baseRef === base) ?? null;
-  return open[0] ?? null;
+  const candidates = prs.filter((p) => p.state === "open" && (!base || p.baseRef === base));
+  if (candidates.length === 0) return { kind: "none" };
+  if (candidates.length === 1) return { kind: "one", pr: candidates[0] };
+  return { kind: "ambiguous", prs: candidates };
+}
+
+/** The single adoptable PR from a head-branch listing, or `null` when there is none OR the listing is
+ *  ambiguous (see `classifyAdoptablePrs`). */
+export function pickAdoptablePr(prs: HeadPr[] | null, baseBranch?: string): HeadPr | null {
+  const v = classifyAdoptablePrs(prs, baseBranch);
+  return v.kind === "one" ? v.pr : null;
 }
 
 /** The canonical implement-cell reconcile decision (mirror of `ic_reconcile_gw`). Best-effort: any
@@ -158,6 +171,32 @@ export function pickAdoptablePr(prs: HeadPr[] | null, baseBranch?: string): Head
  *  today's behaviour, and idempotent (a pure GitHub read that adopts the SAME open PR on a re-run, so
  *  a re-dispatch never opens or double-adopts a second PR). */
 export async function reconcileImplement(
+  input: ReconcileImplementInput,
+  lookup: OpenPrLookup,
+  token: string,
+): Promise<ReconcileImplementResult> {
+  const res = await reconcileImplementCore(input, lookup, token);
+  // A keyless `opened` that could NOT be reconciled (verified absence, ambiguous listing, failed/null
+  // lookup, missing inputs, or an answerable question) must NEVER leave the cell with the SUCCESS status
+  // `opened` and no PR (issue #1011 review): an operator Abandon or the escalation-SLA auto-abandon ends
+  // the cell straight from the escalation, and `record-feature` would persist a terminal `opened` row with
+  // `pr_key: null` — read as delivered. Fail closed: rewrite to the non-success `blocked`, and always
+  // carry lookup evidence so the escalation reason names what happened.
+  if (!res.reconciled && isKeylessOpened(input.status, input.pr)) {
+    return {
+      ...res,
+      status: "blocked",
+      evidence: !res.evidence
+        ? "reported opened but its PR could not be looked up on GitHub"
+        : res.evidence.startsWith("reported opened")
+          ? res.evidence
+          : `reported opened but ${res.evidence}`,
+    };
+  }
+  return res;
+}
+
+async function reconcileImplementCore(
   input: ReconcileImplementInput,
   lookup: OpenPrLookup,
   token: string,
@@ -186,6 +225,7 @@ export async function reconcileImplement(
   const branches = reconcileBranches(taskId, input.branch);
   const base = str(input.baseBranch);
   let adopt: HeadPr | null = null;
+  let ambiguous: { branch: string; prs: HeadPr[] } | null = null;
   for (const branch of branches) {
     let prs: HeadPr[] | null;
     try {
@@ -199,8 +239,24 @@ export async function reconcileImplement(
     // A `null` listing is an unavailable transport (no token), not a confirmed "no PR" — same reasoning
     // as the thrown case: escalate rather than retry on unconfirmed state.
     if (prs === null) return escalate;
-    adopt = pickAdoptablePr(prs, base);
-    if (adopt) break;
+    const verdict = classifyAdoptablePrs(prs, base);
+    if (verdict.kind === "ambiguous") {
+      ambiguous = { branch, prs: verdict.prs };
+      break;
+    }
+    if (verdict.kind === "one") {
+      adopt = verdict.pr;
+      break;
+    }
+  }
+  if (ambiguous) {
+    // Several open PRs match — adopting any one could converge a stale PR. Escalate with the ambiguity
+    // diagnostics (no auto-retry: a retry would not make the listing less ambiguous).
+    const nums = ambiguous.prs.map((p) => `#${p.number}`).join(", ");
+    return {
+      ...escalate,
+      evidence: `ambiguous: ${ambiguous.prs.length} open PRs (${nums}) from ${ambiguous.branch} into ${base ?? "any base"}`,
+    };
   }
   if (adopt) {
     return {
