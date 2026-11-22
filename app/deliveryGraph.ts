@@ -319,6 +319,11 @@ export const AGENT_RESULT_LOCAL_VARS = [
   //   • `scopeBlocked` / `scopeBlockReason` — scope-classify.md.
   //   • `tasks` — plan.md (the decomposed task list).
   //   • `result` / `conflicts` / `failing` — trial-merge.md.
+  //   • `adopted` / `goalMet` — the delivery-graph idempotency preflight (#1014): an agent that adopts
+  //     an existing PR reports whether that PR already meets the node's goal; the producer gate reads
+  //     both, so they must stay node-local (a sibling's `goalMet` must never gate this node).
+  "adopted",
+  "goalMet",
   "dependsOn",
   "adversarialFindings",
   "adversarialSummary",
