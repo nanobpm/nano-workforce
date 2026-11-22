@@ -1,3 +1,9 @@
+## [0.219.1](https://github.com/nanobpm/nano-workforce/compare/v0.219.0...v0.219.1) (2026-11-22)
+
+### Bug Fixes
+
+* **convergence:** merge converged PRs instead of escalating 'head did not advance' ([#1019](https://github.com/nanobpm/nano-workforce/issues/1019)) ([c8d18a0](https://github.com/nanobpm/nano-workforce/commit/c8d18a0e0b201f768ba4dfffc9d93de28a71edd7)), closes [#1018](https://github.com/nanobpm/nano-workforce/issues/1018)
+
 ## [0.219.0](https://github.com/nanobpm/nano-workforce/compare/v0.218.3...v0.219.0) (2026-11-22)
 
 ### Features
