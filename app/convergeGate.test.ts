@@ -1083,8 +1083,12 @@ test("gw-converge-gate default arm routes to the scope classifier (not straight 
   assertStringIncludes(gw[0], 'default="f_convergeOk"');
   const ok = flowElement("f_convergeOk");
   assert(ok, "f_convergeOk flow missing");
-  assertStringIncludes(ok, 'targetRef="classify-scope"');
+  // #1023: via the pre-dispatch PR-liveness gate, whose open/default arm reaches the classifier.
+  assertStringIncludes(ok, 'targetRef="liveness-scope"');
   assert(!/conditionExpression/.test(ok), "the default arm must carry no conditionExpression");
+  const live = flowElement("f_scopeLive");
+  assert(live, "f_scopeLive flow missing");
+  assertStringIncludes(live, 'targetRef="classify-scope"');
 });
 
 // ── The scope classifier (agent task) replaces the deterministic scope regex ──

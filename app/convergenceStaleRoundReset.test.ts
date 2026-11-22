@@ -79,7 +79,14 @@ test("capture-head still precedes review-round on every loop entry (the reset is
   const capture = flat.match(/<bpmn:sequenceFlow[^>]*\bid="f_capture"[^>]*\/>/);
   assert(capture, "f_capture flow missing");
   assertStringIncludes(capture![0], 'sourceRef="capture-head"');
-  assertStringIncludes(capture![0], 'targetRef="review-round"');
+  // Issue #1023: the round-entry PR-liveness gate sits between capture-head and review-round. It
+  // carries no output mapping, so the on-entry reset still reaches review-round untouched.
+  assertStringIncludes(capture![0], 'targetRef="liveness-round"');
+  const live = flat.match(/<bpmn:sequenceFlow[^>]*\bid="f_roundLive"[^>]*\/>/);
+  assert(live, "f_roundLive flow missing");
+  assertStringIncludes(live![0], 'sourceRef="gw-round-live"');
+  assertStringIncludes(live![0], 'targetRef="review-round"');
+  assert(!/<zeebe:output\b/.test(serviceTask("liveness-round") ?? ""), "liveness-round must not remap round vars");
 });
 
 test("gw-status still defaults a blank status to the addressed (re-enter) arm, not escalation", () => {

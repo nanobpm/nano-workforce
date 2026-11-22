@@ -103,7 +103,11 @@ function assertAdversarialDefaultsReenterRound() {
   }
   const loop = flowElement("f_advFindings");
   assert(loop, "f_advFindings flow missing");
-  assertStringIncludes(loop, 'targetRef="review-round"');
+  // #1023: through the pre-dispatch PR-liveness gate, whose open/default arm re-enters review-round.
+  assertStringIncludes(loop, 'targetRef="liveness-findings"');
+  const live = flowElement("f_findingsLive");
+  assert(live, "f_findingsLive flow missing");
+  assertStringIncludes(live, 'targetRef="review-round"');
 }
 
 test("regression: an empty/unknown status no longer routes to persist-escalation", () => {

@@ -2796,6 +2796,38 @@ test("abandonClosedPr is idempotent — the terminal merges audit row is written
   assertEquals((stores.merges.rows[0] as any).method, "pr-closed");
 });
 
+// #1023 review (previously-missed advisory app/service.ts:1979): the PR row's `abandoned` status is
+// the completion marker `hasPendingTerminalFinalization` keys on, so `abandonClosedPr` must write it
+// LAST. If a plan_tasks update fails, the PR row must stay non-final so a later pass retries.
+test("abandonClosedPr leaves the PR row non-final when a plan_tasks update fails (#1023)", async () => {
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    pull_requests: { rows: [{ pr_key: "owner/repo#72", status: "converging" }], key: "pr_key" },
+    plan_tasks: { rows: [{ id: "owner/repo#67:d", plan_key: "owner/repo#67", wave: 1, status: "opened", pr_key: "owner/repo#72" }], key: "id" },
+    merges: { rows: [], key: "id" },
+  };
+  let failTasks = true;
+  const base = withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key));
+  const data = {
+    table: (name: string, key: string) => {
+      const tbl: any = base(name, key);
+      if (name !== "plan_tasks") return tbl;
+      return { ...tbl, find: tbl.find.bind(tbl), update: async (id: any, patch: any) => {
+        if (failTasks) throw new Error("boom: task update failed");
+        return tbl.update(id, patch);
+      } };
+    },
+    open: () => memOpen(stores),
+  } as any;
+
+  await assertRejects(() => abandonClosedPr(data, "owner/repo#72", "closed without merging"));
+  assertEquals(stores.pull_requests.rows.find((r) => r.pr_key === "owner/repo#72")?.status, "converging", "PR row not marked final before task bookkeeping");
+  failTasks = false;
+  await abandonClosedPr(data, "owner/repo#72", "closed without merging");
+  assertEquals(stores.plan_tasks.rows.find((r) => r.id === "owner/repo#67:d")?.status, "abandoned");
+  assertEquals(stores.pull_requests.rows.find((r) => r.pr_key === "owner/repo#72")?.status, "abandoned");
+  assertEquals(stores.merges.rows.length, 1);
+});
+
 // #352 review (suppressed advisory app/service.ts:863): `abandonClosedPr` writes the terminal
 // `merges` audit row — an FK child of `pull_requests.pr_key` — and must not assume the parent row
 // exists. The merge-worker caller pre-heals with `ensurePr`, but the wave-gate self-heal path

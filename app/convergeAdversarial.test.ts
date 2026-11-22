@@ -26,6 +26,7 @@ const ALL_JOB_TYPES = [
   "senior:pr-review",
   "senior:adversarial-review",
   "pr.capture-head",
+  "pr.liveness-check",
   "pr.persist-round",
   "pr.progress-check",
   "pr.converge-gate",
@@ -42,6 +43,7 @@ const DEFAULT_RESPONSES: Record<string, Responder> = {
   "senior:pr-review": { status: "addressed", summary: "fixed" },
   "senior:adversarial-review": CLEAN,
   "pr.capture-head": { roundEntryHead: "sha-entry" },
+  "pr.liveness-check": { prGone: "" },
   "pr.persist-round": {},
   "pr.progress-check": { progressed: true },
   "pr.converge-gate": { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false },
@@ -497,4 +499,18 @@ test("#956 review: a classify-scope completion echoing customInstructions:null c
     String(followUp?.appendPrompt ?? "").includes(BLOCK),
     `a classify-scope null echo must not clear the steering — the follow-up round's prompt: ${JSON.stringify(followUp?.appendPrompt)}`,
   );
+});
+
+test("#1023: a PR merged before the round dispatches ends the loop at EndPrGone — no agent job", async () => {
+  const { engine } = await boot({ responses: { "pr.liveness-check": { prGone: "merged" } } });
+  assert(completions(engine, "EndPrGone") === 1, `loop must end at EndPrGone: ${runs(engine)}`);
+  assert(completions(engine, "review-round") === 0, `no review-round dispatched: ${runs(engine)}`);
+  assert(completions(engine, "adversarial-review") === 0, `no adversarial-review dispatched: ${runs(engine)}`);
+});
+
+test("#1023: a PR merged DURING the review round ends the loop before the adversarial pass is dispatched", async () => {
+  const { engine } = await boot({ responses: { "pr.liveness-check": [{ prGone: "" }, { prGone: "merged" }] } });
+  assert(completions(engine, "EndPrGone") === 1, `loop must end at EndPrGone: ${runs(engine)}`);
+  assert(completions(engine, "review-round") === 1, `the round ran once: ${runs(engine)}`);
+  assert(completions(engine, "adversarial-review") === 0, `no adversarial-review dispatched: ${runs(engine)}`);
 });

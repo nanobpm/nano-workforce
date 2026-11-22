@@ -1141,7 +1141,8 @@ test("gw-husk auto-retries a husk back into review-round, and defaults to the hu
   assertStringIncludes(captureHead[0], "<bpmn:incoming>f_huskRetry</bpmn:incoming>");
   const reviewRound = flat.match(/<bpmn:serviceTask\b[^>]*\bid="review-round"[^>]*>.*?<\/bpmn:serviceTask>/);
   assert(reviewRound, "review-round task missing");
-  assertStringIncludes(reviewRound[0], "<bpmn:incoming>f_capture</bpmn:incoming>");
+  // #1023: capture-head → liveness-round → gw-round-live → (f_roundLive) review-round.
+  assertStringIncludes(reviewRound[0], "<bpmn:incoming>f_roundLive</bpmn:incoming>");
 });
 
 test("capture-head runs BEFORE review-round on EVERY round entry (round-entry head baseline, #786/#789)", () => {
@@ -1170,11 +1171,16 @@ test("capture-head runs BEFORE review-round on EVERY round entry (round-entry he
   const cap = flowElement("f_capture");
   assert(cap, "f_capture flow missing");
   assertStringIncludes(cap, 'sourceRef="capture-head"');
-  assertStringIncludes(cap, 'targetRef="review-round"');
+  // #1023: the round-entry PR-liveness gate sits between capture-head and review-round.
+  assertStringIncludes(cap, 'targetRef="liveness-round"');
   assertStringIncludes(capture[0], "<bpmn:outgoing>f_capture</bpmn:outgoing>");
+  const live = flowElement("f_roundLive");
+  assert(live, "f_roundLive flow missing");
+  assertStringIncludes(live, 'sourceRef="gw-round-live"');
+  assertStringIncludes(live, 'targetRef="review-round"');
   const reviewRound = flat.match(/<bpmn:serviceTask\b[^>]*\bid="review-round"[^>]*>.*?<\/bpmn:serviceTask>/);
   assert(reviewRound, "review-round task missing");
-  assertStringIncludes(reviewRound[0], "<bpmn:incoming>f_capture</bpmn:incoming>");
+  assertStringIncludes(reviewRound[0], "<bpmn:incoming>f_roundLive</bpmn:incoming>");
   // review-round is entered ONLY via f_capture — no direct round-entry flow survives.
   for (const id of ["f_start", "f_reviewLoop", "f_answerLoop", "f_huskRetry"]) {
     assert(!reviewRound[0].includes(`<bpmn:incoming>${id}</bpmn:incoming>`), `review-round must not still take ${id} directly`);
@@ -1467,7 +1473,8 @@ test("convergence-loop BPMN: gw-progress ends on prGone and gw-husk routes ciRed
   const xml = readFileSync(new URL("../resources/processes/convergence-loop.bpmn", import.meta.url), "utf8");
   assertStringIncludes(xml, 'sourceRef="gw-progress" targetRef="EndPrGone"');
   assertStringIncludes(xml, '=prGone = "merged" or prGone = "closed"');
-  assertStringIncludes(xml, 'sourceRef="gw-husk" targetRef="converge-fix-ci"');
+  assertStringIncludes(xml, 'sourceRef="gw-husk" targetRef="liveness-fixci"');
+  assertStringIncludes(xml, 'sourceRef="gw-fixci-live" targetRef="converge-fix-ci"');
   assertStringIncludes(xml, "=ciRed = true");
   assertStringIncludes(xml, 'sourceRef="converge-fix-ci" targetRef="gw-guard"');
   assert(/id="converge-fix-ci"[\s\S]*?type="senior:fix-ci"/.test(xml), "converge-fix-ci is a senior:fix-ci agent task");
