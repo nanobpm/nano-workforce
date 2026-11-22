@@ -18,6 +18,7 @@ import {
   isAckThread,
   parseAckedAdvisories,
   parseReviewOpenFindings,
+  reconcileReviewOpenFindings,
   parseReviewThreadsPage,
   parseSuppressedAdvisories,
   pickLatestCopilotReview,
@@ -1375,4 +1376,109 @@ test("converge-gate #923: a head-current CLEAN review with no findings still con
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
   assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: false });
+});
+
+// ── Live reconciliation of the frozen review summary (issue #1018) ───────────
+const V2_OPEN_TWO = [
+  "<!-- ccr-overview-v2 -->",
+  "",
+  "### 🟡 Changes recommended",
+  "",
+  "<details open>",
+  "<summary><strong>2 open issues</strong></summary>",
+  "",
+  "- [Fix A](https://github.com/o/r/pull/1#discussion_r11) · New",
+  "- [Fix B](https://github.com/o/r/pull/1#discussion_r22) · New",
+  "</details>",
+].join("\n");
+const thread = (isResolved: boolean, ids: number[]) => ({ isResolved, path: "a.ts", bodies: ["x"], commentIds: ids.map(String) });
+
+test("reconcileReviewOpenFindings: every itemised finding's thread resolved → no open findings", () => {
+  assertEquals(reconcileReviewOpenFindings(V2_OPEN_TWO, [thread(true, [11, 12]), thread(true, [22])]), []);
+});
+
+test("reconcileReviewOpenFindings: one linked thread still open → blocks", () => {
+  assertEquals(reconcileReviewOpenFindings(V2_OPEN_TWO, [thread(true, [11]), thread(false, [22])]).length > 0, true);
+});
+
+test("reconcileReviewOpenFindings: an unknown linked thread → blocks (fail closed)", () => {
+  assertEquals(reconcileReviewOpenFindings(V2_OPEN_TWO, [thread(true, [11])]).length > 0, true);
+});
+
+test("reconcileReviewOpenFindings: a summary-only finding (no thread link) → blocks (#923 safeguard)", () => {
+  const body = V2_OPEN_TWO.replace("(https://github.com/o/r/pull/1#discussion_r22)", "(#somewhere)");
+  assertEquals(reconcileReviewOpenFindings(body, [thread(true, [11]), thread(true, [22])]).length > 0, true);
+});
+
+test("reconcileReviewOpenFindings: count/list mismatch → blocks", () => {
+  const body = V2_OPEN_TWO.replace("2 open issues", "3 open issues");
+  assertEquals(reconcileReviewOpenFindings(body, [thread(true, [11]), thread(true, [22])]).length > 0, true);
+});
+
+test("reconcileReviewOpenFindings: a verdict line with no itemised section → blocks", () => {
+  const body = "## Pull Request Overview\n🟡 Changes recommended — 7 findings (6 high).";
+  assertEquals(reconcileReviewOpenFindings(body, []), ["changes recommended"]);
+});
+
+test("converge-gate #1018: a head-current 'Changes recommended' review whose findings were all reply-resolved converges", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [thread(true, [11]), thread(true, [22])],
+    readReviewBody: async () => V2_OPEN_TWO,
+    reviewCommitId: "headsha4444444444444444444444444444444444",
+    headSha: "headsha4444444444444444444444444444444444",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false, reviewStale: false });
+});
+
+test("converge-gate #1018: the same review with one finding's thread still open blocks", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [thread(true, [11]), thread(false, [22])],
+    readReviewBody: async () => V2_OPEN_TWO,
+    reviewCommitId: "headsha4444444444444444444444444444444444",
+    headSha: "headsha4444444444444444444444444444444444",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+});
+
+test("reconcileReviewOpenFindings: a literal (unlinked) #discussion_r id does not borrow a resolved thread", () => {
+  for (const item of ["- Fix parsing of the literal #discussion_r11", "- Fix `[x](https://x/pull/1#discussion_r11)` handling"]) {
+    const body = V2_OPEN_TWO.replace("- [Fix A](https://github.com/o/r/pull/1#discussion_r11) · New", item);
+    assertEquals(reconcileReviewOpenFindings(body, [thread(true, [11]), thread(true, [22])]).length > 0, true);
+  }
+});
+
+test("reconcileReviewOpenFindings: comment ids above 2^31-1 via fullDatabaseId reconcile end-to-end", () => {
+  const big = "4657696246123";
+  const body = V2_OPEN_TWO.replace("discussion_r11", `discussion_r${big}`);
+  const page = parseReviewThreadsPage({
+    data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+      { isResolved: true, path: "a.ts", comments: { nodes: [{ fullDatabaseId: big, databaseId: null, body: "x" }] } },
+      { isResolved: true, path: "a.ts", comments: { nodes: [{ fullDatabaseId: "22", databaseId: 22, body: "y" }] } },
+    ] } } } },
+  });
+  assertEquals(page?.threads[0].commentIds, [big]);
+  assertEquals(reconcileReviewOpenFindings(body, page?.threads ?? []), []);
+});
+
+test("reconcileReviewOpenFindings: an unresolved thread ABSENT from the frozen summary keeps findings (fail closed)", () => {
+  const out = reconcileReviewOpenFindings(V2_OPEN_TWO, [thread(true, [11]), thread(true, [22]), thread(false, [99])]);
+  assertEquals(out.length > 0, true);
+});
+
+test("reconcileReviewOpenFindings: a nested count section inside an open-issues section fails closed", () => {
+  const body = [
+    "### 🟡 Changes recommended",
+    "<details open>",
+    "<summary><strong>1 open issue</strong></summary>",
+    "",
+    "- [Fix A](https://github.com/o/r/pull/1#discussion_r11) · New",
+    "<details>",
+    "<summary><strong>1 open issue</strong></summary>",
+    "Hidden prose finding with no thread",
+    "</details>",
+    "</details>",
+  ].join("\n");
+  assertEquals(reconcileReviewOpenFindings(body, [thread(true, [11])]).length > 0, true);
 });

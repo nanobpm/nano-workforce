@@ -297,3 +297,16 @@ export function redCiRoute(
   if (!(state.failingChecks > 0)) return { route: false, failingChecksList: "" };
   return { route: true, failingChecksList: state.failingCheckNames.join("\n") };
 }
+
+// ── Converged head on a no-advance round (issue #1018) ──────────────────────────────────────────
+/** Whether a NO-ADVANCE `addressed` round is actually a CONVERGED PR and must route to the canonical
+ * converge gate (→ scope → approval → persist-converged/merge, honouring autoMerge) instead of the
+ * human no-progress escalation. "Addressed with no new commit" is legitimate when the reviewer's
+ * remaining comments were answered/resolved by reply: zero unresolved threads (positively read) and
+ * no failing check on the current head. Pending/absent checks (frugal CI) do not block here — the
+ * merge stage owns required-check readiness and the `freshHeadRun` finalizer. An unreadable state, an
+ * unknown thread count, any open thread, or any red check never routes (→ fix-ci or escalation). */
+export function convergedHeadRoute(state: CiView | null): boolean {
+  if (!state) return false;
+  return state.unresolvedThreads === 0 && state.failingChecks === 0;
+}
