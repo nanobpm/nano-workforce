@@ -67,6 +67,7 @@
           <zeebe:input source="=if (is defined(claimIssue)) then claimIssue else null" target="claimIssue" />
           <zeebe:output source="=status" target="status" />
           <zeebe:output source="=question" target="question" />
+          <zeebe:output source="=if (is defined(pr)) then pr else null" target="pr" />
           <zeebe:output source="=if (is defined(summary)) then summary else null" target="summary" />
           <zeebe:output source="=if (is defined(transcriptUrl)) then transcriptUrl else null" target="transcriptUrl" />
           <zeebe:output source="=if (is defined(branch)) then branch else null" target="reportedBranch" />
