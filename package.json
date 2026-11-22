@@ -66,13 +66,13 @@
   },
   "dependencies": {
     "@nanobpm/agentic": "^0.16.0",
-    "@nanobpm/urban": "^0.99.0",
+    "@nanobpm/urban": "^0.99.1",
     "bpmn-auto-layout": "git+https://github.com/jwulf/bpmn-auto-layout.git#25251a2ac5802c74d9a00f8d087052091530a0f5"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",
-    "@nanobpm/urban-testkit": "^1.6.0",
-    "@nanobpm/workflow": "^0.15.0",
+    "@nanobpm/urban-testkit": "^1.7.1",
+    "@nanobpm/workflow": "^0.20.0",
     "@semantic-release/changelog": "^7.0.0",
     "@semantic-release/exec": "^7.1.0",
     "@semantic-release/git": "^11.0.0",
