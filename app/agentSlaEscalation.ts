@@ -168,22 +168,14 @@ export async function agentSlaEscalationQuestion(
   });
 }
 
-/** Cap on never-activated re-queues per agent node before the SLA check escalates instead (issue #1016):
- * an unserved job type must reach a human, not loop the `=nodeTimeout` boundary forever. */
-export const MAX_SLA_REQUEUES = 3;
-
-/** Default freshness window for a "never activated" ledger observation: two default poll intervals
- * (`NANO_PR_POLL_MS` default 60s), so one missed/slow pass still counts as fresh. */
-export const DEFAULT_SLA_OBSERVATION_FRESH_MS = 120_000;
-
-/** The delivery-graph agent-node SLA check (issue #1016). The node's interrupting `=nodeTimeout`
- * boundary starts when the node is ENTERED, so on its own it measures queue time as work time. The
- * compiled body routes the boundary through this check: a job the poller observed QUEUED but never
- * leased (`requeue: true`) is re-queued instead of escalated — the work SLA only counts once a worker
- * has picked the job up. Otherwise (`requeue: false`) the node escalates with a `reason` stating the
- * activation FACTS (worker, activation time, or "activation unknown") instead of guessing that
- * "in-flight work may already exist". An absent ledger row (the poller never saw the job) is NOT proof
- * of non-activation, so it escalates with the honest "unknown" wording. */
+/** The delivery-graph agent-node work-SLA check (issue #1016). It runs on the node's NON-interrupting
+ * `R/<nodeTimeout>` cycle boundary, so it never cancels the live job itself: it only decides whether the
+ * work SLA has elapsed SINCE ACTIVATION (`activated_at + sla <= now`, per the durable activation ledger).
+ * `expired: true` throws the node's SLA error (escalation, `reason` stating the worker + activation
+ * time); otherwise the job keeps running/queued untouched. A job not yet observed as activated (queued,
+ * or leased after the last poll) is NEVER expired — its work SLA has not provably started, and because
+ * nothing is cancelled a lease racing this read is harmless (the next cycle sees the activation). Queue
+ * time therefore never escalates; queue/capacity alerting is out of scope here (issue #1020). */
 export async function deliveryNodeSlaCheck(
   data: DataLayer,
   input: {
@@ -192,40 +184,23 @@ export async function deliveryNodeSlaCheck(
     jobType: string;
     sla: string;
     now?: string;
-    /** Max age (ms) of the ledger's last observation for a "never activated" reading to be trusted;
-     * defaults to {@link DEFAULT_SLA_OBSERVATION_FRESH_MS}. */
-    freshWithinMs?: number;
-    /** How many times this node has already been re-queued (the node-scoped `<el>_slaRequeues`). */
-    priorRequeues?: number;
-    /** Re-queue cap; defaults to {@link MAX_SLA_REQUEUES}. */
-    maxRequeues?: number;
   },
-): Promise<{ requeue: boolean; reason: string; requeues: number }> {
-  const prior = Number.isInteger(input.priorRequeues) && (input.priorRequeues ?? 0) > 0 ? (input.priorRequeues ?? 0) : 0;
-  const cap = input.maxRequeues ?? MAX_SLA_REQUEUES;
+): Promise<{ expired: boolean; reason: string }> {
   const now = input.now ?? new Date().toISOString();
-  const freshMs = input.freshWithinMs ?? DEFAULT_SLA_OBSERVATION_FRESH_MS;
   const row = input.processInstanceKey.length > 0
     ? await getAgentJobActivation(data, input.processInstanceKey, input.activationJobType)
     : undefined;
-  // A never-activated reading is only trusted when the poller observed the job RECENTLY: a worker may
-  // have leased it after a stale last pass, so a stale unleased row is "activation unknown" (escalate).
-  const ageMs = row ? Date.parse(now) - Date.parse(row.updated_at) : Number.NaN;
-  const fresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= freshMs;
-  const activation: AgentSlaActivation | null = row && (row.activated_at || fresh)
+  const activatedMs = row?.activated_at ? Date.parse(row.activated_at) : Number.NaN;
+  const slaMs = isoDurationToMs(input.sla, "PT0S");
+  const expired = Number.isFinite(activatedMs) && Date.parse(now) - activatedMs >= slaMs;
+  const activation: AgentSlaActivation | null = row
     ? { activatedAt: row.activated_at, firstSeenAt: row.first_seen_at, worker: row.worker }
     : null;
-  const neverActivated = row !== undefined && !row.activated_at && fresh;
-  const capped = neverActivated && prior >= cap;
-  const requeue = neverActivated && !capped;
   const recovery = activation?.activatedAt
     ? `Activated at ${activation.activatedAt}${activation.worker ? ` by worker "${activation.worker}"` : ""} — check that run's branch/draft PR for partial work before retrying or reassigning.`
-    : capped
-      ? `Never picked up after ${prior + 1} × ${input.sla} SLA (${prior} re-queues) — check that a worker serves job type "${input.jobType}" (typo in the node's jobType, or no fleet host for it) before retrying.`
-      : "Check the job's state before retrying or reassigning.";
+    : "Check the job's state before retrying or reassigning.";
   return {
-    requeue,
-    requeues: requeue ? prior + 1 : prior,
+    expired,
     reason: buildAgentSlaEscalationReason({ jobType: input.jobType, sla: input.sla, activation, now, recovery }),
   };
 }

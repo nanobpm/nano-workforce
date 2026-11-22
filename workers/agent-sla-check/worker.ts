@@ -1,14 +1,12 @@
-// pr.agent-sla-check — the delivery-graph agent-node work-SLA gate (issue #1016).
+// pr.agent-sla-check — the delivery-graph agent-node work-SLA check (issue #1016).
 //
-// Runs on a compiled agent node's `=nodeTimeout` boundary arm (`<el>_slaChk`, see
-// `serviceBodyLines` in app/deliveryGraphCompiler.ts). The boundary timer starts when the node is
-// ENTERED, so it alone would count QUEUE time as WORK time and escalate a job no worker ever picked up
-// ("in-flight work may already exist" — when none can). This check reads the durable activation ledger
-// (populated by the poller while the job was live) and returns:
-//   • `requeue: true`  — the job was observed queued but never leased: the node re-enters its task
-//     (no human escalation; the work SLA has not started).
-//   • `requeue: false` + `reason` — the job was activated (or activation is unknown): escalate, stating
-//     the activation facts (worker, activation time) instead of guessing.
+// Runs on a compiled agent node's NON-interrupting `R/<nodeTimeout>` cycle boundary (`<el>_slaChk`,
+// see `agentSlaCheckLines` in app/deliveryGraphCompiler.ts). It never cancels the live job: it reads
+// the durable activation ledger (populated by the poller) and returns
+//   • `agentSlaExpired: true`  — the work SLA has elapsed SINCE ACTIVATION: the node throws its SLA
+//     error and escalates, with `agentSlaReason` stating the worker + activation time;
+//   • `agentSlaExpired: false` — still queued, activation not yet observed, or within budget: the
+//     boundary branch just ends and the job keeps running.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { deliveryNodeActivationJobType } from "../../app/agentActivationLedger.ts";
 import { deliveryNodeSlaCheck } from "../../app/agentSlaEscalation.ts";
@@ -16,13 +14,10 @@ import { deliveryNodeSlaCheck } from "../../app/agentSlaEscalation.ts";
 interface In extends Record<string, unknown> {
   jobType?: string | null;
   nodeTimeout?: string | null;
-  /** The node's prior re-queue count, bound by the check task's ioMapping from its collision-free control var. */
-  agentSlaPriorRequeues?: number | null;
 }
 interface Out extends Record<string, unknown> {
-  agentSlaRequeue: boolean;
+  agentSlaExpired: boolean;
   agentSlaReason: string;
-  agentSlaRequeues: number;
 }
 
 /** The SLA-check element id is `<el>_slaChk`; the watched agent leaf is `<el>_task`. */
@@ -35,17 +30,14 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const sla = typeof job.variables.nodeTimeout === "string" ? job.variables.nodeTimeout : "";
   const pik = job.processInstanceKey != null ? String(job.processInstanceKey) : "";
   const el = typeof job.elementId === "string" ? job.elementId : "";
-  const priorRaw = job.variables.agentSlaPriorRequeues;
-  const priorRequeues = typeof priorRaw === "number" && Number.isInteger(priorRaw) && priorRaw > 0 ? priorRaw : 0;
-  const { requeue, reason, requeues } = await deliveryNodeSlaCheck(app.data, {
-    priorRequeues,
+  const { expired, reason } = await deliveryNodeSlaCheck(app.data, {
     processInstanceKey: pik,
     activationJobType: deliveryNodeActivationJobType(jobType, watchedTaskElement(el)),
     jobType,
     sla,
   });
-  app.log.info("agent-sla-check", { pik, el, jobType, requeue });
-  return { agentSlaRequeue: requeue, agentSlaReason: reason, agentSlaRequeues: requeues };
+  app.log.info("agent-sla-check", { pik, el, jobType, expired });
+  return { agentSlaExpired: expired, agentSlaReason: reason };
 };
 
 export default handler;

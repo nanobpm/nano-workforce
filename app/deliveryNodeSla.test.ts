@@ -1,6 +1,6 @@
 // Issue #1016: a delivery-graph agent node's work SLA must not count queue time. The poller records each
-// delivery node's job activation under a node-qualified ledger key, and `deliveryNodeSlaCheck` decides
-// re-queue (never activated) vs escalate (activated / unknown) with a reason stating the facts.
+// delivery node's job activation under a node-qualified ledger key, and `deliveryNodeSlaCheck` reports the
+// work SLA expired ONLY once it has elapsed since activation, with a reason stating the facts.
 import { test } from "node:test";
 import { assertEquals, assertStringIncludes } from "#test-assert";
 import { deliveryNodeActivationJobType, getAgentJobActivation, recordAgentJobObservation } from "./agentActivationLedger.ts";
@@ -12,31 +12,31 @@ import { memDataFor } from "../test/worldDb.ts";
 const MIG = ["119_agent_job_activations.sql"];
 const key = deliveryNodeActivationJobType("senior:feature", "n0_task");
 
-test("never-activated delivery node job → re-queue, no escalation", async () => {
+test("never-activated delivery node job → not expired (queue time never escalates)", async () => {
   const { data } = memDataFor(MIG);
   await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:00:00Z" });
-  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:59:00Z" });
-  const r = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T01:00:00Z" });
-  assertEquals(r.requeue, true);
-  assertEquals(r.requeues, 1);
+  const r = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T05:00:00Z" });
+  assertEquals(r.expired, false);
 });
 
-test("activated delivery node job → escalate with worker + activation time, not 'may already exist'", async () => {
-  const { data } = memDataFor(MIG);
-  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:00:00Z" });
-  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: "merlin-1", jobKey: "J1", now: "2026-11-22T00:10:00Z" });
-  const r = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T01:00:00Z" });
-  assertEquals(r.requeue, false);
-  assertStringIncludes(r.reason, "merlin-1");
-  assertStringIncludes(r.reason, "2026-11-22T00:10:00Z");
-  assertEquals(r.reason.includes("may already exist"), false);
-});
-
-test("unobserved delivery node job → escalate with honest 'unknown' wording (not proof of non-activation)", async () => {
+test("unobserved delivery node job → not expired (activation not provable, nothing is cancelled)", async () => {
   const { data } = memDataFor(MIG);
   const r = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H" });
-  assertEquals(r.requeue, false);
-  assertStringIncludes(r.reason, "cannot confirm");
+  assertEquals(r.expired, false);
+});
+
+test("activated shortly before the ENTRY deadline → full work budget from activation, then escalate with the facts", async () => {
+  const { data } = memDataFor(MIG);
+  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:00:00Z" });
+  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: "merlin-1", jobKey: "J1", now: "2026-11-22T00:59:00Z" });
+  // The entry-anchored boundary fires at 01:00 — one minute into the work: must NOT expire.
+  const early = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T01:00:00Z" });
+  assertEquals(early.expired, false);
+  const late = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T02:00:00Z" });
+  assertEquals(late.expired, true);
+  assertStringIncludes(late.reason, "merlin-1");
+  assertStringIncludes(late.reason, "2026-11-22T00:59:00Z");
+  assertEquals(late.reason.includes("may already exist"), false);
 });
 
 test("watchedTaskElement maps the check element to the agent leaf", () => {
@@ -64,25 +64,6 @@ test("poll records delivery-graph agent jobs under a node-qualified key (paralle
   assertEquals((await getAgentJobActivation(data, "PI", deliveryNodeActivationJobType("senior:feature", "n0_task")))?.worker, "w1");
   assertEquals((await getAgentJobActivation(data, "PI", deliveryNodeActivationJobType("senior:feature", "n1_task")))?.activated_at, null);
   assertEquals(await getAgentJobActivation(data, "PX", deliveryNodeActivationJobType("senior:feature", "x_task")), undefined);
-});
-
-test("never-activated re-queues are capped → escalate 'never picked up' (no infinite loop)", async () => {
-  const { data } = memDataFor(MIG);
-  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:59:30Z" });
-  const ok = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T01:00:00Z", priorRequeues: 2, maxRequeues: 3 });
-  assertEquals(ok.requeue, true);
-  assertEquals(ok.requeues, 3);
-  const r = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T01:00:00Z", priorRequeues: 3, maxRequeues: 3 });
-  assertEquals(r.requeue, false);
-  assertStringIncludes(r.reason, "Never picked up");
-});
-
-test("stale unleased observation → escalate as 'unknown', never re-queue", async () => {
-  const { data } = memDataFor(MIG);
-  await recordAgentJobObservation(data, { processInstanceKey: "PI", jobType: key, worker: null, jobKey: "J1", now: "2026-11-22T00:00:00Z" });
-  const r = await deliveryNodeSlaCheck(data, { processInstanceKey: "PI", activationJobType: key, jobType: "senior:feature", sla: "PT1H", now: "2026-11-22T01:00:00Z", freshWithinMs: 120_000 });
-  assertEquals(r.requeue, false);
-  assertStringIncludes(r.reason, "cannot confirm");
 });
 
 test("re-observation refreshes updated_at so a polled-queued job stays fresh", async () => {

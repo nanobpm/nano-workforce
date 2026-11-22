@@ -120,8 +120,8 @@ test("deploy+advance: a stalled service node escalates on its node-timeout bound
       edges: [{ from: "impl", to: "signoff" }],
     };
     // Issue #1016: the boundary arm consults the activation ledger via `pr.agent-sla-check`. Stub it as
-    // an ACTIVATED-but-overrunning job (no re-queue) so the work-SLA escalation fires.
-    await engine.registerWorker("pr.agent-sla-check", async () => ({ agentSlaRequeue: false, agentSlaReason: "activated by worker w1" }));
+    // an ACTIVATED job whose work SLA has elapsed, so the work-SLA escalation fires.
+    await engine.registerWorker("pr.agent-sla-check", async () => ({ agentSlaExpired: true, agentSlaReason: "activated by worker w1" }));
     // Short node timeout so the boundary fires within one virtual-clock advance; a long SLA so the
     // human node's own escalation boundary never fires during the drive.
     const run = await runDeliveryGraph(engine, graph, { nodeTimeout: "PT1M", escalationSlaTimeout: "PT1H", repoless: true });
@@ -171,7 +171,7 @@ test("deploy+advance: a stalled service node escalates on its node-timeout bound
   }
 });
 
-test("issue #1016: a NEVER-ACTIVATED agent job does not raise the work-SLA escalation — it is re-queued until a worker picks it up", async () => {
+test("issue #1016: a NEVER-ACTIVATED (or within-budget) agent job is never escalated or cancelled — only an SLA elapsed since activation escalates", async () => {
   const engine = await createWasmEngineClient();
   try {
     const graph: DeliveryGraph = {
@@ -179,15 +179,16 @@ test("issue #1016: a NEVER-ACTIVATED agent job does not raise the work-SLA escal
       nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "do it" } }],
       edges: [],
     };
-    // The ledger says: observed queued, never leased → re-queue (no escalation). Flip to "activated"
-    // afterwards to prove the SAME boundary still escalates once a worker has actually started.
+    // The ledger says: not yet activated / within budget → keep waiting (the non-interrupting check
+    // leaves the live job alone). Flip to "elapsed since activation" afterwards to prove the SAME cycle
+    // boundary escalates once the work SLA has actually run out.
     let activated = false;
     let checks = 0;
     await engine.registerWorker("pr.agent-sla-check", async () => {
       checks++;
       return activated
-        ? { agentSlaRequeue: false, agentSlaReason: "activated by worker w1" }
-        : { agentSlaRequeue: true, agentSlaReason: "never activated" };
+        ? { agentSlaExpired: true, agentSlaReason: "activated by worker w1" }
+        : { agentSlaExpired: false, agentSlaReason: "not yet activated" };
     });
     const run = await runDeliveryGraph(engine, graph, { nodeTimeout: "PT1M", escalationSlaTimeout: "PT1H", repoless: true });
     assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
@@ -203,7 +204,7 @@ test("issue #1016: a NEVER-ACTIVATED agent job does not raise the work-SLA escal
     const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
     assertEquals(open.length, 0, "a never-activated job must not raise the work-SLA escalation");
     const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
-    assertEquals(pi?.state, "ACTIVE", "the re-queued node keeps the instance live");
+    assertEquals(pi?.state, "ACTIVE", "the waiting node keeps the instance live");
 
     // Once activated, the next work-SLA elapse escalates as before.
     activated = true;
@@ -212,6 +213,17 @@ test("issue #1016: a NEVER-ACTIVATED agent job does not raise the work-SLA escal
     const esc = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
     assertEquals(esc.length, 1, "an activated job that overruns its SLA escalates");
     assert(esc[0].elementId?.endsWith("__esc"), `expected an __esc escalation task, saw ${esc[0].elementId}`);
+
+    // Retry re-arms the work SLA: the previous expiry must NOT immediately re-fire the escalation, and a
+    // fresh (not-yet-activated) attempt waits again rather than escalating.
+    activated = false;
+    await engine.completeUserTask(esc[0].userTaskKey, { decision: "retry" });
+    await engine.drain();
+    const afterRetry = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+    assertEquals(afterRetry.length, 0, "a Retry must not re-fire the previous attempt's SLA expiry");
+    await engine.advanceTime(60_000);
+    await engine.drain();
+    assertEquals((await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" })).length, 0, "the retried, not-yet-activated attempt keeps waiting");
   } finally {
     await engine.close();
   }
