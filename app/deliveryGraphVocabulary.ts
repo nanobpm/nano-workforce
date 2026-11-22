@@ -248,7 +248,7 @@ const WAIT_PROBE_DETAIL: Record<string, Omit<WaitProbeEntry, "kind">> = {
       "the issue reaches `match.issueState` (default `completed`): `closed` = CLOSED for any reason; " +
       "`completed` = CLOSED with stateReason COMPLETED (a NOT_PLANNED close does not count); " +
       "`closed-by-pr-merged` = completed AND at least one closing PR is MERGED.",
-    binds: ["pr"],
+    binds: ["closingPr"],
   },
 };
 

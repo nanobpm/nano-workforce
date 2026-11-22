@@ -52,7 +52,7 @@ test("pr / epic / issue probe conditions match the closed PR_CONDITIONS / EPIC_C
   assert.deepEqual(sorted(epic.conditions ?? []), sorted(EPIC_CONDITIONS), "epic conditions drifted from EPIC_CONDITIONS");
   assert.deepEqual(sorted(issue.conditions ?? []), sorted(ISSUE_CONDITIONS), "issue conditions drifted from ISSUE_CONDITIONS");
   // The issue kind's emitted closing PR (a `pr`-typed fact) must be discoverable from the surface.
-  assert.deepEqual(issue.binds ?? [], ["pr"], "the issue probe must document its emitted closing-PR `pr` bind");
+  assert.deepEqual(issue.binds ?? [], ["closingPr"], "the issue probe must document its emitted closing-PR `closingPr` bind");
 });
 
 test("every real converge-enrollment target has a real vocab entry (add a target ⇒ must add a vocab entry)", () => {

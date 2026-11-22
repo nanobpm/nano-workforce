@@ -2471,6 +2471,25 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
       nodeFactTypes.set(id, factTypes);
     }
 
+    // A `pr`-typed `wait` emit is sourced from the `closingPr` bind, which ONLY a
+    // `wait[issue]` with `match.issueState: "closed-by-pr-merged"` produces (#997). On any other wait it
+    // would publish null (or, before the dedicated name, a stale enclosing `pr`) — fail closed here.
+    if (kind === "wait" && [...factTypes.entries()].some(([n, t]) => t === "pr" && n !== "mergedSha" && n !== "prCount")) {
+      const cfg = isRecord(rawNode.wait) ? rawNode.wait : {};
+      const waitKind = typeof cfg.kind === "string" ? cfg.kind.trim() : "";
+      const issueState = isRecord(cfg.match) && typeof cfg.match.issueState === "string" ? cfg.match.issueState.trim() : "";
+      if (waitKind !== "issue" || issueState !== "closed-by-pr-merged") {
+        errors.push({
+          path: `${path}.emits`,
+          message:
+            `wait node "${String(id)}" emits a \`pr\`-typed fact, but only a \`wait[issue]\` with ` +
+            "`match.issueState: \"closed-by-pr-merged\"` binds a PR — any other wait would publish null. " +
+            "Change the probe to that shape or retype the fact.",
+          code: "invalid-fact-type",
+        });
+      }
+    }
+
     // Reject a `human` node whose emits no static form can capture (PR #863 review — threads
     // deliveryGraphCompiler.ts:1859 / :2451 / :1927). A human form captures ONE value: the generic form a
     // single non-artifact `value`, the publish form a single `resolvedArtifact`. A node emitting ≥2 typed

@@ -1059,7 +1059,7 @@ export function issueViewCommand(repo: string, number: string): string {
  * landed (nwf, Mergify, a human).
  *
  * `closed-by-pr-merged` additionally requires at least one MERGED PR in
- * `closedByPullRequestsReferences` and binds it as `{ pr: "owner/repo#N" }` — a `pr`-typed fact a
+ * `closedByPullRequestsReferences` and binds it as `{ closingPr: "owner/repo#N" }` — a `pr`-typed fact a
  * downstream `wait[pr]`/agent consumes, mirroring how the canonical
  * `agent → connector[converge] → wait[pr]` shape hands its PR on. The repo half comes from
  * `targetRepo` (the probe target's `owner/repo`) since the payload's references carry only the
@@ -1087,7 +1087,7 @@ export function matchIssue(match: ProbeMatch | undefined, payload: unknown, targ
       if (merged === null) {
         return { ready: false, detail: `${base} (no merged closing PR observed)` };
       }
-      return { ready: true, detail: `issue closed by merged PR ${merged}`, bind: { pr: merged } };
+      return { ready: true, detail: `issue closed by merged PR ${merged}`, bind: { closingPr: merged } };
     }
   }
 }

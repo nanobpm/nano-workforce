@@ -1420,7 +1420,7 @@ test("matchIssue: issueState 'closed-by-pr-merged' needs a MERGED closing PR and
   assert(!matchIssue({ issueState: "closed-by-pr-merged" }, CLOSED_BY_UNMERGED_PR).ready, "an unmerged closing PR does not count");
   const r = matchIssue({ issueState: "closed-by-pr-merged" }, CLOSED_BY_MERGED_PR, "o/r");
   assert(r.ready);
-  assertEquals(r.bind?.pr, "o/r#432", "the merged closing PR is bound as a pr-typed fact for a downstream wait[pr]/agent");
+  assertEquals(r.bind?.closingPr, "o/r#432", "the merged closing PR is bound as a pr-typed fact for a downstream wait[pr]/agent");
 });
 
 test("matchIssue: a garbled/gh-failure-shaped payload is not ready, never a throw", () => {
@@ -1443,7 +1443,7 @@ test("probeOnce issue: builds a quoted `gh issue view` command (reading closedBy
   assertStringIncludes(capture.cmd ?? "", "'9'");
   assertStringIncludes(capture.cmd ?? "", "--repo 'o/r'");
   assertStringIncludes(capture.cmd ?? "", "closedByPullRequestsReferences");
-  assertEquals(r.bind?.pr, "o/r#432");
+  assertEquals(r.bind?.closingPr, "o/r#432");
 });
 
 test("probeOnce issue: a failed `gh issue view` is not-ready (bounded wait routes to onTimeout), never a throw", async () => {

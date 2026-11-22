@@ -499,7 +499,8 @@ opens however the issue landed (nwf, Mergify, a human). `target` is the issue ke
 - `closed-by-pr-merged` — CLOSED as completed AND at least one PR in
   `closedByPullRequestsReferences` is MERGED. On a match it **binds the closing PR as a `pr`
   fact** — declare `emits: [{ "name": "pr", "type": "pr" }]` and thread it to a downstream
-  `wait[pr]`/agent, exactly like an agent's emitted PR.
+  `wait[pr]`/agent, exactly like an agent's emitted PR. A `pr`-typed emit on any other wait
+  (another kind, or another `issueState`) is rejected at compile — nothing would bind it.
 
 This is how a graph says "join on issues A, B and C landing" — one `wait[issue]` per issue as
 branches of a parallel AND-join — without a raw `command` probe running `gh issue view`. A

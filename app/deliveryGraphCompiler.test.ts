@@ -17,6 +17,7 @@ import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { missingExternalMarkerAgentTaskTypes } from "./agentic/vocab/job-types.ts";
 import { AGENT_TERMINAL_SUCCESS_STATUSES, compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText, resumeValidVar } from "./deliveryGraphCompiler.ts";
 import { isDeliveryEscalationTwin } from "./deliveryHuman.ts";
+import { validateDeliveryGraph } from "./deliveryGraph.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
 async function compileOk(graph: unknown) {
@@ -345,6 +346,48 @@ test("#997 issue wait kind: issue wait nodes compile as branches of a parallel j
   assertEquals(probes.length, 6, "each issue wait compiles to its own readiness-probe branch of the join");
 });
 
+test("#997 issue wait kind: a pr-typed emit on a wait that cannot bind a PR is rejected at compile", () => {
+  const variants: unknown[] = [
+    { kind: "issue", target: "o/r#9", match: { issueState: "completed" } },
+    { kind: "issue", target: "o/r#9", match: { issueState: "closed" } },
+    { kind: "issue", target: "o/r#9" },
+    { kind: "pr", target: "o/r#9" },
+    { kind: "epic", target: "o/r#9" },
+  ];
+  for (const wait of variants) {
+    const errs = validateDeliveryGraph({ name: "bad", nodes: [{ id: "w", kind: "wait", wait, emits: [{ name: "pr", type: "pr" }] }], edges: [] });
+    assert(errs.some((e) => e.path === "nodes[0].emits" && e.code === "invalid-fact-type"), `rejects pr emit on ${JSON.stringify(wait)}`);
+  }
+  const ok = validateDeliveryGraph({
+    name: "ok",
+    nodes: [{ id: "w", kind: "wait", wait: { kind: "issue", target: "o/r#9", match: { issueState: "closed-by-pr-merged" } }, emits: [{ name: "pr", type: "pr" }] }],
+    edges: [],
+  });
+  assert(!ok.some((e) => e.path === "nodes[0].emits"), "closed-by-pr-merged issue wait may emit a pr fact");
+});
+
+test("#997 issue wait kind: the closing-PR bind never writes the shared `pr` name; parallel issue waits each emit their own bind", async () => {
+  const issueWait = (id: string, n: number) => ({
+    id,
+    kind: "wait",
+    wait: { kind: "issue", target: `o/r#${n}`, match: { issueState: "closed-by-pr-merged" } },
+    emits: [{ name: "pr", type: "pr" }],
+  });
+  const graph = {
+    name: "two-branch join",
+    nodes: [issueWait("wa", 1), issueWait("wb", 2), { id: "gate-pr", kind: "wait", wait: { kind: "pr", target: "o/r#3" } }, { id: "build", kind: "agent", agent: { jobType: "senior:feature", prompt: "x" } }],
+    edges: [{ from: "wa", to: "build" }, { from: "wb", to: "build" }, { from: "gate-pr", to: "build" }],
+  };
+  const r = await compileOk(graph);
+  assert(!r.bpmn.includes('then pr else null" target="pr"'), "no wait body lifts into the bare shared `pr` variable");
+  const lifts = r.bpmn.match(/then closingPr else null" target="closingPr"/g) ?? [];
+  assertEquals(lifts.length, 2, "only the two issue waits lift closingPr (the pr wait does not)");
+  // Each branch declares closingPr node-local, so its emit reads its OWN probe's bind.
+  for (const el of ["n2", "n3"]) {
+    assert(r.bpmn.includes(`source="=if (is defined(closingPr)) then closingPr else null" target="${el}_pr"`), `${el} emits from its own closingPr`);
+  }
+});
+
 test("#997 issue wait kind: a wait[issue] node's emitted `pr` fact is consumable by a downstream pr-typed node", async () => {
   // `closed-by-pr-merged` binds the closing PR as a `pr`-typed fact (mirroring how the canonical
   // agent -> connector[converge] -> wait[pr] shape hands its PR on): the probe loop must lift the
@@ -366,12 +409,12 @@ test("#997 issue wait kind: a wait[issue] node's emitted `pr` fact is consumable
   const r = await compileOk(graph);
   // The probe-loop subProcess must lift the `pr` bind out of the gate scope (alongside mergedSha/prCount).
   assert(
-    r.bpmn.includes('source="=if (is defined(pr)) then pr else null" target="pr"'),
+    r.bpmn.includes('source="=if (is defined(closingPr)) then closingPr else null" target="closingPr"'),
     "the probe loop lifts the issue probe's `pr` bind out of the gate scope",
   );
   // The wait node's emit output must SOURCE the pr fact from the `pr` bind variable, not `detail`.
   assert(
-    r.bpmn.includes('source="=if (is defined(pr)) then pr else null" target="n0_pr"'),
+    r.bpmn.includes('source="=if (is defined(closingPr)) then closingPr else null" target="n0_pr"'),
     "the pr emit publishes from the pr bind variable, not the probe detail",
   );
   // The downstream wait[pr] late-binds its target from the threaded fact.
