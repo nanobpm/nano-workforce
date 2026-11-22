@@ -3,6 +3,7 @@
 // is on, or (b) close the PR out as `converged` (review-only mode).
 import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
+import { withMergePolicyLock } from "../../app/mergePolicyLock.ts";
 import { maybeStartRetro } from "../../app/retro.ts";
 import { AUTO_MERGE, ensurePr, startMerge } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
@@ -52,15 +53,34 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // with no process behind it, and `submitPr` refuses to restart it (only `cancel` recovers). On
   // failure we leave the PR terminal as `converged` so a human/operator can (re)start merge.
   //
-  // Merge intent (issue #916): `autoMerge` is the CANONICAL positive variable — read it first and
-  // fall back to the legacy inverted `convergeOnly` only when `autoMerge` is absent, so an in-flight
-  // loop seeded before `autoMerge` existed keeps its behaviour. A review-only intent
-  // (`autoMerge:false`, or legacy `convergeOnly:true`) forces the review-only path for this PR
-  // regardless of the global auto-merge default — the PR rests at `converged` and is never handed
-  // to the merge-loop.
-  const mergeRequested = autoMerge === true || (autoMerge == null && convergeOnly !== true);
-  let status = "converged";
-  if (AUTO_MERGE && mergeRequested) {
+  // Merge intent (issue #916, hardened in #1007 review round 3): the DURABLE `merge_requested`
+  // projection `submitPr` stamps (and adoption narrows) is the authoritative opt-out — an
+  // adoption narrowing that lands while a review/fix agent is live is reverted in the PROCESS
+  // VARIABLES when that agent's completion restores its guard snapshots
+  // (convergence-loop.bpmn's `guardAutoMerge`/`guardConvergeOnly` outputs), but the projection
+  // compare-and-set survives, so reading it here can never un-do an operator's explicit
+  // review-only pin. The process variables (`autoMerge` canonical, `convergeOnly` legacy inverse)
+  // remain the fallback for a legacy row written before the projection existed
+  // (`merge_requested` NULL) — mirroring `mergePolicyFromRow`'s serve path.
+  // The policy read and the merge handoff run under the SAME owner-keyed `withMergePolicyLock`
+  // adoption's review-only narrowing uses (issue #1007 review, round 6): otherwise finalization could
+  // read `merge_requested = 1`, pause inside `startMerge`'s GitHub lookup while adoption stamps `0`,
+  // and then hand off (re-stamping `1`), undoing the explicit opt-out. Under the lock the two are
+  // totally ordered: either adoption narrows first (we re-read `0` here and stay review-only) or the
+  // handoff lands first (adoption's compare-and-set then sees the re-pointed owner / converged row).
+  const readPolicyRow = async () =>
+    // biome-ignore lint/plugin: runtime/framework contract boundary for the data-layer row shape
+    (await app.data.table("pull_requests", "pr_key").get(prKey)) as
+      | { merge_requested?: number | null; process_key?: string | null }
+      | undefined;
+  const ownerKey = (await readPolicyRow())?.process_key ?? null;
+  const handoff = async (): Promise<string> => {
+    const prRow = await readPolicyRow();
+    const mergeRequested =
+      prRow?.merge_requested != null
+        ? prRow.merge_requested === 1
+        : autoMerge === true || (autoMerge == null && convergeOnly !== true);
+    if (!(AUTO_MERGE && mergeRequested)) return "converged";
     try {
       const { mergeProcessKey } = await startMerge(app.data, app.engine, {
         repo,
@@ -73,17 +93,16 @@ const handler: AppJobHandler<In> = async (job, app) => {
       // nullable `processInstanceKey`). Only park the PR in the merge-stage `waiting_deps` status
       // when merge-loop is actually running — otherwise leave it terminal as `converged` so a
       // human/operator can (re)start merge rather than stranding it with no process behind it.
-      if (mergeProcessKey != null) {
-        status = "waiting_deps";
-      } else {
-        app.log.error(`finalize: merge-loop start returned no process key for ${prKey}; leaving PR converged`);
-      }
+      if (mergeProcessKey != null) return "waiting_deps";
+      app.log.error(`finalize: merge-loop start returned no process key for ${prKey}; leaving PR converged`);
     } catch (err) {
       app.log.error(`finalize: could not start merge-loop for ${prKey}; leaving PR converged`, {
         err: String(err),
       });
     }
-  }
+    return "converged";
+  };
+  const status = ownerKey != null ? await withMergePolicyLock(ownerKey, handoff) : await handoff();
 
   // Converged bookkeeping is recorded in both modes; `outcome`/`converged_at` capture the review
   // result. In auto-merge mode (when merge-loop started) the *status* moves into the merge stage

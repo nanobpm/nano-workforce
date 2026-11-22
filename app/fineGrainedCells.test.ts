@@ -215,3 +215,84 @@ test("plan-fanout.bpmn composes its per-wave implement step via a callActivity t
     "plan-fanout.bpmn must not keep the inlined record-wave-escalation recorder (folded into the cell's recorder)",
   );
 });
+
+test("plan-fanout.bpmn converges each opened slice PR inside the epic via a callActivity to converge-cell (issue #1007)", () => {
+  // Without this composition an epic parked at `wait-wave-merged` forever: nothing converged the slice
+  // PRs (no review/fix loop, no auto-merge) unless an operator ran `nwf converge` per PR by hand.
+  //
+  // F3 (#1007 review): the converge-cell call is NOT in the per-slice multi-instance wave body — it is a
+  // wave-scoped step AFTER `record-wave`, so every slice's `pr_key` and the wave's trial-merge decision
+  // are settled before ANY slice's convergence loop can auto-merge (a fast slice can no longer merge
+  // ahead of its siblings' recorded associations / the trial-merge gate).
+  const xml = flat("plan-fanout");
+  const implementSub =
+    xml.match(/<bpmn:subProcess\b[^>]*\bid="implement"[\s\S]*?<\/bpmn:subProcess>/)?.[0] ?? "";
+  // The per-slice wave body must NOT converge inline (that was the F3 gap).
+  assert(
+    !/<bpmn:callActivity\b[^>]*\bid="converge-cell-call"/.test(implementSub),
+    "the per-slice wave body must NOT hold converge-cell-call — convergence is a wave-scoped step after record-wave (F3)",
+  );
+  // The wave-scoped converge-cell-call is a multi-instance over record-wave's `openedPrs`, mapping each
+  // slice's taskId + prKey into the child scope. Merge policy is NARROW-ONLY mapped (round 3): the
+  // trial-merge Abandon arm maps `autoMerge=false` (the operator's merge opt-out for the wave); every
+  // other arm leaves the epic's durable `plans.auto_merge` governing (F1) — an input `true` can never
+  // widen an opted-out epic (converge-slice ANDs the two).
+  const convergeCall =
+    xml.match(/<bpmn:callActivity\b[^>]*\bid="converge-cell-call"[\s\S]*?<\/bpmn:callActivity>/)?.[0] ?? "";
+  assert(convergeCall.length > 0, "the wave body must hold a converge-cell-call callActivity");
+  assert(
+    /<zeebe:calledElement\b[^>]*\bprocessId="converge-cell"/.test(convergeCall),
+    "converge-cell-call must call the shared converge-cell",
+  );
+  assert(
+    /<zeebe:loopCharacteristics\b[^>]*\binputCollection="=openedPrs"[^>]*\binputElement="pr"/.test(convergeCall),
+    "converge-cell-call is a multi-instance over record-wave's openedPrs",
+  );
+  for (const [source, target] of [["planKey", "planKey"], ["pr.taskId", "taskId"], ["pr.prKey", "prKey"]] as const) {
+    assert(
+      new RegExp(`<zeebe:input\\b[^>]*\\bsource="=${source.replace(".", "\\.")}"[^>]*\\btarget="${target}"`).test(convergeCall),
+      `converge-cell-call must map ${source} into the child scope as ${target}`,
+    );
+  }
+  // Round 3 (#1007 review): the ONLY autoMerge mapping is the narrow-only abandon signal — never a
+  // bare `=autoMerge` variable forward (an agent-clobbered variable must not reach the policy). The
+  // quote entity is serializer-dependent (`&quot;` vs `&#34;`), so match either.
+  assert(
+    /<zeebe:input\b[^>]*\bsource="=not \(action = (&quot;|&#34;)abandon\1\)"[^>]*\btarget="autoMerge"/.test(convergeCall),
+    "converge-cell-call maps the narrow-only abandon signal to autoMerge (round 3)",
+  );
+  assert(
+    !/<zeebe:input\b[^>]*\bsource="=autoMerge"/.test(convergeCall),
+    "the raw autoMerge variable is never forwarded — the durable plans row governs (F1)",
+  );
+  // It runs only when record-wave emitted opened PRs, and only after the trial-merge gate.
+  const toConverge =
+    xml.match(/<bpmn:sequenceFlow\b[^>]*\bid="f_toConvergeWave"[\s\S]*?<\/bpmn:sequenceFlow>/)?.[0] ?? "";
+  assert(/sourceRef="gw-converge-wave"/.test(toConverge) && /targetRef="converge-cell-call"/.test(toConverge), "the converge gateway feeds the converge cell");
+  assert(/count\(openedPrs\) &gt; 0/.test(toConverge), "the wave converges only when record-wave emitted opened PRs");
+  for (const feeder of ["f_skipTrialMerge", "f_trialProceed", "f_trialAnswerProceed"]) {
+    assert(
+      new RegExp(`<bpmn:sequenceFlow\\b[^>]*\\bid="${feeder}"[^>]*\\btargetRef="gw-converge-wave"`).test(xml),
+      `${feeder} routes through the trial-merge gate before convergence (F3)`,
+    );
+  }
+  // record-wave still flows into the trial-merge decision, and the converge cell joins the more-waves gate.
+  assert(/<bpmn:sequenceFlow\b[^>]*\bid="f_toTrialNeeded"[^>]*\bsourceRef="record-wave"/.test(xml), "record-wave still feeds the trial-merge gate");
+  assert(/<bpmn:sequenceFlow\b[^>]*\bid="f_convergedToMore"[^>]*\bsourceRef="converge-cell-call"[^>]*\btargetRef="gw-more"/.test(xml), "the converge cell joins the more-waves gate");
+  // The wave gate is unchanged — it now releases because the cell merged the PRs.
+  assert(/<bpmn:intermediateCatchEvent\b[^>]*\bid="wait-wave-merged"/.test(xml), "the wave gate stays as is");
+});
+
+test("converge-cell routes an epic slice to pr.converge-slice and a feature run to pr.converge-feature (issue #1007)", () => {
+  const xml = flat("converge-cell");
+  assert(/<bpmn:exclusiveGateway\b[^>]*\bid="cc_gw_kind"[^>]*\bdefault="cc_toConverge"/.test(xml), "feature runs take the default arm");
+  const sliceFlow = xml.match(/<bpmn:sequenceFlow\b[^>]*\bid="cc_toConvergeSlice"[\s\S]*?<\/bpmn:sequenceFlow>/)?.[0] ?? "";
+  assert(/targetRef="converge-slice"/.test(sliceFlow) && /planKey != null/.test(sliceFlow), "a planKey routes to the slice arm");
+  assert(/<zeebe:taskDefinition\b[^>]*\btype="pr.converge-slice"/.test(xml), "the slice arm hands off via pr.converge-slice");
+});
+
+test("implement-cell sends a keyless 'opened' to reconcile rather than straight to done (issue #1007)", () => {
+  const xml = flat("implement-cell");
+  const done = xml.match(/<bpmn:sequenceFlow\b[^>]*\bid="ic_done"[\s\S]*?<\/bpmn:sequenceFlow>/)?.[0] ?? "";
+  assert(/status = "opened" and is defined\(pr\) and pr != null/.test(done), "ic_done requires a PR key for an opened slice");
+});

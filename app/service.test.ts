@@ -72,7 +72,54 @@ function memOpen(stores: Record<string, { rows: any[]; key: string }>, ops?: str
         }
         return { changed };
       }
+      // Adoption merge-policy narrowing (issue #1007 review, F2): a review-only caller adopting a live
+      // auto-merging loop stamps merge_requested = 0 (compare-and-set on the same owner, pre-finalize).
+      if (/^UPDATE "pull_requests" SET "merge_requested" = 0 WHERE "pr_key" = \? AND "process_key" = \? AND "converged_at" IS NULL$/.test(sql)) {
+        let changed = 0;
+        for (const r of stores.pull_requests?.rows ?? []) {
+          if (r.pr_key === params[0] && r.process_key === params[1] && r.converged_at == null) {
+            r.merge_requested = 0;
+            changed++;
+          }
+        }
+        return { changed };
+      }
       throw new Error(`unexpected exec sql: ${sql}`);
+    },
+    // Dependency replacement runs in one transaction (issue #1007 review, round 3) so a
+    // `pollMerges` read can never observe the transient empty set. The double applies the same
+    // DELETE+INSERTs against the in-memory store, in order.
+    tx: async (fn: (q: { exec: (sql: string, params?: any[]) => Promise<{ changed: number }> }) => Promise<unknown>) => {
+      const q = {
+        exec: async (sql: string, params: any[] = []) => {
+          if (/^DELETE FROM "pr_dependencies" WHERE "pr_key" = \?$/.test(sql)) {
+            const store = stores.pr_dependencies;
+            let changed = 0;
+            if (store) {
+              for (let i = store.rows.length - 1; i >= 0; i--) {
+                if (store.rows[i].pr_key === params[0]) {
+                  store.rows.splice(i, 1);
+                  changed++;
+                }
+              }
+            }
+            return { changed };
+          }
+          if (/^INSERT INTO "pr_dependencies" \("pr_key", "depends_on_key", "created_at"\) VALUES \(\?, \?, \?\)$/.test(sql)) {
+            stores.pr_dependencies?.rows.push({ pr_key: params[0], depends_on_key: params[1], created_at: params[2] });
+            return { changed: 1 };
+          }
+          // Adoption's additive union (issue #1007 review, round 6): insert-if-absent, never delete.
+          if (/^INSERT INTO "pr_dependencies" \("pr_key", "depends_on_key", "created_at"\) SELECT \?, \?, \? WHERE NOT EXISTS/.test(sql)) {
+            const rows = (stores.pr_dependencies ??= { rows: [], key: "id" }).rows;
+            if (rows.some((r) => r.pr_key === params[0] && r.depends_on_key === params[1])) return { changed: 0 };
+            rows.push({ pr_key: params[0], depends_on_key: params[1], created_at: params[2] });
+            return { changed: 1 };
+          }
+          throw new Error(`unexpected tx exec sql: ${sql}`);
+        },
+      };
+      return fn(q);
     },
   };
 }
@@ -513,6 +560,20 @@ test("re-submit rolls back (cancels) the new instance when the adjudication rese
         if (/DELETE FROM "pr_adjudications" WHERE "pr_key" = \?/.test(sql)) throw new Error("boom: reset DELETE failed");
         throw new Error(`unexpected exec sql: ${sql}`);
       },
+      // The tx channel is unused here — the submit fails at the adjudication reset, after the
+      // dependency registration — but the double must still offer it (registerDependencies runs
+      // its DELETE+INSERTs through `tx` since the round-3 atomicity fix).
+      tx: async (fn: (q: { exec: (sql: string, params?: any[]) => Promise<{ changed: number }> }) => Promise<unknown>) =>
+        fn({
+          exec: async (sql: string, params: any[] = []) => {
+            if (/^DELETE FROM "pr_dependencies" WHERE "pr_key" = \?$/.test(sql)) return { changed: 0 };
+            if (/^INSERT INTO "pr_dependencies"/.test(sql)) {
+              stores.pr_dependencies.rows.push({ pr_key: params[0], depends_on_key: params[1], created_at: params[2] });
+              return { changed: 1 };
+            }
+            throw new Error(`unexpected tx exec sql: ${sql}`);
+          },
+        }),
     });
     const data = { table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)), open: failingOpen } as any;
     const cancelled: string[] = [];
@@ -1137,6 +1198,237 @@ test("submitPr still short-circuits a genuinely-live non-terminal row (process_k
   });
 });
 
+// Adoption reconciliation (issue #1007 review, F2): adopting a live loop must apply THIS caller's
+// dependencies, lineage root, and merge policy — not silently keep the earlier submit's. Drives the
+// `alreadyRunning` branch against an in-memory data layer.
+test("submitPr adopting a live loop reconciles dependencies, lineage root, and a review-only merge policy (#1007 F2)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#90";
+    // A live, auto-merging, self-rooted convergence loop an operator started by hand.
+    const live = {
+      pr_key: PR_KEY, repo: "owner/repo", number: 90, status: "converging", process_key: "PI-live",
+      root_request_key: null, merge_requested: 1, converged_at: null,
+    };
+    const stores: Record<string, { rows: unknown[]; key: string }> = {
+      pull_requests: { rows: [live], key: "pr_key" },
+      escalations: { rows: [], key: "id" },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const data = {
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+      open: () => memOpen(stores),
+    } as any;
+    const setVarsCalls: { scopeKey: string; variables: Record<string, unknown> }[] = [];
+    const engine = {
+      createInstance: () => Promise.resolve({ processInstanceKey: "PI-new" }),
+      searchProcessInstances: () =>
+        Promise.resolve([{ processInstanceKey: "PI-live", state: "ACTIVE", processDefinitionId: "convergence-loop" }]),
+      setVariables: (req: { scopeKey: string; variables: Record<string, unknown> }) => {
+        setVarsCalls.push(req);
+        return Promise.resolve({});
+      },
+    } as any;
+
+    // An epic slice converges the SAME PR with autoMerge=false (the operator's epic opt-out), a
+    // dependency, and the epic root. `convergeOnly=true` is the legacy inverse of autoMerge=false.
+    const res = await submitPr(
+      data, engine,
+      { repo: "owner/repo", number: 90, url: "https://github.com/owner/repo/pull/90", prKey: PR_KEY },
+      ["owner/repo#89"], // dependsOn
+      20, // maxRounds
+      true, // convergeOnly (review-only)
+      "owner/repo#1", // rootRequestKey = the epic
+    );
+
+    assertEquals((res as any).alreadyRunning, true, "the live loop is adopted, not duplicated");
+    // Dependencies reconciled to this caller's set.
+    const depRows = stores.pr_dependencies.rows as { pr_key: string; depends_on_key: string }[];
+    assertEquals(depRows.map((d) => d.depends_on_key), ["owner/repo#89"], "the adopted loop takes on the caller's dependencies");
+    // Lineage root coalesced onto the epic.
+    assertEquals((stores.pull_requests.rows[0] as any).root_request_key, "owner/repo#1", "the adopted loop joins the epic's lineage");
+    // Merge policy narrowed to review-only on BOTH the live loop's variables and the durable projection.
+    assertEquals(
+      setVarsCalls.some((c) => c.scopeKey === "PI-live" && c.variables.autoMerge === false && c.variables.convergeOnly === true),
+      true,
+      "the live loop's merge intent is narrowed to converge-only",
+    );
+    assertEquals((stores.pull_requests.rows[0] as any).merge_requested, 0, "the durable merge-policy projection is narrowed too");
+  });
+});
+
+// The widening direction is deliberately NOT applied to a live loop: a review-only live loop adopted
+// by an auto-merge caller keeps its converge-only intent (its `pr.finalize` already read it), so the
+// operator's opt-out is never silently overridden.
+test("submitPr adopting a live review-only loop does NOT widen it to auto-merge (#1007 F2)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#91";
+    const live = {
+      pr_key: PR_KEY, repo: "owner/repo", number: 91, status: "converging", process_key: "PI-live",
+      root_request_key: "owner/repo#1", merge_requested: 0, converged_at: null,
+    };
+    const stores: Record<string, { rows: unknown[]; key: string }> = {
+      pull_requests: { rows: [live], key: "pr_key" },
+      escalations: { rows: [], key: "id" },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const data = {
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+      open: () => memOpen(stores),
+    } as any;
+    const setVarsCalls: unknown[] = [];
+    const engine = {
+      createInstance: () => Promise.resolve({ processInstanceKey: "PI-new" }),
+      searchProcessInstances: () =>
+        Promise.resolve([{ processInstanceKey: "PI-live", state: "ACTIVE", processDefinitionId: "convergence-loop" }]),
+      setVariables: (req: unknown) => {
+        setVarsCalls.push(req);
+        return Promise.resolve({});
+      },
+    } as any;
+
+    // An auto-merge caller adopts the review-only live loop.
+    const res = await submitPr(
+      data, engine,
+      { repo: "owner/repo", number: 91, url: "https://github.com/owner/repo/pull/91", prKey: PR_KEY },
+      [], 20, false, "owner/repo#1",
+    );
+
+    assertEquals((res as any).alreadyRunning, true);
+    assertEquals(setVarsCalls.length, 0, "no setVariables — the live loop's review-only intent is preserved");
+    assertEquals((stores.pull_requests.rows[0] as any).merge_requested, 0, "the durable projection stays review-only");
+  });
+});
+
+// Round-3 hardening (issue #1007 review): adoption must never CLEAR a dependency another channel
+// recorded — a `Depends-on:` PR-body line or a `pr.record-dependency` edge survives a caller whose
+// `dependsOn` omits it. The adopted loop's dep set is the UNION, so a repeated submission can never
+// drop a prerequisite and let the PR merge early.
+test("submitPr adopting a live loop UNIONS dependencies — body and recorded blockers survive (#1007 round 3)", async () => {
+  const PR_KEY = "owner/repo#92";
+  const live = {
+    pr_key: PR_KEY, repo: "owner/repo", number: 92, status: "converging", process_key: "PI-live",
+    root_request_key: null, merge_requested: 1, converged_at: null,
+  };
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: { rows: [live], key: "pr_key" },
+    escalations: { rows: [], key: "id" },
+    // A blocker a merge-stage agent discovered earlier via pr.record-dependency.
+    pr_dependencies: { rows: [{ pr_key: PR_KEY, depends_on_key: "owner/repo#77", created_at: "2026-01-01" }], key: "pr_key" },
+  };
+  const data = {
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+    open: () => memOpen(stores),
+  } as any;
+  const engine = {
+    createInstance: () => Promise.resolve({ processInstanceKey: "PI-new" }),
+    searchProcessInstances: () =>
+      Promise.resolve([{ processInstanceKey: "PI-live", state: "ACTIVE", processDefinitionId: "convergence-loop" }]),
+    setVariables: () => Promise.resolve({}),
+  } as any;
+  // The PR body declares a `Depends-on:` ref the caller's dependsOn omits.
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevTok = process.env["GITHUB_TOKEN"];
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  process.env["GITHUB_TOKEN"] = "tok";
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const u = String(url);
+    if (u.includes("/pulls/92")) {
+      return Promise.resolve(new Response(JSON.stringify({
+        title: "t", head: { ref: "feat" }, base: { ref: "main" }, body: "Depends-on: owner/repo#88",
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    }
+    return Promise.resolve(new Response("not found", { status: 404 }));
+  }) as typeof fetch;
+  try {
+    const res = await submitPr(
+      data, engine,
+      { repo: "owner/repo", number: 92, url: "https://github.com/owner/repo/pull/92", prKey: PR_KEY },
+      ["owner/repo#99"], // the caller's own dep
+      20, false, "owner/repo#1",
+    );
+    assertEquals((res as any).alreadyRunning, true);
+    const got = (stores.pr_dependencies.rows as { depends_on_key: string }[]).map((d) => d.depends_on_key).sort();
+    assertEquals(got, ["owner/repo#77", "owner/repo#88", "owner/repo#99"],
+      "the recorded edge, the body-declared edge, and the caller's edge all survive");
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode !== undefined) process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    else delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
+    else delete process.env["GITHUB_TOKEN"];
+  }
+});
+
+// Round-3 hardening (issue #1007 review): an operator-started loop SELF-ROOTS on its prKey
+// (`effectiveRoot` below), so a NULL-only adoption condition left it outside the epic's lineage.
+// A self-rooted loop is adoptable; a loop rooted at a DIFFERENT request is not re-parented.
+test("submitPr adopting a SELF-ROOTED live loop re-roots it onto the epic (#1007 round 3)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#93";
+    const live = {
+      pr_key: PR_KEY, repo: "owner/repo", number: 93, status: "converging", process_key: "PI-live",
+      root_request_key: PR_KEY, merge_requested: 1, converged_at: null, // self-rooted, as effectiveRoot stamps
+    };
+    const stores: Record<string, { rows: unknown[]; key: string }> = {
+      pull_requests: { rows: [live], key: "pr_key" },
+      escalations: { rows: [], key: "id" },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const data = {
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+      open: () => memOpen(stores),
+    } as any;
+    const engine = {
+      createInstance: () => Promise.resolve({ processInstanceKey: "PI-new" }),
+      searchProcessInstances: () =>
+        Promise.resolve([{ processInstanceKey: "PI-live", state: "ACTIVE", processDefinitionId: "convergence-loop" }]),
+      setVariables: () => Promise.resolve({}),
+    } as any;
+
+    const res = await submitPr(
+      data, engine,
+      { repo: "owner/repo", number: 93, url: "https://github.com/owner/repo/pull/93", prKey: PR_KEY },
+      [], 20, false, "owner/repo#1",
+    );
+    assertEquals((res as any).alreadyRunning, true);
+    assertEquals((stores.pull_requests.rows[0] as any).root_request_key, "owner/repo#1", "a self-rooted loop joins the adopting epic");
+  });
+});
+
+test("submitPr adopting a loop rooted at ANOTHER request keeps that root (#1007 round 3)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#94";
+    const live = {
+      pr_key: PR_KEY, repo: "owner/repo", number: 94, status: "converging", process_key: "PI-live",
+      root_request_key: "owner/repo#2", merge_requested: 1, converged_at: null, // another epic's member
+    };
+    const stores: Record<string, { rows: unknown[]; key: string }> = {
+      pull_requests: { rows: [live], key: "pr_key" },
+      escalations: { rows: [], key: "id" },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const data = {
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+      open: () => memOpen(stores),
+    } as any;
+    const engine = {
+      createInstance: () => Promise.resolve({ processInstanceKey: "PI-new" }),
+      searchProcessInstances: () =>
+        Promise.resolve([{ processInstanceKey: "PI-live", state: "ACTIVE", processDefinitionId: "convergence-loop" }]),
+      setVariables: () => Promise.resolve({}),
+    } as any;
+
+    const res = await submitPr(
+      data, engine,
+      { repo: "owner/repo", number: 94, url: "https://github.com/owner/repo/pull/94", prKey: PR_KEY },
+      [], 20, false, "owner/repo#1",
+    );
+    assertEquals((res as any).alreadyRunning, true);
+    assertEquals((stores.pull_requests.rows[0] as any).root_request_key, "owner/repo#2", "a loop under another epic is not re-parented");
+  });
+});
+
 // Per-request review-only override: `submitPr` carries `convergeOnly` onto the convergence
 // instance so `pr.finalize` can stop at `converged` without handing off to the merge-loop. Default
 // false (so the global auto-merge default governs); true when the caller pins review-only.
@@ -1357,7 +1649,14 @@ test("a gated submitPr adopting a live loop narrows it to humanApproval (issue #
 
     const convergeOnly = adoptLoop("converging", "ACTIVE");
     await submitPr(convergeOnly.data, convergeOnly.engine, pr, [], 20, true, null, true);
-    assertEquals(convergeOnly.narrowed, [], "a converge-only adopter never merges, so never gates");
+    // F2 (#1007 review): a converge-only adopter never GATES (no humanApproval — it won't merge), but it
+    // DOES narrow the adopted loop's merge policy to converge-only so the operator's opt-out wins over
+    // the loop's stale auto-merge. That is a separate write from the humanApproval gate.
+    assertEquals(
+      convergeOnly.narrowed,
+      [{ scopeKey: "PI-LOOP", variables: { autoMerge: false, convergeOnly: true } }],
+      "a converge-only adopter narrows the merge policy (no humanApproval gate)",
+    );
 
     const merging = adoptLoop("waiting_deps", "ACTIVE", "2026-01-01T00:00:00.000Z");
     assertEquals(await submitPr(merging.data, merging.engine, pr, [], 20, false, null, true), { prKey: pr.prKey, alreadyRunning: true });

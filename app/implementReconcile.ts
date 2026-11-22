@@ -294,10 +294,10 @@ async function reconcileImplementCore(
   // escalation reason may say "none was found"; only now may a claimed completion auto-retry.
   const verifiedAbsent: CoreResult = { ...escalate, deliveryVerified: true };
   if (isKeylessOpened(input.status, input.pr)) {
-    // Issue #1011: the agent CLAIMED `opened` but no PR exists on any candidate branch — escalate with
-    // the lookup evidence (never pass `pr: null` downstream, and never auto-retry a recognised status).
+    // Issue #1011: the agent CLAIMED `opened` but no PR exists on any candidate branch — carry the
+    // lookup evidence (never pass `pr: null` downstream). Like a claimed completion it is retried once
+    // first (issue #1007, main), then escalates.
     verifiedAbsent.evidence = `reported opened but no PR from ${branches.join(" or ")} into ${base ?? "any base"}`;
-    return verifiedAbsent;
   }
   return maybeRetry(input, alreadyRetried, verifiedAbsent);
 }
@@ -312,7 +312,7 @@ function maybeRetry(
   escalate: CoreResult,
 ): CoreResult {
   const status = str(input.status);
-  if (!alreadyRetried && status !== undefined && isClaimedCompletion(status)) {
+  if (!alreadyRetried && status !== undefined && (isClaimedCompletion(status) || isKeylessOpened(status, input.pr))) {
     return {
       // Spread the (successful-lookup) escalate base so `deliveryVerified: true` is preserved — this
       // arm is only reached after a lookup CONFIRMED no adoptable PR.

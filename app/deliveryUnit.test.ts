@@ -195,6 +195,36 @@ function assertViewParity(db: DatabaseSync, base: string, view: string) {
   assertEquals(norm(rows(db, `SELECT * FROM ${base} ORDER BY 1`)), norm(rows(db, `SELECT * FROM ${view} ORDER BY 1`)), `${view} must equal ${base}`);
 }
 
+// Migration 142 backfill (issue #1007 review, round 3): 140 added `plans.auto_merge DEFAULT 1` and
+// 141 re-created the sync triggers, but triggers fire only on INSERT/UPDATE — a pre-140 plan row's
+// aggregate kept `auto_merge = NULL` until some unrelated update re-fired the trigger, so
+// `plans__units` disagreed with `plans`. Prove the backfill leaves every epic aggregate row equal
+// to its canonical plan row WITHOUT any plan update.
+test("MIGRATION 142: a pre-existing plan's aggregate auto_merge is backfilled without a plan update", () => {
+  const db = freshDb();
+  exec(
+    db,
+    `INSERT INTO plans(plan_key,repo,issue_number,issue_url,title,status,task_count,base_branch,epic_phase,auto_merge,created_at,updated_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+    "o/r#9", "o/r", 9, "u", "Epic", "planning", 1, "main", "Planning", 0, NOW, NOW,
+  );
+  // Simulate the pre-142 stale window: the aggregate row exists (the INSERT trigger fired) but its
+  // auto_merge is NULL, exactly as a plan row written before migration 140 left it.
+  exec(db, "UPDATE delivery_units SET auto_merge=NULL WHERE unit_id=?", epicUnitId("o/r#9"));
+  assertEquals(row(db, "SELECT auto_merge FROM delivery_units WHERE unit_id=?", epicUnitId("o/r#9")).auto_merge, null, "seeded stale");
+
+  const mig = readMigrationSetFromDisk().find((m) => m.name === "142_plans_auto_merge_delivery_units_backfill.sql");
+  assert(mig, "142_plans_auto_merge_delivery_units_backfill.sql must exist");
+  db.exec(mig.sql);
+
+  assertEquals(
+    row(db, "SELECT auto_merge FROM delivery_units WHERE unit_id=?", epicUnitId("o/r#9")).auto_merge,
+    0,
+    "the aggregate mirrors the canonical plan row's explicit opt-out",
+  );
+  assertViewParity(db, "plans", "plans__units");
+});
+
 test("COMPAT-VIEW PARITY: every legacy surface is served row-for-row from the aggregate across insert/update/delete", () => {
   const db = freshDb();
   exec(

@@ -59,9 +59,9 @@ import {
   fetchReviewThreads,
   isAckThread,
   parseAckedAdvisories,
-  parseReviewOpenFindings,
   parseSuppressedAdvisories,
   type ReviewThread,
+  reconcileReviewOpenFindings,
 } from "../../app/github.ts";
 import { type IssueComment, listIssueComments } from "../../app/issuePrLink.ts";
 import {
@@ -210,7 +210,7 @@ export function makeHandler(deps: {
       // (a review can carry findings as summary-only, as #1443's 7-finding review did). This block
       // is NOT ack-only: the findings need the round agent's code/reply work, so it escalates to a
       // human rather than entering the bounded auto-ack path.
-      const openFindings = parseReviewOpenFindings(review.body);
+      const openFindings = reconcileReviewOpenFindings(review.body, threadsRead);
       if (openFindings.length > 0) {
         return {
           convergeBlocked: true,

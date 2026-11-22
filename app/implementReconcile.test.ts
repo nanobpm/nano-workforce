@@ -384,9 +384,10 @@ test("reconcileImplement: opened + no pr falls back to feat/<task.id> when the r
   assertEquals(res.pr, "owner/repo#226");
 });
 
-test("reconcileImplement: opened + no pr + NO PR → escalates with evidence (no retry, verified absence)", async () => {
+test("reconcileImplement: opened + no pr + NO PR after its retry → escalates with evidence (verified absence)", async () => {
+  // The first keyless `opened` with no PR is retried once (#1007); once that retry is spent it escalates.
   const res = await reconcileImplement(
-    { status: "opened", subjectKey: "owner/repo#7", taskId: "t1", baseBranch: "epic/x" },
+    { status: "opened", subjectKey: "owner/repo#7", taskId: "t1", baseBranch: "epic/x", retried: true },
     async () => [openPr(5, "main")],
     "t",
   );
@@ -395,6 +396,7 @@ test("reconcileImplement: opened + no pr + NO PR → escalates with evidence (no
     status: "blocked",
     pr: null,
     ...verified,
+    retried: true,
     summary: KEYLESS_OPENED_SUMMARY,
     evidence: "reported opened but no PR from feat/t1 into epic/x",
   });
@@ -472,4 +474,33 @@ test("reconcileImplement: opened + pr set is unchanged (no lookup)", async () =>
   );
   assertEquals(called, false);
   assertEquals(res, { reconciled: false, status: "opened", pr: "owner/repo#9", ...tail });
+});
+
+// Issue #1007 (Related): a wave-1 slice whose agent opened the PR itself was recorded as
+// `status: opened, pr: null`, so it was never converged and its dependants were never dispatched.
+// A KEYLESS `opened` must resolve the PR from the deterministic slice branch.
+test("shouldReconcileImplement: a keyless 'opened' reconciles; an 'opened' carrying a PR key does not (#1007)", () => {
+  assertEquals(shouldReconcileImplement("opened", null, null), true);
+  assertEquals(shouldReconcileImplement("opened", null, "  "), true);
+  assertEquals(shouldReconcileImplement("opened", null, "owner/repo#5"), false);
+});
+
+test("reconcileImplement: keyless 'opened' + an open PR on feat/<task.id> → adopt that PR (#1007)", async () => {
+  const res = await reconcileImplement(
+    { status: "opened", pr: null, subjectKey: "owner/repo#1", taskId: "t1", baseBranch: "main" },
+    async () => [openPr(225)],
+    "token",
+  );
+  assertEquals(res, { reconciled: true, status: "opened", pr: "owner/repo#225", ...verified });
+});
+
+test("reconcileImplement: keyless 'opened' + NO PR → auto-retry once, like a claimed completion (#1007)", async () => {
+  const res = await reconcileImplement(
+    { status: "opened", pr: null, subjectKey: "owner/repo#1", taskId: "t1" },
+    async () => [],
+    "token",
+  );
+  assertEquals(res.reconciled, false);
+  assertEquals(res.retry, true);
+  assertEquals(res.retried, true);
 });

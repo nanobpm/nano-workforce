@@ -28,6 +28,11 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // converge, so it must reach the no-work guard (and be named there), not be reported as success.
   const hasKey = (k: unknown): boolean => typeof k === "string" && k.trim() !== "";
   const opened = rows.filter((r) => r.status === "opened" && hasKey(r.pr_key)).length;
+  // The trial-merge Abandon arm (issue #1007 review, round 3) reaches this finalizer having
+  // enrolled its opened slices converge-ONLY (the operator's explicit merge opt-out for the wave)
+  // — record that terminal outcome honestly rather than a generic "dispatched to convergence"
+  // success. `action` is the trial-merge decision variable; it is absent on every other path.
+  const abandoned = job.variables.action === "abandon";
 
   // Categorical no-work guard (issue #86): the epic reached its finalizer having opened ZERO PRs —
   // an empty plan (e.g. the planner agent could not persist its result), or every task
@@ -72,7 +77,12 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // a `failed` epic is deliberately never labelled Dispatched.
   await plans(app.data).update(planKey, {
     status: "done",
-    outcome: `${opened} PR(s) dispatched to convergence`,
+    // An abandoned non-final wave reaches here with `gate_wave` still armed by record-wave
+    // (hasMoreWaves) — clear the barrier marker so no poller pass publishes into a finished plan.
+    gate_wave: null,
+    outcome: abandoned
+      ? `${opened} PR(s) enrolled converge-only — wave abandoned at the trial-merge gate (operator merge opt-out)`
+      : `${opened} PR(s) dispatched to convergence`,
     updated_at: ts,
   });
 

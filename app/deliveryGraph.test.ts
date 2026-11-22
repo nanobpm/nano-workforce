@@ -556,6 +556,24 @@ test("invalid-fact-name: an AGENT emit named `status` is reserved — the produc
   assertEquals(connector.length, 0, `a connector emitting 'status' validates (no producer gate), got: ${JSON.stringify(connector)}`);
 });
 
+test("invalid-fact-name: AGENT emits named `adopted`/`goalMet` are reserved — the #1014 adopt guard reads them as completion controls", () => {
+  // Regression guard (PR #1015 Copilot "Previously missed"): the adopt guard reads the node-local
+  // `adopted`/`goalMet` result fields, so a boolean routing emit with either name would collide —
+  // `goalMet:false` (to pick a branch) escalates, and `adopted:true` trips the stale-adoption guard.
+  for (const name of ["adopted", "goalMet", "pushed"]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name, type: "boolean" }] }],
+    });
+    const err = hasCode(errors, "invalid-fact-name");
+    assertEquals(err.path, "nodes[0].emits[0].name", `an agent emitting '${name}' is rejected`);
+    assert(err.message.includes("reserved"), `emit '${name}' names the reserved collision, got: ${err.message}`);
+    const connector = validateDeliveryGraph({
+      nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#a" }, emits: [{ name, type: "boolean" }] }],
+    });
+    assertEquals(connector.length, 0, `a connector emitting '${name}' validates (no adopt guard), got: ${JSON.stringify(connector)}`);
+  }
+});
+
 test("invalid-fact-name is KIND-AWARE: an agent may emit a connector-only config name (`target`), and vice versa (r4181322008)", () => {
   // Regression guard (PR #863 Copilot Medium, thread r4181322008): the reserved set reserves only the
   // node's OWN kind's config. An agent seeds no `target`/`payload`/`dedupeKey` (connector-only), so an

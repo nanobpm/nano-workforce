@@ -27,7 +27,14 @@ import {
   updateBranchRef,
 } from "../../app/github.ts";
 import { CHURN_WINDOW, type ChurnRound, detectChurn } from "../../app/roundChurn.ts";
-import { agentInstanceRan, CONVERGE_CI_FIX_MAX, decideProgress, isAddressedStatus, redCiRoute } from "../../app/roundProgress.ts";
+import {
+  agentInstanceRan,
+  CONVERGE_CI_FIX_MAX,
+  convergedHeadRoute,
+  decideProgress,
+  isAddressedStatus,
+  redCiRoute,
+} from "../../app/roundProgress.ts";
 import { abandonClosedPr, parsePr } from "../../app/service.ts";
 import { WorldStore } from "../../app/world/index.ts";
 import { attemptNoAdvanceSelfHeal, type SelfHealResult } from "../../app/world/selfHeal.ts";
@@ -377,7 +384,7 @@ export function makeHandler(deps: {
     ): Promise<Out> => {
       // Always emit the #988 route flags so a prior round's `ciRed`/`prGone` can never linger in
       // process scope and mis-route this round at `gw-progress`/`gw-husk`.
-      const out: Out = { ciRed: false, prGone: "", ...rawOut };
+      const out: Out = { ciRed: false, convergedHead: false, prGone: "", ...rawOut };
       const ts = new Date().toISOString();
       // Re-check ownership immediately before the write and drop it when this job no longer owns the
       // row — acking without persisting is correct (the straggler's token is in a terminated instance).
@@ -647,6 +654,22 @@ export function makeHandler(deps: {
           );
         }
       }
+    }
+
+    // CONVERGED HEAD (#1018). "Addressed" with no new commit is legitimate when the remaining review
+    // comments were answered/resolved by reply. Re-evaluate the convergence picture on the CURRENT
+    // head before escalating: zero unresolved threads and no failing check → route to the canonical
+    // converge gate (scope → approval → merge, honouring autoMerge) instead of parking a human. An
+    // open thread or a red check never takes this path. Only a real no-advance (never a husk).
+    if (decision.reason === "no-advance" && convergedHeadRoute(prState)) {
+      app.log.info("no-advance round on a converged head — routing to the converge gate instead of escalating (#1018)", {
+        prKey,
+        round: roundNo,
+      });
+      return commit(
+        { progressed: false, huskRetries: 0, huskRetry: false, convergedHead: true },
+        { head: currentHead, agentWatermark },
+      );
     }
 
     // RED CI, CLEAN REVIEW (#988). A no-op review round can't fix a failing required check: when the

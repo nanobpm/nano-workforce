@@ -101,6 +101,11 @@ export interface Plan {
   // Opt-in escalation steward (120_escalation_auto_resolutions.sql, issue #889): 1 ⇒ this epic's
   // escalations (and its spawned child loops) are eligible for steward auto-resolution. Default 0.
   auto_resolve_escalations: number;
+  // Epic merge policy (140_plans_auto_merge.sql, issue #1007): 1 ⇒ each slice PR's convergence loop
+  // auto-merges into `base_branch`; 0 ⇒ converge-only (the operator's explicit `autoMerge: false`).
+  // This is the DURABLE source of truth `pr.converge-slice` reads — persisted here (not only the
+  // clobberable process variable) so an agent completion can never override the operator's opt-out.
+  auto_merge: number;
   // The derived epic delivery signal (029_plan_delivery.sql) was RETIRED as a stored column (epic
   // #412): `delivery` / `delivery_label` are now a DERIVED SQL VIEW (`plan_delivery` /
   // `plan_read_model`, 061), computed from the SAME pure `deriveDelivery`/`TERMINAL_STATUSES`
@@ -894,6 +899,10 @@ export interface StartPlanOptions {
   /** Opt-in escalation steward (issue #889): when true, this epic's escalations — and every child
    * convergence/merge loop it spawns — become eligible for steward auto-resolution. Default false. */
   autoResolveEscalations?: boolean;
+  /** The epic's merge policy for its slice PRs (issue #1007): each slice PR is converged inside the
+   * epic (`converge-cell`), and auto-merged into the epic base branch unless this is `false`. Default
+   * true. */
+  autoMerge?: boolean;
 }
 
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
@@ -981,6 +990,7 @@ export async function startPlan(
       blackboard_token: token,
       base_branch: base,
       auto_resolve_escalations: opts.autoResolveEscalations === true ? 1 : 0,
+      auto_merge: opts.autoMerge === false ? 0 : 1,
       updated_at: ts,
     });
   } else {
@@ -997,6 +1007,7 @@ export async function startPlan(
       blackboard_token: token,
       base_branch: base,
       auto_resolve_escalations: opts.autoResolveEscalations === true ? 1 : 0,
+      auto_merge: opts.autoMerge === false ? 0 : 1,
       created_at: ts,
       updated_at: ts,
     });
@@ -1027,6 +1038,12 @@ export async function startPlan(
       // AND persisted on the `plans` row (the durable source the steward's eligibility reads), so an
       // agent-completion clobber of the variable can never silently opt an epic in or out (#887/#888).
       autoResolveEscalations: opts.autoResolveEscalations === true,
+      // Slice merge policy (issue #1007): the operator's intent, ALSO persisted on the durable
+      // `plans.auto_merge` column (above) which `pr.converge-slice` reads. The variable is kept on
+      // the instance for searchability/observability, but the durable row is authoritative — an
+      // agent completion echoing `autoMerge` can clobber this variable yet never the row, so an
+      // operator's explicit `false` opt-out survives agent output (#1007 review).
+      autoMerge: opts.autoMerge !== false,
       // Agent-task liveness SLA (issue #849): PRE-SEED the canonical bound for the fan-out's
       // external agent tasks. Each slice's implementation agent (via the implement-cell
       // callActivity's explicit `agentSlaTimeout` input mapping) is bounded today; the wave's own

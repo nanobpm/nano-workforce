@@ -1,3 +1,21 @@
+## [0.219.1](https://github.com/nanobpm/nano-workforce/compare/v0.219.0...v0.219.1) (2026-11-22)
+
+### Bug Fixes
+
+* **convergence:** merge converged PRs instead of escalating 'head did not advance' ([#1019](https://github.com/nanobpm/nano-workforce/issues/1019)) ([c8d18a0](https://github.com/nanobpm/nano-workforce/commit/c8d18a0e0b201f768ba4dfffc9d93de28a71edd7)), closes [#1018](https://github.com/nanobpm/nano-workforce/issues/1018)
+
+## [0.219.0](https://github.com/nanobpm/nano-workforce/compare/v0.218.3...v0.219.0) (2026-11-22)
+
+### Features
+
+* **plan-fanout:** converge each slice PR inside the epic via converge-cell ([#1010](https://github.com/nanobpm/nano-workforce/issues/1010)) ([422bb4b](https://github.com/nanobpm/nano-workforce/commit/422bb4b08c030bdae6fad8e97aef74664f3ed53b)), closes [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#916](https://github.com/nanobpm/nano-workforce/issues/916) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#889](https://github.com/nanobpm/nano-workforce/issues/889) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#test-open-tx](https://github.com/nanobpm/nano-workforce/issues/test-open-tx) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007)
+
+## [0.218.3](https://github.com/nanobpm/nano-workforce/compare/v0.218.2...v0.218.3) (2026-11-22)
+
+### Bug Fixes
+
+* **deps:** adopt @nanobpm/urban ^0.99.1, urban-testkit ^1.7.1, workflow ^0.20.0 ([#1017](https://github.com/nanobpm/nano-workforce/issues/1017)) ([916ad83](https://github.com/nanobpm/nano-workforce/commit/916ad830de727b6b561b417ccbcabb1731ecaaa9))
+
 ## [0.218.2](https://github.com/nanobpm/nano-workforce/compare/v0.218.1...v0.218.2) (2026-11-21)
 
 ### Bug Fixes
