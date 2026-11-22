@@ -560,7 +560,7 @@ test("invalid-fact-name: AGENT emits named `adopted`/`goalMet` are reserved — 
   // Regression guard (PR #1015 Copilot "Previously missed"): the adopt guard reads the node-local
   // `adopted`/`goalMet` result fields, so a boolean routing emit with either name would collide —
   // `goalMet:false` (to pick a branch) escalates, and `adopted:true` trips the stale-adoption guard.
-  for (const name of ["adopted", "goalMet"]) {
+  for (const name of ["adopted", "goalMet", "pushed"]) {
     const errors = validateDeliveryGraph({
       nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name, type: "boolean" }] }],
     });

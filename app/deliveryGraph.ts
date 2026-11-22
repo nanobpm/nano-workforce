@@ -469,7 +469,7 @@ export const DELIVERY_SCAFFOLDING_VARS = ["boundFacts", "nodeInputs", "nodeInput
  * anything else (`approved`, …) ALWAYS escalates, and `status="done"` can never take an `approved`
  * branch — the emit contract and the gate conflict. `status` is therefore reserved for an `agent`
  * (a connector has no producer status gate, so its `status` emit collides with nothing and stays
- * allowed). The #1014 adopt-guard controls `adopted`/`goalMet` are reserved for an agent for the same
+ * allowed). The #1014 adopt-guard controls `adopted`/`goalMet`/`pushed` are reserved for an agent for the same
  * reason; the rest of the result set (`pr`, `summary`, …) remains unreserved.
  * {@link validateDeliveryGraph} rejects a reserved name (fail-closed at authoring time); derived from
  * the same source-of-truth sets so it can never drift from them. */
@@ -477,10 +477,10 @@ export function reservedDeliveryFactNames(kind: DeliveryNodeKind): readonly stri
   const config =
     kind === "agent" ? AGENT_CONFIG_VARS : kind === "connector" ? CONNECTOR_CONFIG_VARS : [];
   // `status` is reserved ONLY for an agent (the producer-gate completion control — see the doc above),
-  // as are the #1014 adopt-guard controls `adopted`/`goalMet`: the gate reads those same node-local
-  // fields, so a routing emit of either name (`goalMet:false` to pick a branch, `adopted:true`) would
+  // as are the #1014 adopt-guard controls `adopted`/`goalMet`/`pushed`: the gate reads those same node-local
+  // fields, so a routing emit of either name (`goalMet:false` to pick a branch, `adopted:true`, `pushed:true` faking an update) would
   // escalate instead of routing.
-  const completionControl = kind === "agent" ? ["status", "adopted", "goalMet"] : [];
+  const completionControl = kind === "agent" ? ["status", "adopted", "goalMet", "pushed"] : [];
   return [...new Set<string>([...ESCALATION_LOCAL_VARS, ...DELIVERY_SCAFFOLDING_VARS, ...config, ...completionControl])];
 }
 
