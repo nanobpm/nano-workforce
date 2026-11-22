@@ -119,6 +119,9 @@ test("deploy+advance: a stalled service node escalates on its node-timeout bound
       ],
       edges: [{ from: "impl", to: "signoff" }],
     };
+    // Issue #1016: the boundary arm consults the activation ledger via `pr.agent-sla-check`. Stub it as
+    // an ACTIVATED-but-overrunning job (no re-queue) so the work-SLA escalation fires.
+    await engine.registerWorker("pr.agent-sla-check", async () => ({ agentSlaRequeue: false, agentSlaReason: "activated by worker w1" }));
     // Short node timeout so the boundary fires within one virtual-clock advance; a long SLA so the
     // human node's own escalation boundary never fires during the drive.
     const run = await runDeliveryGraph(engine, graph, { nodeTimeout: "PT1M", escalationSlaTimeout: "PT1H", repoless: true });
@@ -163,6 +166,52 @@ test("deploy+advance: a stalled service node escalates on its node-timeout bound
       completed.some((id) => id.startsWith("delivery-human-task__") && !isDeliveryEscalationTwin(id)),
       `the downstream human task must have been driven, saw ${JSON.stringify(completed)}`,
     );
+  } finally {
+    await engine.close();
+  }
+});
+
+test("issue #1016: a NEVER-ACTIVATED agent job does not raise the work-SLA escalation — it is re-queued until a worker picks it up", async () => {
+  const engine = await createWasmEngineClient();
+  try {
+    const graph: DeliveryGraph = {
+      name: "queued graph",
+      nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "do it" } }],
+      edges: [],
+    };
+    // The ledger says: observed queued, never leased → re-queue (no escalation). Flip to "activated"
+    // afterwards to prove the SAME boundary still escalates once a worker has actually started.
+    let activated = false;
+    let checks = 0;
+    await engine.registerWorker("pr.agent-sla-check", async () => {
+      checks++;
+      return activated
+        ? { agentSlaRequeue: false, agentSlaReason: "activated by worker w1" }
+        : { agentSlaRequeue: true, agentSlaReason: "never activated" };
+    });
+    const run = await runDeliveryGraph(engine, graph, { nodeTimeout: "PT1M", escalationSlaTimeout: "PT1H", repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+    await engine.drain();
+
+    // Two full SLA budgets elapse with the job never activated: NO escalation task, instance still live.
+    for (let i = 0; i < 2; i++) {
+      await engine.advanceTime(60_000);
+      await engine.drain();
+    }
+    assertEquals(checks >= 2, true, `the SLA check must run on each boundary fire (ran ${checks})`);
+    const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+    assertEquals(open.length, 0, "a never-activated job must not raise the work-SLA escalation");
+    const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+    assertEquals(pi?.state, "ACTIVE", "the re-queued node keeps the instance live");
+
+    // Once activated, the next work-SLA elapse escalates as before.
+    activated = true;
+    await engine.advanceTime(60_000);
+    await engine.drain();
+    const esc = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+    assertEquals(esc.length, 1, "an activated job that overruns its SLA escalates");
+    assert(esc[0].elementId?.endsWith("__esc"), `expected an __esc escalation task, saw ${esc[0].elementId}`);
   } finally {
     await engine.close();
   }

@@ -10,7 +10,7 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { matchAdjudication, prAdjudications, resetAdjudications } from "./adjudications.ts";
-import { AGENT_SLA_JOB_TYPES, recordAgentJobObservation } from "./agentActivationLedger.ts";
+import { AGENT_SLA_JOB_TYPES, deliveryNodeActivationJobType, recordAgentJobObservation } from "./agentActivationLedger.ts";
 import { completeEscalationAutoApplied, escalationFormId } from "./agentCompletion.ts";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { maybeUpdateBehindBranch } from "./behindBaseRemedy.ts";
@@ -3007,6 +3007,10 @@ interface JobSearchItem {
   /** The engine job key — the unique id of THIS job attempt. The activation ledger uses it to tell one
    * attempt of a retrying agent task from the next (issue #879 review). */
   jobKey?: string;
+  /** The job's BPMN element — keys a delivery-graph node's ledger row (issue #1016). */
+  elementId?: string;
+  /** The owning process definition — identifies a compiled delivery-graph job (issue #1016). */
+  processDefinitionId?: string;
 }
 
 /** One agent-activation ledger poll pass (issue #879). Unlike {@link pollJobActivationImpl} (which
@@ -3092,6 +3096,62 @@ export async function pollAgentActivationsImpl(
       }
     }
     if (items.length < limit) break; // last page
+    from += items.length;
+  }
+  await pollDeliveryNodeActivations(data, base, headers, ts);
+}
+
+/** Delivery-graph agent-node activation pass (issue #1016). A compiled delivery graph's agent nodes run
+ * ARBITRARY job types, so the fixed {@link AGENT_SLA_JOB_TYPES} filter above cannot see them. This pass
+ * filters by the delivery-graph agent leaf element instead (`<el>_task` in a `delivery-graph-<digest>`
+ * definition) and records each under {@link deliveryNodeActivationJobType}, so a node's SLA check
+ * (`pr.agent-sla-check`) can tell a never-activated (queued) job from a started one. Best-effort. */
+async function pollDeliveryNodeActivations(
+  data: DataLayer,
+  base: string,
+  headers: Record<string, string>,
+  ts: string,
+) {
+  const limit = 200;
+  let from = 0;
+  const prefix = `${DELIVERY_GRAPH_PROCESS_ID}-`;
+  for (let guard = 0; guard < 1000; guard++) {
+    let items: JobSearchItem[] = [];
+    try {
+      const res = await fetch(`${base}/jobs/search`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ filter: { state: "CREATED" }, page: { from, limit } }),
+      });
+      if (!res.ok) return;
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const body = (await res.json()) as { items?: JobSearchItem[] };
+      items = body.items ?? [];
+    } catch (err) {
+      console.error(`[poller] delivery-node activation search: ${err}`);
+      return;
+    }
+    for (const j of items) {
+      const jobType = j.type ?? "";
+      const pik = j.processInstanceKey ?? "";
+      const el = j.elementId ?? "";
+      const def = j.processDefinitionId ?? "";
+      if (pik.length === 0 || jobType.length === 0 || !def.startsWith(prefix) || !el.endsWith("_task")) continue;
+      const worker = typeof j.worker === "string" && j.worker.length > 0 ? j.worker : null;
+      const jobKey = typeof j.jobKey === "string" && j.jobKey.length > 0 ? j.jobKey : null;
+      try {
+        await recordAgentJobObservation(data, {
+          processInstanceKey: pik,
+          jobType: deliveryNodeActivationJobType(jobType, el),
+          worker,
+          jobKey,
+          now: ts,
+        });
+      } catch (err) {
+        console.error(`[poller] delivery-node activation upsert ${pik}:${el}: ${err}`);
+      }
+    }
+    if (items.length < limit) break;
     from += items.length;
   }
 }

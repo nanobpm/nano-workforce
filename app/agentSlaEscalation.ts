@@ -167,3 +167,32 @@ export async function agentSlaEscalationQuestion(
     recovery: input.recovery,
   });
 }
+
+/** The delivery-graph agent-node SLA check (issue #1016). The node's interrupting `=nodeTimeout`
+ * boundary starts when the node is ENTERED, so on its own it measures queue time as work time. The
+ * compiled body routes the boundary through this check: a job the poller observed QUEUED but never
+ * leased (`requeue: true`) is re-queued instead of escalated — the work SLA only counts once a worker
+ * has picked the job up. Otherwise (`requeue: false`) the node escalates with a `reason` stating the
+ * activation FACTS (worker, activation time, or "activation unknown") instead of guessing that
+ * "in-flight work may already exist". An absent ledger row (the poller never saw the job) is NOT proof
+ * of non-activation, so it escalates with the honest "unknown" wording. */
+export async function deliveryNodeSlaCheck(
+  data: DataLayer,
+  input: { processInstanceKey: string; activationJobType: string; jobType: string; sla: string; now?: string },
+): Promise<{ requeue: boolean; reason: string }> {
+  const now = input.now ?? new Date().toISOString();
+  const row = input.processInstanceKey.length > 0
+    ? await getAgentJobActivation(data, input.processInstanceKey, input.activationJobType)
+    : undefined;
+  const activation: AgentSlaActivation | null = row
+    ? { activatedAt: row.activated_at, firstSeenAt: row.first_seen_at, worker: row.worker }
+    : null;
+  const requeue = row !== undefined && !row.activated_at;
+  const recovery = activation?.activatedAt
+    ? `Activated at ${activation.activatedAt}${activation.worker ? ` by worker "${activation.worker}"` : ""} — check that run's branch/draft PR for partial work before retrying or reassigning.`
+    : "Check the job's state before retrying or reassigning.";
+  return {
+    requeue,
+    reason: buildAgentSlaEscalationReason({ jobType: input.jobType, sla: input.sla, activation, now, recovery }),
+  };
+}

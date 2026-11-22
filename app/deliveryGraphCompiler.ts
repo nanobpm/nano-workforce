@@ -2255,17 +2255,26 @@ function serviceBodyLines(
         ...(contractResumable ? [`${contractEsc}Vok`] : []),
       ])
     : [];
+  // Issue #1016: an AGENT node's `=nodeTimeout` boundary starts on node ENTRY, so it alone measures
+  // queue time as work time. Its arm is routed through the `pr.agent-sla-check` gate ({@link
+  // agentSlaCheckLines}): a never-activated job re-enters the task (no escalation — the work SLA has not
+  // started), and an escalation states the activation FACTS (`<el>_slaReason`) instead of guessing that
+  // in-flight work "may already exist". A connector keeps the plain boundary → escalation wiring.
+  const slaReasonVar = `${el}_slaReason`;
+  const timeoutContext = isAgent
+    ? `${escalationContextFeel(nodeId, descriptor, "nodeTimeout", ". ")} + (if (is defined(${slaReasonVar}) and ${slaReasonVar} != null) then string(${slaReasonVar}) + " " else "")`
+    : escalationContextFeel(
+        nodeId,
+        descriptor,
+        "nodeTimeout",
+        "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
+      );
   const timeoutEscalation = escalationTaskLines(
     esc,
     nodeId,
-    [`${el}_i2`, ...(hasEnrollment ? [`${el}_e2`] : [])],
+    [isAgent ? `${el}_s2` : `${el}_i2`, ...(hasEnrollment ? [`${el}_e2`] : [])],
     `${el}_i3`,
-    `${escalationContextFeel(
-      nodeId,
-      descriptor,
-      "nodeTimeout",
-      "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
-    )} + ${feelStr(escalationResolutionHint(nodeEmits, resumeEmits, isAgent))}`,
+    `${timeoutContext} + ${feelStr(escalationResolutionHint(nodeEmits, resumeEmits, isAgent))}`,
     {
       // #863 Retry + #876 Continue/validate, nested: the timeout escalation routes through a retry gate
       // (`retryElement`) and, on Continue with a required emit, a fail-closed validation gate
@@ -2290,6 +2299,7 @@ function serviceBodyLines(
     `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
     `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=nodeTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
     "      </bpmn:boundaryEvent>",
+    ...(isAgent ? agentSlaCheckLines(el) : []),
     ...timeoutEscalation,
   ];
   // #863 shared reset: both escalations' retry branches (`${esc}Rr` / `${contractEsc}Rr`) loop into ONE
@@ -2299,7 +2309,8 @@ function serviceBodyLines(
   const resetFlagVars: string[] = [];
   if (timeoutResumable) resetFlagVars.push(escalationResumeFlagVar(esc, { kind, emits: resumeEmits }, reservedFlagTargets));
   if (contractResumable) resetFlagVars.push(escalationResumeFlagVar(contractEsc, { kind: "agent", emits: contractEmits }, reservedFlagTargets));
-  const retryIncoming = [`${esc}Rr`, ...(isAgent ? [`${contractEsc}Rr`] : [])];
+  // Issue #1016: a never-activated agent job's re-queue (`<el>_s1`) reuses the ONE reset → task loop.
+  const retryIncoming = [`${esc}Rr`, ...(isAgent ? [`${contractEsc}Rr`, `${el}_s1`] : [])];
   const reset = retryResetLines(el, kind, allEmits, resetFlagVars, retryIncoming);
 
   if (contractGate === undefined) {
@@ -2366,8 +2377,39 @@ function serviceBodyLines(
     `      <bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="${contractEsc}" />`,
     flow(`${el}_g2`, contractEsc, `${contractEsc}Rg`),
     ...(hasEnrollment ? [flow(`${el}_e1`, `${el}_enroll`, `${el}_end`), flow(`${el}_e2`, `${el}_enrollBe`, esc)] : []),
-    flow(`${el}_i2`, `${el}_be`, esc),
+    flow(`${el}_i2`, `${el}_be`, `${el}_slaChk`),
     flow(`${el}_i3`, esc, `${esc}Rg`),
+  ];
+}
+
+/** The agent-node work-SLA gate (issue #1016), seated on the `=nodeTimeout` boundary arm: a
+ * `pr.agent-sla-check` service task reads the durable activation ledger and an exclusive split routes a
+ * NEVER-ACTIVATED job (`<el>_slaRequeue = true`) through the shared reset (`<el>_retry`) back into the
+ * agent task — re-queued, no escalation,
+ * because the work SLA only starts once a worker picks the job up — and everything else (activated, or
+ * activation unknown) onward to the timeout escalation, whose context line carries `<el>_slaReason`
+ * (the activation facts). Outputs are node-scoped (`<el>_…`) so parallel nodes never share them. */
+function agentSlaCheckLines(el: string): string[] {
+  return [
+    `      <bpmn:serviceTask id="${el}_slaChk" name="Was the job ever activated?">`,
+    "        <bpmn:extensionElements>",
+    '          <zeebe:taskDefinition type="pr.agent-sla-check" />',
+    "          <zeebe:ioMapping>",
+    `            <zeebe:output source="=agentSlaRequeue" target="${el}_slaRequeue" />`,
+    `            <zeebe:output source="=agentSlaReason" target="${el}_slaReason" />`,
+    "          </zeebe:ioMapping>",
+    "        </bpmn:extensionElements>",
+    `        <bpmn:incoming>${el}_i2</bpmn:incoming>`,
+    `        <bpmn:outgoing>${el}_s0</bpmn:outgoing>`,
+    "      </bpmn:serviceTask>",
+    `      <bpmn:exclusiveGateway id="${el}_slaGw" name="never activated?" default="${el}_s2">`,
+    `        <bpmn:incoming>${el}_s0</bpmn:incoming>`,
+    `        <bpmn:outgoing>${el}_s1</bpmn:outgoing>`,
+    `        <bpmn:outgoing>${el}_s2</bpmn:outgoing>`,
+    "      </bpmn:exclusiveGateway>",
+    flow(`${el}_s0`, `${el}_slaChk`, `${el}_slaGw`),
+    `      <bpmn:sequenceFlow id="${el}_s1" name="never activated — re-queue" sourceRef="${el}_slaGw" targetRef="${el}_retry"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=${el}_slaRequeue = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+    flow(`${el}_s2`, `${el}_slaGw`, escalationTaskElement(el)),
   ];
 }
 
