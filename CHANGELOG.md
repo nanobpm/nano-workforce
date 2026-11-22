@@ -1,3 +1,13 @@
+## [0.220.0](https://github.com/nanobpm/nano-workforce/compare/v0.219.2...v0.220.0) (2026-11-22)
+
+### Features
+
+* **readiness:** first-class `issue` wait-probe kind for delivery graphs ([#1000](https://github.com/nanobpm/nano-workforce/issues/1000)) ([98465d4](https://github.com/nanobpm/nano-workforce/commit/98465d45fd6414c61615112515861b6a6fd41acf)), closes [#548](https://github.com/nanobpm/nano-workforce/issues/548) [#992](https://github.com/nanobpm/nano-workforce/issues/992) [#997](https://github.com/nanobpm/nano-workforce/issues/997)
+
+### Bug Fixes
+
+* **upgrade:** reinstall dependencies after overlaying a release ([#1009](https://github.com/nanobpm/nano-workforce/issues/1009)) ([64ebba9](https://github.com/nanobpm/nano-workforce/commit/64ebba9fd23ddcd2a740bde486965799df671d7e)), closes [#1008](https://github.com/nanobpm/nano-workforce/issues/1008)
+
 ## [0.219.2](https://github.com/nanobpm/nano-workforce/compare/v0.219.1...v0.219.2) (2026-11-22)
 
 ### Bug Fixes
