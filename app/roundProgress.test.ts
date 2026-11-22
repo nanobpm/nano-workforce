@@ -1511,3 +1511,12 @@ test("convergence-loop BPMN: gw-husk routes convergedHead to the converge gate (
   assertStringIncludes(xml, 'sourceRef="gw-husk" targetRef="check-converge"');
   assertStringIncludes(xml, "=convergedHead = true");
 });
+
+test("convergence-loop BPMN: persist-round promotes the review-stale status to process scope (#1018)", () => {
+  // A stale/missing review on the converge gate re-enters persist-round → check-progress. The
+  // `review-stale` status must reach PROCESS scope, or check-progress reads the prior `addressed`
+  // status and mis-classifies the re-entry as a no-advance/husk round instead of parking.
+  const xml = readFileSync(new URL("../resources/processes/convergence-loop.bpmn", import.meta.url), "utf8");
+  const persist = /<bpmn:serviceTask id="persist-round"[\s\S]*?<\/bpmn:serviceTask>/.exec(xml)?.[0] ?? "";
+  assertStringIncludes(persist, '<zeebe:output source="=status" target="status" />');
+});

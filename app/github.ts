@@ -158,6 +158,9 @@ export interface ReviewThread {
    * on reads/fixtures that don't carry it, which classifies the thread as non-operator (unchanged). */
   rootLogin?: string | null;
   rootAssociation?: string | null;
+  /** Every comment's REST `databaseId` (issue #1018: links a review-summary finding's
+   * `#discussion_r<id>` anchor to its live thread). Optional — absent on fixtures that don't carry it. */
+  commentIds?: number[];
 }
 
 /** A suppressed / low-confidence Copilot advisory parsed out of a review body. Its `key` is the
@@ -324,6 +327,45 @@ export function parseReviewOpenFindings(reviewBody: string | null | undefined): 
     if (Number(m[1]) > 0) out.push(`${m[1]} open finding${m[1] === "1" ? "" : "s"}`);
   }
   return out;
+}
+
+/** Reconcile a head-current review's summary-level open findings (`parseReviewOpenFindings`) with
+ * LIVE thread resolution (issue #1018). Copilot's summary is frozen at review time, so after the
+ * agent reply-and-resolves every finding the unchanged body still says "Changes recommended" /
+ * "N open issues". A count section is RECONCILED only when it lists exactly N items, EVERY item links
+ * to an inline thread (`#discussion_r<id>`), and every linked thread is resolved. The verdict line
+ * ("changes recommended") is dropped only when at least one count section exists and all count
+ * sections reconciled. Anything else — a summary-only finding with no thread link, a count/list
+ * mismatch, an unknown or unresolved thread, a verdict with no itemised section — stays blocking
+ * (fail-CLOSED, preserving the #923 summary-only-finding safeguard). Pure; unit-tested. */
+export function reconcileReviewOpenFindings(
+  reviewBody: string | null | undefined,
+  threads: readonly ReviewThread[],
+): string[] {
+  const findings = parseReviewOpenFindings(reviewBody);
+  if (findings.length === 0) return findings;
+  const body = reviewBody ?? "";
+  const resolvedIds = new Set<number>();
+  for (const t of threads) if (t.isResolved) for (const id of t.commentIds ?? []) resolvedIds.add(id);
+  const sectionRe =
+    /<summary>(?:<strong>)?\s*(?:(\d+)\s+open\s+issues?|Open\s*\((\d+)\))\s*(?:<\/strong>)?\s*<\/summary>([\s\S]*?)(?:<\/details>|$)/gi;
+  let sections = 0;
+  let allReconciled = true;
+  for (const m of body.matchAll(sectionRe)) {
+    const n = Number(m[1] ?? m[2]);
+    if (!(n > 0)) continue;
+    sections++;
+    const items = m[3].split(/\r?\n/).filter((l) => /^\s*[-*]\s+\S/.test(l));
+    const ok =
+      items.length === n &&
+      items.every((l) => {
+        const ids = [...l.matchAll(/#discussion_r(\d+)/g)].map((x) => Number(x[1]));
+        return ids.length > 0 && ids.every((id) => resolvedIds.has(id));
+      });
+    if (!ok) allReconciled = false;
+  }
+  if (sections === 0 || !allReconciled) return findings;
+  return [];
 }
 
 /** A finding clause's trailing `(<severity>, N vote[s])` tag in the ccr-overview-v2 file table. */
@@ -570,7 +612,7 @@ export interface ReviewThreadsResponse {
           nodes?: {
             isResolved?: boolean;
             path?: string | null;
-            comments?: { nodes?: { body?: string; authorAssociation?: string | null; author?: { login?: string | null } | null }[] };
+            comments?: { nodes?: { databaseId?: number | null; body?: string; authorAssociation?: string | null; author?: { login?: string | null } | null }[] };
           }[];
         };
       };
@@ -606,6 +648,10 @@ export function parseReviewThreadsPage(payload: ReviewThreadsResponse): ReviewTh
         isResolved: !!t.isResolved,
         path: t.path ?? null,
         bodies: comments.map((c) => c.body ?? ""),
+        ...(() => {
+          const ids = comments.flatMap((c) => (typeof c.databaseId === "number" ? [c.databaseId] : []));
+          return ids.length > 0 ? { commentIds: ids } : {};
+        })(),
         ...(root?.author?.login ? { rootLogin: root.author.login } : {}),
         ...(root?.authorAssociation ? { rootAssociation: root.authorAssociation } : {}),
       };
@@ -631,7 +677,7 @@ export async function fetchReviewThreads(
   const [owner, name] = repo.split("/");
   const query =
     "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){pullRequest(number:$n){" +
-    "reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{isResolved path comments(first:100){nodes{body authorAssociation author{login}}}}}}}}";
+    "reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{isResolved path comments(first:100){nodes{databaseId body authorAssociation author{login}}}}}}}}";
   const mode = githubTransport();
   const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
   if (!useGh && !token) return null;
