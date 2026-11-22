@@ -81,7 +81,7 @@
     "@types/node": "^24.0.0",
     "conventional-changelog-conventionalcommits": "^8.0.0",
     "linkedom": "^0.18.13",
-    "semantic-release": "^25.0.0",
+    "semantic-release": "^26.0.0",
     "typescript": "^5.6.0",
     "yaml": "^2.9.0"
   },
