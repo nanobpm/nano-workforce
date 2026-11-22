@@ -8,6 +8,8 @@ import { assertEquals } from "#test-assert";
 import type { HeadPr } from "./github.ts";
 import {
   implementCellBranch,
+  isKeylessOpened,
+  reconcileBranches,
   pickAdoptablePr,
   reconcileImplement,
   retryNudgeFor,
@@ -44,7 +46,10 @@ test("shouldReconcileImplement: blank or a claimed-completion (off-vocabulary) s
   assertEquals(shouldReconcileImplement("done"), true);
   // Recognised statuses are the agent's own clean terminal / escalation — never auto-reconciled.
   assertEquals(shouldReconcileImplement("escalated"), false);
-  assertEquals(shouldReconcileImplement("opened"), false);
+  // A KEYED `opened` is a clean terminal; a KEYLESS one (issue #1011) must reconcile.
+  assertEquals(shouldReconcileImplement("opened", null, "owner/repo#1"), false);
+  assertEquals(shouldReconcileImplement("opened"), true);
+  assertEquals(shouldReconcileImplement("opened", null, "  "), true);
   assertEquals(shouldReconcileImplement("blocked"), false);
   assertEquals(shouldReconcileImplement("skipped"), false);
   // An off-vocabulary status carrying an answerable question is a GENUINE escalation — honour it.
@@ -320,4 +325,88 @@ test("reconcileImplement: a blank status + a NULL listing → escalate (unavaila
     "token",
   );
   assertEquals(res, { reconciled: false, status: null, pr: "owner/repo#42", ...tail });
+});
+
+// ── Issue #1011: an `opened` result with no `pr` key ────────────────────────────────────────────────
+
+test("isKeylessOpened: only `opened` with a blank/absent pr", () => {
+  assertEquals(isKeylessOpened("opened", null), true);
+  assertEquals(isKeylessOpened("opened", undefined), true);
+  assertEquals(isKeylessOpened("opened", ""), true);
+  assertEquals(isKeylessOpened("opened", "owner/repo#1"), false);
+  assertEquals(isKeylessOpened("blocked", null), false);
+  assertEquals(isKeylessOpened(null, null), false);
+});
+
+test("reconcileBranches: the reported branch first, then the deterministic fallback, de-duplicated", () => {
+  assertEquals(reconcileBranches("t1", "feat/custom"), ["feat/custom", "feat/t1"]);
+  assertEquals(reconcileBranches("t1", "feat/t1"), ["feat/t1"]);
+  assertEquals(reconcileBranches("t1", null), ["feat/t1"]);
+});
+
+test("reconcileImplement: opened + no pr + an adoptable PR on feat/<task.id> → pr is set", async () => {
+  const res = await reconcileImplement(
+    { status: "opened", pr: null, subjectKey: "owner/repo#1011", taskId: "issue-1011", baseBranch: "main" },
+    async () => [openPr(1010)],
+    "t",
+  );
+  assertEquals(res, { reconciled: true, status: "opened", pr: "owner/repo#1010", ...verified });
+});
+
+test("reconcileImplement: opened + no pr looks up the REPORTED branch before the deterministic one", async () => {
+  const calls: string[] = [];
+  const res = await reconcileImplement(
+    { status: "opened", subjectKey: "owner/repo#7", taskId: "t1", baseBranch: "main", branch: "feat/custom" },
+    async (_repo, branch) => {
+      calls.push(branch);
+      return branch === "feat/custom" ? [openPr(225)] : [];
+    },
+    "t",
+  );
+  assertEquals(calls, ["feat/custom"]);
+  assertEquals(res.pr, "owner/repo#225");
+  assertEquals(res.reconciled, true);
+});
+
+test("reconcileImplement: opened + no pr falls back to feat/<task.id> when the reported branch has none", async () => {
+  const calls: string[] = [];
+  const res = await reconcileImplement(
+    { status: "opened", subjectKey: "owner/repo#7", taskId: "t1", baseBranch: "main", branch: "feat/custom" },
+    async (_repo, branch) => {
+      calls.push(branch);
+      return branch === "feat/t1" ? [openPr(226)] : [];
+    },
+    "t",
+  );
+  assertEquals(calls, ["feat/custom", "feat/t1"]);
+  assertEquals(res.pr, "owner/repo#226");
+});
+
+test("reconcileImplement: opened + no pr + NO PR → escalates with evidence (no retry, verified absence)", async () => {
+  const res = await reconcileImplement(
+    { status: "opened", subjectKey: "owner/repo#7", taskId: "t1", baseBranch: "epic/x" },
+    async () => [openPr(5, "main")],
+    "t",
+  );
+  assertEquals(res, {
+    reconciled: false,
+    status: "opened",
+    pr: null,
+    ...verified,
+    evidence: "reported opened but no PR from feat/t1 into epic/x",
+  });
+});
+
+test("reconcileImplement: opened + pr set is unchanged (no lookup)", async () => {
+  let called = false;
+  const res = await reconcileImplement(
+    { status: "opened", pr: "owner/repo#9", subjectKey: "owner/repo#7", taskId: "t1" },
+    async () => {
+      called = true;
+      return [];
+    },
+    "t",
+  );
+  assertEquals(called, false);
+  assertEquals(res, { reconciled: false, status: "opened", pr: "owner/repo#9", ...tail });
 });

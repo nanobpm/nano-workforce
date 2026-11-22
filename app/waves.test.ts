@@ -6,7 +6,7 @@
 // rather than silently mis-levelized.
 import { test } from "node:test";
 import { assertEquals, assertThrows } from "#test-assert";
-import { computeWaves, WaveError, type WaveGateTask, type WaveTask, waveMergeTargets } from "./waves.ts";
+import { computeWaves, WaveError, type WaveGateTask, type WaveTask, waveMergeTargets, waveUnkeyedOpened } from "./waves.ts";
 
 test("no dependencies → every task in wave 0 (fully parallel)", () => {
   const tasks: WaveTask[] = [{ id: "a" }, { id: "b" }, { id: "c" }];
@@ -138,4 +138,17 @@ test("waveMergeTargets → an abandoned (closed-unmerged) wave member drops out 
     { wave: 0, status: "abandoned", pr_key: "o/r#2" }, // PR closed without merging → reconciled terminal
   ];
   assertEquals(waveMergeTargets(tasks, 0), ["o/r#1"]);
+});
+
+test("waveUnkeyedOpened: an opened task with no PR key holds the gate; keyed/blocked/other-wave do not (issue #1011)", () => {
+  const tasks: WaveGateTask[] = [
+    { wave: 0, status: "opened", pr_key: null },
+    { wave: 0, status: "opened", pr_key: "o/r#1" },
+    { wave: 0, status: "blocked", pr_key: null },
+    { wave: 1, status: "opened", pr_key: null },
+  ];
+  assertEquals(waveUnkeyedOpened(tasks, 0), 1);
+  assertEquals(waveUnkeyedOpened(tasks, 2), 0);
+  // The vacuous-clear hazard: the merge-target set alone would read this wave as merged.
+  assertEquals(waveMergeTargets([{ wave: 0, status: "opened", pr_key: null }], 0), []);
 });

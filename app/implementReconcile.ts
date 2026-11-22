@@ -46,6 +46,10 @@ export interface ReconcileImplementInput {
    *  variable). A claimed-completion-without-delivery is auto-retried ONCE (issue #865) before it
    *  escalates; this flag bounds that race to a single retry. */
   retried?: unknown;
+  /** The branch the agent reported it actually pushed (its result's `branch` key, when present) —
+   *  issue #1011. Looked up FIRST, then the deterministic `feat/<task.id>` fallback, so an agent that
+   *  pushed a non-deterministic branch is still reconcilable. */
+  branch?: unknown;
 }
 
 /** The reconcile decision. `reconciled` is the `ic_reconcile_gw` gate: true → adopt-and-converge (with
@@ -65,6 +69,10 @@ export interface ReconcileImplementResult {
   retryNudge: string | null;
   retried: boolean;
   deliveryVerified: boolean;
+  /** Human-readable lookup evidence for a keyless `opened` that could NOT be reconciled (issue #1011):
+   *  "reported opened but no PR from <branch> into <base>". Present ONLY on that arm (omitted
+   *  otherwise) so the escalation reason can name exactly what was looked for. */
+  evidence?: string;
 }
 
 /** The injected GitHub read — the canonical `listPrsForHead(repo, headBranch, token)` (so this module
@@ -81,9 +89,30 @@ const str = (v: unknown): string | undefined =>
  *  an answerable `question`), and a reported non-completion outcome (`failed`/`needs_input`/unknown), are
  *  honoured as the agent's own decision and escalate accurately — never silently reconciled/adopted as a
  *  success by a branch PR that may be unrelated (#865 review). */
-export function shouldReconcileImplement(status: unknown, question?: unknown): boolean {
+export function shouldReconcileImplement(status: unknown, question?: unknown, pr?: unknown): boolean {
   if (hasAnswerableQuestion(typeof question === "string" ? question : null)) return false;
-  return str(status) === undefined || isClaimedCompletion(status);
+  return str(status) === undefined || isClaimedCompletion(status) || isKeylessOpened(status, pr);
+}
+
+/** True iff the agent reported the clean `opened` terminal but its result carried NO `pr` key (issue
+ *  #1011) — it opened the PR itself with `gh pr create` and left `pr` out of the envelope. Downstream
+ *  (the wave gate, `converge-cell`) keys entirely on `pr`, so this is NOT a clean finish: the cell
+ *  routes it through the reconcile step (mirror of the `ic_done` guard in implement-cell.bpmn) to
+ *  recover the key from GitHub, or escalate with evidence — never pass `pr: null` downstream. */
+export function isKeylessOpened(status: unknown, pr: unknown): boolean {
+  return str(status) === "opened" && str(pr) === undefined;
+}
+
+/** The head branches to look up, in priority order (issue #1011): the branch the agent REPORTED it
+ *  pushed (feature runs may use e.g. `feat/issue-<N>`), then the deterministic `feat/<task.id>`
+ *  fallback — de-duplicated. */
+export function reconcileBranches(taskId: string, reportedBranch?: unknown): string[] {
+  const out: string[] = [];
+  const reported = str(reportedBranch);
+  if (reported) out.push(reported);
+  const det = implementCellBranch(taskId);
+  if (!out.includes(det)) out.push(det);
+  return out;
 }
 
 /** The nudge appended to the implement agent's prompt on its one automatic retry (issue #865), naming
@@ -149,25 +178,30 @@ export async function reconcileImplement(
     // (#865 review). Only the successful-lookup paths below flip this to `true`.
     deliveryVerified: false,
   };
-  if (!shouldReconcileImplement(input.status, input.question)) return escalate;
+  if (!shouldReconcileImplement(input.status, input.question, input.pr)) return escalate;
   const taskId = str(input.taskId);
   // `subjectKey` shares the `owner/repo#N` shape parsePr validates; we use only its `repo` half.
   const parsed = parsePr(input.subjectKey);
   if (!taskId || !parsed) return escalate;
-  const branch = implementCellBranch(taskId);
-  let prs: HeadPr[] | null;
-  try {
-    prs = await lookup(parsed.repo, branch, token);
-  } catch {
-    // GitHub is unavailable — a failed lookup does NOT establish that delivery is missing, so it must
-    // never consume the one automatic retry (issue #865 review). Escalate (best-effort, unchanged from
-    // the pre-#865 no-result behaviour); the next reconcile pass can retry/adopt once GitHub recovers.
-    return escalate;
+  const branches = reconcileBranches(taskId, input.branch);
+  const base = str(input.baseBranch);
+  let adopt: HeadPr | null = null;
+  for (const branch of branches) {
+    let prs: HeadPr[] | null;
+    try {
+      prs = await lookup(parsed.repo, branch, token);
+    } catch {
+      // GitHub is unavailable — a failed lookup does NOT establish that delivery is missing, so it must
+      // never consume the one automatic retry (issue #865 review). Escalate (best-effort, unchanged from
+      // the pre-#865 no-result behaviour); the next reconcile pass can retry/adopt once GitHub recovers.
+      return escalate;
+    }
+    // A `null` listing is an unavailable transport (no token), not a confirmed "no PR" — same reasoning
+    // as the thrown case: escalate rather than retry on unconfirmed state.
+    if (prs === null) return escalate;
+    adopt = pickAdoptablePr(prs, base);
+    if (adopt) break;
   }
-  // A `null` listing is an unavailable transport (no token), not a confirmed "no PR" — same reasoning as
-  // the thrown case: escalate rather than retry on unconfirmed state.
-  if (prs === null) return escalate;
-  const adopt = pickAdoptablePr(prs, str(input.baseBranch));
   if (adopt) {
     return {
       reconciled: true,
@@ -182,7 +216,14 @@ export async function reconcileImplement(
   }
   // The lookup SUCCEEDED and confirmed no adoptable PR — delivery is verified (absent), so the
   // escalation reason may say "none was found"; only now may a claimed completion auto-retry.
-  return maybeRetry(input, alreadyRetried, { ...escalate, deliveryVerified: true });
+  const verifiedAbsent: ReconcileImplementResult = { ...escalate, deliveryVerified: true };
+  if (isKeylessOpened(input.status, input.pr)) {
+    // Issue #1011: the agent CLAIMED `opened` but no PR exists on any candidate branch — escalate with
+    // the lookup evidence (never pass `pr: null` downstream, and never auto-retry a recognised status).
+    verifiedAbsent.evidence = `reported opened but no PR from ${branches.join(" or ")} into ${base ?? "any base"}`;
+    return verifiedAbsent;
+  }
+  return maybeRetry(input, alreadyRetried, verifiedAbsent);
 }
 
 /** No adoptable PR was found on a SUCCESSFUL lookup. A claimed-completion-without-delivery (an

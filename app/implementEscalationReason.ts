@@ -96,6 +96,10 @@ export interface ImplementEscalationReasonInput {
   transcriptUrl?: unknown;
   pr?: unknown;
   deliveryVerified?: unknown;
+  /** The reconcile step's lookup evidence for a keyless `opened` (issue #1011) — e.g. "reported opened
+   *  but no PR from feat/x into main". When present it leads the reason verbatim, so the human sees
+   *  exactly which branch/base was searched. */
+  evidence?: unknown;
 }
 
 // The lead sentence for a genuine no-result (blank status) — the agent returned nothing we can read.
@@ -180,6 +184,16 @@ export function implementEscalationQuestion(input: ImplementEscalationReasonInpu
   const status = str(input.status);
   const pr = str(input.pr);
   const deliveryVerified = input.deliveryVerified === true;
+  const evidence = str(input.evidence);
+  if (evidence && !pr) {
+    // Issue #1011: the agent reported `opened` with no `pr` key and the GitHub lookup found no PR on the
+    // reported/deterministic branch into the run's base — lead with that verified evidence.
+    const lead =
+      `The implementation agent reported status "opened" but its result carried no pull-request key, and a GitHub lookup found none (${evidence}).`;
+    const parts = withContext([lead], summary, transcriptUrl);
+    parts.push(recoveryTail(pr, deliveryVerified));
+    return parts.join(" ");
+  }
   const delivery = deliveryClause(pr, deliveryVerified);
   const parts = withContext([leadForKind(classifyImplementEscalation(status), status, delivery)], summary, transcriptUrl);
   parts.push(recoveryTail(pr, deliveryVerified));

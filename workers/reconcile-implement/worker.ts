@@ -30,6 +30,8 @@ interface In extends Record<string, unknown> {
   baseBranch?: unknown;
   question?: unknown;
   implementRetried?: unknown;
+  /** The branch the agent's result reported it pushed (issue #1011) — looked up before `feat/<task.id>`. */
+  reportedBranch?: unknown;
 }
 
 /** The cell's deterministic branch is `feat/<task.id>`; `task` is the implement-cell's slice object.
@@ -49,6 +51,7 @@ const handler: AppJobHandler<In, ReconcileImplementResult> = async (job, app) =>
       baseBranch: job.variables.baseBranch,
       question: job.variables.question,
       retried: job.variables.implementRetried,
+      branch: job.variables.reportedBranch,
     },
     listPrsForHead,
     process.env.GITHUB_TOKEN ?? "",

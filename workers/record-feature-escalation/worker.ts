@@ -95,6 +95,8 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
         // found"). Both are process variables the upstream `reconcile-implement` step emits into scope.
         pr: job.variables.pr,
         deliveryVerified: job.variables.deliveryVerified,
+        // Issue #1011: the keyless-`opened` lookup evidence (which branch/base was searched).
+        evidence: job.variables.reconcileEvidence,
       });
 
   // Append to the canonical `feature_escalations` audit log (the surviving table `pollUserTasks` reads),

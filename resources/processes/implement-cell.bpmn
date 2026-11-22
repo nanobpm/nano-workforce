@@ -33,6 +33,7 @@
           <nano:extend name="transcriptUrl" type="string" optional="true" />
           <nano:extend name="pr" type="string" optional="true" />
           <nano:extend name="deliveryVerified" type="boolean" optional="true" />
+          <nano:extend name="reconcileEvidence" type="string" optional="true" />
           <nano:extend name="agentSlaJobType" type="string" optional="true" />
           <nano:extend name="agentSlaTimeout" type="string" optional="true" />
         </nano:shape>
@@ -68,6 +69,7 @@
           <zeebe:output source="=question" target="question" />
           <zeebe:output source="=if (is defined(summary)) then summary else null" target="summary" />
           <zeebe:output source="=if (is defined(transcriptUrl)) then transcriptUrl else null" target="transcriptUrl" />
+          <zeebe:output source="=if (is defined(branch)) then branch else null" target="reportedBranch" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>ic_toImplement</bpmn:incoming>
@@ -96,6 +98,7 @@
           <zeebe:output source="=retryNudge" target="retryNudge" />
           <zeebe:output source="=retried" target="implementRetried" />
           <zeebe:output source="=deliveryVerified" target="deliveryVerified" />
+          <zeebe:output source="=if (is defined(evidence)) then evidence else null" target="reconcileEvidence" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>ic_escalate</bpmn:incoming>
@@ -166,6 +169,8 @@
           <zeebe:output source="=null" target="summary" />
           <zeebe:output source="=null" target="transcriptUrl" />
           <zeebe:output source="=null" target="deliveryVerified" />
+          <zeebe:output source="=null" target="reconcileEvidence" />
+          <zeebe:output source="=null" target="reportedBranch" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>ic_answerLoop</bpmn:incoming>
@@ -181,7 +186,7 @@
     <bpmn:sequenceFlow id="ic_toImplement" sourceRef="slice-branch" targetRef="implement-task" />
     <bpmn:sequenceFlow id="ic_toGw" sourceRef="implement-task" targetRef="ic_gw" />
     <bpmn:sequenceFlow id="ic_done" name="done" sourceRef="ic_gw" targetRef="ic_end">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "opened" or status = "blocked" or status = "skipped"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=(status = "opened" and is defined(pr) and pr != null and pr != "") or status = "blocked" or status = "skipped"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="ic_escalate" name="reconcile" sourceRef="ic_gw" targetRef="reconcile-implement" />
     <bpmn:sequenceFlow id="ic_toReconcileGw" sourceRef="reconcile-implement" targetRef="ic_reconcile_gw" />

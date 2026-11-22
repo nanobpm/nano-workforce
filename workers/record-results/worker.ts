@@ -13,7 +13,7 @@
 
 import type { AppJobHandler } from "@nanobpm/urban";
 import { BpmnError } from "@nanobpm/urban";
-import { plans, planTasks } from "../../app/plan.ts";
+import { KEYLESS_OPENED_SUMMARY, plans, planTasks } from "../../app/plan.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`RecordResultsIn` in plan-fanout.bpmn) — ADR 0040.
@@ -35,8 +35,19 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // (no boundary catches `NO_WORK_DISPATCHED`) instead of completing the process. This backstops
   // any zero-work path regardless of the review outcome.
   if (opened === 0) {
+    // Issue #1011: name the slices that reported `opened` with no PR key (recorded `opened` keyless,
+    // or demoted to `blocked` by record-wave with the shared marker) — they are NOT "blocked or
+    // skipped" work, and the generic message hid that their PRs may actually exist.
+    const keyless = rows
+      .filter((r) =>
+        (r.status === "opened" && !r.pr_key) ||
+        (r.status === "blocked" && (r.summary ?? "").startsWith(KEYLESS_OPENED_SUMMARY))
+      )
+      .map((r) => r.task_id);
     const outcome = rows.length === 0
       ? "no work dispatched — the planner produced no tasks"
+      : keyless.length > 0
+      ? `no work dispatched — task(s) ${keyless.join(", ")} reported "opened" with no PR key (pr: null); the rest were blocked or skipped`
       : "no work dispatched — every task was blocked or skipped";
     await plans(app.data).update(planKey, {
       status: "failed",

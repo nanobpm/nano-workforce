@@ -571,6 +571,45 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
     );
   });
 
+  test("keyless opened: a wave-1 slice that omits `pr` is reconciled from GitHub, so wave 2 still dispatches (issue #1011)", async () => {
+    // The #1011 defect: wave-1's agent reported `opened` without a `pr` key; the empty merge-target set
+    // cleared the wave vacuously and the dependant was skipped ("dependency not opened") → NO_WORK_DISPATCHED.
+    githubState.openPrs.set("feat/t1", { number: 225, base: "epic/e2e" });
+    const dispatched: string[] = [];
+    try {
+      await withApp(
+        {
+          "senior:plan": () => ({
+            tasks: [
+              { id: "t1", title: "T1", prompt: "do t1" },
+              { id: "t2", title: "T2", prompt: "do t2", dependsOn: ["t1"] },
+            ],
+          }),
+          "senior:plan-review": approveReview,
+          "senior:feature": (job) => {
+            const task = (job.variables as { task?: { id?: string } }).task;
+            dispatched.push(String(task?.id));
+            // t1 omits `pr` (the defect); t2 reports a keyed PR.
+            return task?.id === "t1" ? { status: "opened", summary: "opened via gh" } : { status: "opened", pr: "owner/repo#226" };
+          },
+        },
+        async ({ app, planKey }) => {
+          const t1 = await app.db
+            .table<{ id: number; plan_key: string; task_id: string; status: string; pr_key: string | null }>("plan_tasks", "id")
+            .findOne({ plan_key: planKey, task_id: "t1" });
+          assert.equal(t1?.status, "opened", "wave-1 slice recorded opened");
+          assert.equal(t1?.pr_key, "owner/repo#225", "the reconciled PR key was recorded");
+          // The wave gate (poller) releases wave 2 once t1's PR merges — publish it directly here.
+          await app.engine.publishMessage({ name: "wave-merged", correlationKey: planKey, variables: {} });
+          await settleFully(app);
+          assert.deepEqual(dispatched, ["t1", "t2"], "wave 2's dependant was dispatched");
+        },
+      );
+    } finally {
+      githubState.openPrs.delete("feat/t1");
+    }
+  });
+
   // Capability edge (issue #289): a task that declares cross-repo `needs` must PARK at the
   // `wait-caps-resolved` barrier (never take the no-needs shortcut), and publishing `caps-resolved`
   // correlated on the per-task barrier key `<planKey>:<taskId>` must release it into `implement-task`

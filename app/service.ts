@@ -135,7 +135,7 @@ import {
   userTasks,
 } from "./userTasks.ts";
 import { deriveWaitGate } from "./waitGate.ts";
-import { waveMergeTargets } from "./waves.ts";
+import { waveMergeTargets, waveUnkeyedOpened } from "./waves.ts";
 import { WorldStore } from "./world/index.ts";
 
 /** The BPMN process that drives review convergence (`resources/processes/convergence-loop.bpmn`). */
@@ -3436,6 +3436,12 @@ export async function pollWaveGatesImpl(
     try {
       let allMerged = true;
       const tasks = await planTasks(data).find({ plan_key: planKey });
+      // Issue #1011: an `opened` task with no PR key must never let the wave clear vacuously.
+      const unkeyed = waveUnkeyedOpened(tasks, gateWave);
+      if (unkeyed > 0) {
+        console.log(`[poller] wave gate held -> ${planKey} wave ${gateWave}: ${unkeyed} opened task(s) carry no PR key`);
+        continue;
+      }
       for (const prKey of waveMergeTargets(tasks, gateWave)) {
         const state = await classifyWaveTarget(data, prKey, token);
         if (state === "closed") {
