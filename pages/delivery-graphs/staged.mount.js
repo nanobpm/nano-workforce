@@ -94,6 +94,10 @@ const REQUEST_TIMEOUT_MS = 30000;
 // a genuinely hung door still releases the controls. Kept under the server's launch-claim TTL
 // (`LAUNCH_CLAIM_TTL_MS`, 15 min) so the UI never gives up AFTER a crashed launch became re-claimable.
 const DISPATCH_TIMEOUT_MS = 10 * 60_000;
+// The DI-preview POST lays the graph out too (#1005): the expanded attempt can run for minutes before the
+// server falls back within its layout budget (`NANO_DELIVERY_LAYOUT_TIMEOUT_MS`, default 5 min). The
+// 30 s default would abort before the fallback answer arrives, so it shares the dispatch budget.
+const PREVIEW_DI_TIMEOUT_MS = DISPATCH_TIMEOUT_MS;
 
 // The confirm shown before a dispatch — dispatching authorises every side-effecting node, so the
 // operator acknowledges that the launch (and its side effects) is content-addressed to this graph.
@@ -394,7 +398,7 @@ export function mountStagedProposals(host, config = {}) {
     busy(true);
     setStatus("Compiling DI…");
     try {
-      const { status, body } = await post(proposalBpmnUrl, { digest: staged });
+      const { status, body } = await post(proposalBpmnUrl, { digest: staged }, PREVIEW_DI_TIMEOUT_MS);
       const outcome = previewDiOutcome(status, body);
       if (outcome.navigate) {
         window.parent.postMessage(

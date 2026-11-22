@@ -211,7 +211,23 @@ test("#1005 a queued Semaphore waiter past its deadline is dropped and never tak
   const gate = new Semaphore(1);
   const hold = await gate.acquire();
   const started = Date.now();
-  await assertRejects(() => gate.acquire(Date.now() + 30));
+  // A REFERENCED watchdog keeps the event loop alive (the semaphore's deadline timer is unref'd), so the
+  // test cannot be cancelled with a pending promise, and it fails loudly if expiry never fires.
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcome = await Promise.race([
+      gate.acquire(Date.now() + 30).then(
+        () => "acquired" as const,
+        () => "rejected" as const,
+      ),
+      new Promise<"hung">((resolve) => {
+        watchdog = setTimeout(() => resolve("hung"), 2000);
+      }),
+    ]);
+    assert(outcome === "rejected", `queued acquire must reject at its deadline (got "${outcome}")`);
+  } finally {
+    clearTimeout(watchdog);
+  }
   assert(Date.now() - started < 1000, "queued acquire must reject at its deadline, not wait for the holder");
   hold();
   // The expired waiter was removed: the freed slot is immediately available to a fresh acquirer.
