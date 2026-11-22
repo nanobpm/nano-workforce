@@ -40,7 +40,7 @@ import { applyMigrationSet, readMigrationSetFromDisk } from "../test/migrations.
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const READ_MODEL_MIGRATION = "143_delivery_graph_read_model_committed_cancel.sql";
+const READ_MODEL_MIGRATION = "146_delivery_graph_read_model_committed_cancel.sql";
 
 // A minimal in-memory DB carrying the base `delivery_graph_runs` / `pull_requests` shapes the VIEW
 // reads, plus stand-ins for the managed `<table>__tracking` derived VIEWs urban provisions at mount
@@ -60,8 +60,8 @@ function viewDb(): DatabaseSync {
      CREATE TABLE pull_requests (pr_key TEXT PRIMARY KEY, root_request_key TEXT, status TEXT,
        derived_status_override TEXT);`,
   );
-  db.exec(MIG("140_run_cancellations.sql"));
-  db.exec(MIG("142_run_cancellations_committed.sql"));
+  db.exec(MIG("143_run_cancellations.sql"));
+  db.exec(MIG("145_run_cancellations_committed.sql"));
   db.exec(
     `SELECT 1;`,
   );

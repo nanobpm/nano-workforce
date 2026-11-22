@@ -1,5 +1,5 @@
 -- Re-create the `delivery_graph_read_model` VIEW for PR #996 review: only a COMMITTED operator
--- cancellation (migration 142's `run_cancellations.committed`) promotes the terminated edge
+-- cancellation (migration 145's `run_cancellations.committed`) promotes the terminated edge
 -- (`abandoned`) to `cancelled`. A provisional cancellation row whose engine cancel was never
 -- confirmed (a refused attempt's leftover, or a retry over an already-terminated run) must NOT
 -- re-label the run or re-attribute the termination, so the `delivery_graph_cancellations` rollup
@@ -8,7 +8,7 @@
 -- Every DERIVED column below is emitted VERBATIM from the ONE declaration in
 -- app/deliveryGraphReadModel.ts (`sqlSelectFor(col, { baseAlias: "dg" })`); the rollup VIEWs verbatim
 -- from `rollup.viewDdl()`. The drift guard (app/deliveryGraphReadModel.test.ts) points at THIS
--- migration. 141 is immutable, so this is a fresh forward-only DROP+CREATE. No BEGIN/COMMIT (the
+-- migration. 144 is immutable, so this is a fresh forward-only DROP+CREATE. No BEGIN/COMMIT (the
 -- runner wraps it).
 
 DROP VIEW IF EXISTS delivery_graph_read_model;

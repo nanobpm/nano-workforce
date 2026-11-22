@@ -1,5 +1,5 @@
 -- Re-create the `delivery_graph_read_model` VIEW for issue #994: an operator cancel reads a distinct,
--- NEUTRAL `cancelled` status (with actor / time / reason from `run_cancellations`, migration 140) instead
+-- NEUTRAL `cancelled` status (with actor / time / reason from `run_cancellations`, migration 143) instead
 -- of `failed`, and an out-of-band terminate (`abandoned`, the canonical terminated edge in
 -- app/runTerminal.ts) no longer renders with failure styling. `status` is now a DERIVED column.
 --
