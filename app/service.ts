@@ -601,15 +601,28 @@ async function registerDependencies(data: DataLayer, prKey: string, depKeys: str
  * `pr.record-dependency` edge a merge-stage agent discovered) survive a caller whose `dependsOn`
  * omits them (issue #1007 review, round 3). */
 async function unionDependencies(data: DataLayer, prKey: string, keys: string[]) {
-  const table = deps(data);
-  const existing = await table.find({ pr_key: prKey });
-  const have = new Set(existing.map((d) => d.depends_on_key));
   const ts = now();
-  for (const depKey of new Set(keys)) {
-    if (depKey === prKey || have.has(depKey)) continue;
-    await table.insert({ pr_key: prKey, depends_on_key: depKey, created_at: ts });
-    have.add(depKey);
-  }
+  const add = [...new Set(keys)].filter((k) => k !== prKey);
+  if (add.length === 0) return;
+  // ONE transaction under the PR's dependency lock (issue #1007 review, round 6): a live adoption's
+  // additions are atomic AND totally ordered with `pollMerges`' read-then-publish of `deps-cleared`,
+  // so the poller can never clear a PR from a partial (or pre-addition) prerequisite set.
+  await withDependencyLock(prKey, async () => {
+    await data.open().tx(async (q) => {
+      for (const depKey of add) {
+        await q.exec(
+          `INSERT INTO "pr_dependencies" ("pr_key", "depends_on_key", "created_at") SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM "pr_dependencies" WHERE "pr_key" = ? AND "depends_on_key" = ?)`,
+          [prKey, depKey, ts, prKey, depKey],
+        );
+      }
+    });
+  });
+}
+
+/** Serialize a PR's dependency-set mutations with the poller's dependency read + `deps-cleared`
+ * publication. Shares the app's in-process keyed serializer under a disjoint `deps:` key space. */
+export function withDependencyLock<T>(prKey: string, fn: () => Promise<T>): Promise<T> {
+  return withMergePolicyLock(`deps:${prKey}`, fn);
 }
 
 // The repository-provisioning envelope builder now lives in its own module (app/repoEnvelope.ts);
@@ -2676,20 +2689,21 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
       // must converge even if its declared deps never clear (the #368 wedge). `wait-deps` subscribes
       // only `deps-cleared`, so the shared pre-check publishes exactly that.
       if (await advanceIfTerminalOutOfBand(data, engine, pr, token)) continue;
-      const depRows = await deps(data).find({ pr_key: prKey });
-      let allMerged = true;
-      for (const d of depRows) {
-        if (!(await isDepMerged(data, d.depends_on_key, token))) {
-          allMerged = false;
-          break;
+      // Read + publish under the PR's dependency lock so a concurrent adoption's prerequisite
+      // additions land wholly before or wholly after this decision (issue #1007 review, round 6).
+      const cleared = await withDependencyLock(prKey, async () => {
+        const depRows = await deps(data).find({ pr_key: prKey });
+        for (const d of depRows) {
+          if (!(await isDepMerged(data, d.depends_on_key, token))) return false;
         }
-      }
-      if (!allMerged) continue;
-      await flipToMergingThenPublish(data, engine, prKey, "waiting_deps", {
-        name: "deps-cleared",
-        correlationKey: prKey,
-        variables: {},
+        await flipToMergingThenPublish(data, engine, prKey, "waiting_deps", {
+          name: "deps-cleared",
+          correlationKey: prKey,
+          variables: {},
+        });
+        return true;
       });
+      if (!cleared) continue;
       console.log(`[poller] deps cleared -> ${prKey}`);
     } catch (err) {
       console.error(`[poller] deps ${prKey}: ${err}`);

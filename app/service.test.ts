@@ -109,6 +109,13 @@ function memOpen(stores: Record<string, { rows: any[]; key: string }>, ops?: str
             stores.pr_dependencies?.rows.push({ pr_key: params[0], depends_on_key: params[1], created_at: params[2] });
             return { changed: 1 };
           }
+          // Adoption's additive union (issue #1007 review, round 6): insert-if-absent, never delete.
+          if (/^INSERT INTO "pr_dependencies" \("pr_key", "depends_on_key", "created_at"\) SELECT \?, \?, \? WHERE NOT EXISTS/.test(sql)) {
+            const rows = (stores.pr_dependencies ??= { rows: [], key: "id" }).rows;
+            if (rows.some((r) => r.pr_key === params[0] && r.depends_on_key === params[1])) return { changed: 0 };
+            rows.push({ pr_key: params[0], depends_on_key: params[1], created_at: params[2] });
+            return { changed: 1 };
+          }
           throw new Error(`unexpected tx exec sql: ${sql}`);
         },
       };

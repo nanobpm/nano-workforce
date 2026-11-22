@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
+import { withMergePolicyLock } from "../../app/mergePolicyLock.ts";
 import { MERGE_PROCESS_ID } from "../../app/service.ts";
 
 function fakeApp() {
@@ -179,6 +180,30 @@ test("finalize falls back to the process variables for a legacy row with merge_r
     stores.pull_requests.push({ pr_key: BASE_VARS.prKey, merge_requested: null });
     // biome-ignore lint/plugin: constructing the framework's job envelope for the handler under test
     await handler({ variables: { ...BASE_VARS, autoMerge: false } } as never, app as never);
+    assertEquals(createdProcesses.includes(MERGE_PROCESS_ID), false);
+    assertEquals(stores.pull_requests[0].status, "converged");
+  });
+});
+
+// Controlled interleaving (#1007 review, round 6): a review-only adoption holding the owner's
+// `withMergePolicyLock` stamps `merge_requested = 0` while finalization is mid-flight. Finalization
+// must serialize its policy read + merge handoff behind that lock and honour the narrowed intent,
+// never hand off on the stale `1` it would otherwise have read first.
+test("finalize serializes the merge handoff behind a concurrent review-only adoption (#1007 round 6)", async () => {
+  await withRetroOff(async () => {
+    const { app, stores, createdProcesses } = fakeApp();
+    stores.pull_requests.push({ pr_key: BASE_VARS.prKey, merge_requested: 1, process_key: "LOOP-1" });
+    let release: () => void = () => {};
+    const adoption = withMergePolicyLock("LOOP-1", async () => {
+      await new Promise<void>((r) => (release = r));
+      stores.pull_requests[0].merge_requested = 0;
+    });
+    // biome-ignore lint/plugin: constructing the framework's job envelope for the handler under test
+    const finalizing = handler({ variables: { ...BASE_VARS, autoMerge: true } } as never, app as never);
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    release();
+    await adoption;
+    await finalizing;
     assertEquals(createdProcesses.includes(MERGE_PROCESS_ID), false);
     assertEquals(stores.pull_requests[0].status, "converged");
   });
