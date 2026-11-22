@@ -75,17 +75,40 @@ export class Semaphore {
   }
 
   /** Wait (FIFO) for a slot, then return a one-shot `release`. Always `release()` in a `finally` so a
-   * rejecting holder cannot leak its slot and wedge every queued layout behind it. */
-  async acquire(): Promise<() => void> {
-    await new Promise<void>((resolve) => {
+   * rejecting holder cannot leak its slot and wedge every queued layout behind it.
+   *
+   * `deadline` (absolute epoch ms, optional): a queued waiter still unadmitted at the deadline is
+   * REMOVED from the queue and the acquire rejects — an expired request never takes a slot (issue
+   * #1005 review: queueing must not exceed the caller's total layout budget). */
+  async acquire(deadline?: number, now: () => number = Date.now): Promise<() => void> {
+    await new Promise<void>((resolve, reject) => {
       if (this.active < this.max) {
         this.active++;
         resolve();
-      } else {
-        this.waiters.push(() => {
-          this.active++;
-          resolve();
-        });
+        return;
+      }
+      if (deadline !== undefined && deadline - now() <= 0) {
+        reject(new Error("Semaphore: deadline expired before a slot was available"));
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const waiter = () => {
+        if (timer) clearTimeout(timer);
+        this.active++;
+        resolve();
+      };
+      this.waiters.push(waiter);
+      if (deadline !== undefined) {
+        timer = setTimeout(
+          () => {
+            const i = this.waiters.indexOf(waiter);
+            if (i === -1) return; // already admitted
+            this.waiters.splice(i, 1);
+            reject(new Error("Semaphore: deadline expired while queued for a slot"));
+          },
+          Math.min(MAX_TIMER_MS, Math.max(0, deadline - now())),
+        );
+        timer.unref?.();
       }
     });
     let released = false;
@@ -117,8 +140,10 @@ type LayoutWorkerMessage = { ok: true; laidOut: string } | { ok: false; error: s
  * leaks across calls. At most {@link layoutMaxConcurrency} workers run at once (the shared
  * {@link Semaphore} gate) — a burst of overlapping preview/dispatch layouts queues for a slot rather
  * than spawning an unbounded number of superlinear CPU-bound workers that would saturate the host.
- * The timeout covers only the ACTUAL layout (it starts after a slot is acquired), so queueing behind
- * other layouts is never charged against a graph's bound.
+ * Without `opts.deadline`, the timeout covers only the ACTUAL layout (it starts after a slot is
+ * acquired). With `opts.deadline` (absolute epoch ms — the caller's TOTAL budget, issue #1005), queue
+ * time IS charged: an unadmitted request is dropped from the queue at the deadline, and the worker runs
+ * for at most `min(timeoutMs, deadline - now)` once admitted.
  *
  * `spawnWorker` is an injectable seam (default: the real `layoutWorker.ts` worker) so a test can force
  * a SYNCHRONOUS construction failure — `new Worker(...)` can throw (e.g. `ERR_WORKER_INIT_FAILED`
@@ -128,13 +153,19 @@ export async function layoutBpmnOffThread(
   timeoutMs: number = layoutTimeoutMs(),
   spawnWorker: () => Worker = () =>
     new Worker(new URL("./layoutWorker.ts", import.meta.url), { workerData: { semanticBpmn } }),
+  opts: { deadline?: number } = {},
 ): Promise<string> {
   // Acquire the slot, then wrap EVERYTHING — including worker construction — in the release `finally`.
   // `new Worker(...)` can throw synchronously (e.g. `ERR_WORKER_INIT_FAILED` under resource pressure);
   // if construction sat outside this guard, each such failure would permanently consume a slot and,
   // after `max` failures, wedge every later layout waiting on the gate forever (issue #854 review).
-  const release = await layoutConcurrencyGate().acquire();
+  const release = await layoutConcurrencyGate().acquire(opts.deadline);
   try {
+    if (opts.deadline !== undefined) {
+      const left = opts.deadline - Date.now();
+      if (left < 1) throw new Error("layoutDeliveryDiagram: layout budget expired before the layout could start");
+      timeoutMs = Math.min(timeoutMs, left);
+    }
     const worker = spawnWorker();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

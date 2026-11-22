@@ -109,7 +109,7 @@ export const ENV_CONTRACTS = {
     name: "NANO_DELIVERY_LAYOUT_TIMEOUT_MS",
     owner: "app/layoutOffThread.ts",
     semantics:
-      "Bound (ms) on the delivery-graph BPMN autolayout (`layoutBpmn` → `bpmn-auto-layout`), which runs OFF the main event loop in a `node:worker_threads` worker (`layoutBpmnOffThread`, issue #854). On expiry the worker is terminated and the compile/launch fails CLEANLY rather than hanging — the inline layout previously froze the whole app (no HTTP, no poll passes) for the entire superlinear run (#852). Shared by both the dispatch (`dispatchDeliveryGraphRun` → `compileDeliveryGraph`) and preview (`previewProposalBpmn`) paths, which both funnel through the one `layoutDeliveryDiagram` entry point.",
+      "Bound (ms) on the delivery-graph BPMN autolayout (`layoutBpmn` → `bpmn-auto-layout`), which runs OFF the main event loop in a `node:worker_threads` worker (`layoutBpmnOffThread`, issue #854). It is the TOTAL budget for all layout attempts (issue #1005): the expanded layout gets a share and, on expiry or a LayoutError, a collapsed-sub-process retry gets the remainder; if both fail the graph deploys with a basic grid DI — layout alone never fails a preview or launch. On expiry the worker is terminated rather than left hanging — the inline layout previously froze the whole app (no HTTP, no poll passes) for the entire superlinear run (#852). Shared by both the dispatch (`dispatchDeliveryGraphRun` → `compileDeliveryGraph`) and preview (`previewProposalBpmn`) paths, which both funnel through the one `layoutDeliveryDiagram` entry point.",
     default: "300000",
   },
   NANO_DELIVERY_LAYOUT_MAX_CONCURRENCY: {

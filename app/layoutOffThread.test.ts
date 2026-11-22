@@ -206,3 +206,51 @@ test("#854 a synchronous worker-construction failure releases the slot instead o
     );
   }
 });
+
+test("#1005 a queued Semaphore waiter past its deadline is dropped and never takes a slot", async () => {
+  const gate = new Semaphore(1);
+  const hold = await gate.acquire();
+  const started = Date.now();
+  // A REFERENCED watchdog keeps the event loop alive (the semaphore's deadline timer is unref'd), so the
+  // test cannot be cancelled with a pending promise, and it fails loudly if expiry never fires.
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcome = await Promise.race([
+      gate.acquire(Date.now() + 30).then(
+        () => "acquired" as const,
+        () => "rejected" as const,
+      ),
+      new Promise<"hung">((resolve) => {
+        watchdog = setTimeout(() => resolve("hung"), 2000);
+      }),
+    ]);
+    assert(outcome === "rejected", `queued acquire must reject at its deadline (got "${outcome}")`);
+  } finally {
+    clearTimeout(watchdog);
+  }
+  assert(Date.now() - started < 1000, "queued acquire must reject at its deadline, not wait for the holder");
+  hold();
+  // The expired waiter was removed: the freed slot is immediately available to a fresh acquirer.
+  const next = await gate.acquire(Date.now() + 30);
+  next();
+  // An already-expired deadline with an occupied pool rejects at once.
+  const h2 = await gate.acquire();
+  await assertRejects(() => gate.acquire(Date.now() - 1));
+  h2();
+});
+
+test("#1005 layoutBpmnOffThread charges the total deadline: an expired budget never spawns a worker", async () => {
+  let spawned = false;
+  await assertRejects(() =>
+    layoutBpmnOffThread(
+      "<x/>",
+      60_000,
+      () => {
+        spawned = true;
+        throw new Error("must not spawn");
+      },
+      { deadline: Date.now() - 1 },
+    ),
+  );
+  assert(!spawned, "no worker may be spawned once the deadline has passed");
+});

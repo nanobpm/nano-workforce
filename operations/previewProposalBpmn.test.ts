@@ -12,6 +12,7 @@ import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { deliveryGraphRuns } from "../app/deliveryGraphRun.ts";
+import { setPreviewLayoutOptionsForTest } from "./previewProposalBpmn.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
 const GITHUB_ENV: Record<string, string> = { NANO_PR_GITHUB_TRANSPORT: "token", GITHUB_TOKEN: "" };
@@ -39,6 +40,33 @@ describe("previewProposalBpmn — read-only DI preview of a staged proposal", ()
     apps.push(app);
     return app;
   };
+
+  test("#1005: both layouts fail → 200 with no-DI preview and a plain layout message", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const staged = await app.api.call<{ digest: string }>("compileDeliveryGraph", { body: SIDE_EFFECTING });
+    assert.equal(staged.status, 200);
+    setPreviewLayoutOptionsForTest({
+      budgetMs: 1000,
+      layout: async () => {
+        throw new Error("ROUTING_FAILED: no legal orthogonal route");
+      },
+    });
+    try {
+      const res = await app.api.call<{ ok: boolean; bpmn?: string; layout?: { mode: string; message: string } }>(
+        "previewProposalBpmn",
+        { body: { digest: staged.body.digest } },
+      );
+      assert.equal(res.status, 200);
+      assert.equal(res.body.ok, true);
+      assert.equal(res.body.layout?.mode, "none");
+      assert.match(res.body.layout?.message ?? "", /No diagram could be laid out.*ROUTING_FAILED/);
+      assert.doesNotMatch(res.body.bpmn ?? "", /<bpmndi:BPMNDiagram/);
+      assert.match(res.body.bpmn ?? "", /<bpmn:process /);
+    } finally {
+      setPreviewLayoutOptionsForTest({});
+    }
+  });
 
   test("a missing/blank digest → 400 with a human error", async () => {
     const app = await boot();

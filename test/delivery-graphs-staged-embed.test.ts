@@ -155,3 +155,19 @@ test("#523/#569: Save-to-library names the entry via an in-DOM input, not a nati
   assert(/data-library-name=/.test(MOUNT_JS), "staged.mount.js must collect the library name via an in-DOM input (data-library-name), not window.prompt (#569)");
   assert(/data-save-library-confirm=/.test(MOUNT_JS), "staged.mount.js must confirm the save via an in-DOM Save affordance (data-save-library-confirm)");
 });
+
+test("#1005: DI preview honours body.layout — `none` never opens the diagram view; `collapsed` surfaces its reason", async () => {
+  const { previewDiOutcome } = await import("../pages/delivery-graphs/staged.mount.js");
+  const none = previewDiOutcome(200, { ok: true, bpmn: "<x/>", layout: { mode: "none", message: "No diagram could be laid out (boom)" } });
+  assertEquals(none.navigate, false);
+  assertEquals(none.message, "No diagram could be laid out (boom)");
+  const collapsed = previewDiOutcome(200, { ok: true, bpmn: "<x/>", layout: { mode: "collapsed", message: "layout: collapsed (expanded layout failed: R)" } });
+  assertEquals(collapsed.navigate, true);
+  assertEquals(collapsed.xml, "<x/>");
+  assert(collapsed.message.includes("expanded layout failed: R"), "collapsed reason must be shown");
+  const expanded = previewDiOutcome(200, { ok: true, bpmn: "<x/>", layout: { mode: "expanded", message: "layout: expanded" } });
+  assertEquals(expanded.navigate, true);
+  const err = previewDiOutcome(400, { ok: false, error: "nope" });
+  assertEquals(err.navigate, false);
+  assertEquals(err.message, "nope");
+});

@@ -15,9 +15,16 @@
 
 import { compileDeliveryGraph } from "../app/deliveryGraphCompiler.ts";
 import { getStagedProposal } from "../app/deliveryGraphProposals.ts";
+import type { LayoutWithFallbackOptions } from "../app/deliveryLayout.ts";
 import { deliveryGraphDigest } from "../app/deliveryRunner.ts";
 import type { DeliveryGraphProposalBpmnResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
+
+/** Test seam: layout options (an injected layout fn / budget) for the recompile (issue #1005). */
+let layoutOptions: LayoutWithFallbackOptions = {};
+export function setPreviewLayoutOptionsForTest(options: LayoutWithFallbackOptions): void {
+  layoutOptions = options;
+}
 
 export default defineOperation("previewProposalBpmn", async ({ body }, app) => {
   const digest = typeof body?.digest === "string" ? body.digest.trim() : "";
@@ -59,7 +66,7 @@ export default defineOperation("previewProposalBpmn", async ({ body }, app) => {
   // contract — never a bubbled 500.
   let compiled: Awaited<ReturnType<typeof compileDeliveryGraph>>;
   try {
-    compiled = await compileDeliveryGraph(graph);
+    compiled = await compileDeliveryGraph(graph, layoutOptions);
   } catch (err) {
     app.log.warn("preview-proposal-bpmn: staged graph threw during recompile", { digest });
     return {
@@ -90,7 +97,14 @@ export default defineOperation("previewProposalBpmn", async ({ body }, app) => {
     };
   }
 
-  app.log.info("preview-proposal-bpmn served", { digest, bytes: compiled.bpmn.length });
-  const out: DeliveryGraphProposalBpmnResult = { ok: true, digest, bpmn: compiled.bpmn };
+  // Layout never fails the preview (issue #1005): a `none` layout serves the semantic BPMN without DI
+  // and says so plainly; a `collapsed` fallback is surfaced with its reason.
+  const { layout } = compiled;
+  const bpmn = layout.mode === "none" ? compiled.semanticBpmn : compiled.bpmn;
+  if (layout.mode !== "expanded") {
+    app.log.warn("preview-proposal-bpmn: layout degraded", { digest, mode: layout.mode, reason: layout.reason });
+  }
+  app.log.info("preview-proposal-bpmn served", { digest, bytes: bpmn.length, layout: layout.mode });
+  const out: DeliveryGraphProposalBpmnResult = { ok: true, digest, bpmn, layout };
   return { status: 200, body: out };
 });

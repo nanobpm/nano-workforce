@@ -23,6 +23,7 @@ import { isPlausibleBranchName } from "./baseBranch.ts";
 import { redactConnectorValue } from "./deliveryGraph.ts";
 import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText, redactProbeTargetForDisplay, requiredEmitsByNodeId } from "./deliveryGraphCompiler.ts";
 import { GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
+import type { DeliveryLayoutInfo, LayoutWithFallbackOptions } from "./deliveryLayout.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -64,6 +65,9 @@ export interface DeliveryRunTimeouts {
 }
 
 export interface DeliveryRunOptions extends DeliveryRunTimeouts {
+  /** Layout seam (injected layout fn / budget) for the DI pass (issue #1005). Default: the real
+   * off-thread layout bounded by `NANO_DELIVERY_LAYOUT_TIMEOUT_MS`. */
+  layout?: LayoutWithFallbackOptions;
   /** A per-run token that scopes each `wait` node's gate key (`<runKey>:<element>`) so two concurrent
    * runs of the same graph never share a gate correlation. Defaults to a fresh random per-run token
    * (`randomUUID()`) — NOT the graph digest, which every run of an identical graph would share and so
@@ -138,6 +142,8 @@ export interface PreparedDeliveryGraph {
    *  ioMapping reads when its per-node `nodeInputs.<el>.timeout` is null, so a node released with no
    *  per-node timeout gets a real SLA instead of a zero-length timer that fires instantly (issue #872). */
   runNodeTimeout: string;
+  /** How the deployed DI was laid out (issue #1005) — recorded on the run so a degraded diagram is visible. */
+  layout: DeliveryLayoutInfo;
 }
 
 export type PrepareDeliveryResult =
@@ -165,7 +171,7 @@ export async function prepareDeliveryGraph(
   graph: DeliveryGraph,
   options: DeliveryRunOptions = {},
 ): Promise<PrepareDeliveryResult> {
-  const compiled = await compileDeliveryGraph(graph);
+  const compiled = await compileDeliveryGraph(graph, options.layout);
   if (!compiled.ok) return { ok: false, errors: compiled.errors };
 
   const digest = deliveryGraphDigest(compiled.semanticBpmn);
@@ -203,7 +209,10 @@ export async function prepareDeliveryGraph(
     if (element === undefined) continue; // unreachable — resolved covers every node — but keep total.
     nodeInputs[element] = buildNodeInput(node, { runKey, element, ...timeouts, requiredEmits: requiredByNodeId.get(node.id) ?? EMPTY_REQUIRED_EMITS });
   }
-  return { ok: true, prepared: { processDefinitionId, bpmn, nodeInputs, runKey, runNodeTimeout: timeouts.nodeTimeout } };
+  return {
+    ok: true,
+    prepared: { processDefinitionId, bpmn, nodeInputs, runKey, runNodeTimeout: timeouts.nodeTimeout, layout: compiled.layout },
+  };
 }
 
 /** Deploy + start a compiled graph as a running engine-native instance. Idempotent at the DEFINITION
@@ -217,7 +226,7 @@ export async function runDeliveryGraph(
 ): Promise<RunDeliveryResult> {
   const prep = await prepareDeliveryGraph(graph, options);
   if (!prep.ok) return prep;
-  const { processDefinitionId, bpmn, nodeInputs, runKey, runNodeTimeout } = prep.prepared;
+  const { processDefinitionId, bpmn, nodeInputs, runKey, runNodeTimeout, layout } = prep.prepared;
 
   await engine.deployResources([{ name: `${processDefinitionId}.bpmn`, content: bpmn, contentType: "application/xml" }]);
   // Per-node repository isolation (#739): the `io.nanobpm.agentTask.repository` envelope is now seeded
@@ -263,7 +272,15 @@ export async function runDeliveryGraph(
   // downstream consumers expect a string — coerce (codebase-wide `String(...)` pattern, e.g. app/plan.ts).
   return {
     ok: true,
-    handle: { processDefinitionId, bpmn, nodeInputs, runKey, runNodeTimeout, processInstanceKey: String(processInstanceKey) },
+    handle: {
+      processDefinitionId,
+      bpmn,
+      nodeInputs,
+      runKey,
+      runNodeTimeout,
+      layout,
+      processInstanceKey: String(processInstanceKey),
+    },
   };
 }
 
