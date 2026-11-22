@@ -1968,6 +1968,39 @@ export async function pollReviews(data: DataLayer, engine: EngineClient, token: 
  * (with `merged_at`) for a landed PR, the canonical `abandonClosedPr` for a closed-unmerged one.
  * Conservative: an unreadable/open state returns `false` and the caller re-solicits as before.
  * Exported for tests. */
+/** Marker embedded in the termination reason of an out-of-band terminal-PR retirement — the
+ * persisted finalization intent {@link retryPendingTerminalFinalization} reconciles. */
+export const RETIRE_REASON_MARK = " retired: PR ";
+
+/** Base statuses a retirement finalizes a row to; a row still short of one has pending bookkeeping. */
+const FINALIZED_BASE_STATUSES: readonly string[] = ["merged", "abandoned"];
+
+/** Does this row carry an unfinished out-of-band retirement (#1023 review)? The instance was cancelled
+ * under a recorded retirement intent but the merged/abandoned row write (and its side effects —
+ * retrospective, audit/task updates) never landed. */
+export function hasPendingTerminalFinalization(pr: PullRequest): boolean {
+  return (
+    pr.process_key != null &&
+    typeof pr.termination_reason === "string" &&
+    pr.termination_reason.includes(RETIRE_REASON_MARK) &&
+    String(pr.termination_process_key ?? "") === String(pr.process_key) &&
+    !FINALIZED_BASE_STATUSES.includes(String(pr.status))
+  );
+}
+
+/** Finish an out-of-band retirement whose cancellation landed but whose row finalization failed.
+ * Re-runs the ONE canonical {@link retireTerminalReviewWait} (its cancel is confirmed terminal and
+ * skipped through, then the merged/abandoned bookkeeping + side effects run). Exported for tests. */
+export async function retryPendingTerminalFinalization(
+  data: DataLayer,
+  engine: EngineClient,
+  pr: PullRequest,
+  token: string,
+): Promise<boolean | null> {
+  if (!hasPendingTerminalFinalization(pr)) return false;
+  return retireTerminalReviewWait(data, engine, pr, token, "incident");
+}
+
 export async function retireTerminalReviewWait(
   data: DataLayer,
   engine: EngineClient,
@@ -1981,8 +2014,14 @@ export async function retireTerminalReviewWait(
   if (liveness !== "merged" && liveness !== "closed") return false;
   if (pr.process_key != null) {
     const key = String(pr.process_key);
+    const reason = `${parkedOn === "incident" ? "incident" : "review wait"}${RETIRE_REASON_MARK}${liveness} out-of-band`;
+    // Persist the finalization INTENT before cancelling (strict — a failed write aborts this pass with
+    // the instance still live, so nothing is lost). If the cancel then lands but the row bookkeeping
+    // below fails, the row reads derived-terminal and drops out of every live-row scan; this recorded
+    // intent is what {@link retryPendingTerminalFinalization} keys on to finish it on a later pass.
+    await recordTerminationProvenance(data, pr.pr_key, key, reason);
     try {
-      await terminatePrLoop(data, engine, pr.pr_key, key, `${parkedOn === "incident" ? "incident" : "review wait"} retired: PR ${liveness} out-of-band`, true);
+      await terminatePrLoop(data, engine, pr.pr_key, key, reason, true);
     } catch (err) {
       // Only finalize the row once the instance is confirmed gone/terminal: a transiently-failed
       // cancel would otherwise drop the row from `waiting_review` scans while the live instance's
@@ -3351,6 +3390,11 @@ async function reconcilePrIncidents(
     // instance. Reuses the canonical `TERMINAL_STATUSES` so incident logic can't drift from the rest
     // of the status machine. Writes stay on the base `prs`.
     if (!pr.process_key || TERMINAL_STATUSES.includes(pr.derived_status)) {
+      if (finish && hasPendingTerminalFinalization(pr)) {
+        await retryPendingTerminalFinalization(data, finish.engine, pr, finish.token).catch((err) => {
+          console.error(`[poller] incidents ${pr.pr_key}: finish pending retirement failed: ${err}`);
+        });
+      }
       await clearIncidentMirror(pr, (patch) => prs(data).update(pr.pr_key, patch));
       continue;
     }

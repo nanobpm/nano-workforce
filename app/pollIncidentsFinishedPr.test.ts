@@ -30,7 +30,7 @@ function memTable(rows: any[], key: string) {
   };
 }
 
-async function run(prState: { merged: boolean; state: string } | null, withFinisher = true) {
+async function run(prState: { merged: boolean; state: string } | null, withFinisher = true, rowOverrides: Record<string, unknown> = {}) {
   const row: any = {
     pr_key: `${REPO}#${NUMBER}`,
     repo: REPO,
@@ -42,6 +42,7 @@ async function run(prState: { merged: boolean; state: string } | null, withFinis
     incident_message: null,
     incident_since: null,
     updated_at: "t0",
+    ...rowOverrides,
   };
   const stores: Record<string, { rows: unknown[]; key: string }> = {
     pull_requests: { rows: [row], key: "pr_key" },
@@ -125,4 +126,39 @@ test("#1023: an unreadable PR state is conservative — the incident is mirrored
   const { row, cancelled } = await run(null);
   assertEquals(cancelled, []);
   assertEquals(row.incident_key, "INC-1");
+});
+
+// #1023 review: the cancel landed but the merged/abandoned row write failed. The row now reads
+// derived-terminal (`abandoned`), so the live-incident branch skips it — the persisted retirement
+// intent must still drive the finalization (and its retrospective / audit side effects) to completion.
+const PENDING = {
+  derived_status: "abandoned",
+  termination_reason: "incident retired: PR merged out-of-band",
+  termination_process_key: "84080",
+};
+
+test("#1023 review: a pending retirement on a derived-terminal row is finalized as MERGED on a later pass", async () => {
+  const { row } = await run({ merged: true, state: "closed" }, true, PENDING);
+  assertEquals(row.status, "merged");
+  assertEquals(typeof row.merged_at, "string");
+});
+
+test("#1023 review: a pending retirement whose PR CLOSED is finalized as abandoned with its audit row", async () => {
+  const { stores } = await run({ merged: false, state: "closed" }, true, {
+    ...PENDING,
+    termination_reason: "incident retired: PR closed out-of-band",
+  });
+  assertEquals(
+    stores.merges.rows.some((m: any) => m.outcome === "abandoned" && m.method === "pr-closed"),
+    true,
+  );
+});
+
+test("#1023 review: an operator-cancelled row (no retirement intent) is left alone", async () => {
+  const { row } = await run({ merged: true, state: "closed" }, true, {
+    ...PENDING,
+    termination_reason: "operator cancel (ui)",
+  });
+  assertEquals(row.status, "converging");
+  assertEquals(row.merged_at, undefined);
 });

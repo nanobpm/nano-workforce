@@ -360,7 +360,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrLivenessOut" />
         </zeebe:properties>
       </bpmn:extensionElements>
-      <bpmn:incoming>f_scopeLive</bpmn:incoming>
+      <bpmn:incoming>f_convergeOk</bpmn:incoming>
       <bpmn:outgoing>f_toScopeLive</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:exclusiveGateway id="gw-scope-live" name="PR open?" default="f_scopeLive">
@@ -816,7 +816,7 @@
           <zeebe:output source="=guardCustomInstructions" target="customInstructions" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
-      <bpmn:incoming>f_convergeOk</bpmn:incoming>
+      <bpmn:incoming>f_scopeLive</bpmn:incoming>
       <bpmn:outgoing>f_toScopeGate</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:exclusiveGateway id="gw-scope-gate" name="scope delivered?" default="f_scopeOk">
