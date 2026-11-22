@@ -1,3 +1,9 @@
+## [0.222.2](https://github.com/nanobpm/nano-workforce/compare/v0.222.1...v0.222.2) (2026-11-22)
+
+### Bug Fixes
+
+* **delivery:** start agent-node work SLA on job activation, not node entry ([#1021](https://github.com/nanobpm/nano-workforce/issues/1021)) ([aee0c2e](https://github.com/nanobpm/nano-workforce/commit/aee0c2e9c0afaac5a293e7d4a125356b74acafb1)), closes [#1016](https://github.com/nanobpm/nano-workforce/issues/1016) [#1020](https://github.com/nanobpm/nano-workforce/issues/1020) [#1016](https://github.com/nanobpm/nano-workforce/issues/1016)
+
 ## [0.222.1](https://github.com/nanobpm/nano-workforce/compare/v0.222.0...v0.222.1) (2026-11-22)
 
 ### Bug Fixes
