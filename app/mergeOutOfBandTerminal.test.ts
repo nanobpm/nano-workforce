@@ -15,7 +15,7 @@ import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { memStatusCas } from "../test/memStatusCas.ts";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
-import { pollMerges } from "./service.ts";
+import { pollMerges, withDependencyLock } from "./service.ts";
 
 // In-memory record gateway (get/find/insert/update/delete), matching app/promotionPoll.test.ts.
 function memData(): { data: DataLayer; stores: Record<string, any[]> } {
@@ -230,5 +230,30 @@ test("a failed publish reverts merging back to the read status", async () => {
   stores["pull_requests"] = [prRow("o/r#100", 100, "waiting_deps")];
   stores["pr_dependencies"] = [{ pr_key: "o/r#100", depends_on_key: "o/r#200", created_at: "t" }];
   await withGithub(new Map<number, Live>([[100, "merged"]]), () => pollMerges(data, engine, "tok").catch(() => {}));
+  assertEquals(stores["pull_requests"][0].status, "waiting_deps");
+});
+
+// Controlled interleaving (#1007 review, round 6): an adoption adding an UNMERGED prerequisite under
+// the PR's dependency lock while the poller evaluates `waiting_deps` must never let the poller clear
+// the PR from the pre-addition set. The poller's read + `deps-cleared` publish serializes behind the
+// same lock, so it sees the added blocker and holds the PR.
+test("pollMerges never clears deps from a set a concurrent adoption is extending (#1007 round 6)", async () => {
+  const { data, stores } = memData();
+  const { engine, messages } = recordingEngine();
+  stores["pull_requests"] = [prRow("o/r#100", 100, "waiting_deps"), { ...prRow("o/r#200", 200, "merged") }];
+  stores["pr_dependencies"] = [{ pr_key: "o/r#100", depends_on_key: "o/r#200", created_at: "t" }];
+  let release: () => void = () => {};
+  const adoption = withDependencyLock("o/r#100", async () => {
+    await new Promise<void>((r) => (release = r));
+    stores["pr_dependencies"].push({ pr_key: "o/r#100", depends_on_key: "o/r#300", created_at: "t" });
+  });
+  await withGithub(new Map<number, Live>([[100, "open"], [300, "open"]]), async () => {
+    const polling = pollMerges(data, engine, "tok");
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    release();
+    await adoption;
+    await polling;
+  });
+  assertEquals(messages.length, 0);
   assertEquals(stores["pull_requests"][0].status, "waiting_deps");
 });

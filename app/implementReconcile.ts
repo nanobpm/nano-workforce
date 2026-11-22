@@ -81,9 +81,18 @@ const str = (v: unknown): string | undefined =>
  *  an answerable `question`), and a reported non-completion outcome (`failed`/`needs_input`/unknown), are
  *  honoured as the agent's own decision and escalate accurately — never silently reconciled/adopted as a
  *  success by a branch PR that may be unrelated (#865 review). */
-export function shouldReconcileImplement(status: unknown, question?: unknown): boolean {
+export function shouldReconcileImplement(status: unknown, question?: unknown, pr?: unknown): boolean {
   if (hasAnswerableQuestion(typeof question === "string" ? question : null)) return false;
-  return str(status) === undefined || isClaimedCompletion(status);
+  return str(status) === undefined || isClaimedCompletion(status) || isKeylessOpened(status, pr);
+}
+
+/** A KEYLESS `opened` (issue #1007): the agent reported `status: "opened"` but no `pr` key reached the
+ *  cell (e.g. the agent opened the PR itself and never echoed its key). The cell's `ic_done` gate only
+ *  routes an `opened` WITH a PR key straight to done; a keyless one comes here so the PR is resolved
+ *  from the deterministic slice branch — otherwise the caller records `opened, pr: null`, never
+ *  converges it, and an epic's dependants are never dispatched (`NO_WORK_DISPATCHED`). */
+export function isKeylessOpened(status: unknown, pr: unknown): boolean {
+  return str(status) === "opened" && str(pr) === undefined;
 }
 
 /** The nudge appended to the implement agent's prompt on its one automatic retry (issue #865), naming
@@ -149,7 +158,7 @@ export async function reconcileImplement(
     // (#865 review). Only the successful-lookup paths below flip this to `true`.
     deliveryVerified: false,
   };
-  if (!shouldReconcileImplement(input.status, input.question)) return escalate;
+  if (!shouldReconcileImplement(input.status, input.question, input.pr)) return escalate;
   const taskId = str(input.taskId);
   // `subjectKey` shares the `owner/repo#N` shape parsePr validates; we use only its `repo` half.
   const parsed = parsePr(input.subjectKey);
@@ -195,7 +204,7 @@ function maybeRetry(
   escalate: ReconcileImplementResult,
 ): ReconcileImplementResult {
   const status = str(input.status);
-  if (!alreadyRetried && status !== undefined && isClaimedCompletion(status)) {
+  if (!alreadyRetried && status !== undefined && (isClaimedCompletion(status) || isKeylessOpened(status, input.pr))) {
     return {
       // Spread the (successful-lookup) escalate base so `deliveryVerified: true` is preserved — this
       // arm is only reached after a lookup CONFIRMED no adoptable PR.

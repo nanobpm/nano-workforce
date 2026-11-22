@@ -213,3 +213,25 @@ test("listEscalations: shared-secret guard — 401 without x-hook-secret, 200 wi
     else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
   }
 });
+
+test("listEscalations: each escalation carries the expectedFields its .form takes (issue #989)", async () => {
+  const { app } = memApp(
+    [
+      utRow({ user_task_key: "ut-pr", element_id: "wait-answer", updated_at: "2026-01-03T00:00:00.000Z" }),
+      utRow({ user_task_key: "ut-feat", element_id: "feature-escalation", updated_at: "2026-01-02T00:00:00.000Z" }),
+      utRow({ user_task_key: "ut-acp", element_id: "acp-permission", updated_at: "2026-01-01T00:00:00.000Z" }),
+    ],
+    [],
+  );
+  const listed = await callList(app);
+  const [pr, feat, acp] = listed.body.items;
+  assertEquals(pr.expectedFields.map((f: { name: string }) => f.name), ["answer"]);
+  assertEquals(pr.expectedFields[0].required, true);
+  const resolution = feat.expectedFields.find((f: { name: string }) => f.name === "resolution");
+  assertEquals(resolution.required, true);
+  assertEquals(resolution.enum, ["answer", "abandon"]);
+  const answer = feat.expectedFields.find((f: { name: string }) => f.name === "answer");
+  assertEquals(answer.required, false);
+  assertEquals(answer.requiredWhen, 'resolution == "answer"');
+  assert(Array.isArray(acp.expectedFields), "a kind with no form still lists an (empty) array");
+});

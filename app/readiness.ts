@@ -948,25 +948,29 @@ export interface EpicObservation {
   /** Count of slice PRs on the epic — bound downstream as a fact (parity with the `pr` kind's
    * `mergedSha`), so a consumer can pin how many PRs the epic landed. */
   readonly prCount: number;
+  /** The lineage thread's root kind (`epic` for a plan-fanout epic, `feature`/`pr`/… otherwise; `""`
+   * when absent). A known plan-fanout epic must satisfy the AGGREGATE — never the GitHub issue fallback. */
+  readonly kind: string;
 }
 
 /** Parse a raw `/lineage?root=<planKey>` response (already JSON-decoded) into an {@link EpicObservation}
- * for `planKey`. The endpoint returns `{ count, threads: [thread] }` (or `threads: []` for an unknown
- * root); this reads the thread whose `rootRequestKey` matches `planKey`. Tolerant: a malformed/empty
- * payload yields an absent observation, so a transient read degrades to "not ready" (keep waiting),
- * never a throw. */
+ * for `planKey`. The endpoint returns the Camunda list envelope `{ items: [thread], page }` (or
+ * `items: []` for an unknown root) — see `operations/getLineage.ts` + `app/apiShape.ts`; this reads
+ * the item whose `rootRequestKey` matches `planKey`. Tolerant: a malformed/empty payload yields an
+ * absent observation, so a transient read degrades to "not ready" (keep waiting), never a throw. */
 export function parseEpicLineage(payload: unknown, planKey: string): EpicObservation {
   const j = isRecord(payload) ? payload : {};
-  const threads = Array.isArray(j.threads) ? j.threads : [];
+  const threads = Array.isArray(j.items) ? j.items : [];
   const key = planKey.trim();
   const thread = threads.find((t) => isRecord(t) && str(t.rootRequestKey).trim() === key);
-  if (!isRecord(thread)) return { present: false, stage: "", active: false, prCount: 0 };
+  if (!isRecord(thread)) return { present: false, stage: "", active: false, prCount: 0, kind: "" };
   const prCount = num(thread.prCount);
   return {
     present: true,
     stage: str(thread.stage).trim().toLowerCase(),
     active: thread.active === true,
     prCount: typeof prCount === "number" ? prCount : 0,
+    kind: str(thread.kind).trim().toLowerCase(),
   };
 }
 
@@ -992,6 +996,25 @@ export function matchEpic(match: ProbeMatch | undefined, epic: EpicObservation):
       : `epic in flight (stage '${epic.stage || "unknown"}', not merged yet)`,
     observed: `stage=${epic.stage || "unknown"} active=${epic.active} prCount=${epic.prCount}`,
   };
+}
+
+/** Build the `gh issue view` command reading an issue's closure state (#992). `gh` reads its token
+ * from the ambient env, like the `pr` kind. */
+export function issueViewCommand(repo: string, number: string): string {
+  return `gh issue view ${shellQuote(number)} --repo ${shellQuote(repo)} --json ${shellQuote("state,stateReason")}`;
+}
+
+/** GitHub-truth "landed" check for an issue (#992): ready EXACTLY when the issue is CLOSED with
+ * `stateReason: COMPLETED` — independent of who/what closed it (nwf, Mergify, a human). PURE; a
+ * malformed payload is simply not ready. A NOT_PLANNED closure never counts as landed. */
+export function matchIssueClosed(payload: unknown): ProbeResult {
+  const j = isRecord(payload) ? payload : {};
+  const state = str(j.state).trim().toUpperCase();
+  const reason = str(j.stateReason).trim().toUpperCase();
+  if (state === "CLOSED" && reason === "COMPLETED") {
+    return { ready: true, detail: "issue closed as completed on GitHub (landed outside nwf lineage)" };
+  }
+  return { ready: false, detail: `issue state=${state || "unknown"} reason=${reason || "none"} (not landed)` };
 }
 
 /** Build the app's lineage read-model URL for an epic's `planKey`. The app mounts its OpenAPI paths
@@ -1065,9 +1088,61 @@ export async function probeOnce(
       const key = parsePlanKey(probe.target);
       if (!key) return { ready: false, detail: "epic: unresolved/unparseable planKey (not ready)" };
       const url = epicLineageUrl(key.planKey, readEnvOr("NANO_WORKFORCE_BASE_URL", "", env));
-      const resp = await exec.httpGet(url, { accept: "application/json" });
-      if (resp.status < 200 || resp.status >= 300) return { ready: false, detail: `epic: lineage read HTTP ${resp.status} (not ready)` };
-      return matchEpic(probe.match, parseEpicLineage(parseJson(resp.body), key.planKey));
+      let lineage: ProbeResult;
+      let observed: EpicObservation | null = null;
+      // The GitHub issue-closure fallback (#992) is only safe when lineage was READ successfully and
+      // the thread is genuinely absent/non-epic there. A failed/unauthenticated/unparseable read
+      // leaves the aggregate guard blind, so the fallback stays shut (fail closed).
+      let lineageRead = false;
+      try {
+        // The lineage endpoint enforces the app's optional shared-secret guard (`x-hook-secret`,
+        // `operations/getLineage.ts`): send the configured secret so a protected deployment's read
+        // is authenticated rather than 401-blind.
+        const headers: Record<string, string> = { accept: "application/json" };
+        const hookSecret = readEnvOr("NANO_PR_WEBHOOK_SECRET", "", env);
+        if (hookSecret) headers["x-hook-secret"] = hookSecret;
+        const resp = await exec.httpGet(url, headers);
+        if (resp.status < 200 || resp.status >= 300) {
+          lineage = { ready: false, detail: `epic: lineage read HTTP ${resp.status} (not ready)` };
+        } else {
+          const body = parseJson(resp.body);
+          // Validate the envelope BEFORE enabling the #992 fallback: only a well-formed lineage list
+          // (`{ items: [] }`) proves the thread is genuinely absent/non-epic. A malformed 2xx (`{}`,
+          // no `items` array, unparseable) is as blind as a thrown/401 read — it cannot tell "no such
+          // thread" from "a known epic whose slices are unmerged" — so it must fail closed, never open
+          // the gate via GitHub issue closure.
+          if (isRecord(body) && Array.isArray(body.items)) {
+            observed = parseEpicLineage(body, key.planKey);
+            lineage = matchEpic(probe.match, observed);
+            lineageRead = true;
+          } else {
+            lineage = { ready: false, detail: "epic: lineage read malformed (no items envelope) (not ready)" };
+          }
+        }
+      } catch (e) {
+        // Error CLASS only — never the raw message (it may carry URL/credential detail), matching the
+        // worker's `errorDetail` sanitisation.
+        lineage = { ready: false, detail: `epic: lineage read failed (${e instanceof Error ? e.name : "Error"})` };
+      }
+      if (lineage.ready) return lineage;
+      // A KNOWN plan-fanout epic keeps the aggregate guarantee: a closed parent issue does not mean
+      // every slice merged, so never let the issue-closure fallback bypass `matchEpic` for it.
+      if (observed?.present && observed.kind === "epic") return lineage;
+      // #992: nwf lineage only records merges nwf itself drove. A dependency that landed any other
+      // way (Mergify/human merge after the loop was cancelled, work done outside nwf, nwf reset) is
+      // only visible as GitHub truth — the issue CLOSED as COMPLETED. Accept that route too — but
+      // ONLY once lineage was read successfully: a failed read (401/5xx/throw) cannot distinguish
+      // "no such thread" from "a known epic whose slices are unmerged", so it must fail closed.
+      if (!lineageRead) return lineage;
+      const ref = parsePr(key.planKey);
+      if (!ref) return lineage;
+      const out = await exec.run(issueViewCommand(ref.repo, String(ref.number)), env);
+      if (out.code !== 0) return lineage;
+      const gh = matchIssueClosed(parseJson(out.stdout));
+      // Keep the epic kind's `prCount` fact contract (#572): retain a known lineage count; zero only
+      // when lineage is absent/unreadable.
+      const prCount = observed?.present ? observed.prCount : 0;
+      return gh.ready ? { ...gh, bind: { prCount: String(prCount) } } : { ...lineage, detail: `${lineage.detail}; ${gh.detail}` };
     }
   }
 }

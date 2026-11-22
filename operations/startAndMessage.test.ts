@@ -7,6 +7,7 @@
 // rejecting an unparseable reference with a 400.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
+import { memOpenWithDepsTx } from "#test-open-tx";
 import type { AppApi } from "@nanobpm/urban";
 import { noopLog } from "../test/log.ts";
 import startConvergenceLoop from "./startConvergenceLoop.ts";
@@ -37,6 +38,7 @@ test("startConvergenceLoop → 400 on an unparseable PR reference", async () => 
 // real delegate → submitPr against an in-memory app and captures the `convergeOnly` process variable.
 function captureApp() {
   const rows: Record<string, unknown>[] = [];
+  const depRows: Record<string, unknown>[] = [];
   let captured: unknown;
   const data = {
     table: (_name: string, key: string) => ({
@@ -58,6 +60,8 @@ function captureApp() {
         return Promise.resolve();
       },
     }),
+    // submitPr's registerDependencies runs through `open().tx` since the round-3 atomicity fix.
+    open: memOpenWithDepsTx({ pr_dependencies: { rows: depRows, key: "pr_key" } }),
   };
   const engine = {
     createInstance: (req: { variables?: Record<string, unknown> }) => {
@@ -213,6 +217,7 @@ test("startConvergenceLoop → 400 on a non-boolean autoMerge (issue #916)", asy
 // createInstance variables.
 function captureInstructions() {
   const rows: Record<string, unknown>[] = [];
+  const depRows: Record<string, unknown>[] = [];
   let captured: unknown;
   const data = {
     table: (_name: string, key: string) => ({
@@ -234,6 +239,8 @@ function captureInstructions() {
         return Promise.resolve();
       },
     }),
+    // submitPr's registerDependencies runs through `open().tx` since the round-3 atomicity fix.
+    open: memOpenWithDepsTx({ pr_dependencies: { rows: depRows, key: "pr_key" } }),
   };
   const engine = {
     createInstance: (req: { variables?: Record<string, unknown> }) => {

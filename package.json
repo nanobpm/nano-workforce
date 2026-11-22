@@ -1,12 +1,13 @@
 {
   "name": "@nanobpm/nano-workforce",
-  "version": "0.216.1",
+  "version": "0.219.0",
   "description": "Nano Workforce — an Agent Graph Orchestration application for Agentic SDLC: durable BPMN processes that coordinate a graph of AI agents across the software delivery lifecycle.",
   "type": "module",
   "main": "main.ts",
   "imports": {
     "#test-assert": "./test/assert.ts",
-    "#test-migrations": "./test/migrations.ts"
+    "#test-migrations": "./test/migrations.ts",
+    "#test-open-tx": "./test/openTx.ts"
   },
   "engines": {
     "node": ">=22.6"
@@ -66,13 +67,13 @@
   },
   "dependencies": {
     "@nanobpm/agentic": "^0.16.0",
-    "@nanobpm/urban": "^0.99.0",
-    "bpmn-auto-layout": "^2.0.0-alpha.2"
+    "@nanobpm/urban": "^0.99.1",
+    "bpmn-auto-layout": "git+https://github.com/jwulf/bpmn-auto-layout.git#25251a2ac5802c74d9a00f8d087052091530a0f5"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",
-    "@nanobpm/urban-testkit": "^1.6.0",
-    "@nanobpm/workflow": "^0.15.0",
+    "@nanobpm/urban-testkit": "^1.7.1",
+    "@nanobpm/workflow": "^0.20.0",
     "@semantic-release/changelog": "^7.0.0",
     "@semantic-release/exec": "^7.1.0",
     "@semantic-release/git": "^11.0.0",
@@ -85,7 +86,8 @@
     "yaml": "^2.9.0"
   },
   "overrides": {
-    "@nanobpm/engine-wasm": "^0.11.0",
-    "@semantic-release/npm": "^13.1.5"
+    "@nanobpm/engine-wasm": "^0.11.1",
+    "@semantic-release/npm": "^13.1.5",
+    "bpmn-auto-layout": "$bpmn-auto-layout"
   }
 }

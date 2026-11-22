@@ -202,7 +202,9 @@ test("retro's complete port differs from its golden by ONLY the agent-task marke
   //     When the marker assertion starts failing, upstream task() grew marker support;
   //     when the boundary assertion starts failing, the builder grew boundary events:
   //     un-park retro by threading `retroFlow` back into its PORTS entry in ./flows.ts.
-  assertEquals(markers(derived), 0, "@nanobpm/workflow can now emit <zeebe:agentDefinition/> — un-park retro");
+  //     @nanobpm/workflow 0.20 task() now emits the marker on both agent tasks, so the
+  //     marker is no longer a blocker — only the SLA boundaries keep retro parked.
+  assertEquals(markers(derived), 2, "@nanobpm/workflow should emit <zeebe:agentDefinition/> on both agent tasks");
   assertEquals(boundaries(derived), 0, "@nanobpm/workflow can now emit boundary events — un-park retro");
 
   // (c) strip exactly the marker lines AND the SLA boundary blocks (plus their
@@ -212,7 +214,6 @@ test("retro's complete port differs from its golden by ONLY the agent-task marke
   //     normalize/equality — so nothing but the marker + SLA-escalation apparatus
   //     diverges.
   const unmarked = golden
-    .replace(/^[ \t]*<(?:\w+:)?agentDefinition\b[^>]*\/>[ \t]*\r?\n/gm, "")
     .replace(/^[ \t]*<(?:\w+:)?boundaryEvent\b[\s\S]*?<\/(?:\w+:)?boundaryEvent>\r?\n/gm, "")
     // the SLA recorder service tasks (record-conformance-sla / record-synthesize-sla) and the
     // `<!-- Agent-SLA recorders: … -->` comment block immediately preceding them
@@ -225,7 +226,7 @@ test("retro's complete port differs from its golden by ONLY the agent-task marke
     // elements, so strip the golden's `io.nanobpm.dataEnvelope.in` start declaration too. Its field
     // set is pinned against the app seed by app/startEnvelopeDrift.test.ts.
     .replace(/(<(?:\w+:)?startEvent\b[^>]*>)\s*<(?:\w+:)?extensionElements>[\s\S]*?<\/(?:\w+:)?extensionElements>/, "$1");
-  assertEquals(markers(unmarked), 0, "the strip must remove every marker line");
+  assertEquals(markers(unmarked), 2, "the strip must keep both marker lines (the builder emits them)");
   assertEquals(boundaries(unmarked), 0, "the strip must remove every SLA boundary");
   const expected = normalize(unmarked);
   const actual = normalize(derived);

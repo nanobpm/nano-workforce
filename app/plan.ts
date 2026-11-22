@@ -29,8 +29,8 @@ import {
   fetchIssueTitle,
 } from "./github.ts";
 import { derivedTrackingTable } from "./instanceTracking.ts";
+import { type ParsedIssue, parseIssue } from "./issueParse.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
-import { parsePr } from "./prParse.ts";
 import type { ReadinessProbe } from "./readiness.ts";
 import { requireRepoEnvelopeVars } from "./repoEnvelope.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
@@ -101,6 +101,11 @@ export interface Plan {
   // Opt-in escalation steward (120_escalation_auto_resolutions.sql, issue #889): 1 ⇒ this epic's
   // escalations (and its spawned child loops) are eligible for steward auto-resolution. Default 0.
   auto_resolve_escalations: number;
+  // Epic merge policy (140_plans_auto_merge.sql, issue #1007): 1 ⇒ each slice PR's convergence loop
+  // auto-merges into `base_branch`; 0 ⇒ converge-only (the operator's explicit `autoMerge: false`).
+  // This is the DURABLE source of truth `pr.converge-slice` reads — persisted here (not only the
+  // clobberable process variable) so an agent completion can never override the operator's opt-out.
+  auto_merge: number;
   // The derived epic delivery signal (029_plan_delivery.sql) was RETIRED as a stored column (epic
   // #412): `delivery` / `delivery_label` are now a DERIVED SQL VIEW (`plan_delivery` /
   // `plan_read_model`, 061), computed from the SAME pure `deriveDelivery`/`TERMINAL_STATUSES`
@@ -502,55 +507,11 @@ export const MAX_PLAN_REVIEW_ROUNDS = positiveIntEnv("NANO_PLAN_REVIEW_ROUNDS", 
  * is in flight. The cancel guard and the active view key off this. */
 export const PLAN_TERMINAL_STATUSES = ["done", "failed", "abandoned"] as const;
 
-export interface ParsedIssue {
-  repo: string;
-  number: number;
-  url: string;
-  planKey: string;
-}
-
-/** Parse "owner/repo#123" or a canonical issue URL into its parts. The URL branch is the /issues/
- * spelling; the shorthand branch DELEGATES to the canonical {@link parsePr} (`app/prParse.ts`) — the
- * single source of truth for the `owner/repo#N` shape — rather than carrying a second copy of its
- * regex (#856/#857: a duplicated shorthand grammar is exactly the drift the single-grammar guard bans).
- *
- * `parseIssue` admits an ISSUE reference, and `parsePr` ALSO accepts a `/pull/<n>` URL, so delegating
- * raw input to it would silently widen every issue-target door (startPlan/startFeature/startEpicSet,
- * plan deps) to accept a PR URL — resolvable-by-accident (issues and PRs share GitHub's number space)
- * but undocumented and off-contract (#857). So only the bare `owner/repo#N` shorthand is delegated: a
- * GitHub URL that is not the `/issues/` spelling handled above (a PR URL, a commit URL, …) fails closed
- * here. The gate keys on the `github.com/` HOST spelling (host + path separator), which every GitHub
- * URL carries but the `owner/repo#N` shorthand never does — NOT the bare `github.com` substring, which
- * a valid shorthand CAN carry as a repository name (`owner/github.com#42`, which `parsePr` accepts).
- * So the host-spelling gate rejects every non-issue GitHub URL while leaving the shorthand — including
- * a repo literally named `github.com` — to the one canonical grammar. */
-export function parseIssue(input: string): ParsedIssue | null {
-  const s = input.trim();
-  // ANCHORED to the whole string with an exact `github.com` host (optional scheme + `www.`),
-  // mirroring the hardened `parsePr` URL branch: the old UNANCHORED `github\.com/…` matched
-  // `github.com` as a SUBSTRING — a spoofed host suffix (`notgithub.com`), a userinfo trick
-  // (`github.com@evil.com`), or any prose-wrapped occurrence — and issue intake then operated on the
-  // embedded `owner/repo`, a DIFFERENT target than the submitted value (#857 review). Supported URL
-  // suffixes (`?query`, `#fragment`) are preserved via the trailing group.
-  const m = s.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)(?:[/?#].*)?$/i);
-  if (m) {
-    const repo = `${m[1]}/${m[2]}`;
-    const number = Number(m[3]);
-    return { repo, number, url: `https://github.com/${repo}/issues/${number}`, planKey: `${repo}#${number}` };
-  }
-  if (/github\.com\//i.test(s)) return null;
-  const pr = parsePr(s);
-  if (pr) {
-    return { repo: pr.repo, number: pr.number, url: `https://github.com/${pr.repo}/issues/${pr.number}`, planKey: pr.prKey };
-  }
-  return null;
-}
-
 /** The base-branch validation gate lives in the side-effect-free leaf `./baseBranch.ts` so an API
  * door (e.g. `operations/dispatchDeliveryGraph.ts`) can reuse it without importing this heavy module
  * and its import-time env seeding. Re-exported here so existing importers keep resolving through
  * `plan.ts` — one implementation (derivation over duplication), just hoisted below the heavy module. */
-export { InvalidBaseBranchError, isPlausibleBranchName, MissingBaseBranchError, normalizeBaseBranch };
+export { InvalidBaseBranchError, isPlausibleBranchName, MissingBaseBranchError, normalizeBaseBranch, type ParsedIssue, parseIssue };
 
 /** The per-instance brief appended to an implementer agent's prompt when the plan pins a base
  * branch. It is authoritative over the static "branch off the default branch" wording in
@@ -932,6 +893,10 @@ export interface StartPlanOptions {
   /** Opt-in escalation steward (issue #889): when true, this epic's escalations — and every child
    * convergence/merge loop it spawns — become eligible for steward auto-resolution. Default false. */
   autoResolveEscalations?: boolean;
+  /** The epic's merge policy for its slice PRs (issue #1007): each slice PR is converged inside the
+   * epic (`converge-cell`), and auto-merged into the epic base branch unless this is `false`. Default
+   * true. */
+  autoMerge?: boolean;
 }
 
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
@@ -1019,6 +984,7 @@ export async function startPlan(
       blackboard_token: token,
       base_branch: base,
       auto_resolve_escalations: opts.autoResolveEscalations === true ? 1 : 0,
+      auto_merge: opts.autoMerge === false ? 0 : 1,
       updated_at: ts,
     });
   } else {
@@ -1035,6 +1001,7 @@ export async function startPlan(
       blackboard_token: token,
       base_branch: base,
       auto_resolve_escalations: opts.autoResolveEscalations === true ? 1 : 0,
+      auto_merge: opts.autoMerge === false ? 0 : 1,
       created_at: ts,
       updated_at: ts,
     });
@@ -1065,6 +1032,12 @@ export async function startPlan(
       // AND persisted on the `plans` row (the durable source the steward's eligibility reads), so an
       // agent-completion clobber of the variable can never silently opt an epic in or out (#887/#888).
       autoResolveEscalations: opts.autoResolveEscalations === true,
+      // Slice merge policy (issue #1007): the operator's intent, ALSO persisted on the durable
+      // `plans.auto_merge` column (above) which `pr.converge-slice` reads. The variable is kept on
+      // the instance for searchability/observability, but the durable row is authoritative — an
+      // agent completion echoing `autoMerge` can clobber this variable yet never the row, so an
+      // operator's explicit `false` opt-out survives agent output (#1007 review).
+      autoMerge: opts.autoMerge !== false,
       // Agent-task liveness SLA (issue #849): PRE-SEED the canonical bound for the fan-out's
       // external agent tasks. Each slice's implementation agent (via the implement-cell
       // callActivity's explicit `agentSlaTimeout` input mapping) is bounded today; the wave's own

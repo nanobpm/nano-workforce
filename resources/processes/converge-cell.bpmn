@@ -4,10 +4,18 @@
     <bpmn:extensionElements>
       <nano:shapes>
         <nano:shape id="ConvergeCellStartIn" name="Converge cell — start input">
-          <nano:extend name="featureKey" type="string" />
+          <nano:extend name="featureKey" type="string" optional="true" />
           <nano:extend name="prKey" type="string" />
           <nano:extend name="autoMerge" type="boolean" optional="true" />
           <nano:extend name="humanApproval" type="boolean" optional="true" />
+          <nano:extend name="planKey" type="string" optional="true" />
+          <nano:extend name="taskId" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="ConvergeSliceIn" name="Converge epic slice PR — input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="taskId" type="string" optional="true" />
+          <nano:extend name="prKey" type="string" />
+          <nano:extend name="autoMerge" type="boolean" optional="true" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>
@@ -17,8 +25,23 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ConvergeCellStartIn" />
         </zeebe:properties>
       </bpmn:extensionElements>
-      <bpmn:outgoing>cc_toConverge</bpmn:outgoing>
+      <bpmn:outgoing>cc_toKind</bpmn:outgoing>
     </bpmn:startEvent>
+    <bpmn:exclusiveGateway id="cc_gw_kind" name="epic slice?" default="cc_toConverge">
+      <bpmn:incoming>cc_toKind</bpmn:incoming>
+      <bpmn:outgoing>cc_toConverge</bpmn:outgoing>
+      <bpmn:outgoing>cc_toConvergeSlice</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="converge-slice" name="Hand off epic slice to convergence loop">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.converge-slice" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ConvergeSliceIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>cc_toConvergeSlice</bpmn:incoming>
+      <bpmn:outgoing>cc_sliceToEnd</bpmn:outgoing>
+    </bpmn:serviceTask>
     <bpmn:serviceTask id="converge" name="Hand off to convergence loop">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.converge-feature" />
@@ -31,8 +54,14 @@
     </bpmn:serviceTask>
     <bpmn:endEvent id="End" name="Converging">
       <bpmn:incoming>cc_toEnd</bpmn:incoming>
+      <bpmn:incoming>cc_sliceToEnd</bpmn:incoming>
     </bpmn:endEvent>
-    <bpmn:sequenceFlow id="cc_toConverge" sourceRef="Start" targetRef="converge" />
+    <bpmn:sequenceFlow id="cc_toKind" sourceRef="Start" targetRef="cc_gw_kind" />
+    <bpmn:sequenceFlow id="cc_toConverge" name="feature run" sourceRef="cc_gw_kind" targetRef="converge" />
+    <bpmn:sequenceFlow id="cc_toConvergeSlice" name="epic slice" sourceRef="cc_gw_kind" targetRef="converge-slice">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=is defined(planKey) and planKey != null</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="cc_sliceToEnd" sourceRef="converge-slice" targetRef="End" />
     <bpmn:sequenceFlow id="cc_toEnd" sourceRef="converge" targetRef="End" />
   </bpmn:process>
   <bpmndi:BPMNDiagram id="BPMNDiagram_converge-cell">
@@ -43,22 +72,51 @@
           <dc:Bounds x="68" y="143" width="60" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="BPMNShape_converge" bpmnElement="converge">
-        <dc:Bounds x="216" y="80" width="100" height="80" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="BPMNShape_End" bpmnElement="End">
-        <dc:Bounds x="416" y="102" width="36" height="36" />
+      <bpmndi:BPMNShape id="BPMNShape_cc_gw_kind" bpmnElement="cc_gw_kind" isMarkerVisible="true">
+        <dc:Bounds x="216" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="396" y="143" width="76" height="14" />
+          <dc:Bounds x="202" y="76" width="78" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNEdge id="BPMNEdge_cc_toConverge" bpmnElement="cc_toConverge">
+      <bpmndi:BPMNShape id="BPMNShape_converge-slice" bpmnElement="converge-slice">
+        <dc:Bounds x="366" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_converge" bpmnElement="converge">
+        <dc:Bounds x="366" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_End" bpmnElement="End">
+        <dc:Bounds x="566" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="546" y="83" width="76" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="BPMNEdge_cc_toKind" bpmnElement="cc_toKind">
         <di:waypoint x="116" y="120" />
         <di:waypoint x="216" y="120" />
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_cc_toConverge" bpmnElement="cc_toConverge">
+        <di:waypoint x="266" y="120" />
+        <di:waypoint x="366" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="277" y="128" width="78" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_cc_toEnd" bpmnElement="cc_toEnd">
-        <di:waypoint x="316" y="120" />
-        <di:waypoint x="416" y="120" />
+        <di:waypoint x="466" y="120" />
+        <di:waypoint x="566" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_cc_toConvergeSlice" bpmnElement="cc_toConvergeSlice">
+        <di:waypoint x="241" y="145" />
+        <di:waypoint x="241" y="280" />
+        <di:waypoint x="366" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="246" y="206" width="71" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_cc_sliceToEnd" bpmnElement="cc_sliceToEnd">
+        <di:waypoint x="466" y="280" />
+        <di:waypoint x="584" y="280" />
+        <di:waypoint x="584" y="138" />
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>

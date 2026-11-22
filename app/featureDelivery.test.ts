@@ -101,6 +101,30 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
       }
       return { changed };
     },
+    // submitPr's registerDependencies runs its DELETE+INSERTs through `tx` since the round-3
+    // atomicity fix (issue #1007 review) — model it against the in-memory `pr_dependencies` store.
+    async tx(fn: (q: { exec: (sql: string, params?: any[]) => Promise<{ changed: number }> }) => Promise<unknown>) {
+      return fn({
+        async exec(sql: string, params: any[] = []) {
+          if (/^DELETE FROM "pr_dependencies" WHERE "pr_key" = \?$/.test(sql)) {
+            const rows = stores.pr_dependencies ?? [];
+            let changed = 0;
+            for (let i = rows.length - 1; i >= 0; i--) {
+              if (rows[i].pr_key === params[0]) {
+                rows.splice(i, 1);
+                changed++;
+              }
+            }
+            return { changed };
+          }
+          if (/^INSERT INTO "pr_dependencies"/.test(sql)) {
+            (stores.pr_dependencies ??= []).push({ pr_key: params[0], depends_on_key: params[1], created_at: params[2] });
+            return { changed: 1 };
+          }
+          throw new Error(`memData mock: unhandled tx sql: ${sql}`);
+        },
+      });
+    },
   });
   return { data, stores };
 }

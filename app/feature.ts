@@ -19,6 +19,7 @@ import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcr
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { derivedTrackingTable } from "./instanceTracking.ts";
+import { issueReadCommand } from "./operatorFeedback.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
 import type { ReadinessProbe } from "./readiness.ts";
 import { requireRepoEnvelopeVars, sliceBranchCreate } from "./repoEnvelope.ts";
@@ -350,6 +351,9 @@ export type StartFeatureResult = {
   processKey: string | null;
   /** True iff a non-terminal prior run short-circuited the start (`outcome === "already-active"`). */
   alreadyRunning: boolean;
+  /** The base branch the run ACTUALLY targets: the admitted request base for `started`/`noop-terminal`,
+   *  but the LIVE run's persisted `base_branch` for `already-active` (the request did not change it). */
+  baseBranch: string;
 };
 
 /** The deterministic task id for a single-issue run — the implementation agent branches
@@ -436,6 +440,7 @@ export async function startFeature(
       outcome: "already-active",
       processKey: trackedExisting.process_key,
       alreadyRunning: true,
+      baseBranch: trackedExisting.base_branch,
     };
   }
   const base = normalizeBaseBranch(baseBranch);
@@ -524,7 +529,7 @@ export async function startFeature(
     variables: {
       featureKey: parsed.planKey,
       repo: parsed.repo,
-      // The parent issue reference (`owner/repo#123`) the agent reads for context (`gh issue view`).
+      // The parent issue reference (`owner/repo#123`) the agent reads for context (`issueReadCommand`).
       issue: parsed.planKey,
       issueNumber: parsed.number,
       issueUrl: parsed.url,
@@ -536,7 +541,7 @@ export async function startFeature(
         title: parsed.planKey,
         prompt:
           `Implement the GitHub issue ${parsed.planKey} end to end. Read it in full first ` +
-          `(\`gh issue view ${parsed.number} -R ${parsed.repo}\`), implement it completely, ` +
+          `(\`${issueReadCommand(parsed.number, parsed.repo)}\` — body AND every comment; operator comments are scope), implement it completely, ` +
           `and open exactly one pull request that closes it.`,
       },
       // Follow-on knobs, read by the record/converge workers. `autoMerge` is the canonical
@@ -617,10 +622,10 @@ export async function startFeature(
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
   if (processKey != null) {
     await table.update(parsed.planKey, { process_key: processKey, updated_at: now() });
-    return { featureKey: parsed.planKey, outcome: "started", processKey, alreadyRunning: false };
+    return { featureKey: parsed.planKey, outcome: "started", processKey, alreadyRunning: false, baseBranch: base };
   }
   // The engine accepted the start but returned NO instance key — nothing was actually dispatched.
   // Report a discriminated no-op (issue #704) so the caller can surface it as a distinct non-success
   // instead of a bare green "Done": a submit that dispatches no instance is not "started".
-  return { featureKey: parsed.planKey, outcome: "noop-terminal", processKey: null, alreadyRunning: false };
+  return { featureKey: parsed.planKey, outcome: "noop-terminal", processKey: null, alreadyRunning: false, baseBranch: base };
 }

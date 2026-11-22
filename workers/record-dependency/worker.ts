@@ -12,7 +12,7 @@
 // duplicates, and insert missing edges idempotently — a worker retry never double-inserts, and an
 // already-recorded edge is a no-op.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { ensurePr, parsePr } from "../../app/service.ts";
+import { ensurePr, parsePr, unionDependencies } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`RecordDepIn` in merge-loop.bpmn) — ADR 0040. The
@@ -56,15 +56,13 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // Append the discovered edges to whatever the plan DAG already declared — never wipe the set
   // (a `registerDependencies`-style replace would drop still-relevant sibling ordering). Dedupe
   // against existing rows so this is safe to retry.
-  const existing = await depTable.find({ pr_key: prKey });
-  const have = new Set(existing.map((d) => d.depends_on_key));
-  let recorded = 0;
-  for (const depKey of depKeys) {
-    if (depKey === prKey || have.has(depKey)) continue; // never wait on self; skip known edges
-    await depTable.insert({ pr_key: prKey, depends_on_key: depKey, created_at: ts });
-    have.add(depKey);
-    recorded += 1;
-  }
+  // Routed through the canonical locked, transactional union (issue #1007 review, round 7): the
+  // additions are atomic, duplicate-safe (INSERT … WHERE NOT EXISTS), and ordered with the merge
+  // poller's dependency read, so it can never clear deps from the pre-addition set.
+  const before = await depTable.find({ pr_key: prKey });
+  await unionDependencies(app.data, prKey, depKeys);
+  const have = new Set((await depTable.find({ pr_key: prKey })).map((d) => d.depends_on_key));
+  const recorded = have.size - new Set(before.map((d) => d.depends_on_key)).size;
 
   if (depKeys.length === 0) {
     // The agent signalled "waiting-on-pr" but named no parseable PR. Whether this actually strands

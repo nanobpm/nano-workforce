@@ -44,7 +44,7 @@ test("shouldReconcileImplement: blank or a claimed-completion (off-vocabulary) s
   assertEquals(shouldReconcileImplement("done"), true);
   // Recognised statuses are the agent's own clean terminal / escalation — never auto-reconciled.
   assertEquals(shouldReconcileImplement("escalated"), false);
-  assertEquals(shouldReconcileImplement("opened"), false);
+  assertEquals(shouldReconcileImplement("opened", null, "owner/repo#5"), false);
   assertEquals(shouldReconcileImplement("blocked"), false);
   assertEquals(shouldReconcileImplement("skipped"), false);
   // An off-vocabulary status carrying an answerable question is a GENUINE escalation — honour it.
@@ -320,4 +320,33 @@ test("reconcileImplement: a blank status + a NULL listing → escalate (unavaila
     "token",
   );
   assertEquals(res, { reconciled: false, status: null, pr: "owner/repo#42", ...tail });
+});
+
+// Issue #1007 (Related): a wave-1 slice whose agent opened the PR itself was recorded as
+// `status: opened, pr: null`, so it was never converged and its dependants were never dispatched.
+// A KEYLESS `opened` must resolve the PR from the deterministic slice branch.
+test("shouldReconcileImplement: a keyless 'opened' reconciles; an 'opened' carrying a PR key does not (#1007)", () => {
+  assertEquals(shouldReconcileImplement("opened", null, null), true);
+  assertEquals(shouldReconcileImplement("opened", null, "  "), true);
+  assertEquals(shouldReconcileImplement("opened", null, "owner/repo#5"), false);
+});
+
+test("reconcileImplement: keyless 'opened' + an open PR on feat/<task.id> → adopt that PR (#1007)", async () => {
+  const res = await reconcileImplement(
+    { status: "opened", pr: null, subjectKey: "owner/repo#1", taskId: "t1", baseBranch: "main" },
+    async () => [openPr(225)],
+    "token",
+  );
+  assertEquals(res, { reconciled: true, status: "opened", pr: "owner/repo#225", ...verified });
+});
+
+test("reconcileImplement: keyless 'opened' + NO PR → auto-retry once, like a claimed completion (#1007)", async () => {
+  const res = await reconcileImplement(
+    { status: "opened", pr: null, subjectKey: "owner/repo#1", taskId: "t1" },
+    async () => [],
+    "token",
+  );
+  assertEquals(res.reconciled, false);
+  assertEquals(res.retry, true);
+  assertEquals(res.retried, true);
 });

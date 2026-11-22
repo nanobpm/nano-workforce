@@ -20,7 +20,9 @@ import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generate
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { isPlausibleBranchName } from "./baseBranch.ts";
-import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText, requiredEmitsByNodeId } from "./deliveryGraphCompiler.ts";
+import { redactConnectorValue } from "./deliveryGraph.ts";
+import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText, redactProbeTargetForDisplay, requiredEmitsByNodeId } from "./deliveryGraphCompiler.ts";
+import { GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -662,4 +664,116 @@ function buildNodeInput(
     default:
       return assertNever(node, "buildNodeInput");
   }
+}
+
+/** One step of a staged delivery graph as an operator reviews it before dispatch (issue #989). */
+export interface DeliveryStepSummary {
+  id: string;
+  /** The node kind from the closed allowlist (agent / wait / human / connector). */
+  kind: DeliveryNode["kind"];
+  /** A finer type: the agent job type, `wait:<probe kind>`, `human`, or the connector target
+   *  (e.g. `converge`, `converge-merge`). */
+  type: string;
+  /** What the step acts on: the agent repository, the wait/connector target (issue/PR/epic), or null. */
+  target: string | null;
+  /** The upstream endpoints this step waits on (`<nodeId>` or `<nodeId>.<fact>`). */
+  dependsOn: string[];
+  /** The guard on each incoming guarded edge, rendered `<fact> == <value>` (or `default`). */
+  gate: string | null;
+  /** The effective time limit (ISO-8601) at the run defaults — a dispatch-time override replaces the
+   *  run defaults for steps that do not declare their own. */
+  timeLimit: string | null;
+  /** True when `timeLimit` is the run default rather than declared on the node. */
+  timeLimitDefaulted: boolean;
+  /** Wait steps: what happens when the time limit elapses (escalate / continue / fail). */
+  onTimeout: string | null;
+  /** Agent steps: hand the opened PR to the convergence loop. */
+  converge: boolean;
+  /** Agent steps: drive the merge loop after convergence. */
+  autoMerge: boolean;
+  /** Why this step would fail at runtime (e.g. a wait probe `parseProbe` rejects), else null — a
+   *  read projection reports it rather than failing the whole review. */
+  problem: string | null;
+}
+
+/** Summarise each node of a delivery graph for pre-dispatch review (issue #989). Derives the time
+ *  limits from the SAME defaults + per-kind rules {@link buildNodeInput} seeds, so what the operator
+ *  reads is what dispatch would run (at the run defaults). Pure. */
+export function summarizeDeliverySteps(graph: DeliveryGraph): DeliveryStepSummary[] {
+  const edges = graph.edges ?? [];
+  return graph.nodes.map((node): DeliveryStepSummary => {
+    const incoming = edges.filter((e) => e.to === node.id);
+    // Render a guard's `equals` literal through the SAME redactor every other display field uses
+    // (agent repository, wait target, connector target/pr): a string literal may embed a credential
+    // (`https://user:pass@host/path?token=…`) and the gate field is operator-facing output. Display
+    // redaction ONLY — the stored graph and the executable comparison keep the verbatim value.
+    const guards = incoming
+      .map((e) =>
+        e.when !== undefined
+          ? `${e.when} == ${JSON.stringify(typeof e.equals === "string" ? redactConnectorValue(e.equals) : e.equals)}`
+          : e.default === true
+            ? "default"
+            : null,
+      )
+      .filter((g): g is string => g !== null);
+    const base = {
+      id: node.id,
+      kind: node.kind,
+      dependsOn: incoming.map((e) => e.from),
+      gate: guards.length > 0 ? guards.join("; ") : null,
+      onTimeout: null,
+      converge: false,
+      autoMerge: false,
+      problem: null,
+    };
+    switch (node.kind) {
+      case "agent": {
+        const policy = agentEnrollmentTarget(node.agent);
+        const declared = typeof node.agent.timeout === "string" && node.agent.timeout.trim() !== "";
+        return {
+          ...base,
+          type: node.agent.jobType,
+          target: node.agent.repository !== undefined ? redactConnectorValue(node.agent.repository) : null,
+          timeLimit: isoDuration(node.agent.timeout, DEFAULTS.nodeTimeout),
+          timeLimitDefaulted: !declared,
+          converge: policy !== null,
+          autoMerge: node.agent.merge === true,
+        };
+      }
+      case "wait": {
+        // Display ONLY the redacted target (a command probe or URL may embed a secret) — the SAME
+        // redactor the compiler's preview uses. Staging validation does not run parseProbe, so a staged
+        // probe can still be invalid: report it on the step rather than failing the whole read.
+        const shown = { ...base, type: `wait:${redactConnectorValue(node.wait.kind)}`, target: redactProbeTargetForDisplay(node.wait), onTimeout: node.wait.onTimeout ?? "escalate" };
+        let probe: ReturnType<typeof parseProbe>;
+        try {
+          probe = parseProbe(node.wait, { allowLateBoundTarget: true });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { ...shown, timeLimit: DEFAULTS.probeTimeout, timeLimitDefaulted: true, problem: redactFreeText(msg) };
+        }
+        const declared = typeof probe.poll?.timeoutMs === "number" && probe.poll.timeoutMs >= 1;
+        return {
+          ...shown,
+          timeLimit: declared ? readinessTimeout(probe, {}) : DEFAULTS.probeTimeout,
+          timeLimitDefaulted: !declared,
+        };
+      }
+      case "human":
+        return { ...base, type: "human", target: resolveHumanForm(node).formKey ?? GENERIC_HUMAN_FORM, timeLimit: DEFAULTS.escalationSlaTimeout, timeLimitDefaulted: true };
+      case "connector": {
+        const declared = typeof node.connector.timeout === "string" && node.connector.timeout.trim() !== "";
+        const pr = node.connector.payload && typeof node.connector.payload === "object" && "pr" in node.connector.payload ? node.connector.payload.pr : undefined;
+        return {
+          ...base,
+          type: redactConnectorValue(node.connector.target),
+          target: typeof pr === "string" ? redactConnectorValue(pr.trim()) : null,
+          timeLimit: isoDuration(node.connector.timeout, DEFAULTS.nodeTimeout),
+          timeLimitDefaulted: !declared,
+        };
+      }
+      default:
+        return assertNever(node, "summarizeDeliverySteps");
+    }
+  });
 }

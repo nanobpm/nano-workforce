@@ -38,6 +38,13 @@ export interface ConvergeGateInput {
   /** Acknowledged line-stable keys (`<path>#<fp>`) from RESOLVED `nano-ack:` threads. An advisory is
    * acked iff its stable key appears here. */
   acknowledgedKeys: string[];
+  /** Outstanding trusted OPERATOR feedback (issue #985) — derived by the ONE `deriveOperatorFeedback`
+   * (app/operatorFeedback.ts): unacknowledged post-start issue/PR comments and unresolved review
+   * threads rooted by a trusted human. Each BLOCKS convergence on the recoverable (ack-only) route:
+   * the round agent is re-entered with the feedback injected, bounded by `ackRetryMax`, then a human
+   * is asked. Callers must NOT also count an operator thread in `unresolvedThreadCount`. Optional
+   * (defaults to none). */
+  operatorFeedback?: { label: string }[];
 }
 
 export interface ConvergeGateResult {
@@ -64,6 +71,7 @@ export function evaluateConvergeGate(input: ConvergeGateInput): ConvergeGateResu
   // advisory re-emitted at the same line (a false-OPEN this gate exists to prevent).
   const unacked = input.suppressedAdvisories.filter((a) => !acked.has(a.key));
   const unresolvedAck = input.unresolvedAckThreadCount ?? 0;
+  const feedback = input.operatorFeedback ?? [];
   const reasons: string[] = [];
   if (input.unresolvedThreadCount > 0) {
     const n = input.unresolvedThreadCount;
@@ -76,16 +84,22 @@ export function evaluateConvergeGate(input: ConvergeGateInput): ConvergeGateResu
     const noun = unacked.length === 1 ? "advisory" : "advisories";
     reasons.push(`${unacked.length} unacknowledged suppressed ${noun} (${unacked.map((a) => a.label).join(", ")})`);
   }
+  if (feedback.length > 0) {
+    const noun = feedback.length === 1 ? "item" : "items";
+    reasons.push(
+      `${feedback.length} unacknowledged operator feedback ${noun} (${feedback.map((f) => f.label).join(", ")})`,
+    );
+  }
   if (reasons.length === 0) {
     return { convergeBlocked: false, convergeBlockReason: "", ackOnly: false };
   }
   return {
     convergeBlocked: true,
-    convergeBlockReason: `Convergence blocked: ${reasons.join("; ")}. Resolve every review thread and reply-and-resolve an ack thread (nano-ack: <path> :: <verbatim advisory text>) for each suppressed advisory before converging.`,
+    convergeBlockReason: `Convergence blocked: ${reasons.join("; ")}. Resolve every review thread and reply-and-resolve an ack thread (nano-ack: <path> :: <verbatim advisory text>) for each suppressed advisory before converging.${feedback.length > 0 ? " Address each operator feedback item and acknowledge it (reply with nano-ack: issuecomment-<id>, or resolve the thread)." : ""}`,
     // Ack-only iff NO substantive (non-ack) reviewer thread is open — the only remaining causes are
     // recoverable by re-dispatching the review-round agent (#796): unacked suppressed advisories
     // and/or a partially-completed (unresolved) ack thread it can re-post and resolve. A substantive
     // unresolved thread needs the round agent's code/reply work and escalates to a human.
-    ackOnly: input.unresolvedThreadCount === 0 && (unacked.length > 0 || unresolvedAck > 0),
+    ackOnly: input.unresolvedThreadCount === 0 && (unacked.length > 0 || unresolvedAck > 0 || feedback.length > 0),
   };
 }

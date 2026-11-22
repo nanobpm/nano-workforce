@@ -18,9 +18,9 @@ const DIRS = ["app", "workers", "operations", "actions"];
 // `.ts` module (not just a hardcoded `main.ts`) so any future root production source is covered too.
 const ROOT_FILES_FILTER = (f: string) => f.endsWith(".ts") && !f.endsWith(".test.ts");
 // The canonical home of each single-source grammar: the PR-shape parser lives in app/prParse.ts, and
-// the issue-shape parser (its `/issues/<n>` URL branch) lives in app/plan.ts `parseIssue`.
+// the issue-shape parser (its `/issues/<n>` URL branch) lives in app/issueParse.ts `parseIssue`.
 const PARSE_PR = "app/prParse.ts";
-const PARSE_ISSUE = "app/plan.ts";
+const PARSE_ISSUE = "app/issueParse.ts";
 
 function walk(dir: string, out: string[]) {
   let entries: string[];
@@ -110,14 +110,14 @@ test("#856/#857: only app/prParse.ts defines the `owner/repo#<digits>` shorthand
   );
 });
 
-test("#857: only app/plan.ts defines the issue-URL regex (`/issues/<digits>`) — everyone else calls parseIssue", () => {
+test("#857: only app/issueParse.ts defines the issue-URL regex (`/issues/<digits>`) — everyone else calls parseIssue", () => {
   // `parseIssue` is the single source of the issue-shape grammar, exactly as `parsePr` is for the PR
   // shape. Its `/issues/<n>` URL branch was unguarded, so a second issue-URL parser could drift in and
-  // reopen the #856 class on the issue side. Ban the capture regex everywhere outside app/plan.ts.
+  // reopen the #856 class on the issue side. Ban the capture regex everywhere outside app/issueParse.ts.
   assert.deepEqual(
     offenders(ISSUES_URL_REGEX, PARSE_ISSUE),
     [],
-    "use parseIssue from app/plan.ts instead of a local /issues/<n> regex",
+    "use parseIssue from app/issueParse.ts instead of a local /issues/<n> regex",
   );
 });
 

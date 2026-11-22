@@ -1,3 +1,43 @@
+## [0.219.0](https://github.com/nanobpm/nano-workforce/compare/v0.218.3...v0.219.0) (2026-11-22)
+
+### Features
+
+* **plan-fanout:** converge each slice PR inside the epic via converge-cell ([#1010](https://github.com/nanobpm/nano-workforce/issues/1010)) ([422bb4b](https://github.com/nanobpm/nano-workforce/commit/422bb4b08c030bdae6fad8e97aef74664f3ed53b)), closes [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#916](https://github.com/nanobpm/nano-workforce/issues/916) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#889](https://github.com/nanobpm/nano-workforce/issues/889) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#test-open-tx](https://github.com/nanobpm/nano-workforce/issues/test-open-tx) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007) [#1007](https://github.com/nanobpm/nano-workforce/issues/1007)
+
+## [0.218.3](https://github.com/nanobpm/nano-workforce/compare/v0.218.2...v0.218.3) (2026-11-22)
+
+### Bug Fixes
+
+* **deps:** adopt @nanobpm/urban ^0.99.1, urban-testkit ^1.7.1, workflow ^0.20.0 ([#1017](https://github.com/nanobpm/nano-workforce/issues/1017)) ([916ad83](https://github.com/nanobpm/nano-workforce/commit/916ad830de727b6b561b417ccbcabb1731ecaaa9))
+
+## [0.218.2](https://github.com/nanobpm/nano-workforce/compare/v0.218.1...v0.218.2) (2026-11-21)
+
+### Bug Fixes
+
+* **layout:** pin bpmn-auto-layout to the uncapped [#162](https://github.com/nanobpm/nano-workforce/issues/162) fork build ([#1004](https://github.com/nanobpm/nano-workforce/issues/1004)) ([09e58c7](https://github.com/nanobpm/nano-workforce/commit/09e58c7bd610bcd6f56ee766922ebc1a7f751f73)), closes [#1003](https://github.com/nanobpm/nano-workforce/issues/1003)
+
+## [0.218.1](https://github.com/nanobpm/nano-workforce/compare/v0.218.0...v0.218.1) (2026-11-21)
+
+### Bug Fixes
+
+* **processes:** unassigned escalations create the task instead of an incident ([#999](https://github.com/nanobpm/nano-workforce/issues/999)) ([ea918f2](https://github.com/nanobpm/nano-workforce/commit/ea918f287155e4f9f1cd7b9819bd4d2f5e3c766f)), closes [#1421](https://github.com/nanobpm/nano-workforce/issues/1421) [#998](https://github.com/nanobpm/nano-workforce/issues/998)
+
+## [0.218.0](https://github.com/nanobpm/nano-workforce/compare/v0.217.0...v0.218.0) (2026-11-21)
+
+### Features
+
+* **api:** cli ergonomics — start pr, workers list, graph show, typed escalation answers, default base ([#991](https://github.com/nanobpm/nano-workforce/issues/991)) ([b9cb2b9](https://github.com/nanobpm/nano-workforce/commit/b9cb2b9e869c0c4308b3f8d3475167f401acff58)), closes [#989](https://github.com/nanobpm/nano-workforce/issues/989) [#989](https://github.com/nanobpm/nano-workforce/issues/989) [#715](https://github.com/nanobpm/nano-workforce/issues/715)
+
+## [0.217.0](https://github.com/nanobpm/nano-workforce/compare/v0.216.1...v0.217.0) (2026-11-21)
+
+### Features
+
+* **feature:** agents see post-start operator feedback; gate convergence until acknowledged ([#987](https://github.com/nanobpm/nano-workforce/issues/987)) ([ec56fb5](https://github.com/nanobpm/nano-workforce/commit/ec56fb534dd19fe9b98cb87ff8c89c83eba0cec5)), closes [#985](https://github.com/nanobpm/nano-workforce/issues/985)
+
+### Bug Fixes
+
+* **readiness:** open epic/--behind gates on GitHub issue closure, not only nwf lineage ([#993](https://github.com/nanobpm/nano-workforce/issues/993)) ([0d01035](https://github.com/nanobpm/nano-workforce/commit/0d01035500d9a787b2108222cd6bd22bfc7c2c84)), closes [#992](https://github.com/nanobpm/nano-workforce/issues/992) [#992](https://github.com/nanobpm/nano-workforce/issues/992) [#992](https://github.com/nanobpm/nano-workforce/issues/992) [#992](https://github.com/nanobpm/nano-workforce/issues/992) [#992](https://github.com/nanobpm/nano-workforce/issues/992)
+
 ## [0.216.1](https://github.com/nanobpm/nano-workforce/compare/v0.216.0...v0.216.1) (2026-11-21)
 
 ### Bug Fixes

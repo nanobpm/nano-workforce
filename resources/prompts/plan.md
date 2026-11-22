@@ -17,7 +17,7 @@ The job payload (stdin JSON) carries:
 - `variables.issueUrl` — the canonical issue URL.
 - `variables.repo` — `owner/repo`.
 
-Read the issue with `gh issue view <issue>` (title, body, comments). You have
+Read the issue with `gh issue view <issue> --comments` (title, body, comments). You have
 `gh` authenticated for the target repository.
 
 ## Revising after a rejected review
@@ -75,7 +75,7 @@ Detect existing children two ways (try both; union the results, de-duplicated):
 
 For every distinct child issue number `N` you find:
 
-- Read it with `gh issue view <owner>/<repo>#N` to get its title, body, and
+- Read it with `gh issue view <owner>/<repo>#N --comments` to get its title, body, and
   current **state** (substitute `<owner>/<repo>` with `variables.repo` so `#N` is
   resolved in this same repository, not a different one; task-list `#N` references
   carry no state until you fetch them; the native `sub_issues` query above already

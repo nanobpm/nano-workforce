@@ -4,6 +4,7 @@
 // `payload`/`boundFacts` is coerced to null with a surfaced warning rather than passed through.
 import { test } from "node:test";
 import { assert, assertEquals, assertThrows } from "#test-assert";
+import { memOpenWithDepsTx } from "#test-open-tx";
 import { PROCESS_ID } from "../../app/service.ts";
 import { withTrackingViews } from "../../test/trackingViews.ts";
 import handler, { readConnectorInput, readConvergeInput, safeStringify, setLaunchStampSleep } from "./worker.ts";
@@ -60,6 +61,8 @@ function fakeApp() {
       }
       return memTable(store.rows, store.key);
     }),
+    // submitPr's registerDependencies runs through `open().tx` since the round-3 atomicity fix.
+    open: memOpenWithDepsTx(stores),
   };
   const engine = {
     createInstance: (req: { processDefinitionId?: string; variables?: Record<string, unknown> }) => {

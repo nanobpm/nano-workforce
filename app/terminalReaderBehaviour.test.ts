@@ -71,6 +71,31 @@ function memData(stores: Stores) {
         }
         throw new Error(`unexpected exec sql: ${sql}`);
       },
+      // submitPr's registerDependencies runs its DELETE+INSERTs through `tx` since the round-3
+      // atomicity fix (issue #1007 review).
+      tx: async (fn: (q: { exec: (sql: string, params?: any[]) => Promise<{ changed: number }> }) => Promise<unknown>) =>
+        fn({
+          exec: async (sql: string, params: any[] = []) => {
+            if (/^DELETE FROM "pr_dependencies" WHERE "pr_key" = \?$/.test(sql)) {
+              const store = stores.pr_dependencies;
+              let changed = 0;
+              if (store) {
+                for (let i = store.rows.length - 1; i >= 0; i--) {
+                  if (store.rows[i].pr_key === params[0]) {
+                    store.rows.splice(i, 1);
+                    changed++;
+                  }
+                }
+              }
+              return { changed };
+            }
+            if (/^INSERT INTO "pr_dependencies"/.test(sql)) {
+              stores.pr_dependencies?.rows.push({ pr_key: params[0], depends_on_key: params[1], created_at: params[2] });
+              return { changed: 1 };
+            }
+            throw new Error(`unexpected tx exec sql: ${sql}`);
+          },
+        }),
     }),
   } as any;
 }

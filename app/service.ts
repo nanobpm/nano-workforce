@@ -580,17 +580,52 @@ export function parseDependsOn(body: string): string[] {
 }
 
 /** Replace a PR's dependency set (idempotent on resubmit). Self-references are dropped so a PR
- * can never wait on itself. */
+ * can never wait on itself. The whole replacement runs in ONE transaction: a concurrent
+ * `pollMerges` dependency read can never observe the transiently EMPTY set a DELETE-then-INSERTs
+ * sequence would otherwise expose and publish a spurious `deps-cleared` ahead of unmerged
+ * prerequisites (issue #1007 review, round 3). */
 async function registerDependencies(data: DataLayer, prKey: string, depKeys: string[]) {
-  const table = deps(data);
-  // The gateway keys this table on `pr_key`, so a single delete clears the PR's whole dep set
-  // (DELETE ... WHERE pr_key = ?) — then we re-insert the current set.
-  await table.delete(prKey);
   const ts = now();
-  for (const depKey of new Set(depKeys)) {
-    if (depKey === prKey) continue;
-    await table.insert({ pr_key: prKey, depends_on_key: depKey, created_at: ts });
-  }
+  const keys = [...new Set(depKeys)].filter((k) => k !== prKey);
+  // Under the PR's dependency lock so a resubmit's replacement is totally ordered with
+  // `pollMerges`' read-then-publish of `deps-cleared` (issue #1007 review, round 7).
+  await withDependencyLock(prKey, async () => {
+    await data.open().tx(async (q) => {
+      await q.exec(`DELETE FROM "pr_dependencies" WHERE "pr_key" = ?`, [prKey]);
+      for (const depKey of keys) {
+        await q.exec(`INSERT INTO "pr_dependencies" ("pr_key", "depends_on_key", "created_at") VALUES (?, ?, ?)`, [prKey, depKey, ts]);
+      }
+    });
+  });
+}
+
+/** Union `keys` into `prKey`'s dependency set — never deleting an edge another channel recorded.
+ * Adoption uses this so independently declared blockers (a `Depends-on:` PR-body line, a
+ * `pr.record-dependency` edge a merge-stage agent discovered) survive a caller whose `dependsOn`
+ * omits them (issue #1007 review, round 3). */
+export async function unionDependencies(data: DataLayer, prKey: string, keys: string[]) {
+  const ts = now();
+  const add = [...new Set(keys)].filter((k) => k !== prKey);
+  if (add.length === 0) return;
+  // ONE transaction under the PR's dependency lock (issue #1007 review, round 6): a live adoption's
+  // additions are atomic AND totally ordered with `pollMerges`' read-then-publish of `deps-cleared`,
+  // so the poller can never clear a PR from a partial (or pre-addition) prerequisite set.
+  await withDependencyLock(prKey, async () => {
+    await data.open().tx(async (q) => {
+      for (const depKey of add) {
+        await q.exec(
+          `INSERT INTO "pr_dependencies" ("pr_key", "depends_on_key", "created_at") SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM "pr_dependencies" WHERE "pr_key" = ? AND "depends_on_key" = ?)`,
+          [prKey, depKey, ts, prKey, depKey],
+        );
+      }
+    });
+  });
+}
+
+/** Serialize a PR's dependency-set mutations with the poller's dependency read + `deps-cleared`
+ * publication. Shares the app's in-process keyed serializer under a disjoint `deps:` key space. */
+export function withDependencyLock<T>(prKey: string, fn: () => Promise<T>): Promise<T> {
+  return withMergePolicyLock(`deps:${prKey}`, fn);
 }
 
 // The repository-provisioning envelope builder now lives in its own module (app/repoEnvelope.ts);
@@ -817,6 +852,59 @@ async function submitPrCritical(
     // it). Idempotent; a retry against our own opted-in loop is a no-op write.
     if (autoResolveEscalations && existing.auto_resolve_escalations !== 1) {
       await table.update(parsed.prKey, { auto_resolve_escalations: 1 });
+    }
+    // Adoption reconciliation (issue #1007 review, F2): an adopted live loop must take on THIS caller's
+    // merge policy, lineage root, and dependencies — not silently keep whatever an earlier submit set.
+    //   • Dependencies: UNION this caller's set (plus any `Depends-on:` refs the PR body declares —
+    //     the same canonical body resolution a fresh submit does) INTO the recorded set, never
+    //     deleting an edge another channel recorded (a prior submit's deps, a `pr.record-dependency`
+    //     edge a merge-stage agent discovered). A repeated adoption whose `dependsOn` omits a
+    //     prerequisite must not clear it and let the PR merge early (issue #1007 review, round 3).
+    //   • Lineage: coalesce onto this caller's root when the loop has no OTHER root — a NULL root,
+    //     or a SELF-root (`root_request_key = pr_key`, which every operator-started loop stamps at
+    //     `effectiveRoot` below) both mean "not part of another request", so the adopted loop joins
+    //     the epic. A root naming a DIFFERENT request is kept (a loop already under an epic is not
+    //     silently re-parented).
+    //   • Merge policy: a review-only caller (`mergeIntent` false) NARROWS an auto-merging live loop to
+    //     converge-only — the operator's opt-out must win over an adopted loop's stale auto-merge. The
+    //     widening direction (a review-only live loop adopted by an auto-merge caller) is deliberately
+    //     NOT done here: that loop's `pr.finalize` already read converge-only, so flipping its variable
+    //     could force a merge the operator never approved. (A review-only loop that already CONVERGED
+    //     is terminal, so it never reaches this branch — it reopens below with the fresh run's intent.)
+    {
+      const depKeys = new Set(dependsOn.map((d) => parsePr(d)?.prKey).filter((k): k is string => !!k));
+      try {
+        const meta = await fetchPrMeta(parsed.repo, parsed.number, process.env.GITHUB_TOKEN ?? "");
+        if (meta) for (const k of parseDependsOn(meta.body)) depKeys.add(k);
+      } catch (err) {
+        console.warn(`[submit] ${parsed.prKey} adopt meta fetch: ${err}`);
+      }
+      await unionDependencies(data, parsed.prKey, [...depKeys]);
+      if (
+        rootRequestKey != null &&
+        (existing.root_request_key == null || existing.root_request_key === parsed.prKey)
+      ) {
+        await table.update(parsed.prKey, { root_request_key: rootRequestKey });
+      }
+      if (!mergeIntent && existing.converged_at == null && existing.merge_requested !== 0) {
+        const loopKey = existing.process_key;
+        const match = (await engine.searchProcessInstances({ processInstanceKeys: [loopKey] })).find(
+          (s) => String(s.processInstanceKey) === loopKey,
+        );
+        const state = match ? String(match.state ?? "").trim().toUpperCase() : null;
+        const isConvergenceLoop = match?.processDefinitionId == null || match.processDefinitionId === PROCESS_ID;
+        if (state !== null && !ENGINE_TERMINAL_STATES.has(state) && isConvergenceLoop) {
+          // Serialized with merge-approval completion on this loop (same lock the gated-adopt uses), so
+          // the variable write and the projection stamp land as one pair.
+          await withMergePolicyLock(loopKey, async () => {
+            await engine.setVariables({ scopeKey: loopKey, variables: { autoMerge: false, convergeOnly: true } });
+            await data.open().exec(
+              `UPDATE "pull_requests" SET "merge_requested" = 0 WHERE "pr_key" = ? AND "process_key" = ? AND "converged_at" IS NULL`,
+              [parsed.prKey, loopKey],
+            );
+          });
+        }
+      }
     }
     return { prKey: parsed.prKey, alreadyRunning: true };
   }
@@ -2604,20 +2692,21 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
       // must converge even if its declared deps never clear (the #368 wedge). `wait-deps` subscribes
       // only `deps-cleared`, so the shared pre-check publishes exactly that.
       if (await advanceIfTerminalOutOfBand(data, engine, pr, token)) continue;
-      const depRows = await deps(data).find({ pr_key: prKey });
-      let allMerged = true;
-      for (const d of depRows) {
-        if (!(await isDepMerged(data, d.depends_on_key, token))) {
-          allMerged = false;
-          break;
+      // Read + publish under the PR's dependency lock so a concurrent adoption's prerequisite
+      // additions land wholly before or wholly after this decision (issue #1007 review, round 6).
+      const cleared = await withDependencyLock(prKey, async () => {
+        const depRows = await deps(data).find({ pr_key: prKey });
+        for (const d of depRows) {
+          if (!(await isDepMerged(data, d.depends_on_key, token))) return false;
         }
-      }
-      if (!allMerged) continue;
-      await flipToMergingThenPublish(data, engine, prKey, "waiting_deps", {
-        name: "deps-cleared",
-        correlationKey: prKey,
-        variables: {},
+        await flipToMergingThenPublish(data, engine, prKey, "waiting_deps", {
+          name: "deps-cleared",
+          correlationKey: prKey,
+          variables: {},
+        });
+        return true;
       });
+      if (!cleared) continue;
       console.log(`[poller] deps cleared -> ${prKey}`);
     } catch (err) {
       console.error(`[poller] deps ${prKey}: ${err}`);
