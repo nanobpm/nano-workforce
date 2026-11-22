@@ -33,7 +33,14 @@ class LayoutError extends Error {
 const isCollapsedSeed = (xml: string) => xml.includes("CollapsedSeed_plane");
 /** A fake layout that returns a trivial diagram (enough for the graft). */
 const fakeDiagram = (tag: string) =>
-  `<x><bpmndi:BPMNDiagram id="${tag}"><bpmndi:BPMNPlane id="${tag}_p" bpmnElement="delivery-graph"/></bpmndi:BPMNDiagram></x>`;
+  `<x><bpmndi:BPMNDiagram id="${tag}"><bpmndi:BPMNPlane id="${tag}_p" bpmnElement="delivery-graph"><bpmndi:BPMNShape id="${tag}_s" bpmnElement="Start"/></bpmndi:BPMNPlane></bpmndi:BPMNDiagram></x>`;
+
+/** A deterministic clock: each layout attempt "spends" exactly the bound it was handed, so budget
+ * allocation never depends on host timer scheduling. */
+function fakeClock() {
+  let t = 0;
+  return { now: () => t, spend: (ms: number) => { t += ms; } };
+}
 
 test("#1005: expanded layout throwing ROUTING_FAILED falls back to collapsed, surfacing the reason", async () => {
   const semantic = await semanticOf(SMALL);
@@ -75,19 +82,16 @@ test("#1005: a layout that never resolves hits its timeout and falls back, all w
   const semantic = await semanticOf(SMALL);
   const budgetMs = 300;
   const timeouts: number[] = [];
-  // Mirrors layoutBpmnOffThread: the bound is the timeout handed in; the work itself never finishes.
-  const layout: LayoutFn = (_xml, timeoutMs) => {
+  const clock = fakeClock();
+  // Mirrors layoutBpmnOffThread: the attempt consumes its whole bound, then rejects.
+  const layout: LayoutFn = async (_xml, timeoutMs) => {
     timeouts.push(timeoutMs);
-    return new Promise((_resolve, reject) => {
-      setTimeout(() => reject(new Error(`layout exceeded its ${timeoutMs}ms bound`)), timeoutMs);
-    });
+    clock.spend(timeoutMs);
+    throw new Error(`layout exceeded its ${timeoutMs}ms bound`);
   };
-  const t0 = Date.now();
-  const r = await layoutWithFallback(semantic, { layout, budgetMs });
-  const elapsed = Date.now() - t0;
+  const r = await layoutWithFallback(semantic, { layout, budgetMs, now: clock.now });
   assert.equal(timeouts.length, 2);
   assert.ok((timeouts[0] ?? 0) + (timeouts[1] ?? 0) <= budgetMs, `attempt bounds ${timeouts} exceed budget`);
-  assert.ok(elapsed < budgetMs + 150, `fallback took ${elapsed}ms, budget ${budgetMs}ms`);
   assert.equal(r.layout.mode, "none");
   assert.match(r.layout.reason ?? "", /exceeded/);
 });
@@ -95,12 +99,15 @@ test("#1005: a layout that never resolves hits its timeout and falls back, all w
 test("#1005: a collapsed layout that succeeds after an expanded timeout is within budget", async () => {
   const semantic = await semanticOf(SMALL);
   const timeouts: number[] = [];
-  const layout: LayoutFn = (xml, timeoutMs) => {
+  const clock = fakeClock();
+  const layout: LayoutFn = async (xml, timeoutMs) => {
     timeouts.push(timeoutMs);
-    if (isCollapsedSeed(xml)) return Promise.resolve(fakeDiagram("C"));
-    return new Promise((_r, reject) => setTimeout(() => reject(new Error("timed out")), timeoutMs));
+    if (isCollapsedSeed(xml)) return fakeDiagram("C");
+    clock.spend(timeoutMs);
+    throw new Error("timed out");
   };
-  const r = await layoutWithFallback(semantic, { layout, budgetMs: 200 });
+  const r = await layoutWithFallback(semantic, { layout, budgetMs: 200, now: clock.now });
+  assert.equal(timeouts.length, 2);
   assert.equal(r.layout.mode, "collapsed");
   assert.ok((timeouts[0] ?? 0) + (timeouts[1] ?? 0) <= 200);
 });
@@ -170,5 +177,28 @@ test("#1005: a genuinely never-settling injected layout is bounded and degrades 
   const semantic = await semanticOf(SMALL);
   const res = await layoutWithFallback(semantic, { layout, budgetMs: 50 });
   assert.equal(res.layout.mode, "none");
-  assert.match(res.layout.reason ?? "", /expanded layout failed: layout timed out.*collapsed layout failed: layout timed out/);
+  assert.match(res.layout.reason ?? "", /expanded layout failed: layout timed out.*collapsed layout failed: (layout timed out|no layout budget left)/);
+});
+
+test("#1005: the collapsed retry is skipped (not run) once the budget is exhausted", async () => {
+  const semantic = await semanticOf(SMALL);
+  const clock = fakeClock();
+  const calls: string[] = [];
+  const layout: LayoutFn = async (xml, timeoutMs) => {
+    calls.push(isCollapsedSeed(xml) ? "collapsed" : "expanded");
+    clock.spend(timeoutMs * 10); // overruns the whole budget
+    throw new Error("slow");
+  };
+  const r = await layoutWithFallback(semantic, { layout, budgetMs: 100, now: clock.now });
+  assert.deepEqual(calls, ["expanded"]);
+  assert.equal(r.layout.mode, "none");
+  assert.match(r.layout.reason ?? "", /no layout budget left/);
+});
+
+test("#1005: a no-op layouter (returns its input) never yields an empty collapsed diagram", async () => {
+  const semantic = await semanticOf(SMALL);
+  const r = await layoutWithFallback(semantic, { layout: async (xml) => xml, budgetMs: 1000 });
+  assert.equal(r.layout.mode, "none");
+  assert.doesNotMatch(r.bpmn, /CollapsedSeed/);
+  assert.match(r.bpmn, /<bpmndi:BPMNShape /);
 });

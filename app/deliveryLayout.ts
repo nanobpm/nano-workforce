@@ -144,6 +144,11 @@ export function graftDiagram(semanticBpmn: string, laidOut: string): string {
     );
   }
   const diagram = laidOut.slice(start, end + endTag.length);
+  // A diagram with no node shapes (e.g. a no-op layouter echoing the collapsed seed back) is as
+  // useless as no diagram: fail so the fallback chain degrades to the grid instead of a blank plane.
+  if (!diagram.includes("<bpmndi:BPMNShape")) {
+    throw new Error("compileDeliveryGraph: layout produced a bpmndi:BPMNDiagram with no node shapes");
+  }
   const closing = "</bpmn:definitions>";
   const insertAt = semanticBpmn.lastIndexOf(closing);
   if (insertAt === -1) {
