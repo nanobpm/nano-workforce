@@ -28,7 +28,7 @@
     },
     {
       "description": "bpmn-auto-layout is pinned to a commit on the jwulf fork (nano/uncapped-routing, 25251a2) that removes the 4096-point routing cap; large delivery graphs fail with ROUTING_FAILED without it (nanobpm/nano-workforce#1003, #1008). The fork's main is BEHIND that pin, so Renovate digest 'updates' are downgrades (see #1012). Remove this rule when the uncapped-routing fix ships upstream in bpmn-io/bpmn-auto-layout and we move back to a release.",
-      "matchPackageNames": [
+      "matchDepNames": [
         "bpmn-auto-layout"
       ],
       "matchUpdateTypes": [
