@@ -2101,10 +2101,15 @@ function agentContractProceedCondition(requiredEmits: readonly DeliveryFact[]): 
  * met" (release run 60007 adopted a months-stale PR pinned to an old version, pushed nothing, and the
  * node completed anyway). So the gate fails — escalating AT the node — when the agent says the goal is
  * NOT met (`goalMet = false`), or when it adopted a PR (`adopted = true`) WITHOUT pushing
- * (`pushed = false`) and without affirming `goalMet = true`. Absent fields pass (a plain implementation
+ * (`pushed` is not true — false, null, or omitted) and without affirming `goalMet = true`. Absent fields pass (a plain implementation
  * node is unaffected). Null-safe: every comparison is guarded so a missing var never errors the FEEL. */
+/** Fail-closed stale-adoption predicate: an adoption must be backed by `pushed = true` OR
+ * `goalMet = true`; an omitted/null `pushed` does NOT exempt it. Shared by the gate and the escalation
+ * context line so the two cannot drift. */
+export const AGENT_STALE_ADOPTION =
+  "is defined(adopted) and adopted = true and not((is defined(pushed) and pushed = true) or (is defined(goalMet) and goalMet = true))";
 export const AGENT_GOAL_MET_CLAUSE =
-  "(not(is defined(goalMet) and goalMet = false) and not(is defined(adopted) and adopted = true and is defined(pushed) and pushed = false and not(is defined(goalMet) and goalMet = true)))";
+  `(not(is defined(goalMet) and goalMet = false) and not(${AGENT_STALE_ADOPTION}))`;
 
 /** The read-only context line seeded onto an `agent` node's producer-contract escalation (issue #731),
  * so the human/agent unsticking it sees WHY it parked — the node, its job type, the actual reported
@@ -2121,7 +2126,7 @@ function agentContractContextFeel(nodeId: string, descriptor: string, requiredEm
   );
   let feel = `=${head} + (if (is defined(status) and status != null) then string(status) else "(none)") + "."`;
   feel += ` + (if is defined(goalMet) and goalMet = false then " The agent reported goalMet=false (the node's goal is NOT met)." else "")`;
-  feel += ` + (if is defined(adopted) and adopted = true and is defined(pushed) and pushed = false and not(is defined(goalMet) and goalMet = true) then " The agent adopted an existing PR without pushing and without confirming it meets the node's goal." else "")`;
+  feel += ` + (if ${AGENT_STALE_ADOPTION} then " The agent adopted an existing PR without pushing and without confirming it meets the node's goal." else "")`;
   for (const f of requiredEmits) {
     const present = `(is defined(${f.name}) and ${f.name} != null)`;
     feel += ` + " Required emit '${f.name}': " + (if ${present} then "present" else "MISSING (null)") + "."`;

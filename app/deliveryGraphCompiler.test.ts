@@ -2190,7 +2190,7 @@ test("#1014 adopt guard: the producer gate carries the goalMet/adopted-without-p
   const r = await compileOk(PRODUCER_GATE);
   const el = elementForNode(r.bpmn, "open");
   const cond = contractMetExpr(r.bpmn, el);
-  assert(cond.includes("goalMet = false") && cond.includes("adopted = true") && cond.includes("pushed = false"), `the gate rejects an unmet/stale adoption, got: ${cond}`);
+  assert(cond.includes("goalMet = false") && cond.includes("adopted = true") && cond.includes("pushed = true") && !cond.includes("pushed = false"), `the gate (fail-closed: only an affirmative push exempts an adoption) rejects an unmet/stale adoption, got: ${cond}`);
   const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
   assert(esc.includes("goalMet=false"), "the escalation context explains the adopt guard");
 });
