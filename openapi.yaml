@@ -5986,6 +5986,9 @@ paths:
                     autoResolveEscalations:
                       type: boolean
                       description: "Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
+                    autoMerge:
+                      type: boolean
+                      description: "The epic's merge policy for its slice PRs (issue #1007). Each slice PR is converged INSIDE the epic (the wave body calls `converge-cell`); when true (the default) its convergence loop then auto-merges it into the epic `baseBranch` (still gated by `NANO_PR_AUTO_MERGE`), which releases the wave gate. Pass false to converge only and merge by hand."
                 - type: object
                   additionalProperties: false
                   required:
@@ -6010,6 +6013,9 @@ paths:
                     autoResolveEscalations:
                       type: boolean
                       description: "Opt this epic's (and its child loops') escalations into the escalation steward (issue #889) — it reviews each open escalation every 30 min and submits a recommended choice, recorded reviewably in Auto-resolutions. Default off."
+                    autoMerge:
+                      type: boolean
+                      description: "The epic's merge policy for its slice PRs (issue #1007). Each slice PR is converged INSIDE the epic (the wave body calls `converge-cell`); when true (the default) its convergence loop then auto-merges it into the epic `baseBranch` (still gated by `NANO_PR_AUTO_MERGE`), which releases the wave gate. Pass false to converge only and merge by hand."
               type: object
               # END generated:mcp-body
       responses:
