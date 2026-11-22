@@ -29,6 +29,7 @@ interface In extends Record<string, unknown> {
   pr?: unknown;
   baseBranch?: unknown;
   question?: unknown;
+  summary?: unknown;
   implementRetried?: unknown;
   /** The branch the agent's result reported it pushed (issue #1011) — looked up before `feat/<task.id>`. */
   reportedBranch?: unknown;
@@ -64,6 +65,7 @@ const handler: AppJobHandler<In, ReconcileImplementResult> = async (job, app) =>
       pr: job.variables.pr,
       baseBranch: job.variables.baseBranch,
       question: job.variables.question,
+      summary: job.variables.summary,
       retried: job.variables.implementRetried,
       branch: resolveReportedBranch(job.variables),
     },

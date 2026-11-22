@@ -478,3 +478,27 @@ test("record-wave stamps a keyless `opened` slice with the shared marker so the 
   assertEquals(row.status, "blocked");
   assertEquals(row.summary, `${KEYLESS_OPENED_SUMMARY} — opened it`);
 });
+
+// Issue #1011 review: after escalation → Abandon/SLA auto-abandon, the unreconciled keyless `opened`
+// arrives as `blocked` carrying the reconcile step's provenance-stamped summary (plan-fanout forwards
+// only status/summary/pr/delta). record-wave must persist that marker verbatim so the finalizer still
+// NAMES it rather than reporting "every task was blocked or skipped".
+test("record-wave keeps the keyless provenance of an ABANDONED keyless opened (arrives as blocked)", async () => {
+  const rows: Row[] = [{ id: 1, plan_key: "owner/repo#64", task_id: "seam", status: "pending", wave: 0 }];
+  const { app } = fakeApp(rows);
+  await handler(
+    {
+      variables: {
+        planKey: "owner/repo#64",
+        currentWave: 0,
+        waveCount: 1,
+        waveTasks: [{ id: "seam" }],
+        waveResults: [{ status: "blocked", pr: null, summary: `${KEYLESS_OPENED_SUMMARY} — opened it` }],
+      },
+    } as any,
+    app,
+  );
+  const row = rows[0] as unknown as Record<string, unknown>;
+  assertEquals(row.status, "blocked");
+  assertEquals(row.summary, `${KEYLESS_OPENED_SUMMARY} — opened it`);
+});

@@ -6,6 +6,7 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { HeadPr } from "./github.ts";
+import { KEYLESS_OPENED_SUMMARY } from "./plan.ts";
 import {
   implementCellBranch,
   isKeylessOpened,
@@ -29,7 +30,7 @@ const openPr = (number: number, base = "main"): HeadPr => ({
 // object so the tests stay focused on the reconcile/pr decision. `deliveryVerified: false` is the
 // fall-through default (no lookup ran / it threw / transport unavailable); the adopt and
 // verified-absence cases override it to `true`.
-const tail = { retry: false, retryNudge: null, retried: false, deliveryVerified: false } as const;
+const tail = { retry: false, retryNudge: null, retried: false, deliveryVerified: false, summary: null } as const;
 // The tail for a SUCCESSFUL lookup: delivery state was confirmed (an adoptable PR, or a verified
 // absence), so `deliveryVerified` is `true`.
 const verified = { ...tail, deliveryVerified: true } as const;
@@ -204,7 +205,7 @@ test("reconcileImplement: claimed-completion status + an open PR on the branch �
     },
     "token",
   );
-  assertEquals(res, { reconciled: true, status: "opened", pr: "owner/repo#900", retry: false, retryNudge: null, retried: false, deliveryVerified: true });
+  assertEquals(res, { reconciled: true, status: "opened", pr: "owner/repo#900", retry: false, retryNudge: null, retried: false, deliveryVerified: true, summary: null });
   assertEquals(calls, [{ repo: "owner/repo", branch: "feat/issue-41" }]);
 });
 
@@ -245,7 +246,7 @@ test("reconcileImplement: claimed-completion + NO PR but ALREADY retried → esc
     async () => [],
     "token",
   );
-  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: true, deliveryVerified: true });
+  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: true, deliveryVerified: true, summary: null });
 });
 
 test("reconcileImplement: claimed-completion carrying an answerable question → escalate, no lookup, no retry", async () => {
@@ -258,7 +259,7 @@ test("reconcileImplement: claimed-completion carrying an answerable question →
     },
     "token",
   );
-  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: false, deliveryVerified: false });
+  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: false, deliveryVerified: false, summary: null });
   assertEquals(consulted, false);
 });
 
@@ -307,7 +308,7 @@ test("reconcileImplement: claimed-completion + a THROWN lookup → escalate, the
   );
   // Escalate, retry untouched — the next pass can still retry/adopt once GitHub recovers. The lookup
   // THREW, so delivery is UNVERIFIED (deliveryVerified: false).
-  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: false, deliveryVerified: false });
+  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: false, deliveryVerified: false, summary: null });
 });
 
 test("reconcileImplement: claimed-completion + a NULL listing (no transport) → escalate, the retry is NOT consumed (#865 review)", async () => {
@@ -316,7 +317,7 @@ test("reconcileImplement: claimed-completion + a NULL listing (no transport) →
     async () => null,
     "token",
   );
-  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: false, deliveryVerified: false });
+  assertEquals(res, { reconciled: false, status: "completed", pr: null, retry: false, retryNudge: null, retried: false, deliveryVerified: false, summary: null });
 });
 
 test("reconcileImplement: a blank status + a NULL listing → escalate (unavailable transport, unchanged)", async () => {
@@ -394,8 +395,23 @@ test("reconcileImplement: opened + no pr + NO PR → escalates with evidence (no
     status: "blocked",
     pr: null,
     ...verified,
+    summary: KEYLESS_OPENED_SUMMARY,
     evidence: "reported opened but no PR from feat/t1 into epic/x",
   });
+});
+
+// Issue #1011 review: the fail-closed `blocked` must carry keyless-`opened` PROVENANCE in its summary so an
+// Abandon / SLA auto-abandon can't lose it — record-feature refuses blocked-delivery recovery for it and
+// record-wave / the finalizer name it (the plan-fanout projection forwards only status/summary/pr/delta).
+test("reconcileImplement: fail-closed keyless opened stamps the provenance marker on the summary (idempotent)", async () => {
+  const base = { status: "opened", subjectKey: "owner/repo#7", taskId: "t1", baseBranch: "main" };
+  const withSummary = await reconcileImplement({ ...base, summary: "did it" }, async () => [], "t");
+  assertEquals(withSummary.summary, `${KEYLESS_OPENED_SUMMARY} — did it`);
+  const restamped = await reconcileImplement({ ...base, summary: withSummary.summary }, async () => [], "t");
+  assertEquals(restamped.summary, withSummary.summary);
+  // A non-keyless result passes its summary through untouched.
+  const blocked = await reconcileImplement({ ...base, status: "blocked", summary: "stuck" }, async () => [], "t");
+  assertEquals(blocked.summary, "stuck");
 });
 
 // Issue #1011 review: an unreconciled keyless `opened` must never leave the cell with the SUCCESS status

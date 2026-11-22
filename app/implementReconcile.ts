@@ -21,6 +21,7 @@
 import { hasAnswerableQuestion } from "./escalationTaxonomy.ts";
 import type { HeadPr } from "./github.ts";
 import { isClaimedCompletion } from "./implementEscalationReason.ts";
+import { KEYLESS_OPENED_SUMMARY } from "./plan.ts";
 import { parsePr } from "./prParse.ts";
 import { sliceBranchCreate } from "./repoEnvelope.ts";
 
@@ -42,6 +43,10 @@ export interface ReconcileImplementInput {
   /** The agent's own question. An answerable question means a GENUINE escalation even under an
    *  off-vocabulary status — honour it (escalate), never auto-reconcile/auto-retry over it. */
   question?: unknown;
+  /** The agent's own summary — passed through unchanged, except on the keyless-`opened` fail-closed arm
+   *  where it is stamped with `KEYLESS_OPENED_SUMMARY` so the provenance survives an Abandon/SLA
+   *  auto-abandon into record-feature / record-wave / the finalizer (issue #1011 review). */
+  summary?: unknown;
   /** Whether this slice has ALREADY consumed its one automatic retry (the `implementRetried` process
    *  variable). A claimed-completion-without-delivery is auto-retried ONCE (issue #865) before it
    *  escalates; this flag bounds that race to a single retry. */
@@ -73,6 +78,8 @@ export interface ReconcileImplementResult {
    *  "reported opened but no PR from <branch> into <base>". Present ONLY on that arm (omitted
    *  otherwise) so the escalation reason can name exactly what was looked for. */
   evidence?: string;
+  /** The (possibly provenance-stamped) summary — see `ReconcileImplementInput.summary`. */
+  summary: string | null;
 }
 
 /** The injected GitHub read — the canonical `listPrsForHead(repo, headBranch, token)` (so this module
@@ -176,6 +183,7 @@ export async function reconcileImplement(
   token: string,
 ): Promise<ReconcileImplementResult> {
   const res = await reconcileImplementCore(input, lookup, token);
+  const summary = str(input.summary) ?? null;
   // A keyless `opened` that could NOT be reconciled (verified absence, ambiguous listing, failed/null
   // lookup, missing inputs, or an answerable question) must NEVER leave the cell with the SUCCESS status
   // `opened` and no PR (issue #1011 review): an operator Abandon or the escalation-SLA auto-abandon ends
@@ -186,6 +194,7 @@ export async function reconcileImplement(
     return {
       ...res,
       status: "blocked",
+      summary: stampKeylessOpened(summary),
       evidence: !res.evidence
         ? "reported opened but its PR could not be looked up on GitHub"
         : res.evidence.startsWith("reported opened")
@@ -193,16 +202,27 @@ export async function reconcileImplement(
           : `reported opened but ${res.evidence}`,
     };
   }
-  return res;
+  return { ...res, summary };
 }
+
+/** Prefix the shared keyless-`opened` marker onto a summary (idempotent). The marker is the ONE
+ *  provenance channel downstream consumers key on: record-feature refuses blocked-delivery recovery for
+ *  it, and record-wave / the finalizer name it instead of "blocked or skipped". */
+export function stampKeylessOpened(summary: string | null): string {
+  if (!summary) return KEYLESS_OPENED_SUMMARY;
+  if (summary.startsWith(KEYLESS_OPENED_SUMMARY)) return summary;
+  return `${KEYLESS_OPENED_SUMMARY} — ${summary}`;
+}
+
+type CoreResult = Omit<ReconcileImplementResult, "summary">;
 
 async function reconcileImplementCore(
   input: ReconcileImplementInput,
   lookup: OpenPrLookup,
   token: string,
-): Promise<ReconcileImplementResult> {
+): Promise<CoreResult> {
   const alreadyRetried = input.retried === true;
-  const escalate: ReconcileImplementResult = {
+  const escalate: CoreResult = {
     reconciled: false,
     status: str(input.status) ?? null,
     // Carry any existing PR key through unchanged — the reconcile step's `pr` output is mapped back
@@ -272,7 +292,7 @@ async function reconcileImplementCore(
   }
   // The lookup SUCCEEDED and confirmed no adoptable PR — delivery is verified (absent), so the
   // escalation reason may say "none was found"; only now may a claimed completion auto-retry.
-  const verifiedAbsent: ReconcileImplementResult = { ...escalate, deliveryVerified: true };
+  const verifiedAbsent: CoreResult = { ...escalate, deliveryVerified: true };
   if (isKeylessOpened(input.status, input.pr)) {
     // Issue #1011: the agent CLAIMED `opened` but no PR exists on any candidate branch — escalate with
     // the lookup evidence (never pass `pr: null` downstream, and never auto-retry a recognised status).
@@ -289,8 +309,8 @@ async function reconcileImplementCore(
 function maybeRetry(
   input: ReconcileImplementInput,
   alreadyRetried: boolean,
-  escalate: ReconcileImplementResult,
-): ReconcileImplementResult {
+  escalate: CoreResult,
+): CoreResult {
   const status = str(input.status);
   if (!alreadyRetried && status !== undefined && isClaimedCompletion(status)) {
     return {

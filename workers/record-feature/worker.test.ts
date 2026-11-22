@@ -11,6 +11,7 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
+import { KEYLESS_OPENED_SUMMARY } from "../../app/plan.ts";
 import handler from "./worker.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: tiny in-memory app double, mirrors record-feature-implementing.worker.test
@@ -254,3 +255,39 @@ test("a failed comment POST never fails the job — the run still records opened
     gh.restore();
   }
 });
+
+// Issue #1011 review: an unreconciled keyless `opened` reaches record-feature as a provenance-stamped
+// `blocked` ONLY via Abandon / escalation-SLA auto-abandon. Blocked-delivery recovery must NOT adopt an
+// existing PR (or create a draft from a pushed branch) over that decision.
+// The recovery is skipped BEFORE any GitHub read, so neither the adopt-existing-PR nor the
+// create-draft-from-pushed-branch arm can run — asserted by zero pulls/branches/compare traffic.
+{
+  test("an abandoned keyless opened stays blocked and never recovers (no adopt, no draft create)", async () => {
+    const gh = stubGithubComments();
+    const rows = [{ ...ROW }];
+    const { app } = fakeApp(rows);
+    try {
+      const out = await handler(
+        {
+          jobKey: "j9",
+          variables: {
+            featureKey: "owner/repo#7",
+            status: "blocked",
+            summary: `${KEYLESS_OPENED_SUMMARY} — did it`,
+            task: { id: "t1" },
+            baseBranch: "main",
+            claimIssue: true,
+            "io.nanobpm.agentResult": { headSha: "abc", branch: "feat/t1" },
+          },
+        } as never,
+        app,
+      );
+      assertEquals(out.featureStatus, "blocked");
+      assertEquals(out.prKey, null);
+      // No GitHub reconcile traffic at all (no branch/compare/pulls read, no PR create).
+      assertEquals(gh.calls.filter((c) => /\/(pulls|branches|compare|git)\b/.test(c)).length, 0);
+    } finally {
+      gh.restore();
+    }
+  });
+}
