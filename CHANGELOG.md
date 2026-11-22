@@ -1,3 +1,9 @@
+## [0.219.2](https://github.com/nanobpm/nano-workforce/compare/v0.219.1...v0.219.2) (2026-11-22)
+
+### Bug Fixes
+
+* **delivery-graph:** stale adopted PR no longer completes an agent node ([#1015](https://github.com/nanobpm/nano-workforce/issues/1015)) ([7ebbf1a](https://github.com/nanobpm/nano-workforce/commit/7ebbf1afeb9f7d90f6d46d957fbf707ad938cea8)), closes [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014) [#1014](https://github.com/nanobpm/nano-workforce/issues/1014)
+
 ## [0.219.1](https://github.com/nanobpm/nano-workforce/compare/v0.219.0...v0.219.1) (2026-11-22)
 
 ### Bug Fixes
