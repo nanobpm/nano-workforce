@@ -66,13 +66,37 @@ export function classifyAssessmentAnswer(answer: string | null | undefined): "ac
   return null;
 }
 
-/** The escalation question for a head parked on a human assessment, quoting the verdict. */
-export function assessmentQuestion(args: { repo: string; prNumber: number; head: string; verdict: string }): string {
+/** The escalation question for a head parked on a human assessment, quoting the verdict.
+ *
+ * `channel` names where the human's decision is actually READ (issue #1037 adversarial review):
+ *  - `"answer"` (default, pr.merge): the merge stage records the parked head and honours an
+ *    escalation reply of "accept" / "fix: …", so both the reply and the PR-comment marker are offered.
+ *  - `"comment"` (converge-gate): the convergence escalation path never reads `answer` as an
+ *    acceptance — only the `nano-assessment: accept <sha>` PR comment clears the gate. Offering
+ *    "reply accept" there would send the operator round the same spin, so ONLY the marker is offered. */
+export function assessmentQuestion(args: {
+  repo: string;
+  prNumber: number;
+  head: string;
+  verdict: string;
+  channel?: "answer" | "comment";
+}): string {
   const sha7 = args.head.slice(0, 7);
-  return (
+  const lead =
     `The head-current Copilot review of ${args.head} says "Needs a closer look" with no open thread and no ` +
     `open-issue count — it asks for a HUMAN assessment, which no agent push can clear. ` +
-    (args.verdict ? `Reviewer verdict: "${args.verdict}". ` : "") +
+    (args.verdict ? `Reviewer verdict: "${args.verdict}". ` : "");
+  if (args.channel === "comment") {
+    return (
+      lead +
+      `Assess the change, then post a PR comment on ${args.repo}#${args.prNumber} starting ` +
+      `\`${assessmentAcceptMarker(sha7)}\` to accept this head (${sha7}) as-is — that comment is the ONLY ` +
+      `way to clear this gate (an escalation reply of "accept" is NOT read here). To request changes ` +
+      `instead, reply with your instructions and the next round will act on them.`
+    );
+  }
+  return (
+    lead +
     `Assess the change, then reply "accept" to land this head (${sha7}) as-is, or "fix: <instructions>" to send it ` +
     `back to convergence with your instructions. (Equivalent: a PR comment starting ` +
     `\`${assessmentAcceptMarker(sha7)}\` on ${args.repo}#${args.prNumber} accepts this head.)`

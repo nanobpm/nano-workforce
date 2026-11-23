@@ -48,6 +48,15 @@ test("assessmentQuestion quotes the verdict and names the head", () => {
   assertStringIncludes(q, "nano-assessment: accept 68de21c");
 });
 
+test("assessmentQuestion channel=comment offers ONLY the PR-comment marker (converge-gate never reads answer)", () => {
+  const q = assessmentQuestion({ repo: "o/r", prNumber: 5, head: HEAD, verdict: "", channel: "comment" });
+  assertStringIncludes(q, "nano-assessment: accept 68de21c");
+  assertStringIncludes(q, "NOT read here");
+  assertEquals(/reply "accept" to land/.test(q), false);
+  // Default (merge) wording keeps the reply path it actually honours.
+  assertStringIncludes(assessmentQuestion({ repo: "o/r", prNumber: 5, head: HEAD, verdict: "" }), 'reply "accept"');
+});
+
 test("/status names a human-assessment wait distinctly (not merging)", () => {
   const rows = [
     { id: 1, outcome: "review-pending", detail: `x ${reviewHeadToken("51c424c0")}` },

@@ -232,6 +232,7 @@ export function makeHandler(deps: {
               prNumber: ghNumber,
               head: headSha,
               verdict: reviewVerdictExcerpt(review.body),
+              channel: "comment",
             })} Do NOT dispatch a fix round for this verdict.`,
             convergeAckOnly: false,
             reviewStale: false,
