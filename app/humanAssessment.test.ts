@@ -83,6 +83,15 @@ test("assessmentHeadFromQuestion reads the builder head, never a marker quoted f
   assertEquals(assessmentHeadFromQuestion(null), null);
 });
 
+test("assessmentHeadFromQuestion recognises the persisted converge-gate and merge-loop question forms (#1037 review)", () => {
+  const q = assessmentQuestion({ repo: "o/r", prNumber: 5, head: HEAD, verdict: "", channel: "comment" });
+  const gate = `Convergence blocked: the latest head-current Copilot review reports needs a closer look (a human assessment). ${q} Do NOT dispatch a fix round for this verdict.`;
+  assertEquals(assessmentHeadFromQuestion(gate), HEAD);
+  assertEquals(assessmentHeadFromQuestion(`This PR cannot be merged and needs a human decision. ${q}`), HEAD);
+  // Any other lead-in is not builder-controlled, so it is never recognised.
+  assertEquals(assessmentHeadFromQuestion(`Reviewer says: ${q}`), null);
+});
+
 test("assessmentFixCompletionToken round-trips through a detail string", () => {
   assertEquals(assessmentFixCompletionId(`re-entering ${assessmentFixCompletionToken(42)}`), 42);
   assertEquals(assessmentFixCompletionId("no token"), null);

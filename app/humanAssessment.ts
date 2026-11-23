@@ -119,11 +119,16 @@ export function assessmentAcceptor(comments: readonly IssueComment[], head: stri
  * names)? Derived from the ONE question builder above (`assessmentQuestion` always embeds the accept
  * marker), so the automated completers (steward, adjudication replay) and the marker resume share one
  * recognition rule with the writer. Null for any other question. */
+const ASSESSMENT_QUESTION_HEAD_RE =
+  /^(?:Convergence blocked: the latest head-current Copilot review reports needs a closer look \(a human assessment\)\. |This PR cannot be merged and needs a human decision\. )?The head-current Copilot review of ([0-9a-f]{7,64}) says "Needs a closer look"/i;
+
 export function assessmentHeadFromQuestion(question: string | null | undefined): string | null {
   // Read ONLY the builder-controlled head declaration at the very start of the question — never the
   // first marker anywhere in it, which could come from the quoted (reviewer-authored) verdict excerpt
   // and name an OLD head whose historical acceptance would then authorize the current one.
-  const m = /^The head-current Copilot review of ([0-9a-f]{7,64}) says "Needs a closer look"/i.exec(question ?? "");
+  // The persisted question may carry exactly one of the two process-controlled lead-ins: the
+  // converge-gate's `Convergence blocked: …` reason, or merge-loop.bpmn's escalation preamble.
+  const m = ASSESSMENT_QUESTION_HEAD_RE.exec(question ?? "");
   return m ? m[1].toLowerCase() : null;
 }
 
