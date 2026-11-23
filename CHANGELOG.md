@@ -1,3 +1,9 @@
+## [0.222.5](https://github.com/nanobpm/nano-workforce/compare/v0.222.4...v0.222.5) (2026-11-23)
+
+### Bug Fixes
+
+* **merge:** always request the head-current review; name the unreviewed head in escalation and /status ([#1035](https://github.com/nanobpm/nano-workforce/issues/1035)) ([a76f72e](https://github.com/nanobpm/nano-workforce/commit/a76f72e4cb343978cecbbfffa7b35f038bd2ba61)), closes [#1034](https://github.com/nanobpm/nano-workforce/issues/1034)
+
 ## [0.222.4](https://github.com/nanobpm/nano-workforce/compare/v0.222.3...v0.222.4) (2026-11-23)
 
 ### Bug Fixes
