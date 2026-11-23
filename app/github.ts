@@ -300,21 +300,13 @@ export function parseSuppressedAdvisories(reviewBody: string | null | undefined)
   return out;
 }
 
-/** Read the reviewer VERDICT out of a Copilot review body (issue #923 §2): does the review's own
- * summary report OPEN, actionable findings? Convergence requires a head-current verdict that is
- * CLEAN — a review whose body says findings are still open must block the same way an unresolved
- * thread does, even when every inline thread happens to be resolved (a review can carry findings
- * with no unresolved threads at all: the nano-bpm#1443 review raised 7 findings as a summary-only
- * "Changes recommended").
- *
- * Recognised open-finding signals (each returns a short human label for the block reason):
- *   • "Changes recommended" — Copilot's 🟡 verdict line (vs. the ✅ clean verdict);
- *   • "N open issue(s)"    — the summary count Copilot emits when findings remain;
- *   • a ccr-overview-v2 `<summary>…Open (N)…</summary>` section (issue #835's format) with N ≥ 1.
- * A body carrying NONE of these reports no open findings (empty array) — including the empty body
- * of a comment-only review. Pure; unit-tested. */
-const NEEDS_CLOSER_LOOK_RE = /^[ \t]*(?:#{1,6}[ \t]*)?(?:🔵[ \t]*)?(?:\*\*)?needs a closer look\b/imu;
-const VERDICT_LINE_RE = /^[ \t]*(?:#{1,6}[ \t]*)?(?:[🟡🔵][ \t]*)?(?:\*\*)?(?:changes recommended|needs a closer look)\b/imu;
+/** ONE verdict-line shape shared by every verdict detector (heading marks, optional 🟡/🔵 emoji,
+ * optional bold) so the open-finding gate and the excerpt can never disagree on a variant. */
+const verdictLineRe = (verdict: string): RegExp =>
+  new RegExp(`^[ \\t]*(?:#{1,6}[ \\t]*)?(?:(?:🟡|🔵)[ \\t]*)?(?:\\*\\*)?(?:${verdict})\\b`, "imu");
+const CHANGES_RECOMMENDED_RE = verdictLineRe("changes recommended");
+const NEEDS_CLOSER_LOOK_RE = verdictLineRe("needs a closer look");
+const VERDICT_LINE_RE = verdictLineRe("changes recommended|needs a closer look");
 
 /** The reviewer's overall VERDICT text (issue #1032), quoted verbatim so a convergence escalation can
  * show the human the concern a thread-only picture hides: the first "Changes recommended" / "Needs a
@@ -336,6 +328,20 @@ export function reviewVerdictExcerpt(reviewBody: string | null | undefined, max 
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+
+/** Read the reviewer VERDICT out of a Copilot review body (issue #923 §2): does the review's own
+ * summary report OPEN, actionable findings? Convergence requires a head-current verdict that is
+ * CLEAN — a review whose body says findings are still open must block the same way an unresolved
+ * thread does, even when every inline thread happens to be resolved (a review can carry findings
+ * with no unresolved threads at all: the nano-bpm#1443 review raised 7 findings as a summary-only
+ * "Changes recommended").
+ *
+ * Recognised open-finding signals (each returns a short human label for the block reason):
+ *   • "Changes recommended" — Copilot's 🟡 verdict line (vs. the ✅ clean verdict);
+ *   • "N open issue(s)"    — the summary count Copilot emits when findings remain;
+ *   • a ccr-overview-v2 `<summary>…Open (N)…</summary>` section (issue #835's format) with N ≥ 1.
+ * A body carrying NONE of these reports no open findings (empty array) — including the empty body
+ * of a comment-only review. Pure; unit-tested. */
 export function parseReviewOpenFindings(reviewBody: string | null | undefined): string[] {
   const body = reviewBody ?? "";
   if (body.trim() === "") return [];
@@ -343,7 +349,7 @@ export function parseReviewOpenFindings(reviewBody: string | null | undefined): 
   // Only VERDICT lines and dedicated finding-count <summary> sections count — never descriptive
   // prose (a clean review's file table may legitimately say `Recognizes "Changes recommended"`).
   // A verdict line STARTS with the verdict (`### 🟡 Changes recommended`, `🟡 Changes recommended`).
-  if (/^[ \t]*(?:#{1,6}[ \t]*)?(?:🟡[ \t]*)?changes recommended\b/imu.test(body)) out.push("changes recommended");
+  if (CHANGES_RECOMMENDED_RE.test(body)) out.push("changes recommended");
   // 🔵 "Needs a closer look" (issue #1032): the reviewer could not clear the change and asks for a
   // human assessment IN THE SUMMARY (often alongside "No open issues" and zero threads). It is a
   // non-clean verdict — never converge on it silently.

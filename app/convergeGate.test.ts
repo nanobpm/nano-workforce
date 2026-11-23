@@ -1499,6 +1499,10 @@ test("parseReviewOpenFindings: a 'Needs a closer look' verdict is a non-clean ve
   assertEquals(parseReviewOpenFindings(CLOSER_LOOK), ["needs a closer look"]);
   assertEquals(parseReviewOpenFindings("🔵 Needs a closer look — Human assessment is needed."), ["needs a closer look"]);
   assertEquals(parseReviewOpenFindings("| `a.ts` | Explains when a PR needs a closer look |"), []);
+  // Bold verdict forms (adversarial finding): both verdicts share one line shape.
+  assertEquals(parseReviewOpenFindings("**Changes recommended**"), ["changes recommended"]);
+  assertEquals(parseReviewOpenFindings("🟡 **Changes recommended**"), ["changes recommended"]);
+  assertEquals(parseReviewOpenFindings("### 🔵 **Needs a closer look**"), ["needs a closer look"]);
 });
 
 test("reconcileReviewOpenFindings: resolved threads never clear a 'Needs a closer look' verdict (#1032)", () => {
