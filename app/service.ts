@@ -56,6 +56,7 @@ import {
   fetchPrState,
   hasCopilotWorkStarted,
   hasPendingCopilotReviewer,
+  isCopilotReviewInFlight,
   isNotAPullRequestError,
   type MergeMethod,
   markPullRequestReady,
@@ -2871,10 +2872,17 @@ export async function ensureHeadReviewRequested(
     await record(res === "requested" ? "retried" : res);
     return res === "requested" ? "retried" : res;
   }
-  const pending = await hasPendingCopilotReviewer(repo, number, token).catch(() => null);
-  if (pending === null) return "skipped";
+  // GitHub empties `requested_reviewers` once Copilot STARTS, so a review already running (e.g. asked
+  // by the convergence stage just before CI went green) reads as "not pending". Check the timeline
+  // too and ADOPT a running review: a fresh ask would duplicate it, and the retry path would later
+  // withdraw it as "never started since our ask" (#1043 review).
+  const [pending, inFlight] = await Promise.all([
+    hasPendingCopilotReviewer(repo, number, token).catch(() => null),
+    isCopilotReviewInFlight(repo, number, token).catch(() => null),
+  ]);
+  if (pending === null || inFlight === null) return "skipped";
   let result: "adopted" | "requested" | "unavailable";
-  if (pending) result = "adopted";
+  if (pending || inFlight) result = "adopted";
   else {
     const res = await requestCopilotReview(repo, number, token).catch(() => null);
     if (res === null) return "skipped"; // transport failure → retried next pass (no marker)

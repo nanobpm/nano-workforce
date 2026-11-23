@@ -893,40 +893,86 @@ export async function hasCopilotWorkStarted(
   sinceIso: string,
   opts: { timeoutMs?: number } = {},
 ): Promise<boolean | null> {
+  const read = await readPrTimeline(repo, number, token, opts);
+  if (read === null) return null;
+  if (!read.complete) return copilotWorkStartedSince(read.events, sinceIso) ? true : null;
+  return copilotWorkStartedSince(read.events, sinceIso);
+}
+
+/** Issue #1043 review: is a Copilot review RUNNING right now — the newest `copilot_work_started` on
+ * the timeline is later than the newest Copilot `reviewed` event? GitHub empties
+ * `requested_reviewers` once Copilot starts, so the pending-reviewer read alone cannot see an
+ * in-flight review; asking again would duplicate it, and a later "never started since our ask"
+ * check would withdraw it. `null` when the timeline is unreadable or incomplete (unknown). */
+export async function isCopilotReviewInFlight(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<boolean | null> {
+  const read = await readPrTimeline(repo, number, token);
+  if (read === null || !read.complete) return null;
+  return copilotReviewInFlight(read.events);
+}
+
+/** Pure half of {@link isCopilotReviewInFlight}. */
+export function copilotReviewInFlight(events: readonly TimelineEvent[]): boolean {
+  const ts = (e: TimelineEvent) => Date.parse(e.created_at ?? e.submitted_at ?? "") || 0;
+  let started = 0;
+  let reviewed = 0;
+  for (const e of events) {
+    if (e.event === "copilot_work_started") started = Math.max(started, ts(e));
+    else if (e.event === "reviewed" && /copilot/i.test(e.user?.login ?? "")) reviewed = Math.max(reviewed, ts(e));
+  }
+  return started > 0 && started > reviewed;
+}
+
+export interface TimelineEvent {
+  event?: string;
+  created_at?: string;
+  submitted_at?: string;
+  user?: { login?: string };
+}
+
+/** Reads the PR's whole issue timeline. `complete: false` when the REST page cap was hit with more
+ * pages advertised; `null` when no transport is usable or any read failed. `opts.timeoutMs` bounds the
+ * whole walk (one shared signal / the `gh` process timeout). */
+async function readPrTimeline(
+  repo: string,
+  number: number | string,
+  token: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ events: TimelineEvent[]; complete: boolean } | null> {
   const path = `repos/${repo}/issues/${number}/timeline?per_page=100`;
   try {
-    let events: { event?: string; created_at?: string }[];
     if (await useGh()) {
       const out = await runGh(
         ["api", path, "--paginate", "--slurp", "-H", "Accept: application/vnd.github+json"],
         opts.timeoutMs === undefined ? undefined : { timeoutMs: opts.timeoutMs },
       );
       // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-      events = (JSON.parse(out) as { event?: string; created_at?: string }[][]).flat();
-    } else {
-      if (!token) return null;
-      // Walk EVERY page (mirrors the `gh --paginate` path): a `copilot_work_started` beyond the first
-      // 100 events must not read as "never started". An incomplete read (non-OK page, or the page cap
-      // still advertising `rel="next"`) is UNKNOWN (`null`), never `false`.
-      const MAX_PAGES = 20;
-      const signal = opts.timeoutMs === undefined ? undefined : AbortSignal.timeout(opts.timeoutMs);
-      events = [];
-      for (let page = 1; page <= MAX_PAGES; page++) {
-        const r = await fetch(`https://api.github.com/${path}&page=${page}`, {
-          headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
-          ...(signal === undefined ? {} : { signal }),
-        });
-        if (!r.ok) return null;
-        // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-        const batch = (await r.json()) as { event?: string; created_at?: string }[];
-        if (!Array.isArray(batch)) return null;
-        events.push(...batch);
-        const hasNext = /<[^>]*>;\s*rel="next"/.test(r.headers.get("link") ?? "");
-        if (!hasNext) break;
-        if (page === MAX_PAGES) return copilotWorkStartedSince(events, sinceIso) ? true : null;
-      }
+      return { events: (JSON.parse(out) as TimelineEvent[][]).flat(), complete: true };
     }
-    return copilotWorkStartedSince(events, sinceIso);
+    if (!token) return null;
+    // Walk EVERY page (mirrors the `gh --paginate` path): an event beyond the first 100 must not read
+    // as absent. A non-OK page is unknown (`null`); the page cap still advertising `rel="next"` is
+    // `complete: false`.
+    const MAX_PAGES = 20;
+    const signal = opts.timeoutMs === undefined ? undefined : AbortSignal.timeout(opts.timeoutMs);
+    const events: TimelineEvent[] = [];
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const r = await fetch(`https://api.github.com/${path}&page=${page}`, {
+        headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (!r.ok) return null;
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const batch = (await r.json()) as TimelineEvent[];
+      if (!Array.isArray(batch)) return null;
+      events.push(...batch);
+      const hasNext = /<[^>]*>;\s*rel="next"/.test(r.headers.get("link") ?? "");
+      if (!hasNext) return { events, complete: true };
+    }
+    return { events, complete: false };
   } catch {
     return null;
   }

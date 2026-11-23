@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { memStatusCas } from "../test/memStatusCas.ts";
+import { copilotReviewInFlight } from "./github.ts";
 import { reviewWaitReason } from "./reviewWait.ts";
 import { ensureHeadReviewRequested, POLLER_REVIEW_START_WINDOW_MS, pollMerges } from "./service.ts";
 
@@ -64,7 +65,7 @@ function githubFetch(fx: {
   posts?: string[];
   postStatus?: number;
   deletes?: string[];
-  timeline?: { event: string; created_at: string }[];
+  timeline?: { event: string; created_at: string; user?: { login: string } }[];
 }) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const u = new URL(String(url));
@@ -179,9 +180,10 @@ test("#1043: a request Copilot DID start is not retried", async () => {
   const { data } = setup();
   const posts: string[] = [];
   const t0 = Date.parse("2026-11-23T16:00:00Z");
-  const timeline = [{ event: "copilot_work_started", created_at: "2026-11-23T16:00:30Z" }];
+  const timeline: { event: string; created_at: string }[] = [];
   await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, posts, deletes: [], timeline }, async () => {
-    await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", t0);
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", t0), "requested");
+    timeline.push({ event: "copilot_work_started", created_at: "2026-11-23T16:00:30Z" });
     const late = t0 + POLLER_REVIEW_START_WINDOW_MS + 1000;
     assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", late), "skipped");
   });
@@ -271,4 +273,45 @@ test("#1043: an 'unavailable' ask (Copilot not assignable) never opens a waiting
   assertEquals(posts.length, 1);
   assertEquals(reviewWaitReason(stores["merges"]), null);
   assertEquals(stores["merges"].filter((r) => r.outcome === "review-requested").length, 0);
+});
+
+test("#1043 review: a RUNNING Copilot review (requested_reviewers already emptied) is adopted — never duplicated nor withdrawn", async () => {
+  const { data } = setup();
+  const posts: string[] = [];
+  const deletes: string[] = [];
+  const t0 = Date.parse("2026-11-23T16:00:00Z");
+  // The convergence stage asked just before CI went green: Copilot started at 15:59 (after its
+  // previous review at 15:00), so GitHub no longer lists it as a pending reviewer.
+  const timeline = [
+    { event: "reviewed", created_at: "2026-11-23T15:00:00Z", user: { login: "copilot-pull-request-reviewer[bot]" } },
+    { event: "copilot_work_started", created_at: "2026-11-23T15:59:00Z" },
+  ];
+  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, posts, deletes, timeline, pendingCopilot: false }, async () => {
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", t0), "adopted");
+    const late = t0 + POLLER_REVIEW_START_WINDOW_MS + 1000;
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", late), "skipped");
+  });
+  assertEquals(posts.length, 0, "no duplicate request for a running review");
+  assertEquals(deletes.length, 0, "a running review is never withdrawn");
+});
+
+test("#1043 review: copilotReviewInFlight — started after the last Copilot review is in flight; a finished one is not", () => {
+  const bot = { login: "copilot-pull-request-reviewer[bot]" };
+  assertEquals(copilotReviewInFlight([]), false);
+  assertEquals(copilotReviewInFlight([{ event: "copilot_work_started", created_at: "2026-11-23T15:00:00Z" }]), true);
+  assertEquals(
+    copilotReviewInFlight([
+      { event: "copilot_work_started", created_at: "2026-11-23T15:00:00Z" },
+      { event: "reviewed", submitted_at: "2026-11-23T15:04:00Z", user: bot },
+    ]),
+    false,
+  );
+  assertEquals(
+    copilotReviewInFlight([
+      { event: "copilot_work_started", created_at: "2026-11-23T15:00:00Z" },
+      { event: "reviewed", submitted_at: "2026-11-23T15:04:00Z", user: { login: "jwulf" } },
+    ]),
+    true,
+    "a human review does not end Copilot's",
+  );
 });
