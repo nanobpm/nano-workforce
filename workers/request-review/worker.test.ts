@@ -113,3 +113,22 @@ test("a request still not started after the retry reports not-started (#1034)", 
   assertEquals(out, { reviewRequest: "not-started" });
   assertEquals(String(merges[0].detail).includes("not-started"), true);
 });
+
+test("a failed withdraw before the not-started retry still re-requests (#1034)", async () => {
+  const calls: string[] = [];
+  const { app } = fakeApp();
+  const out = await makeHandler(
+    ops(
+      {
+        awaitStarted: async () => (calls.push("started?"), false),
+        remove: async () => {
+          calls.push("remove");
+          throw new Error("422 reviewer not requested");
+        },
+      },
+      calls,
+    ),
+  )(job(0), app);
+  assertEquals(out, { reviewRequest: "not-started" });
+  assertEquals(calls, ["request", "started?", "remove", "request", "started?"]);
+});
