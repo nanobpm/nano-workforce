@@ -62,6 +62,7 @@ function githubFetch(fx: {
   reviewsStatus?: number;
   pendingCopilot?: boolean;
   posts?: string[];
+  postStatus?: number;
   deletes?: string[];
   timeline?: { event: string; created_at: string }[];
 }) {
@@ -77,7 +78,7 @@ function githubFetch(fx: {
     if (/\/pulls\/\d+\/requested_reviewers$/.test(u.pathname)) {
       if (init?.method === "POST") {
         fx.posts?.push(u.pathname);
-        return json({});
+        return json({}, fx.postStatus ?? 200);
       }
       if (init?.method === "DELETE") {
         fx.deletes?.push(u.pathname);
@@ -241,4 +242,18 @@ test("#1043: an unreadable review list fails safe (no request)", async () => {
   assertEquals(posts.length, 0);
   assertEquals(messages.filter((m) => m.name === "merge-ready").length, 0);
   assertEquals(stores["pull_requests"][0].status, "waiting_merge");
+});
+
+test("#1043: an 'unavailable' ask (Copilot not assignable) never opens a waiting_review wait and is not re-asked", async () => {
+  const { data, stores } = setup();
+  const posts: string[] = [];
+  const t0 = Date.parse("2026-11-23T16:00:00Z");
+  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, posts, postStatus: 422, deletes: [], timeline: [] }, async () => {
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", t0), "unavailable");
+    const late = t0 + POLLER_REVIEW_START_WINDOW_MS + 1000;
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", late), "skipped");
+  });
+  assertEquals(posts.length, 1);
+  assertEquals(reviewWaitReason(stores["merges"]), null);
+  assertEquals(stores["merges"].filter((r) => r.outcome === "review-requested").length, 0);
 });

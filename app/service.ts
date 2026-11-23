@@ -2803,6 +2803,10 @@ export const POLLER_REVIEW_ASKS_PER_HEAD = 2;
  * When the review becomes VERIFIED head-current while a review wait is the newest audit row, the
  * canonical {@link REVIEW_WAIT_ENDED_OUTCOME} row closes it so /status stops reporting
  * `waiting_review` (unreadable reads never close it). */
+/** Merge-audit outcome for a poller review ask GitHub refused (Copilot not assignable). Deliberately
+ *  NOT in `REVIEW_WAIT_OUTCOMES`: it never opens a review wait. */
+export const REVIEW_UNAVAILABLE_OUTCOME = "review-unavailable";
+
 export async function ensureHeadReviewRequested(
   data: DataLayer,
   prKey: string,
@@ -2831,13 +2835,18 @@ export async function ensureHeadReviewRequested(
   }
   const head = state.head;
   const marker = reviewHeadToken(head);
-  const prior = (await audit.find({ pr_key: prKey, outcome: "review-requested" })).filter(
-    (r) => typeof r.detail === "string" && r.detail.includes(marker),
-  );
+  // An `unavailable` ask (Copilot not assignable) is recorded under a NON-wait outcome: no review
+  // was requested and none can arrive, so it must not open a /status `waiting_review` wait.
+  const prior = [
+    ...(await audit.find({ pr_key: prKey, outcome: "review-requested" })),
+    ...(await audit.find({ pr_key: prKey, outcome: REVIEW_UNAVAILABLE_OUTCOME })),
+  ]
+    .filter((r) => typeof r.detail === "string" && r.detail.includes(marker))
+    .sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
   const record = async (result: string) => {
     await audit.insert({
       pr_key: prKey,
-      outcome: "review-requested",
+      outcome: result === "unavailable" ? REVIEW_UNAVAILABLE_OUTCOME : "review-requested",
       method: "review-request",
       detail: `poller head-current Copilot review ${result} ${marker}`,
       at: new Date(nowMs).toISOString(),
