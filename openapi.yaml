@@ -2287,13 +2287,13 @@ components:
           description: The base branch the run actually targets — for `already-active`, the live run's persisted base (not the request's); otherwise the admitted request base, the repository default branch when the request omitted `baseBranch` (issue 989).
         converge:
           type: boolean
-          description: The EFFECTIVE converge flag for this request (issue 1041) — `autoMerge`/`humanApproval` true imply it.
+          description: The EFFECTIVE converge flag for this request (issue 1041); present only when `outcome` is `started` — omitted for `already-active`, whose live run keeps its own flags — `autoMerge`/`humanApproval` true imply it.
         autoMerge:
           type: boolean
-          description: The EFFECTIVE autoMerge flag for this request (issue 1041) — `humanApproval` true implies it.
+          description: The EFFECTIVE autoMerge flag for this request (issue 1041); present only when `outcome` is `started` — omitted for `already-active`, whose live run keeps its own flags — `humanApproval` true implies it.
         humanApproval:
           type: boolean
-          description: The EFFECTIVE humanApproval flag for this request (issue 1041).
+          description: The EFFECTIVE humanApproval flag for this request (issue 1041); present only when `outcome` is `started` — omitted for `already-active`, whose live run keeps its own flags.
     EpicSetStart:
       description: >-
         The set/batch admission request body (issue #292, slice S2). Submits a SET of epics plus the

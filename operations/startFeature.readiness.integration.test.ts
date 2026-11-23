@@ -304,6 +304,20 @@ test("already-active echoes the LIVE run's persisted base, not the re-request's 
   });
 });
 
+test("already-active omits the effective flags: the re-request's flags were not applied (issue #1041)", async () => {
+  await withGithub(REPO, async () => {
+    const { app, started } = makeApp();
+    const first = (await startFeature(input({ issue: `${REPO}#992`, ...GATED_BASE, converge: true }), app)) as any;
+    assertEquals(first.status, 202);
+    assertEquals(first.body.autoMerge, false);
+    const again = (await startFeature(input({ issue: `${REPO}#992`, ...GATED_BASE, autoMerge: true }), app)) as any;
+    assertEquals(again.status, 202);
+    assertEquals(again.body.outcome, "already-active");
+    for (const k of ["converge", "autoMerge", "humanApproval"]) assertEquals(k in again.body, false, k);
+    assertEquals(started.length, 1);
+  });
+});
+
 // ── adversarial-review regression: a THROWING default-branch lookup is the missing-base 400 ─────
 // When `baseBranch` is omitted the operation resolves the repo default branch itself — but
 // `fetchDefaultBranch` THROWS on any GitHub error (a non-ok fetch for an unknown/private repo, a

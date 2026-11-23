@@ -264,6 +264,10 @@ export default defineOperation("startFeature", async ({ body }, app) => {
       },
     };
   }
-  // Echo the EFFECTIVE flags (issue #1041) so a caller sees whether a merge loop will run.
+  // Echo the EFFECTIVE flags (issue #1041) so a caller sees whether a merge loop will run — but ONLY
+  // for a run this request actually started. On `already-active` the request's flags were NOT applied
+  // (the live run keeps its own), so echoing them would misreport e.g. autoMerge:true on a review-only
+  // run — the very silent drop #1041 fixes. Omit them there.
+  if (result.outcome === "already-active") return { status: 202, body: withProcessInstanceKey(result) };
   return { status: 202, body: { ...withProcessInstanceKey(result), converge, autoMerge, humanApproval } };
 });
