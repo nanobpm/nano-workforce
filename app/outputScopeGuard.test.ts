@@ -13,11 +13,17 @@
 //   • a user task's static `formId` form — every keyed form component.
 // Each produced field must be mapped to a target of the same name (`=x` → `x`; inside the element
 // scope `x` resolves to the local result, falling back to the parent value when the result omits it,
-// so the pass-through never clobbers an unchanged variable).
+// so the pass-through never clobbers an unchanged variable) — UNLESS the element deliberately consumes
+// it: the field feeds one of the element's own output sources AND no FEEL expression elsewhere in the
+// process reads the name (e.g. the delivery-graph human step folds `note` into `humanNote`).
+// The same check runs over COMPILED delivery graphs (deliveryGraphCompiler), whose escalation user
+// tasks are the generated twin of the class.
 import { test } from "node:test";
 import { assert } from "#test-assert";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
+import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 
 const PROCESS_DIR = "resources/processes";
 const FORM_DIR = "resources/forms";
@@ -37,7 +43,8 @@ function shapeFields(sources: Iterable<string>): Map<string, string[]> {
   const shapes = new Map<string, string[]>();
   for (const xml of sources) {
     for (const m of xml.matchAll(/<nano:shape id="([^"]+)"[^>]*>([\s\S]*?)<\/nano:shape>/g)) {
-      shapes.set(m[1] ?? "", [...(m[2] ?? "").matchAll(/<nano:extend name="([^"]+)"/g)].map((f) => f[1] ?? ""));
+      // Scalar (`nano:extend`) AND reference-valued (`nano:reference`, incl. object lists) fields.
+      shapes.set(m[1] ?? "", [...(m[2] ?? "").matchAll(/<nano:(?:extend|reference) name="([^"]+)"/g)].map((f) => f[1] ?? ""));
     }
   }
   return shapes;
@@ -51,6 +58,17 @@ function formFields(): Map<string, string[]> {
     forms.set(form.id, (form.components ?? []).flatMap((c) => (c.key ? [c.key] : [])));
   }
   return forms;
+}
+
+/** Every FEEL expression in the process outside `element`: `="="…` attributes and condition bodies. */
+function feelOutside(xml: string, element: string): string[] {
+  const rest = xml.replace(element, "");
+  const unescape = (s: string) => s.replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+  return [
+    ...[...rest.matchAll(/="(=[^"]*)"/g)].map((f) => unescape(f[1] ?? "")),
+    ...[...rest.matchAll(/='(=[^']*)'/g)].map((f) => unescape(f[1] ?? "")),
+    ...[...rest.matchAll(/<bpmn:conditionExpression[^>]*>([\s\S]*?)<\/bpmn:conditionExpression>/g)].map((f) => unescape(f[1] ?? "")),
+  ];
 }
 
 interface Violation {
@@ -75,7 +93,11 @@ function outputScopeViolations(sources: Map<string, string>, shapes: Map<string,
         ...(formId === undefined ? [] : (forms.get(formId) ?? [`<unknown form ${formId}>`])),
       ];
       if (produced.length > 0) checked++;
-      const missing = produced.filter((p) => !targets.has(p));
+      const ownSources = [...body.matchAll(/<zeebe:output source="([^"]*)"/g)].map((t) => t[1] ?? "");
+      const elsewhere = feelOutside(xml, m[0]);
+      const word = (name: string) => new RegExp(`(^|[^\\w.])${name}(?![\\w])`);
+      const consumed = (p: string) => ownSources.some((src) => word(p).test(src)) && !elsewhere.some((f) => word(p).test(f));
+      const missing = produced.filter((p) => !targets.has(p) && !consumed(p));
       if (missing.length > 0) violations.push({ where: `${file} ${m[1]} #${m[2]}`, missing });
     }
   }
@@ -107,4 +129,34 @@ test("#1045: the guard catches a user task that drops its form's decision field"
     <zeebe:output source="=0" target="huskRetries" /></bpmn:userTask>`;
   const { violations } = outputScopeViolations(new Map([["t.bpmn", xml]]), new Map(), new Map([["f", ["decision"]]]));
   assert(violations.length === 1 && violations[0]?.missing.join() === "decision", JSON.stringify(violations));
+});
+
+test("#1045: compiled delivery graphs pass every escalation form answer through their output mappings", async () => {
+  const graph = {
+    name: "output-scope guard",
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "senior:a" }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "b", kind: "agent", agent: { jobType: "senior:b" }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "c", kind: "connector", connector: { target: "slack", dedupeKey: "c-1", payload: { pr: "a.pr" } } },
+    ],
+    edges: [
+      { from: "a.pr", to: "c" },
+      { from: "a.pr", to: "b" },
+    ],
+  } as DeliveryGraph;
+  const r = await compileDeliveryGraph(graph);
+  assert(r.ok, JSON.stringify(r));
+  const sources = new Map([["compiled.bpmn", r.bpmn]]);
+  const { violations, checked } = outputScopeViolations(sources, new Map(), formFields());
+  assert(checked >= 2, `expected the agents' escalation user tasks to be checked, checked ${checked}`);
+  assert(violations.length === 0, violations.map((v) => `${v.where}: ${v.missing.join(", ")}`).join("\n"));
+});
+
+test("#1045: the guard catches a dropped reference-valued (object list) result field", () => {
+  const xml = `<nano:shape id="Out"><nano:extend name="status" type="string" /><nano:reference name="results" ref="R" list="true" /></nano:shape>
+    <bpmn:serviceTask id="t"><zeebe:property name="io.nanobpm.dataEnvelope.out" value="Out" />
+    <zeebe:output source="=status" target="status" /></bpmn:serviceTask>`;
+  const sources = new Map([["t.bpmn", xml]]);
+  const { violations } = outputScopeViolations(sources, shapeFields(sources.values()), new Map());
+  assert(violations.length === 1 && violations[0]?.missing.join() === "results", JSON.stringify(violations));
 });

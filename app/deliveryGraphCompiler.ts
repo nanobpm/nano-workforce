@@ -3307,6 +3307,13 @@ function escalationTaskLines(
   // continue", never "re-run the probe loop" — so it keeps the select-less generic form rather than
   // render a "Retry this step" option that would be silently ignored.
   const form = opts?.retryElement !== undefined ? ESCALATION_FORM : GENERIC_HUMAN_FORM;
+  // Issue #1045: with ANY output mapping, Zeebe keeps the completion variables (the operator's form
+  // answers) TASK-LOCAL — so the retry reset never saw `escalationNote`. Pass every escalation control
+  // through to the node scope (ESCALATION_LOCAL_VARS is the delivery-escalation form's field set, and is
+  // null-seeded node-local on the subProcess, so it never reaches the shared root).
+  if (form === ESCALATION_FORM && outputs.length > 0) {
+    for (const v of ESCALATION_LOCAL_VARS) outputs.push(`            <zeebe:output source="=${v}" target="${v}" />`);
+  }
   const task = [
     `      <bpmn:userTask id="${esc}" name="Escalate: ${escapeXml(escLabel)}">`,
     "        <bpmn:extensionElements>",
