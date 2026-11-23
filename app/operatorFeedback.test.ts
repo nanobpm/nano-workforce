@@ -269,6 +269,9 @@ test("an acked review clears; a quoted, mid-sentence, or untrusted ack does not"
   assertEquals(deriveReviews([fb], [c(71, "jwulf", "OWNER", at, "> nano-ack: review-900\nnot done")]).map((i) => i.id), [71, 900]);
   assertEquals(deriveReviews([fb], [c(72, "jwulf", "OWNER", at, "You wrote nano-ack: review-900 but no")]).map((i) => i.id), [72, 900]);
   assertEquals(deriveReviews([fb], [c(73, "rando", "NONE", at, "nano-ack: review-900")]).map((i) => i.id), [900]);
+  // A PENDING (unsubmitted draft) review is never an ack source — it may be discarded.
+  assertEquals(deriveReviews([fb, rv(902, "jwulf", "OWNER", at, "nano-ack: review-900", "PENDING")]).map((i) => i.id), [900]);
+  assertEquals(deriveReviews([fb, rv(903, "jwulf", "OWNER", "", "nano-ack: review-900")]).map((i) => i.id), [900]);
   // An issuecomment ack with the same number does not clear a review (distinct namespaces).
   assertEquals(deriveReviews([fb], [c(74, "jwulf", "OWNER", at, "nano-ack: issuecomment-900")]).map((i) => i.id), [900]);
 });
