@@ -650,6 +650,14 @@ export const TYPE_CONTRACTS = {
       "The durable registry of per-worker advertised harness protocol version (issue #802), over `worker_harness_protocol` (migration 107) through the RAD `Table<T>` surface — mirroring {@link DurableResumeRegistry}. `harness-protocol` is a worker ATTRIBUTE advertised at enrolment (ADR 0056 §7 — capability gates enrolment, NEVER the routing token `network.role#seat`), recorded per worker instance by `recordEnrolment` from the enrol door (`operations/enrolAgenticWorker.ts`); a MISSING version is first-class STALE. It is the ONE shared source consumed by enrolment (record), supply (`getAgenticSupply` staleness verdict) and registry reporting (`computeRegistryReport` → `staleWorkers`, which folds a non-empty stale set into the overall red drain signal). The bounded `protocolsFor(instances)` read scopes to the live presence keys via a single `WHERE instance IN (…)` query — never an N+1 per-worker `findOne`. Consume this ONE module for the harness-protocol gate — do not re-declare a synonym or read the version off a second store.",
     module: "app/harnessProtocol.ts",
   },
+  FeatureFlags: {
+    category: "type",
+    name: "FeatureFlags",
+    owner: "app/featureFlags.ts",
+    semantics:
+      "A feature run's resolved merge-intent flags (issue #1041) — `{ converge, autoMerge, humanApproval }`, resolved from the optional caller `FeatureFlagInput` by the ONE resolver `resolveFeatureFlags`, shared by the API door (operations/startFeature.ts) and the MCP door (app/mcpStart.ts). Implication chain `humanApproval ⇒ autoMerge ⇒ converge`: a flag set `true` implies its prerequisites; a prerequisite explicitly set `false` contradicts it and throws `ContradictoryFeatureFlagsError` (never resolved by dropping a `true`). Both doors import this — do not re-declare a synonym flag shape or a second resolver.",
+    module: "app/featureFlags.ts",
+  },
 } as const satisfies Record<string, TypeContract>;
 
 export const CAPABILITY_URL_CONTRACTS = {
