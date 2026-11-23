@@ -608,9 +608,11 @@ async function makeUnderTest(deps: {
   // relies on). A stale-review test supplies a `reviewCommitId` that differs from `headSha`.
   reviewCommitId?: string | null;
   headSha?: string | null;
+  readComments?: (repo: string, n: number) => Promise<any[] | null>;
 }) {
   const { makeHandler } = await import("../workers/converge-gate/worker.ts");
   return makeHandler({
+    readComments: deps.readComments,
     readThreads: deps.readThreads,
     readReview: async (repo, n) => {
       const body = await deps.readReviewBody(repo, n);
@@ -1532,4 +1534,41 @@ test("converge-gate #1032: a head-current 'Needs a closer look' review with zero
   assertEquals(out.convergeAckOnly, false);
   assertStringIncludes(out.convergeBlockReason ?? "", "needs a closer look");
   assertStringIncludes(out.convergeBlockReason ?? "", "resource-exhaustion risks from superseded probes");
+});
+
+// ── Human assessment of "Needs a closer look" (issue #1037) ──────────────────
+const ASSESS_HEAD = "68de21c0aaaabbbbccccddddeeeeffff00001111";
+
+test("converge-gate #1037: a closer-look-only verdict asks a HUMAN — never an ack-only auto round", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["x"] }],
+    readReviewBody: async () => CLOSER_LOOK,
+    reviewCommitId: ASSESS_HEAD,
+    headSha: ASSESS_HEAD,
+    readComments: async () => [],
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertEquals(out.convergeAckOnly, false);
+  assertStringIncludes(out.convergeBlockReason ?? "", "nano-assessment: accept 68de21c");
+  assertStringIncludes(out.convergeBlockReason ?? "", "Do NOT dispatch a fix round");
+});
+
+test("converge-gate #1037: a trusted nano-assessment accept for THIS head clears the verdict", async () => {
+  const comment = (body: string, association = "MEMBER", login = "jwulf") => ({ id: 1, body, login, association, createdAt: "" });
+  const mk = (comments: any[]) =>
+    makeUnderTest({
+      readThreads: async () => [],
+      readReviewBody: async () => CLOSER_LOOK,
+      reviewCommitId: ASSESS_HEAD,
+      headSha: ASSESS_HEAD,
+      readComments: async () => comments,
+    });
+  const run = async (comments: any[]) =>
+    (await mk(comments))({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals((await run([comment("nano-assessment: accept 68de21c")])).convergeBlocked, false);
+  // Another head, an outsider, or a bot never clears it.
+  assertEquals((await run([comment("nano-assessment: accept 1234567")])).convergeBlocked, true);
+  assertEquals((await run([comment("nano-assessment: accept 68de21c", "NONE")])).convergeBlocked, true);
+  assertEquals((await run([comment("nano-assessment: accept 68de21c", "MEMBER", "github-actions[bot]")])).convergeBlocked, true);
 });

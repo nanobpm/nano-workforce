@@ -48,7 +48,14 @@ export function makeHandler(
     // `custom_instructions` projection). Read the SAME `pull_requests` row the opt-in came from.
     // biome-ignore lint/plugin: runtime/framework contract boundary for the untyped row shape
     const rowInstructions = (row as { custom_instructions_text?: string | null } | undefined)?.custom_instructions_text;
-    const customInstructions = typeof rowInstructions === "string" && rowInstructions.trim() !== "" ? rowInstructions : null;
+    const baseInstructions = typeof rowInstructions === "string" && rowInstructions.trim() !== "" ? rowInstructions : null;
+    // Issue #1037: a human who answered a "Needs a closer look" assessment with `fix: …` sends the PR
+    // back to convergence CARRYING that answer as the round agent's instructions.
+    const assessment = typeof job.variables.assessmentAnswer === "string" ? job.variables.assessmentAnswer.trim() : "";
+    const customInstructions =
+      assessment === ""
+        ? baseInstructions
+        : `${baseInstructions ? `${baseInstructions}\n\n` : ""}Human assessment of the reviewer's "Needs a closer look" verdict — act on it:\n\n${assessment}`;
     await app.data.table("merges", "id").insert({
       pr_key: prKey,
       outcome: "reconverge",

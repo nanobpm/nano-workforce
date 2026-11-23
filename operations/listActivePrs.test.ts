@@ -33,6 +33,13 @@ function memApp(rows: any[], userTaskRows: any[] = [], deliveryRows: any[] = [])
         },
       };
     }
+    if (name === "merges") {
+      return {
+        async find() {
+          return [];
+        },
+      };
+    }
     return {
       async all() {
         return rows;

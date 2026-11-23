@@ -157,13 +157,18 @@ export const REVIEW_WAIT_ENDED_OUTCOME = "review-wait-ended";
 
 /** The PR statuses during which the merge stage's review wait can be live (read-only derivation;
  *  the stored status is never changed). `merging` covers the timer race after `flipToMergingThenPublish`. */
-export const REVIEW_WAIT_STATUSES: readonly string[] = ["waiting_merge", "merging"];
+export const REVIEW_WAIT_STATUSES: readonly string[] = ["waiting_merge", "merging", "escalated"];
+
+/** The merge-audit outcome recorded when a head parks on a human assessment of a 🔵 "Needs a closer
+ *  look" verdict (issue #1037) — /status derives `waiting_human_assessment(<sha7>)` from it. Re-exported as
+ *  `HUMAN_ASSESSMENT_OUTCOME` by app/humanAssessment.ts (one source). */
+export const HUMAN_ASSESSMENT_WAIT_OUTCOME = "human-assessment";
 
 /** Pure: is the newest audit row (highest id) a review-wait outcome? */
 export function isReviewWaitOpen(rows: readonly { id?: number | null; outcome: string }[]): boolean {
   if (rows.length === 0) return false;
   const newest = rows.reduce((a, b) => ((b.id ?? 0) > (a.id ?? 0) ? b : a));
-  return REVIEW_WAIT_OUTCOMES.includes(newest.outcome);
+  return REVIEW_WAIT_OUTCOMES.includes(newest.outcome) || newest.outcome === HUMAN_ASSESSMENT_WAIT_OUTCOME;
 }
 
 /** The canonical head token appended to a `review-pending` audit row's detail. */
@@ -185,6 +190,10 @@ export function reviewWaitReason(
 ): string | null {
   if (rows.length === 0) return null;
   const sorted = [...rows].sort((a, b) => (b.id ?? 0) - (a.id ?? 0));
+  if (sorted[0].outcome === HUMAN_ASSESSMENT_WAIT_OUTCOME) {
+    const head = parseReviewHead(sorted[0].detail);
+    return head ? `waiting_human_assessment(${head.slice(0, 7)})` : "waiting_human_assessment";
+  }
   if (!REVIEW_WAIT_OUTCOMES.includes(sorted[0].outcome)) return null;
   for (const r of sorted) {
     if (!REVIEW_WAIT_OUTCOMES.includes(r.outcome)) break;

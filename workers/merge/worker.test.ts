@@ -31,7 +31,7 @@ function fakeApp() {
                 store.find((r) => Object.entries(q).every(([f, v]) => r[f] === v)) ?? null,
               ),
             insert: (row: any) => {
-              store.push(row);
+              store.push(row.id === undefined ? { id: store.length + 1, ...row } : row);
               return Promise.resolve(store.length);
             },
             update: (k: any, patch: any) => {
@@ -597,5 +597,78 @@ test("pr.merge #1018: an unreadable thread set keeps the frozen findings blockin
     const out = (await backstop({ variables: { prKey: "acme/widgets#30", repo: "acme/widgets", prNumber: 30 } } as any, app)) as Record<string, unknown>;
     assertEquals(out, { mergeStatus: "review-findings" });
     assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+  });
+});
+
+// ── Human assessment of "Needs a closer look" (issue #1037) ──────────────────
+// nano-bpm#1850 spun arm → attempt → review-findings every ~5 min with no escalation: a head-current
+// 🔵 verdict with zero threads is a HUMAN assessment request no agent push can clear.
+const CLOSER_LOOK_BODY =
+  "## Pull request overview\n\n### 🔵 Needs a closer look\n\nHuman assessment is needed for probe exhaustion.\n\n<details><summary>No open issues</summary>\n</details>";
+const AHEAD = "68de21c0aaaabbbbccccddddeeeeffff00001111";
+const landRoutes = (url: string) => {
+  if (/\/pulls\/\d+\/merge$/.test(url)) return new Response(JSON.stringify({ merged: true }), { status: 200 });
+  return backstopRoutes(url);
+};
+const assessHandler = (comments: any[] = []) =>
+  makeHandler({
+    readReview: async () => ({ body: CLOSER_LOOK_BODY, commitId: AHEAD }),
+    readHeadSha: async () => AHEAD,
+    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["x"], commentIds: ["1"] }],
+    readComments: async () => comments,
+  });
+const vars = (extra: Record<string, unknown> = {}) =>
+  ({ variables: { prKey: "acme/widgets#40", repo: "acme/widgets", prNumber: 40, ...extra } }) as any;
+
+test("pr.merge #1037: a closer-look-only verdict escalates ONCE to a human (no reconverge, no land)", async () => {
+  await withGithub(landRoutes, async (calls) => {
+    const { app, stores } = fakeApp();
+    const out = (await assessHandler()(vars(), app)) as Record<string, unknown>;
+    // `blocked` + question → the model's merge-esc-attempt arm opens exactly one escalation and the
+    // token parks on wait-merge-answer: no further pr.merge attempt until a human answers.
+    assertEquals(out.mergeStatus, "blocked");
+    assertEquals(String(out.question).includes("Human assessment is needed for probe exhaustion."), true);
+    assertEquals(String(out.question).includes("nano-assessment: accept 68de21c"), true);
+    assertEquals(stores.merges.map((m) => m.outcome), ["human-assessment"]);
+    assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+  });
+});
+
+test("pr.merge #1037: answering accept lands that head; a stale accept for another park does not", async () => {
+  await withGithub(landRoutes, async (calls) => {
+    const { app, stores } = fakeApp();
+    await assessHandler()(vars(), app);
+    // record-answer → arm-merge stamps review-wait-ended before the re-attempt.
+    await app.data.table("merges", "id").insert({ pr_key: "acme/widgets#40", outcome: "review-wait-ended" });
+    const out = (await assessHandler()(vars({ answer: "accept" }), app)) as Record<string, unknown>;
+    assertEquals(out, { mergeStatus: "merged" });
+    assertEquals(stores.merges.some((m) => m.outcome === "assessment-accepted"), true);
+    assertEquals(calls.some((c) => /\/pulls\/\d+\/merge$/.test(c.url) && c.method === "PUT"), true);
+  });
+  await withGithub(landRoutes, async (calls) => {
+    const { app } = fakeApp();
+    // An `answer` left over from an unrelated escalation never accepts an un-parked head.
+    const out = (await assessHandler()(vars({ answer: "accept" }), app)) as Record<string, unknown>;
+    assertEquals(out.mergeStatus, "blocked");
+    assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+  });
+});
+
+test("pr.merge #1037: answering fix re-enters convergence carrying the answer", async () => {
+  await withGithub(landRoutes, async () => {
+    const { app } = fakeApp();
+    await assessHandler()(vars(), app);
+    const out = (await assessHandler()(vars({ answer: "fix: bound the probe pool" }), app)) as Record<string, unknown>;
+    assertEquals(out, { mergeStatus: "review-findings", assessmentAnswer: "fix: bound the probe pool" });
+  });
+});
+
+test("pr.merge #1037: a trusted nano-assessment accept comment for this head satisfies the backstop", async () => {
+  await withGithub(landRoutes, async () => {
+    const { app } = fakeApp();
+    const out = (await assessHandler([
+      { id: 9, body: "nano-assessment: accept 68de21c", login: "jwulf", association: "MEMBER", createdAt: "" },
+    ])(vars(), app)) as Record<string, unknown>;
+    assertEquals(out, { mergeStatus: "merged" });
   });
 });
