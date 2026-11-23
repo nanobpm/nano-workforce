@@ -49,6 +49,7 @@ import {
   ensurePromotionPr,
   fetchBranchHead,
   fetchDefaultBranch,
+  fetchLatestCopilotReview,
   fetchPrHead,
   fetchPrMeta,
   fetchPrReviews,
@@ -108,6 +109,7 @@ import { maybeStartRetro } from "./retro.ts";
 import {
   clampNudgeMinutes,
   isoDurationToMs,
+  isReviewMissingOrStale,
   isReviewStale,
   REVIEW_WAIT_STATUSES,
   reviewWaitReason,
@@ -2759,6 +2761,18 @@ export async function terminatePrLoop(
   }
 }
 
+/** Issue #1043: does the PR verifiably LACK a head-current Copilot review? Uses the merge backstop's
+ * own predicate ({@link isReviewMissingOrStale}) over the same readers, so the poller and the
+ * backstop can never disagree about which heads need a review. Unreadable review/head → `false`. */
+async function hasNoHeadCurrentReview(repo: string, number: number, token: string): Promise<boolean> {
+  const [review, head] = await Promise.all([
+    fetchLatestCopilotReview(repo, number, token).catch(() => null),
+    readCurrentHead(repo, number, token).catch(() => null),
+  ]);
+  if (review === null) return false;
+  return isReviewMissingOrStale(review.commitId, head);
+}
+
 export async function pollMerges(data: DataLayer, engine: EngineClient, token: string) {
   // 0) Pending predecessor retirements from earlier hand-offs (PR #944 review).
   try {
@@ -2915,6 +2929,30 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
         // `pull_request` run once per head (mark ready / close+reopen); rebases change
         // `headRefOid`, so downstream merge-train PRs get a new nudge after every post-rebase
         // landing attempt.
+        // Issue #1043: a head that moved AFTER the last review (an out-of-band force-push following
+        // approval) leaves no head-current Copilot review, and nothing in this stage requests one —
+        // the merge backstop (`pr.merge`) that does is only reached on a `ready` verdict, which a
+        // branch still waiting on its reviewer never reaches. Route the stale head through the ONE
+        // canonical request-and-wait path: publish `merge-ready {ready}` so `attempt-merge`'s
+        // backstop returns `review-pending` → `request-review` → the bounded `reviewRequestWait` →
+        // re-arm, escalating once `reviewRequestMax` requests went unanswered. The backstop re-checks
+        // before ANY landing, so this never merges unreviewed code. An unreadable review/head fails
+        // safe (no routing) exactly as the backstop's predicate does.
+        if (await hasNoHeadCurrentReview(repo, number, token)) {
+          await flipToMergingThenPublish(data, engine, prKey, "waiting_merge", {
+            name: "merge-ready",
+            correlationKey: prKey,
+            variables: {
+              mergeState: "ready",
+              failingChecks: st.failingChecks,
+              failingChecksList: st.failingCheckNames.join("\n"),
+              reviewThreads: st.unresolvedThreads,
+              pendingChecks: st.pendingCheckNames.length,
+            },
+          });
+          console.log(`[poller] no head-current review while waiting -> merge backstop requests one -> ${prKey}`);
+          continue;
+        }
         if (protocol) {
           await maybeEnsureFreshHeadRun(data, repo, number, prKey, protocol, verdict, st, pr);
         }
