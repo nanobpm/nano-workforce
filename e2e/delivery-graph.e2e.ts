@@ -1641,7 +1641,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       // poll cadence rounds up to a whole second (`msToIsoDuration`), so step the virtual clock in
       // 1s increments (the same shape `advanceUntilEscalated` uses) — a single coarse jump can land
       // between the engine's timer-fire and the drain that re-arms the next poll.
-      for (let t = 0; t < 3; t += 1_000) {
+      for (let tick = 0; tick < 3; tick += 1) {
         await app.advanceTime(1_000);
         await app.settle();
       }
@@ -1650,7 +1650,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       assert.ok(openPolls >= 2, `the gate level-polls the OPEN PR (saw ${openPolls} reads)`);
 
       prState = "MERGED";
-      for (let t = 0; t < 5 && consumerFired === 0; t += 1_000) {
+      for (let tick = 0; tick < 5 && consumerFired === 0; tick += 1) {
         await app.advanceTime(1_000);
         await app.settle();
       }
