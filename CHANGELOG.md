@@ -1,3 +1,9 @@
+## [0.223.1](https://github.com/nanobpm/nano-workforce/compare/v0.223.0...v0.223.1) (2026-11-23)
+
+### Bug Fixes
+
+* **feature:** autoMerge/humanApproval imply converge instead of being silently dropped ([#1042](https://github.com/nanobpm/nano-workforce/issues/1042)) ([a0dcc47](https://github.com/nanobpm/nano-workforce/commit/a0dcc47a0580cc7dc4f5eb7536c3ae1330b6ccc2)), closes [#1041](https://github.com/nanobpm/nano-workforce/issues/1041)
+
 ## [0.223.0](https://github.com/nanobpm/nano-workforce/compare/v0.222.6...v0.223.0) (2026-11-23)
 
 ### Features
