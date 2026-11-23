@@ -16,6 +16,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import {
   completeEscalationAsAgent,
+  completeEscalationAutoApplied,
   completeEscalationAsHuman,
   completeUserTaskAttributed,
   escalationFormId,
@@ -1145,4 +1146,45 @@ test("a merge-approval projection-stamp failure never masks the engine completio
 
   assertEquals(r.ok, true, "best-effort: the projection miss is swallowed");
   assertEquals(completed.length, 1, "the engine resume already happened");
+});
+
+// Issue #1037 review: a PR escalation parked on a HUMAN assessment of a "Needs a closer look" verdict
+// is human-only — neither an agent/steward nor an auto-applied adjudication replay may answer it, on
+// either PR escalation task. An ordinary PR escalation stays agent-answerable.
+const ASSESS_Q =
+  'The head-current Copilot review of 68de21c0 says "Needs a closer look" with no open thread … ' +
+  "a PR comment starting `nano-assessment: accept 68de21c` on o/r#5 accepts this head.";
+for (const elementId of ["wait-merge-answer", "wait-answer"]) {
+  test(`${elementId}: a human-assessment park refuses agent and auto-applied completion; a human may answer (#1037)`, async () => {
+    const stores = {
+      task_completions: { rows: [] as any[], key: "id" },
+      user_tasks: { rows: [{ user_task_key: "ut-a", element_id: elementId, question: ASSESS_Q }] as any[], key: "user_task_key" },
+    };
+    const data = memData(stores);
+    const { engine, completed } = fakeEngine([{ userTaskKey: "ut-a", elementId }]);
+    const asAgent = await completeEscalationAsAgent(data, engine, { userTaskKey: "ut-a", agentId: "steward", variables: { answer: "accept" } });
+    assertEquals(asAgent.ok, false);
+    const replay = await completeEscalationAutoApplied(data, engine, {
+      userTaskKey: "ut-a",
+      variables: { answer: "accept" },
+      actor: { kind: "human", id: "jwulf" },
+    });
+    assertEquals(replay.ok, false);
+    assertEquals(completed.length, 0);
+    assertEquals(stores.task_completions.rows.length, 0);
+    const asHuman = await completeEscalationAsHuman(data, engine, { userTaskKey: "ut-a", operatorId: "jwulf", variables: { answer: "accept" } });
+    assertEquals(asHuman.ok, true);
+    assertEquals(stores.task_completions.rows[0].actor_kind, "human");
+  });
+}
+
+test("an ordinary PR escalation stays agent-answerable (#1037 refusal is assessment-scoped)", async () => {
+  const stores = {
+    task_completions: { rows: [] as any[], key: "id" },
+    user_tasks: { rows: [{ user_task_key: "ut-b", element_id: "wait-answer", question: "Should getUser() throw?" }] as any[], key: "user_task_key" },
+  };
+  const data = memData(stores);
+  const { engine } = fakeEngine([{ userTaskKey: "ut-b", elementId: "wait-answer" }]);
+  const r = await completeEscalationAsAgent(data, engine, { userTaskKey: "ut-b", agentId: "steward", variables: { answer: "throw" } });
+  assertEquals(r.ok, true);
 });

@@ -67,6 +67,7 @@
           <nano:extend name="round" type="integer" optional="true" />
           <nano:extend name="abandonUrl" type="string" optional="true" />
           <nano:extend name="answer" type="string" optional="true" />
+          <nano:extend name="completedCompletionId" type="integer" optional="true" />
         </nano:shape>
         <nano:shape id="MergeAttemptOut" name="Attempt merge — result">
           <nano:extend name="mergeStatus" type="string" />

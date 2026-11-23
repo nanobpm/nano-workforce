@@ -21,6 +21,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { matchTags, tag } from "@nanobpm/urban/effect";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
+import { taskCompletions } from "../../app/agentCompletion.ts";
 import { checkBaseTarget, classifyBaseGuard } from "../../app/baseGuard.ts";
 import { type HeadReader, makeDefaultReadHead } from "../../app/currentHead.ts";
 import {
@@ -43,11 +44,13 @@ import {
   HUMAN_ASSESSMENT_OUTCOME,
   isAssessmentAccepted,
   isAssessmentOnly,
+  verifiedAssessmentAnswer,
 } from "../../app/humanAssessment.ts";
 import { type IssueComment, listIssueComments } from "../../app/issuePrLink.ts";
 import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { isReviewMissingOrStale, parseReviewHead, REVIEW_WAIT_ENDED_OUTCOME, reviewHeadToken } from "../../app/reviewWait.ts";
 import { abandonClosedPr, ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
+import { PR_WAIT_MERGE_ANSWER_ELEMENT } from "../../app/userTasks.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`MergeAttemptIn` in merge-loop.bpmn) — ADR 0040.
@@ -247,8 +250,21 @@ export function makeHandler(deps: {
       newest !== undefined &&
       String(newest.outcome ?? "") === HUMAN_ASSESSMENT_OUTCOME &&
       parseReviewHead(typeof newest.detail === "string" ? newest.detail : null) === headTrimmed;
-    const answer = typeof job.variables.answer === "string" ? job.variables.answer : null;
-    const decision = parkedOnThisHead ? classifyAssessmentAnswer(answer) : null;
+    // The decision counts only when the EXACT winning completion of this assessment's `wait-merge-answer`
+    // (its ledger id rides the resumed token as `completedCompletionId`) is a first-hand HUMAN answer
+    // on THIS instance recorded after the park. The job's inherited `answer` variable is never trusted
+    // on its own: a redelivered job, an agent/steward answer, or an auto-applied replay must not land.
+    let answer: string | null = null;
+    if (parkedOnThisHead) {
+      const completionId = Number(job.variables.completedCompletionId);
+      const row = Number.isInteger(completionId) && completionId > 0 ? await taskCompletions(app.data).get(completionId).catch(() => null) : null;
+      answer = verifiedAssessmentAnswer(row, {
+        elementId: PR_WAIT_MERGE_ANSWER_ELEMENT,
+        processInstanceKey: job.processInstanceKey != null ? String(job.processInstanceKey) : "",
+        parkedAt: String(newest.at ?? ""),
+      });
+    }
+    const decision = classifyAssessmentAnswer(answer);
     // A verified acceptance already recorded for THIS head survives landing retries: once an
     // `assessment-accepted` row exists for the head, a later `retry` row must not re-open the
     // assessment (it is no longer the newest row). A new head needs a new decision.

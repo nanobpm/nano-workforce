@@ -272,3 +272,48 @@ test("pollUserTasks: auto-resume resolves the task per-instance, never an engine
   const unfiltered = scans.filter((f) => !f?.processInstanceKey && !f?.rootProcessInstanceKey);
   assertEquals(unfiltered.length, 0, "no engine-wide (unfiltered) openUserTasks scan — the resolve is per-instance");
 });
+
+// ── Issue #1037: a human-assessment park resumes from the trusted PR-comment marker ──────────────
+const ASSESS_Q =
+  'The head-current Copilot review of 68de21c0aaaa says "Needs a closer look" with no open thread … post a PR ' +
+  "comment on o/r#900 starting `nano-assessment: accept 68de21c` to accept this head (68de21c) as-is.";
+const assessSeed = (pk: string) => ({
+  pull_requests: [{ pr_key: "o/r#900", status: "escalated", process_key: pk, url: "https://github.com/o/r/pull/900", title: "Converge" }],
+  escalations: [{ id: 1, pr_key: "o/r#900", status: "open", question: ASSESS_Q }],
+  // A settled adjudication for the SAME question must NOT be replayed onto a human-only assessment.
+  pr_adjudications: [
+    { id: 1, pr_key: "o/r#900", question_fingerprint: questionFingerprint(ASSESS_Q), answer: "accept", adjudicated_by: "bot", adjudicated_kind: "agent", adjudicated_at: "2025-01-01T00:00:00.000Z" },
+  ],
+});
+const marker = (login: string, association: string, body: string) => [{ id: 7, login, association, body, createdAt: "2026-01-01T00:00:00Z" }];
+
+for (const elementId of ["wait-merge-answer", "wait-answer"]) {
+  test(`pollUserTasks: a trusted same-head accept marker resumes the parked ${elementId} as a HUMAN completion (#1037)`, async () => {
+    const { data, stores } = memData(assessSeed("rp-900"));
+    const { engine, completions } = fakeEngine([{ userTaskKey: "ut-900", elementId, processInstanceKey: "rp-900" }]);
+    await pollUserTasks(data, engine, undefined, { readAssessmentComments: async () => marker("jwulf", "OWNER", "nano-assessment: accept 68de21c0aaaa") });
+    assertEquals(completions.length, 1);
+    assertEquals(completions[0].variables.answer, "accept");
+    // The convergence loop routes back to the converge-gate instead of dispatching another round.
+    assertEquals(completions[0].variables.assessmentResume, elementId === "wait-answer" ? true : undefined);
+    const ledger = stores.task_completions ?? [];
+    assertEquals(ledger.map((r) => [r.actor_kind, r.actor_id, r.auto_applied]), [["human", "jwulf", 0]]);
+    assertEquals((stores.user_tasks ?? []).length, 0, "a resumed task is not projected into the inbox");
+  });
+
+  test(`pollUserTasks: no / other-head / untrusted / quoted marker leaves the ${elementId} assessment for a human, and never replays an adjudication (#1037)`, async () => {
+    for (const comments of [
+      [],
+      marker("jwulf", "OWNER", "nano-assessment: accept 1111111"),
+      marker("rando", "NONE", "nano-assessment: accept 68de21c"),
+      marker("github-actions[bot]", "MEMBER", "nano-assessment: accept 68de21c"),
+      marker("jwulf", "OWNER", "> nano-assessment: accept 68de21c"),
+    ]) {
+      const { data, stores } = memData(assessSeed("rp-901"));
+      const { engine, completions } = fakeEngine([{ userTaskKey: "ut-901", elementId, processInstanceKey: "rp-901" }]);
+      await pollUserTasks(data, engine, undefined, { readAssessmentComments: async () => comments });
+      assertEquals(completions.length, 0);
+      assertEquals((stores.user_tasks ?? []).map((r) => r.user_task_key), ["ut-901"]);
+    }
+  });
+}

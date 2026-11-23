@@ -23,10 +23,12 @@
 // `workers/escalation-steward-*`; the actual ANSWER is submitted through the ONE canonical attributed
 // door (`completeUserTaskAttributed`, app/agentCompletion.ts) with AGENT attribution — never recorded
 // as a human decision (ADR 0046).
+
 import type { DataLayer } from "@nanobpm/urban";
 import { ESCALATION_TASK_ELEMENTS, snapshotUserTaskFormOptions } from "./agentCompletion.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { ESCALATION_FORM, GENERIC_HUMAN_FORM, isDeliveryHumanElement } from "./deliveryHuman.ts";
+import { assessmentHeadFromQuestion } from "./humanAssessment.ts";
 import type { UserTaskRow } from "./userTasks.ts";
 
 /** The minimal shape of a subject row that carries the opt-in flag. The index signature lets the
@@ -183,11 +185,14 @@ export function isStewardAnswerableForm(elementId: string, formKey: string | nul
  *   • the task is not currently claimed by a live steward run (`claimedUserTaskKeys`).
  * `at` is the current time (ms epoch); the task's `created_at` is its open-since timestamp. */
 export function isEligibleEscalation(
-  row: Pick<UserTaskRow, "user_task_key" | "element_id" | "created_at" | "form_key">,
+  row: Pick<UserTaskRow, "user_task_key" | "element_id" | "created_at" | "form_key"> & { question?: string | null },
   opts: { optedIn: boolean; minAgeMs: number; claimedUserTaskKeys: ReadonlySet<string>; at: number },
 ): boolean {
   if (!opts.optedIn) return false;
   if (!isStewardAnswerableElement(row.element_id)) return false;
+  // A human assessment of a "Needs a closer look" verdict is human-only (issue #1037) — never claim it
+  // (the completer refuses it too, so a claim would only burn a steward run).
+  if (assessmentHeadFromQuestion(row.question ?? null) !== null) return false;
   if (!isStewardAnswerableForm(row.element_id, row.form_key)) return false;
   if (opts.claimedUserTaskKeys.has(row.user_task_key)) return false;
   const openedAt = Date.parse(row.created_at);

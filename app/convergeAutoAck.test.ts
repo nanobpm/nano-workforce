@@ -252,3 +252,53 @@ test("a contested advisory — the re-dispatched agent returns needs_input — s
   // verdict routed it to the human via the normal status escalation arm.
   assert(completions(engine, "review-round") === 2, `review-round should run twice; ran ${completions(engine, "review-round")}`);
 });
+
+// ── Issue #1037: a human-assessment block resumes on the gate, NOT another review round ──────────
+
+async function waitAnswerKey(engine: WasmEngineClient): Promise<string> {
+  const t = (await engine.openUserTasks({})).find((x) => x.elementId === "wait-answer");
+  assert(t, "expected an open wait-answer");
+  return t.userTaskKey;
+}
+
+test("an accepted human assessment re-checks the converge-gate without dispatching another review round (#1037)", async () => {
+  const engine = await boot({
+    responses: {
+      "pr.converge-gate": [
+        { convergeBlocked: true, convergeBlockReason: "needs a human assessment", convergeAckOnly: false },
+        { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false },
+      ],
+    },
+  });
+  // The poller's marker resume completes the parked wait-answer with `assessmentResume`.
+  await engine.completeUserTask(await waitAnswerKey(engine), { answer: "accept", assessmentResume: true });
+  assertThatInstance(engine, byProcessId("convergence-loop")).hasCompleted().hasNoIncident();
+  assert(completions(engine, "review-round") === 1, `no further review round; ran ${completions(engine, "review-round")}`);
+  assert(completions(engine, "check-converge") === 2, "the gate is re-checked once");
+  assert(completedElementIds(engine).has("persist-converged"), "the PR finalizes as converged");
+});
+
+test("a stale assessment resume that the re-checked gate still blocks re-escalates (no round, no spin) (#1037)", async () => {
+  const engine = await boot({
+    responses: { "pr.converge-gate": { convergeBlocked: true, convergeBlockReason: "needs a human assessment", convergeAckOnly: false } },
+  });
+  await engine.completeUserTask(await waitAnswerKey(engine), { answer: "accept", assessmentResume: true });
+  assertThatInstance(engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+  assert(completions(engine, "review-round") === 1, "a re-blocked gate must not dispatch a round");
+  assert(instanceVars(engine).assessmentResume == null, "the resume flag is consumed by the gate");
+  await waitAnswerKey(engine);
+});
+
+test("an ordinary escalation answer still loops back to a review round (#1037 route is assessment-only)", async () => {
+  const engine = await boot({
+    responses: {
+      "pr.converge-gate": [
+        { convergeBlocked: true, convergeBlockReason: "1 unresolved review thread", convergeAckOnly: false },
+        { convergeBlocked: false, convergeBlockReason: "", convergeAckOnly: false },
+      ],
+    },
+  });
+  await engine.completeUserTask(await waitAnswerKey(engine), { answer: "resolve it" });
+  assertThatInstance(engine, byProcessId("convergence-loop")).hasCompleted().hasNoIncident();
+  assert(completions(engine, "review-round") === 2, "a normal answer dispatches the next round");
+});

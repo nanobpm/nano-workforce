@@ -635,13 +635,38 @@ test("pr.merge #1037: a closer-look-only verdict escalates ONCE to a human (no r
   });
 });
 
-test("pr.merge #1037: answering accept lands that head; a stale accept for another park does not", async () => {
+// The exact winning completion of the parked `wait-merge-answer` (issue #1037 review): its ledger id
+// rides the resumed token as `completedCompletionId`.
+const PIK = "2251799813685300";
+async function answered(
+  app: any,
+  answer: string,
+  opts: { actor?: string; autoApplied?: number; element?: string; pik?: string; at?: string } = {},
+): Promise<number> {
+  await app.data.table("task_completions", "id").insert({
+    element_id: opts.element ?? "wait-merge-answer",
+    process_instance_key: opts.pik ?? PIK,
+    actor_kind: opts.actor ?? "human",
+    actor_id: "jwulf",
+    auto_applied: opts.autoApplied ?? 0,
+    reverted: 0,
+    variables_json: JSON.stringify({ answer }),
+    created_at: opts.at ?? new Date(Date.now() + 1000).toISOString(),
+  });
+  const rows = await app.data.table("task_completions", "id").find({});
+  return rows.length;
+}
+const resumed = (completedCompletionId: number, answer: string) =>
+  ({ processInstanceKey: PIK, variables: { prKey: "acme/widgets#40", repo: "acme/widgets", prNumber: 40, answer, completedCompletionId } }) as any;
+
+test("pr.merge #1037: a human-attributed accept lands that head; an un-parked inherited accept does not", async () => {
   await withGithub(landRoutes, async (calls) => {
     const { app, stores } = fakeApp();
     await assessHandler()(vars(), app);
     // record-answer → arm-merge stamps review-wait-ended before the re-attempt.
     await app.data.table("merges", "id").insert({ pr_key: "acme/widgets#40", outcome: "review-wait-ended" });
-    const out = (await assessHandler()(vars({ answer: "accept" }), app)) as Record<string, unknown>;
+    const id = await answered(app, "accept");
+    const out = (await assessHandler()(resumed(id, "accept"), app)) as Record<string, unknown>;
     assertEquals(out, { mergeStatus: "merged" });
     assertEquals(stores.merges.some((m) => m.outcome === "assessment-accepted"), true);
     assertEquals(calls.some((c) => /\/pulls\/\d+\/merge$/.test(c.url) && c.method === "PUT"), true);
@@ -655,11 +680,38 @@ test("pr.merge #1037: answering accept lands that head; a stale accept for anoth
   });
 });
 
-test("pr.merge #1037: answering fix re-enters convergence carrying the answer", async () => {
+// Every way an `answer: "accept"` can reach pr.merge WITHOUT a human answering this park must re-park
+// (one blocked result, no land): no ledger row, an agent/steward answer, an auto-applied replay, a
+// completion recorded BEFORE the park (a redelivered job inheriting a stale answer), another instance,
+// another element, and a human row whose own answer is not an acceptance.
+for (const [name, mk] of [
+  ["no completion id (redelivered job, inherited answer)", async () => 0],
+  ["agent-attributed answer", async (app: any) => answered(app, "accept", { actor: "agent" })],
+  ["auto-applied adjudication replay", async (app: any) => answered(app, "accept", { autoApplied: 1 })],
+  ["completion recorded before the park (stale)", async (app: any) => answered(app, "accept", { at: "2000-01-01T00:00:00.000Z" })],
+  ["completion from another process instance", async (app: any) => answered(app, "accept", { pik: "999" })],
+  ["completion of another user task", async (app: any) => answered(app, "accept", { element: "wait-answer" })],
+  ["human completion whose answer is not accept", async (app: any) => answered(app, "accept only after fixing X")],
+] as const) {
+  test(`pr.merge #1037: ${name} does not accept the assessment`, async () => {
+    await withGithub(landRoutes, async (calls) => {
+      const { app, stores } = fakeApp();
+      await assessHandler()(vars(), app);
+      const id = await mk(app);
+      const out = (await assessHandler()(resumed(id, "accept"), app)) as Record<string, unknown>;
+      assertEquals(out.mergeStatus, "blocked");
+      assertEquals(stores.merges.some((m) => m.outcome === "assessment-accepted"), false);
+      assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+    });
+  });
+}
+
+test("pr.merge #1037: a human fix answer re-enters convergence carrying the answer", async () => {
   await withGithub(landRoutes, async () => {
     const { app } = fakeApp();
     await assessHandler()(vars(), app);
-    const out = (await assessHandler()(vars({ answer: "fix: bound the probe pool" }), app)) as Record<string, unknown>;
+    const id = await answered(app, "fix: bound the probe pool");
+    const out = (await assessHandler()(resumed(id, "fix: bound the probe pool"), app)) as Record<string, unknown>;
     assertEquals(out, { mergeStatus: "review-findings", assessmentAnswer: "fix: bound the probe pool" });
   });
 });

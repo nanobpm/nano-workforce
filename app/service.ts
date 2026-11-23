@@ -11,7 +11,7 @@ import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { matchAdjudication, prAdjudications, resetAdjudications } from "./adjudications.ts";
 import { AGENT_SLA_JOB_TYPES, deliveryNodeActivationJobType, recordAgentJobObservation } from "./agentActivationLedger.ts";
-import { completeEscalationAutoApplied, escalationFormId } from "./agentCompletion.ts";
+import { completeEscalationAsHuman, completeEscalationAutoApplied, escalationFormId } from "./agentCompletion.ts";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import { maybeUpdateBehindBranch } from "./behindBaseRemedy.ts";
 import {
@@ -60,8 +60,9 @@ import {
   type PrState,
   requestCopilotReview,
 } from "./github.ts";
+import { assessmentAcceptor, assessmentHeadFromQuestion } from "./humanAssessment.ts";
 import { activeStatusesFor, derivedTrackingTable } from "./instanceTracking.ts";
-import { retryOutstandingIssuePrLinks } from "./issuePrLink.ts";
+import { type IssueComment, listIssueComments, retryOutstandingIssuePrLinks } from "./issuePrLink.ts";
 import { pollLineage } from "./lineage.ts";
 import { mergeableRepollInterval, mergeableWaitTimeout } from "./mergeableWait.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
@@ -4781,7 +4782,16 @@ export async function pollUserTasks(
   data: DataLayer,
   engine: EngineClient,
   engineRest?: { restAddress: string; token?: string },
+  opts: {
+    /** PR conversation-comment reader for the human-assessment marker resume (issue #1037). Defaults
+     *  to the GitHub reader when `githubToken` is set; absent both, no marker resume is attempted. */
+    readAssessmentComments?: (repo: string, prNumber: number) => Promise<IssueComment[] | null>;
+    githubToken?: string;
+  } = {},
 ) {
+  const readAssessmentComments =
+    opts.readAssessmentComments ??
+    (opts.githubToken ? (repo: string, n: number) => listIssueComments(repo, n, opts.githubToken ?? "") : undefined);
   const at = now();
   // Raw-REST context (present in production; the reduced-capability seam host passes no `engineRest`) —
   // used by the engine-first sweep AND the escalation self-heal's callActivity-hierarchy confirmation.
@@ -4970,7 +4980,40 @@ export async function pollUserTasks(
     // question escalated at round 2 and again at round 13). Scoped to the review loop's `wait-answer`
     // on a real PR key; on any resolution failure the task still projects, so an un-resumable question
     // always reaches a human (fail-open to the human).
-    if (elementId === PR_WAIT_ANSWER_ELEMENT && ctx.subjectType === "pr" && ctx.question && parsePr(ctx.subjectKey)) {
+    // HUMAN-ASSESSMENT RESUME (issue #1037): a PR escalation parked on a human assessment of a
+    // "Needs a closer look" verdict for head H resumes as soon as a trusted human posts the
+    // `nano-assessment: accept <H>` PR comment — the canonical poller observes the marker and completes
+    // the parked task through the ONE attributed human door, attributed to the marker's author, so the
+    // resumed `pr.merge` sees a first-hand human acceptance of THIS park. On the convergence loop's
+    // `wait-answer` the completion carries `assessmentResume`, routing the token straight back to the
+    // converge-gate (which re-checks the marker for the current head) instead of dispatching another
+    // review round whose push would invalidate the accepted head. Such a task is human-only, so the
+    // adjudication auto-resume below never replays onto it. Any read/complete failure fails open to the
+    // inbox (the task still projects).
+    const assessedHead = assessmentHeadFromQuestion(ctx.question);
+    if (assessedHead !== null) {
+      const pr = ctx.subjectType === "pr" ? parsePr(ctx.subjectKey) : null;
+      if (pr && readAssessmentComments && (elementId === PR_WAIT_ANSWER_ELEMENT || elementId === PR_WAIT_MERGE_ANSWER_ELEMENT)) {
+        try {
+          const comments = await readAssessmentComments(pr.repo, pr.number);
+          const acceptor = comments ? assessmentAcceptor(comments, assessedHead) : null;
+          if (acceptor) {
+            const done = await completeEscalationAsHuman(data, engine, {
+              userTaskKey: rowKey,
+              operatorId: acceptor,
+              variables: elementId === PR_WAIT_ANSWER_ELEMENT ? { answer: "accept", assessmentResume: true } : { answer: "accept" },
+            });
+            if (done.ok) {
+              resumedByKey.add(rowKey);
+              return;
+            }
+          }
+        } catch (err) {
+          console.error(`[poller] assessment marker resume (${ctx.subjectKey}): ${err}`);
+        }
+      }
+    }
+    if (assessedHead === null && elementId === PR_WAIT_ANSWER_ELEMENT && ctx.subjectType === "pr" && ctx.question && parsePr(ctx.subjectKey)) {
       try {
         // The adjudication LOOKUP lives inside this fail-open `try` (not just the resume) so a transient
         // `pr_adjudications.find` error never rejects `project` and aborts `pollUserTasks` mid-pass — the
@@ -5356,7 +5399,7 @@ export async function pollOnce(
   // Issue #907: retry every owed-but-unconfirmed "PR opened" issue link (best-effort, never throws).
   await retryOutstandingIssuePrLinks(data, token);
   await pollLineage(data);
-  await pollUserTasks(data, engine, engineRest);
+  await pollUserTasks(data, engine, engineRest, { githubToken: token });
   // The escalation steward is an OPTIONAL, best-effort pass: a steward-specific failure (a search or
   // instance-start error) must never reject `pollOnce` and starve the unrelated epic / taskless-plan /
   // delivery-graph reconciliation passes that follow it. Catch + log it independently so the canonical

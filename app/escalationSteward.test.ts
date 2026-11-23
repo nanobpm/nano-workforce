@@ -76,6 +76,13 @@ test("isEligibleEscalation: requires opt-in (non-opted-in work is never touched)
   assertEquals(isEligibleEscalation(row, { ...base, optedIn: false }), false, "not opted in → ineligible");
 });
 
+test("isEligibleEscalation: a human-assessment park (Needs a closer look) is never claimed (#1037)", () => {
+  const base = { minAgeMs: 300_000, claimedUserTaskKeys: new Set<string>(), at: Date.now(), optedIn: true };
+  const q = 'Copilot says "Needs a closer look" … a PR comment starting `nano-assessment: accept 68de21c` accepts this head.';
+  assertEquals(isEligibleEscalation(taskRow({ element_id: "wait-merge-answer", question: q }), base), false);
+  assertEquals(isEligibleEscalation(taskRow({ question: q }), base), false);
+});
+
 test("isEligibleEscalation: enforces the minimum age so a human already answering wins", () => {
   const fresh = taskRow({ created_at: new Date().toISOString() }); // just opened
   const base = { optedIn: true, claimedUserTaskKeys: new Set<string>(), at: Date.now() };

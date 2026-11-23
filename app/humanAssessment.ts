@@ -42,17 +42,7 @@ export function isAssessmentOnly(
  * `nano-assessment: accept <sha>` (sha ≥ 7 hex chars, a prefix of `head`)? Quoted (`>`) and
  * mid-sentence markers do not count; nor do markers for a different head. */
 export function isAssessmentAccepted(comments: readonly IssueComment[], head: string): boolean {
-  const h = head.trim().toLowerCase();
-  if (h === "") return false;
-  const re = ASSESSMENT_ACCEPT_LINE_RE;
-  for (const c of comments) {
-    if (!isTrustedAuthor(c.association, c.login)) continue;
-    for (const line of (c.body ?? "").split(/\r?\n/)) {
-      const m = re.exec(line);
-      if (m && h.startsWith(m[1].toLowerCase())) return true;
-    }
-  }
-  return false;
+  return assessmentAcceptor(comments, head) !== null;
 }
 
 /** Pure: classify a human's escalation answer. `accept` requires an EXACT acceptance command
@@ -103,4 +93,72 @@ export function assessmentQuestion(args: {
     `back to convergence with your instructions. (Equivalent: a PR comment starting ` +
     `\`${assessmentAcceptMarker(sha7)}\` on ${args.repo}#${args.prNumber} accepts this head.)`
   );
+}
+
+/** Pure: the trusted, non-bot author of the newest-first acceptance marker for `head`, or null. The
+ * attribution the poller stamps when it resumes a parked assessment from a PR comment, so the resumed
+ * completion is a first-hand HUMAN decision by the person who posted the marker. */
+export function assessmentAcceptor(comments: readonly IssueComment[], head: string): string | null {
+  const h = head.trim().toLowerCase();
+  if (!/^[0-9a-f]{7,64}$/.test(h)) return null;
+  for (const c of comments) {
+    if (!isTrustedAuthor(c.association, c.login)) continue;
+    for (const line of (c.body ?? "").split(/\r?\n/)) {
+      const m = ASSESSMENT_ACCEPT_LINE_RE.exec(line);
+      if (!m) continue;
+      // Either side may be the abbreviated sha (both are ≥ 7 hex chars): a short marker accepts the full
+      // head, and a full-sha marker accepts the short head an escalation question names.
+      const marked = m[1].toLowerCase();
+      if (h.startsWith(marked) || marked.startsWith(h)) return c.login;
+    }
+  }
+  return null;
+}
+
+/** Pure: is this escalation question a human-assessment park, and for which head (the sha prefix it
+ * names)? Derived from the ONE question builder above (`assessmentQuestion` always embeds the accept
+ * marker), so the automated completers (steward, adjudication replay) and the marker resume share one
+ * recognition rule with the writer. Null for any other question. */
+export function assessmentHeadFromQuestion(question: string | null | undefined): string | null {
+  const q = question ?? "";
+  if (!q.includes("Needs a closer look")) return null;
+  const m = /`nano-assessment:[ \t]+accept[ \t]+([0-9a-f]{7,64})`/i.exec(q);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/** One `task_completions` ledger row, narrowed to what acceptance verification reads. */
+export interface AssessmentCompletionRow {
+  element_id: string | null;
+  process_instance_key: string | null;
+  actor_kind: string;
+  auto_applied?: number | null;
+  reverted: number;
+  variables_json: string;
+  created_at: string;
+}
+
+/** Pure: the answer a HUMAN gave to THIS parked assessment, or null when `row` does not prove one.
+ * Requires the exact winning completion (looked up by the resumed token's `completedCompletionId`) to be
+ * a first-hand (not auto-applied, not reverted) human completion of `elementId` on THIS process
+ * instance, recorded AFTER the park. A redelivered job carrying a stale inherited `answer`, an
+ * agent/steward answer, or an auto-applied adjudication replay never counts (fail closed). */
+export function verifiedAssessmentAnswer(
+  row: AssessmentCompletionRow | null | undefined,
+  expect: { elementId: string; processInstanceKey: string; parkedAt: string },
+): string | null {
+  if (!row) return null;
+  if (row.actor_kind !== "human") return null;
+  if (Number(row.auto_applied ?? 0) !== 0 || Number(row.reverted) !== 0) return null;
+  if (row.element_id !== expect.elementId) return null;
+  if (expect.processInstanceKey === "" || String(row.process_instance_key ?? "") !== expect.processInstanceKey) return null;
+  // `>=`: an in-process resume can land in the same millisecond as the park; a stale completion from an
+  // EARLIER park always precedes the job activation that wrote this park row.
+  if (!(String(row.created_at) >= expect.parkedAt)) return null;
+  try {
+    const v: unknown = JSON.parse(row.variables_json);
+    const answer = v !== null && typeof v === "object" && "answer" in v ? v.answer : undefined;
+    return typeof answer === "string" && answer.trim() !== "" ? answer.trim() : null;
+  } catch {
+    return null;
+  }
 }
