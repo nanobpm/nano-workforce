@@ -1,3 +1,9 @@
+## [0.223.4](https://github.com/nanobpm/nano-workforce/compare/v0.223.3...v0.223.4) (2026-11-23)
+
+### Bug Fixes
+
+* **models:** pass result variables through output mappings under Zeebe scope semantics ([#1046](https://github.com/nanobpm/nano-workforce/issues/1046)) ([57d46f0](https://github.com/nanobpm/nano-workforce/commit/57d46f05fba65c4d402cf88e3c87acb6f1e22276)), closes [#1045](https://github.com/nanobpm/nano-workforce/issues/1045) [#1045](https://github.com/nanobpm/nano-workforce/issues/1045)
+
 ## [0.223.3](https://github.com/nanobpm/nano-workforce/compare/v0.223.2...v0.223.3) (2026-11-23)
 
 ### Bug Fixes
