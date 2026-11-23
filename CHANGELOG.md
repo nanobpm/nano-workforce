@@ -1,3 +1,9 @@
+## [0.222.3](https://github.com/nanobpm/nano-workforce/compare/v0.222.2...v0.222.3) (2026-11-23)
+
+### Bug Fixes
+
+* **delivery-graph:** propagate agent job result (pr) to the node scope for enrollment ([#1030](https://github.com/nanobpm/nano-workforce/issues/1030)) ([80433d2](https://github.com/nanobpm/nano-workforce/commit/80433d22186eb7479f709f92e9b6700f15765099)), closes [#1029](https://github.com/nanobpm/nano-workforce/issues/1029)
+
 ## [0.222.2](https://github.com/nanobpm/nano-workforce/compare/v0.222.1...v0.222.2) (2026-11-22)
 
 ### Bug Fixes
