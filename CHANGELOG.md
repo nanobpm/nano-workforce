@@ -1,3 +1,9 @@
+## [0.223.3](https://github.com/nanobpm/nano-workforce/compare/v0.223.2...v0.223.3) (2026-11-23)
+
+### Bug Fixes
+
+* **merge:** request a head-current review when the head moves after approval ([#1044](https://github.com/nanobpm/nano-workforce/issues/1044)) ([631b2fe](https://github.com/nanobpm/nano-workforce/commit/631b2fe5fc7b1055e8a2060980a58e5d93883812)), closes [#1043](https://github.com/nanobpm/nano-workforce/issues/1043) [#1043](https://github.com/nanobpm/nano-workforce/issues/1043) [#1043](https://github.com/nanobpm/nano-workforce/issues/1043) [#1043](https://github.com/nanobpm/nano-workforce/issues/1043) [#1043](https://github.com/nanobpm/nano-workforce/issues/1043) [#1043](https://github.com/nanobpm/nano-workforce/issues/1043)
+
 ## [0.223.2](https://github.com/nanobpm/nano-workforce/compare/v0.223.1...v0.223.2) (2026-11-23)
 
 ### Bug Fixes
