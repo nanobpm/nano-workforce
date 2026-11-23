@@ -4,16 +4,20 @@ import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import { evaluateConvergeGate } from "./convergeGate.ts";
+import { fetchPrReviews } from "./github.ts";
 import { type IssueComment, listIssueComments } from "./issuePrLink.ts";
 import {
   CLAIM_COMMENT_PREFIX,
   deriveOperatorFeedback,
+  type FeedbackReview,
   feedbackAckMarker,
   IMPLEMENT_FEEDBACK_CHECKPOINTS,
   issueReadCommand,
   parseClosingIssueNumbers,
   renderOperatorFeedbackBrief,
+  reviewAckMarker,
   runStartOnIssue,
+  toFeedbackReview,
 } from "./operatorFeedback.ts";
 
 const c = (id: number, login: string, association: string, createdAt: string, body: string): IssueComment => ({
@@ -197,4 +201,98 @@ test("a comment posted mid-implement and acked on the issue before the PR opens 
   assertEquals(derive([mid]).map((i) => i.id), [60]);
   const ack = c(61, "jwulf", "OWNER", "2026-11-21T10:40:00Z", `${feedbackAckMarker(60)}\nreused X`);
   assertEquals(derive([mid, ack]), []);
+});
+
+// Issue #1039: a trusted human's submitted PR REVIEW BODY (the "Submit review" summary, no inline
+// threads) is operator feedback — it must gate convergence until acked with `nano-ack: review-<id>`.
+const rv = (
+  id: number,
+  login: string,
+  association: string,
+  submittedAt: string,
+  body: string,
+  state = "COMMENTED",
+): FeedbackReview => ({ id, login, association, submittedAt, body, state, url: `https://github.com/o/r/pull/5#pullrequestreview-${id}` });
+
+function deriveReviews(reviews: FeedbackReview[], prComments: IssueComment[] = []) {
+  return deriveOperatorFeedback({ repo: "o/r", issues: [], prComments, threads: [], reviews, reviewsSince: START });
+}
+
+test("a trusted COMMENTED review body with no threads blocks convergence until acked", () => {
+  const items = deriveReviews([rv(900, "jwulf", "OWNER", "2026-11-21T10:05:00Z", "please change X")]);
+  assertEquals(items.map((i) => [i.source, i.id]), [["review", 900]]);
+  const gate = evaluateConvergeGate({
+    unresolvedThreadCount: 0,
+    suppressedAdvisories: [],
+    acknowledgedKeys: [],
+    operatorFeedback: items.map((i) => ({ label: i.label })),
+  });
+  assertEquals(gate.convergeBlocked, true);
+  const brief = renderOperatorFeedbackBrief(items);
+  assertStringIncludes(brief, reviewAckMarker(900));
+  assertStringIncludes(brief, "https://github.com/o/r/pull/5#pullrequestreview-900");
+  assertStringIncludes(brief, "please change X");
+  assertEquals(reviewAckMarker(900), "nano-ack: review-900");
+});
+
+test("CHANGES_REQUESTED review bodies count; APPROVED/DISMISSED do not", () => {
+  const at = "2026-11-21T10:05:00Z";
+  const items = deriveReviews([
+    rv(1, "jwulf", "OWNER", at, "fix it", "CHANGES_REQUESTED"),
+    rv(2, "jwulf", "OWNER", at, "lgtm", "APPROVED"),
+    rv(3, "jwulf", "OWNER", at, "old", "DISMISSED"),
+  ]);
+  assertEquals(items.map((i) => i.id), [1]);
+});
+
+test("review bodies from bots/Copilot/untrusted, pre-start, blank, or run-own are ignored", () => {
+  const at = "2026-11-21T10:05:00Z";
+  assertEquals(
+    deriveReviews([
+      rv(1, "Copilot", "NONE", at, "advisory"),
+      rv(2, "copilot-pull-request-reviewer[bot]", "MEMBER", at, "advisory"),
+      rv(3, "rando", "NONE", at, "do X"),
+      rv(4, "jwulf", "OWNER", "2026-11-21T09:00:00Z", "before start"),
+      rv(5, "jwulf", "OWNER", at, "   \n "),
+      rv(6, "jwulf", "OWNER", at, "Done.\nnano-ack: review-1"),
+    ]),
+    [],
+  );
+});
+
+test("an acked review clears; a quoted, mid-sentence, or untrusted ack does not", () => {
+  const fb = rv(900, "jwulf", "OWNER", "2026-11-21T10:05:00Z", "please change X");
+  const at = "2026-11-21T10:09:00Z";
+  assertEquals(deriveReviews([fb], [c(70, "jwulf", "OWNER", at, "Changed X.\nnano-ack: review-900")]), []);
+  // A trusted review body may carry the ack line too (the agent posts under the operator's identity).
+  assertEquals(deriveReviews([fb, rv(901, "jwulf", "OWNER", at, "nano-ack: review-900\nchanged")]), []);
+  assertEquals(deriveReviews([fb], [c(71, "jwulf", "OWNER", at, "> nano-ack: review-900\nnot done")]).map((i) => i.id), [71, 900]);
+  assertEquals(deriveReviews([fb], [c(72, "jwulf", "OWNER", at, "You wrote nano-ack: review-900 but no")]).map((i) => i.id), [72, 900]);
+  assertEquals(deriveReviews([fb], [c(73, "rando", "NONE", at, "nano-ack: review-900")]).map((i) => i.id), [900]);
+  // An issuecomment ack with the same number does not clear a review (distinct namespaces).
+  assertEquals(deriveReviews([fb], [c(74, "jwulf", "OWNER", at, "nano-ack: issuecomment-900")]).map((i) => i.id), [900]);
+});
+
+test("pagination: PR reviews beyond the first page (GitHub default 30) are read", async () => {
+  const prevT = process.env.NANO_PR_GITHUB_TRANSPORT;
+  const prevF = globalThis.fetch;
+  process.env.NANO_PR_GITHUB_TRANSPORT = "token";
+  const mk = (id: number) => ({ id, state: "COMMENTED", body: `r${id}`, user: { login: "jwulf" }, author_association: "OWNER", submitted_at: START });
+  // biome-ignore lint/plugin: test stub for the fetch boundary
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    const page = Number(new URL(String(url)).searchParams.get("page"));
+    const arr = page === 1 ? Array.from({ length: 100 }, (_, i) => mk(i + 1)) : page === 2 ? [mk(101)] : [];
+    return new Response(JSON.stringify(arr), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const all = await fetchPrReviews("o/r", 5, "tok");
+    assert(all !== null);
+    assertEquals(all.length, 101);
+    const reviews = all.map(toFeedbackReview);
+    assertEquals(reviews[100], { id: 101, login: "jwulf", association: "OWNER", submittedAt: START, body: "r101", state: "COMMENTED", url: null });
+  } finally {
+    globalThis.fetch = prevF;
+    if (prevT === undefined) delete process.env.NANO_PR_GITHUB_TRANSPORT;
+    else process.env.NANO_PR_GITHUB_TRANSPORT = prevT;
+  }
 });
