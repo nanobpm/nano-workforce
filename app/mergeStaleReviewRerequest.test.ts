@@ -7,7 +7,8 @@ import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { memStatusCas } from "../test/memStatusCas.ts";
-import { pollMerges } from "./service.ts";
+import { reviewWaitReason } from "./reviewWait.ts";
+import { ensureHeadReviewRequested, POLLER_REVIEW_START_WINDOW_MS, pollMerges } from "./service.ts";
 
 function memData(): { data: DataLayer; stores: Record<string, any[]> } {
   const stores: Record<string, any[]> = {};
@@ -25,6 +26,7 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
         return rows.filter((r) => match(r, where));
       },
       async insert(row: any) {
+        if (pk === "id" && row.id === undefined) row = { ...row, id: rows.length + 1 };
         rows.push({ ...row });
         return row[pk];
       },
@@ -60,6 +62,8 @@ function githubFetch(fx: {
   reviewsStatus?: number;
   pendingCopilot?: boolean;
   posts?: string[];
+  deletes?: string[];
+  timeline?: { event: string; created_at: string }[];
 }) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const u = new URL(String(url));
@@ -75,8 +79,13 @@ function githubFetch(fx: {
         fx.posts?.push(u.pathname);
         return json({});
       }
+      if (init?.method === "DELETE") {
+        fx.deletes?.push(u.pathname);
+        return json({});
+      }
       return json({ users: fx.pendingCopilot ? [{ login: "Copilot" }] : [] });
     }
+    if (/\/issues\/\d+\/timeline$/.test(u.pathname)) return json(fx.timeline ?? []);
     if (/\/pulls\/\d+\/reviews$/.test(u.pathname)) {
       if (fx.reviewsStatus) return json({}, fx.reviewsStatus);
       return json(
@@ -136,12 +145,61 @@ test("#1043: approve then force-push → exactly one review request per head, re
   assertEquals(audit[0].detail.includes(NEW_HEAD), true);
 });
 
+test("#1043: an unreadable review list never closes an open review wait", async () => {
+  const { data, stores, engine } = setup();
+  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, posts: [] }, () => pollMerges(data, engine, "tok"));
+  await withGithub({ reviewCommit: NEW_HEAD, head: NEW_HEAD, reviewsStatus: 502 }, () => pollMerges(data, engine, "tok"));
+  assertEquals(reviewWaitReason(stores["merges"]), "waiting_review");
+});
+
+test("#1043: a successful POST that never starts a review is withdrawn and re-requested ONCE after the verify window", async () => {
+  const { data, stores } = setup();
+  const posts: string[] = [];
+  const deletes: string[] = [];
+  const t0 = Date.parse("2026-11-23T16:00:00Z");
+  const fx = { reviewCommit: OLD_HEAD, head: NEW_HEAD, posts, deletes, timeline: [] };
+  await withGithub(fx, async () => {
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", t0), "requested");
+    // Within the verify window: no retry yet.
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", t0 + 1000), "skipped");
+    // Past the window with no copilot_work_started: withdraw + re-add once.
+    const late = t0 + POLLER_REVIEW_START_WINDOW_MS + 1000;
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", late), "retried");
+    // Bounded: no further asks for this head.
+    const later = late + POLLER_REVIEW_START_WINDOW_MS + 1000;
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", later), "skipped");
+  });
+  assertEquals(posts.length, 2);
+  assertEquals(deletes.length, 1);
+  assertEquals(stores["merges"].filter((r) => r.outcome === "review-requested").length, 2);
+});
+
+test("#1043: a request Copilot DID start is not retried", async () => {
+  const { data } = setup();
+  const posts: string[] = [];
+  const t0 = Date.parse("2026-11-23T16:00:00Z");
+  const timeline = [{ event: "copilot_work_started", created_at: "2026-11-23T16:00:30Z" }];
+  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, posts, deletes: [], timeline }, async () => {
+    await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", t0);
+    const late = t0 + POLLER_REVIEW_START_WINDOW_MS + 1000;
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", late), "skipped");
+  });
+  assertEquals(posts.length, 1);
+});
+
 test("#1043: a review landing between passes cannot land the PR — next pass keeps the waiting verdict", async () => {
   const { data, stores, engine, messages } = setup();
   await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, posts: [] }, () => pollMerges(data, engine, "tok"));
+  assertEquals(reviewWaitReason(stores["merges"]), "waiting_review");
   await withGithub({ reviewCommit: NEW_HEAD, head: NEW_HEAD }, () => pollMerges(data, engine, "tok"));
   assertEquals(messages.filter((m) => m.name === "merge-ready").length, 0);
   assertEquals(stores["pull_requests"][0].status, "waiting_merge");
+  // The verified head-current review closes the wait so /status stops reporting waiting_review.
+  assertEquals(reviewWaitReason(stores["merges"]), null);
+  // Idempotent: a further pass does not append another row.
+  const n = stores["merges"].length;
+  await withGithub({ reviewCommit: NEW_HEAD, head: NEW_HEAD }, () => pollMerges(data, engine, "tok"));
+  assertEquals(stores["merges"].length, n);
 });
 
 test("#1043: an in-flight Copilot request for the head is adopted, not duplicated", async () => {
