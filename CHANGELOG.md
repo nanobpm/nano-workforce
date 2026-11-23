@@ -1,3 +1,9 @@
+## [0.222.6](https://github.com/nanobpm/nano-workforce/compare/v0.222.5...v0.222.6) (2026-11-23)
+
+### Bug Fixes
+
+* **convergence:** reset per-round routing vars at round entry and gate on Copilot's overall verdict ([#1036](https://github.com/nanobpm/nano-workforce/issues/1036)) ([45b154e](https://github.com/nanobpm/nano-workforce/commit/45b154e3a7a5758e447cd60fd0fce0daac24f568)), closes [#1032](https://github.com/nanobpm/nano-workforce/issues/1032) [#1032](https://github.com/nanobpm/nano-workforce/issues/1032) [#1032](https://github.com/nanobpm/nano-workforce/issues/1032)
+
 ## [0.222.5](https://github.com/nanobpm/nano-workforce/compare/v0.222.4...v0.222.5) (2026-11-23)
 
 ### Bug Fixes
