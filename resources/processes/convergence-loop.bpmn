@@ -275,6 +275,9 @@
           <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
           <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
           <zeebe:output source="=guardCustomInstructions" target="customInstructions" />
+          <zeebe:output source="=status" target="status" />
+          <zeebe:output source="=summary" target="summary" />
+          <zeebe:output source="=question" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_roundLive</bpmn:incoming>
@@ -298,6 +301,7 @@
           <zeebe:output source="=false" target="ciRed" />
           <zeebe:output source="=false" target="huskRetry" />
           <zeebe:output source="=null" target="noProgressQuestion" />
+          <zeebe:output source="=roundEntryHead" target="roundEntryHead" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_start</bpmn:incoming>
@@ -458,6 +462,7 @@
           <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
           <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
           <zeebe:output source="=guardCustomInstructions" target="customInstructions" />
+          <zeebe:output source="=adversarialSummary" target="adversarialSummary" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_advLive</bpmn:incoming>
@@ -543,6 +548,11 @@
           <zeebe:output source="=guardPrUrl" target="prUrl" />
           <zeebe:output source="=guardCustomInstructions" target="customInstructions" />
           <zeebe:output source="=false" target="ciRed" />
+          <zeebe:output source="=status" target="status" />
+          <zeebe:output source="=summary" target="summary" />
+          <zeebe:output source="=question" target="question" />
+          <zeebe:output source="=dependsOn" target="dependsOn" />
+          <zeebe:output source="=pushed" target="pushed" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_fixCiLive</bpmn:incoming>
@@ -706,6 +716,8 @@
           <zeebe:input source="=prKey" target="prKey" />
           <zeebe:output source="=0" target="huskRetries" />
           <zeebe:output source="=if mergeDecision = &#34;approve&#34; then false else humanApproval" target="humanApproval" />
+          <zeebe:output source="=mergeDecision" target="mergeDecision" />
+          <zeebe:output source="=answer" target="answer" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_needApproval</bpmn:incoming>
@@ -737,6 +749,12 @@
         <zeebe:ioMapping>
           <zeebe:output source="=if convergeBlocked = true and convergeAckOnly = true then ackRetryRound + 1 else ackRetryRound" target="ackRetryRound" />
           <zeebe:output source="=null" target="assessmentResume" />
+          <zeebe:output source="=convergeBlocked" target="convergeBlocked" />
+          <zeebe:output source="=convergeBlockReason" target="convergeBlockReason" />
+          <zeebe:output source="=convergeAckOnly" target="convergeAckOnly" />
+          <zeebe:output source="=reviewStale" target="reviewStale" />
+          <zeebe:output source="=reviewWaitCutoff" target="reviewWaitCutoff" />
+          <zeebe:output source="=operatorFeedbackBrief" target="operatorFeedbackBrief" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_converged</bpmn:incoming>
@@ -825,6 +843,8 @@
           <zeebe:output source="=guardAbandonUrl" target="abandonUrl" />
           <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
           <zeebe:output source="=guardCustomInstructions" target="customInstructions" />
+          <zeebe:output source="=scopeBlocked" target="scopeBlocked" />
+          <zeebe:output source="=scopeBlockReason" target="scopeBlockReason" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_scopeLive</bpmn:incoming>
@@ -848,6 +868,9 @@
           <zeebe:input source="=scopeBlockReason" target="question" />
           <zeebe:input source="=null" target="agentSlaJobType" />
           <zeebe:output source="=true" target="scopePending" />
+          <zeebe:output source="=escalationId" target="escalationId" />
+          <zeebe:output source="=escalated" target="escalated" />
+          <zeebe:output source="=question" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_scopeBlocked</bpmn:incoming>

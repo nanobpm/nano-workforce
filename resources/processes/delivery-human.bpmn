@@ -39,6 +39,8 @@
           <zeebe:output source="=if (is defined(value)) then value else null" target="humanEmitValue" />
           <zeebe:output source="=if (is defined(resolvedArtifact)) then resolvedArtifact else null" target="humanEmitArtifact" />
           <zeebe:output source="=if (is defined(note)) then note else null" target="humanNote" />
+          <zeebe:output source="=value" target="value" />
+          <zeebe:output source="=note" target="note" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_start</bpmn:incoming>
