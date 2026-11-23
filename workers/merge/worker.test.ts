@@ -331,7 +331,7 @@ test("pr.merge #923: refuses to land when NO Copilot review exists (the #1443 fa
 
     // Issue #939: an automatable remedy → `review-pending` (the model requests + waits), NEVER a
     // human escalation payload on the first occurrence.
-    assertEquals(out, { mergeStatus: "review-pending" });
+    assertEquals(out, { mergeStatus: "review-pending", reviewHead: "headsha4444444444444444444444444444444444" });
 
     // The refusal is audited, and NO land was attempted (no merge PUT, no enqueue comment).
     assertEquals(stores.merges.length, 1);
@@ -355,7 +355,7 @@ test("pr.merge #923: refuses to land when the head MOVED past the latest review 
       app,
     )) as Record<string, unknown>;
 
-    assertEquals(out, { mergeStatus: "review-pending" });
+    assertEquals(out, { mergeStatus: "review-pending", reviewHead: "newsha2222222222222222222222222222222222" });
     assertEquals(stores.merges[0].method, "review-backstop");
     assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
   });

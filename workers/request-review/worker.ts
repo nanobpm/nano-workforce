@@ -25,8 +25,10 @@ type In = WorkerInputs["pr.request-review"];
 interface Out extends Record<string, unknown> {
   /** `requested` — a request is in flight; `unavailable` — Copilot is not an assignable reviewer on
    * this repo (waiting is pointless → escalate); `failed` — no usable transport / transport error
-   * (the bounded wait still re-checks, so a transient failure is retried by the budget). */
-  reviewRequest: "requested" | "unavailable" | "failed";
+   * (the bounded wait still re-checks, so a transient failure is retried by the budget);
+   * `not-started` — the request was issued (and retried once) but Copilot never STARTED it
+   * (no `copilot_work_started`, issue #1034) — still waited on, and named in the escalation. */
+  reviewRequest: "requested" | "not-started" | "unavailable" | "failed";
 }
 
 export interface ReviewRequestOps {
@@ -73,22 +75,33 @@ export function makeHandler(ops: ReviewRequestOps): AppJobHandler<In, Out> {
     let result: Out["reviewRequest"];
     try {
       // A re-request whose previous ask is still pending was silently ignored → withdraw, re-add.
-      if (round > 0 && (await ops.hasPending(repo, prNumber)) === true) {
-        await ops.remove(repo, prNumber);
-      }
+      // Best-effort (issue #1034): a failed pending-read or withdraw must NEVER skip the request
+      // itself — that left a loop waiting out its whole budget with no `review_requested` event.
+      if (round > 0) await withdrawIfPending(ops, repo, prNumber, prKey, app.log);
       let since = new Date().toISOString();
       let res = await ops.request(repo, prNumber);
+      let started: boolean | null = null;
       // Issue #951: verify the request actually STARTED a review. A request that only produced
       // `review_requested` (no `copilot_work_started`) is stuck — withdraw it and retry ONCE before
       // leaving it to the bounded wait (and, past budget, the escalation).
-      if (res === "requested" && (await ops.awaitStarted(repo, prNumber, since)) === false) {
+      if (res === "requested") started = await ops.awaitStarted(repo, prNumber, since);
+      if (res === "requested" && started === false) {
         app.log.warn(`request-review: ${prKey} Copilot review request did not start — withdrawing and retrying once`);
-        await ops.remove(repo, prNumber);
+        await ops.remove(repo, prNumber).catch((err: unknown) => {
+          app.log.warn(`request-review: ${prKey} withdraw before retry failed (re-requesting anyway): ${err}`);
+        });
         since = new Date().toISOString();
         res = await ops.request(repo, prNumber);
-        if (res === "requested") await ops.awaitStarted(repo, prNumber, since);
+        started = res === "requested" ? await ops.awaitStarted(repo, prNumber, since) : null;
       }
-      result = res === "requested" ? "requested" : res === "unavailable" ? "unavailable" : "failed";
+      result =
+        res === "requested"
+          ? started === false
+            ? "not-started"
+            : "requested"
+          : res === "unavailable"
+            ? "unavailable"
+            : "failed";
     } catch (err) {
       app.log.warn(`request-review: ${prKey} Copilot review request failed: ${err}`);
       result = "failed";
@@ -102,6 +115,20 @@ export function makeHandler(ops: ReviewRequestOps): AppJobHandler<In, Out> {
     });
     return { reviewRequest: result };
   };
+}
+
+async function withdrawIfPending(
+  ops: ReviewRequestOps,
+  repo: string,
+  prNumber: number,
+  prKey: string,
+  log: { warn: (msg: string) => void },
+): Promise<void> {
+  try {
+    if ((await ops.hasPending(repo, prNumber)) === true) await ops.remove(repo, prNumber);
+  } catch (err) {
+    log.warn(`request-review: ${prKey} withdrawing the ignored request failed (re-requesting anyway): ${err}`);
+  }
 }
 
 const handler = makeHandler(defaultOps);

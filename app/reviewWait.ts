@@ -140,3 +140,56 @@ export function isReviewMissingOrStale(
   if (rev === "") return true;
   return rev !== head;
 }
+
+// ── Review-wait reason (issue #1034) ─────────────────────────────────────────
+// A merge loop waiting on a head-current Copilot review used to read `waiting_merge` in /status —
+// indistinguishable from "waiting for CI". The merge backstop stamps the head it found unreviewed
+// onto its `merges` audit row (one canonical token, written and parsed only here), and /status
+// derives `waitReason: "waiting_review(<sha7>)"` from the PR's newest merge-audit rows.
+
+/** The merge-audit outcomes that mean "the loop is waiting for a head-current review". */
+export const REVIEW_WAIT_OUTCOMES: readonly string[] = ["review-pending", "review-requested"];
+
+/** The merge-audit outcome `pr.arm-merge` records when it re-arms a loop whose newest audit row is a
+ *  review wait: the wait has ENDED (a clean review landed, or the timer fired), so /status must stop
+ *  reporting `waiting_review` even when no later merge attempt writes another row (e.g. CI pending). */
+export const REVIEW_WAIT_ENDED_OUTCOME = "review-wait-ended";
+
+/** The PR statuses during which the merge stage's review wait can be live (read-only derivation;
+ *  the stored status is never changed). `merging` covers the timer race after `flipToMergingThenPublish`. */
+export const REVIEW_WAIT_STATUSES: readonly string[] = ["waiting_merge", "merging"];
+
+/** Pure: is the newest audit row (highest id) a review-wait outcome? */
+export function isReviewWaitOpen(rows: readonly { id?: number | null; outcome: string }[]): boolean {
+  if (rows.length === 0) return false;
+  const newest = rows.reduce((a, b) => ((b.id ?? 0) > (a.id ?? 0) ? b : a));
+  return REVIEW_WAIT_OUTCOMES.includes(newest.outcome);
+}
+
+/** The canonical head token appended to a `review-pending` audit row's detail. */
+export function reviewHeadToken(head: string): string {
+  return `[head ${head}]`;
+}
+
+/** Pure: parse the head out of an audit detail carrying {@link reviewHeadToken}; null when absent. */
+export function parseReviewHead(detail: string | null | undefined): string | null {
+  const m = /\[head ([0-9a-fA-F]{7,64})\]/.exec(detail ?? "");
+  return m ? m[1] : null;
+}
+
+/** Pure: the /status wait reason for a PR from its `merges` audit rows (any order; `id` ascending =
+ *  oldest first). `waiting_review(<sha7>)` when the NEWEST row is a review-wait outcome (the head is
+ *  taken from the newest `review-pending` row), `waiting_review` when no head was recorded, else null. */
+export function reviewWaitReason(
+  rows: readonly { id?: number | null; outcome: string; detail?: string | null }[],
+): string | null {
+  if (rows.length === 0) return null;
+  const sorted = [...rows].sort((a, b) => (b.id ?? 0) - (a.id ?? 0));
+  if (!REVIEW_WAIT_OUTCOMES.includes(sorted[0].outcome)) return null;
+  for (const r of sorted) {
+    if (!REVIEW_WAIT_OUTCOMES.includes(r.outcome)) break;
+    const head = r.outcome === "review-pending" ? parseReviewHead(r.detail) : null;
+    if (head) return `waiting_review(${head.slice(0, 7)})`;
+  }
+  return "waiting_review";
+}

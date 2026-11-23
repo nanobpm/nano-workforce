@@ -37,7 +37,7 @@ import {
   reconcileReviewOpenFindings,
 } from "../../app/github.ts";
 import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
-import { isReviewMissingOrStale } from "../../app/reviewWait.ts";
+import { isReviewMissingOrStale, reviewHeadToken } from "../../app/reviewWait.ts";
 import { abandonClosedPr, ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -48,6 +48,8 @@ interface Out extends Record<string, unknown> {
   mergeStatus: "merged" | "queued" | "blocked" | "retry" | "abandoned" | "review-pending" | "review-findings";
   status?: string;
   question?: string;
+  /** The head the backstop found unreviewed (issue #1034) — named in the review escalation. */
+  reviewHead?: string;
 }
 
 // The backstop's review reader — the SAME shape the converge-gate binds (`{ body, commitId }`,
@@ -168,10 +170,11 @@ export function makeHandler(deps: {
       pr_key: prKey,
       outcome: "review-pending",
       method: "review-backstop",
-      detail: BLOCK_NO_HEAD_CURRENT_REVIEW,
+      // The unreviewed head (issue #1034): /status derives `waiting_review(<sha7>)` from it.
+      detail: `${BLOCK_NO_HEAD_CURRENT_REVIEW} ${reviewHeadToken(headTrimmed)}`,
       at: now,
     });
-    return { mergeStatus: "review-pending" };
+    return { mergeStatus: "review-pending", reviewHead: headTrimmed };
   }
   if (unverifiable) {
     const detail = BLOCK_UNVERIFIABLE_REVIEW;

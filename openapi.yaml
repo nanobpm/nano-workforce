@@ -105,6 +105,7 @@ components:
         - merge
         - incident
         - terminationReason
+        - waitReason
         - processInstanceKey
       properties:
         processInstanceKey:
@@ -115,6 +116,12 @@ components:
           type: string
           enum: [pr]
           description: "The row kind discriminator — present on the `items` rows of listActivePrs (#972)."
+        waitReason:
+          type: string
+          nullable: true
+          description: >-
+            Why a merge-stage PR is waiting (issue #1034) — `waiting_review(<sha7>)` while the merge
+            loop waits on a Copilot review of that head; null otherwise.
         terminationReason:
           type: string
           nullable: true

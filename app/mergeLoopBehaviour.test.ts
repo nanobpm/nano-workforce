@@ -100,6 +100,7 @@ const DEFAULT_VARS: Record<string, unknown> = {
   reviewRequestMax: 3,
   reviewRequestWait: "PT10M",
   reviewRequest: null,
+  reviewHead: null,
   abandonBrief: "\n\n---\nAbort if cancelled: curl …",
   failingChecksList: null,
   status: null,
@@ -1071,6 +1072,20 @@ test("#939: a review that never arrives escalates after the bounded request budg
   const q = String(escalation(engine).question ?? "");
   assertStringIncludes(q, "requested a Copilot review of the current HEAD 1 time(s)");
   assertStringIncludes(q, "PT10M");
+});
+
+test("#1034: the review escalation names the unreviewed head and offers merge-without-review or wait", async () => {
+  const engine = await boot({
+    responses: { "pr.merge": { mergeStatus: "review-pending", reviewHead: "51c424cabc" } },
+    vars: { reviewRequestMax: 1 },
+  });
+  await driveToAttempt(engine);
+  await engine.advanceTime(REVIEW_REQUEST_WAIT_MS + 1);
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  const q = String(escalation(engine).question ?? "");
+  assertStringIncludes(q, "(51c424cabc)");
+  assertStringIncludes(q, "merge it by hand to land WITHOUT a review");
 });
 
 test("#939: a clean re-check resets the request budget so a later head move gets a fresh budget", async () => {

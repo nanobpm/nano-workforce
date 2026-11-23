@@ -62,7 +62,7 @@ test("a request that never starts Copilot is withdrawn and retried once (#951)",
   const out = await makeHandler(
     ops({ awaitStarted: async () => (calls.push("started?"), false) }, calls),
   )(job(0), app);
-  assertEquals(out, { reviewRequest: "requested" });
+  assertEquals(out, { reviewRequest: "not-started" });
   assertEquals(calls, ["request", "started?", "remove", "request", "started?"]);
 });
 
@@ -78,4 +78,57 @@ test("an unverifiable timeline (null) is not treated as a dropped request (#951)
   const { app } = fakeApp();
   await makeHandler(ops({ awaitStarted: async () => (calls.push("started?"), null) }, calls))(job(0), app);
   assertEquals(calls, ["request", "started?"]);
+});
+
+// Issue #1034: a failing withdraw (or pending-reviewer read) on a re-request must never SKIP the
+// request itself — the loop otherwise waits out its whole budget with no `review_requested` event.
+test("a failed withdraw / pending read still issues the request (#1034)", async () => {
+  const calls: string[] = [];
+  const { app } = fakeApp();
+  const out = await makeHandler(
+    ops(
+      {
+        hasPending: async () => (calls.push("pending?"), true),
+        remove: async () => {
+          calls.push("remove");
+          throw new Error("422 reviewer not requested");
+        },
+      },
+      calls,
+    ),
+  )(job(1), app);
+  assertEquals(out, { reviewRequest: "requested" });
+  assertEquals(calls, ["pending?", "remove", "request"]);
+  const calls2: string[] = [];
+  const out2 = await makeHandler(
+    ops({ hasPending: async () => { calls2.push("pending?"); throw new Error("502"); } }, calls2),
+  )(job(1), app);
+  assertEquals(out2, { reviewRequest: "requested" });
+  assertEquals(calls2, ["pending?", "request"]);
+});
+
+test("a request still not started after the retry reports not-started (#1034)", async () => {
+  const { app, merges } = fakeApp();
+  const out = await makeHandler(ops({ awaitStarted: async () => false }, []))(job(0), app);
+  assertEquals(out, { reviewRequest: "not-started" });
+  assertEquals(String(merges[0].detail).includes("not-started"), true);
+});
+
+test("a failed withdraw before the not-started retry still re-requests (#1034)", async () => {
+  const calls: string[] = [];
+  const { app } = fakeApp();
+  const out = await makeHandler(
+    ops(
+      {
+        awaitStarted: async () => (calls.push("started?"), false),
+        remove: async () => {
+          calls.push("remove");
+          throw new Error("422 reviewer not requested");
+        },
+      },
+      calls,
+    ),
+  )(job(0), app);
+  assertEquals(out, { reviewRequest: "not-started" });
+  assertEquals(calls, ["request", "started?", "remove", "request", "started?"]);
 });
