@@ -14,6 +14,7 @@ import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
+import { assessmentQuestion } from "./humanAssessment.ts";
 import {
   claimEscalations,
   countSubjectResolutions,
@@ -74,6 +75,13 @@ test("isEligibleEscalation: requires opt-in (non-opted-in work is never touched)
   const base = { minAgeMs: 300_000, claimedUserTaskKeys: new Set<string>(), at: Date.now() };
   assertEquals(isEligibleEscalation(row, { ...base, optedIn: true }), true);
   assertEquals(isEligibleEscalation(row, { ...base, optedIn: false }), false, "not opted in → ineligible");
+});
+
+test("isEligibleEscalation: a human-assessment park (Needs a closer look) is never claimed (#1037)", () => {
+  const base = { minAgeMs: 300_000, claimedUserTaskKeys: new Set<string>(), at: Date.now(), optedIn: true };
+  const q = assessmentQuestion({ repo: "o/r", prNumber: 5, head: "68de21c0", verdict: "v" });
+  assertEquals(isEligibleEscalation(taskRow({ element_id: "wait-merge-answer", question: q }), base), false);
+  assertEquals(isEligibleEscalation(taskRow({ question: q }), base), false);
 });
 
 test("isEligibleEscalation: enforces the minimum age so a human already answering wins", () => {

@@ -66,12 +66,15 @@
           <nano:extend name="prNumber" type="integer" />
           <nano:extend name="round" type="integer" optional="true" />
           <nano:extend name="abandonUrl" type="string" optional="true" />
+          <nano:extend name="answer" type="string" optional="true" />
+          <nano:extend name="completedCompletionId" type="integer" optional="true" />
         </nano:shape>
         <nano:shape id="MergeAttemptOut" name="Attempt merge — result">
           <nano:extend name="mergeStatus" type="string" />
           <nano:extend name="status" type="string" optional="true" />
           <nano:extend name="question" type="string" optional="true" />
           <nano:extend name="reviewHead" type="string" optional="true" />
+          <nano:extend name="assessmentAnswer" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="MarkMergedIn" name="Mark merged — input">
           <nano:extend name="prKey" type="string" />
@@ -142,6 +145,7 @@
         </nano:shape>
         <nano:shape id="ReconvergeIn" name="Re-enter convergence — input">
           <nano:extend name="prKey" type="string" />
+          <nano:extend name="assessmentAnswer" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="RecordDepIn" name="Record discovered dependency — input">
           <nano:extend name="prKey" type="string" />

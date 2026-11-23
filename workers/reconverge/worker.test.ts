@@ -287,3 +287,29 @@ test("a closed-unmerged PR is abandoned and no replacement run is submitted", as
   assert(merges.some((m) => m.outcome === "abandoned" && m.method === "pr-closed"), "closed audit row written");
   assert(prUpdates.some((u) => u.status === "abandoned"), "row settled abandoned");
 });
+
+test("a human assessment `fix:` answer rides the hand-off as instructions (#1037)", async () => {
+  const app = {
+    data: {
+      table: (name: string) => ({
+        get: async () => (name === "pull_requests" ? { custom_instructions_text: "base" } : undefined),
+        insert: async () => 1,
+      }),
+    },
+    engine: {},
+    log: noopLog(),
+  } as any;
+  let args: unknown[] = [];
+  const submit = (async (...a: unknown[]) => {
+    args = a;
+    return { prKey: "acme/w#7", processKey: "999" };
+  }) as unknown as Submit;
+  const head = (async () => null) as unknown as FetchPrHead;
+  await makeHandler(submit, head, openLive)(
+    { processInstanceKey: "4242", variables: { prKey: "acme/w#7", assessmentAnswer: "fix: bound the pool" } } as any,
+    app,
+  );
+  const text = String(args[12]);
+  assertEquals(text.startsWith("base\n\n"), true);
+  assertEquals(text.includes("fix: bound the pool"), true);
+});

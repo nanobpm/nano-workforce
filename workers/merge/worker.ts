@@ -21,6 +21,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { matchTags, tag } from "@nanobpm/urban/effect";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
+import { taskCompletions } from "../../app/agentCompletion.ts";
 import { checkBaseTarget, classifyBaseGuard } from "../../app/baseGuard.ts";
 import { type HeadReader, makeDefaultReadHead } from "../../app/currentHead.ts";
 import {
@@ -35,10 +36,23 @@ import {
   parseReviewOpenFindings,
   type ReviewThread,
   reconcileReviewOpenFindings,
+  reviewVerdictExcerpt,
 } from "../../app/github.ts";
+import {
+  assessmentFixCompletionId,
+  assessmentFixCompletionToken,
+  assessmentQuestion,
+  classifyAssessmentAnswer,
+  HUMAN_ASSESSMENT_OUTCOME,
+  isAssessmentAccepted,
+  isAssessmentOnly,
+  verifiedAssessmentAnswer,
+} from "../../app/humanAssessment.ts";
+import { type IssueComment, listIssueComments } from "../../app/issuePrLink.ts";
 import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
-import { isReviewMissingOrStale, reviewHeadToken } from "../../app/reviewWait.ts";
+import { isReviewMissingOrStale, parseReviewHead, REVIEW_WAIT_ENDED_OUTCOME, reviewHeadToken } from "../../app/reviewWait.ts";
 import { abandonClosedPr, ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
+import { PR_WAIT_MERGE_ANSWER_ELEMENT } from "../../app/userTasks.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`MergeAttemptIn` in merge-loop.bpmn) — ADR 0040.
@@ -50,6 +64,9 @@ interface Out extends Record<string, unknown> {
   question?: string;
   /** The head the backstop found unreviewed (issue #1034) — named in the review escalation. */
   reviewHead?: string;
+  /** A human's `fix: …` answer to a "Needs a closer look" assessment (issue #1037), carried into the
+   * reconvergence hand-off as the round agent's instructions. */
+  assessmentAnswer?: string;
 }
 
 // The backstop's review reader — the SAME shape the converge-gate binds (`{ body, commitId }`,
@@ -68,6 +85,11 @@ export type MergeThreadsReader = (repo: string, prNumber: number) => Promise<Rev
 const defaultReadThreads: MergeThreadsReader = (repo, prNumber) =>
   fetchReviewThreads(repo, prNumber, process.env.GITHUB_TOKEN ?? "");
 
+/** PR conversation-comment reader (issue #1037: a `nano-assessment: accept <sha>` marker). */
+export type MergeCommentsReader = (repo: string, prNumber: number) => Promise<IssueComment[] | null>;
+const defaultReadComments: MergeCommentsReader = (repo, prNumber) =>
+  listIssueComments(repo, prNumber, process.env.GITHUB_TOKEN ?? "");
+
 const BLOCK_UNVERIFIABLE_REVIEW =
   "the PR's Copilot review state or current HEAD could not be read, so a head-current reviewer verdict cannot be verified (the backstop fails CLOSED on an unverifiable read)";
 
@@ -80,9 +102,11 @@ export function makeHandler(deps: {
   readReview: MergeReviewReader;
   readHeadSha: HeadReader;
   readThreads?: MergeThreadsReader;
+  readComments?: MergeCommentsReader;
 }): AppJobHandler<In, Out> {
   const { readReview, readHeadSha } = deps;
   const readThreads = deps.readThreads ?? defaultReadThreads;
+  const readComments = deps.readComments ?? defaultReadComments;
   const handler: AppJobHandler<In, Out> = async (job, app) => {
   const { prKey, repo, prNumber, round, abandonUrl } = job.variables;
   const token = process.env.GITHUB_TOKEN ?? "";
@@ -204,9 +228,107 @@ export function makeHandler(deps: {
   // frozen summary whose linked threads are all resolved doesn't bounce a converged PR back into
   // convergence forever. An unreadable thread set keeps the raw findings (fail CLOSED).
   let openFindings = parseReviewOpenFindings(backstopReview.body);
+  let threads: ReviewThread[] | null = null;
   if (openFindings.length > 0) {
-    const threads = await readThreads(repo, prNumber).catch(() => null);
+    threads = await readThreads(repo, prNumber).catch(() => null);
     if (threads !== null) openFindings = reconcileReviewOpenFindings(backstopReview.body, threads);
+  }
+  // HUMAN ASSESSMENT (issue #1037): a head-current 🔵 "Needs a closer look" verdict with no open
+  // thread and no open-issue count asks for a HUMAN — no agent push can clear it (every new head gets
+  // a fresh review free to say the same thing). Sending it to convergence made the fix agent chase an
+  // unclearable verdict, and the merge loop spun arm → attempt → review-findings forever with no
+  // escalation. Instead: a human acceptance recorded for THIS head (an answered escalation, or a
+  // trusted `nano-assessment: accept <sha>` PR comment) lands it; a `fix: …` answer re-enters
+  // convergence carrying the answer; otherwise park on exactly ONE escalation (the model's blocked
+  // arm opens it and the token waits on the human — no further `pr.merge` attempt until answered).
+  const prior = await app.data.table("merges", "id").find({ pr_key: prKey }).catch(() => []);
+  // The re-arm after an answer stamps a `review-wait-ended` row; skip it to find the parked row.
+  const ordered = [...prior]
+    .filter((r) => String(r.outcome ?? "") !== REVIEW_WAIT_ENDED_OUTCOME)
+    .sort((a, b) => Number(b.id ?? 0) - Number(a.id ?? 0));
+  const completionId = Number(job.variables.completedCompletionId);
+  const validCompletion = Number.isInteger(completionId) && completionId > 0;
+  // Redelivery of a job whose verified `fix` answer was already recorded (the audit row landed but the
+  // engine never acknowledged the result): the newest row is that `review-findings` row, stamped with
+  // the winning completion id. Look past it to the park and replay the SAME verified decision.
+  const head0 = ordered[0];
+  const replayFix =
+    validCompletion &&
+    head0 !== undefined &&
+    String(head0.outcome ?? "") === "review-findings" &&
+    String(head0.method ?? "") === "human-assessment" &&
+    parseReviewHead(typeof head0.detail === "string" ? head0.detail : null) === headTrimmed &&
+    assessmentFixCompletionId(typeof head0.detail === "string" ? head0.detail : null) === completionId;
+  // A recorded verified `fix` replays on redelivery REGARDLESS of the latest verdict: a newer clean
+  // review of the same head must not let `mergePr` land the head a human requested changes to.
+  if (replayFix || isAssessmentOnly(openFindings, threads)) {
+    const comments = await readComments(repo, prNumber).catch(() => null);
+    const newest = replayFix ? ordered[1] : ordered[0];
+    const parkedOnThisHead =
+      newest !== undefined &&
+      String(newest.outcome ?? "") === HUMAN_ASSESSMENT_OUTCOME &&
+      parseReviewHead(typeof newest.detail === "string" ? newest.detail : null) === headTrimmed;
+    // The decision counts only when the EXACT winning completion of this assessment's `wait-merge-answer`
+    // (its ledger id rides the resumed token as `completedCompletionId`) is a first-hand HUMAN answer
+    // on THIS instance recorded after the park. The job's inherited `answer` variable is never trusted
+    // on its own: a redelivered job, an agent/steward answer, or an auto-applied replay must not land.
+    let answer: string | null = null;
+    if (parkedOnThisHead) {
+      const row = validCompletion ? await taskCompletions(app.data).get(completionId).catch(() => null) : null;
+      answer = verifiedAssessmentAnswer(row, {
+        elementId: PR_WAIT_MERGE_ANSWER_ELEMENT,
+        processInstanceKey: job.processInstanceKey != null ? String(job.processInstanceKey) : "",
+        parkedAt: String(newest.at ?? ""),
+      });
+    }
+    const decision = classifyAssessmentAnswer(answer);
+    // A verified acceptance already recorded for THIS head survives landing retries: once an
+    // `assessment-accepted` row exists for the head, a later `retry` row must not re-open the
+    // assessment (it is no longer the newest row). A new head needs a new decision.
+    const acceptedBefore = prior.some(
+      (r) =>
+        String(r.outcome ?? "") === "assessment-accepted" &&
+        parseReviewHead(typeof r.detail === "string" ? r.detail : null) === headTrimmed,
+    );
+    if (decision === "fix" && replayFix) {
+      return { mergeStatus: "review-findings", assessmentAnswer: String(answer).trim() };
+    }
+    if (decision === "fix") {
+      await app.data.table("merges", "id").insert({
+        pr_key: prKey,
+        outcome: "review-findings",
+        method: "human-assessment",
+        detail: `human assessment answered fix — re-entering convergence ${reviewHeadToken(headTrimmed)} ${assessmentFixCompletionToken(completionId)}`,
+        at: now,
+      });
+      return { mergeStatus: "review-findings", assessmentAnswer: String(answer).trim() };
+    }
+    if (acceptedBefore) {
+      openFindings = [];
+    } else if (decision === "accept" || (comments !== null && isAssessmentAccepted(comments, headTrimmed))) {
+      await app.data.table("merges", "id").insert({
+        pr_key: prKey,
+        outcome: "assessment-accepted",
+        method: "human-assessment",
+        detail: `a human accepted the "Needs a closer look" verdict ${reviewHeadToken(headTrimmed)}`,
+        at: now,
+      });
+      openFindings = [];
+    } else {
+      const verdict = reviewVerdictExcerpt(backstopReview.body);
+      await app.data.table("merges", "id").insert({
+        pr_key: prKey,
+        outcome: HUMAN_ASSESSMENT_OUTCOME,
+        method: "review-backstop",
+        detail: `the head-current Copilot review says "Needs a closer look" — waiting on a human assessment ${reviewHeadToken(headTrimmed)}`,
+        at: now,
+      });
+      return {
+        mergeStatus: "blocked",
+        status: "blocked",
+        question: assessmentQuestion({ repo, prNumber, head: headTrimmed, verdict }),
+      };
+    }
   }
   if (openFindings.length > 0) {
     const detail = `the head-current Copilot review reports open findings (${openFindings.join(", ")})`;

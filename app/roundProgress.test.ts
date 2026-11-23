@@ -1158,7 +1158,9 @@ test("capture-head runs BEFORE review-round on EVERY round entry (round-entry he
   for (const [id, src] of [
     ["f_start", "Start"],
     ["f_reviewLoop", "wait-review"],
-    ["f_answerLoop", "record-answer"],
+    // record-answer → gw-answer-route → (default) capture-head; the assessment-accept arm (#1037)
+    // re-checks the gate instead and dispatches no round, so it never reaches capture-head.
+    ["f_answerLoop", "gw-answer-route"],
     ["f_huskRetry", "gw-husk"],
   ] as const) {
     const f = flowElement(id);
@@ -1200,10 +1202,13 @@ test("record-answer resets huskRetries on every human resume (Copilot #789)", ()
   assertStringIncludes(task[0], 'target="huskRetries"');
   // record-answer is the loop-back into review-round via capture-head (the human-resume chokepoint
   // the reset guards); capture-head re-captures the round-entry head before the re-run.
-  assertStringIncludes(task[0], "<bpmn:outgoing>f_answerLoop</bpmn:outgoing>");
+  assertStringIncludes(task[0], "<bpmn:outgoing>f_toAnswerRoute</bpmn:outgoing>");
+  const route = flowElement("f_toAnswerRoute");
+  assert(route, "f_toAnswerRoute flow missing");
+  assertStringIncludes(route, 'targetRef="gw-answer-route"');
   const loop = flowElement("f_answerLoop");
   assert(loop, "f_answerLoop flow missing");
-  assertStringIncludes(loop, 'sourceRef="record-answer"');
+  assertStringIncludes(loop, 'sourceRef="gw-answer-route"');
   assertStringIncludes(loop, 'targetRef="capture-head"');
 });
 

@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { _clearMergeProtocolCache } from "../../app/mergeProtocol.ts";
+import { reviewHeadToken } from "../../app/reviewWait.ts";
 import { noopLog } from "../../test/log.ts";
 import handler, { makeHandler } from "./worker.ts";
 
@@ -31,7 +32,7 @@ function fakeApp() {
                 store.find((r) => Object.entries(q).every(([f, v]) => r[f] === v)) ?? null,
               ),
             insert: (row: any) => {
-              store.push(row);
+              store.push(row.id === undefined ? { id: store.length + 1, ...row } : row);
               return Promise.resolve(store.length);
             },
             update: (k: any, patch: any) => {
@@ -597,5 +598,188 @@ test("pr.merge #1018: an unreadable thread set keeps the frozen findings blockin
     const out = (await backstop({ variables: { prKey: "acme/widgets#30", repo: "acme/widgets", prNumber: 30 } } as any, app)) as Record<string, unknown>;
     assertEquals(out, { mergeStatus: "review-findings" });
     assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+  });
+});
+
+// ── Human assessment of "Needs a closer look" (issue #1037) ──────────────────
+// nano-bpm#1850 spun arm → attempt → review-findings every ~5 min with no escalation: a head-current
+// 🔵 verdict with zero threads is a HUMAN assessment request no agent push can clear.
+const CLOSER_LOOK_BODY =
+  "## Pull request overview\n\n### 🔵 Needs a closer look\n\nHuman assessment is needed for probe exhaustion.\n\n<details><summary>No open issues</summary>\n</details>";
+const AHEAD = "68de21c0aaaabbbbccccddddeeeeffff00001111";
+const landRoutes = (url: string) => {
+  if (/\/pulls\/\d+\/merge$/.test(url)) return new Response(JSON.stringify({ merged: true }), { status: 200 });
+  return backstopRoutes(url);
+};
+const assessHandler = (comments: any[] = []) =>
+  makeHandler({
+    readReview: async () => ({ body: CLOSER_LOOK_BODY, commitId: AHEAD }),
+    readHeadSha: async () => AHEAD,
+    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["x"], commentIds: ["1"] }],
+    readComments: async () => comments,
+  });
+const vars = (extra: Record<string, unknown> = {}) =>
+  ({ variables: { prKey: "acme/widgets#40", repo: "acme/widgets", prNumber: 40, ...extra } }) as any;
+
+test("pr.merge #1037: a closer-look-only verdict escalates ONCE to a human (no reconverge, no land)", async () => {
+  await withGithub(landRoutes, async (calls) => {
+    const { app, stores } = fakeApp();
+    const out = (await assessHandler()(vars(), app)) as Record<string, unknown>;
+    // `blocked` + question → the model's merge-esc-attempt arm opens exactly one escalation and the
+    // token parks on wait-merge-answer: no further pr.merge attempt until a human answers.
+    assertEquals(out.mergeStatus, "blocked");
+    assertEquals(String(out.question).includes("Human assessment is needed for probe exhaustion."), true);
+    assertEquals(String(out.question).includes("nano-assessment: accept 68de21c"), true);
+    assertEquals(stores.merges.map((m) => m.outcome), ["human-assessment"]);
+    assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+  });
+});
+
+// The exact winning completion of the parked `wait-merge-answer` (issue #1037 review): its ledger id
+// rides the resumed token as `completedCompletionId`.
+const PIK = "2251799813685300";
+async function answered(
+  app: any,
+  answer: string,
+  opts: { actor?: string; autoApplied?: number; element?: string; pik?: string; at?: string } = {},
+): Promise<number> {
+  await app.data.table("task_completions", "id").insert({
+    element_id: opts.element ?? "wait-merge-answer",
+    process_instance_key: opts.pik ?? PIK,
+    actor_kind: opts.actor ?? "human",
+    actor_id: "jwulf",
+    auto_applied: opts.autoApplied ?? 0,
+    reverted: 0,
+    variables_json: JSON.stringify({ answer }),
+    created_at: opts.at ?? new Date(Date.now() + 1000).toISOString(),
+  });
+  const rows = await app.data.table("task_completions", "id").find({});
+  return rows.length;
+}
+const resumed = (completedCompletionId: number, answer: string) =>
+  ({ processInstanceKey: PIK, variables: { prKey: "acme/widgets#40", repo: "acme/widgets", prNumber: 40, answer, completedCompletionId } }) as any;
+
+test("pr.merge #1037: a human-attributed accept lands that head; an un-parked inherited accept does not", async () => {
+  await withGithub(landRoutes, async (calls) => {
+    const { app, stores } = fakeApp();
+    await assessHandler()(vars(), app);
+    // record-answer → arm-merge stamps review-wait-ended before the re-attempt.
+    await app.data.table("merges", "id").insert({ pr_key: "acme/widgets#40", outcome: "review-wait-ended" });
+    const id = await answered(app, "accept");
+    const out = (await assessHandler()(resumed(id, "accept"), app)) as Record<string, unknown>;
+    assertEquals(out, { mergeStatus: "merged" });
+    assertEquals(stores.merges.some((m) => m.outcome === "assessment-accepted"), true);
+    assertEquals(calls.some((c) => /\/pulls\/\d+\/merge$/.test(c.url) && c.method === "PUT"), true);
+  });
+  await withGithub(landRoutes, async (calls) => {
+    const { app } = fakeApp();
+    // An `answer` left over from an unrelated escalation never accepts an un-parked head.
+    const out = (await assessHandler()(vars({ answer: "accept" }), app)) as Record<string, unknown>;
+    assertEquals(out.mergeStatus, "blocked");
+    assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+  });
+});
+
+// Every way an `answer: "accept"` can reach pr.merge WITHOUT a human answering this park must re-park
+// (one blocked result, no land): no ledger row, an agent/steward answer, an auto-applied replay, a
+// completion recorded BEFORE the park (a redelivered job inheriting a stale answer), another instance,
+// another element, and a human row whose own answer is not an acceptance.
+for (const [name, mk] of [
+  ["no completion id (redelivered job, inherited answer)", async () => 0],
+  ["agent-attributed answer", async (app: any) => answered(app, "accept", { actor: "agent" })],
+  ["auto-applied adjudication replay", async (app: any) => answered(app, "accept", { autoApplied: 1 })],
+  ["completion recorded before the park (stale)", async (app: any) => answered(app, "accept", { at: "2000-01-01T00:00:00.000Z" })],
+  ["completion from another process instance", async (app: any) => answered(app, "accept", { pik: "999" })],
+  ["completion of another user task", async (app: any) => answered(app, "accept", { element: "wait-answer" })],
+  ["human completion whose answer is not accept", async (app: any) => answered(app, "accept only after fixing X")],
+] as const) {
+  test(`pr.merge #1037: ${name} does not accept the assessment`, async () => {
+    await withGithub(landRoutes, async (calls) => {
+      const { app, stores } = fakeApp();
+      await assessHandler()(vars(), app);
+      const id = await mk(app);
+      const out = (await assessHandler()(resumed(id, "accept"), app)) as Record<string, unknown>;
+      assertEquals(out.mergeStatus, "blocked");
+      assertEquals(stores.merges.some((m) => m.outcome === "assessment-accepted"), false);
+      assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+    });
+  });
+}
+
+test("pr.merge #1037: a human fix answer re-enters convergence carrying the answer", async () => {
+  await withGithub(landRoutes, async () => {
+    const { app } = fakeApp();
+    await assessHandler()(vars(), app);
+    const id = await answered(app, "fix: bound the probe pool");
+    const out = (await assessHandler()(resumed(id, "fix: bound the probe pool"), app)) as Record<string, unknown>;
+    assertEquals(out, { mergeStatus: "review-findings", assessmentAnswer: "fix: bound the probe pool" });
+  });
+});
+
+test("pr.merge #1037: a redelivered fix job replays the recorded verified decision instead of re-parking", async () => {
+  await withGithub(landRoutes, async () => {
+    const { app, stores } = fakeApp();
+    await assessHandler()(vars(), app);
+    const id = await answered(app, "fix: bound the probe pool");
+    const first = (await assessHandler()(resumed(id, "fix: bound the probe pool"), app)) as Record<string, unknown>;
+    const rows = stores.merges.length;
+    const again = (await assessHandler()(resumed(id, "fix: bound the probe pool"), app)) as Record<string, unknown>;
+    assertEquals(again, first);
+    assertEquals(stores.merges.length, rows, "no new park/audit row on redelivery");
+  });
+});
+
+test("pr.merge #1037: a redelivered fix job replays the decision even when a newer CLEAN review of the head landed", async () => {
+  await withGithub(landRoutes, async (calls) => {
+    const { app, stores } = fakeApp();
+    await assessHandler()(vars(), app);
+    const id = await answered(app, "fix: bound the probe pool");
+    const first = (await assessHandler()(resumed(id, "fix: bound the probe pool"), app)) as Record<string, unknown>;
+    const rows = stores.merges.length;
+    const clean = makeHandler({
+      readReview: async () => ({ body: "## Pull request overview\n\nReviewed 2 files and generated no new comments.", commitId: AHEAD }),
+      readHeadSha: async () => AHEAD,
+      readThreads: async () => [],
+      readComments: async () => [],
+    });
+    const again = (await clean(resumed(id, "fix: bound the probe pool"), app)) as Record<string, unknown>;
+    assertEquals(again, first);
+    assertEquals(stores.merges.length, rows);
+    assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false, "the human-rejected head must not land");
+  });
+});
+
+test("pr.merge #1037: a trusted nano-assessment accept comment for this head satisfies the backstop", async () => {
+  await withGithub(landRoutes, async () => {
+    const { app } = fakeApp();
+    const out = (await assessHandler([
+      { id: 9, body: "nano-assessment: accept 68de21c", login: "jwulf", association: "MEMBER", createdAt: "" },
+    ])(vars(), app)) as Record<string, unknown>;
+    assertEquals(out, { mergeStatus: "merged" });
+  });
+});
+
+test("pr.merge #1037: a verified acceptance for this head survives a landing retry; a new head does not inherit it", async () => {
+  await withGithub(landRoutes, async (calls) => {
+    const { app } = fakeApp();
+    await app.data.table("merges", "id").insert({
+      pr_key: "acme/widgets#40",
+      outcome: "assessment-accepted",
+      detail: `a human accepted the "Needs a closer look" verdict ${reviewHeadToken(AHEAD)}`,
+    });
+    await app.data.table("merges", "id").insert({ pr_key: "acme/widgets#40", outcome: "retry", detail: "x" });
+    const out = (await assessHandler()(vars(), app)) as Record<string, unknown>;
+    assertEquals(out, { mergeStatus: "merged" });
+    assertEquals(calls.some((c) => /\/pulls\/\d+\/merge$/.test(c.url) && c.method === "PUT"), true);
+  });
+  await withGithub(landRoutes, async () => {
+    const { app } = fakeApp();
+    await app.data.table("merges", "id").insert({
+      pr_key: "acme/widgets#40",
+      outcome: "assessment-accepted",
+      detail: `a human accepted the "Needs a closer look" verdict ${reviewHeadToken("1111111aaaabbbbccccddddeeeeffff00001111")}`,
+    });
+    const out = (await assessHandler()(vars(), app)) as Record<string, unknown>;
+    assertEquals(out.mergeStatus, "blocked");
   });
 });

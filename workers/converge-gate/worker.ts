@@ -65,6 +65,7 @@ import {
   reconcileReviewOpenFindings,
   reviewVerdictExcerpt,
 } from "../../app/github.ts";
+import { assessmentQuestion, isAssessmentAccepted, isAssessmentOnly } from "../../app/humanAssessment.ts";
 import { type IssueComment, listIssueComments } from "../../app/issuePrLink.ts";
 import {
   deriveOperatorFeedback,
@@ -147,6 +148,8 @@ export function makeHandler(deps: {
   readHeadSha?: HeadReader;
   /** Omitted ⇒ no operator-feedback read (unit fixtures); the bound default handler wires the real one. */
   readOperatorFeedback?: OperatorFeedbackReader;
+  /** PR conversation comments (issue #1037: the `nano-assessment: accept <sha>` marker). */
+  readComments?: (repo: string, prNumber: number) => Promise<IssueComment[] | null>;
 }): AppJobHandler<In, Out> {
   const readHeadSha = deps.readHeadSha ?? defaultReadHead;
   return async (job) => {
@@ -218,7 +221,31 @@ export function makeHandler(deps: {
       // (a review can carry findings as summary-only, as #1443's 7-finding review did). This block
       // is NOT ack-only: the findings need the round agent's code/reply work, so it escalates to a
       // human rather than entering the bounded auto-ack path.
-      const openFindings = reconcileReviewOpenFindings(review.body, threadsRead);
+      let openFindings = reconcileReviewOpenFindings(review.body, threadsRead);
+      // HUMAN ASSESSMENT (issue #1037): a 🔵 "Needs a closer look" verdict with no open thread and no
+      // open-issue count is a request for a HUMAN — never a fix round (an agent push cannot clear it:
+      // every new head gets a fresh review free to say the same thing). A trusted
+      // `nano-assessment: accept <sha>` PR comment for THIS head clears it; otherwise block with an
+      // assessment question (escalates to a human, never the ack-only auto-retry path).
+      if (headSha && isAssessmentOnly(openFindings, threadsRead)) {
+        const comments = deps.readComments ? await deps.readComments(ghRepo, ghNumber).catch(() => null) : null;
+        if (comments !== null && isAssessmentAccepted(comments, headSha)) {
+          openFindings = [];
+        } else {
+          return {
+            convergeBlocked: true,
+            convergeBlockReason: `Convergence blocked: the latest head-current Copilot review reports needs a closer look (a human assessment). ${assessmentQuestion({
+              repo: ghRepo,
+              prNumber: ghNumber,
+              head: headSha,
+              verdict: reviewVerdictExcerpt(review.body),
+              channel: "comment",
+            })} Do NOT dispatch a fix round for this verdict.`,
+            convergeAckOnly: false,
+            reviewStale: false,
+          };
+        }
+      }
       if (openFindings.length > 0) {
         const verdict = reviewVerdictExcerpt(review.body);
         return {
@@ -294,5 +321,6 @@ const handler = makeHandler({
   readReview: defaultReadReview,
   readHeadSha: defaultReadHead,
   readOperatorFeedback: defaultReadOperatorFeedback,
+  readComments: (repo, prNumber) => listIssueComments(repo, prNumber, process.env.GITHUB_TOKEN ?? ""),
 });
 export default handler;

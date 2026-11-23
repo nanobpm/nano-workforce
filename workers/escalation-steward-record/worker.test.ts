@@ -16,7 +16,7 @@ import { bootTestApp } from "@nanobpm/urban-testkit";
 import { taskCompletions } from "../../app/agentCompletion.ts";
 import { recordAgentJobObservation } from "../../app/agentActivationLedger.ts";
 import { claimEscalations, escalationAutoResolutions, LOOP_GUARD_MAX_RESOLUTIONS, recordResolution } from "../../app/escalationSteward.ts";
-import type { UserTaskRow } from "../../app/userTasks.ts";
+import { type UserTaskRow, userTasks } from "../../app/userTasks.ts";
 import handler, { FREE_TEXT_VALUE_KEYS, SELECTED_VALUE_KEYS } from "./worker.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..", "..");
@@ -52,6 +52,13 @@ async function run(
   const completed: { userTaskKey: string; variables: Record<string, unknown> }[] = [];
   try {
     await seed(app.db);
+    // Production claims only PROJECTED tasks; mirror that projection so the human-only assessment
+    // guard (which fails closed on an unprojected task) sees each claimed task's question.
+    for (const c of await escalationAutoResolutions(app.db).all()) {
+      if ((await userTasks(app.db).get(c.user_task_key)) == null) {
+        await userTasks(app.db).insert(taskRow({ user_task_key: c.user_task_key, element_id: c.element_id ?? "wait-answer" }));
+      }
+    }
     // The record worker completes through `completeEscalationAsAgent`, which resolves the open task via
     // `openUserTasks` (CREATED only) before calling `completeUserTask`. Report every claimed task as an
     // open `wait-answer` escalation so the door resolves it (a key with no open task is a no-op).
