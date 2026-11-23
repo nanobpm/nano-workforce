@@ -1910,7 +1910,8 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
   // when it lands — so pass 5 requires every such edge to target an explicit merged-PR gate, making
   // "B starts after A has landed" the only expressible ordering.
   const mergeAgentNodes = new Set<string>();
-  const mergedPrWaitNodes = new Set<string>();
+  // #1031: merged-PR gate id -> the trimmed `wait.target` it polls (pass 5 correlates it to the producer).
+  const mergedPrWaitNodes = new Map<string, string>();
   const prBindConsumers: {
     path: string;
     field: "connector.payload.pr" | "wait.target";
@@ -2304,7 +2305,9 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         // binding once edges are resolved). Only when the id is usable so pass 4 can key by node id.
         if (typeof id === "string" && id.length > 0) {
           if (kind === "agent" && config.merge === true) mergeAgentNodes.add(id);
-          if (kind === "wait" && isMergedPrWait(config)) mergedPrWaitNodes.add(id);
+          if (kind === "wait" && isMergedPrWait(config)) {
+            mergedPrWaitNodes.set(id, typeof config.target === "string" ? config.target.trim() : "");
+          }
           if (kind === "connector" && typeof config.target === "string" && isConvergeTarget(config.target)) {
             const payload = isRecord(config.payload) ? config.payload : undefined;
             prBindConsumers.push({
@@ -2710,7 +2713,11 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     validatePrBindings(prBindConsumers, incomingFactRefs, nodeFacts, nodeFactTypes, errors);
     // Pass 5 (#1031): an edge out of a `merge: true` agent must target a `wait[pr, merged]` gate.
     for (const e of guardEdges) {
-      if (mergeAgentNodes.has(e.fromNode) && !mergedPrWaitNodes.has(e.to)) {
+      // The gate must poll THIS producer's PR (`<fromNode>.<pr fact>`) — a merged-PR gate on a
+      // different PR would release the consumer when an unrelated PR merges.
+      const gateTarget = mergedPrWaitNodes.get(e.to);
+      const gateOnProducer = gateTarget?.startsWith(`${e.fromNode}.`) === true;
+      if (mergeAgentNodes.has(e.fromNode) && !gateOnProducer) {
         errors.push({
           path: `edges[${e.index}]`,
           message:

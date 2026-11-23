@@ -3482,6 +3482,14 @@ test("#1031 a `wait[pr]` gate that is NOT a merged match does not satisfy the ru
   hasCode(validateDeliveryGraph(g), "merge-edge-unguarded");
 });
 
+test("#1031 a merged-PR gate on a DIFFERENT producer's PR does not satisfy the rule", () => {
+  const g = mergeProducerGraph([{ from: "other.pr", to: "landed" }, { from: "fix", to: "landed" }, { from: "landed", to: "after" }]);
+  g.nodes.push({ id: "other", kind: "agent", agent: { jobType: "senior:feature", prompt: "other" }, emits: [{ name: "pr", type: "pr" }] });
+  g.nodes[1] = { id: "landed", kind: "wait", wait: { kind: "pr", target: "other.pr", match: { prState: "merged" } } };
+  const err = hasCode(validateDeliveryGraph(g), "merge-edge-unguarded");
+  assertEquals(err.path, "edges[1]");
+});
+
 test("#1031 a `converge`-only agent may feed a consumer directly (no merge promised)", () => {
   const g = mergeProducerGraph([{ from: "fix", to: "after" }]);
   g.nodes[0] = { id: "fix", kind: "agent", agent: { jobType: "senior:feature", prompt: "fix it", converge: true, merge: false }, emits: [{ name: "pr", type: "pr" }] };
