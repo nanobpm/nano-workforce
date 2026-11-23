@@ -2432,14 +2432,10 @@ test("#778 the compiled subProcess carries the descriptive name + a `<bpmn:docum
     name: "descriptive",
     nodes: [
       { id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "Implement #567 and open a PR.", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
-      { id: "land", kind: "connector", connector: { target: "converge-merge", dedupeKey: "land-1", payload: { pr: "impl.pr" } } },
       { id: "gate", kind: "wait", wait: { kind: "pr", target: "impl.pr", match: { prState: "merged" } } },
     ],
-    edges: [
-      { from: "impl.pr", to: "land" },
-      { from: "land", to: "gate" },
-      { from: "impl.pr", to: "gate" },
-    ],
+    // #1031: an edge out of a `merge: true` agent must target a merged-PR gate.
+    edges: [{ from: "impl.pr", to: "gate" }],
   };
   const r = await compileOk(graph);
   const el = elementForNode(r.bpmn, "impl");
@@ -4467,4 +4463,36 @@ test("#1016 an agent node's SLA boundary is non-interrupting and only an elapsed
   assert(!/<bpmn:boundaryEvent id="n0_slaBe"[^>]*cancelActivity="false"/.test(r.bpmn), "the expiry boundary interrupts the work");
   assert(r.bpmn.includes('sourceRef="n0_retry" targetRef="n0_slaArm"'), "a retry re-arms the SLA before re-entering the work");
   assert(r.bpmn.includes('<zeebe:output source="=false" target="n0_slaExpired" />'), "arming clears a stale expiry so a Retry cannot re-fire it");
+});
+
+// #1031: a consumer of a `merge: true` agent must not activate before the merge fact is bound — in
+// the compiled BPMN the consumer is reachable from the producer ONLY through the `wait[pr, merged]`
+// gate (which binds `mergedSha`), and an ungated edge is rejected at compile.
+test("#1031 a consumer of a `merge: true` agent activates only after the merged-PR gate", async () => {
+  const nodes = [
+    { id: "fix", kind: "agent", agent: { jobType: "senior:feature", prompt: "fix it", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+    { id: "landed", kind: "wait", wait: { kind: "pr", target: "fix.pr", match: { prState: "merged" } } },
+    { id: "after", kind: "agent", agent: { jobType: "senior:feature", prompt: "promote the check" } },
+  ];
+  const ungated = await compileDeliveryGraph({ name: "m", nodes, edges: [{ from: "fix.pr", to: "landed" }, { from: "fix", to: "after" }] });
+  assert(!ungated.ok, "an edge from a merge node straight to its consumer must not compile");
+
+  const r = await compileOk({ name: "m", nodes, edges: [{ from: "fix.pr", to: "landed" }, { from: "landed", to: "after" }] });
+  const fix = elementForNode(r.bpmn, "fix");
+  const gate = elementForNode(r.bpmn, "landed");
+  const after = elementForNode(r.bpmn, "after");
+  const flows = [...r.bpmn.matchAll(/<bpmn:sequenceFlow [^>]*sourceRef="([^"]+)" targetRef="([^"]+)"/g)].map((m) => [m[1], m[2]]);
+  assert(!flows.some(([s, t]) => s === fix && t === after), "no flow from the merge producer straight to the consumer");
+  // Walk backwards from the consumer at the top level: every path to the producer passes the gate.
+  const preds = (n: string) => flows.filter(([, t]) => t === n).map(([s]) => s);
+  const seen = new Set<string>();
+  const stack = [after];
+  while (stack.length > 0) {
+    const n = stack.pop() ?? "";
+    if (n === gate || seen.has(n)) continue;
+    seen.add(n);
+    assert(n !== fix, "the consumer is reachable from the merge producer without passing the merged-PR gate");
+    stack.push(...preds(n));
+  }
+  assert(r.bpmn.includes('target="mergedSha"'), "the gate binds the merge fact");
 });
