@@ -1,3 +1,9 @@
+## [0.223.2](https://github.com/nanobpm/nano-workforce/compare/v0.223.1...v0.223.2) (2026-11-23)
+
+### Bug Fixes
+
+* **merge:** route a 'Needs a closer look' verdict to one human assessment ([#1038](https://github.com/nanobpm/nano-workforce/issues/1038)) ([7a34de4](https://github.com/nanobpm/nano-workforce/commit/7a34de499e2d391db8e9f66107bd4814943df7a2)), closes [#1037](https://github.com/nanobpm/nano-workforce/issues/1037)
+
 ## [0.223.1](https://github.com/nanobpm/nano-workforce/compare/v0.223.0...v0.223.1) (2026-11-23)
 
 ### Bug Fixes
