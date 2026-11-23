@@ -112,6 +112,7 @@ import {
   isReviewMissingOrStale,
   isReviewStale,
   REVIEW_WAIT_STATUSES,
+  reviewHeadToken,
   reviewWaitReason,
   reviewWaitTimeout,
 } from "./reviewWait.ts";
@@ -2761,16 +2762,55 @@ export async function terminatePrLoop(
   }
 }
 
-/** Issue #1043: does the PR verifiably LACK a head-current Copilot review? Uses the merge backstop's
- * own predicate ({@link isReviewMissingOrStale}) over the same readers, so the poller and the
- * backstop can never disagree about which heads need a review. Unreadable review/head → `false`. */
-async function hasNoHeadCurrentReview(repo: string, number: number, token: string): Promise<boolean> {
+/** Issue #1043: the head that verifiably LACKS a head-current Copilot review, or `null`. Uses the
+ * merge backstop's own predicate ({@link isReviewMissingOrStale}) over the same readers, so the
+ * poller and the backstop never disagree. Unreadable review/head → `null` (fail safe). */
+async function headLackingCurrentReview(repo: string, number: number, token: string): Promise<string | null> {
   const [review, head] = await Promise.all([
     fetchLatestCopilotReview(repo, number, token).catch(() => null),
     readCurrentHead(repo, number, token).catch(() => null),
   ]);
-  if (review === null) return false;
-  return isReviewMissingOrStale(review.commitId, head);
+  if (review === null || !head) return null;
+  return isReviewMissingOrStale(review.commitId, head) ? head : null;
+}
+
+/** Issue #1043: REVIEW-ONLY recovery for a waiting PR whose head has no head-current review. It never
+ * publishes `merge-ready` and never touches the row status, so it cannot route around the
+ * mergeability / exclusion-lane gates (a review that lands later simply lets the NEXT normal poll
+ * verdict decide), and it works identically from `wait-mergeable` and the timer-only
+ * `wait-mergeable-repoll` (it needs no process subscription). Bounded: at most ONE ask per head,
+ * keyed by a `review-requested` audit row carrying {@link reviewHeadToken}. An in-flight Copilot
+ * request is ADOPTED (recorded, not re-issued); an unreadable pending state fails safe (no ask). */
+export async function ensureHeadReviewRequested(
+  data: DataLayer,
+  prKey: string,
+  repo: string,
+  number: number,
+  token: string,
+): Promise<"none" | "adopted" | "requested" | "unavailable" | "skipped"> {
+  const head = await headLackingCurrentReview(repo, number, token);
+  if (head === null) return "none";
+  const audit = data.table("merges", "id");
+  const marker = reviewHeadToken(head);
+  const prior = await audit.find({ pr_key: prKey, outcome: "review-requested" });
+  if (prior.some((r) => typeof r.detail === "string" && r.detail.includes(marker))) return "skipped";
+  const pending = await hasPendingCopilotReviewer(repo, number, token).catch(() => null);
+  if (pending === null) return "skipped";
+  let result: "adopted" | "requested" | "unavailable" | "skipped";
+  if (pending) result = "adopted";
+  else {
+    const res = await requestCopilotReview(repo, number, token).catch(() => null);
+    if (res === null) return "skipped"; // transport failure → retried next pass (no marker)
+    result = res;
+  }
+  await audit.insert({
+    pr_key: prKey,
+    outcome: "review-requested",
+    method: "review-request",
+    detail: `poller head-current Copilot review ${result} ${marker}`,
+    at: new Date().toISOString(),
+  });
+  return result;
 }
 
 export async function pollMerges(data: DataLayer, engine: EngineClient, token: string) {
@@ -2930,28 +2970,12 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
         // `headRefOid`, so downstream merge-train PRs get a new nudge after every post-rebase
         // landing attempt.
         // Issue #1043: a head that moved AFTER the last review (an out-of-band force-push following
-        // approval) leaves no head-current Copilot review, and nothing in this stage requests one —
-        // the merge backstop (`pr.merge`) that does is only reached on a `ready` verdict, which a
-        // branch still waiting on its reviewer never reaches. Route the stale head through the ONE
-        // canonical request-and-wait path: publish `merge-ready {ready}` so `attempt-merge`'s
-        // backstop returns `review-pending` → `request-review` → the bounded `reviewRequestWait` →
-        // re-arm, escalating once `reviewRequestMax` requests went unanswered. The backstop re-checks
-        // before ANY landing, so this never merges unreviewed code. An unreadable review/head fails
-        // safe (no routing) exactly as the backstop's predicate does.
-        if (await hasNoHeadCurrentReview(repo, number, token)) {
-          await flipToMergingThenPublish(data, engine, prKey, "waiting_merge", {
-            name: "merge-ready",
-            correlationKey: prKey,
-            variables: {
-              mergeState: "ready",
-              failingChecks: st.failingChecks,
-              failingChecksList: st.failingCheckNames.join("\n"),
-              reviewThreads: st.unresolvedThreads,
-              pendingChecks: st.pendingCheckNames.length,
-            },
-          });
-          console.log(`[poller] no head-current review while waiting -> merge backstop requests one -> ${prKey}`);
-          continue;
+        // approval) leaves no head-current Copilot review, and nothing in this stage asked for one.
+        // Ask (or adopt an in-flight ask) once per head — review-only: no `merge-ready`, no status
+        // flip, so every landing gate still runs on the next normal verdict.
+        const asked = await ensureHeadReviewRequested(data, prKey, repo, number, token);
+        if (asked === "requested" || asked === "adopted") {
+          console.log(`[poller] no head-current review while waiting -> review ${asked} -> ${prKey}`);
         }
         if (protocol) {
           await maybeEnsureFreshHeadRun(data, repo, number, prKey, protocol, verdict, st, pr);

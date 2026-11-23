@@ -1,5 +1,5 @@
 // Issue #1043: approve → force-push → the merge stage must REQUEST a head-current review (once per
-// head, through the canonical backstop path) instead of waiting forever in `wait-mergeable` for a
+// head, review-only — never via merge-ready, so no landing gate is bypassed) instead of waiting forever in `wait-mergeable` for a
 // review nothing ever asks for. Poller-level: drive `pollMerges` over a `waiting_merge` row whose
 // latest Copilot review is on an OLD head while GitHub still reports the PR as not yet mergeable
 // (the `waiting` verdict that used to `continue` silently every pass).
@@ -54,8 +54,14 @@ const OLD_HEAD = "8a65a9a5000000000000000000000000000000aa";
 const NEW_HEAD = "39f5f15e000000000000000000000000000000bb";
 
 /** Token-transport stub: PR view (`blocked` → `waiting` in token mode), Copilot reviews list. */
-function githubFetch(fx: { reviewCommit: string | null; head: string; reviewsStatus?: number }) {
-  return (url: string | URL | Request): Promise<Response> => {
+function githubFetch(fx: {
+  reviewCommit: string | null;
+  head: string;
+  reviewsStatus?: number;
+  pendingCopilot?: boolean;
+  posts?: string[];
+}) {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const u = new URL(String(url));
     const json = (obj: unknown, status = 200) =>
       Promise.resolve(new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } }));
@@ -63,6 +69,13 @@ function githubFetch(fx: { reviewCommit: string | null; head: string; reviewsSta
       return json({
         data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } },
       });
+    }
+    if (/\/pulls\/\d+\/requested_reviewers$/.test(u.pathname)) {
+      if (init?.method === "POST") {
+        fx.posts?.push(u.pathname);
+        return json({});
+      }
+      return json({ users: fx.pendingCopilot ? [{ login: "Copilot" }] : [] });
     }
     if (/\/pulls\/\d+\/reviews$/.test(u.pathname)) {
       if (fx.reviewsStatus) return json({}, fx.reviewsStatus);
@@ -107,30 +120,67 @@ function setup() {
   return { data, stores, engine, messages };
 }
 
-test("#1043: approve then force-push → exactly one hand-off to the review-requesting backstop, no silent wait", async () => {
+test("#1043: approve then force-push → exactly one review request per head, review-only (no merge-ready, no status flip)", async () => {
   const { data, stores, engine, messages } = setup();
-  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD }, async () => {
+  const posts: string[] = [];
+  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, posts }, async () => {
     await pollMerges(data, engine, "tok");
-    // A second pass must not re-publish: the row left `waiting_merge` for the backstop's bounded
-    // request-and-wait path, which re-arms it only after `reviewRequestWait` (once per head/round).
-    await pollMerges(data, engine, "tok");
+    await pollMerges(data, engine, "tok"); // second pass: deduped by the per-head audit marker
   });
-  const ready = messages.filter((m) => m.name === "merge-ready");
-  assertEquals(ready.length, 1, "the stale head must be routed to the backstop exactly once");
-  assertEquals(ready[0].variables.mergeState, "ready", "routes through attempt-merge, whose backstop returns review-pending");
-  assertEquals(stores["pull_requests"][0].status, "merging");
+  assertEquals(posts.length, 1, "exactly one review request for the stale head");
+  // Never bypasses the landing gates: no merge-ready, row stays waiting_merge.
+  assertEquals(messages.filter((m) => m.name === "merge-ready").length, 0);
+  assertEquals(stores["pull_requests"][0].status, "waiting_merge");
+  const audit = stores["merges"].filter((r) => r.outcome === "review-requested");
+  assertEquals(audit.length, 1);
+  assertEquals(audit[0].detail.includes(NEW_HEAD), true);
 });
 
-test("#1043: a head-current review while waiting → keeps waiting (no request)", async () => {
+test("#1043: a review landing between passes cannot land the PR — next pass keeps the waiting verdict", async () => {
   const { data, stores, engine, messages } = setup();
+  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, posts: [] }, () => pollMerges(data, engine, "tok"));
   await withGithub({ reviewCommit: NEW_HEAD, head: NEW_HEAD }, () => pollMerges(data, engine, "tok"));
   assertEquals(messages.filter((m) => m.name === "merge-ready").length, 0);
   assertEquals(stores["pull_requests"][0].status, "waiting_merge");
 });
 
-test("#1043: an unreadable review list fails safe (no routing)", async () => {
+test("#1043: an in-flight Copilot request for the head is adopted, not duplicated", async () => {
+  const { data, stores, engine } = setup();
+  const posts: string[] = [];
+  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, pendingCopilot: true, posts }, async () => {
+    await pollMerges(data, engine, "tok");
+    await pollMerges(data, engine, "tok");
+  });
+  assertEquals(posts.length, 0, "no new request while one is in flight");
+  const audit = stores["merges"].filter((r) => r.outcome === "review-requested");
+  assertEquals(audit.length, 1);
+  assertEquals(audit[0].detail.includes("adopted"), true);
+});
+
+test("#1043: recovery works after the mergeability timeout (timer-only re-poll; no subscription needed)", async () => {
   const { data, stores, engine, messages } = setup();
-  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, reviewsStatus: 502 }, () => pollMerges(data, engine, "tok"));
+  stores["pull_requests"][0].waiting_since = "2026-01-01T00:00:00Z"; // long past mergeableWaitTimeout
+  const posts: string[] = [];
+  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, posts }, () => pollMerges(data, engine, "tok"));
+  assertEquals(posts.length, 1);
+  assertEquals(messages.filter((m) => m.name === "merge-ready").length, 0);
+  assertEquals(stores["pull_requests"][0].status, "waiting_merge");
+});
+
+test("#1043: a head-current review while waiting → keeps waiting (no request)", async () => {
+  const { data, stores, engine, messages } = setup();
+  const posts: string[] = [];
+  await withGithub({ reviewCommit: NEW_HEAD, head: NEW_HEAD, posts }, () => pollMerges(data, engine, "tok"));
+  assertEquals(posts.length, 0);
+  assertEquals(messages.filter((m) => m.name === "merge-ready").length, 0);
+  assertEquals(stores["pull_requests"][0].status, "waiting_merge");
+});
+
+test("#1043: an unreadable review list fails safe (no request)", async () => {
+  const { data, stores, engine, messages } = setup();
+  const posts: string[] = [];
+  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, reviewsStatus: 502, posts }, () => pollMerges(data, engine, "tok"));
+  assertEquals(posts.length, 0);
   assertEquals(messages.filter((m) => m.name === "merge-ready").length, 0);
   assertEquals(stores["pull_requests"][0].status, "waiting_merge");
 });
