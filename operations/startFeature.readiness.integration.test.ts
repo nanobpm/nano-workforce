@@ -194,16 +194,59 @@ test("malformed readiness descriptor → 400 at the edge (never a 500)", async (
   });
 });
 
-// ── human approval before merge (issue #826): threaded through the edge, pinned off without autoMerge ─
+// ── human approval before merge (issue #826): threaded through the edge; issue #1041: an explicit
+// `autoMerge: false` alongside `humanApproval: true` is a contradiction → 400, never a silent drop ─
 
-test("humanApproval reaches the run only together with autoMerge", async () => {
+test("humanApproval reaches the run with autoMerge; contradicting autoMerge:false is a 400", async () => {
   await withGithub(REPO, async () => {
-    for (const [autoMerge, expected] of [[true, true], [false, false]] as const) {
+    {
       const { app, started } = makeApp();
-      const body = { issue: `${REPO}#577`, ...GATED_BASE, converge: true, autoMerge, humanApproval: true };
+      const body = { issue: `${REPO}#577`, ...GATED_BASE, converge: true, autoMerge: true, humanApproval: true };
       const res = (await startFeature(input(body), app)) as any;
       assertEquals(res.status, 202);
-      assertEquals(started[0].variables?.humanApproval, expected);
+      assertEquals(started[0].variables?.humanApproval, true);
+    }
+    {
+      const { app, started } = makeApp();
+      const body = { issue: `${REPO}#577`, ...GATED_BASE, converge: true, autoMerge: false, humanApproval: true };
+      const res = (await startFeature(input(body), app)) as any;
+      assertEquals(res.status, 400);
+      assertEquals(started.length, 0);
+    }
+  });
+});
+
+// ── issue #1041: the door never silently drops a flag the caller set true; effective flags echoed ─
+
+test("start/feature flag table: true implies prerequisites, contradictions 400, effective flags echoed", async () => {
+  const vals = [undefined, false, true] as const;
+  await withGithub(REPO, async () => {
+    for (const converge of vals) {
+      for (const autoMerge of vals) {
+        for (const humanApproval of vals) {
+          const { app, started } = makeApp();
+          const flags: Record<string, boolean> = {};
+          if (converge !== undefined) flags.converge = converge;
+          if (autoMerge !== undefined) flags.autoMerge = autoMerge;
+          if (humanApproval !== undefined) flags.humanApproval = humanApproval;
+          const res = (await startFeature(input({ issue: `${REPO}#577`, ...GATED_BASE, ...flags }), app)) as any;
+          const label = JSON.stringify(flags);
+          const contradictory =
+            (humanApproval === true && autoMerge === false) ||
+            ((autoMerge === true || humanApproval === true) && converge === false);
+          if (contradictory) {
+            assertEquals(res.status, 400, label);
+            assertEquals(started.length, 0, label);
+            continue;
+          }
+          assertEquals(res.status, 202, label);
+          const v = started[0].variables as Record<string, unknown>;
+          for (const k of ["converge", "autoMerge", "humanApproval"] as const) {
+            assertEquals(res.body[k], v[k], `${label}: echoed ${k} matches the run`);
+            if (flags[k] === true) assertEquals(v[k], true, `${label}: ${k} silently dropped`);
+          }
+        }
+      }
     }
   });
 });

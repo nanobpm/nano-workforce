@@ -2285,6 +2285,15 @@ components:
         baseBranch:
           type: string
           description: The base branch the run actually targets — for `already-active`, the live run's persisted base (not the request's); otherwise the admitted request base, the repository default branch when the request omitted `baseBranch` (issue 989).
+        converge:
+          type: boolean
+          description: The EFFECTIVE converge flag for this request (issue 1041) — `autoMerge`/`humanApproval` true imply it.
+        autoMerge:
+          type: boolean
+          description: The EFFECTIVE autoMerge flag for this request (issue 1041) — `humanApproval` true implies it.
+        humanApproval:
+          type: boolean
+          description: The EFFECTIVE humanApproval flag for this request (issue 1041).
     EpicSetStart:
       description: >-
         The set/batch admission request body (issue #292, slice S2). Submits a SET of epics plus the
@@ -4398,15 +4407,15 @@ components:
         autoMerge:
           type: boolean
           description: >-
-            When true (and `converge` is true), drive the merge-loop after convergence only when
-            `NANO_PR_AUTO_MERGE` is enabled. When false the run stops at `converged`.
-            Moot when `converge` is false.
+            When true, drive the merge-loop after convergence only when `NANO_PR_AUTO_MERGE` is
+            enabled. `autoMerge: true` IMPLIES `converge: true` (issue 1041); combining it with an
+            explicit `converge: false` is a 400. When false the run stops at `converged`.
         humanApproval:
           type: boolean
           description: >-
             When true (with `autoMerge`), the converged PR waits in Tasks for a human to approve the
             merge or request changes; the agent applies them to the same PR and convergence re-runs.
-            Moot when the run does not merge (see `autoMerge`).
+            IMPLIES `autoMerge` and `converge` (issue 1041); an explicit `false` for either is a 400.
         confirmDefaultBase:
           type: boolean
           description: >-
@@ -7662,10 +7671,10 @@ paths:
                       description: When true, hand the opened PR to the convergence loop (review rounds) as a follow-on step. When false (default) the run ends at "PR raised, not reviewed".
                     autoMerge:
                       type: boolean
-                      description: When true (and `converge` is true), drive the merge-loop after convergence only when `NANO_PR_AUTO_MERGE` is enabled. When false the run stops at `converged`. Moot when `converge` is false.
+                      description: 'When true, drive the merge-loop after convergence only when `NANO_PR_AUTO_MERGE` is enabled. `autoMerge: true` IMPLIES `converge: true` (issue 1041); combining it with an explicit `converge: false` is a 400. When false the run stops at `converged`.'
                     humanApproval:
                       type: boolean
-                      description: When true (with `autoMerge`), the converged PR waits in Tasks for a human to approve the merge or request changes; the agent applies them to the same PR and convergence re-runs. Moot when the run does not merge (see `autoMerge`).
+                      description: When true (with `autoMerge`), the converged PR waits in Tasks for a human to approve the merge or request changes; the agent applies them to the same PR and convergence re-runs. IMPLIES `autoMerge` and `converge` (issue 1041); an explicit `false` for either is a 400.
                     confirmDefaultBase:
                       type: boolean
                       description: Acknowledge that `baseBranch` is the repository default branch (the PR would target it directly). See `PlanStartByIssue.confirmDefaultBase`.
