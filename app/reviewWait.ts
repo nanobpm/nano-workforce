@@ -164,6 +164,21 @@ export const REVIEW_WAIT_STATUSES: readonly string[] = ["waiting_merge", "mergin
  *  `HUMAN_ASSESSMENT_OUTCOME` by app/humanAssessment.ts (one source). */
 export const HUMAN_ASSESSMENT_WAIT_OUTCOME = "human-assessment";
 
+/** Pure: the /status wait reason for an ESCALATED PR, derived from its CURRENT open user-task
+ *  question(s) — never the merge-audit history, which can name a historical assessment from an
+ *  unrelated earlier escalation (and a converge-gate assessment writes no merge row at all).
+ *  `headFromQuestion` is the canonical builder-controlled head reader (app/humanAssessment.ts). */
+export function escalatedWaitReason(
+  questions: readonly (string | null | undefined)[],
+  headFromQuestion: (q: string | null | undefined) => string | null,
+): string | null {
+  for (const q of questions) {
+    const head = headFromQuestion(q);
+    if (head) return `waiting_human_assessment(${head.slice(0, 7)})`;
+  }
+  return null;
+}
+
 /** Pure: is the newest audit row (highest id) a review-wait outcome? */
 export function isReviewWaitOpen(rows: readonly { id?: number | null; outcome: string }[]): boolean {
   if (rows.length === 0) return false;

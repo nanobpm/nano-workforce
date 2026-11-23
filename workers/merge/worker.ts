@@ -241,26 +241,28 @@ export function makeHandler(deps: {
   // trusted `nano-assessment: accept <sha>` PR comment) lands it; a `fix: …` answer re-enters
   // convergence carrying the answer; otherwise park on exactly ONE escalation (the model's blocked
   // arm opens it and the token waits on the human — no further `pr.merge` attempt until answered).
-  if (isAssessmentOnly(openFindings, threads)) {
+  const prior = await app.data.table("merges", "id").find({ pr_key: prKey }).catch(() => []);
+  // The re-arm after an answer stamps a `review-wait-ended` row; skip it to find the parked row.
+  const ordered = [...prior]
+    .filter((r) => String(r.outcome ?? "") !== REVIEW_WAIT_ENDED_OUTCOME)
+    .sort((a, b) => Number(b.id ?? 0) - Number(a.id ?? 0));
+  const completionId = Number(job.variables.completedCompletionId);
+  const validCompletion = Number.isInteger(completionId) && completionId > 0;
+  // Redelivery of a job whose verified `fix` answer was already recorded (the audit row landed but the
+  // engine never acknowledged the result): the newest row is that `review-findings` row, stamped with
+  // the winning completion id. Look past it to the park and replay the SAME verified decision.
+  const head0 = ordered[0];
+  const replayFix =
+    validCompletion &&
+    head0 !== undefined &&
+    String(head0.outcome ?? "") === "review-findings" &&
+    String(head0.method ?? "") === "human-assessment" &&
+    parseReviewHead(typeof head0.detail === "string" ? head0.detail : null) === headTrimmed &&
+    assessmentFixCompletionId(typeof head0.detail === "string" ? head0.detail : null) === completionId;
+  // A recorded verified `fix` replays on redelivery REGARDLESS of the latest verdict: a newer clean
+  // review of the same head must not let `mergePr` land the head a human requested changes to.
+  if (replayFix || isAssessmentOnly(openFindings, threads)) {
     const comments = await readComments(repo, prNumber).catch(() => null);
-    const prior = await app.data.table("merges", "id").find({ pr_key: prKey }).catch(() => []);
-    // The re-arm after an answer stamps a `review-wait-ended` row; skip it to find the parked row.
-    const ordered = [...prior]
-      .filter((r) => String(r.outcome ?? "") !== REVIEW_WAIT_ENDED_OUTCOME)
-      .sort((a, b) => Number(b.id ?? 0) - Number(a.id ?? 0));
-    const completionId = Number(job.variables.completedCompletionId);
-    const validCompletion = Number.isInteger(completionId) && completionId > 0;
-    // Redelivery of a job whose verified `fix` answer was already recorded (the audit row landed but the
-    // engine never acknowledged the result): the newest row is that `review-findings` row, stamped with
-    // the winning completion id. Look past it to the park and replay the SAME verified decision.
-    const head0 = ordered[0];
-    const replayFix =
-      validCompletion &&
-      head0 !== undefined &&
-      String(head0.outcome ?? "") === "review-findings" &&
-      String(head0.method ?? "") === "human-assessment" &&
-      parseReviewHead(typeof head0.detail === "string" ? head0.detail : null) === headTrimmed &&
-      assessmentFixCompletionId(typeof head0.detail === "string" ? head0.detail : null) === completionId;
     const newest = replayFix ? ordered[1] : ordered[0];
     const parkedOnThisHead =
       newest !== undefined &&

@@ -729,6 +729,26 @@ test("pr.merge #1037: a redelivered fix job replays the recorded verified decisi
   });
 });
 
+test("pr.merge #1037: a redelivered fix job replays the decision even when a newer CLEAN review of the head landed", async () => {
+  await withGithub(landRoutes, async (calls) => {
+    const { app, stores } = fakeApp();
+    await assessHandler()(vars(), app);
+    const id = await answered(app, "fix: bound the probe pool");
+    const first = (await assessHandler()(resumed(id, "fix: bound the probe pool"), app)) as Record<string, unknown>;
+    const rows = stores.merges.length;
+    const clean = makeHandler({
+      readReview: async () => ({ body: "## Pull request overview\n\nReviewed 2 files and generated no new comments.", commitId: AHEAD }),
+      readHeadSha: async () => AHEAD,
+      readThreads: async () => [],
+      readComments: async () => [],
+    });
+    const again = (await clean(resumed(id, "fix: bound the probe pool"), app)) as Record<string, unknown>;
+    assertEquals(again, first);
+    assertEquals(stores.merges.length, rows);
+    assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false, "the human-rejected head must not land");
+  });
+});
+
 test("pr.merge #1037: a trusted nano-assessment accept comment for this head satisfies the backstop", async () => {
   await withGithub(landRoutes, async () => {
     const { app } = fakeApp();

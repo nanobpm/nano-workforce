@@ -216,11 +216,15 @@ export interface OperatorFeedbackInput {
 export const ASSESSMENT_ACCEPT_LINE_RE = /^nano-assessment:[ \t]+accept[ \t]+([0-9a-f]{7,64})\b/i;
 
 /** Pure: a comment body with its consumed assessment-acceptance marker lines removed. Any OTHER
- * instruction in the same comment is preserved and still counts as operator feedback. */
+ * instruction in the same comment — including text after the marker on the same line — is preserved and still counts as operator feedback. */
 export function stripAssessmentMarkers(body: string): string {
   return body
     .split(/\r?\n/)
-    .filter((line) => !ASSESSMENT_ACCEPT_LINE_RE.test(line))
+    .flatMap((line) => {
+      if (!ASSESSMENT_ACCEPT_LINE_RE.test(line)) return [line];
+      const rest = line.replace(ASSESSMENT_ACCEPT_LINE_RE, "").replace(/^[ \t]*[;,:.-]?[ \t]*/, "");
+      return rest.trim() === "" ? [] : [rest];
+    })
     .join("\n")
     .trim();
 }

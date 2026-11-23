@@ -108,6 +108,7 @@ import { repoEnvelopeVars } from "./repoEnvelope.ts";
 import { maybeStartRetro } from "./retro.ts";
 import {
   clampNudgeMinutes,
+  escalatedWaitReason,
   isoDurationToMs,
   isReviewStale,
   REVIEW_WAIT_STATUSES,
@@ -1530,6 +1531,21 @@ export async function activePrs(
   const mergeAudit = data.table("merges", "id");
   for (const p of active) {
     if (!REVIEW_WAIT_STATUSES.includes(p.status)) continue;
+    if (p.status === "escalated") {
+      // An escalation's wait reason comes from its CURRENT open user task, not merge-audit history.
+      const tasks = await data
+        .table("user_tasks", "user_task_key")
+        .find({ subject_key: p.pr_key })
+        .catch(() => []);
+      waitReasonByPr.set(
+        p.pr_key,
+        escalatedWaitReason(
+          tasks.map((t) => (typeof t.question === "string" ? t.question : null)),
+          assessmentHeadFromQuestion,
+        ),
+      );
+      continue;
+    }
     const rows = await mergeAudit.find({ pr_key: p.pr_key }).catch(() => []);
     waitReasonByPr.set(
       p.pr_key,

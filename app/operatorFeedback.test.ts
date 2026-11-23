@@ -216,6 +216,11 @@ test("a consumed assessment-acceptance marker is not operator feedback; other li
   assertEquals(items[0].body, "also rename the helper");
 });
 
+test("an instruction after the assessment marker on the SAME line is still operator feedback (#1037)", () => {
+  const items = derive([], [c(52, "jwulf", "OWNER", "2026-11-21T10:07:00Z", "nano-assessment: accept 68de21c; also add a timeout")]);
+  assertEquals(items.map((i) => [i.id, i.body]), [[52, "also add a timeout"]]);
+});
+
 // Issue #1039: a trusted human's submitted PR REVIEW BODY (the "Submit review" summary, no inline
 // threads) is operator feedback — it must gate convergence until acked with `nano-ack: review-<id>`.
 const rv = (

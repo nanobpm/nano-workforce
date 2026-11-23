@@ -11,7 +11,7 @@ import {
   isAssessmentOnly,
   NEEDS_CLOSER_LOOK,
 } from "./humanAssessment.ts";
-import { reviewHeadToken, reviewWaitReason } from "./reviewWait.ts";
+import { escalatedWaitReason, reviewHeadToken, reviewWaitReason } from "./reviewWait.ts";
 
 const HEAD = "68de21c0aaaabbbbccccddddeeeeffff00001111";
 const c = (body: string, association = "MEMBER", login = "alice") => ({ id: 1, body, login, association, createdAt: "" });
@@ -62,6 +62,17 @@ test("assessmentQuestion channel=comment offers ONLY the PR-comment marker (conv
   assertEquals(/reply "accept" to land/.test(q), false);
   // Default (merge) wording keeps the reply path it actually honours.
   assertStringIncludes(assessmentQuestion({ repo: "o/r", prNumber: 5, head: HEAD, verdict: "" }), 'reply "accept"');
+});
+
+test("/status: an escalated PR's assessment reason comes from its CURRENT user-task question, not merge history", () => {
+  const merge = assessmentQuestion({ repo: "o/r", prNumber: 5, head: HEAD, verdict: "" });
+  const gate = `Convergence blocked: the latest head-current Copilot review reports needs a closer look (a human assessment). ${assessmentQuestion({ repo: "o/r", prNumber: 5, head: HEAD, verdict: "", channel: "comment" })}`;
+  assertEquals(escalatedWaitReason([merge], assessmentHeadFromQuestion), "waiting_human_assessment(68de21c)");
+  // A converge-gate assessment writes no merge row; it is still named.
+  assertEquals(escalatedWaitReason([gate], assessmentHeadFromQuestion), "waiting_human_assessment(68de21c)");
+  // An unrelated current escalation never inherits a historical assessment.
+  assertEquals(escalatedWaitReason(["CI is red — what now?"], assessmentHeadFromQuestion), null);
+  assertEquals(escalatedWaitReason([], assessmentHeadFromQuestion), null);
 });
 
 test("/status names a human-assessment wait distinctly (not merging)", () => {
