@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { connectorDedupeKey, deliveryConnectorDispatches, dispatchConnector } from "../app/deliveryConnector.ts";
 import type { CommandResult } from "../app/readiness.ts";
+import { prViewCommand } from "../app/readiness.ts";
 import connectorHandler, { readConnectorInput } from "../workers/delivery-connector/worker.ts";
 import { deliveryGraphRuns } from "../app/deliveryGraphRun.ts";
 import { __setProbeExecForTest } from "../workers/readiness-probe/worker.ts";
@@ -1385,25 +1386,26 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // #1031: an edge out of a `merge: true` agent must target a merged-PR gate, so the required-emit
     // consumer now sits BEHIND `wait[pr, merged]`. A `pr` probe runs a real `gh pr view`, which this
     // suite's hermetic command-probe seam records as an escape — drive the gate through the seam
-    // instead: answer the `gh` read with a MERGED observation so the gate resolves deterministically
-    // inside the drain fixpoint, and drain the seam's escape ledger on restore so the suite teardown
-    // never fails on the expected read.
-    const probeEscapes: string[] = [];
+    // instead: answer ONLY the expected `gh` read for the resumed PR with a MERGED observation so the
+    // gate resolves deterministically inside the drain fixpoint, and DELEGATE every other call to the
+    // saved seam exec, so an unexpected command or HTTP probe still lands on the seam's escape ledger
+    // and fails the suite teardown (PR #1033 review — an override that swallows non-matching calls
+    // would mask a probe escape as a silent not-ready).
+    const expectedPrView = prViewCommand("owner/repo", "88");
+    const savedProbe = __setProbeExecForTest(undefined);
     const restoreProbe = __setProbeExecForTest({
-      run(command: string): Promise<CommandResult> {
-        probeEscapes.push(command);
-        if (command.startsWith("gh pr view ")) {
+      run(command: string, env: Record<string, string | undefined>): Promise<CommandResult> {
+        if (command === expectedPrView) {
           return Promise.resolve({
             code: 0,
             stdout: JSON.stringify({ state: "MERGED", mergedAt: "2026-11-23T00:00:00Z", mergeCommit: { oid: "deadbeef" } }),
             stderr: "",
           });
         }
-        const cmd = command.trim();
-        return Promise.resolve({ code: cmd === "true" ? 0 : 1, stdout: "", stderr: "" });
+        return savedProbe?.run(command, env) ?? Promise.reject(new Error("no probe exec installed"));
       },
-      httpGet(): Promise<never> {
-        return Promise.reject(new Error("unexpected http probe"));
+      httpGet(url: string, headers: Record<string, string>) {
+        return savedProbe?.httpGet(url, headers) ?? Promise.reject(new Error("no probe exec installed"));
       },
     });
     try {
@@ -1439,7 +1441,6 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       assert.deepEqual(enrollments, ["converge-merge"], "the resumed producer's PR is enrolled exactly like a first-pass one");
     } finally {
       __setProbeExecForTest(restoreProbe);
-      probeEscapes.length = 0;
     }
   });
 
@@ -1493,25 +1494,25 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     const seen = await observeEnrollments(app);
     // #1031: an edge out of a `merge: true` agent must target a merged-PR gate, so the required-emit
     // consumer sits BEHIND `wait[pr, merged]`. The gate's `pr` probe runs a real `gh pr view` — drive
-    // it through the probe seam (a MERGED observation) so it resolves deterministically inside the
-    // drain fixpoint, and drain the suite seam's escape ledger on restore (same shape as the
-    // contract-resume test above).
-    const probeEscapes: string[] = [];
+    // ONLY the expected read for the resumed PR through the seam (a MERGED observation) so it resolves
+    // deterministically inside the drain fixpoint, and DELEGATE every other call to the saved seam exec
+    // so an unexpected probe still lands on the escape ledger and fails the suite teardown (same shape
+    // as the contract-resume test above; PR #1033 review).
+    const expectedPrView = prViewCommand("owner/repo", "92");
+    const savedProbe = __setProbeExecForTest(undefined);
     const restoreProbe = __setProbeExecForTest({
-      run(command: string): Promise<CommandResult> {
-        probeEscapes.push(command);
-        if (command.startsWith("gh pr view ")) {
+      run(command: string, env: Record<string, string | undefined>): Promise<CommandResult> {
+        if (command === expectedPrView) {
           return Promise.resolve({
             code: 0,
             stdout: JSON.stringify({ state: "MERGED", mergedAt: "2026-11-23T00:00:00Z", mergeCommit: { oid: "deadbeef" } }),
             stderr: "",
           });
         }
-        const cmd = command.trim();
-        return Promise.resolve({ code: cmd === "true" ? 0 : 1, stdout: "", stderr: "" });
+        return savedProbe?.run(command, env) ?? Promise.reject(new Error("no probe exec installed"));
       },
-      httpGet(): Promise<never> {
-        return Promise.reject(new Error("unexpected http probe"));
+      httpGet(url: string, headers: Record<string, string>) {
+        return savedProbe?.httpGet(url, headers) ?? Promise.reject(new Error("no probe exec installed"));
       },
     });
     try {
@@ -1543,7 +1544,124 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       assert.deepEqual(seen.map((e) => [e.target, e.payload]), [["converge-merge", { pr: "owner/repo#92" }]], "the resumed PR is enrolled");
     } finally {
       __setProbeExecForTest(restoreProbe);
-      probeEscapes.length = 0;
+    }
+  });
+
+  test("#1031 a consumer of a `merge: true` agent stays PARKED while the producer's PR is OPEN and activates once it observes MERGED (engine-backed)", async () => {
+    const app = track(await boot(freshDir()));
+
+    // PR #1033 review: neither the compiler test (topological reachability only) nor the resume e2es
+    // (the stub returns MERGED immediately) cover the ORIGINAL failure condition — the consumer must
+    // NOT activate while the producer's PR is still OPEN. Drive the gate's `pr` probe through a
+    // STATEFUL stub: OPEN until the test flips it, then MERGED with a merge-commit oid. Only the
+    // expected read for the producer's PR is answered; every other call delegates to the saved seam
+    // exec so an unexpected probe still lands on the escape ledger (PR #1033 review).
+    const expectedPrView = prViewCommand("owner/repo", "95");
+    let prState: "OPEN" | "MERGED" = "OPEN";
+    const probeCalls: string[] = [];
+    const savedProbe = __setProbeExecForTest(undefined);
+    const restoreProbe = __setProbeExecForTest({
+      run(command: string, env: Record<string, string | undefined>): Promise<CommandResult> {
+        probeCalls.push(command);
+        if (command === expectedPrView) {
+          const merged = prState === "MERGED";
+          return Promise.resolve({
+            code: 0,
+            stdout: JSON.stringify({
+              state: prState,
+              mergedAt: merged ? "2026-11-23T00:00:00Z" : null,
+              mergeCommit: merged ? { oid: "deadbeef" } : null,
+            }),
+            stderr: "",
+          });
+        }
+        return savedProbe?.run(command, env) ?? Promise.reject(new Error("no probe exec installed"));
+      },
+      httpGet(url: string, headers: Record<string, string>) {
+        return savedProbe?.httpGet(url, headers) ?? Promise.reject(new Error("no probe exec installed"));
+      },
+    });
+    try {
+      let consumerFired = 0;
+      let consumerMergedSha: unknown;
+      await app.engine.registerWorker("senior:producer", async () => ({ status: "opened", pr: "owner/repo#95" }));
+      await app.engine.registerWorker("senior:consumer", async (job) => {
+        consumerFired++;
+        consumerMergedSha = (job.variables as Record<string, unknown>).mergedSha;
+        return { status: "completed" };
+      });
+      // The producer's converge+merge policy lowers an in-body enrollment (`pr.delivery-connector`).
+      // Stub it through the canonical dispatch path (the same observer shape the other enrollment
+      // tests use) so the producer completes deterministically — the manifest's REAL handler would
+      // await a hermetic GitHub fetch past the drain fixpoint and park the producer.
+      await app.engine.registerWorker(
+        "pr.delivery-connector",
+        async (job) => {
+          const vars = job.variables as Record<string, unknown>;
+          const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+          const dedupeKey = connectorDedupeKey({
+            dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+            processInstanceKey: job.processInstanceKey ?? null,
+            elementId: job.elementId ?? null,
+          });
+          if (!dedupeKey) throw new Error("connector stub: no dedupe key available");
+          return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
+        },
+        { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+      );
+      const graph: DeliveryGraph = {
+        name: "e2e merge gate open-then-merged",
+        nodes: [
+          { id: "fix", kind: "agent", agent: { jobType: "senior:producer", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+          { id: "landed", kind: "wait", wait: { kind: "pr", target: "fix.pr", match: { prState: "merged" }, poll: { everyMs: 5, backoff: "fixed" } } },
+          { id: "after", kind: "agent", agent: { jobType: "senior:consumer" } },
+        ],
+        edges: [
+          { from: "fix.pr", to: "landed" },
+          { from: "landed", to: "after" },
+        ],
+      };
+      const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT30S", escalationSlaTimeout: "PT1H", repoless: true });
+      assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+      await app.settle();
+
+      // The producer completed and opened its PR; the gate's first probe observes it OPEN — the
+      // consumer must NOT have activated, and the gate must still be inside its probe loop (no
+      // ready branch taken, no escalation).
+      assert.equal(consumerFired, 0, "the consumer never activates while the producer's PR is OPEN");
+      const parked = await app.engine.searchJobs({ processInstanceKey: run.handle.processInstanceKey, state: "CREATED" });
+      assert.equal(parked.filter((j) => j.type === "senior:consumer").length, 0, "no consumer job exists while the gate is not ready");
+      assert.ok(
+        (await app.engine.searchUserTasks({ state: "CREATED" })).every((t) => !t.elementId?.endsWith("__esc")),
+        "an OPEN observation is 'not ready yet', never an escalation",
+      );
+
+      // Poll the OPEN state a few cycles to prove the gate LEVEL-polls (it does not resolve on the
+      // first not-ready, and it does not bypass the probe), then flip the observation to MERGED. The
+      // poll cadence rounds up to a whole second (`msToIsoDuration`), so step the virtual clock in
+      // 1s increments (the same shape `advanceUntilEscalated` uses) — a single coarse jump can land
+      // between the engine's timer-fire and the drain that re-arms the next poll.
+      for (let t = 0; t < 3; t += 1_000) {
+        await app.advanceTime(1_000);
+        await app.settle();
+      }
+      assert.equal(consumerFired, 0, "the consumer stays parked across repeated OPEN polls");
+      const openPolls = probeCalls.filter((c) => c === expectedPrView).length;
+      assert.ok(openPolls >= 2, `the gate level-polls the OPEN PR (saw ${openPolls} reads)`);
+
+      prState = "MERGED";
+      for (let t = 0; t < 5 && consumerFired === 0; t += 1_000) {
+        await app.advanceTime(1_000);
+        await app.settle();
+      }
+
+      // The next poll observes MERGED: the gate resolves, binds the merge fact, and ONLY NOW the
+      // consumer activates — the exact OPEN→MERGED transition the #1031 gate exists to enforce.
+      assert.equal(consumerFired, 1, "the consumer activates once the producer's PR is observed MERGED");
+      assert.equal(consumerMergedSha, "deadbeef", "the gate binds the observed merge commit as mergedSha");
+      assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the graph reached its End event");
+    } finally {
+      __setProbeExecForTest(restoreProbe);
     }
   });
 
