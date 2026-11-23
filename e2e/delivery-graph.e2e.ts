@@ -1263,14 +1263,24 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the policy-carrying node completed through its enrollment to End");
   });
 
-  test("#1029 an agent node with converge+merge and NO declared emits threads its job's pr (a PR URL) to the enrollment", async () => {
+  // #1029 review: the compiled FEEL must mirror `parsePr` — exact host (a spoofed `githubXcom` must NOT
+  // normalise; single regex backslashes were consumed by the FEEL lexer into a wildcard `.`), case-
+  // insensitive literals with owner/repo case preserved, leading zeros stripped, whitespace trimmed.
+  for (const [label, raw, expected] of [
+    ["a PR URL", "https://github.com/owner/repo/pull/1818", "owner/repo#1818"],
+    ["a mixed-case URL", "HTTPS://WWW.GitHub.com/Owner/Repo/PULL/1818", "Owner/Repo#1818"],
+    ["a leading-zero PR number", "https://github.com/Owner/Repo/pull/0018", "Owner/Repo#18"],
+    ["whitespace-padded URL", "  https://github.com/owner/repo/pull/1818/files \n", "owner/repo#1818"],
+    ["a spoofed host (verbatim, not normalised)", "https://githubXcom/owner/repo/pull/1818", "https://githubXcom/owner/repo/pull/1818"],
+  ] as const) {
+  test(`#1029 an agent node with converge+merge and NO declared emits threads its job's pr (${label}) to the enrollment`, async () => {
     const app = track(await boot(freshDir()));
 
     // The merlin graph ea02c3162926 wedge: five `converge: true, merge: true` agent nodes with NO
     // explicit `emits` opened PRs, yet every enroll step bound `pr: null` — the job result stayed
     // task-local because the agent task carries an output mapping (the contract gate), and the implied
     // `pr` was never propagated to the node scope the enrollment reads.
-    await app.engine.registerWorker("senior:demo", async () => ({ status: "opened", pr: "https://github.com/owner/repo/pull/1818", summary: "PR opened." }));
+    await app.engine.registerWorker("senior:demo", async () => ({ status: "opened", pr: raw, summary: "PR opened." }));
     const enrollments: { payload: unknown; boundFacts: unknown }[] = [];
     await app.engine.registerWorker(
       "pr.delivery-connector",
@@ -1299,10 +1309,11 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     await app.settle();
 
     assert.equal(enrollments.length, 1, "the implied enrollment fired exactly once");
-    assert.deepEqual(enrollments[0].payload, { pr: "owner/repo#1818" }, "the enrollment binds the node's pr, normalised to owner/repo#N");
-    assert.deepEqual(enrollments[0].boundFacts, [{ from: "impl", name: "pr", value: "owner/repo#1818" }], "the self boundFacts entry carries the node's pr fact");
+    assert.deepEqual(enrollments[0].payload, { pr: expected }, "the enrollment binds the node's pr, normalised to owner/repo#N");
+    assert.deepEqual(enrollments[0].boundFacts, [{ from: "impl", name: "pr", value: expected }], "the self boundFacts entry carries the node's pr fact");
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the node completed through its enrollment to End");
   });
+  }
 
   test("#962 a converge-ONLY policy enrolls review-only (convergeOnly semantics), and a policy-less node enrolls nothing", async () => {
     const app = track(await boot(freshDir()));

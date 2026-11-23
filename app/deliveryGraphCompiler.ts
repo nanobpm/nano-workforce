@@ -2109,8 +2109,12 @@ export function agentResultOutputLines(emitSources: readonly string[], skip: str
 
 /** FEEL normalising the agent's `pr` result: a `github.com/<owner>/<repo>/pull/<n>` URL (optional
  * scheme/`www.`, trailing path/query/fragment) becomes `<owner>/<repo>#<n>`; anything else verbatim. */
+// Regex backslashes are DOUBLED: the FEEL lexer consumes one level of string escaping, so a single `\\.`
+// would reach the regex as a wildcard `.` (accepting spoofed hosts like `githubXcom`). Case-insensitive like
+// `parsePr` (`/i`) via explicit character classes on the literals (owner/repo case preserved), leading
+// zeros stripped from the number (`Number(...)`), surrounding whitespace trimmed.
 export const AGENT_PR_NORMALISE_FEEL =
-  'if not(is defined(pr)) or pr = null then null else if not(pr instance of string) then pr else if matches(pr, "^\\s*(https?://)?(www\\.)?github\\.com/[^/]+/[^/]+/pull/[0-9]+([/?#].*)?\\s*$") then replace(pr, "^\\s*(https?://)?(www\\.)?github\\.com/([^/]+)/([^/]+)/pull/([0-9]+)([/?#].*)?\\s*$", "$3/$4#$5") else pr';
+  'if not(is defined(pr)) or pr = null then null else if not(pr instance of string) then pr else if matches(trim(pr), "^([Hh][Tt][Tt][Pp][Ss]?://)?([Ww][Ww][Ww]\\\\.)?[Gg][Ii][Tt][Hh][Uu][Bb]\\\\.[Cc][Oo][Mm]/([^/]+)/([^/]+)/[Pp][Uu][Ll][Ll]/0*([0-9]+)([/?#].*)?$") then replace(trim(pr), "^([Hh][Tt][Tt][Pp][Ss]?://)?([Ww][Ww][Ww]\\\\.)?[Gg][Ii][Tt][Hh][Uu][Bb]\\\\.[Cc][Oo][Mm]/([^/]+)/([^/]+)/[Pp][Uu][Ll][Ll]/0*([0-9]+)([/?#].*)?$", "$3/$4#$5") else pr';
 
 function agentContractProceedCondition(requiredEmits: readonly DeliveryFact[]): string {
   const statusList = `[${AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => feelStr(s)).join(", ")}]`;
