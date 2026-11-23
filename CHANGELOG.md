@@ -1,3 +1,9 @@
+## [0.223.0](https://github.com/nanobpm/nano-workforce/compare/v0.222.6...v0.223.0) (2026-11-23)
+
+### Features
+
+* **converge:** treat trusted human PR review bodies as operator feedback ([#1040](https://github.com/nanobpm/nano-workforce/issues/1040)) ([60c40a7](https://github.com/nanobpm/nano-workforce/commit/60c40a7449a59ead3b0bd56483e063e0c6af185e)), closes [#1039](https://github.com/nanobpm/nano-workforce/issues/1039)
+
 ## [0.222.6](https://github.com/nanobpm/nano-workforce/compare/v0.222.5...v0.222.6) (2026-11-23)
 
 ### Bug Fixes

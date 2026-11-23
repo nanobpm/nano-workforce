@@ -56,6 +56,7 @@ import {
   fetchLatestCopilotReview,
   fetchPrHead,
   fetchPrMeta,
+  fetchPrReviews,
   fetchReviewThreads,
   isAckThread,
   parseAckedAdvisories,
@@ -74,6 +75,7 @@ import {
   parseClosingIssueNumbers,
   renderOperatorFeedbackBrief,
   runStartOnIssue,
+  toFeedbackReview,
 } from "../../app/operatorFeedback.ts";
 import { isReviewMissingOrStale } from "../../app/reviewWait.ts";
 import { parsePr } from "../../app/service.ts";
@@ -118,7 +120,12 @@ export const defaultReadOperatorFeedback: OperatorFeedbackReader = async (repo, 
     if (comments === null) return null;
     issues.push({ number: n, comments, since: runStartOnIssue(comments, meta.createdAt ?? null) });
   }
-  return deriveOperatorFeedback({ repo, issues, prComments, threads });
+  // Submitted review bodies (issue #1039), paged in full by the ONE reviews reader. The PR is created
+  // by the run, so its creation is the run start for reviews.
+  const rawReviews = await fetchPrReviews(repo, prNumber, token);
+  if (rawReviews === null) return null;
+  const reviews = rawReviews.map(toFeedbackReview);
+  return deriveOperatorFeedback({ repo, issues, prComments, threads, reviews, reviewsSince: meta.createdAt ?? null });
 };
 
 const defaultReadThreads: ThreadsReader = (repo, prNumber) =>

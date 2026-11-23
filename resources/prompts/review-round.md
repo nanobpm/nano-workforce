@@ -273,6 +273,13 @@ process runs a deterministic gate that re-checks GitHub and will **block** conve
 advisory lacks a resolved `nano-ack:` thread. Resolve every thread and acknowledge
 every advisory (steps 5 + 5a) *before* you converge, or the PR bounces to a human.
 
+The gate also blocks on unacknowledged **operator feedback** from a trusted human
+(listed in an "Operator feedback to address" section of your prompt when present):
+issue/PR comments are acked with a PR conversation comment whose line STARTS with
+`nano-ack: issuecomment-<id>`, and a submitted **PR review body** (a review summary,
+with or without inline comments) with a line STARTING with `nano-ack: review-<id>`.
+Address the feedback first, then post the ack (not quoted, not mid-sentence).
+
 ### No review has landed yet — return `waiting`, do NOT escalate
 
 A PR is **not** converged merely because there are zero reviews and zero

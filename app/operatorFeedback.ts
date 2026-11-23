@@ -16,9 +16,12 @@
 // Feedback sources, all treated the same:
 //   • issue comments on each issue the PR CLOSES (closing keyword), posted after the run started;
 //   • PR conversation comments (the PR is created by the run, so every one post-dates the start);
-//   • unresolved PR review THREADS whose root author is a trusted human (not a bot such as Copilot).
-// An item is acknowledged by a line STARTING with `nano-ack: issuecomment-<id>` in a trusted-author
-// comment on the issue or the PR conversation (a review thread is acknowledged by RESOLVING it). An
+//   • unresolved PR review THREADS whose root author is a trusted human (not a bot such as Copilot);
+//   • submitted PR REVIEW BODIES (`COMMENTED` / `CHANGES_REQUESTED`) by a trusted human, submitted
+//     after the run started (issue #1039 — the "Submit review" summary with no inline comments).
+// An item is acknowledged by a line STARTING with `nano-ack: issuecomment-<id>` (a review body:
+// `nano-ack: review-<id>`) in a trusted-author comment on the issue or the PR conversation (a review
+// thread is acknowledged by RESOLVING it). An
 // unacknowledged item blocks convergence on the RECOVERABLE (ack-only) route: re-enter the round
 // agent within the existing `ackRetryMax` budget, then escalate to a human.
 //
@@ -46,25 +49,41 @@ export function feedbackAckMarker(commentId: number): string {
   return `nano-ack: issuecomment-${commentId}`;
 }
 
+/** The line-stable acknowledgement marker for a submitted PR review body (issue #1039). */
+export function reviewAckMarker(reviewId: number): string {
+  return `nano-ack: review-${reviewId}`;
+}
+
 // A DEDICATED acknowledgement line: the marker must START a (non-quoted) line. A marker merely
 // mentioned mid-sentence ("You posted nano-ack: issuecomment-42, but …") or quoted (`> nano-ack: …`)
 // is NOT an ack — that is corrective feedback and must still gate.
-const ACK_LINE_RE = /^nano-ack:\s*issuecomment-(\d+)\b/;
+const ACK_LINE_RE = /^nano-ack:\s*(issuecomment|review)-(\d+)\b/;
 
-function ackLineIds(body: string): number[] {
-  const out: number[] = [];
+type AckKind = "issuecomment" | "review";
+
+function ackLines(body: string): { kind: AckKind; id: number }[] {
+  const out: { kind: AckKind; id: number }[] = [];
   for (const line of body.split("\n")) {
     const m = line.trim().match(ACK_LINE_RE);
-    if (m) out.push(Number(m[1]));
+    if (m) out.push({ kind: m[1] === "review" ? "review" : "issuecomment", id: Number(m[2]) });
   }
+  return out;
+}
+
+function parseAcks(bodies: string[], kind: AckKind): Set<number> {
+  const out = new Set<number>();
+  for (const b of bodies) for (const a of ackLines(b)) if (a.kind === kind) out.add(a.id);
   return out;
 }
 
 /** Every comment id acknowledged by a dedicated `nano-ack: issuecomment-<id>` line in the bodies. */
 export function parseFeedbackAcks(bodies: string[]): Set<number> {
-  const out = new Set<number>();
-  for (const b of bodies) for (const id of ackLineIds(b)) out.add(id);
-  return out;
+  return parseAcks(bodies, "issuecomment");
+}
+
+/** Every review id acknowledged by a dedicated `nano-ack: review-<id>` line in the bodies. */
+export function parseReviewAcks(bodies: string[]): Set<number> {
+  return parseAcks(bodies, "review");
 }
 
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -87,7 +106,7 @@ export function isRunOwnComment(body: string): boolean {
   return (
     body.trimStart().startsWith(CLAIM_COMMENT_PREFIX) ||
     body.includes(ISSUE_PR_LINK_MARKER_PREFIX) ||
-    ackLineIds(body).length > 0 ||
+    ackLines(body).length > 0 ||
     // A Copilot-advisory ack thread root (`<verdict>. nano-ack: <path> :: <text>`, app/github.ts).
     /nano-ack:\s*\S+\s+::\s+\S/.test(body)
   );
@@ -138,10 +157,39 @@ export function isOperatorThread(t: FeedbackThread): boolean {
   return !t.isResolved && isTrustedAuthor(t.rootAssociation, t.rootLogin) && !isRunOwnComment(t.bodies[0] ?? "");
 }
 
+/** A submitted PR review (`GET /pulls/{n}/reviews`) as the feedback derivation needs it. */
+export interface FeedbackReview {
+  id: number;
+  login: string;
+  association: string;
+  /** `COMMENTED`, `CHANGES_REQUESTED`, `APPROVED`, `DISMISSED`, `PENDING`. */
+  state: string;
+  body: string;
+  submittedAt: string;
+  url: string | null;
+}
+
+/** Narrow a raw GitHub review payload to a {@link FeedbackReview}. */
+export function toFeedbackReview(r: unknown): FeedbackReview {
+  const o: Record<string, unknown> = r !== null && typeof r === "object" ? { ...r } : {};
+  const user: Record<string, unknown> = o.user !== null && typeof o.user === "object" ? { ...o.user } : {};
+  return {
+    id: typeof o.id === "number" ? o.id : 0,
+    login: typeof user.login === "string" ? user.login : "",
+    association: typeof o.author_association === "string" ? o.author_association : "NONE",
+    submittedAt: typeof o.submitted_at === "string" ? o.submitted_at : "",
+    body: typeof o.body === "string" ? o.body : "",
+    state: typeof o.state === "string" ? o.state : "",
+    url: typeof o.html_url === "string" ? o.html_url : null,
+  };
+}
+
+const FEEDBACK_REVIEW_STATES = new Set(["COMMENTED", "CHANGES_REQUESTED"]);
+
 export interface OperatorFeedbackItem {
-  /** `issue#N` / `pr` comment, or a review `thread`. */
-  source: "issue" | "pr" | "thread";
-  /** Comment id (0 for a thread — a thread is acknowledged by resolving it). */
+  /** `issue#N` / `pr` comment, a review `thread`, or a submitted `review` body. */
+  source: "issue" | "pr" | "thread" | "review";
+  /** Comment / review id (0 for a thread — a thread is acknowledged by resolving it). */
   id: number;
   login: string;
   body: string;
@@ -157,6 +205,10 @@ export interface OperatorFeedbackInput {
   prComments: IssueComment[];
   /** The PR's review threads. */
   threads: FeedbackThread[];
+  /** The PR's submitted reviews (issue #1039); bodies by trusted humans are feedback. */
+  reviews?: FeedbackReview[];
+  /** Run start for reviews (reviews at/before it are excluded); `null` = no cutoff. */
+  reviewsSince?: string | null;
 }
 
 /** A line-start human-assessment acceptance marker (`nano-assessment: accept <sha>`, issue #1037).
@@ -183,7 +235,15 @@ export function deriveOperatorFeedback(input: OperatorFeedbackInput): OperatorFe
   const ackBodies = [...input.prComments, ...input.issues.flatMap((i) => i.comments)]
     .filter((c) => isTrustedAuthor(c.association, c.login))
     .map((c) => c.body);
-  const acked = parseFeedbackAcks(ackBodies);
+  // A trusted review body is an ack source too: the agent may post under the operator's identity.
+  const trustedReviews = (input.reviews ?? []).filter((r) => isTrustedAuthor(r.association, r.login));
+  // Only SUBMITTED reviews ack: GitHub returns the caller's own PENDING draft, which may be discarded.
+  const submittedReviews = trustedReviews.filter((r) => r.state.toUpperCase() !== "PENDING" && r.submittedAt !== "");
+  // ONE ack-source list feeds BOTH parsers (separate id namespaces), so a submitted review can ack
+  // a comment exactly as a comment can ack a review.
+  const ackSources = [...ackBodies, ...submittedReviews.map((r) => r.body)];
+  const acked = parseFeedbackAcks(ackSources);
+  const ackedReviews = parseReviewAcks(ackSources);
   const items: OperatorFeedbackItem[] = [];
   const consider = (c: IssueComment, source: "issue" | "pr", label: string) => {
     if (!isTrustedAuthor(c.association, c.login)) return;
@@ -211,7 +271,28 @@ export function deriveOperatorFeedback(input: OperatorFeedbackInput): OperatorFe
       label: `review thread on ${t.path ?? "the PR"} by @${t.rootLogin}`,
     });
   }
+  const since = input.reviewsSince ?? null;
+  for (const r of trustedReviews) {
+    if (!FEEDBACK_REVIEW_STATES.has(r.state.toUpperCase())) continue;
+    if (r.body.trim() === "") continue;
+    if (since !== null && !(r.submittedAt > since)) continue;
+    if (isRunOwnComment(r.body)) continue;
+    if (ackedReviews.has(r.id)) continue;
+    items.push({
+      source: "review",
+      id: r.id,
+      login: r.login,
+      body: r.body,
+      label: `PR review-${r.id} by @${r.login}${r.url ? ` (${r.url})` : ""}`,
+    });
+  }
   return items;
+}
+
+/** The ack instruction for one item (the ONE place mapping a source to its ack form). */
+function ackInstruction(it: OperatorFeedbackItem): string {
+  if (it.source === "thread") return "resolve the thread";
+  return `\`${it.source === "review" ? reviewAckMarker(it.id) : feedbackAckMarker(it.id)}\``;
 }
 
 const BRIEF_BODY_MAX = 2000;
@@ -233,13 +314,14 @@ export function renderOperatorFeedbackBrief(items: OperatorFeedbackItem[]): stri
     "",
     "- an issue / PR comment: reply (on the same issue or on this PR) with a line STARTING with its marker",
     "  `nano-ack: issuecomment-<id>` (shown below), stating what you did;",
+    "- a PR review body (a submitted review's summary): reply in a PR conversation comment with a line",
+    "  STARTING with `nano-ack: review-<id>` (shown below), stating what you did;",
     "- a review thread: address it, reply, and RESOLVE the thread.",
     "",
   ];
   for (const it of items) {
     const body = it.body.length > BRIEF_BODY_MAX ? `${it.body.slice(0, BRIEF_BODY_MAX)}…` : it.body;
-    const marker = it.source === "thread" ? "resolve the thread" : `\`${feedbackAckMarker(it.id)}\``;
-    lines.push(`### ${it.label} — ack: ${marker}`, "", body.split("\n").map((l) => `> ${l}`).join("\n"), "");
+    lines.push(`### ${it.label} — ack: ${ackInstruction(it)}`, "", body.split("\n").map((l) => `> ${l}`).join("\n"), "");
   }
   return lines.join("\n");
 }
