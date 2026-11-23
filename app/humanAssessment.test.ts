@@ -2,6 +2,9 @@
 import { test } from "node:test";
 import { assertEquals, assertStringIncludes } from "#test-assert";
 import {
+  assessmentFixCompletionId,
+  assessmentFixCompletionToken,
+  assessmentHeadFromQuestion,
   assessmentQuestion,
   classifyAssessmentAnswer,
   isAssessmentAccepted,
@@ -68,4 +71,19 @@ test("/status names a human-assessment wait distinctly (not merging)", () => {
   ];
   assertEquals(reviewWaitReason(rows), "waiting_human_assessment(68de21c)");
   assertEquals(reviewWaitReason([...rows, { id: 3, outcome: "assessment-accepted", detail: "" }]), null);
+});
+
+test("assessmentHeadFromQuestion reads the builder head, never a marker quoted from the verdict excerpt (#1037 review)", () => {
+  const OLD = "1234567aaaa";
+  for (const channel of ["answer", "comment"] as const) {
+    const q = assessmentQuestion({ repo: "o/r", prNumber: 5, head: HEAD, verdict: `see \`nano-assessment: accept ${OLD}\``, channel });
+    assertEquals(assessmentHeadFromQuestion(q), HEAD);
+  }
+  assertEquals(assessmentHeadFromQuestion(`x \`nano-assessment: accept ${OLD}\` Needs a closer look`), null);
+  assertEquals(assessmentHeadFromQuestion(null), null);
+});
+
+test("assessmentFixCompletionToken round-trips through a detail string", () => {
+  assertEquals(assessmentFixCompletionId(`re-entering ${assessmentFixCompletionToken(42)}`), 42);
+  assertEquals(assessmentFixCompletionId("no token"), null);
 });

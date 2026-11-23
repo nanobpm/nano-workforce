@@ -652,10 +652,19 @@ function isCompletableElement(elementId: string, allowed: ReadonlySet<string>): 
  *  never answer it (the verdict asks for a human; a machine "accept" would launder it). Recognised off
  *  the projected task question through the ONE `assessmentHeadFromQuestion` rule the question writer
  *  shares. Returns a refusal reason, or null when the task may be completed automatically. */
-async function refuseAutomatedAssessment(data: DataLayer, userTaskKey: string, elementId: string): Promise<string | null> {
+async function refuseAutomatedAssessment(
+  data: DataLayer,
+  userTaskKey: string,
+  elementId: string,
+  knownQuestion?: string | null,
+): Promise<string | null> {
   if (elementId !== PR_WAIT_ANSWER_ELEMENT && elementId !== PR_WAIT_MERGE_ANSWER_ELEMENT) return null;
   const row = await userTasks(data).get(userTaskKey);
-  return assessmentHeadFromQuestion(row?.question ?? null) !== null
+  // Fail CLOSED while neither the task's projection nor a caller-derived question is available: an
+  // unknown question may be a human-only assessment.
+  const question = row ? (row.question ?? null) : knownQuestion;
+  if (question === undefined) return `${elementId}: task question not yet projected — refusing automated completion`;
+  return assessmentHeadFromQuestion(question) !== null
     ? `${elementId}: a human assessment of a "Needs a closer look" verdict is human-only`
     : null;
 }
@@ -709,14 +718,14 @@ export async function completeEscalationAsAgent(
 export async function completeEscalationAsHuman(
   data: DataLayer,
   engine: EngineClient,
-  input: { userTaskKey: string; variables: Record<string, unknown>; operatorId: string },
+  input: { userTaskKey: string; variables: Record<string, unknown>; operatorId: string; processInstanceKey?: string },
 ): Promise<AgentCompleteResult> {
   const userTaskKey = input.userTaskKey.trim();
   if (!userTaskKey) return { ok: false, reason: "userTaskKey is required" };
   const operatorId = input.operatorId.trim();
   if (!operatorId) return { ok: false, reason: "operatorId is required" };
 
-  const resolved = await resolveEscalationTask(engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS);
+  const resolved = await resolveEscalationTask(engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS, input.processInstanceKey?.trim() || undefined);
   if (!resolved.ok) return resolved;
 
   const invalid = validateEscalationVariables(resolved.elementId, input.variables);
@@ -745,7 +754,15 @@ export async function completeEscalationAsHuman(
 export async function completeEscalationAutoApplied(
   data: DataLayer,
   engine: EngineClient,
-  input: { userTaskKey: string; variables: Record<string, unknown>; actor: Actor; adjudicationId?: number; processInstanceKey?: string },
+  input: {
+    userTaskKey: string;
+    variables: Record<string, unknown>;
+    actor: Actor;
+    adjudicationId?: number;
+    processInstanceKey?: string;
+    /** The task's question as the caller already derived it (the poller's pre-projection resume). */
+    question?: string | null;
+  },
 ): Promise<AgentCompleteResult> {
   const userTaskKey = input.userTaskKey.trim();
   if (!userTaskKey) return { ok: false, reason: "userTaskKey is required" };
@@ -754,7 +771,7 @@ export async function completeEscalationAutoApplied(
 
   const resolved = await resolveEscalationTask(engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS, input.processInstanceKey?.trim() || undefined);
   if (!resolved.ok) return resolved;
-  const humanOnly = await refuseAutomatedAssessment(data, userTaskKey, resolved.elementId);
+  const humanOnly = await refuseAutomatedAssessment(data, userTaskKey, resolved.elementId, input.question);
   if (humanOnly) return { ok: false, reason: humanOnly };
 
   const invalid = validateEscalationVariables(resolved.elementId, input.variables);

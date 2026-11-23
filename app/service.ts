@@ -4791,7 +4791,7 @@ export async function pollUserTasks(
 ) {
   const readAssessmentComments =
     opts.readAssessmentComments ??
-    (opts.githubToken ? (repo: string, n: number) => listIssueComments(repo, n, opts.githubToken ?? "") : undefined);
+    (opts.githubToken !== undefined ? (repo: string, n: number) => listIssueComments(repo, n, opts.githubToken ?? "") : undefined);
   const at = now();
   // Raw-REST context (present in production; the reduced-capability seam host passes no `engineRest`) —
   // used by the engine-first sweep AND the escalation self-heal's callActivity-hierarchy confirmation.
@@ -5001,6 +5001,7 @@ export async function pollUserTasks(
             const done = await completeEscalationAsHuman(data, engine, {
               userTaskKey: rowKey,
               operatorId: acceptor,
+              processInstanceKey,
               variables: elementId === PR_WAIT_ANSWER_ELEMENT ? { answer: "accept", assessmentResume: true } : { answer: "accept" },
             });
             if (done.ok) {
@@ -5034,6 +5035,7 @@ export async function pollUserTasks(
             // already-adjudicated PRs). `contextFor`/the sweep report the task's direct instance, so the
             // filtered scan finds exactly this task; a miss still fails open to the human.
             processInstanceKey,
+            question: ctx.question ?? null,
             variables: { answer: adjudication.answer },
             actor: {
               kind: adjudication.adjudicated_kind === "agent" ? "agent" : "human",

@@ -716,6 +716,19 @@ test("pr.merge #1037: a human fix answer re-enters convergence carrying the answ
   });
 });
 
+test("pr.merge #1037: a redelivered fix job replays the recorded verified decision instead of re-parking", async () => {
+  await withGithub(landRoutes, async () => {
+    const { app, stores } = fakeApp();
+    await assessHandler()(vars(), app);
+    const id = await answered(app, "fix: bound the probe pool");
+    const first = (await assessHandler()(resumed(id, "fix: bound the probe pool"), app)) as Record<string, unknown>;
+    const rows = stores.merges.length;
+    const again = (await assessHandler()(resumed(id, "fix: bound the probe pool"), app)) as Record<string, unknown>;
+    assertEquals(again, first);
+    assertEquals(stores.merges.length, rows, "no new park/audit row on redelivery");
+  });
+});
+
 test("pr.merge #1037: a trusted nano-assessment accept comment for this head satisfies the backstop", async () => {
   await withGithub(landRoutes, async () => {
     const { app } = fakeApp();

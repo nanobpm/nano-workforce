@@ -120,10 +120,23 @@ export function assessmentAcceptor(comments: readonly IssueComment[], head: stri
  * marker), so the automated completers (steward, adjudication replay) and the marker resume share one
  * recognition rule with the writer. Null for any other question. */
 export function assessmentHeadFromQuestion(question: string | null | undefined): string | null {
-  const q = question ?? "";
-  if (!q.includes("Needs a closer look")) return null;
-  const m = /`nano-assessment:[ \t]+accept[ \t]+([0-9a-f]{7,64})`/i.exec(q);
+  // Read ONLY the builder-controlled head declaration at the very start of the question — never the
+  // first marker anywhere in it, which could come from the quoted (reviewer-authored) verdict excerpt
+  // and name an OLD head whose historical acceptance would then authorize the current one.
+  const m = /^The head-current Copilot review of ([0-9a-f]{7,64}) says "Needs a closer look"/i.exec(question ?? "");
   return m ? m[1].toLowerCase() : null;
+}
+
+/** The token stamping a `fix` assessment's `review-findings` audit row with its winning completion id,
+ * so a redelivered `pr.merge` job replays that verified decision instead of re-opening the assessment. */
+export function assessmentFixCompletionToken(completionId: number): string {
+  return `[assessment-completion:${completionId}]`;
+}
+
+/** Pure: the completion id stamped by `assessmentFixCompletionToken`, or null. */
+export function assessmentFixCompletionId(detail: string | null | undefined): number | null {
+  const m = /\[assessment-completion:(\d+)\]/.exec(detail ?? "");
+  return m ? Number(m[1]) : null;
 }
 
 /** One `task_completions` ledger row, narrowed to what acceptance verification reads. */

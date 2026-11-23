@@ -1188,3 +1188,16 @@ test("an ordinary PR escalation stays agent-answerable (#1037 refusal is assessm
   const r = await completeEscalationAsAgent(data, engine, { userTaskKey: "ut-b", agentId: "steward", variables: { answer: "throw" } });
   assertEquals(r.ok, true);
 });
+
+test("a PR escalation whose user_tasks projection is not yet written refuses automated completion (#1037 review)", async () => {
+  for (const elementId of ["wait-answer", "wait-merge-answer"]) {
+    const stores = { task_completions: { rows: [] as any[], key: "id" }, user_tasks: { rows: [] as any[], key: "user_task_key" } };
+    const data = memData(stores);
+    const { engine, completed } = fakeEngine([{ userTaskKey: "ut-c", elementId }]);
+    const asAgent = await completeEscalationAsAgent(data, engine, { userTaskKey: "ut-c", agentId: "steward", variables: { answer: "x" } });
+    assertEquals(asAgent.ok, false);
+    const replay = await completeEscalationAutoApplied(data, engine, { userTaskKey: "ut-c", variables: { answer: "x" }, actor: { kind: "human", id: "h" } });
+    assertEquals(replay.ok, false);
+    assertEquals(completed.length, 0);
+  }
+});
