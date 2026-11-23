@@ -188,6 +188,21 @@ test("#1043: a request Copilot DID start is not retried", async () => {
   assertEquals(posts.length, 1);
 });
 
+test("#1043: an ADOPTED in-flight request (Copilot started before adoption) is never withdrawn or re-requested", async () => {
+  const { data } = setup();
+  const posts: string[] = [];
+  const deletes: string[] = [];
+  const t0 = Date.parse("2026-11-23T16:00:00Z");
+  const timeline = [{ event: "copilot_work_started", created_at: "2026-11-23T15:59:00Z" }];
+  await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, posts, deletes, timeline, pendingCopilot: true }, async () => {
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", t0), "adopted");
+    const late = t0 + POLLER_REVIEW_START_WINDOW_MS + 1000;
+    assertEquals(await ensureHeadReviewRequested(data, "o/r#1856", "o/r", 1856, "tok", late), "skipped");
+  });
+  assertEquals(posts.length, 0);
+  assertEquals(deletes.length, 0);
+});
+
 test("#1043: a review landing between passes cannot land the PR — next pass keeps the waiting verdict", async () => {
   const { data, stores, engine, messages } = setup();
   await withGithub({ reviewCommit: OLD_HEAD, head: NEW_HEAD, posts: [] }, () => pollMerges(data, engine, "tok"));

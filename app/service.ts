@@ -2857,6 +2857,10 @@ export async function ensureHeadReviewRequested(
     if (prior.length >= POLLER_REVIEW_ASKS_PER_HEAD) return "skipped";
     const last = prior[prior.length - 1];
     if (typeof last.detail === "string" && last.detail.includes(" unavailable ")) return "skipped";
+    // An ADOPTED request was issued by someone else at an unknown time: its `copilot_work_started` may
+    // predate our adoption row, so a since-adoption check could withdraw work already in flight. Never
+    // withdraw/re-add an adopted ask; a genuinely stalled one is bounded by the merge stage's escalation.
+    if (typeof last.detail === "string" && last.detail.includes(" adopted ")) return "skipped";
     const at = typeof last.at === "string" ? Date.parse(last.at) : Number.NaN;
     if (Number.isNaN(at) || nowMs - at < POLLER_REVIEW_START_WINDOW_MS) return "skipped";
     const started = await hasCopilotWorkStarted(repo, number, token, new Date(at).toISOString()).catch(() => null);
