@@ -106,7 +106,7 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
     await app.settle();
 
     // `a` met its contract and handed ITS pr to `ca`; `b` parked on its own contract escalation.
-    assert.deepEqual(connectors.get("ca-1"), [{ from: "a", name: "pr", value: PR_A }]);
+    assert.deepEqual(connectors.get("ca-1"), [{ from: "a", name: "pr", value: "acme/repo#1" }]);
     assert.equal(connectors.has("cb-1"), false, "the blocked producer's consumer did not fire");
     const esc = await openTask(app, "__contract");
     assert.ok(esc, "b parked on its producer-contract escalation");
@@ -130,7 +130,7 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
     for (const name of ["status", "summary", "question", "pr", "value", "decision"]) {
       assert.equal(root.has(name), false, `root must not carry the node-local '${name}'`);
     }
-    assert.equal(root.get("n0_pr") ?? root.get(`${"n0"}_pr`), PR_A, "a's emit still publishes onward as <el>_pr");
+    assert.equal(root.get("n0_pr") ?? root.get(`${"n0"}_pr`), "acme/repo#1", "a's emit still publishes onward as <el>_pr");
   });
 
   test("retry-node: decision=retry re-runs the job with the operator's note; a status-less success then passes the gate", async () => {
@@ -161,7 +161,7 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
     assert.equal(bPrompts.length, 2, "the retry re-ran b's job");
     assert.match(String(bPrompts[1]), /Operator guidance for this retry: clone acme\/repo/);
     assert.equal(await openTask(app, "__contract"), undefined, "the status-less rerun passed the contract gate");
-    assert.deepEqual(connectors.get("cb-1"), [{ from: "b", name: "pr", value: PR_B }], "b's retried PR threads onward");
+    assert.deepEqual(connectors.get("cb-1"), [{ from: "b", name: "pr", value: "acme/repo#2" }], "b's retried PR threads onward");
     const flows = (app.snapshot().takenSequenceFlows ?? []) as { to: string }[];
     assert.ok(flows.some((f) => f.to === "End"), "the graph completed");
   });
