@@ -139,10 +139,11 @@ export default defineOperation("startFeature", async ({ body }, app) => {
   }
   // A PRESENT-but-non-boolean flag (e.g. the string "true") is a 400 (issue #916): it used to read
   // as silently false (`=== true`), so a mistyped merge request ran review-only with no signal.
+  // An explicitly present `null`/`undefined` is rejected too (the request schema is non-nullable).
   for (const flag of ["converge", "autoMerge", "humanApproval"] as const) {
     if (flag in body) {
       const v: unknown = Reflect.get(body, flag);
-      if (v !== undefined && v !== null && typeof v !== "boolean") {
+      if (typeof v !== "boolean") {
         app.log.warn(`start-feature rejected: ${flag} must be a boolean`, { [flag]: v });
         return { status: 400, body: { error: `${flag} must be a boolean (true or false)` } };
       }

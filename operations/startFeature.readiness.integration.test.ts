@@ -266,6 +266,22 @@ test("non-boolean autoMerge → 400 at the edge (never silently review-only)", a
   });
 });
 
+for (const flag of ["converge", "autoMerge", "humanApproval"] as const) {
+  for (const bad of [null, undefined]) {
+    test(`explicitly present ${flag}: ${String(bad)} → 400 (non-nullable schema, never read as omitted)`, async () => {
+      await withGithub(REPO, async () => {
+        const { app, started } = makeApp();
+        const res = (await startFeature(
+          input({ issue: `${REPO}#578`, ...GATED_BASE, converge: true, [flag]: bad }),
+          app,
+        )) as any;
+        assertEquals(res.status, 400);
+        assertEquals(started.length, 0, "a rejected door never starts a run");
+      });
+    });
+  }
+}
+
 // ── issue #989: an omitted baseBranch resolves to the repository default branch in ONE call ───────
 
 test("omitted baseBranch → 202 on the default branch with no confirm round trip, resolved base echoed", async () => {
