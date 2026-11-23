@@ -3496,3 +3496,24 @@ test("#1031 a `converge`-only agent may feed a consumer directly (no merge promi
   g.nodes.splice(1, 1);
   assertEquals(validateDeliveryGraph(g), []);
 });
+
+test("#1033 a merged-PR gate with `onTimeout: continue` does not satisfy the rule (fails open on timeout)", () => {
+  for (const onTimeout of ["continue", " continue "]) {
+    const g = mergeProducerGraph([{ from: "fix.pr", to: "landed" }, { from: "landed", to: "after" }]);
+    g.nodes[1] = { id: "landed", kind: "wait", wait: { kind: "pr", target: "fix.pr", match: { prState: "merged" }, onTimeout } };
+    hasCode(validateDeliveryGraph(g), "merge-edge-unguarded");
+  }
+});
+
+test("#1033 a merged-PR gate must target the producer's canonical `<producer>.pr`, not a prefixed sibling", () => {
+  const g = mergeProducerGraph([{ from: "fix", to: "landed" }, { from: "fix.child.pr", to: "landed" }, { from: "landed", to: "after" }]);
+  g.nodes.push({ id: "fix.child", kind: "agent", agent: { jobType: "senior:feature", prompt: "child" }, emits: [{ name: "pr", type: "pr" }] });
+  g.nodes[1] = { id: "landed", kind: "wait", wait: { kind: "pr", target: "fix.child.pr", match: { prState: "merged" } } };
+  hasCode(validateDeliveryGraph(g), "merge-edge-unguarded");
+});
+
+test("#1033 a padded `kind: \" pr \"` gate is validated as a PR-binding consumer (fact must be threaded)", () => {
+  const g = mergeProducerGraph([{ from: "fix", to: "landed" }, { from: "landed", to: "after" }]);
+  g.nodes[1] = { id: "landed", kind: "wait", wait: { kind: " pr ", target: "fix.pr", match: { prState: "merged" } } };
+  assert(validateDeliveryGraph(g).length > 0, "an unthreaded fix.pr on a padded pr wait must be rejected");
+});

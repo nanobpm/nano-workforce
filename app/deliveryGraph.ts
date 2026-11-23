@@ -2317,12 +2317,14 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               expect: "pr",
               authored: payload !== undefined && typeof payload.pr === "string" ? payload.pr : undefined,
             });
-          } else if (kind === "wait" && (config.kind === "pr" || config.kind === "issue")) {
+          } else if (kind === "wait" && typeof config.kind === "string" && (config.kind.trim() === "pr" || config.kind.trim() === "issue")) {
+            // Trim exactly as `parseProbe` does (#1033 review): a padded `" pr "` runs as a `pr` probe,
+            // so it must be validated as a PR-binding consumer too.
             prBindConsumers.push({
               path,
               field: "wait.target",
               id,
-              expect: config.kind === "issue" ? "issue" : "pr",
+              expect: config.kind.trim() === "issue" ? "issue" : "pr",
               authored: typeof config.target === "string" ? config.target : undefined,
             });
           }
@@ -2716,7 +2718,9 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
       // The gate must poll THIS producer's PR (`<fromNode>.<pr fact>`) — a merged-PR gate on a
       // different PR would release the consumer when an unrelated PR merges.
       const gateTarget = mergedPrWaitNodes.get(e.to);
-      const gateOnProducer = gateTarget?.startsWith(`${e.fromNode}.`) === true;
+      // Exact canonical `<producer>.pr` only (#1033 review): enrollment always binds the producer's
+      // node-local `pr`, so a prefix match would accept `fix.child.pr` / `fix.otherPr`.
+      const gateOnProducer = gateTarget === `${e.fromNode}.pr`;
       if (mergeAgentNodes.has(e.fromNode) && !gateOnProducer) {
         errors.push({
           path: `edges[${e.index}]`,
@@ -2733,9 +2737,12 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
   return errors;
 }
 
-/** #1031: a `wait` config that gates on a PR having MERGED (`kind: "pr"`, `match.prState: "merged"`). */
+/** #1031: a `wait` config that gates on a PR having MERGED (`kind: "pr"`, `match.prState: "merged"`).
+ * It must fail CLOSED on timeout: `onTimeout: "continue"` routes a not-ready token straight past the
+ * gate, releasing downstream work before the merge, so it does not count as a merge gate (#1033). */
 function isMergedPrWait(config: Record<string, unknown>): boolean {
   if (typeof config.kind !== "string" || config.kind.trim() !== "pr") return false;
+  if (typeof config.onTimeout === "string" && config.onTimeout.trim() === "continue") return false;
   // `match.prState` defaults to `merged` (the pr probe's default condition).
   const match = isRecord(config.match) ? config.match : undefined;
   const prState = match?.prState;
