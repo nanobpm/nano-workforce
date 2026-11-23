@@ -62,6 +62,7 @@ import {
   parseSuppressedAdvisories,
   type ReviewThread,
   reconcileReviewOpenFindings,
+  reviewVerdictExcerpt,
 } from "../../app/github.ts";
 import { type IssueComment, listIssueComments } from "../../app/issuePrLink.ts";
 import {
@@ -212,10 +213,14 @@ export function makeHandler(deps: {
       // human rather than entering the bounded auto-ack path.
       const openFindings = reconcileReviewOpenFindings(review.body, threadsRead);
       if (openFindings.length > 0) {
+        const verdict = reviewVerdictExcerpt(review.body);
         return {
           convergeBlocked: true,
           convergeBlockReason:
             `Convergence blocked: the latest head-current Copilot review reports ${openFindings.join("; ")}. ` +
+            // Quote the reviewer's overall verdict (#1032) so the human sees a summary-only concern
+            // (e.g. "Needs a closer look" with zero threads) instead of a bare count.
+            (verdict ? `Reviewer verdict: "${verdict}". ` : "") +
             `Address every finding the review raised (or reply-and-resolve why each is a false positive) before converging.`,
           convergeAckOnly: false,
           reviewStale: false,

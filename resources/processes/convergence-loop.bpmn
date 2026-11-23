@@ -294,6 +294,10 @@
           <zeebe:output source="=null" target="question" />
           <zeebe:output source="=false" target="escalated" />
           <zeebe:output source="=0" target="advPass" />
+          <zeebe:output source="=false" target="convergedHead" />
+          <zeebe:output source="=false" target="ciRed" />
+          <zeebe:output source="=false" target="huskRetry" />
+          <zeebe:output source="=null" target="noProgressQuestion" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_start</bpmn:incoming>

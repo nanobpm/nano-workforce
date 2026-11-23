@@ -19,6 +19,7 @@ import {
   parseAckedAdvisories,
   parseReviewOpenFindings,
   reconcileReviewOpenFindings,
+  reviewVerdictExcerpt,
   parseReviewThreadsPage,
   parseSuppressedAdvisories,
   pickLatestCopilotReview,
@@ -1485,4 +1486,50 @@ test("reconcileReviewOpenFindings: a nested count section inside an open-issues 
     "</details>",
   ].join("\n");
   assertEquals(reconcileReviewOpenFindings(body, [thread(true, [11])]).length > 0, true);
+});
+
+// ── "Needs a closer look" overall verdict (issue #1032) ──────────────────────
+// nano-coder#260 merged with Copilot's "🔵 Needs a closer look" summary concern unaddressed: the
+// review said "No open issues" and had zero threads, so the thread-only picture read as converged.
+
+const CLOSER_LOOK =
+  "## Pull request overview\n\n### 🔵 Needs a closer look\n\nHuman assessment is needed to evaluate resource-exhaustion risks from superseded probes.\n\n<details><summary>No open issues</summary>\n</details>";
+
+test("parseReviewOpenFindings: a 'Needs a closer look' verdict is a non-clean verdict (#1032)", () => {
+  assertEquals(parseReviewOpenFindings(CLOSER_LOOK), ["needs a closer look"]);
+  assertEquals(parseReviewOpenFindings("🔵 Needs a closer look — Human assessment is needed."), ["needs a closer look"]);
+  assertEquals(parseReviewOpenFindings("| `a.ts` | Explains when a PR needs a closer look |"), []);
+  // Bold verdict forms (adversarial finding): both verdicts share one line shape.
+  assertEquals(parseReviewOpenFindings("**Changes recommended**"), ["changes recommended"]);
+  assertEquals(parseReviewOpenFindings("🟡 **Changes recommended**"), ["changes recommended"]);
+  assertEquals(parseReviewOpenFindings("### 🔵 **Needs a closer look**"), ["needs a closer look"]);
+});
+
+test("reconcileReviewOpenFindings: resolved threads never clear a 'Needs a closer look' verdict (#1032)", () => {
+  assertEquals(reconcileReviewOpenFindings(CLOSER_LOOK, [{ isResolved: true, path: "a.ts", bodies: ["x"], commentIds: ["1"] }]), [
+    "needs a closer look",
+  ]);
+});
+
+test("reviewVerdictExcerpt: quotes the verdict line and its paragraph (#1032)", () => {
+  assertEquals(
+    reviewVerdictExcerpt(CLOSER_LOOK),
+    "🔵 Needs a closer look Human assessment is needed to evaluate resource-exhaustion risks from superseded probes.",
+  );
+  assertEquals(reviewVerdictExcerpt("✅ Looks good"), "");
+  assert(reviewVerdictExcerpt(`🟡 Changes recommended\n${"x".repeat(2000)}`, 100).length === 100);
+});
+
+test("converge-gate #1032: a head-current 'Needs a closer look' review with zero threads blocks and quotes the verdict", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => CLOSER_LOOK,
+    reviewCommitId: "headsha5555555555555555555555555555555555",
+    headSha: "headsha5555555555555555555555555555555555",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertEquals(out.convergeAckOnly, false);
+  assertStringIncludes(out.convergeBlockReason ?? "", "needs a closer look");
+  assertStringIncludes(out.convergeBlockReason ?? "", "resource-exhaustion risks from superseded probes");
 });
