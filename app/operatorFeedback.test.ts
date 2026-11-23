@@ -198,3 +198,16 @@ test("a comment posted mid-implement and acked on the issue before the PR opens 
   const ack = c(61, "jwulf", "OWNER", "2026-11-21T10:40:00Z", `${feedbackAckMarker(60)}\nreused X`);
   assertEquals(derive([mid, ack]), []);
 });
+
+test("a consumed assessment-acceptance marker is not operator feedback; other lines in it still are (#1037)", () => {
+  const items = derive(
+    [],
+    [
+      c(50, "jwulf", "OWNER", "2026-11-21T10:05:00Z", "nano-assessment: accept 68de21c"),
+      c(51, "jwulf", "OWNER", "2026-11-21T10:06:00Z", "nano-assessment: accept 68de21c\nalso rename the helper"),
+    ],
+  );
+  assertEquals(items.length, 1);
+  assertEquals(items[0].id, 51);
+  assertEquals(items[0].body, "also rename the helper");
+});

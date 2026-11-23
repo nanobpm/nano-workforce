@@ -36,7 +36,11 @@ test("isAssessmentAccepted: trusted, line-start marker for a prefix of this head
 
 test("classifyAssessmentAnswer: accept / fix / unrecognised", () => {
   assertEquals(classifyAssessmentAnswer("Accept"), "accept");
-  assertEquals(classifyAssessmentAnswer("lgtm, ship it"), "accept");
+  assertEquals(classifyAssessmentAnswer("LGTM."), "accept");
+  assertEquals(classifyAssessmentAnswer("lgtm, ship it"), null);
+  assertEquals(classifyAssessmentAnswer("accept only after fixing the pool"), null);
+  assertEquals(classifyAssessmentAnswer("merge is not safe; fix the pool first"), null);
+  assertEquals(classifyAssessmentAnswer("approve? no"), null);
   assertEquals(classifyAssessmentAnswer("fix: bound the probe pool"), "fix");
   assertEquals(classifyAssessmentAnswer("retry"), null);
   assertEquals(classifyAssessmentAnswer(null), null);

@@ -7,7 +7,7 @@
 // place that decides "this verdict needs a human", records/reads the human's acceptance for a head,
 // and words the escalation — shared by the merge backstop (`pr.merge`) and the converge-gate.
 import type { IssueComment } from "./issuePrLink.ts";
-import { isTrustedAuthor } from "./operatorFeedback.ts";
+import { ASSESSMENT_ACCEPT_LINE_RE, isTrustedAuthor } from "./operatorFeedback.ts";
 import { HUMAN_ASSESSMENT_WAIT_OUTCOME } from "./reviewWait.ts";
 
 /** The open-finding label `parseReviewOpenFindings` emits for the 🔵 verdict (app/github.ts). */
@@ -44,7 +44,7 @@ export function isAssessmentOnly(
 export function isAssessmentAccepted(comments: readonly IssueComment[], head: string): boolean {
   const h = head.trim().toLowerCase();
   if (h === "") return false;
-  const re = /^nano-assessment:[ \t]+accept[ \t]+([0-9a-f]{7,64})\b/i;
+  const re = ASSESSMENT_ACCEPT_LINE_RE;
   for (const c of comments) {
     if (!isTrustedAuthor(c.association, c.login)) continue;
     for (const line of (c.body ?? "").split(/\r?\n/)) {
@@ -55,13 +55,15 @@ export function isAssessmentAccepted(comments: readonly IssueComment[], head: st
   return false;
 }
 
-/** Pure: classify a human's escalation answer. `accept` (accept / approve / lgtm / merge) lands the
- * PR on that head; `fix` (`fix: <instructions>` / `fix …`) re-enters convergence carrying the
+/** Pure: classify a human's escalation answer. `accept` requires an EXACT acceptance command
+ * (accept / accepted / approve / approved / lgtm / merge / land, optional trailing `.`/`!`) — any
+ * conditional or negative prose ("accept only after fixing…", "merge is not safe") is NOT
+ * acceptance and stays unrecognised (fail closed); `fix` (`fix: <instructions>` / `fix …`) `fix` (`fix: <instructions>` / `fix …`) re-enters convergence carrying the
  * answer as instructions; anything else is unrecognised (null). */
 export function classifyAssessmentAnswer(answer: string | null | undefined): "accept" | "fix" | null {
   const a = (answer ?? "").trim().toLowerCase();
   if (a === "") return null;
-  if (/^(?:accept(?:ed)?|approve[d]?|lgtm|merge|land)\b/.test(a)) return "accept";
+  if (/^(?:accept(?:ed)?|approved?|lgtm|merge|land)[.!]?$/.test(a)) return "accept";
   if (/^fix\b/.test(a)) return "fix";
   return null;
 }

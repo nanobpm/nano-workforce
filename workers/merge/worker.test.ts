@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { _clearMergeProtocolCache } from "../../app/mergeProtocol.ts";
+import { reviewHeadToken } from "../../app/reviewWait.ts";
 import { noopLog } from "../../test/log.ts";
 import handler, { makeHandler } from "./worker.ts";
 
@@ -670,5 +671,30 @@ test("pr.merge #1037: a trusted nano-assessment accept comment for this head sat
       { id: 9, body: "nano-assessment: accept 68de21c", login: "jwulf", association: "MEMBER", createdAt: "" },
     ])(vars(), app)) as Record<string, unknown>;
     assertEquals(out, { mergeStatus: "merged" });
+  });
+});
+
+test("pr.merge #1037: a verified acceptance for this head survives a landing retry; a new head does not inherit it", async () => {
+  await withGithub(landRoutes, async (calls) => {
+    const { app } = fakeApp();
+    await app.data.table("merges", "id").insert({
+      pr_key: "acme/widgets#40",
+      outcome: "assessment-accepted",
+      detail: `a human accepted the "Needs a closer look" verdict ${reviewHeadToken(AHEAD)}`,
+    });
+    await app.data.table("merges", "id").insert({ pr_key: "acme/widgets#40", outcome: "retry", detail: "x" });
+    const out = (await assessHandler()(vars(), app)) as Record<string, unknown>;
+    assertEquals(out, { mergeStatus: "merged" });
+    assertEquals(calls.some((c) => /\/pulls\/\d+\/merge$/.test(c.url) && c.method === "PUT"), true);
+  });
+  await withGithub(landRoutes, async () => {
+    const { app } = fakeApp();
+    await app.data.table("merges", "id").insert({
+      pr_key: "acme/widgets#40",
+      outcome: "assessment-accepted",
+      detail: `a human accepted the "Needs a closer look" verdict ${reviewHeadToken("1111111aaaabbbbccccddddeeeeffff00001111")}`,
+    });
+    const out = (await assessHandler()(vars(), app)) as Record<string, unknown>;
+    assertEquals(out.mergeStatus, "blocked");
   });
 });

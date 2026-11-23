@@ -162,6 +162,20 @@ export interface OperatorFeedbackInput {
 /** The ONE derivation of outstanding operator feedback. Returns every UNACKNOWLEDGED trusted item:
  *  issue/PR comments lacking a `nano-ack: issuecomment-<id>` marker, and UNRESOLVED review threads
  *  rooted by a trusted human. Pure. */
+/** A line-start human-assessment acceptance marker (`nano-assessment: accept <sha>`, issue #1037).
+ * The ONE pattern both the assessment reader (app/humanAssessment.ts) and the feedback derivation use. */
+export const ASSESSMENT_ACCEPT_LINE_RE = /^nano-assessment:[ \t]+accept[ \t]+([0-9a-f]{7,64})\b/i;
+
+/** Pure: a comment body with its consumed assessment-acceptance marker lines removed. Any OTHER
+ * instruction in the same comment is preserved and still counts as operator feedback. */
+export function stripAssessmentMarkers(body: string): string {
+  return body
+    .split(/\r?\n/)
+    .filter((line) => !ASSESSMENT_ACCEPT_LINE_RE.test(line))
+    .join("\n")
+    .trim();
+}
+
 export function deriveOperatorFeedback(input: OperatorFeedbackInput): OperatorFeedbackItem[] {
   // Acks count ONLY from trusted human issue/PR comments: an untrusted commenter must not be able to
   // forge `nano-ack: issuecomment-<id>` and clear a maintainer's feedback. Review-thread replies carry
@@ -175,7 +189,10 @@ export function deriveOperatorFeedback(input: OperatorFeedbackInput): OperatorFe
     if (!isTrustedAuthor(c.association, c.login)) return;
     if (isRunOwnComment(c.body)) return;
     if (acked.has(c.id)) return;
-    items.push({ source, id: c.id, login: c.login, body: c.body, label });
+    // An assessment-acceptance marker is consumed by the assessment gate, not feedback for an agent.
+    const body = stripAssessmentMarkers(c.body ?? "");
+    if (body === "") return;
+    items.push({ source, id: c.id, login: c.login, body, label });
   };
   for (const issue of input.issues) {
     for (const c of issue.comments) {

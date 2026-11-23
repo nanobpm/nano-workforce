@@ -249,6 +249,14 @@ export function makeHandler(deps: {
       parseReviewHead(typeof newest.detail === "string" ? newest.detail : null) === headTrimmed;
     const answer = typeof job.variables.answer === "string" ? job.variables.answer : null;
     const decision = parkedOnThisHead ? classifyAssessmentAnswer(answer) : null;
+    // A verified acceptance already recorded for THIS head survives landing retries: once an
+    // `assessment-accepted` row exists for the head, a later `retry` row must not re-open the
+    // assessment (it is no longer the newest row). A new head needs a new decision.
+    const acceptedBefore = prior.some(
+      (r) =>
+        String(r.outcome ?? "") === "assessment-accepted" &&
+        parseReviewHead(typeof r.detail === "string" ? r.detail : null) === headTrimmed,
+    );
     if (decision === "fix") {
       await app.data.table("merges", "id").insert({
         pr_key: prKey,
@@ -259,7 +267,9 @@ export function makeHandler(deps: {
       });
       return { mergeStatus: "review-findings", assessmentAnswer: String(answer).trim() };
     }
-    if (decision === "accept" || (comments !== null && isAssessmentAccepted(comments, headTrimmed))) {
+    if (acceptedBefore) {
+      openFindings = [];
+    } else if (decision === "accept" || (comments !== null && isAssessmentAccepted(comments, headTrimmed))) {
       await app.data.table("merges", "id").insert({
         pr_key: prKey,
         outcome: "assessment-accepted",
