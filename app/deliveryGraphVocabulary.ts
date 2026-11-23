@@ -125,6 +125,10 @@ const NODE_KIND_DETAIL: Record<string, Omit<NodeKindEntry, "kind">> = {
       "which strips isolation from every node. First-class " +
       "`converge?`/`merge?` cell-policy flags declare review-convergence / landing intent (`merge` " +
       "requires `converge`); a raw `senior:converge`/`senior:merge` jobType is rejected (`raw-converge-node`). " +
+      "An edge OUT of an agent fires when its job completes — for a `merge` agent that is when the PR is OPENED " +
+      "and enrolled, NOT when it lands — so every edge from a `merge: true` agent must target an explicit " +
+      "`wait[pr, merged]` gate (binding `mergedSha`); a consumer wired straight to it is rejected " +
+      "(`merge-edge-unguarded`, #1031). " +
       "An optional per-node ISO-8601 `timeout` (#505) overrides the run-level `nodeTimeout` (and the " +
       "`PT1H` default) for THIS node's bounded-timeout → escalate boundary, so a legitimately-long node " +
       "(e.g. a full `senior:feature`) outlasts a quick gate without a spurious escalation; absent → the " +

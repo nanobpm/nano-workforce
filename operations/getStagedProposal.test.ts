@@ -16,12 +16,15 @@ const GRAPH = {
   name: "ship B after epic",
   nodes: [
     { id: "gate", kind: "wait", wait: { kind: "epic", target: "owner/repo#488", poll: { timeoutMs: 259_200_000 } } },
-    { id: "build", kind: "agent", agent: { jobType: "senior:feature", repository: "owner/repo", converge: true, merge: true } },
+    { id: "build", kind: "agent", agent: { jobType: "senior:feature", repository: "owner/repo", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+    // #1031: an edge out of a `merge: true` agent must pass a merged-PR gate.
+    { id: "landed", kind: "wait", wait: { kind: "pr", target: "build.pr", match: { prState: "merged" } } },
     { id: "ok", kind: "human", human: { prompt: "Confirm." } },
   ],
   edges: [
     { from: "gate", to: "build" },
-    { from: "build", to: "ok" },
+    { from: "build.pr", to: "landed" },
+    { from: "landed", to: "ok" },
   ],
 };
 

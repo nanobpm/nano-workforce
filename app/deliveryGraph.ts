@@ -100,6 +100,7 @@ export type DeliveryGraphErrorCode =
   | "unsupported-on-timeout"
   | "raw-converge-node"
   | "merge-requires-converge"
+  | "merge-edge-unguarded"
   | "converge-merge-type"
   | "invalid-node-repository"
   | "invalid-node-base-branch"
@@ -1904,6 +1905,13 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
   // literal `owner/repo#N` OR a threaded upstream `pr` fact. Collected in pass 1, validated in pass 4
   // once the incoming fact edges are known — so an author who references a `pr` fact that isn't
   // actually threaded (or isn't `pr`-typed) is rejected at COMPILE, not left to fail closed at runtime.
+  // #1031: `merge: true` agent nodes (id → node path) and the `wait[pr, merged]` gates. An edge OUT of a
+  // merge node releases its consumer when the agent's job completes (the PR is OPENED and enrolled), NOT
+  // when it lands — so pass 5 requires every such edge to target an explicit merged-PR gate, making
+  // "B starts after A has landed" the only expressible ordering.
+  const mergeAgentNodes = new Set<string>();
+  // #1031: merged-PR gate id -> the trimmed `wait.target` it polls (pass 5 correlates it to the producer).
+  const mergedPrWaitNodes = new Map<string, string>();
   const prBindConsumers: {
     path: string;
     field: "connector.payload.pr" | "wait.target";
@@ -1984,7 +1992,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         // end — the "declared knob silently ignored" defect class. Reject it loudly (path-qualified)
         // until engine parity lands (Magikcraft/nano-bpm#978), rather than mis-compile it. `escalate`
         // (default) and `continue` ARE honored.
-        if (kind === "wait" && config.onTimeout === "fail") {
+        if (kind === "wait" && typeof config.onTimeout === "string" && config.onTimeout.trim() === "fail") {
           errors.push({
             path: `${path}.${configKey}.onTimeout`,
             message:
@@ -2296,7 +2304,11 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         // #548: register a converge-connector / pr-wait as a PR-binding consumer (pass 4 validates the
         // binding once edges are resolved). Only when the id is usable so pass 4 can key by node id.
         if (typeof id === "string" && id.length > 0) {
-          if (kind === "connector" && typeof config.target === "string" && isConvergeTarget(config.target)) {
+          if (kind === "agent" && config.merge === true) mergeAgentNodes.add(id);
+          if (kind === "wait" && isMergedPrWait(config)) {
+            mergedPrWaitNodes.set(id, typeof config.target === "string" ? config.target.trim() : "");
+          }
+          if (kind === "connector" && typeof config.target === "string" && isConvergeTarget(config.target.trim())) {
             const payload = isRecord(config.payload) ? config.payload : undefined;
             prBindConsumers.push({
               path,
@@ -2305,12 +2317,14 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               expect: "pr",
               authored: payload !== undefined && typeof payload.pr === "string" ? payload.pr : undefined,
             });
-          } else if (kind === "wait" && (config.kind === "pr" || config.kind === "issue")) {
+          } else if (kind === "wait" && typeof config.kind === "string" && (config.kind.trim() === "pr" || config.kind.trim() === "issue")) {
+            // Trim exactly as `parseProbe` does (#1033 review): a padded `" pr "` runs as a `pr` probe,
+            // so it must be validated as a PR-binding consumer too.
             prBindConsumers.push({
               path,
               field: "wait.target",
               id,
-              expect: config.kind === "issue" ? "issue" : "pr",
+              expect: config.kind.trim() === "issue" ? "issue" : "pr",
               authored: typeof config.target === "string" ? config.target : undefined,
             });
           }
@@ -2699,8 +2713,46 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     validateGuardedEdges(guardEdges, nodeFactTypes, errors);
     // Pass 4 (#548): converge/wait PR late-binding — a referenced PR fact must be threaded + `pr`-typed.
     validatePrBindings(prBindConsumers, incomingFactRefs, nodeFacts, nodeFactTypes, errors);
+    // Pass 5 (#1031): an edge out of a `merge: true` agent must target a `wait[pr, merged]` gate.
+    for (const e of guardEdges) {
+      // The gate must poll THIS producer's PR (`<fromNode>.<pr fact>`) — a merged-PR gate on a
+      // different PR would release the consumer when an unrelated PR merges.
+      const gateTarget = mergedPrWaitNodes.get(e.to);
+      // Exact canonical `<producer>.pr` only (#1033 review): enrollment always binds the producer's
+      // node-local `pr`, so a prefix match would accept `fix.child.pr` / `fix.otherPr`.
+      // AND the producer's `pr` must be a declared, `pr`-typed fact actually threaded into the gate —
+      // a bare edge whose target string merely LOOKS canonical (e.g. a node literally named `fix.pr`)
+      // leaves the probe polling a literal, not the producer's PR (#1033 review).
+      const gateOnProducer =
+        gateTarget === `${e.fromNode}.pr` &&
+        (incomingFactRefs.get(e.to) ?? []).some((r) => r.ref === `${e.fromNode}.pr` && r.factType === "pr");
+      if (mergeAgentNodes.has(e.fromNode) && !gateOnProducer) {
+        errors.push({
+          path: `edges[${e.index}]`,
+          message:
+            `edge from \`merge: true\` agent node "${e.fromNode}" to "${e.to}" would release "${e.to}" when the ` +
+            "agent OPENS its PR, not when the PR merges. Route it through an explicit merged-PR gate — " +
+            `\`{ kind: "wait", wait: { kind: "pr", target: "${e.fromNode}.pr", match: { prState: "merged" } } }\` ` +
+            "(binding `mergedSha`) — and depend on that gate instead (#1031)",
+          code: "merge-edge-unguarded",
+        });
+      }
+    }
   }
   return errors;
+}
+
+/** #1031: a `wait` config that gates on a PR having MERGED (`kind: "pr"`, `match.prState: "merged"`).
+ * It must fail CLOSED on timeout: `onTimeout: "continue"` routes a not-ready token straight past the
+ * gate, releasing downstream work before the merge, so it does not count as a merge gate (#1033). */
+function isMergedPrWait(config: Record<string, unknown>): boolean {
+  if (typeof config.kind !== "string" || config.kind.trim() !== "pr") return false;
+  if (typeof config.onTimeout === "string" && config.onTimeout.trim() === "continue") return false;
+  // `match.prState` defaults to `merged` (the pr probe's default condition).
+  const match = isRecord(config.match) ? config.match : undefined;
+  const prState = match?.prState;
+  // A blank/whitespace state normalises to the merged default, exactly as `parsePrCondition` does.
+  return prState === undefined || (typeof prState === "string" && ["", "merged"].includes(prState.trim()));
 }
 
 /** Pass 4 (#548) — validate that every converge-connector / pr-wait node can resolve its target PR.
