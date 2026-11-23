@@ -404,7 +404,9 @@ export function makeHandler(deps: {
         jobKey,
         processInstanceKey: job.processInstanceKey ?? null,
         progressed: out.progressed,
-        reason: out.noProgressReason ?? null,
+        // The converged-head / red-CI routes return without `noProgressReason`, but both are only
+        // reached on a `no-advance` decision — recover it so the log never says `reason: null`.
+        reason: out.noProgressReason ?? (out.convergedHead || out.ciRed ? "no-advance" : null),
         huskRetry: out.huskRetry ?? null,
         convergedHead: out.convergedHead,
         ciRed: out.ciRed,

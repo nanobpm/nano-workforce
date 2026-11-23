@@ -1507,6 +1507,8 @@ test("progress-check: logs its routing decision with the PR-state read outcome (
       assertEquals(entry!.meta.convergedHead, out.convergedHead);
       assertEquals(entry!.meta.progressed, false);
       assertEquals(entry!.meta.huskRetry, false);
+      // The converged-head route omits `noProgressReason`; the log must still carry the reason.
+      if (out.convergedHead) assertEquals(entry!.meta.reason, "no-advance");
     });
   }
 });
