@@ -1382,33 +1382,65 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
     );
 
-    const graph: DeliveryGraph = {
-      name: "e2e policy resume",
-      nodes: [
-        { id: "impl", kind: "agent", agent: { jobType: "senior:demo", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
-        // The downstream consumer makes `pr` a REQUIRED emit (a fact-qualified edge is a required
-        // data dependency), so the blocked producer (no PR) trips the contract gate and the resume
-        // must supply it. A second agent node — not a `wait[pr]`, whose probe would escape this
-        // suite's hermetic command-probe seam (a `pr` probe runs a real `gh` call).
-        { id: "downstream", kind: "agent", agent: { jobType: "senior:demo" } },
-      ],
-      edges: [{ from: "impl.pr", to: "downstream" }],
-    };
+    // #1031: an edge out of a `merge: true` agent must target a merged-PR gate, so the required-emit
+    // consumer now sits BEHIND `wait[pr, merged]`. A `pr` probe runs a real `gh pr view`, which this
+    // suite's hermetic command-probe seam records as an escape — drive the gate through the seam
+    // instead: answer the `gh` read with a MERGED observation so the gate resolves deterministically
+    // inside the drain fixpoint, and drain the seam's escape ledger on restore so the suite teardown
+    // never fails on the expected read.
+    const probeEscapes: string[] = [];
+    const restoreProbe = __setProbeExecForTest({
+      run(command: string): Promise<CommandResult> {
+        probeEscapes.push(command);
+        if (command.startsWith("gh pr view ")) {
+          return Promise.resolve({
+            code: 0,
+            stdout: JSON.stringify({ state: "MERGED", mergedAt: "2026-11-23T00:00:00Z", mergeCommit: { oid: "deadbeef" } }),
+            stderr: "",
+          });
+        }
+        const cmd = command.trim();
+        return Promise.resolve({ code: cmd === "true" ? 0 : 1, stdout: "", stderr: "" });
+      },
+      httpGet(): Promise<never> {
+        return Promise.reject(new Error("unexpected http probe"));
+      },
+    });
+    try {
+      const graph: DeliveryGraph = {
+        name: "e2e policy resume",
+        nodes: [
+          { id: "impl", kind: "agent", agent: { jobType: "senior:demo", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+          { id: "landed", kind: "wait", wait: { kind: "pr", target: "impl.pr", match: { prState: "merged" } } },
+          // The downstream consumer makes `pr` a REQUIRED emit (a fact-qualified edge is a required
+          // data dependency), so the blocked producer (no PR) trips the contract gate and the resume
+          // must supply it. It consumes only through the merged-PR gate (#1031).
+          { id: "downstream", kind: "agent", agent: { jobType: "senior:demo" } },
+        ],
+        edges: [
+          { from: "impl.pr", to: "landed" },
+          { from: "landed", to: "downstream" },
+        ],
+      };
 
-    const run = await runDeliveryGraph(app.engine, graph, { escalationSlaTimeout: "PT1H", probeTimeout: "PT2S", repoless: true });
-    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
-    await app.settle();
+      const run = await runDeliveryGraph(app.engine, graph, { escalationSlaTimeout: "PT1H", probeTimeout: "PT2S", repoless: true });
+      assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+      await app.settle();
 
-    // The broken producer parked on its __contract escalation; nothing enrolled yet.
-    const open = await app.engine.searchUserTasks({ state: "CREATED" });
-    const contract = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && t.elementId?.endsWith("__contract"));
-    assert.ok(contract, `the broken producer parks on its contract escalation, got ${JSON.stringify(open.map((t) => t.elementId))}`);
-    assert.equal(enrollments.length, 0, "no enrollment before the contract is met");
+      // The broken producer parked on its __contract escalation; nothing enrolled yet.
+      const open = await app.engine.searchUserTasks({ state: "CREATED" });
+      const contract = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && t.elementId?.endsWith("__contract"));
+      assert.ok(contract, `the broken producer parks on its contract escalation, got ${JSON.stringify(open.map((t) => t.elementId))}`);
+      assert.equal(enrollments.length, 0, "no enrollment before the contract is met");
 
-    // Resume with the out-of-band PR — the validated resume routes THROUGH the enrollment.
-    await app.engine.completeUserTask(contract.userTaskKey, { value: "owner/repo#88", humanOutcome: "completed" });
-    await app.settle();
-    assert.deepEqual(enrollments, ["converge-merge"], "the resumed producer's PR is enrolled exactly like a first-pass one");
+      // Resume with the out-of-band PR — the validated resume routes THROUGH the enrollment.
+      await app.engine.completeUserTask(contract.userTaskKey, { value: "owner/repo#88", humanOutcome: "completed" });
+      await app.settle();
+      assert.deepEqual(enrollments, ["converge-merge"], "the resumed producer's PR is enrolled exactly like a first-pass one");
+    } finally {
+      __setProbeExecForTest(restoreProbe);
+      probeEscapes.length = 0;
+    }
   });
 
   /** Observe the lowered #962 enrollment through the canonical connector dispatch path (the same
@@ -1459,28 +1491,60 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // No `senior:demo` worker for `impl`: its job never completes, so the node SLA fires the timeout
     // escalation. The operator supplies the PR on Continue — the policy must still enroll it.
     const seen = await observeEnrollments(app);
-    const graph: DeliveryGraph = {
-      name: "e2e timeout resume enrolls",
-      nodes: [
-        { id: "impl", kind: "agent", agent: { jobType: "senior:never", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
-        { id: "downstream", kind: "agent", agent: { jobType: "senior:demo" } },
-      ],
-      edges: [{ from: "impl.pr", to: "downstream" }],
-    };
-    await app.engine.registerWorker("senior:demo", async () => ({ status: "opened" }));
-    const run = await runDeliveryGraph(app.engine, graph, { nodeTimeout: "PT2S", escalationSlaTimeout: "PT1H", repoless: true });
-    assert.ok(run.ok, JSON.stringify(run));
-    await app.settle();
-    // Issue #1016: activation-anchored work SLA — record the parked job's activation (the poller's
-    // role; the testkit runs no poll loop) so the elapsed budget escalates.
-    await activateParkedAgentJob(app, run.handle.processInstanceKey, "senior:never");
-    await advanceUntilEscalated(app, 10_000);
-    const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
-    assert.ok(esc, "the timed-out policy agent parks on its timeout escalation");
-    assert.equal(seen.length, 0, "nothing enrolled before the resume");
-    await app.engine.completeUserTask(esc.userTaskKey, { value: "owner/repo#92", humanOutcome: "completed" });
-    await app.settle();
-    assert.deepEqual(seen.map((e) => [e.target, e.payload]), [["converge-merge", { pr: "owner/repo#92" }]], "the resumed PR is enrolled");
+    // #1031: an edge out of a `merge: true` agent must target a merged-PR gate, so the required-emit
+    // consumer sits BEHIND `wait[pr, merged]`. The gate's `pr` probe runs a real `gh pr view` — drive
+    // it through the probe seam (a MERGED observation) so it resolves deterministically inside the
+    // drain fixpoint, and drain the suite seam's escape ledger on restore (same shape as the
+    // contract-resume test above).
+    const probeEscapes: string[] = [];
+    const restoreProbe = __setProbeExecForTest({
+      run(command: string): Promise<CommandResult> {
+        probeEscapes.push(command);
+        if (command.startsWith("gh pr view ")) {
+          return Promise.resolve({
+            code: 0,
+            stdout: JSON.stringify({ state: "MERGED", mergedAt: "2026-11-23T00:00:00Z", mergeCommit: { oid: "deadbeef" } }),
+            stderr: "",
+          });
+        }
+        const cmd = command.trim();
+        return Promise.resolve({ code: cmd === "true" ? 0 : 1, stdout: "", stderr: "" });
+      },
+      httpGet(): Promise<never> {
+        return Promise.reject(new Error("unexpected http probe"));
+      },
+    });
+    try {
+      const graph: DeliveryGraph = {
+        name: "e2e timeout resume enrolls",
+        nodes: [
+          { id: "impl", kind: "agent", agent: { jobType: "senior:never", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+          { id: "landed", kind: "wait", wait: { kind: "pr", target: "impl.pr", match: { prState: "merged" } } },
+          { id: "downstream", kind: "agent", agent: { jobType: "senior:demo" } },
+        ],
+        edges: [
+          { from: "impl.pr", to: "landed" },
+          { from: "landed", to: "downstream" },
+        ],
+      };
+      await app.engine.registerWorker("senior:demo", async () => ({ status: "opened" }));
+      const run = await runDeliveryGraph(app.engine, graph, { nodeTimeout: "PT2S", escalationSlaTimeout: "PT1H", repoless: true });
+      assert.ok(run.ok, JSON.stringify(run));
+      await app.settle();
+      // Issue #1016: activation-anchored work SLA — record the parked job's activation (the poller's
+      // role; the testkit runs no poll loop) so the elapsed budget escalates.
+      await activateParkedAgentJob(app, run.handle.processInstanceKey, "senior:never");
+      await advanceUntilEscalated(app, 10_000);
+      const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).find((t) => t.elementId?.endsWith("__esc"));
+      assert.ok(esc, "the timed-out policy agent parks on its timeout escalation");
+      assert.equal(seen.length, 0, "nothing enrolled before the resume");
+      await app.engine.completeUserTask(esc.userTaskKey, { value: "owner/repo#92", humanOutcome: "completed" });
+      await app.settle();
+      assert.deepEqual(seen.map((e) => [e.target, e.payload]), [["converge-merge", { pr: "owner/repo#92" }]], "the resumed PR is enrolled");
+    } finally {
+      __setProbeExecForTest(restoreProbe);
+      probeEscapes.length = 0;
+    }
   });
 
   test("#962 a STALLED enrollment escalates on its own timeout instead of parking forever (PR #964 review)", async () => {
