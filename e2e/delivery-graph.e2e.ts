@@ -1393,7 +1393,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // would mask a probe escape as a silent not-ready).
     const expectedPrView = prViewCommand("owner/repo", "88");
     const savedProbe = __setProbeExecForTest(undefined);
-    const restoreProbe = __setProbeExecForTest({
+    __setProbeExecForTest({
       run(command: string, env: Record<string, string | undefined>): Promise<CommandResult> {
         if (command === expectedPrView) {
           return Promise.resolve({
@@ -1440,7 +1440,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       await app.settle();
       assert.deepEqual(enrollments, ["converge-merge"], "the resumed producer's PR is enrolled exactly like a first-pass one");
     } finally {
-      __setProbeExecForTest(restoreProbe);
+      __setProbeExecForTest(savedProbe);
     }
   });
 
@@ -1500,7 +1500,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // as the contract-resume test above; PR #1033 review).
     const expectedPrView = prViewCommand("owner/repo", "92");
     const savedProbe = __setProbeExecForTest(undefined);
-    const restoreProbe = __setProbeExecForTest({
+    __setProbeExecForTest({
       run(command: string, env: Record<string, string | undefined>): Promise<CommandResult> {
         if (command === expectedPrView) {
           return Promise.resolve({
@@ -1543,7 +1543,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       await app.settle();
       assert.deepEqual(seen.map((e) => [e.target, e.payload]), [["converge-merge", { pr: "owner/repo#92" }]], "the resumed PR is enrolled");
     } finally {
-      __setProbeExecForTest(restoreProbe);
+      __setProbeExecForTest(savedProbe);
     }
   });
 
@@ -1560,7 +1560,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     let prState: "OPEN" | "MERGED" = "OPEN";
     const probeCalls: string[] = [];
     const savedProbe = __setProbeExecForTest(undefined);
-    const restoreProbe = __setProbeExecForTest({
+    __setProbeExecForTest({
       run(command: string, env: Record<string, string | undefined>): Promise<CommandResult> {
         probeCalls.push(command);
         if (command === expectedPrView) {
@@ -1661,7 +1661,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       assert.equal(consumerMergedSha, "deadbeef", "the gate binds the observed merge commit as mergedSha");
       assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the graph reached its End event");
     } finally {
-      __setProbeExecForTest(restoreProbe);
+      __setProbeExecForTest(savedProbe);
     }
   });
 
