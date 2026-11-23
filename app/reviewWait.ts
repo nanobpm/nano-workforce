@@ -150,6 +150,22 @@ export function isReviewMissingOrStale(
 /** The merge-audit outcomes that mean "the loop is waiting for a head-current review". */
 export const REVIEW_WAIT_OUTCOMES: readonly string[] = ["review-pending", "review-requested"];
 
+/** The merge-audit outcome `pr.arm-merge` records when it re-arms a loop whose newest audit row is a
+ *  review wait: the wait has ENDED (a clean review landed, or the timer fired), so /status must stop
+ *  reporting `waiting_review` even when no later merge attempt writes another row (e.g. CI pending). */
+export const REVIEW_WAIT_ENDED_OUTCOME = "review-wait-ended";
+
+/** The PR statuses during which the merge stage's review wait can be live (read-only derivation;
+ *  the stored status is never changed). `merging` covers the timer race after `flipToMergingThenPublish`. */
+export const REVIEW_WAIT_STATUSES: readonly string[] = ["waiting_merge", "merging"];
+
+/** Pure: is the newest audit row (highest id) a review-wait outcome? */
+export function isReviewWaitOpen(rows: readonly { id?: number | null; outcome: string }[]): boolean {
+  if (rows.length === 0) return false;
+  const newest = rows.reduce((a, b) => ((b.id ?? 0) > (a.id ?? 0) ? b : a));
+  return REVIEW_WAIT_OUTCOMES.includes(newest.outcome);
+}
+
 /** The canonical head token appended to a `review-pending` audit row's detail. */
 export function reviewHeadToken(head: string): string {
   return `[head ${head}]`;

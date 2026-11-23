@@ -190,4 +190,13 @@ test("waitReason: a waiting_merge PR whose newest merge audit is a review wait r
   assertEquals(pr.waitReason, "waiting_review(51c424c)");
   const plain = await statusOf({ status: "waiting_merge" });
   assertEquals(plain.waitReason, null);
+  // The review-wait timer runs while the stored status is `merging` — derive it there too.
+  const merging: Stores = {
+    pull_requests: { rows: [prRow({ status: "merging" })], key: "pr_key" },
+    user_tasks: { rows: [], key: "id" },
+    merges: { rows: merges, key: "id" },
+  };
+  const [m] = await activePrs(memData(merging), fakeEngine());
+  assertEquals(m.status, "merging");
+  assertEquals(m.waitReason, "waiting_review(51c424c)");
 });

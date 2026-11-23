@@ -109,6 +109,7 @@ import {
   clampNudgeMinutes,
   isoDurationToMs,
   isReviewStale,
+  REVIEW_WAIT_STATUSES,
   reviewWaitReason,
   reviewWaitTimeout,
 } from "./reviewWait.ts";
@@ -1527,7 +1528,7 @@ export async function activePrs(
   const waitReasonByPr = new Map<string, string | null>();
   const mergeAudit = data.table("merges", "id");
   for (const p of active) {
-    if (p.status !== "waiting_merge") continue;
+    if (!REVIEW_WAIT_STATUSES.includes(p.status)) continue;
     const rows = await mergeAudit.find({ pr_key: p.pr_key }).catch(() => []);
     waitReasonByPr.set(
       p.pr_key,
