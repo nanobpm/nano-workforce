@@ -3517,3 +3517,17 @@ test("#1033 a padded `kind: \" pr \"` gate is validated as a PR-binding consumer
   g.nodes[1] = { id: "landed", kind: "wait", wait: { kind: " pr ", target: "fix.pr", match: { prState: "merged" } } };
   assert(validateDeliveryGraph(g).length > 0, "an unthreaded fix.pr on a padded pr wait must be rejected");
 });
+
+test("#1033 a gate whose target names a NODE `fix.pr` (no threaded pr fact) does not satisfy the rule", () => {
+  const g = mergeProducerGraph([{ from: "fix", to: "landed" }, { from: "landed", to: "after" }]);
+  g.nodes.push({ id: "fix.pr", kind: "agent", agent: { jobType: "senior:feature", prompt: "decoy" } });
+  hasCode(validateDeliveryGraph(g), "merge-edge-unguarded");
+});
+
+test("#1033 a blank/whitespace `prState` normalises to merged and satisfies the rule", () => {
+  for (const prState of ["", "  "]) {
+    const g = mergeProducerGraph([{ from: "fix.pr", to: "landed" }, { from: "landed", to: "after" }]);
+    g.nodes[1] = { id: "landed", kind: "wait", wait: { kind: "pr", target: "fix.pr", match: { prState } } };
+    assertEquals(validateDeliveryGraph(g), [], JSON.stringify(prState));
+  }
+});

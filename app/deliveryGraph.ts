@@ -2720,7 +2720,12 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
       const gateTarget = mergedPrWaitNodes.get(e.to);
       // Exact canonical `<producer>.pr` only (#1033 review): enrollment always binds the producer's
       // node-local `pr`, so a prefix match would accept `fix.child.pr` / `fix.otherPr`.
-      const gateOnProducer = gateTarget === `${e.fromNode}.pr`;
+      // AND the producer's `pr` must be a declared, `pr`-typed fact actually threaded into the gate —
+      // a bare edge whose target string merely LOOKS canonical (e.g. a node literally named `fix.pr`)
+      // leaves the probe polling a literal, not the producer's PR (#1033 review).
+      const gateOnProducer =
+        gateTarget === `${e.fromNode}.pr` &&
+        (incomingFactRefs.get(e.to) ?? []).some((r) => r.ref === `${e.fromNode}.pr` && r.factType === "pr");
       if (mergeAgentNodes.has(e.fromNode) && !gateOnProducer) {
         errors.push({
           path: `edges[${e.index}]`,
@@ -2746,7 +2751,8 @@ function isMergedPrWait(config: Record<string, unknown>): boolean {
   // `match.prState` defaults to `merged` (the pr probe's default condition).
   const match = isRecord(config.match) ? config.match : undefined;
   const prState = match?.prState;
-  return prState === undefined || (typeof prState === "string" && prState.trim() === "merged");
+  // A blank/whitespace state normalises to the merged default, exactly as `parsePrCondition` does.
+  return prState === undefined || (typeof prState === "string" && ["", "merged"].includes(prState.trim()));
 }
 
 /** Pass 4 (#548) — validate that every converge-connector / pr-wait node can resolve its target PR.
