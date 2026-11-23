@@ -274,6 +274,11 @@ test("an acked review clears; a quoted, mid-sentence, or untrusted ack does not"
   assertEquals(deriveReviews([fb, rv(903, "jwulf", "OWNER", "", "nano-ack: review-900")]).map((i) => i.id), [900]);
   // An issuecomment ack with the same number does not clear a review (distinct namespaces).
   assertEquals(deriveReviews([fb], [c(74, "jwulf", "OWNER", at, "nano-ack: issuecomment-900")]).map((i) => i.id), [900]);
+  // A submitted trusted review can ack a COMMENT too (both parsers read the same sources); a pending one cannot.
+  const cm = c(42, "jwulf", "OWNER", at, "please change Y");
+  assertEquals(deriveReviews([rv(904, "jwulf", "OWNER", at, "nano-ack: issuecomment-42\ndone")], [cm]), []);
+  assertEquals(deriveReviews([rv(905, "jwulf", "OWNER", at, "nano-ack: issuecomment-42", "PENDING")], [cm]).map((i) => i.id), [42]);
+  assertEquals(deriveReviews([rv(906, "jwulf", "OWNER", at, "nano-ack: review-42")], [cm]).map((i) => i.id), [42]);
 });
 
 test("pagination: PR reviews beyond the first page (GitHub default 30) are read", async () => {

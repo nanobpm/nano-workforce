@@ -223,10 +223,13 @@ export function deriveOperatorFeedback(input: OperatorFeedbackInput): OperatorFe
     .map((c) => c.body);
   // A trusted review body is an ack source too: the agent may post under the operator's identity.
   const trustedReviews = (input.reviews ?? []).filter((r) => isTrustedAuthor(r.association, r.login));
-  const acked = parseFeedbackAcks(ackBodies);
   // Only SUBMITTED reviews ack: GitHub returns the caller's own PENDING draft, which may be discarded.
   const submittedReviews = trustedReviews.filter((r) => r.state.toUpperCase() !== "PENDING" && r.submittedAt !== "");
-  const ackedReviews = parseReviewAcks([...ackBodies, ...submittedReviews.map((r) => r.body)]);
+  // ONE ack-source list feeds BOTH parsers (separate id namespaces), so a submitted review can ack
+  // a comment exactly as a comment can ack a review.
+  const ackSources = [...ackBodies, ...submittedReviews.map((r) => r.body)];
+  const acked = parseFeedbackAcks(ackSources);
+  const ackedReviews = parseReviewAcks(ackSources);
   const items: OperatorFeedbackItem[] = [];
   const consider = (c: IssueComment, source: "issue" | "pr", label: string) => {
     if (!isTrustedAuthor(c.association, c.login)) return;
