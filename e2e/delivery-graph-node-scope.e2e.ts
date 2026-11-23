@@ -125,10 +125,13 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
     assert.match(prompt, /Retry this step/, "the prompt names how to resolve it");
     assert.doesNotMatch(prompt, /opened PR 1/, "a sibling's report never leaks into this node's escalation");
 
-    // The shared root holds no agent result a sibling could read back.
+    // The shared root holds no agent result a sibling could read back. A null CAN surface there: under
+    // Zeebe's mergeDocument walk (nano-bpm#1763, pinned to Zeebe golden traces) a pass-through output
+    // whose value equals the node's null seed is not captured by that seed and propagates upward. A
+    // null carries no report, and every node reads its own null-seeded local first, so it is inert.
     const root = await rootVars(app, pik);
     for (const name of ["status", "summary", "question", "pr", "value", "decision"]) {
-      assert.equal(root.has(name), false, `root must not carry the node-local '${name}'`);
+      assert.equal(root.get(name) ?? null, null, `root must not carry the node-local '${name}'`);
     }
     assert.equal(root.get("n0_pr") ?? root.get(`${"n0"}_pr`), "acme/repo#1", "a's emit still publishes onward as <el>_pr");
   });
@@ -306,10 +309,14 @@ describe("delivery-graph node scope — node-local agent reports, retry-node, pr
   test("preflight: a node whose nodeInputs were lost raises an incident naming the cause, and proceeds once restored", async () => {
     const app = await boot();
     await observeConnectors(app);
-    // `a` simulates the root-variable loss (nano-bpm#1331) while it runs: it completes with
-    // `nodeInputs: null`, which propagates to the root `nodeInputs` the runner seeded.
+    // `a` simulates the root-variable loss (nano-bpm#1331) while it runs by nulling the root
+    // `nodeInputs` the runner seeded. (A job result can't do it: `a`'s task has output mappings, so
+    // under Zeebe scope semantics its unmapped result variables stay task-local, #1045.)
     let seed: unknown;
-    await app.engine.registerWorker("senior:a", async () => ({ status: "done", pr: PR_A, nodeInputs: null }));
+    await app.engine.registerWorker("senior:a", async (job) => {
+      await app.engine.setVariables({ scopeKey: String(job.processInstanceKey), variables: { nodeInputs: null } });
+      return { status: "done", pr: PR_A };
+    });
     let bRuns = 0;
     const bJobTypes: unknown[] = [];
     await app.engine.registerWorker(

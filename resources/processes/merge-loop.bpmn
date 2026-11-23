@@ -224,6 +224,12 @@
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:output source="=mergeStallRounds + 1" target="mergeStallRounds" />
+          <zeebe:output source="=mergeState" target="mergeState" />
+          <zeebe:output source="=failingChecks" target="failingChecks" />
+          <zeebe:output source="=failingChecksList" target="failingChecksList" />
+          <zeebe:output source="=reviewThreads" target="reviewThreads" />
+          <zeebe:output source="=pendingChecks" target="pendingChecks" />
+          <zeebe:output source="=updatePending" target="updatePending" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_mw_stall</bpmn:incoming>
@@ -263,6 +269,11 @@
         <zeebe:ioMapping>
           <zeebe:output source="=if mergeStatus = &#34;retry&#34; then mergeRetryRound + 1 else mergeRetryRound" target="mergeRetryRound" />
           <zeebe:output source="=if mergeStatus = &#34;review-pending&#34; then reviewRequestRound else 0" target="reviewRequestRound" />
+          <zeebe:output source="=mergeStatus" target="mergeStatus" />
+          <zeebe:output source="=status" target="status" />
+          <zeebe:output source="=question" target="question" />
+          <zeebe:output source="=reviewHead" target="reviewHead" />
+          <zeebe:output source="=assessmentAnswer" target="assessmentAnswer" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_mReady</bpmn:incoming>
@@ -569,6 +580,11 @@
             <zeebe:output source="=guardReviewRequestMax" target="reviewRequestMax" />
             <zeebe:output source="=guardReviewRequestWait" target="reviewRequestWait" />
             <zeebe:output source="=guardReviewRequest" target="reviewRequest" />
+            <zeebe:output source="=status" target="status" />
+            <zeebe:output source="=summary" target="summary" />
+            <zeebe:output source="=question" target="question" />
+            <zeebe:output source="=dependsOn" target="dependsOn" />
+            <zeebe:output source="=pushed" target="pushed" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_s0</bpmn:incoming>
@@ -781,6 +797,10 @@
             <zeebe:output source="=guardReviewRequestMax" target="reviewRequestMax" />
             <zeebe:output source="=guardReviewRequestWait" target="reviewRequestWait" />
             <zeebe:output source="=guardReviewRequest" target="reviewRequest" />
+            <zeebe:output source="=status" target="status" />
+            <zeebe:output source="=summary" target="summary" />
+            <zeebe:output source="=question" target="question" />
+            <zeebe:output source="=dependsOn" target="dependsOn" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_s0</bpmn:incoming>

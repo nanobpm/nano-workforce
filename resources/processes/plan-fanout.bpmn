@@ -371,6 +371,8 @@
         <zeebe:assignmentDefinition candidateGroups="operators" assignee="=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != &#34;&#34;) then escalationAssignee else &#34;&#34;" />
         <zeebe:ioMapping>
           <zeebe:output source="=(if planFindings = null then &#34;&#34; else planFindings) + (if (notes = null or notes = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Human guidance:&#10;&#34; + notes)" target="planFindings" />
+          <zeebe:output source="=directive" target="directive" />
+          <zeebe:output source="=notes" target="notes" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_plan_empty</bpmn:incoming>
@@ -419,6 +421,8 @@
         <zeebe:ioMapping>
           <zeebe:output source="=(if planReviewEpoch = null then 0 else planReviewEpoch) + 1" target="planReviewEpoch" />
           <zeebe:output source="=(if planFindings = null then &#34;&#34; else planFindings) + (if (notes = null or notes = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Human guidance:&#10;&#34; + notes)" target="planFindings" />
+          <zeebe:output source="=directive" target="directive" />
+          <zeebe:output source="=notes" target="notes" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_plan_escalate</bpmn:incoming>
