@@ -1,3 +1,9 @@
+## [0.222.4](https://github.com/nanobpm/nano-workforce/compare/v0.222.3...v0.222.4) (2026-11-23)
+
+### Bug Fixes
+
+* **delivery-graph:** require a merged-PR gate on edges out of a merge:true agent ([#1033](https://github.com/nanobpm/nano-workforce/issues/1033)) ([fb99617](https://github.com/nanobpm/nano-workforce/commit/fb996171dfa63a6c20e0d25a469ad51558f6feab)), closes [#1031](https://github.com/nanobpm/nano-workforce/issues/1031) [#962](https://github.com/nanobpm/nano-workforce/issues/962) [#962](https://github.com/nanobpm/nano-workforce/issues/962) [#1031](https://github.com/nanobpm/nano-workforce/issues/1031) [#88](https://github.com/nanobpm/nano-workforce/issues/88) [#92](https://github.com/nanobpm/nano-workforce/issues/92)
+
 ## [0.222.3](https://github.com/nanobpm/nano-workforce/compare/v0.222.2...v0.222.3) (2026-11-23)
 
 ### Bug Fixes
