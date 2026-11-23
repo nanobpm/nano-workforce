@@ -173,3 +173,21 @@ test("incident surfacing: a healthy delivery run keeps its status and a null inc
   assertEquals(delivery.status, "running");
   assertEquals(delivery.incident, null);
 });
+
+// Issue #1034: a merge loop waiting on a Copilot review of a head the reviewer hasn't seen read
+// `waiting_merge` — identical to "waiting for CI". /status now names the wait and the head.
+test("waitReason: a waiting_merge PR whose newest merge audit is a review wait reads waiting_review(<sha7>)", async () => {
+  const merges = [
+    { id: 1, pr_key: "owner/repo#1", outcome: "review-pending", detail: "no review [head 51c424c0000000000000000000000000000000ff]" },
+    { id: 2, pr_key: "owner/repo#1", outcome: "review-requested", detail: "request #1: requested" },
+  ];
+  const stores: Stores = {
+    pull_requests: { rows: [prRow({ status: "waiting_merge" })], key: "pr_key" },
+    user_tasks: { rows: [], key: "id" },
+    merges: { rows: merges, key: "id" },
+  };
+  const [pr] = await activePrs(memData(stores), fakeEngine());
+  assertEquals(pr.waitReason, "waiting_review(51c424c)");
+  const plain = await statusOf({ status: "waiting_merge" });
+  assertEquals(plain.waitReason, null);
+});

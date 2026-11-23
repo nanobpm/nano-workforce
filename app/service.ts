@@ -105,7 +105,13 @@ import { ENGINE_TERMINAL_STATES } from "./reconcile.ts";
 // "./service.ts"` call sites (and its tests) keep resolving.
 import { repoEnvelopeVars } from "./repoEnvelope.ts";
 import { maybeStartRetro } from "./retro.ts";
-import { clampNudgeMinutes, isoDurationToMs, isReviewStale, reviewWaitTimeout } from "./reviewWait.ts";
+import {
+  clampNudgeMinutes,
+  isoDurationToMs,
+  isReviewStale,
+  reviewWaitReason,
+  reviewWaitTimeout,
+} from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
   buildUserTaskRow,
@@ -1308,6 +1314,8 @@ export async function startMerge(
       reviewRequestMax: MAX_REVIEW_REQUESTS,
       reviewRequestWait: REVIEW_REQUEST_WAIT,
       reviewRequest: null,
+      // The head the backstop found unreviewed (issue #1034) — named in the review escalation question.
+      reviewHead: null,
       // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).
       rootRequestKey,
       // Operator steering (issue #956 review): the run's durable custom instructions, so the merge
@@ -1433,6 +1441,10 @@ export interface ActivePr {
   /** Why the app last cancelled this PR's loop (issue #943), naming the successor/outcome; null when
    * never. An `orphaned` status means the loop ended with no reason, successor, or escalation. */
   terminationReason: string | null;
+  /** Why a merge-stage PR is waiting (issue #1034): `waiting_review(<sha7>)` while the merge loop
+   * waits on a Copilot review of that head (derived from the newest `merges` audit rows); null
+   * otherwise — so a review wait no longer reads identically to "waiting for CI". */
+  waitReason: string | null;
 }
 
 /** Every tracked PR not in a terminal state (converged/abandoned), newest-updated first. Backs
@@ -1510,6 +1522,24 @@ export async function activePrs(
     // drains on the first serves after upgrade instead of keeping every /status on the slow path.
     await hydrateLegacyMergePolicy(data, p, vars);
   }
+  // Issue #1034: name a merge-stage review wait. Only merge-stage rows read their audit trail (a
+  // local indexed `merges(pr_key)` read), so the hot path stays engine-free.
+  const waitReasonByPr = new Map<string, string | null>();
+  const mergeAudit = data.table("merges", "id");
+  for (const p of active) {
+    if (p.status !== "waiting_merge") continue;
+    const rows = await mergeAudit.find({ pr_key: p.pr_key }).catch(() => []);
+    waitReasonByPr.set(
+      p.pr_key,
+      reviewWaitReason(
+        rows.map((r) => ({
+          id: typeof r.id === "number" ? r.id : Number(r.id),
+          outcome: String(r.outcome ?? ""),
+          detail: typeof r.detail === "string" ? r.detail : null,
+        })),
+      ),
+    );
+  }
   return active.map((p) => {
     // Issue #931: an ACTIVE engine incident parked on the loop's instance must be VISIBLE — the row
     // kept reading `converging` for hours while nothing ran. Overlay the derived `incident` status
@@ -1535,6 +1565,7 @@ export async function activePrs(
       merge: mergeByPr.get(p.pr_key) ?? mergePolicyDefault(),
       incident,
       terminationReason: p.termination_reason ?? null,
+      waitReason: waitReasonByPr.get(p.pr_key) ?? null,
     };
   });
 }
