@@ -58,7 +58,7 @@ export function isAssessmentAccepted(comments: readonly IssueComment[], head: st
 /** Pure: classify a human's escalation answer. `accept` requires an EXACT acceptance command
  * (accept / accepted / approve / approved / lgtm / merge / land, optional trailing `.`/`!`) — any
  * conditional or negative prose ("accept only after fixing…", "merge is not safe") is NOT
- * acceptance and stays unrecognised (fail closed); `fix` (`fix: <instructions>` / `fix …`) `fix` (`fix: <instructions>` / `fix …`) re-enters convergence carrying the
+ * acceptance and stays unrecognised (fail closed); `fix` (`fix: <instructions>` / `fix …`) re-enters convergence carrying the
  * answer as instructions; anything else is unrecognised (null). */
 export function classifyAssessmentAnswer(answer: string | null | undefined): "accept" | "fix" | null {
   const a = (answer ?? "").trim().toLowerCase();
