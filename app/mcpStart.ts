@@ -23,6 +23,7 @@
 // blank-variable run.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { type StartFeatureResult, startFeature } from "./feature.ts";
+import { resolveFeatureFlags } from "./featureFlags.ts";
 import { type FeatureReadiness, parseFeatureReadiness } from "./featureReadiness.ts";
 import { admitPlan, parseIssue, startPlan } from "./plan.ts";
 import { clampRounds, MAX_ROUNDS, parsePr, submitPr } from "./service.ts";
@@ -78,10 +79,13 @@ export async function admitFeatureTool(
     throw new Error(`${tool}: could not parse issue (use owner/repo#123 or an issue URL)`);
   }
   const baseBranch = requireString(variables, "baseBranch", tool);
-  const converge = optionalBool(variables, "converge", tool) === true;
-  const rawAutoMerge = optionalBool(variables, "autoMerge", tool);
-  const autoMerge = converge && rawAutoMerge === true;
-  const humanApproval = autoMerge && optionalBool(variables, "humanApproval", tool) === true;
+  // Issue #1041: one shared resolver — a `true` flag implies its prerequisites; an explicit
+  // contradiction throws (→ incident). Never silently pins a requested flag off.
+  const { converge, autoMerge, humanApproval } = resolveFeatureFlags({
+    converge: optionalBool(variables, "converge", tool),
+    autoMerge: optionalBool(variables, "autoMerge", tool),
+    humanApproval: optionalBool(variables, "humanApproval", tool),
+  });
   const autoResolveEscalations = optionalBool(variables, "autoResolveEscalations", tool) === true;
   const customInstructions = optionalString(variables, "customInstructions", tool);
   const allowSharedBase = optionalBool(variables, "allowSharedBase", tool) === true;

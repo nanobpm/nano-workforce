@@ -14,6 +14,7 @@
 
 import { withProcessInstanceKey } from "../app/apiShape.ts";
 import { startFeature } from "../app/feature.ts";
+import { ContradictoryFeatureFlagsError, type FeatureFlags, resolveFeatureFlags } from "../app/featureFlags.ts";
 import { type FeatureReadiness, parseFeatureReadiness } from "../app/featureReadiness.ts";
 import { BaseBranchMustExistError, fetchDefaultBranch } from "../app/github.ts";
 import {
@@ -136,18 +137,40 @@ export default defineOperation("startFeature", async ({ body }, app) => {
     }
     throw err;
   }
-  const converge = "converge" in body && body.converge === true;
-  // A PRESENT-but-non-boolean `autoMerge` (e.g. the string "true") is a 400 (issue #916): it used to
-  // read as silently false (`=== true`), so a mistyped merge request ran review-only with no signal.
-  if ("autoMerge" in body && typeof body.autoMerge !== "boolean") {
-    app.log.warn("start-feature rejected: autoMerge must be a boolean", { autoMerge: body.autoMerge });
-    return { status: 400, body: { error: "autoMerge must be a boolean (true or false)" } };
+  // A PRESENT-but-non-boolean flag (e.g. the string "true") is a 400 (issue #916): it used to read
+  // as silently false (`=== true`), so a mistyped merge request ran review-only with no signal.
+  // An explicitly present `null`/`undefined` is rejected too (the request schema is non-nullable).
+  for (const flag of ["converge", "autoMerge", "humanApproval"] as const) {
+    if (flag in body) {
+      const v: unknown = Reflect.get(body, flag);
+      if (typeof v !== "boolean") {
+        app.log.warn(`start-feature rejected: ${flag} must be a boolean`, { [flag]: v });
+        return { status: 400, body: { error: `${flag} must be a boolean (true or false)` } };
+      }
+    }
   }
-  // Auto-merge is only meaningful as a follow-on to convergence; pin it off when converge is off so
-  // the persisted row and the process variable can't disagree.
-  const autoMerge = converge && "autoMerge" in body && body.autoMerge === true;
-  // Human approval gates the merge-loop, so it is moot (pinned off) without auto-merge (issue #826).
-  const humanApproval = autoMerge && "humanApproval" in body && body.humanApproval === true;
+  // Issue #1041: the merge-intent flags resolve through the ONE shared resolver — a `true` flag
+  // implies its prerequisites (humanApproval ⇒ autoMerge ⇒ converge); an explicit contradiction is
+  // a 400. A flag the caller set to true is never silently pinned off.
+  const flagOf = (k: "converge" | "autoMerge" | "humanApproval"): boolean | undefined => {
+    const v: unknown = k in body ? Reflect.get(body, k) : undefined;
+    return typeof v === "boolean" ? v : undefined;
+  };
+  let flags: FeatureFlags;
+  try {
+    flags = resolveFeatureFlags({
+      converge: flagOf("converge"),
+      autoMerge: flagOf("autoMerge"),
+      humanApproval: flagOf("humanApproval"),
+    });
+  } catch (err) {
+    if (err instanceof ContradictoryFeatureFlagsError) {
+      app.log.warn("start-feature rejected: contradictory flags", { message: err.message });
+      return { status: 400, body: { error: err.message } };
+    }
+    throw err;
+  }
+  const { converge, autoMerge, humanApproval } = flags;
   // Opt-in escalation steward (issue #889): only when explicitly requested does this run's
   // escalations become eligible for steward auto-resolution. Default off.
   const autoResolveEscalations = "autoResolveEscalations" in body && body.autoResolveEscalations === true;
@@ -242,5 +265,10 @@ export default defineOperation("startFeature", async ({ body }, app) => {
       },
     };
   }
-  return { status: 202, body: withProcessInstanceKey(result) };
+  // Echo the EFFECTIVE flags (issue #1041) so a caller sees whether a merge loop will run — but ONLY
+  // for a run this request actually started. On `already-active` the request's flags were NOT applied
+  // (the live run keeps its own), so echoing them would misreport e.g. autoMerge:true on a review-only
+  // run — the very silent drop #1041 fixes. Omit them there.
+  if (result.outcome === "already-active") return { status: 202, body: withProcessInstanceKey(result) };
+  return { status: 202, body: { ...withProcessInstanceKey(result), converge, autoMerge, humanApproval } };
 });

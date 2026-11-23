@@ -282,6 +282,55 @@ describe("MCP process tools — message-started runs (issue #976)", () => {
     });
   });
 
+  // Issue #1041: the MCP door resolves merge intent through the shared resolver — a `true` flag
+  // implies its prerequisites (never silently pinned off); an explicit contradiction is an incident.
+  for (const [n, flags, want] of [
+    [10, { autoMerge: true }, { converge: 1, auto_merge: 1, human_approval: 0 }],
+    [11, { humanApproval: true }, { converge: 1, auto_merge: 1, human_approval: 1 }],
+  ] as const) {
+    test(`feature: start-feature with ${JSON.stringify(flags)} seeds the implied flags`, async () => {
+      await withApp(async (app) => {
+        await app.engine.publishMessage({
+          name: "start-feature",
+          correlationKey: `mcp-feature-flags-${n}`,
+          variables: { issue: `owner/repo#${n}`, baseBranch: "main", confirmDefaultBase: true, ...flags },
+        });
+        await settleFully(app);
+        const run = await app.db
+          .table<{ feature_key: string; converge: number; auto_merge: number; human_approval: number }>(
+            "feature_runs",
+            "feature_key",
+          )
+          .findOne({ feature_key: `owner/repo#${n}` });
+        assert.ok(run, "the feature_runs row was registered");
+        assert.equal(Number(run.converge), want.converge);
+        assert.equal(Number(run.auto_merge), want.auto_merge);
+        assert.equal(Number(run.human_approval ?? 0), want.human_approval);
+      });
+    });
+  }
+
+  for (const [n, flags] of [
+    [12, { autoMerge: true, converge: false }],
+    [13, { humanApproval: true, autoMerge: false }],
+    [14, { humanApproval: true, converge: false }],
+  ] as const) {
+    test(`feature: contradictory start-feature ${JSON.stringify(flags)} is an incident, no run`, async () => {
+      await withApp(async (app) => {
+        await app.engine.publishMessage({
+          name: "start-feature",
+          correlationKey: `mcp-feature-contra-${n}`,
+          variables: { issue: `owner/repo#${n}`, baseBranch: "main", confirmDefaultBase: true, ...flags },
+        });
+        await settleFully(app);
+        const incidents = await app.engine.searchIncidents({});
+        assert.ok(incidents.length > 0, "a contradictory start message raises an incident");
+        const runs = await app.db.table<{ feature_key: string }>("feature_runs", "feature_key").all();
+        assert.equal(runs.length, 0, "no feature run was registered for contradictory flags");
+      });
+    });
+  }
+
   test("feature: invalid input fails loudly (incident), never a silent run", async () => {
     await withApp(async (app) => {
       await app.engine.publishMessage({
