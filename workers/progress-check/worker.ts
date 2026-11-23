@@ -338,6 +338,7 @@ export function makeHandler(deps: {
     // The stamp and the baseline advance are written in ONE atomic row update (see `commit` below),
     // so this guard can never disagree with the baseline it replays against.
     if (jobKey && row?.last_progress_job_key === jobKey && typeof row.last_progress_result === "string") {
+      app.log.info("progress-check decision replayed for a redelivered job", { prKey, jobKey, result: row.last_progress_result });
       // biome-ignore lint/plugin: replay a worker outcome persisted as JSON in the idempotency stamp.
       return JSON.parse(row.last_progress_result) as Out;
     }
@@ -361,6 +362,11 @@ export function makeHandler(deps: {
     // superseded) when either key is absent (an older instance, or a row whose `process_key` is not
     // yet seeded) so normal single-run behaviour is untouched. Compare as strings — `process_key` is
     // persisted via `String(processInstanceKey)`, and a job key can arrive numeric.
+    // Read-outcome diagnostics surfaced by the decision log in `commit` (#1032).
+    const diag: { prStateRead: "ok" | "failed" | "not-read"; headRead: "ok" | "failed" | "not-read" } = {
+      prStateRead: "not-read",
+      headRead: "not-read",
+    };
     const isSuperseded = async (): Promise<boolean> => {
       const currentOwner = (await prs.get(prKey))?.process_key ?? null;
       const jobOwner = job.processInstanceKey ?? null;
@@ -388,7 +394,26 @@ export function makeHandler(deps: {
       const ts = new Date().toISOString();
       // Re-check ownership immediately before the write and drop it when this job no longer owns the
       // row — acking without persisting is correct (the straggler's token is in a terminated instance).
-      if (await isSuperseded()) {
+      const superseded = await isSuperseded();
+      // ONE decision log per delivery (#1032): the routing outcome gw-progress/gw-husk will read, the
+      // reason, and whether the PR state read succeeded — so a surprising route (e.g. an escalation on
+      // a converged head) can be diagnosed from logs instead of from post-hoc process variables.
+      app.log.info("progress-check decision", {
+        prKey,
+        round,
+        jobKey,
+        processInstanceKey: job.processInstanceKey ?? null,
+        progressed: out.progressed,
+        reason: out.noProgressReason ?? null,
+        huskRetry: out.huskRetry ?? null,
+        convergedHead: out.convergedHead,
+        ciRed: out.ciRed,
+        prGone: out.prGone,
+        prStateRead: diag.prStateRead,
+        headRead: diag.headRead,
+        superseded,
+      });
+      if (superseded) {
         return out;
       }
       await prs.update(prKey, {
@@ -446,6 +471,8 @@ export function makeHandler(deps: {
     // then END (merged → converged/merged, closed → abandoned), never husk-retry or escalate against
     // a non-open PR. Re-read the live state every round; an unreadable state fails OPEN (null → open).
     const prState = await (deps.readPrState ?? defaultReadPrState)(ghRepo, ghNumber).catch(() => null);
+    diag.headRead = currentHead ? "ok" : "failed";
+    diag.prStateRead = prState ? "ok" : "failed";
     const liveness = classifyPrLiveness(prState);
     if (liveness === "merged" || liveness === "closed") {
       app.log.info(`PR ${liveness} mid-round — ending the convergence loop without escalating (#988)`, {

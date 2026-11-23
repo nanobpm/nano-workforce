@@ -313,6 +313,29 @@ export function parseSuppressedAdvisories(reviewBody: string | null | undefined)
  *   • a ccr-overview-v2 `<summary>…Open (N)…</summary>` section (issue #835's format) with N ≥ 1.
  * A body carrying NONE of these reports no open findings (empty array) — including the empty body
  * of a comment-only review. Pure; unit-tested. */
+const NEEDS_CLOSER_LOOK_RE = /^[ \t]*(?:#{1,6}[ \t]*)?(?:🔵[ \t]*)?(?:\*\*)?needs a closer look\b/imu;
+const VERDICT_LINE_RE = /^[ \t]*(?:#{1,6}[ \t]*)?(?:[🟡🔵][ \t]*)?(?:\*\*)?(?:changes recommended|needs a closer look)\b/imu;
+
+/** The reviewer's overall VERDICT text (issue #1032), quoted verbatim so a convergence escalation can
+ * show the human the concern a thread-only picture hides: the first "Changes recommended" / "Needs a
+ * closer look" verdict line plus the paragraph that follows it, whitespace-collapsed and capped at
+ * `max` chars. `""` when the body carries no such verdict. Pure; unit-tested. */
+export function reviewVerdictExcerpt(reviewBody: string | null | undefined, max = 600): string {
+  const lines = (reviewBody ?? "").split(/\r?\n/);
+  const start = lines.findIndex((l) => VERDICT_LINE_RE.test(l));
+  if (start < 0) return "";
+  const parts = [lines[start]];
+  let i = start + 1;
+  while (i < lines.length && lines[i].trim() === "") i++;
+  for (; i < lines.length && lines[i].trim() !== "" && !/^\s*(?:#{1,6}\s|<)/.test(lines[i]); i++) parts.push(lines[i]);
+  const text = parts
+    .join(" ")
+    .replace(/^[\s#]+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
 export function parseReviewOpenFindings(reviewBody: string | null | undefined): string[] {
   const body = reviewBody ?? "";
   if (body.trim() === "") return [];
@@ -321,6 +344,10 @@ export function parseReviewOpenFindings(reviewBody: string | null | undefined): 
   // prose (a clean review's file table may legitimately say `Recognizes "Changes recommended"`).
   // A verdict line STARTS with the verdict (`### 🟡 Changes recommended`, `🟡 Changes recommended`).
   if (/^[ \t]*(?:#{1,6}[ \t]*)?(?:🟡[ \t]*)?changes recommended\b/imu.test(body)) out.push("changes recommended");
+  // 🔵 "Needs a closer look" (issue #1032): the reviewer could not clear the change and asks for a
+  // human assessment IN THE SUMMARY (often alongside "No open issues" and zero threads). It is a
+  // non-clean verdict — never converge on it silently.
+  if (NEEDS_CLOSER_LOOK_RE.test(body)) out.push("needs a closer look");
   // Each <summary> match is bounded by its own closing tag ([^<]* cannot cross `</summary>`).
   for (const m of body.matchAll(/<summary>(?:<strong>)?\s*(\d+)\s+open\s+issues?\s*(?:<\/strong>)?\s*<\/summary>/gi)) {
     if (Number(m[1]) > 0) out.push(`${m[1]} open issue${m[1] === "1" ? "" : "s"}`);
@@ -347,6 +374,9 @@ export function reconcileReviewOpenFindings(
 ): string[] {
   const findings = parseReviewOpenFindings(reviewBody);
   if (findings.length === 0) return findings;
+  // "Needs a closer look" (#1032) is a summary-level request for human assessment with no thread to
+  // resolve — live thread resolution can never clear it.
+  if (findings.includes("needs a closer look")) return findings;
   // FAIL CLOSED on ANY unresolved live thread (issue #1018 review): a thread opened AFTER the frozen
   // summary (absent from it) must never be masked by clearing the summary's own resolved links.
   if (threads.some((t) => !t.isResolved)) return findings;

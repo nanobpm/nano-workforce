@@ -1493,6 +1493,24 @@ test("progress-check: an addressed no-advance round on a converged head (0 threa
   });
 });
 
+test("progress-check: logs its routing decision with the PR-state read outcome (#1032)", async () => {
+  for (const [state, read] of [[prStateFixture({ unresolvedThreads: 0, failingChecks: 0 }), "ok"], [null, "failed"]] as const) {
+    await withPrState(state, async () => {
+      const handler = await makeUnderTest(async () => "sha-1", async () => true);
+      const { app } = fakeApp({ last_round_head: "sha-1" });
+      const logs: { msg: string; meta: Record<string, unknown> }[] = [];
+      app.log.info = ((msg: string, meta: Record<string, unknown>) => logs.push({ msg, meta })) as never;
+      const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0, roundEntryHead: "sha-1" } } as any, app as any);
+      const entry = logs.find((l) => l.msg === "progress-check decision");
+      assert(entry, `decision must be logged: ${JSON.stringify(logs)}`);
+      assertEquals(entry!.meta.prStateRead, read);
+      assertEquals(entry!.meta.convergedHead, out.convergedHead);
+      assertEquals(entry!.meta.progressed, false);
+      assertEquals(entry!.meta.huskRetry, false);
+    });
+  }
+});
+
 test("progress-check: the same no-advance round with an open thread still escalates (#1018)", async () => {
   await withPrState(prStateFixture({ unresolvedThreads: 1, failingChecks: 0 }), async () => {
     const handler = await makeUnderTest(async () => "sha-1", async () => true);
