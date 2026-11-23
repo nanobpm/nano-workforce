@@ -1992,7 +1992,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         // end — the "declared knob silently ignored" defect class. Reject it loudly (path-qualified)
         // until engine parity lands (Magikcraft/nano-bpm#978), rather than mis-compile it. `escalate`
         // (default) and `continue` ARE honored.
-        if (kind === "wait" && config.onTimeout === "fail") {
+        if (kind === "wait" && typeof config.onTimeout === "string" && config.onTimeout.trim() === "fail") {
           errors.push({
             path: `${path}.${configKey}.onTimeout`,
             message:
@@ -2308,7 +2308,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
           if (kind === "wait" && isMergedPrWait(config)) {
             mergedPrWaitNodes.set(id, typeof config.target === "string" ? config.target.trim() : "");
           }
-          if (kind === "connector" && typeof config.target === "string" && isConvergeTarget(config.target)) {
+          if (kind === "connector" && typeof config.target === "string" && isConvergeTarget(config.target.trim())) {
             const payload = isRecord(config.payload) ? config.payload : undefined;
             prBindConsumers.push({
               path,

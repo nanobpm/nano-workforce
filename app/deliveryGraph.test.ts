@@ -3531,3 +3531,21 @@ test("#1033 a blank/whitespace `prState` normalises to merged and satisfies the 
     assertEquals(validateDeliveryGraph(g), [], JSON.stringify(prState));
   }
 });
+
+test("#1033 a padded `onTimeout: \" fail \"` is still rejected (unsupported-on-timeout) — validation trims like parseProbe", () => {
+  const g = {
+    name: "onTimeout",
+    nodes: [{ id: "g", kind: "wait", wait: { kind: "pr", target: "acme/repo#1", match: { prState: "merged" }, onTimeout: " fail " } }],
+    edges: [],
+  };
+  hasCode(validateDeliveryGraph(g), "unsupported-on-timeout");
+});
+
+test("#1033 a padded `target: \" converge \"` connector is validated as a PR-binding consumer (unbound-pr)", () => {
+  const g = noLiteralConverge({ edges: [{ from: "open", to: "land" }, { from: "land", to: "merged" }] });
+  const conn = g.nodes[1];
+  if (conn.kind !== "connector" || !("connector" in conn)) throw new Error("fixture shape changed");
+  conn.connector.target = " converge-merge ";
+  const unbound = validateDeliveryGraph(g).filter((e) => e.code === "unbound-pr");
+  assert(unbound.some((e) => e.path === "nodes[1].connector.payload.pr"), JSON.stringify(unbound));
+});
