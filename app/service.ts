@@ -49,15 +49,19 @@ import {
   ensurePromotionPr,
   fetchBranchHead,
   fetchDefaultBranch,
+  fetchLatestCopilotReview,
   fetchPrHead,
   fetchPrMeta,
   fetchPrReviews,
   fetchPrState,
+  hasCopilotWorkStarted,
   hasPendingCopilotReviewer,
+  isCopilotReviewInFlight,
   isNotAPullRequestError,
   type MergeMethod,
   markPullRequestReady,
   type PrState,
+  removeCopilotReviewer,
   requestCopilotReview,
 } from "./github.ts";
 import { assessmentAcceptor, assessmentHeadFromQuestion } from "./humanAssessment.ts";
@@ -110,8 +114,12 @@ import {
   clampNudgeMinutes,
   escalatedWaitReason,
   isoDurationToMs,
+  isReviewMissingOrStale,
   isReviewStale,
+  isReviewWaitOpen,
+  REVIEW_WAIT_ENDED_OUTCOME,
   REVIEW_WAIT_STATUSES,
+  reviewHeadToken,
   reviewWaitReason,
   reviewWaitTimeout,
 } from "./reviewWait.ts";
@@ -2776,6 +2784,131 @@ export async function terminatePrLoop(
   }
 }
 
+/** Issue #1043: the head-review state of a PR — `stale` (readable head with no head-current Copilot
+ * review), `current` (a VERIFIED head-current review), or `unknown` (unreadable review/head → fail
+ * safe). Uses the merge backstop's own predicate ({@link isReviewMissingOrStale}) over the same
+ * readers, so the poller and the backstop never disagree. */
+async function headReviewState(
+  repo: string,
+  number: number,
+  token: string,
+): Promise<{ kind: "stale"; head: string } | { kind: "current" } | { kind: "unknown" }> {
+  const [review, head] = await Promise.all([
+    fetchLatestCopilotReview(repo, number, token).catch(() => null),
+    readCurrentHead(repo, number, token).catch(() => null),
+  ]);
+  if (review === null || !head) return { kind: "unknown" };
+  return isReviewMissingOrStale(review.commitId, head) ? { kind: "stale", head } : { kind: "current" };
+}
+
+/** Issue #1043: how long a poller-issued (or adopted) request may go without Copilot STARTING it
+ * before it counts as silently ignored — the same window `pr.request-review` verifies within. */
+export const POLLER_REVIEW_START_WINDOW_MS = 120_000;
+/** Issue #1043: at most this many asks per head (the first + ONE withdraw/re-add retry), mirroring
+ * `pr.request-review`'s single retry; past it the merge stage's own escalation takes over. */
+export const POLLER_REVIEW_ASKS_PER_HEAD = 2;
+
+/** Issue #1043: REVIEW-ONLY recovery for a waiting PR whose head has no head-current review. It never
+ * publishes `merge-ready` and never touches the row status, so it cannot route around the
+ * mergeability / exclusion-lane gates (a review that lands later simply lets the NEXT normal poll
+ * verdict decide), and it works identically from `wait-mergeable` and the timer-only
+ * `wait-mergeable-repoll` (it needs no process subscription). Bounded per head by
+ * `review-requested` audit rows carrying {@link reviewHeadToken}: an in-flight Copilot request is
+ * ADOPTED (recorded, not re-issued); an unreadable pending state fails safe (no ask). The request
+ * lifecycle is VERIFIED without blocking the poll pass: a later pass that finds no
+ * `copilot_work_started` since the ask once {@link POLLER_REVIEW_START_WINDOW_MS} has elapsed
+ * withdraws and re-adds Copilot ONCE (the `pr.request-review` remedy for a silently ignored request).
+ * When the review becomes VERIFIED head-current while a review wait is the newest audit row, the
+ * canonical {@link REVIEW_WAIT_ENDED_OUTCOME} row closes it so /status stops reporting
+ * `waiting_review` (unreadable reads never close it). */
+/** Merge-audit outcome for a poller review ask GitHub refused (Copilot not assignable). Deliberately
+ *  NOT in `REVIEW_WAIT_OUTCOMES`: it never opens a review wait. */
+export const REVIEW_UNAVAILABLE_OUTCOME = "review-unavailable";
+
+export async function ensureHeadReviewRequested(
+  data: DataLayer,
+  prKey: string,
+  repo: string,
+  number: number,
+  token: string,
+  nowMs: number = Date.now(),
+): Promise<"none" | "adopted" | "requested" | "retried" | "unavailable" | "skipped" | "ended"> {
+  const audit = data.table("merges", "id");
+  const state = await headReviewState(repo, number, token);
+  if (state.kind === "unknown") return "none";
+  if (state.kind === "current") {
+    const rows = (await audit.find({ pr_key: prKey })).map((r) => ({
+      id: typeof r.id === "number" ? r.id : null,
+      outcome: typeof r.outcome === "string" ? r.outcome : "",
+    }));
+    if (!isReviewWaitOpen(rows)) return "none";
+    await audit.insert({
+      pr_key: prKey,
+      outcome: REVIEW_WAIT_ENDED_OUTCOME,
+      method: "review-request",
+      detail: "poller: head-current Copilot review landed",
+      at: new Date(nowMs).toISOString(),
+    });
+    return "ended";
+  }
+  const head = state.head;
+  const marker = reviewHeadToken(head);
+  // An `unavailable` ask (Copilot not assignable) is recorded under a NON-wait outcome: no review
+  // was requested and none can arrive, so it must not open a /status `waiting_review` wait.
+  const prior = [
+    ...(await audit.find({ pr_key: prKey, outcome: "review-requested" })),
+    ...(await audit.find({ pr_key: prKey, outcome: REVIEW_UNAVAILABLE_OUTCOME })),
+  ]
+    .filter((r) => typeof r.detail === "string" && r.detail.includes(marker))
+    .sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+  const record = async (result: string) => {
+    await audit.insert({
+      pr_key: prKey,
+      outcome: result === "unavailable" ? REVIEW_UNAVAILABLE_OUTCOME : "review-requested",
+      method: "review-request",
+      detail: `poller head-current Copilot review ${result} ${marker}`,
+      at: new Date(nowMs).toISOString(),
+    });
+  };
+  if (prior.length > 0) {
+    // Verify the last ask actually STARTED; retry once if it was silently ignored.
+    if (prior.length >= POLLER_REVIEW_ASKS_PER_HEAD) return "skipped";
+    const last = prior[prior.length - 1];
+    if (typeof last.detail === "string" && last.detail.includes(" unavailable ")) return "skipped";
+    // An ADOPTED request was issued by someone else at an unknown time: its `copilot_work_started` may
+    // predate our adoption row, so a since-adoption check could withdraw work already in flight. Never
+    // withdraw/re-add an adopted ask; a genuinely stalled one is bounded by the merge stage's escalation.
+    if (typeof last.detail === "string" && last.detail.includes(" adopted ")) return "skipped";
+    const at = typeof last.at === "string" ? Date.parse(last.at) : Number.NaN;
+    if (Number.isNaN(at) || nowMs - at < POLLER_REVIEW_START_WINDOW_MS) return "skipped";
+    const started = await hasCopilotWorkStarted(repo, number, token, new Date(at).toISOString()).catch(() => null);
+    if (started !== false) return "skipped"; // started, or unverifiable → no spurious retry
+    await removeCopilotReviewer(repo, number, token).catch(() => null);
+    const res = await requestCopilotReview(repo, number, token).catch(() => null);
+    if (res === null) return "skipped"; // transport failure → retried next pass (no marker)
+    await record(res === "requested" ? "retried" : res);
+    return res === "requested" ? "retried" : res;
+  }
+  // GitHub empties `requested_reviewers` once Copilot STARTS, so a review already running (e.g. asked
+  // by the convergence stage just before CI went green) reads as "not pending". Check the timeline
+  // too and ADOPT a running review: a fresh ask would duplicate it, and the retry path would later
+  // withdraw it as "never started since our ask" (#1043 review).
+  const [pending, inFlight] = await Promise.all([
+    hasPendingCopilotReviewer(repo, number, token).catch(() => null),
+    isCopilotReviewInFlight(repo, number, token).catch(() => null),
+  ]);
+  if (pending === null || inFlight === null) return "skipped";
+  let result: "adopted" | "requested" | "unavailable";
+  if (pending || inFlight) result = "adopted";
+  else {
+    const res = await requestCopilotReview(repo, number, token).catch(() => null);
+    if (res === null) return "skipped"; // transport failure → retried next pass (no marker)
+    result = res;
+  }
+  await record(result);
+  return result;
+}
+
 export async function pollMerges(data: DataLayer, engine: EngineClient, token: string) {
   // 0) Pending predecessor retirements from earlier hand-offs (PR #944 review).
   try {
@@ -2932,6 +3065,14 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
         // `pull_request` run once per head (mark ready / close+reopen); rebases change
         // `headRefOid`, so downstream merge-train PRs get a new nudge after every post-rebase
         // landing attempt.
+        // Issue #1043: a head that moved AFTER the last review (an out-of-band force-push following
+        // approval) leaves no head-current Copilot review, and nothing in this stage asked for one.
+        // Ask (or adopt an in-flight ask) once per head — review-only: no `merge-ready`, no status
+        // flip, so every landing gate still runs on the next normal verdict.
+        const asked = await ensureHeadReviewRequested(data, prKey, repo, number, token);
+        if (asked !== "none" && asked !== "skipped") {
+          console.log(`[poller] no head-current review while waiting -> review ${asked} -> ${prKey}`);
+        }
         if (protocol) {
           await maybeEnsureFreshHeadRun(data, repo, number, prKey, protocol, verdict, st, pr);
         }
