@@ -73,3 +73,15 @@ test("escalation repo filter: opaque delivery/agent subject keys never infer a r
   const pr = { subjectType: "pr", subjectKey: "acme/service#3", prKey: null, subjectUrl: null };
   assertEquals(applyEscalationFilter([pr], f.filter).length, 1);
 });
+
+test("escalation repo filter: repo-root subjectUrl with no trailing path still matches", () => {
+  const f = parseEscalationFilter({ repo: "acme/service" });
+  assert(f.ok);
+  if (!f.ok) return;
+  for (const subjectUrl of ["https://github.com/acme/service", "https://github.com/acme/service/", "https://github.com/acme/service?x=1", "https://github.com/acme/service#readme", "https://github.com/acme/service.git"]) {
+    const row = { subjectType: "delivery", subjectKey: "opaque", prKey: null, subjectUrl };
+    assertEquals(applyEscalationFilter([row], f.filter).length, 1);
+  }
+  const other = { subjectType: "delivery", subjectKey: "opaque", prKey: null, subjectUrl: "https://github.com/acme/service-two" };
+  assertEquals(applyEscalationFilter([other], f.filter).length, 0);
+});
