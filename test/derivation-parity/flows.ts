@@ -249,6 +249,10 @@ export const PORTS: readonly PortEntry[] = [
     blockedReason: `${MULTI_START_END_BLOCK} (delivery-human: 1 start, 2 ends)`,
   },
   {
+    model: "friction-sweep",
+    blockedReason: `${MULTI_START_END_BLOCK} (friction-sweep: 1 start, 2 ends)`,
+  },
+  {
     model: "implement-cell",
     blockedReason:
       "blocked (call activity + multi-end): the published @nanobpm/workflow " +

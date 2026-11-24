@@ -1,4 +1,4 @@
--- 148_friction_sweep.sql — issue #1073: the 12-hourly agent friction sweep
+-- 152_friction_sweep.sql — issue #1073: the 12-hourly agent friction sweep
 -- (resources/processes/friction-sweep.bpmn, app/friction.ts).
 --
 -- Three tables, all EXPAND (additive) — nothing is dropped or renamed:
