@@ -4333,10 +4333,6 @@ components:
               - type: string
                 minLength: 1
                 maxLength: 255
-                description: >-
-                  A gate reference: a bare `owner/repo#N` (a PR → `wait[pr, merged]`), a
-                  `pr:`/`issue:`/`epic:` prefixed ref, or a GitHub `/pull/N` (PR) or `/issues/N`
-                  (issue → `wait[issue, completed]`) URL.
               - type: object
                 additionalProperties: false
                 required: [kind, ref]
@@ -4348,16 +4344,10 @@ components:
                     type: string
                     minLength: 1
                     maxLength: 255
-          description: >-
-            OPTIONAL parallel AND gate (issue #1056) — the first issue (or, with `parallel`, every
-            issue) starts only once EVERY listed PR merged (`wait[pr, merged]`), issue completed
-            (`wait[issue, completed]`) and epic/feature planKey fully merged (`wait[epic]`). Each gate
-            gets a 7-day poll budget (re-probe every 5 minutes) and escalates on timeout.
+          description: "OPTIONAL AND gate: wait until every PR merged / issue completed / epic merged (7d budget, then escalate)."
         parallel:
           type: boolean
-          description: >-
-            OPTIONAL (issue #1056) — when true, every issue fans out in parallel once the leading
-            `behind`/`after` gates release, instead of each waiting on the prior issue's merge.
+          description: "OPTIONAL: fan all issues out in parallel once gates release."
         issues:
           type: array
           minItems: 1
@@ -6314,7 +6304,6 @@ paths:
                       - type: string
                         minLength: 1
                         maxLength: 255
-                        description: 'A gate reference: a bare `owner/repo#N` (a PR → `wait[pr, merged]`), a `pr:`/`issue:`/`epic:` prefixed ref, or a GitHub `/pull/N` (PR) or `/issues/N` (issue → `wait[issue, completed]`) URL.'
                       - type: object
                         additionalProperties: false
                         required:
@@ -6331,10 +6320,10 @@ paths:
                             type: string
                             minLength: 1
                             maxLength: 255
-                  description: 'OPTIONAL parallel AND gate (issue #1056) — the first issue (or, with `parallel`, every issue) starts only once EVERY listed PR merged (`wait[pr, merged]`), issue completed (`wait[issue, completed]`) and epic/feature planKey fully merged (`wait[epic]`). Each gate gets a 7-day poll budget (re-probe every 5 minutes) and escalates on timeout.'
+                  description: 'OPTIONAL AND gate: wait until every PR merged / issue completed / epic merged (7d budget, then escalate).'
                 parallel:
                   type: boolean
-                  description: "OPTIONAL (issue #1056) — when true, every issue fans out in parallel once the leading `behind`/`after` gates release, instead of each waiting on the prior issue's merge."
+                  description: 'OPTIONAL: fan all issues out in parallel once gates release.'
                 issues:
                   type: array
                   minItems: 1
