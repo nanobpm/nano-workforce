@@ -21,6 +21,8 @@
 
 import type { AppApi } from "@nanobpm/urban";
 import type { DeliveryGraph, DeliveryGraphNodeProgress, DeliveryGraphRunProgress } from "../nano-generated/api-io.d.ts";
+import { isConvergeTarget } from "./convergeTargets.ts";
+import { type BoundFact, resolveConvergePr } from "./deliveryConnector.ts";
 import { compileDeliveryGraphSemantic } from "./deliveryGraphCompiler.ts";
 import { deliveryGraphProposals } from "./deliveryGraphProposals.ts";
 import { type DeliveryGraphRun, deliveryGraphRuns } from "./deliveryGraphRun.ts";
@@ -143,7 +145,8 @@ export function deriveNodeProgress(input: {
     const escTask = input.userTasks.find((t) => t.elementId !== undefined && owningNodeElement(t.elementId, nodeElements) === node.element);
     let escalation: DeliveryNodeEscalation | null = null;
     if (escTask?.elementId) {
-      const reason = escTask.elementId.endsWith("__esc") ? "timeout" : escTask.elementId.endsWith("__contract") ? "contract" : "human";
+      // `…__esc` (service-node twin) and `…__esc__wait` (a wait gate's timeout twin) are both timeouts.
+      const reason = escTask.elementId.endsWith("__esc") || escTask.elementId.endsWith("__esc__wait") ? "timeout" : escTask.elementId.endsWith("__contract") ? "contract" : "human";
       escalation = { userTaskKey: escTask.userTaskKey, elementId: escTask.elementId, reason };
     }
     const inc = input.incidents.find((i) => i.elementId !== undefined && owningNodeElement(i.elementId, nodeElements) === node.element);
@@ -161,16 +164,10 @@ export function deriveNodeProgress(input: {
 
     let lastProbe: DeliveryNodeProbe | null = null;
     if (node.kind === "wait") {
-      // Where the probe job's result vars (`ready`/`detail`/`observed`) land depends on engine scope
-      // propagation: the probeLoop subProcess declares them only as OUTPUTS, so under Zeebe-parity
-      // propagation a job result lands in the nearest scope already defining the name — else the
-      // process root. Read, innermost first: a probeLoop scope, then the node's own element scope,
-      // then the root — the root only when this is the sole active wait node (a root `ready` is shared
-      // by parallel waits, so attributing it to one of several would be a guess; report null instead).
-      const activeWaits = input.nodes.filter(
-        (n) => n.kind === "wait" && input.elements.some((e) => e.state === "ACTIVE" && owningNodeElement(e.elementId, nodeElements) === n.element),
-      );
-      const rootOk = activeWaits.length === 1 && activeWaits[0]?.element === node.element;
+      // Read the probe result (`ready`/`detail`/`observed`) only from a scope this node OWNS: a
+      // probeLoop scope, then the node's own element scope. A run-ROOT `ready` carries no producer
+      // provenance — it may be a previous (now completed) wait's result — so attributing it to this
+      // node would be a guess; report null instead.
       const scopes: Map<string, string>[] = [];
       for (const id of [`${node.element}_probeLoop`, node.element]) {
         // The last element instance listed wins (most recent loop iteration).
@@ -181,7 +178,6 @@ export function deriveNodeProgress(input: {
         const last = found[found.length - 1];
         if (last) scopes.push(last);
       }
-      if (rootOk && rootVars.has("ready")) scopes.push(rootVars);
       const scope = scopes[0];
       if (scope !== undefined) {
         const ready = parseJson(scope.get("ready") ?? "null");
@@ -200,6 +196,20 @@ export function deriveNodeProgress(input: {
       for (const fact of ["pr", "prUrl"]) {
         const raw = rootVars.get(`${node.element}_${fact}`);
         if (raw !== undefined) candidates.push(parseJson(raw));
+      }
+      if (node.kind === "connector") {
+        // A converge connector with no declared emits enrolls the PR it resolves from its own task-local
+        // `payload`/`boundFacts` inputs — derive the key through the SAME canonical resolver the worker uses.
+        for (const e of own) {
+          const scope = varsByScope.get(e.elementInstanceKey);
+          const target = parseJson(scope?.get("target") ?? "null");
+          if (!scope || typeof target !== "string" || !isConvergeTarget(target.trim())) continue;
+          const payload = parseJson(scope.get("payload") ?? "null");
+          const facts = parseJson(scope.get("boundFacts") ?? "null");
+          const payloadPr = payload !== null && typeof payload === "object" ? Reflect.get(payload, "pr") : undefined;
+          const bound: BoundFact[] = Array.isArray(facts) ? facts : [];
+          candidates.push(resolveConvergePr(payloadPr, bound));
+        }
       }
       for (const c of candidates) {
         const key = prKeyOf(c);

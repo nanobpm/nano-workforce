@@ -124,34 +124,65 @@ test("renderProgressMermaid appends one state class per node", () => {
   assert.match(out, /\n {2}class n3 pending\n$/);
 });
 
-test("lastProbe reads a root-propagated probe result only when the wait node is the sole active wait", () => {
+test("lastProbe never attributes a run-root probe result (no provenance) to a wait", () => {
   const base = {
     nodes: NODES,
     processInstanceKey: PIK,
     variables: [
-      { name: "ready", value: "false", scopeKey: PIK },
-      { name: "detail", value: '"pending"', scopeKey: PIK },
+      { name: "ready", value: "true", scopeKey: PIK },
+      { name: "detail", value: '"merged"', scopeKey: PIK },
     ],
     userTasks: [],
     incidents: [],
   };
-  const sole = deriveNodeProgress({
+  // Wait A (n0) completed with a root-propagated result; wait B (n2) just started and has not probed.
+  const out = deriveNodeProgress({
     ...base,
     elements: [
+      { elementId: "n0", elementInstanceKey: "1", state: "COMPLETED" },
       { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
       { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "ACTIVE" },
     ],
   });
-  assert.deepEqual(sole.find((n) => n.id === "landed")?.lastProbe, { ready: false, detail: "pending", observed: null });
-  const parallel = deriveNodeProgress({
-    ...base,
-    elements: [
-      { elementId: "n0", elementInstanceKey: "1", state: "ACTIVE" },
-      { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
-    ],
+  assert.equal(out.find((n) => n.id === "landed")?.lastProbe, null);
+  assert.equal(out.find((n) => n.id === "gate")?.lastProbe, null);
+});
+
+test("an expired wait's `__esc__wait` twin is classified as a timeout escalation", () => {
+  const out = deriveNodeProgress({
+    nodes: NODES,
+    processInstanceKey: PIK,
+    elements: [{ elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" }],
+    variables: [],
+    userTasks: [{ userTaskKey: "u9", elementId: "delivery-human-task__n2__esc__wait" }],
+    incidents: [],
   });
-  assert.equal(parallel.find((n) => n.id === "landed")?.lastProbe, null);
-  assert.equal(parallel.find((n) => n.id === "gate")?.lastProbe, null);
+  const landed = out.find((n) => n.id === "landed");
+  assert.equal(landed?.escalation?.reason, "timeout");
+  assert.equal(landed?.state, "escalated");
+});
+
+test("a no-emits converge connector reports the PR it resolved from its task-local inputs", () => {
+  const nodes = [{ id: "merge", kind: "connector" as const, element: "n5", emits: [], dependsOn: [] }];
+  const mk = (payload: string, boundFacts: string) =>
+    deriveNodeProgress({
+      nodes,
+      processInstanceKey: PIK,
+      elements: [
+        { elementId: "n5", elementInstanceKey: "50", state: "COMPLETED" },
+        { elementId: "n5_connector", elementInstanceKey: "51", state: "COMPLETED" },
+      ],
+      variables: [
+        { name: "target", value: '"converge-merge"', scopeKey: "51" },
+        { name: "payload", value: payload, scopeKey: "51" },
+        { name: "boundFacts", value: boundFacts, scopeKey: "51" },
+      ],
+      userTasks: [],
+      incidents: [],
+    })[0]?.childRunKeys;
+  assert.deepEqual(mk('{"pr":"o/r#7"}', "[]"), ["o/r#7"]);
+  assert.deepEqual(mk("{}", '[{"from":"impl","name":"pr","value":"https://github.com/o/r/pull/8"}]'), ["o/r#8"]);
+  assert.deepEqual(mk('{"pr":"impl.pr"}', '[{"from":"impl","name":"pr","value":"o/r#9"}]'), ["o/r#9"]);
 });
 
 test("lastProbe reads the node element scope when the result propagated there", () => {
