@@ -453,3 +453,32 @@ test("key resolution uses the delivery-aware epic terminal: a `done` epic with u
   // Every slice merged: both terminal, so the newest-created (the feature) wins.
   assertEquals((await pick([pr({ status: "merged", merged_at: T0 })])).kind, "feature");
 });
+
+test("a delegating feature whose child PR closed or failed is terminal", async () => {
+  for (const status of ["closed", "failed"]) {
+    const app = memApp({ feature_runs: [feature({ status: "converging", pr_key: "o/r#9" })], pull_requests: [pr({ status, active_worker: null })] }, PKS);
+    const body = ((await handler(input("o/r#5"), app)) as Row).body;
+    assertEquals(body.terminal, true, status);
+    assertEquals(body.children[0].terminal, true, status);
+  }
+});
+
+test("a delegating feature surfaces its live child PR's incident; the stage/terminal stay on the rollup", async () => {
+  const inc = { incident_key: "inc-1", incident_since: T0, incident_message: "boom", incident_element: "x" };
+  const app = memApp({ feature_runs: [feature({ status: "converging", pr_key: "o/r#9" })], pull_requests: [pr(inc)] }, PKS);
+  const body = ((await handler(input("o/r#5"), app)) as Row).body;
+  const child = body.children[0];
+  assertEquals(body.status, child.status);
+  assertEquals(body.incident, child.incident);
+  assertEquals(body.incident !== null, true);
+  assertEquals(body.terminal, false);
+});
+
+test("a feature/epic tie is decided by the newest launch (process key), not the restart-preserved created_at", async () => {
+  const later = "2026-11-02T00:00:00Z";
+  const epic = { plan_key: "o/r#5", repo: "o/r", title: "Epic", status: "done", process_key: "100", epic_phase: "Done", auto_merge: 0, auto_resolve_escalations: 0, acknowledged_at: null, created_at: later, updated_at: later };
+  // The feature row is OLDER by created_at but was restarted (newer engine instance) and finished.
+  const restarted = feature({ status: "merged", process_key: "200" });
+  const body = ((await handler(input("o/r#5"), memApp({ feature_runs: [restarted], plans: [epic] }, PKS))) as Row).body;
+  assertEquals(body.kind, "feature");
+});

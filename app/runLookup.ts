@@ -229,12 +229,14 @@ async function featureRollup(data: DataLayer, engine: Engine | undefined, featur
       rolledStatus = child.status;
       terminalBasis = "abandoned";
     } else {
-      rolledStatus = deriveFeatureDelivery(child.status).status;
-      terminalBasis = rolledStatus;
+      terminalBasis = deriveFeatureDelivery(child.status).status;
+      // The child's live `incident` overlay is surfaced on the feature's status, but the stage /
+      // terminal derivation stays on the underlying rollup basis.
+      rolledStatus = !child.terminal && child.incident ? child.status : terminalBasis;
     }
   }
   const terminal = isFeatureDismissableTerminal({ derived_status: terminalBasis, converge: feature.converge, pr_key: feature.pr_key });
-  return { children, child, terminalBasis, rolledStatus, terminal };
+  return { children, child, delegating, terminalBasis, rolledStatus, terminal };
 }
 
 function planLive(p: { derived_status: string }): boolean {
@@ -253,13 +255,23 @@ async function epicTerminal(data: DataLayer, plan: PlanRow): Promise<boolean> {
 }
 
 /** Pick between a feature and an epic sharing one key: the LIVE (non-terminal) run wins; only when
- *  both or neither are live does the newest `created_at` decide. Never `updated_at` — acknowledge and
+ *  both or neither are live does the newest launch (engine process key, else `created_at`) decides. Never `updated_at` — acknowledge and
  *  phase polling bump it, so a dismissed finished run could shadow a live one and the choice flip. */
 async function preferPlan(data: DataLayer, engine: Engine | undefined, feature: FeatureRow, plan: PlanRow): Promise<boolean> {
   const fl = !(await featureRollup(data, engine, feature)).terminal;
   const pl = !(await epicTerminal(data, plan));
   if (fl !== pl) return pl;
+  // A restart re-seeds a fresh engine instance but keeps the row's original `created_at`, so the
+  // engine's monotonic process-instance key is the per-launch generation (advances on restart, never
+  // on polling/acknowledgment). Fall back to `created_at` only when either key is absent/non-numeric.
+  const fk = launchGeneration(feature.process_key);
+  const pk = launchGeneration(plan.process_key);
+  if (fk !== null && pk !== null && fk !== pk) return pk > fk;
   return (plan.created_at ?? "") > (feature.created_at ?? "");
+}
+
+function launchGeneration(processKey: string | null | undefined): bigint | null {
+  return typeof processKey === "string" && /^[0-9]+$/.test(processKey) ? BigInt(processKey) : null;
 }
 
 function withChildKeys(view: RunView): RunView {
@@ -271,7 +283,7 @@ function withChildKeys(view: RunView): RunView {
 /** Look one run up by key — `owner/repo#N` (feature, epic, or PR) or a delivery-graph runKey — at any
  *  stage. Resolution order for an `owner/repo#N` key: the CURRENT issue run (feature or epic), then
  *  PR (an issue and a PR never share a number in one repo). A feature and an epic for the same issue
- *  can coexist (admission checks separate tables): the live one wins, else the newest-created
+ *  can coexist (admission checks separate tables): the live one wins, else the newest launch
  *  (see `preferPlan`). Null only when nwf has never tracked the key. */
 export async function lookupRun(data: DataLayer, engine: Engine | undefined, key: string): Promise<RunView | null> {
   const feature = await featureRunsTracking(data).get(key);
@@ -281,7 +293,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
     const openEsc = newestEscalation(tasks);
     const status = await effectiveStatus(data, feature.derived_status, feature.process_key);
     const probes = await readRootVar(engine, feature.process_key, "readinessProbes");
-    const { children, child, terminalBasis, rolledStatus, terminal } = await featureRollup(data, engine, feature);
+    const { children, child, delegating, terminalBasis, rolledStatus, terminal } = await featureRollup(data, engine, feature);
     const topStatus = rolledStatus ?? status;
     // Stage derives from the SAME rolled-up basis as `terminal` (a lagging feature row must not read
     // `Converging` beside a merged child), keeping the tracking VIEW's raw `abandoned` (∈ Done) rather
@@ -319,7 +331,9 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       leaseUntil: child?.leaseUntil ?? null,
       prUrl: child?.prUrl ?? (parsePr(feature.pr_key)?.url ?? null),
       openEscalation: openEsc ?? child?.openEscalation ?? null,
-      incident: null,
+      // A delegating feature's blocking incident lives on its child PR's loop: propagate it (the
+      // child view already nulls it once terminal).
+      incident: delegating ? (child?.incident ?? null) : null,
       acknowledgedAt: feature.acknowledged_at ?? null,
       createdAt: feature.created_at,
       updatedAt: feature.updated_at,
