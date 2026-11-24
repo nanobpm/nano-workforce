@@ -194,13 +194,21 @@ test("a failed collect leaves the watermark untouched and persists nothing", asy
 
 // ── File ───────────────────────────────────────────────────────────────────────────────────────
 
-function githubStub(open: FrictionIssue[] = []) {
+function githubStub(open: FrictionIssue[] = [], pages?: FrictionIssue[][]) {
   const calls: string[] = [];
+  const allPages = pages ?? [open];
   const created: { title: string; body: string; labels: string[] }[] = [];
   const github: FrictionGithub = {
     listOpenIssues: async () => {
       calls.push("list");
       return open;
+    },
+    listIssuesPage: async (_repo, _label, page) => {
+      calls.push("list");
+      return { issues: allPages[page - 1] ?? [], more: page < allPages.length };
+    },
+    reopen: async (_repo, n) => {
+      calls.push(`reopen:${n}`);
     },
     createIssue: async (_repo, issue) => {
       calls.push("create");
@@ -863,16 +871,54 @@ test("a job whose lease expired (TIMED_OUT) is collected as a lease-expiry signa
   });
 });
 
-test("merging 3 same-fingerprint findings counts 3 distinct runs, not 1", async () => {
-  const { github, created } = githubStub();
-  const res = await fileFindings(
-    { github, config: CONFIG, window: WINDOW, observed: () => ({ occurrences: 3, runs: 3 }), leaseHeld: HELD, evidenceLinks: NOLINKS },
-    parseFindings([
-      finding({ occurrences: 1, runs: 1, evidence: "- run A" }),
-      finding({ occurrences: 1, runs: 1, evidence: "- run B" }),
-      finding({ occurrences: 1, runs: 1, evidence: "- run C" }),
-    ]).findings,
-  );
-  assertEquals(res.created.length, 1);
-  assert(created[0]?.body.includes("3 occurrence(s) across 3 run(s)"), created[0]?.body ?? "");
+test("a closed (completed) issue carrying the fingerprint gets a comment and is reopened, not duplicated", async () => {
+  const closed = [{ number: 9, url: "https://github.com/acme/friction/issues/9", title: "t", body: fingerprintMarker("redirect-blocked"), state: "closed", stateReason: "completed" }];
+  const { github, calls, created } = githubStub(closed);
+  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: HELD, evidenceLinks: NOLINKS }, parseFindings([finding()]).findings);
+  assertEquals(created.length, 0);
+  assertEquals(calls, ["list", "comment:9", "reopen:9"]);
+  assertEquals(res.updated, ["https://github.com/acme/friction/issues/9"]);
+});
+
+test("a closed not_planned issue carrying the fingerprint gets a comment but is NOT reopened", async () => {
+  const closed = [{ number: 9, url: "https://github.com/acme/friction/issues/9", title: "t", body: fingerprintMarker("redirect-blocked"), state: "closed", stateReason: "not_planned" }];
+  const { github, calls, created } = githubStub(closed);
+  await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: HELD, evidenceLinks: NOLINKS }, parseFindings([finding()]).findings);
+  assertEquals(created.length, 0);
+  assertEquals(calls, ["list", "comment:9"]);
+});
+
+test("a fingerprint match on page 2 of the issue listing is still found", async () => {
+  const filler = Array.from({ length: 100 }, (_, i) => ({ number: 1000 + i, url: "", title: "x", body: fingerprintMarker(`other-${i}`), state: "open" }));
+  const hit = { number: 42, url: "https://github.com/acme/friction/issues/42", title: "t", body: fingerprintMarker("redirect-blocked"), state: "open" };
+  const { github, calls, created } = githubStub([], [filler, [hit]]);
+  await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: HELD, evidenceLinks: NOLINKS }, parseFindings([finding()]).findings);
+  assertEquals(created.length, 0);
+  assertEquals(calls, ["list", "list", "comment:42"]);
+});
+
+test("merging 3 same-fingerprint findings counts 3 distinct runs, not 1 (real SQL recount)", async () => {
+  await withData(async (data) => {
+    const db = data.source().db;
+    const ins = (id: string, run: string) =>
+      db.run(
+        "INSERT INTO friction_signals (id, sweep_key, kind, run_key, run_url, fingerprint, excerpt, created_at) VALUES (?, 'S', 'escalation', ?, NULL, 'fp', '', '2026-01-01')",
+        [id, run],
+      );
+    ins("1", "rA");
+    ins("2", "rB");
+    ins("3", "rC");
+    ins("4", "rA"); // a repeat of one run must not count as a 4th run
+    const { github, created } = githubStub();
+    const res = await fileFindings(
+      { github, config: CONFIG, window: WINDOW, observed: (fps) => observedSignalCounts(data, "S", fps), leaseHeld: HELD, evidenceLinks: NOLINKS },
+      parseFindings([
+        finding({ occurrences: 2, runs: 1, evidence: "- run A", signalFingerprints: ["fp"] }),
+        finding({ occurrences: 1, runs: 1, evidence: "- run B", signalFingerprints: ["fp"] }),
+        finding({ occurrences: 1, runs: 1, evidence: "- run C", signalFingerprints: ["fp"] }),
+      ]).findings,
+    );
+    assertEquals(res.created.length, 1);
+    assert(created[0]?.body.includes("4 occurrence(s) across 3 run(s)"), created[0]?.body ?? "");
+  });
 });

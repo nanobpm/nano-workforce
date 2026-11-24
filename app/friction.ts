@@ -387,11 +387,19 @@ export interface FrictionIssue {
   url: string;
   title: string;
   body: string;
+  /** `open`/`closed` — only populated by `listIssuesPage` (state=all); open-only listings omit it. */
+  state?: string;
+  /** GitHub's close reason (`completed`, `not_planned`, …) for a closed issue. */
+  stateReason?: string | null;
 }
 
 /** The narrow GitHub surface the sweep needs — injectable so tests stub it. */
 export interface FrictionGithub {
   listOpenIssues(repo: string, label: string): Promise<FrictionIssue[]>;
+  /** One page (1-based, 100 per page) of `label` issues in ANY state — open and closed — so a
+   *  closed finding's fingerprint still dedupes. `more` is true when a further page may exist. */
+  listIssuesPage(repo: string, label: string, page: number): Promise<{ issues: FrictionIssue[]; more: boolean }>;
+  reopen(repo: string, issueNumber: number): Promise<void>;
   createIssue(repo: string, issue: { title: string; body: string; labels: string[] }): Promise<{ number: number; url: string }>;
   comment(repo: string, issueNumber: number, body: string): Promise<{ url: string }>;
 }
@@ -408,8 +416,13 @@ function toIssue(v: unknown): FrictionIssue | null {
     url: typeof v.html_url === "string" ? v.html_url : "",
     title: typeof v.title === "string" ? v.title : "",
     body: typeof v.body === "string" ? v.body : "",
+    state: typeof v.state === "string" ? v.state : undefined,
+    stateReason: typeof v.state_reason === "string" ? v.state_reason : null,
   };
 }
+
+/** Max pages scanned for fingerprint dedupe (100 issues each). */
+const ISSUE_PAGE_CAP = 20;
 
 /** The production GitHub transport: the host `gh` CLI when present (the operator's own login reaches
  *  the private findings repo), else REST with `GITHUB_TOKEN` — the same selection app/github.ts uses. */
@@ -446,6 +459,19 @@ export function frictionGithub(token: string): FrictionGithub {
         if (rows.length < 100) break;
       }
       return out;
+    },
+    async listIssuesPage(repo, label, page) {
+      const res = await api("GET", `repos/${repo}/issues?state=all&labels=${encodeURIComponent(label)}&per_page=100&page=${page}`);
+      const rows = Array.isArray(res) ? res : [];
+      const issues: FrictionIssue[] = [];
+      for (const r of rows) {
+        const issue = toIssue(r);
+        if (issue) issues.push(issue);
+      }
+      return { issues, more: rows.length >= 100 };
+    },
+    async reopen(repo, issueNumber) {
+      await api("PATCH", `repos/${repo}/issues/${issueNumber}`, { state: "open" });
     },
     async createIssue(repo, issue) {
       const res = await api("POST", `repos/${repo}/issues`, { title: issue.title, body: issue.body, labels: issue.labels });
@@ -1002,11 +1028,19 @@ export async function fileFindings(deps: FileDeps, findingsIn: readonly Friction
       prev.signalFingerprints = [...new Set([...(prev.signalFingerprints ?? []), ...(f.signalFingerprints ?? [])])];
     } else byFp.set(f.fingerprint, { ...f });
   }
-  const open = await deps.github.listOpenIssues(deps.config.repo, FRICTION_LABEL);
+  // Dedupe against EVERY friction issue, open or closed: a closed finding that recurs must get a
+  // recurrence comment (and a reopen when it was closed as completed), never a duplicate issue.
   const openByFp = new Map<string, FrictionIssue>();
-  for (const issue of open) {
-    const fp = parseFingerprintMarker(issue.body);
-    if (fp) openByFp.set(fp, issue);
+  for (let page = 1; page <= ISSUE_PAGE_CAP; page++) {
+    const { issues, more } = await deps.github.listIssuesPage(deps.config.repo, FRICTION_LABEL, page);
+    for (const issue of issues) {
+      const fp = parseFingerprintMarker(issue.body);
+      if (!fp) continue;
+      const prev = openByFp.get(fp);
+      // Prefer an open issue carrying the marker over a closed one.
+      if (!prev || (prev.state === "closed" && issue.state !== "closed")) openByFp.set(fp, issue);
+    }
+    if (!more) break;
   }
   for (const f of byFp.values()) {
     // Match by fingerprint only: an agent-supplied `existingIssue` is untrusted — a stale or wrong
@@ -1024,6 +1058,12 @@ export async function fileFindings(deps: FileDeps, findingsIn: readonly Friction
       }
       if (!deps.leaseHeld()) throw new LeaseLostError("friction sweep lease lost before posting a recurrence comment");
       await deps.github.comment(deps.config.repo, match.number, recurrenceComment(f, deps.window, deps.evidenceLinks(f.signalFingerprints ?? [])));
+      // A fix that was shipped (closed as completed) has regressed → reopen. Never reopen a
+      // `not_planned` close: the operator decided not to act; the comment records the recurrence.
+      if (match.state === "closed" && match.stateReason === "completed") {
+        if (!deps.leaseHeld()) throw new LeaseLostError("friction sweep lease lost before reopening an issue");
+        await deps.github.reopen(deps.config.repo, match.number);
+      }
       result.updated.push(match.url || `https://github.com/${deps.config.repo}/issues/${match.number}`);
       continue;
     }
