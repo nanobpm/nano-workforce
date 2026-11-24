@@ -78,7 +78,7 @@ test("escalation repo filter: repo-root subjectUrl with no trailing path still m
   const f = parseEscalationFilter({ repo: "acme/service" });
   assert(f.ok);
   if (!f.ok) return;
-  for (const subjectUrl of ["https://github.com/acme/service", "https://github.com/acme/service/", "https://github.com/acme/service?x=1", "https://github.com/acme/service#readme", "https://github.com/acme/service.git"]) {
+  for (const subjectUrl of ["https://github.com/acme/service", "https://github.com/acme/service/", "https://github.com/acme/service?x=1", "https://github.com/acme/service#readme", "https://github.com/acme/service.git", "http://github.com/acme/service/issues/9", "HTTPS://GitHub.com/acme/service/pull/1", "https://www.github.com/acme/service"]) {
     const row = { subjectType: "delivery", subjectKey: "opaque", prKey: null, subjectUrl };
     assertEquals(applyEscalationFilter([row], f.filter).length, 1);
   }

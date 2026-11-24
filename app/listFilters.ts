@@ -205,7 +205,7 @@ function escalationRepo(r: EscalationFilterRow): string | null {
   const keyIsRepoScoped = REPO_SCOPED_SUBJECT_TYPES.has(r.subjectType) && r.subjectKey.includes("#");
   const fromKey = repoOfKey(r.prKey) ?? (keyIsRepoScoped ? repoOfKey(r.subjectKey) : null);
   if (fromKey) return fromKey;
-  const m = /^https:\/\/github\.com\/([^/?#]+\/[^/?#]+?)(?:\.git)?(?:[/?#]|$)/.exec(r.subjectUrl ?? "");
+  const m = /^https?:\/\/(?:www\.)?github\.com\/([^/?#]+\/[^/?#]+?)(?:\.git)?(?:[/?#]|$)/i.exec(r.subjectUrl ?? "");
   return m?.[1] ?? null;
 }
 
