@@ -462,6 +462,16 @@ opt-in to all interfaces):
 > when bound wide), so no loopback-only guard stands between a wide bind and remote worker visibility —
 > set `NANO_AGENTIC_SECRET` if you want to authenticate that channel instead.
 
+#### Verified Nano server version
+
+`@nanobpm/engine-wasm` is pinned to an **exact** version in `package.json`
+(`devDependencies` and `overrides`, kept equal by `scripts/engine-wasm-pin.test.ts`), and
+Renovate opens a PR for every engine release, patch included, so nwf's typecheck, unit and
+e2e suites run against each one (issue #1049). Since nano-bpm#1871, engine-wasm X.Y.Z is the
+same engine as Nano server X.Y.Z, so **the pinned engine-wasm version is the Nano server
+release this nwf version is verified against** — deploy nwf onto that server version (or
+check the pin before upgrading the server).
+
 #### Choose a path: direct LAN bind vs console proxy
 
 nwf composes with two deployment topologies — pick one and point the fleet at it:
