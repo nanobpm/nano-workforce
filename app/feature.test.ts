@@ -687,3 +687,26 @@ test("startFeature: probes without a probeTimeout fail fast (both are load-beari
   }
   assertEquals(threw, true);
 });
+
+test("startFeature: `effective` echoes exactly the seeded variables (issue #1059)", async () => {
+  const stores = { feature_runs: { rows: [] as any[], key: "feature_key" } };
+  let vars: any = null;
+  const engine = {
+    createInstance: (req: any) => {
+      vars = req.variables;
+      return Promise.resolve({ processInstanceKey: "PI-1" });
+    },
+  } as any;
+  const result = await startFeature(memData(stores), engine, PARSED, "main", true, false, "  steer  ", {}, false, true);
+  assertEquals(result.effective, {
+    converge: vars.converge,
+    autoMerge: vars.autoMerge,
+    convergeOnly: null,
+    maxRounds: null,
+    blockedOn: null,
+    autoResolveEscalations: vars.autoResolveEscalations,
+    customInstructions: { present: true, length: vars.customInstructions.length },
+    baseBranch: vars.baseBranch,
+  });
+  assertEquals(result.effective?.customInstructions.length, 5);
+});

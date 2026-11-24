@@ -178,6 +178,25 @@ function seedKeys(obj: ts.ObjectLiteralExpression, consts: ReadonlyMap<string, s
 
 /** processId → union of every key any `createInstance` call seeds it with. Calls whose process id is
  *  not a static string (the content-addressed compiled delivery graph) are skipped. */
+/** The object-literal initializer of a `const <name> = { … }` declared in `sf`, if any. */
+function constObjectLiteral(sf: ts.SourceFile, name: string): ts.ObjectLiteralExpression | undefined {
+  let found: ts.ObjectLiteralExpression | undefined;
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(n) &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === name &&
+      n.initializer !== undefined &&
+      ts.isObjectLiteralExpression(n.initializer)
+    ) {
+      found = n.initializer;
+    }
+    if (found === undefined) ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return found;
+}
+
 function appSeeds(): Map<string, Set<string>> {
   const files = sourceFiles();
   const consts = allStringConsts(files);
@@ -205,6 +224,10 @@ function appSeeds(): Map<string, Set<string>> {
               else if (ts.isIdentifier(p.initializer)) pid = consts.get(p.initializer.text);
             } else if (p.name.text === "variables" && ts.isObjectLiteralExpression(p.initializer)) {
               vars = p.initializer;
+            } else if (p.name.text === "variables" && ts.isIdentifier(p.initializer)) {
+              // Issue #1059: a seed captured in a `const seeded = { … }` (so the start door can echo the
+              // effective settings from the exact map it seeded) resolves to that same-file literal.
+              vars = constObjectLiteral(sf, p.initializer.text);
             }
           }
           if (pid !== undefined) {

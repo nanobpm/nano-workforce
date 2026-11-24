@@ -14,6 +14,7 @@
 // JSON schema can't express — an unparseable reference is a 400.
 
 import { withProcessInstanceKey } from "../app/apiShape.ts";
+import { ALREADY_RUNNING_WARNING, customInstructionsWarnings } from "../app/effectiveSettings.ts";
 import { clampRounds, MAX_ROUNDS, parsePr, submitPr } from "../app/service.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -66,5 +67,16 @@ export default defineOperation("startConvergenceLoop", async ({ body }, app) => 
     autoResolveEscalations,
     hasCustomInstructions: customInstructions != null && customInstructions.trim() !== "",
   });
-  return { status: 202, body: withProcessInstanceKey(result) };
+  if ("alreadyRunning" in result && result.alreadyRunning === true) {
+    return { status: 202, body: { ...withProcessInstanceKey(result), warnings: [ALREADY_RUNNING_WARNING] } };
+  }
+  const warnings: string[] = [];
+  if (typeof body.maxRounds === "number" && body.maxRounds !== maxRounds) {
+    warnings.push(`maxRounds ${body.maxRounds} was clamped to ${maxRounds}`);
+  }
+  if (hasAutoMerge && typeof body.convergeOnly === "boolean") {
+    warnings.push("convergeOnly was ignored because autoMerge was also supplied (autoMerge wins)");
+  }
+  warnings.push(...customInstructionsWarnings(body.customInstructions));
+  return { status: 202, body: { ...withProcessInstanceKey(result), warnings } };
 });

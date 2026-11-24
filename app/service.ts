@@ -7,6 +7,7 @@
 //
 // Data access goes through the record-oriented gateway (`data.table<T>(name, pk)` — the RAD
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
+
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { matchAdjudication, prAdjudications, resetAdjudications } from "./adjudications.ts";
@@ -38,6 +39,7 @@ import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
 import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRuns, deliveryGraphRunsTracking, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
 import { decodeLivePrompt, deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement, needsLiveDeliveryPrompt } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
+import { deriveEffectiveSettings } from "./effectiveSettings.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
 import { ESCALATION_STEWARD_PROCESS_ID } from "./escalationSteward.ts";
 import { deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun } from "./feature.ts";
@@ -1036,76 +1038,74 @@ async function submitPrCritical(
   // the findings — so the hand-off passes the live head SHA it read, and a fresh hand-off restores
   // the CURRENT head. `null` (every other caller) keeps the checkpoint resume.
   const worldSha = headShaOverride ?? (await worldRestoreSha(data, parsed.prKey));
-  const { processInstanceKey } = await engine.createInstance({
-    processDefinitionId: PROCESS_ID,
-    variables: {
-      repo: parsed.repo,
-      prNumber: parsed.number,
-      prUrl: parsed.url,
-      prKey: parsed.prKey,
-      round: 1,
-      maxRounds: clampRounds(maxRounds, MAX_ROUNDS),
-      reviewWaitTimeout: REVIEW_WAIT_TIMEOUT,
-      // Agent-task liveness SLA (issue #849): PRE-SEED the bound for the loop's external agent
-      // tasks (review-round / adversarial-review / classify-scope). Those tasks sit on a
-      // back-edge loop whose boundary the layouter cannot yet route, so their SLA boundaries are
-      // intentionally deferred to #868 (layouter bug #867) — this seed is preparation for that
-      // follow-up, not yet an armed bound on this loop. (The merge-loop's rebase / fix-ci, seeded
-      // from the same constant, ARE bounded today.)
-      agentSlaTimeout: AGENT_SLA_TIMEOUT,
-      // Bounded agent auto-ack (issue #796): the convergence loop re-dispatches the review-round
-      // agent up to `ackRetryMax` times to ack suppressed advisories when the converge-gate blocks
-      // solely on unacked ones, before escalating to a human. `ackRetryRound` counts those passes.
-      ackRetryRound: 0,
-      ackRetryMax: MAX_ACK_RETRIES,
-      // Clean-review / red-CI fix budget (issue #988): counts `converge-fix-ci` passes, bounded by
-      // CONVERGE_CI_FIX_MAX in `pr.progress-check` (the BPMN also guards a missing seed).
-      ciFixRound: 0,
-      // Local adversarial review (issue #844): `advPass` counts this round's adversarial passes (reset
-      // by `capture-head` each round); `advMax` bounds them. 0 skips the stage.
-      advPass: 0,
-      advMax: MAX_ADVERSARIAL_PASSES,
-      // Lineage (issue #245): carry the origin identity onto the convergence instance so every
-      // descendant (and any message it correlates) is stitched back to the originating request.
-      // A human/webhook PR that is its own root carries its own `pr_key` (never NULL — see above).
-      rootRequestKey: effectiveRoot,
-      // Per-request merge intent (issue #916): `autoMerge` is the CANONICAL positive variable — the
-      // same name the doors accept — so a live loop's merge intent is searchable under `autoMerge`.
-      // `convergeOnly` is its inverse mirror, kept for in-flight compat: `pr.finalize` reads
-      // `autoMerge` first and falls back to `convergeOnly` when it is absent (a loop seeded before
-      // this variable existed). Merge intent only ever narrows (never forces merge on when the
-      // global NANO_PR_AUTO_MERGE switch is off).
-      autoMerge: mergeIntent,
-      convergeOnly: effectiveConvergeOnly,
-      // Human approval before merge (issue #826): a converged PR parks at the `merge-approval` user
-      // task before `pr.finalize` hands it to the merge-loop. Pinned off when the PR won't merge.
-      humanApproval: gated,
-      // Opt-in escalation steward (issue #889): carried on the instance AND persisted on the
-      // `pull_requests` row (the durable source the steward's eligibility reads), so a clobbered
-      // variable can never silently opt a PR in or out (#887/#888).
-      autoResolveEscalations,
-      // Cooperative abandon check (#76): the capability URL + the abort brief appended to the
-      // review-round agent's prompt, so it can stop before pushing if the run is cancelled.
-      abandonUrl: abUrl,
-      abandonBrief: renderAbandonBrief(abUrl),
-      // Optional operator steering (issue #956): appended to EVERY converge round's agent prompt
-      // (review-round + adversarial-review) via their `appendPrompt` FEEL, under the same
-      // "## Operator custom instructions" block the implement cell uses. Null when none was supplied;
-      // persists on the instance, so reconverge re-dispatches and later rounds keep carrying it.
-      customInstructions: instructions,
-      // Host-git provisioning (c8ctl): deliver the repository envelope so the `senior:pr-review`
-      // harness clones an isolated workspace checked out on the PR head branch. Spread last so an
-      // unresolved head (`{}`) leaves the other vars untouched.
-      //
-      // Pass `headRef` as `branch.create` too (5th arg): on a PR path `ref` is the head branch, but
-      // WITHOUT an explicit `branch.create` the harness's base-branch guard (jwulf/c8ctl-plugin-nano#231)
-      // treats the checkout as base-like and cuts a throwaway `nano/agent-work/<base>-<run>` fallback,
-      // stranding the round's commits OFF the PR (the head never advances → no-progress escalation).
-      // With `ref == create == head` the harness does a no-op `checkout -B <head>` and commits/pushes
-      // to the PR head branch itself. Mirrors the delivery-graph node path (`agentNodeRepoEnvelope`, #776).
-      ...repoEnvelopeVars(parsed.repo, headRef, baseRef, worldSha, headRef),
-    },
-  });
+  const seeded = {
+    repo: parsed.repo,
+    prNumber: parsed.number,
+    prUrl: parsed.url,
+    prKey: parsed.prKey,
+    round: 1,
+    maxRounds: clampRounds(maxRounds, MAX_ROUNDS),
+    reviewWaitTimeout: REVIEW_WAIT_TIMEOUT,
+    // Agent-task liveness SLA (issue #849): PRE-SEED the bound for the loop's external agent
+    // tasks (review-round / adversarial-review / classify-scope). Those tasks sit on a
+    // back-edge loop whose boundary the layouter cannot yet route, so their SLA boundaries are
+    // intentionally deferred to #868 (layouter bug #867) — this seed is preparation for that
+    // follow-up, not yet an armed bound on this loop. (The merge-loop's rebase / fix-ci, seeded
+    // from the same constant, ARE bounded today.)
+    agentSlaTimeout: AGENT_SLA_TIMEOUT,
+    // Bounded agent auto-ack (issue #796): the convergence loop re-dispatches the review-round
+    // agent up to `ackRetryMax` times to ack suppressed advisories when the converge-gate blocks
+    // solely on unacked ones, before escalating to a human. `ackRetryRound` counts those passes.
+    ackRetryRound: 0,
+    ackRetryMax: MAX_ACK_RETRIES,
+    // Clean-review / red-CI fix budget (issue #988): counts `converge-fix-ci` passes, bounded by
+    // CONVERGE_CI_FIX_MAX in `pr.progress-check` (the BPMN also guards a missing seed).
+    ciFixRound: 0,
+    // Local adversarial review (issue #844): `advPass` counts this round's adversarial passes (reset
+    // by `capture-head` each round); `advMax` bounds them. 0 skips the stage.
+    advPass: 0,
+    advMax: MAX_ADVERSARIAL_PASSES,
+    // Lineage (issue #245): carry the origin identity onto the convergence instance so every
+    // descendant (and any message it correlates) is stitched back to the originating request.
+    // A human/webhook PR that is its own root carries its own `pr_key` (never NULL — see above).
+    rootRequestKey: effectiveRoot,
+    // Per-request merge intent (issue #916): `autoMerge` is the CANONICAL positive variable — the
+    // same name the doors accept — so a live loop's merge intent is searchable under `autoMerge`.
+    // `convergeOnly` is its inverse mirror, kept for in-flight compat: `pr.finalize` reads
+    // `autoMerge` first and falls back to `convergeOnly` when it is absent (a loop seeded before
+    // this variable existed). Merge intent only ever narrows (never forces merge on when the
+    // global NANO_PR_AUTO_MERGE switch is off).
+    autoMerge: mergeIntent,
+    convergeOnly: effectiveConvergeOnly,
+    // Human approval before merge (issue #826): a converged PR parks at the `merge-approval` user
+    // task before `pr.finalize` hands it to the merge-loop. Pinned off when the PR won't merge.
+    humanApproval: gated,
+    // Opt-in escalation steward (issue #889): carried on the instance AND persisted on the
+    // `pull_requests` row (the durable source the steward's eligibility reads), so a clobbered
+    // variable can never silently opt a PR in or out (#887/#888).
+    autoResolveEscalations,
+    // Cooperative abandon check (#76): the capability URL + the abort brief appended to the
+    // review-round agent's prompt, so it can stop before pushing if the run is cancelled.
+    abandonUrl: abUrl,
+    abandonBrief: renderAbandonBrief(abUrl),
+    // Optional operator steering (issue #956): appended to EVERY converge round's agent prompt
+    // (review-round + adversarial-review) via their `appendPrompt` FEEL, under the same
+    // "## Operator custom instructions" block the implement cell uses. Null when none was supplied;
+    // persists on the instance, so reconverge re-dispatches and later rounds keep carrying it.
+    customInstructions: instructions,
+    // Host-git provisioning (c8ctl): deliver the repository envelope so the `senior:pr-review`
+    // harness clones an isolated workspace checked out on the PR head branch. Spread last so an
+    // unresolved head (`{}`) leaves the other vars untouched.
+    //
+    // Pass `headRef` as `branch.create` too (5th arg): on a PR path `ref` is the head branch, but
+    // WITHOUT an explicit `branch.create` the harness's base-branch guard (jwulf/c8ctl-plugin-nano#231)
+    // treats the checkout as base-like and cuts a throwaway `nano/agent-work/<base>-<run>` fallback,
+    // stranding the round's commits OFF the PR (the head never advances → no-progress escalation).
+    // With `ref == create == head` the harness does a no-op `checkout -B <head>` and commits/pushes
+    // to the PR head branch itself. Mirrors the delivery-graph node path (`agentNodeRepoEnvelope`, #776).
+    ...repoEnvelopeVars(parsed.repo, headRef, baseRef, worldSha, headRef),
+  };
+  const { processInstanceKey } = await engine.createInstance({ processDefinitionId: PROCESS_ID, variables: seeded });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
   // The reopen row-reset, the `process_key` advance, and the adjudication reset below are the writes
   // that MAKE the new run authoritative. If ANY throws, the newly created instance is already live but
@@ -1247,7 +1247,7 @@ async function submitPrCritical(
     }
     throw err;
   }
-  return { prKey: parsed.prKey, processKey };
+  return { prKey: parsed.prKey, processKey, effective: deriveEffectiveSettings(seeded) };
 }
 
 /** Start the merge-loop for a converged PR (called by the `pr.finalize` worker when AUTO_MERGE
