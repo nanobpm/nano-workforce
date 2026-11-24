@@ -421,8 +421,10 @@ function toIssue(v: unknown): FrictionIssue | null {
   };
 }
 
-/** Max pages scanned for fingerprint dedupe (100 issues each). */
-const ISSUE_PAGE_CAP = 20;
+/** Safety bound on pages drained for fingerprint dedupe (100 issues each). Hitting it with more
+ *  pages still pending makes the dedupe index incomplete, so the sweep refuses to write (fail closed)
+ *  rather than risk duplicating an issue that lives on an unscanned page. */
+export const ISSUE_PAGE_CAP = 500;
 
 /** The production GitHub transport: the host `gh` CLI when present (the operator's own login reaches
  *  the private findings repo), else REST with `GITHUB_TOKEN` — the same selection app/github.ts uses. */
@@ -1031,6 +1033,7 @@ export async function fileFindings(deps: FileDeps, findingsIn: readonly Friction
   // Dedupe against EVERY friction issue, open or closed: a closed finding that recurs must get a
   // recurrence comment (and a reopen when it was closed as completed), never a duplicate issue.
   const openByFp = new Map<string, FrictionIssue>();
+  let complete = false;
   for (let page = 1; page <= ISSUE_PAGE_CAP; page++) {
     const { issues, more } = await deps.github.listIssuesPage(deps.config.repo, FRICTION_LABEL, page);
     for (const issue of issues) {
@@ -1040,7 +1043,13 @@ export async function fileFindings(deps: FileDeps, findingsIn: readonly Friction
       // Prefer an open issue carrying the marker over a closed one.
       if (!prev || (prev.state === "closed" && issue.state !== "closed")) openByFp.set(fp, issue);
     }
-    if (!more) break;
+    if (!more) {
+      complete = true;
+      break;
+    }
+  }
+  if (!complete) {
+    throw new Error(`friction sweep: more than ${ISSUE_PAGE_CAP} pages of ${FRICTION_LABEL} issues — dedupe index incomplete, refusing to write`);
   }
   for (const f of byFp.values()) {
     // Match by fingerprint only: an agent-supplied `existingIssue` is untrusted — a stale or wrong

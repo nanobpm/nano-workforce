@@ -922,3 +922,15 @@ test("merging 3 same-fingerprint findings counts 3 distinct runs, not 1 (real SQ
     assert(created[0]?.body.includes("4 occurrence(s) across 3 run(s)"), created[0]?.body ?? "");
   });
 });
+
+test("dedupe index past the page cap refuses to write instead of duplicating an unscanned issue", async () => {
+  const { github, created } = githubStub();
+  github.listIssuesPage = async () => ({ issues: [], more: true });
+  const { findings } = parseFindings([finding()]);
+  await assertRejects(
+    () => fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: HELD, evidenceLinks: NOLINKS }, findings),
+    Error,
+    "dedupe index incomplete",
+  );
+  assertEquals(created.length, 0);
+});
