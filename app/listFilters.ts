@@ -197,8 +197,13 @@ export interface EscalationFilterRow {
   subjectUrl: string | null;
 }
 
+const REPO_SCOPED_SUBJECT_TYPES: ReadonlySet<string> = new Set(["pr", "feature", "plan"]);
+
 function escalationRepo(r: EscalationFilterRow): string | null {
-  const fromKey = repoOfKey(r.prKey) ?? (r.subjectKey.includes("#") ? repoOfKey(r.subjectKey) : null);
+  // Only pr/feature/plan subject keys are `owner/repo#N`; delivery/agent keys are opaque
+  // (`computeRunKey()`), so inferring a repo from them mis-attributes the row — use the URL.
+  const keyIsRepoScoped = REPO_SCOPED_SUBJECT_TYPES.has(r.subjectType) && r.subjectKey.includes("#");
+  const fromKey = repoOfKey(r.prKey) ?? (keyIsRepoScoped ? repoOfKey(r.subjectKey) : null);
   if (fromKey) return fromKey;
   const m = /^https:\/\/github\.com\/([^/]+\/[^/]+)\//.exec(r.subjectUrl ?? "");
   return m?.[1] ?? null;

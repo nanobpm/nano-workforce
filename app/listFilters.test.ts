@@ -1,7 +1,7 @@
 // Unit tests for the /status + /escalations filter vocabulary (issue #1060).
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { parseEscalationFilter, parseStatusFilter, repoOfKey } from "./listFilters.ts";
+import { applyEscalationFilter, parseEscalationFilter, parseStatusFilter, repoOfKey } from "./listFilters.ts";
 
 test("parseStatusFilter accepts repeated and comma-separated values", () => {
   const r = parseStatusFilter({ status: ["converging", "escalated,incident"], key: "o/r#1" });
@@ -58,4 +58,18 @@ test("updatedSince must be a valid timezone-bearing ISO date-time", () => {
   assert(r.ok);
   if (r.ok) assertEquals(r.filter.updatedSince, Date.parse("2026-01-01T00:00:00+02:00"));
   assert(parseStatusFilter({ updatedSince: "2024-02-29T12:30:00.5Z" }).ok);
+});
+
+test("escalation repo filter: opaque delivery/agent subject keys never infer a repo (use subjectUrl)", () => {
+  const f = parseEscalationFilter({ repo: "acme/service" });
+  const wrong = parseEscalationFilter({ repo: "release/prod" });
+  assert(f.ok && wrong.ok);
+  if (!f.ok || !wrong.ok) return;
+  for (const subjectType of ["delivery", "agent"]) {
+    const row = { subjectType, subjectKey: "release/prod#1", prKey: null, subjectUrl: "https://github.com/acme/service/issues/9" };
+    assertEquals(applyEscalationFilter([row], f.filter).length, 1);
+    assertEquals(applyEscalationFilter([row], wrong.filter).length, 0);
+  }
+  const pr = { subjectType: "pr", subjectKey: "acme/service#3", prKey: null, subjectUrl: null };
+  assertEquals(applyEscalationFilter([pr], f.filter).length, 1);
 });
