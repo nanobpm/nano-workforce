@@ -1,3 +1,9 @@
+## [0.223.5](https://github.com/nanobpm/nano-workforce/compare/v0.223.4...v0.223.5) (2026-11-24)
+
+### Bug Fixes
+
+* **merge:** record at most one merged audit row per PR ([#1048](https://github.com/nanobpm/nano-workforce/issues/1048)) ([1042542](https://github.com/nanobpm/nano-workforce/commit/1042542ac0ad494ad87f2f5ea0e19f69a016ed5b)), closes [#1047](https://github.com/nanobpm/nano-workforce/issues/1047)
+
 ## [0.223.4](https://github.com/nanobpm/nano-workforce/compare/v0.223.3...v0.223.4) (2026-11-23)
 
 ### Bug Fixes
