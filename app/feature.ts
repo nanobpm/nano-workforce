@@ -257,6 +257,18 @@ export async function recordFeatureEscalation(
   });
 }
 
+/** The static last-resort question a `feature-blocked` task renders when the run reported neither a
+ *  question nor a summary (issue #1081) — a human-facing task must never render a blank question. */
+export const BLOCKED_NO_REASON_QUESTION =
+  "The implementation agent reported `blocked` without a reason. Inspect the run's transcript and branch, then acknowledge to close the run.";
+
+/** The ONE canonical derivation of a `feature-blocked` task's question (issue #1081): the agent's
+ *  reported `question` when present, else its `summary`, else a static fallback — never blank. */
+export function blockedFeatureQuestion(input: { question?: unknown; summary?: unknown }): string {
+  const s = (v: unknown): string | undefined => (typeof v === "string" && v.trim() !== "" ? v.trim() : undefined);
+  return s(input.question) ?? s(input.summary) ?? BLOCKED_NO_REASON_QUESTION;
+}
+
 /** The `feature-blocked` user-task element id (feature.bpmn) — the native operator wait a run parks on
  * when the agent reports a `blocked` outcome (it gave up / the escalation was abandoned or timed out).
  * `pollUserTasks` reads the engine's open task for this element to project it onto the `user_tasks`

@@ -30,7 +30,7 @@
 // draft one from the branch) and continues to the converge path; only a run with NO commit to
 // deliver parks for a human.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { type FeatureRunStatus, featureRuns } from "../../app/feature.ts";
+import { blockedFeatureQuestion, type FeatureRunStatus, featureRuns, recordFeatureEscalation } from "../../app/feature.ts";
 import { reconcileBlockedFeature, shouldReconcileBlockedFeature } from "../../app/featureReconcile.ts";
 import { compareCommits, createPullRequest, fetchBranchHead, listPrsForHead } from "../../app/github.ts";
 import { requestIssuePrLink } from "../../app/issuePrLink.ts";
@@ -131,6 +131,16 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     updated_at: ts,
   });
   app.log.info("record-feature", { featureKey, featureStatus, rowStatus, prKey });
+  // Issue #1081: persist WHY the run is blocked so the `feature-blocked` inbox task renders the agent's
+  // reported question (else summary) — appended to the same `feature_escalations` audit log the
+  // projection reads, as the newest row for this feature. Never blank (canonical builder fallback).
+  if (status === "blocked") {
+    await recordFeatureEscalation(app.data, {
+      featureKey,
+      question: blockedFeatureQuestion({ question: job.variables.question, summary }),
+      jobKey: job.jobKey,
+    });
+  }
 
   // Issue #907: announce the delivered PR on the claimed issue — ONE idempotent comment, posted by
   // the HOST so every delivery path (agent-opened, retry-opened, reconcile-adopted) covers it.

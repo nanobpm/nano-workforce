@@ -48,6 +48,7 @@
           <nano:extend name="status" type="string" optional="true" />
           <nano:extend name="pr" type="string" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
+          <nano:extend name="question" type="string" optional="true" />
           <nano:extend name="claimIssue" type="boolean" optional="true" />
           <nano:reference name="task" ref="RecordFeatureTaskRef" optional="true" />
           <nano:extend name="baseBranch" type="string" optional="true" />
