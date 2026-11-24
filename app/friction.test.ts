@@ -19,6 +19,8 @@ import {
   type FrictionIssue,
   fetchRunHistory,
   fileFindings,
+  observedSignalCounts,
+  redactStructured,
   HISTORY_PAGE_CAP,
   fingerprintMarker,
   escalationSubjectUrl,
@@ -208,6 +210,8 @@ function githubStub(open: FrictionIssue[] = []) {
   return { github, calls, created };
 }
 
+/** A recount that agrees with whatever the analyst claimed (isolates the non-threshold tests). */
+const TRUST = () => ({ occurrences: 1e9, runs: 1e9 });
 const WINDOW = { start: "2026-01-01T00:00:00.000Z", end: "2026-01-01T12:00:00.000Z" };
 function finding(over: Record<string, unknown> = {}) {
   return { fingerprint: "redirect-blocked", title: "Redirects blocked", occurrences: 5, runs: 3, fixSurface: "permission-rule", targetRepo: "nanobpm/nano-coder", evidence: "- x", proposedFix: "allow", ...over };
@@ -216,7 +220,7 @@ function finding(over: Record<string, unknown> = {}) {
 test("a new fingerprint above threshold opens an issue carrying its fingerprint marker and label", async () => {
   const { github, created } = githubStub();
   const { findings } = parseFindings([finding()]);
-  const res = await fileFindings({ github, config: CONFIG, window: WINDOW }, findings);
+  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST }, findings);
   assertEquals(res.created, ["https://github.com/acme/friction/issues/101"]);
   assertEquals(created[0]?.labels, ["friction"]);
   assertEquals(parseFingerprintMarker(created[0]?.body ?? ""), "redirect-blocked");
@@ -225,7 +229,7 @@ test("a new fingerprint above threshold opens an issue carrying its fingerprint 
 test("an existing open fingerprint gets a recurrence comment, never a second issue", async () => {
   const open = [{ number: 7, url: "https://github.com/acme/friction/issues/7", title: "t", body: fingerprintMarker("redirect-blocked") }];
   const { github, calls } = githubStub(open);
-  const res = await fileFindings({ github, config: CONFIG, window: WINDOW }, parseFindings([finding({ occurrences: 1, runs: 1 })]).findings);
+  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST }, parseFindings([finding({ occurrences: 1, runs: 1 })]).findings);
   assertEquals(calls, ["list", "comment:7"]);
   assertEquals(res.updated, ["https://github.com/acme/friction/issues/7"]);
   assertEquals(res.created, []);
@@ -234,7 +238,7 @@ test("an existing open fingerprint gets a recurrence comment, never a second iss
 test("a new finding below the occurrence or run threshold is not filed", async () => {
   const { github, calls } = githubStub();
   const res = await fileFindings(
-    { github, config: CONFIG, window: WINDOW },
+    { github, config: CONFIG, window: WINDOW, observed: TRUST },
     parseFindings([finding({ fingerprint: "a", occurrences: 1 }), finding({ fingerprint: "b", runs: 1 })]).findings,
   );
   assertEquals(calls, ["list"]);
@@ -243,7 +247,7 @@ test("a new finding below the occurrence or run threshold is not filed", async (
 
 test("no findings → no GitHub call at all", async () => {
   const { github, calls } = githubStub();
-  const res = await fileFindings({ github, config: CONFIG, window: WINDOW }, []);
+  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST }, []);
   assertEquals(calls, []);
   assertEquals(res, { created: [], updated: [], skipped: 0 });
 });
@@ -461,7 +465,7 @@ test("fetchRunHistory reads past an expired history prefix (#1074 review)", asyn
 test("an agent-supplied existingIssue with a different fingerprint is never trusted (#1074 review)", async () => {
   const open = [{ number: 9, url: "https://github.com/acme/friction/issues/9", title: "t", body: fingerprintMarker("something-else") }];
   const { github, calls } = githubStub(open);
-  const res = await fileFindings({ github, config: CONFIG, window: WINDOW }, parseFindings([finding({ occurrences: 1, runs: 1, existingIssue: 9 })]).findings);
+  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST }, parseFindings([finding({ occurrences: 1, runs: 1, existingIssue: 9 })]).findings);
   assertEquals(calls, ["list"]);
   assertEquals(res.updated, []);
   assertEquals(res.skipped, 1);
@@ -478,4 +482,73 @@ test("extractRunSignals ids are stable across transcript prefix expiry (no ordin
   assert(newErr !== undefined && !before.includes(newErr.id));
   const rep = (ids: string[]) => ids.filter((i) => i.startsWith("repeated_command:"));
   assertEquals(rep(after.map((s) => s.id)), rep(before));
+});
+
+test("redact masks bare-KEY, CREDENTIAL, AUTH and hyphenated header names (#1074 assessment)", () => {
+  for (const name of ["ACCESS_KEY", "OPENAI_KEY", "SIGNING_KEY", "DB_CREDENTIAL", "GITHUB_CREDENTIALS", "BASIC_AUTH", "X-Api-Key", "x-api-key", "API-KEY"]) {
+    const out = redact(`${name}=s3cr3tvalue123`);
+    assert(!out.includes("s3cr3tvalue123"), `${name} leaked: ${out}`);
+  }
+  assertEquals(redact("author: Bob"), "author: Bob");
+  const structured = JSON.stringify(redactStructured({ ACCESS_KEY: "v1", "X-Api-Key": "v2", basic_auth: "v3", author: "Bob" }));
+  assert(!/v1|v2|v3/.test(structured), structured);
+  assert(structured.includes("Bob"));
+});
+
+test("redact masks ASIA, AIza, npm_ and glpat- token prefixes (#1074 assessment)", () => {
+  const cases = [
+    `ASIA${"A".repeat(16)}`,
+    `AIza${"b".repeat(35)}`,
+    `npm_${"c".repeat(36)}`,
+    `glpat-${"d".repeat(20)}`,
+  ];
+  for (const tok of cases) {
+    const out = redact(`creds ${tok} here`);
+    assert(!out.includes(tok), `${tok} leaked: ${out}`);
+  }
+});
+
+test("an inflated analyst count does not file: thresholds use the host recount (#1074 assessment)", async () => {
+  const { github, calls } = githubStub();
+  const cited: string[][] = [];
+  const res = await fileFindings(
+    { github, config: CONFIG, window: WINDOW, observed: (fps) => (cited.push([...fps]), { occurrences: 1, runs: 1 }) },
+    parseFindings([finding({ occurrences: 50, runs: 20, signalFingerprints: ["fp-a"] })]).findings,
+  );
+  assertEquals(cited, [["fp-a"]]);
+  assertEquals(calls, ["list"]);
+  assertEquals(res.skipped, 1);
+});
+
+test("observedSignalCounts recounts persisted signals by sweep and distinct run_key", async () => {
+  await withData(async (data) => {
+  const db = data.source().db;
+  const ins = (id: string, sweep: string, run: string, fp: string) =>
+    db.run(
+      "INSERT INTO friction_signals (id, sweep_key, kind, run_key, run_url, fingerprint, excerpt, created_at) VALUES (?, ?, 'escalation', ?, NULL, ?, '', '2026-01-01')",
+      [id, sweep, run, fp],
+    );
+  ins("1", "s1", "r1", "fp");
+  ins("2", "s1", "r1", "fp");
+  ins("3", "s1", "r2", "fp");
+  ins("4", "s2", "r3", "fp");
+  ins("5", "s1", "r4", "other");
+  assertEquals(observedSignalCounts(data, "s1", ["fp"]), { occurrences: 3, runs: 2 });
+  assertEquals(observedSignalCounts(data, "s1", []), { occurrences: 0, runs: 0 });
+  });
+});
+
+test("N escalations of one PR count as ONE run (keyed by subject, #1074 assessment)", async () => {
+  await withData(async (data) => {
+    const db = data.source().db;
+    db.run("PRAGMA foreign_keys = OFF");
+    for (let i = 0; i < 3; i++) {
+      db.run("INSERT INTO escalations (pr_key, round_no, kind, question, status, asked_at) VALUES ('o/r#9', ?, 'question', 'Same blocker', 'open', '2026-01-01T06:00:00.000Z')", [i]);
+    }
+    const { engine } = engineStub({ runs: [] });
+    await collectFriction({ data, engine, sweepKey: "SE", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    const rows = db.all<{ run_key: string }>("SELECT run_key FROM friction_signals WHERE sweep_key = 'SE' AND kind = 'escalation'");
+    assertEquals(rows.length, 3);
+    assertEquals(new Set(rows.map((r) => r.run_key)).size, 1);
+  });
 });

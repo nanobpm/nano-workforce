@@ -11,6 +11,7 @@ import {
   frictionGithub,
   frictionSweeps,
   markFailed,
+  observedSignalCounts,
   parseFindings,
   recordFiled,
 } from "../../app/friction.ts";
@@ -34,7 +35,9 @@ const handler: AppJobHandler<Record<string, unknown>, Out> = async (job, app) =>
   let res: Awaited<ReturnType<typeof fileFindings>>;
   try {
     res = await fileFindings(
-      { github: frictionGithub(process.env.GITHUB_TOKEN ?? ""), config: frictionConfig(), window: { start: windowStart, end: windowEnd } },
+      { github: frictionGithub(process.env.GITHUB_TOKEN ?? ""), config: frictionConfig(), window: { start: windowStart, end: windowEnd },
+        observed: (fps) => observedSignalCounts(app.data, sweepKey, fps),
+      },
       findings,
       malformed,
     );

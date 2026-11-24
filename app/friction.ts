@@ -88,7 +88,10 @@ const REDACTIONS: readonly [RegExp, string][] = [
   [/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[REDACTED:github-token]"],
   // Common vendor keys.
   [/\bsk-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED:api-key]"],
-  [/\bAKIA[0-9A-Z]{16}\b/g, "[REDACTED:aws-key]"],
+  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, "[REDACTED:aws-key]"],
+  [/\bAIza[0-9A-Za-z_-]{35}\b/g, "[REDACTED:google-key]"],
+  [/\bnpm_[A-Za-z0-9]{36}\b/g, "[REDACTED:npm-token]"],
+  [/\bglpat-[A-Za-z0-9_-]{20,}/g, "[REDACTED:gitlab-token]"],
   [/\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, "[REDACTED:slack-token]"],
   // JWTs.
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "[REDACTED:jwt]"],
@@ -101,7 +104,7 @@ const REDACTIONS: readonly [RegExp, string][] = [
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1[REDACTED]@"],
   // KEY=value / "key": "value" for secret-looking names.
   [
-    /(["']?)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|CLIENT_SECRET)[A-Z0-9_]*)\1(\s*[=:]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^\s"',;}]+)/gi,
+    /(["']?)\b((?:[A-Z0-9_-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[-_]?KEY|PRIVATE[-_]?KEY|CREDENTIALS?|AUTH(?![A-Z]))[A-Z0-9_-]*)|(?:[A-Z0-9_-]*[-_])?KEY)\1(\s*[=:]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^\s"',;}]+)/gi,
     "$1$2$1$3[REDACTED]",
   ],
   // netrc-style `password <value>` / `passwd <value>` (fail closed: the next word is always masked).
@@ -185,7 +188,7 @@ const TOOL_RESULT_CLASSIFIERS: readonly { kind: SignalKind; re: RegExp }[] = [
   },
 ];
 
-const SECRET_KEY = /(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTHORIZATION)/i;
+const SECRET_KEY = /(?:TOKEN|SECRET|PASSWORD|PASSWD|API[-_]?KEY|PRIVATE[-_]?KEY|CREDENTIAL|AUTHORIZATION|AUTH(?![a-z])|(?:^|[-_])KEY$)/i;
 
 /** Redact a structured value BEFORE it is serialised (issue #1074 review): JSON-encoding first escapes
  *  quotes (`PASSWORD="x"` → `PASSWORD=\"x\"`), which the text redactor cannot see through. Every string
@@ -666,7 +669,9 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     signals.push({
       id: `escalation:${e.src}:${e.id}`,
       kind: "escalation",
-      runKey: `${e.src}-escalation:${e.id}`,
+      // Key by the run SUBJECT (pr_key / feature_key), not the escalation id: N escalations of one PR
+      // are one run, not N (issue #1074 review). A subject-less escalation falls back to its own id.
+      runKey: e.subject ? `${e.src}:${e.subject}` : `${e.src}-escalation:${e.id}`,
       runUrl: escalationSubjectUrl(e.subject),
       fingerprint: normaliseMessage(q.split("\n")[0] ?? q),
       excerpt: redact(e.subject ? `[${e.subject}] ${q}` : q).replace(/\s+/g, " ").slice(0, 400),
@@ -762,6 +767,8 @@ export interface FrictionFinding {
   evidence: string;
   proposedFix: string;
   existingIssue?: number | null;
+  /** The digest signal-group fingerprints this finding covers; the filer recounts them host-side. */
+  signalFingerprints?: string[];
 }
 
 /** Coerce the analyst's `findings` (an array, or a JSON-encoded array) into typed findings; malformed
@@ -804,6 +811,9 @@ export function parseFindings(raw: unknown): { findings: FrictionFinding[]; malf
       evidence: str("evidence"),
       proposedFix: str("proposedFix"),
       existingIssue: existing > 0 ? existing : null,
+      signalFingerprints: Array.isArray(item.signalFingerprints)
+        ? item.signalFingerprints.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim())
+        : [],
     });
   }
   return { findings, malformed };
@@ -813,6 +823,23 @@ export interface FileDeps {
   github: FrictionGithub;
   config: FrictionConfig;
   window: { start: string; end: string };
+  /** Host-side recount of the persisted signals behind `signalFingerprints` (this sweep's
+   *  `friction_signals`): occurrences = matching rows, runs = distinct `run_key`. The filing threshold
+   *  uses the SMALLER of this and the analyst's figure, so an inflated agent count never files. */
+  observed: (signalFingerprints: readonly string[]) => { occurrences: number; runs: number };
+}
+
+/** Recount `signalFingerprints` from this sweep's persisted `friction_signals`. */
+export function observedSignalCounts(data: DataLayer, sweepKey: string, signalFingerprints: readonly string[]): { occurrences: number; runs: number } {
+  const fps = [...new Set(signalFingerprints)].slice(0, 200);
+  if (sweepKey === "" || fps.length === 0) return { occurrences: 0, runs: 0 };
+  const row = data
+    .source()
+    .db.all<{ n: number; r: number }>(
+      `SELECT COUNT(*) AS n, COUNT(DISTINCT run_key) AS r FROM friction_signals WHERE sweep_key = ? AND fingerprint IN (${fps.map(() => "?").join(", ")})`,
+      [sweepKey, ...fps],
+    )[0];
+  return { occurrences: Number(row?.n ?? 0), runs: Number(row?.r ?? 0) };
 }
 
 export interface FileResult {
@@ -865,6 +892,7 @@ export async function fileFindings(deps: FileDeps, findingsIn: readonly Friction
       prev.runs = Math.max(prev.runs, f.runs);
       prev.evidence = [prev.evidence, f.evidence].filter(Boolean).join("\n");
       prev.existingIssue = prev.existingIssue ?? f.existingIssue;
+      prev.signalFingerprints = [...new Set([...(prev.signalFingerprints ?? []), ...(f.signalFingerprints ?? [])])];
     } else byFp.set(f.fingerprint, { ...f });
   }
   const open = await deps.github.listOpenIssues(deps.config.repo, FRICTION_LABEL);
@@ -882,6 +910,10 @@ export async function fileFindings(deps: FileDeps, findingsIn: readonly Friction
       result.updated.push(match.url || `https://github.com/${deps.config.repo}/issues/${match.number}`);
       continue;
     }
+    // Never trust the analyst's counts alone: take the smaller of its figure and the host recount.
+    const seen = deps.observed(f.signalFingerprints ?? []);
+    f.occurrences = Math.min(f.occurrences, seen.occurrences);
+    f.runs = Math.min(f.runs, seen.runs);
     if (f.occurrences < deps.config.minOccurrences || f.runs < deps.config.minRuns) {
       result.skipped++;
       continue;

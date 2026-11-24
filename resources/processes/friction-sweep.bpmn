@@ -27,6 +27,7 @@
           <nano:extend name="evidence" type="string" />
           <nano:extend name="proposedFix" type="string" />
           <nano:extend name="existingIssue" type="integer" optional="true" />
+          <nano:extend name="signalFingerprints" type="string" list="true" optional="true" />
         </nano:shape>
         <nano:shape id="FrictionFileIn" name="File friction findings — input">
           <nano:reference name="findings" ref="FrictionFinding" list="true" optional="true" />

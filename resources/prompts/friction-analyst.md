@@ -50,7 +50,10 @@ target repo's `AGENTS.md` already answers it).
 
 Do not inflate. One-off noise (a single legitimate failing test, a genuine bug the agent then
 fixed) is not friction — leave it out. Report honest `occurrences` and distinct `runs` counts
-from the digest; the app only opens a NEW issue when both clear its thresholds.
+from the digest, and list in `signalFingerprints` the digest signal-group fingerprints (the
+backticked value in each `### kind · \`fingerprint\`` heading) the finding covers. The app recounts
+those groups itself and uses the smaller of its count and yours; a NEW issue opens only when both
+clear its thresholds, so a finding citing no groups is never newly filed.
 
 ## Output contract
 
@@ -70,7 +73,8 @@ Write a JSON object to the file named by `AGENT_RESULT_FILE`:
       "targetRepo": "nanobpm/nano-coder",
       "evidence": "- run 123 (link): `Blocked by nano-coder permissions: … > out.txt`\n- …",
       "proposedFix": "Allow redirects to paths inside the workspace …",
-      "existingIssue": null
+      "existingIssue": null,
+      "signalFingerprints": ["redirect blocked by nano-coder permissions: <path>"]
     }
   ]
 }
