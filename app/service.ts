@@ -4114,6 +4114,120 @@ export async function pollCapabilityGatesImpl(
  * in-flight — never a false-positive `landed` from a silently-dropped slice. */
 const MISSING_PR_STATUS = "missing";
 
+/** Grace period before a `pr_key` whose `pull_requests` row is missing AND whose PR cannot be found on
+ * GitHub is declared failed (issue #1089). Measured from the referencing row's `updated_at`. */
+export const MISSING_PR_GRACE_MS = 60 * 60 * 1000;
+
+/** What GitHub says about a PR whose `pull_requests` row is missing: a settled terminal, still `open`,
+ * definitively `not_found`, or `null` when the lookup could not answer (transport hiccup / no token) —
+ * an unknown answer never advances the grace clock into a failure verdict on its own. */
+export type MissingPrLookup = "merged" | "closed" | "open" | "not_found" | null;
+
+/** Default GitHub lookup for {@link reconcileMissingPrRows}, over the canonical `fetchPrState`. A
+ * 404 / "Could not resolve" error is a definitive `not_found`; any other failure is unknown (`null`). */
+export async function lookupMissingPr(repo: string, number: number, token: string): Promise<MissingPrLookup> {
+  try {
+    const st = await fetchPrState(repo, number, token);
+    if (!st) return null;
+    return st.merged ? "merged" : st.state === "closed" ? "closed" : "open";
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return /\b404\b|not found|could not resolve/i.test(msg) ? "not_found" : null;
+  }
+}
+
+/** Insert a TERMINAL `pull_requests` row for a PR the app lost track of, so every reader (epic delivery,
+ * feature rollup, run waiters) sees a settled state. `merged` lands; anything else is `abandoned` (the
+ * resolved-not-landed terminal shared by both the delivery and PR terminal sets) with the reason on
+ * `outcome`. Lost a race with a concurrent writer → the row exists, which is the goal. */
+async function writeTerminalPrRow(data: DataLayer, prKey: string, status: "merged" | "abandoned", reason: string) {
+  const parsed = parsePr(prKey);
+  if (!parsed) return;
+  const table = prs(data);
+  if (await table.get(prKey)) return;
+  const ts = now();
+  try {
+    await table.insert({
+      pr_key: prKey,
+      repo: parsed.repo,
+      number: parsed.number,
+      url: canonicalPrUrl(parsed.repo, parsed.number),
+      status,
+      outcome: reason,
+      current_round: 0,
+      abandon_token: mintAbandonToken(),
+      merged_at: status === "merged" ? ts : null,
+      created_at: ts,
+      updated_at: ts,
+    });
+  } catch (err) {
+    if (await table.get(prKey)) return;
+    throw err;
+  }
+}
+
+/** Liveness reconcile for a MISSING `pull_requests` row (issue #1089). A `pr_key` referenced by a `done`
+ * epic's slice or by a converging / mid-handoff feature run with no PR row would otherwise keep that run
+ * non-terminal FOREVER (the `MISSING_PR_STATUS` in-flight sentinel; the feature's `PR record missing`),
+ * hanging every run waiter. For each such key, ask GitHub:
+ *   • merged → write a `merged` row; closed → write an `abandoned` row (reason `closed on GitHub`);
+ *   • open / unknown → leave it (in flight is the truth; feature edge (1) re-enrolls it);
+ *   • not found past {@link MISSING_PR_GRACE_MS} (since the referencing row's `updated_at`) → the slice
+ *     gets an `abandoned` row with a reason, and the feature run is marked `failed` with that reason.
+ * Idempotent and best-effort per key; never throws. */
+export async function reconcileMissingPrRows(
+  data: DataLayer,
+  token: string,
+  opts: { lookup?: (repo: string, number: number, token: string) => Promise<MissingPrLookup>; nowMs?: number } = {},
+): Promise<void> {
+  const lookup = opts.lookup ?? lookupMissingPr;
+  const nowMs = opts.nowMs ?? Date.now();
+  const known = new Set((await prs(data).all()).map((r) => r.pr_key));
+  // pr_key → the newest referencing timestamp, plus the feature runs referencing it.
+  const refs = new Map<string, { since: number; features: string[] }>();
+  const note = (prKey: string, at: string | null | undefined, feature?: string) => {
+    if (known.has(prKey)) return;
+    const t = Date.parse(at ?? "");
+    const e = refs.get(prKey) ?? { since: Number.isFinite(t) ? t : nowMs, features: [] };
+    if (Number.isFinite(t)) e.since = Math.max(e.since, t);
+    if (feature) e.features.push(feature);
+    refs.set(prKey, e);
+  };
+  for (const plan of await plans(data).find({ status: "done" })) {
+    for (const t of await planTasks(data).find({ plan_key: plan.plan_key })) {
+      if (t.pr_key) note(t.pr_key, t.updated_at ?? t.created_at);
+    }
+  }
+  for (const status of ["converging", "opened"] as const) {
+    for (const run of await featureRuns(data).find({ status })) {
+      if (!run.pr_key) continue;
+      if (status === "opened" && run.converge !== 1) continue;
+      note(run.pr_key, run.updated_at ?? run.created_at, run.feature_key);
+    }
+  }
+  for (const [prKey, ref] of refs) {
+    try {
+      const parsed = parsePr(prKey);
+      if (!parsed) continue;
+      const found = await lookup(parsed.repo, parsed.number, token);
+      if (found === "merged") {
+        await writeTerminalPrRow(data, prKey, "merged", "merged on GitHub (PR row was missing)");
+      } else if (found === "closed") {
+        await writeTerminalPrRow(data, prKey, "abandoned", "closed on GitHub (PR row was missing)");
+      } else if (found === "not_found" && nowMs - ref.since >= MISSING_PR_GRACE_MS) {
+        const reason = `PR ${prKey} not found on GitHub after ${MISSING_PR_GRACE_MS / 60000}m grace`;
+        await writeTerminalPrRow(data, prKey, "abandoned", reason);
+        for (const featureKey of ref.features) {
+          await featureRuns(data).update(featureKey, { status: "failed", delivery_label: reason, updated_at: now() });
+        }
+        console.warn(`[poller] missing PR row: ${reason}`);
+      }
+    } catch (err) {
+      console.error(`[poller] missing PR row ${prKey}: ${err}`);
+    }
+  }
+}
+
 /** Recompute an epic's derived `delivery` signal at READ TIME (epic #412) from the SAME pure
  * `deriveDelivery` the `plan_delivery` VIEW encodes — by joining each slice `plan_tasks.pr_key` →
  * `pull_requests.status` (a dangling `pr_key` counts as in-flight, never false-`landed`). The
@@ -5577,6 +5691,7 @@ export async function pollOnce(
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
   await pollWaitGate(data);
+  await reconcileMissingPrRows(data, token);
   await pollPromotion(data, engine, token);
   await pollFeatureDelivery(data, engine);
   // Issue #907: retry every owed-but-unconfirmed "PR opened" issue link (best-effort, never throws).
