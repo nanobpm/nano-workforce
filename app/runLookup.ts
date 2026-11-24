@@ -218,15 +218,27 @@ function planLive(p: { derived_status: string }): boolean {
   return !PLAN_TERMINAL_STATUSES.some((s) => s === p.derived_status);
 }
 
+type PlanRow = NonNullable<Awaited<ReturnType<ReturnType<typeof plansTracking>["get"]>>>;
+
+/** The ONE delivery-aware epic terminal predicate, shared by key resolution and the returned view: a
+ *  `failed`/`abandoned` epic is terminal outright; a `done` epic only once every slice PR is resolved
+ *  (merged or closed) — a `done` epic with converging or missing slices is still live. */
+async function epicTerminal(data: DataLayer, plan: PlanRow): Promise<boolean> {
+  if (planLive(plan)) return false;
+  if (plan.derived_status !== "done") return true;
+  return epicIsAcknowledgeable(plan.derived_status, await derivePlanDelivery(data, plan));
+}
+
 /** Pick between a feature and an epic sharing one key: the LIVE (non-terminal) run wins; only when
  *  both or neither are live does the newest `created_at` decide. Never `updated_at` — acknowledge and
  *  phase polling bump it, so a dismissed finished run could shadow a live one and the choice flip. */
-function preferPlan(
+async function preferPlan(
+  data: DataLayer,
   feature: { derived_status: string; converge?: number | null; pr_key?: string | null; created_at?: string | null },
-  plan: { derived_status: string; created_at?: string | null },
-): boolean {
+  plan: PlanRow,
+): Promise<boolean> {
   const fl = featureLive(feature);
-  const pl = planLive(plan);
+  const pl = !(await epicTerminal(data, plan));
   if (fl !== pl) return pl;
   return (plan.created_at ?? "") > (feature.created_at ?? "");
 }
@@ -245,7 +257,7 @@ function withChildKeys(view: RunView): RunView {
 export async function lookupRun(data: DataLayer, engine: Engine | undefined, key: string): Promise<RunView | null> {
   const feature = await featureRunsTracking(data).get(key);
   const plan = await plansTracking(data).get(key);
-  if (feature && !(plan && preferPlan(feature, plan))) {
+  if (feature && !(plan && (await preferPlan(data, feature, plan)))) {
     const tasks = await subjectTasks(data, "feature", key);
     const openEsc = newestEscalation(tasks);
     const status = await effectiveStatus(data, feature.derived_status, feature.process_key);
@@ -330,10 +342,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       // Delivery-aware: a `done` epic whose slice PRs are still converging (or missing) is NOT
       // terminal — the ONE canonical acknowledgeable predicate over the read-time delivery signal.
       // A `failed`/`abandoned` epic is terminal outright — only `done` waits on delivery.
-      terminal:
-        !planLive(plan) &&
-        (plan.derived_status !== "done" ||
-          epicIsAcknowledgeable(plan.derived_status, await derivePlanDelivery(data, plan))),
+      terminal: await epicTerminal(data, plan),
       stage: gated ? gateLabel : (plan.epic_phase ?? planStatus),
       settings: {
         ...emptySettings(),

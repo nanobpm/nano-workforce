@@ -1,3 +1,39 @@
+## [0.226.1](https://github.com/nanobpm/nano-workforce/compare/v0.226.0...v0.226.1) (2026-11-24)
+
+### Bug Fixes
+
+* **deps:** update dependency @nanobpm/urban to ^0.100.0 ([#1051](https://github.com/nanobpm/nano-workforce/issues/1051)) ([98a73ee](https://github.com/nanobpm/nano-workforce/commit/98a73eeb59571b985ec3acf5fd5fb7e0e84d239e)), closes [nano-ide#625](https://github.com/nanobpm/nano-ide/issues/625)
+
+## [0.226.0](https://github.com/nanobpm/nano-workforce/compare/v0.225.0...v0.226.0) (2026-11-24)
+
+### Features
+
+* **api:** server-side filters on /status and /escalations ([#1064](https://github.com/nanobpm/nano-workforce/issues/1064)) ([d83485a](https://github.com/nanobpm/nano-workforce/commit/d83485ad6cf4de24ca45005230f4e7b7cc60f540)), closes [#1060](https://github.com/nanobpm/nano-workforce/issues/1060) [#1060](https://github.com/nanobpm/nano-workforce/issues/1060)
+
+## [0.225.0](https://github.com/nanobpm/nano-workforce/compare/v0.224.0...v0.225.0) (2026-11-24)
+
+### Features
+
+* **api:** echo the run's effective settings in start responses ([#1072](https://github.com/nanobpm/nano-workforce/issues/1072)) ([d65498b](https://github.com/nanobpm/nano-workforce/commit/d65498b4a1baf6c07b3e31e7ead6c0be9206308f)), closes [#1059](https://github.com/nanobpm/nano-workforce/issues/1059)
+
+## [0.224.0](https://github.com/nanobpm/nano-workforce/compare/v0.223.8...v0.224.0) (2026-11-24)
+
+### Features
+
+* **sequence:** gate a sequence on several PRs/issues (after list) ([#1070](https://github.com/nanobpm/nano-workforce/issues/1070)) ([a5c528a](https://github.com/nanobpm/nano-workforce/commit/a5c528aaaeccdcd2f430a5461fd518fa9719efb4)), closes [#1056](https://github.com/nanobpm/nano-workforce/issues/1056)
+
+## [0.223.8](https://github.com/nanobpm/nano-workforce/compare/v0.223.7...v0.223.8) (2026-11-24)
+
+### Code Refactoring
+
+* **implement-cell:** drop keyless-opened wave/record guards made redundant by the pr output mapping ([#1068](https://github.com/nanobpm/nano-workforce/issues/1068)) ([bf9cd97](https://github.com/nanobpm/nano-workforce/commit/bf9cd97c156f62417561e50d8f7eafa13859efda)), closes [#1067](https://github.com/nanobpm/nano-workforce/issues/1067)
+
+## [0.223.7](https://github.com/nanobpm/nano-workforce/compare/v0.223.6...v0.223.7) (2026-11-24)
+
+### Documentation
+
+* **api:** document start/feature autoMerge-implies-converge flag table ([#1063](https://github.com/nanobpm/nano-workforce/issues/1063)) ([99a3f2c](https://github.com/nanobpm/nano-workforce/commit/99a3f2c4cfb8a507c95800adef0947f7398253f3)), closes [#1058](https://github.com/nanobpm/nano-workforce/issues/1058)
+
 ## [0.223.6](https://github.com/nanobpm/nano-workforce/compare/v0.223.5...v0.223.6) (2026-11-24)
 
 ### Build System

@@ -9,6 +9,7 @@
 // issue parsing, the plan/plan_tasks row shapes, the prompt assets, and starting
 // the process. Data access goes through the record gateway (`data.table`), never
 // hand-written SQL — matching app/service.ts.
+
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
 import {
@@ -19,6 +20,7 @@ import {
 } from "./baseBranch.ts";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
 import { capsWaitTimeout, DEFAULT_CAPS_WAIT_TIMEOUT } from "./capsWait.ts";
+import { deriveEffectiveSettings } from "./effectiveSettings.ts";
 import { EPIC_PHASE } from "./epicPhase.ts";
 import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
 import {
@@ -1012,106 +1014,104 @@ export async function startPlan(
       updated_at: ts,
     });
   }
-  const { processInstanceKey } = await engine.createInstance({
-    processDefinitionId: PLAN_PROCESS_ID,
-    variables: {
-      planKey: parsed.planKey,
-      repo: parsed.repo,
-      issue: parsed.planKey,
-      issueNumber: parsed.number,
-      issueUrl: parsed.url,
-      planFindings: null,
-      // The plan-review epoch is a durable process variable, bumped by the `plan-review-decision`
-      // user task each time a human answers a plan-review escalation. `record-plan-review` reads it
-      // to reset the per-epoch round budget; it starts at 0 for the first review round.
-      planReviewEpoch: 0,
-      // Escalation-of-the-escalation SLA (U5, #156): the validated ISO-8601 duration seeded onto the
-      // instance and read by each escalation user task's interrupting timer boundary
-      // (`<bpmn:timeDuration>=escalationSlaTimeout`). If a human never answers, the boundary fires and
-      // the process auto-proceeds down the gateway's safe-default arm — durable in-process liveness,
-      // not a poller-side watchdog. `escalationAssignee` is the optional named assignee the escalation
-      // user tasks' `zeebe:assignmentDefinition` resolves (null = unassigned, routed via the
-      // `operators` candidate group); an operator/agent can claim/reassign via the task inbox.
-      escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
-      escalationAssignee: null,
-      // Opt-in escalation steward (issue #889): carried on the instance so child processes inherit it,
-      // AND persisted on the `plans` row (the durable source the steward's eligibility reads), so an
-      // agent-completion clobber of the variable can never silently opt an epic in or out (#887/#888).
-      autoResolveEscalations: opts.autoResolveEscalations === true,
-      // Slice merge policy (issue #1007): the operator's intent, ALSO persisted on the durable
-      // `plans.auto_merge` column (above) which `pr.converge-slice` reads. The variable is kept on
-      // the instance for searchability/observability, but the durable row is authoritative — an
-      // agent completion echoing `autoMerge` can clobber this variable yet never the row, so an
-      // operator's explicit `false` opt-out survives agent output (#1007 review).
-      autoMerge: opts.autoMerge !== false,
-      // Agent-task liveness SLA (issue #849): PRE-SEED the canonical bound for the fan-out's
-      // external agent tasks. Each slice's implementation agent (via the implement-cell
-      // callActivity's explicit `agentSlaTimeout` input mapping) is bounded today; the wave's own
-      // inline `trial-merge` agent (`plan-fanout.bpmn:524-542`) is NOT — it is a separate external
-      // task from the standalone `merge-cell` process (which has no callActivity caller), sits on a
-      // rerun back-edge, and its SLA boundary is deferred to #868 alongside the planner (`plan`) and
-      // plan reviewer (`review-plan`), whose back-edge loop the layouter cannot yet route (layouter
-      // bug #867). For those three this seed is preparation, not yet an armed bound. Each bounded
-      // task's interrupting timer boundary evaluates `=agentSlaTimeout` at timer creation, so a hung
-      // or looping agent escalates to a human instead of parking forever.
-      agentSlaTimeout: AGENT_SLA_TIMEOUT,
-      // Capability-barrier bound (#289): the validated ISO-8601 duration read by the
-      // `wait-caps-timeout` timer arm of the `wait-caps-resolved` event-based gateway. A task whose
-      // declared cross-repo capabilities never resolve (most acutely an unresolvable capabilityRef the
-      // host reconciler can never gate) escalates to the `feature-escalation` operator user task when
-      // this elapses, instead of parking at the barrier forever — durable in-process liveness.
-      capsWaitTimeout: CAPS_WAIT_TIMEOUT,
-      // Coordination blackboard (#51): the capability URL + the protocol brief that each
-      // implementer agent gets appended to its prompt (composed into `appendPrompt` in
-      // plan-fanout.bpmn's implement-task). Advisory shared state, delivered in-band, used
-      // out-of-band.
-      blackboardUrl: bbUrl,
-      blackboardBrief: renderCoordinationBrief(bbUrl),
-      // Epic base branch (019_plan_base_branch.sql; ADR 0003): the branch the fleet branches off
-      // and opens every PR against instead of the repo default. `baseBranchBrief` rides
-      // `appendPrompt` in the implement-task (like `blackboardBrief`). Base is now always explicit
-      // (normalizeBaseBranch rejects blank), so the brief is always rendered.
-      baseBranch: base,
-      baseBranchBrief: renderBaseBranchBrief(base),
-      // Inter-epic scheduling (issue #292, slice S3): the leading capability readiness-gate the
-      // plan-fanout runs as a PREFLIGHT before wave 0. `readinessProbes` is a DEPENDENT epic's set
-      // of `capability` probes (one per inbound `plan_deps` edge / producer); it is `null` for a
-      // ROOT (no inbound edge), whose preflight gateway then routes straight past the gate so it
-      // fans out immediately. `probeTimeout` bounds the preflight's escalation timers (derived once
-      // from the same probes) so a never-publishing producer escalates without wedging the set.
-      // `resolvedArtifacts` is filled by the preflight on green — the exact `pkg@version`s carrying
-      // each awaited capability (one per probe, `null` for any that escalated). It rides the
-      // implement task's `appendPrompt` (like `baseBranchBrief`) so slices build against exactly the
-      // bound version. Seeded `null` here so a ROOT (which never runs the preflight) still resolves
-      // the variable in that FEEL expression instead of raising an incident.
-      readinessProbes: probes,
-      probeTimeout: opts.probeTimeout ?? null,
-      probePollEvery: opts.probePollEvery ?? null,
-      // The preflight probe worker (`pr.readiness-probe`) requires a non-blank `gateKey` correlation
-      // key (it publishes `readiness-ready` on it). The typed `ReadinessProbeIn` envelope projects it
-      // from THIS process scope (not task-local ioMapping), so it is seeded here — one per dependent
-      // instance. A ROOT never runs the preflight, so its `gateKey` stays `null`, unused.
-      gateKey: probes ? `preflight:${parsed.planKey}` : null,
-      resolvedArtifacts: null,
-      // Host-git provisioning (c8ctl, issue #684): deliver the repository envelope so each epic slice's
-      // `senior:feature` implementation agent (plan-fanout's per-wave `implement-cell`) gets an
-      // ISOLATED throwaway clone instead of inheriting the worker's launch dir — otherwise several
-      // copilot workers on one host share (and clobber) a single checkout, violating the durable-resume
-      // design. This is the whole-epic seed, so it carries `ref = base` (the epic integration branch)
-      // but NO `branchCreate`: each slice's deterministic `feat/<task.id>` branch differs per MI child,
-      // so the agent cuts its own branch inside the isolated clone (per resources/prompts/feature.md).
-      // The process-level variable propagates through the wave subprocess + `implement-cell` callActivity
-      // into each agent job. This is a fan-out seed, so it is REQUIRED (issue #729): `parsed.repo` is
-      // regex-bound (`parseIssue`) and `base` is `normalizeBaseBranch`-validated non-blank, so the
-      // `requireRepoEnvelopeVars` guard never trips here — but it makes an unresolved repo/base a HARD
-      // launch failure rather than a silent `{}` that would degrade every slice to the shared launch dir.
-      ...requireRepoEnvelopeVars(parsed.repo, base),
-    },
-  });
+  const seeded = {
+    planKey: parsed.planKey,
+    repo: parsed.repo,
+    issue: parsed.planKey,
+    issueNumber: parsed.number,
+    issueUrl: parsed.url,
+    planFindings: null,
+    // The plan-review epoch is a durable process variable, bumped by the `plan-review-decision`
+    // user task each time a human answers a plan-review escalation. `record-plan-review` reads it
+    // to reset the per-epoch round budget; it starts at 0 for the first review round.
+    planReviewEpoch: 0,
+    // Escalation-of-the-escalation SLA (U5, #156): the validated ISO-8601 duration seeded onto the
+    // instance and read by each escalation user task's interrupting timer boundary
+    // (`<bpmn:timeDuration>=escalationSlaTimeout`). If a human never answers, the boundary fires and
+    // the process auto-proceeds down the gateway's safe-default arm — durable in-process liveness,
+    // not a poller-side watchdog. `escalationAssignee` is the optional named assignee the escalation
+    // user tasks' `zeebe:assignmentDefinition` resolves (null = unassigned, routed via the
+    // `operators` candidate group); an operator/agent can claim/reassign via the task inbox.
+    escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
+    escalationAssignee: null,
+    // Opt-in escalation steward (issue #889): carried on the instance so child processes inherit it,
+    // AND persisted on the `plans` row (the durable source the steward's eligibility reads), so an
+    // agent-completion clobber of the variable can never silently opt an epic in or out (#887/#888).
+    autoResolveEscalations: opts.autoResolveEscalations === true,
+    // Slice merge policy (issue #1007): the operator's intent, ALSO persisted on the durable
+    // `plans.auto_merge` column (above) which `pr.converge-slice` reads. The variable is kept on
+    // the instance for searchability/observability, but the durable row is authoritative — an
+    // agent completion echoing `autoMerge` can clobber this variable yet never the row, so an
+    // operator's explicit `false` opt-out survives agent output (#1007 review).
+    autoMerge: opts.autoMerge !== false,
+    // Agent-task liveness SLA (issue #849): PRE-SEED the canonical bound for the fan-out's
+    // external agent tasks. Each slice's implementation agent (via the implement-cell
+    // callActivity's explicit `agentSlaTimeout` input mapping) is bounded today; the wave's own
+    // inline `trial-merge` agent (`plan-fanout.bpmn:524-542`) is NOT — it is a separate external
+    // task from the standalone `merge-cell` process (which has no callActivity caller), sits on a
+    // rerun back-edge, and its SLA boundary is deferred to #868 alongside the planner (`plan`) and
+    // plan reviewer (`review-plan`), whose back-edge loop the layouter cannot yet route (layouter
+    // bug #867). For those three this seed is preparation, not yet an armed bound. Each bounded
+    // task's interrupting timer boundary evaluates `=agentSlaTimeout` at timer creation, so a hung
+    // or looping agent escalates to a human instead of parking forever.
+    agentSlaTimeout: AGENT_SLA_TIMEOUT,
+    // Capability-barrier bound (#289): the validated ISO-8601 duration read by the
+    // `wait-caps-timeout` timer arm of the `wait-caps-resolved` event-based gateway. A task whose
+    // declared cross-repo capabilities never resolve (most acutely an unresolvable capabilityRef the
+    // host reconciler can never gate) escalates to the `feature-escalation` operator user task when
+    // this elapses, instead of parking at the barrier forever — durable in-process liveness.
+    capsWaitTimeout: CAPS_WAIT_TIMEOUT,
+    // Coordination blackboard (#51): the capability URL + the protocol brief that each
+    // implementer agent gets appended to its prompt (composed into `appendPrompt` in
+    // plan-fanout.bpmn's implement-task). Advisory shared state, delivered in-band, used
+    // out-of-band.
+    blackboardUrl: bbUrl,
+    blackboardBrief: renderCoordinationBrief(bbUrl),
+    // Epic base branch (019_plan_base_branch.sql; ADR 0003): the branch the fleet branches off
+    // and opens every PR against instead of the repo default. `baseBranchBrief` rides
+    // `appendPrompt` in the implement-task (like `blackboardBrief`). Base is now always explicit
+    // (normalizeBaseBranch rejects blank), so the brief is always rendered.
+    baseBranch: base,
+    baseBranchBrief: renderBaseBranchBrief(base),
+    // Inter-epic scheduling (issue #292, slice S3): the leading capability readiness-gate the
+    // plan-fanout runs as a PREFLIGHT before wave 0. `readinessProbes` is a DEPENDENT epic's set
+    // of `capability` probes (one per inbound `plan_deps` edge / producer); it is `null` for a
+    // ROOT (no inbound edge), whose preflight gateway then routes straight past the gate so it
+    // fans out immediately. `probeTimeout` bounds the preflight's escalation timers (derived once
+    // from the same probes) so a never-publishing producer escalates without wedging the set.
+    // `resolvedArtifacts` is filled by the preflight on green — the exact `pkg@version`s carrying
+    // each awaited capability (one per probe, `null` for any that escalated). It rides the
+    // implement task's `appendPrompt` (like `baseBranchBrief`) so slices build against exactly the
+    // bound version. Seeded `null` here so a ROOT (which never runs the preflight) still resolves
+    // the variable in that FEEL expression instead of raising an incident.
+    readinessProbes: probes,
+    probeTimeout: opts.probeTimeout ?? null,
+    probePollEvery: opts.probePollEvery ?? null,
+    // The preflight probe worker (`pr.readiness-probe`) requires a non-blank `gateKey` correlation
+    // key (it publishes `readiness-ready` on it). The typed `ReadinessProbeIn` envelope projects it
+    // from THIS process scope (not task-local ioMapping), so it is seeded here — one per dependent
+    // instance. A ROOT never runs the preflight, so its `gateKey` stays `null`, unused.
+    gateKey: probes ? `preflight:${parsed.planKey}` : null,
+    resolvedArtifacts: null,
+    // Host-git provisioning (c8ctl, issue #684): deliver the repository envelope so each epic slice's
+    // `senior:feature` implementation agent (plan-fanout's per-wave `implement-cell`) gets an
+    // ISOLATED throwaway clone instead of inheriting the worker's launch dir — otherwise several
+    // copilot workers on one host share (and clobber) a single checkout, violating the durable-resume
+    // design. This is the whole-epic seed, so it carries `ref = base` (the epic integration branch)
+    // but NO `branchCreate`: each slice's deterministic `feat/<task.id>` branch differs per MI child,
+    // so the agent cuts its own branch inside the isolated clone (per resources/prompts/feature.md).
+    // The process-level variable propagates through the wave subprocess + `implement-cell` callActivity
+    // into each agent job. This is a fan-out seed, so it is REQUIRED (issue #729): `parsed.repo` is
+    // regex-bound (`parseIssue`) and `base` is `normalizeBaseBranch`-validated non-blank, so the
+    // `requireRepoEnvelopeVars` guard never trips here — but it makes an unresolved repo/base a HARD
+    // launch failure rather than a silent `{}` that would degrade every slice to the shared launch dir.
+    ...requireRepoEnvelopeVars(parsed.repo, base),
+  };
+  const { processInstanceKey } = await engine.createInstance({ processDefinitionId: PLAN_PROCESS_ID, variables: seeded });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
   if (processKey != null) {
     await table.update(parsed.planKey, { process_key: processKey, updated_at: now() });
   }
-  return { planKey: parsed.planKey, processKey };
+  return { planKey: parsed.planKey, processKey, effective: deriveEffectiveSettings(seeded) };
 }
 

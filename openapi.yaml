@@ -2336,6 +2336,49 @@ components:
               type: integer
               nullable: true
               description: The `start` to pass for the next page, or null when this is the last page (present only when paginating).
+    EffectiveSettings:
+      description: >-
+        The run's EFFECTIVE settings as seeded on its engine instance (issue 1059) — derived from the exact
+        variable map handed to the engine, so it always equals what the instance carries. A setting the run
+        kind does not seed is null.
+      type: object
+      additionalProperties: false
+      required: [converge, autoMerge, convergeOnly, maxRounds, blockedOn, autoResolveEscalations, customInstructions, baseBranch]
+      properties:
+        converge:
+          type: boolean
+          nullable: true
+        autoMerge:
+          type: boolean
+          nullable: true
+          description: The canonical positive merge intent.
+        convergeOnly:
+          type: boolean
+          nullable: true
+          description: The legacy inverse of autoMerge (convergence loops only).
+        maxRounds:
+          type: integer
+          nullable: true
+        blockedOn:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: "The readiness-gate probe targets the run parks on, REDACTED for display (a `command` probe shows `<redacted>`; an `http` URL has embedded credentials stripped); null when ungated."
+        autoResolveEscalations:
+          type: boolean
+        customInstructions:
+          type: object
+          additionalProperties: false
+          required: [present, length]
+          properties:
+            present:
+              type: boolean
+            length:
+              type: integer
+        baseBranch:
+          type: string
+          nullable: true
     SubmitResult:
       type: object
       required:
@@ -2351,6 +2394,13 @@ components:
           type: boolean
           description: True when a non-terminal convergence loop for this PR already exists; the aggregate was
             refreshed and no new instance was started.
+        effective:
+          $ref: "#/components/schemas/EffectiveSettings"
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Anything the start adjusted or ignored from the request (issue 1059).
     StartPlanResult:
       type: object
       required:
@@ -2365,6 +2415,13 @@ components:
         alreadyRunning:
           type: boolean
           description: True when a non-terminal plan for this issue already exists; no new instance was started.
+        effective:
+          $ref: "#/components/schemas/EffectiveSettings"
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Anything the start adjusted or ignored from the request (issue 1059).
     StartFeatureResult:
       type: object
       required:
@@ -2405,6 +2462,13 @@ components:
         humanApproval:
           type: boolean
           description: The EFFECTIVE humanApproval flag for this request (issue 1041); present only when `outcome` is `started` — omitted for `already-active`, whose live run keeps its own flags.
+        effective:
+          $ref: "#/components/schemas/EffectiveSettings"
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Anything the start adjusted or ignored from the request (issue 1059).
     EpicSetStart:
       description: >-
         The set/batch admission request body (issue #292, slice S2). Submits a SET of epics plus the
@@ -3989,6 +4053,13 @@ components:
         processInstanceKey:
           type: string
           description: The started engine instance key, when dispatched.
+        effective:
+          $ref: "#/components/schemas/EffectiveSettings"
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Anything the start adjusted or ignored from the request (issue 1059).
         processDefinitionId:
           type: string
           description: The started process definition id, when dispatched.
@@ -4436,6 +4507,29 @@ components:
             OPTIONAL gate — an `owner/repo#NN` issue/epic/feature reference. When present, a leading
             `wait[epic]` node gates the whole sequence on that reference reaching "fully merged" (every
             opened slice/PR landed, §9.5) before the first issue's implementation starts.
+        after:
+          type: array
+          maxItems: 32
+          items:
+            oneOf:
+              - type: string
+                minLength: 1
+                maxLength: 255
+              - type: object
+                additionalProperties: false
+                required: [kind, ref]
+                properties:
+                  kind:
+                    type: string
+                    enum: [pr, issue, epic]
+                  ref:
+                    type: string
+                    minLength: 1
+                    maxLength: 255
+          description: "OPTIONAL AND gate: wait until every PR merged / issue completed / epic merged (7d budget, then escalate)."
+        parallel:
+          type: boolean
+          description: "OPTIONAL: fan all issues out in parallel once gates release."
         issues:
           type: array
           minItems: 1
@@ -4940,10 +5034,58 @@ paths:
       operationId: listActivePrs
       x-cli:
         command: [status]
-      summary: List every tracked PR currently in flight (not converged/abandoned), newest-updated first.
+      summary: List every tracked PR currently in flight (not converged/abandoned), newest-updated first. Optional filters (issue 1060) combine with AND; page.totalItems is the filtered count.
       security:
         - hookSecret: []
         - {}
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [pr, delivery]
+          description: "Only rows of this kind (repeatable; OR within, AND with other filters)."
+        - name: repo
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+          description: "Only rows in this owner/repo (repeatable)."
+        - name: key
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+          description: "Only the row with this key — a PR's prKey (owner/repo#N) or a delivery run's runKey (repeatable)."
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [converging, waiting_review, escalated, waiting_deps, waiting_merge, merging, waiting_lane, queued, converged, merged, abandoned, incident, orphaned, awaiting-approval, running, done, failed]
+          description: "Only rows in this status (repeatable)."
+        - name: hasEscalation
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: "true → only rows parked on an open escalation; false → only rows without one."
+        - name: updatedSince
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: "Only rows updated at or after this ISO-8601 date-time, which must carry a timezone (Z or ±hh:mm); a malformed or timezone-less value is a 400."
       responses:
         "200":
           description: The active PRs.
@@ -4951,6 +5093,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ActivePrList"
+        "400":
+          description: An unknown/invalid filter value.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
@@ -5279,10 +5427,37 @@ paths:
         `agentCompleteEscalation` — so a tool-aware agent never has to curl the un-projected
         `/tasks/api/tasks` inbox to find keys. Read-only projection over the ONE `user_tasks` read
         model the Tasks inbox and Convergence page consume (no second source of truth); a row is
-        present iff its task is open, so the list reflects live pending work.
+        present iff its task is open, so the list reflects live pending work. Optional filters (issue 1060)
+        combine with AND; page.totalItems is the filtered count.
       security:
         - hookSecret: []
         - {}
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [feature, epic, plan, pr, delivery, agent]
+          description: "Only escalations whose subjectType is this kind (repeatable; `epic` is an alias of `plan`)."
+        - name: repo
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+          description: "Only escalations whose subject is in this owner/repo (repeatable)."
+        - name: key
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+          description: "Only escalations whose subjectKey or prKey is this key, e.g. owner/repo#N (repeatable)."
       responses:
         "200":
           description: The open escalations.
@@ -5290,6 +5465,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EscalationList"
+        "400":
+          description: An unknown/invalid filter value.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
@@ -6431,6 +6612,34 @@ paths:
                   minLength: 1
                   maxLength: 255
                   description: OPTIONAL gate — an `owner/repo#NN` issue/epic/feature reference. When present, a leading `wait[epic]` node gates the whole sequence on that reference reaching "fully merged" (every opened slice/PR landed, §9.5) before the first issue's implementation starts.
+                after:
+                  type: array
+                  maxItems: 32
+                  items:
+                    oneOf:
+                      - type: string
+                        minLength: 1
+                        maxLength: 255
+                      - type: object
+                        additionalProperties: false
+                        required:
+                          - kind
+                          - ref
+                        properties:
+                          kind:
+                            type: string
+                            enum:
+                              - pr
+                              - issue
+                              - epic
+                          ref:
+                            type: string
+                            minLength: 1
+                            maxLength: 255
+                  description: 'OPTIONAL AND gate: wait until every PR merged / issue completed / epic merged (7d budget, then escalate).'
+                parallel:
+                  type: boolean
+                  description: 'OPTIONAL: fan all issues out in parallel once gates release.'
                 issues:
                   type: array
                   minItems: 1

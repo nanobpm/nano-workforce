@@ -227,7 +227,7 @@ test("a PR's humanApproval reflects the SUBMITTED setting, surviving approval an
   assertEquals(((await handler(input("o/r#9"), merging)) as Row).body.settings.humanApproval, true);
   const off = memApp({ pull_requests: [pr({ human_approval_submitted: 0 })] }, PKS);
   assertEquals(((await handler(input("o/r#9"), off)) as Row).body.settings.humanApproval, false);
-  // A pre-148 row has no record of the submitted setting: unknown, not a guess.
+  // A pre-152 row has no record of the submitted setting: unknown, not a guess.
   const legacy = memApp({ pull_requests: [pr({ merge_human_approval: 0 })] }, PKS);
   assertEquals(((await handler(input("o/r#9"), legacy)) as Row).body.settings.humanApproval, null);
 });
@@ -415,4 +415,21 @@ test("a failed or abandoned epic is terminal regardless of its slice delivery", 
     const body = ((await handler(input("o/r#1"), memApp({ plans: [epic], plan_tasks: slice, pull_requests: [pr()] }, PKS))) as Row).body;
     assertEquals(body.terminal, true, status);
   }
+});
+
+test("key resolution uses the delivery-aware epic terminal: a `done` epic with unresolved slices beats a newer completed feature", async () => {
+  const later = "2026-11-02T00:00:00Z";
+  const epic = { plan_key: "o/r#5", repo: "o/r", title: "Epic", status: "done", process_key: "proc-e", epic_phase: "Done", auto_merge: 1, acknowledged_at: null, created_at: T0, updated_at: T0 };
+  const slice = [{ id: 1, plan_key: "o/r#5", task_id: "a", pr_key: "o/r#9" }];
+  const done = feature({ status: "merged", created_at: later });
+  const pick = async (prs: Row[]) =>
+    ((await handler(input("o/r#5"), memApp({ feature_runs: [done], plans: [epic], plan_tasks: slice, pull_requests: prs }, PKS))) as Row).body;
+  // Converging slice: the epic is still live and wins despite the newer feature.
+  const converging = await pick([pr()]);
+  assertEquals(converging.kind, "epic");
+  assertEquals(converging.terminal, false);
+  // Missing slice PR: still live.
+  assertEquals((await pick([])).kind, "epic");
+  // Every slice merged: both terminal, so the newest-created (the feature) wins.
+  assertEquals((await pick([pr({ status: "merged", merged_at: T0 })])).kind, "feature");
 });

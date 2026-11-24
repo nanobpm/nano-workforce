@@ -1,7 +1,12 @@
--- Re-create the `pull_requests_read_model` VIEW so it re-exports the new base column
--- `human_approval_submitted` (148, issue #1054 review) — the VIEW must pass through EVERY base
--- `pull_requests` column (app/pullRequestReadModel.test.ts DRIFT GUARD). A mechanical re-emission of
--- 138; the derived columns are unchanged. No BEGIN/COMMIT (the runner wraps each file).
+-- Re-create the `pull_requests_read_model` VIEW from the CURRENT `sqlSelectFor` output.
+-- @nanobpm/urban 0.100.0 (nano-ide#625) stopped COALESCE-wrapping projection predicates inside
+-- EXISTS/WHERE/CASE, so SQLite can use its indexes (e.g. the `merges` lookup behind
+-- `pull_requests_read_model`). The derived columns are emitted VERBATIM from app/featureReadModel.ts,
+-- app/deliveryGraphReadModel.ts, app/planReadModel.ts and app/pullRequestReadModel.ts; the base
+-- pass-throughs, display columns, FROM/JOINs are unchanged from 112 / 146 / 100 / 138 respectively.
+-- Semantics are unchanged (the declarations' NULL handling is preserved by the new lowering — the
+-- FRAMEWORK PARITY GUARDs check SQL↔TS agreement). No BEGIN/COMMIT (the runner wraps each file).
+-- Numbered after 147.
 
 DROP VIEW IF EXISTS pull_requests_read_model;
 
@@ -47,7 +52,6 @@ SELECT
   pr.merge_human_approval AS merge_human_approval,
   pr.custom_instructions AS custom_instructions,
   pr.custom_instructions_text AS custom_instructions_text,
-  pr.human_approval_submitted AS human_approval_submitted,
-  CASE WHEN COALESCE((COALESCE((COALESCE(("pr"."derived_status" = 'merged'), 0) OR COALESCE(("pr"."derived_status" = 'converged'), 0) OR COALESCE(("pr"."derived_status" = 'abandoned'), 0) OR COALESCE(("pr"."derived_status" = 'closed'), 0) OR COALESCE(("pr"."derived_status" = 'failed'), 0)), 0) AND COALESCE(("pr"."acknowledged_at" = "pr"."acknowledged_at"), 0)), 0) THEN 'history' ELSE 'active' END AS list_bucket,
-  CASE WHEN COALESCE((COALESCE((COALESCE(("pr"."derived_status" = 'merged'), 0) OR COALESCE(("pr"."derived_status" = 'converged'), 0) OR COALESCE(("pr"."derived_status" = 'abandoned'), 0) OR COALESCE(("pr"."derived_status" = 'closed'), 0) OR COALESCE(("pr"."derived_status" = 'failed'), 0)), 0) AND (NOT COALESCE(COALESCE(("pr"."acknowledged_at" = "pr"."acknowledged_at"), 0), 0))), 0) THEN 1 ELSE 0 END AS ack_open
+  CASE WHEN ((("pr"."derived_status" = 'merged') OR ("pr"."derived_status" = 'converged') OR ("pr"."derived_status" = 'abandoned') OR ("pr"."derived_status" = 'closed') OR ("pr"."derived_status" = 'failed')) AND ("pr"."acknowledged_at" = "pr"."acknowledged_at")) THEN 'history' ELSE 'active' END AS list_bucket,
+  CASE WHEN ((("pr"."derived_status" = 'merged') OR ("pr"."derived_status" = 'converged') OR ("pr"."derived_status" = 'abandoned') OR ("pr"."derived_status" = 'closed') OR ("pr"."derived_status" = 'failed')) AND (NOT COALESCE(COALESCE(("pr"."acknowledged_at" = "pr"."acknowledged_at"), 0), 0))) THEN 1 ELSE 0 END AS ack_open
 FROM pull_requests__tracking pr;

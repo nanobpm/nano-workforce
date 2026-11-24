@@ -1776,7 +1776,7 @@ const GRAPH_NAME_MAX_LENGTH = 255;
  * would otherwise let an oversized-but-compilable graph reach the layout/compiler and be persisted —
  * both violating the declared contract and exposing the import path to avoidable CPU/memory growth. */
 export const GRAPH_MAX_NODES = 256;
-const GRAPH_MAX_EDGES = 1024;
+export const GRAPH_MAX_EDGES = 1024;
 const NODE_MAX_EMITS = 32;
 
 /** The per-kind config key a node of the given kind must carry (`agent` → `agent`, etc.). */

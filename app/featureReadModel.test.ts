@@ -31,7 +31,7 @@ import { deriveListBucket, deriveStage } from "./stage.ts";
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const MIGRATION_LATEST = "112_feature_read_model_opened_midhandoff.sql";
+const MIGRATION_LATEST = "148_feature_read_model_uncoalesced_predicates.sql";
 
 // The base `feature_runs` shape the VIEW reads, plus the `user_tasks` inbox (034) the `attention`
 // derivation `EXISTS`-reads, plus a stand-in for the managed `feature_runs__tracking` derived VIEW

@@ -11,6 +11,7 @@
 // narrows the validated variant and keeps the issue-FORMAT parse guard (schema can't express it).
 
 import { withProcessInstanceKey } from "../app/apiShape.ts";
+import { ALREADY_RUNNING_WARNING } from "../app/effectiveSettings.ts";
 import { admitPlan, admitPlanErrorResponse, parseIssue, startPlan } from "../app/plan.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -74,5 +75,6 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     autoResolveEscalations,
     autoMerge,
   });
-  return { status: 202, body: withProcessInstanceKey(result) };
+  const warnings = alreadyRunning ? [ALREADY_RUNNING_WARNING] : [];
+  return { status: 202, body: { ...withProcessInstanceKey(result), warnings } };
 });
