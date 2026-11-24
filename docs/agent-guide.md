@@ -383,6 +383,15 @@ is read from a same-named top-level field in the agent's result JSON. The system
 instruction to the agent's prompt automatically when the node declares `emits`. If the agent
 omits the fact, the `default` branch is taken.
 
+**Conditional sub-flows can have their own structure.** An arm of a split may fan out in
+parallel and AND-join again, and may contain nested splits. Every node is reached under a
+*branch context* (the stack of split arms above it). A fan-in whose producers all share one
+context is a parallel AND-join; a fan-in whose producers are the distinct arms of ONE split is an
+exclusive merge, and the merge node stays under any OUTER branch (a nested merge is still
+conditional on the outer arm). The process End applies the same rule to the leaves. Still
+rejected: AND-joining a conditional arm with an always-firing node, merging arms of two
+different splits, feeding one arm into an exclusive merge twice, and mixed leaves.
+
 **Result statuses are added automatically. Don't write them into your prompt.** Every agent
 node's prompt gets the allowed terminal statuses (`done` / `opened` / `skipped`, plus the
 unambiguous affirmative-completion aliases `completed` / `succeeded` / `success` — issue #932:

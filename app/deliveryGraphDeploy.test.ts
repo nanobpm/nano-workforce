@@ -1096,3 +1096,104 @@ test("#863 review 5430718031 deploy+route: a single-ARTIFACT human emit rejects 
   assertEquals(good.state, "COMPLETED", "a valid artifact entry must COMPLETE");
   assertEquals(good.published, "@nanobpm/demo@1.0.0", "a valid (scoped) artifact handle must publish through verbatim");
 });
+
+// ── #1083: conditional sub-flows with their own structure DEPLOY and RUN without deadlock/double-fire ──
+// Repro 1: a parallel fork + AND-join INSIDE one exclusive arm; repro 2: a NESTED exclusive split whose
+// inner merge stays under the outer arm. Every node is a distinct agent job type so the run counts prove
+// exactly-once execution on the taken arm and zero on the untaken one.
+const agentNode = (id: string, emits?: { name: string; type: "boolean" | "string" }[]): DeliveryGraph["nodes"][number] =>
+  emits === undefined
+    ? { id, kind: "agent", agent: { jobType: `senior:t1083-${id}` } }
+    : { id, kind: "agent", agent: { jobType: `senior:t1083-${id}` }, emits };
+
+const FORK_IN_ARM: DeliveryGraph = {
+  name: "fork-join inside an arm",
+  nodes: [agentNode("decide", [{ name: "go", type: "boolean" }]), ...["fork", "a", "b", "join", "skip", "done"].map((id) => agentNode(id))],
+  edges: [
+    { from: "decide", to: "fork", when: "decide.go", equals: true },
+    { from: "decide", to: "skip", default: true },
+    { from: "fork", to: "a" },
+    { from: "fork", to: "b" },
+    { from: "a", to: "join" },
+    { from: "b", to: "join" },
+    { from: "join", to: "done" },
+    { from: "skip", to: "done" },
+  ],
+};
+
+const NESTED_SPLIT: DeliveryGraph = {
+  name: "nested split",
+  nodes: [
+    agentNode("decide", [{ name: "go", type: "boolean" }]),
+    agentNode("inner", [{ name: "mode", type: "string" }]),
+    ...["x", "y", "merge", "skip", "done"].map((id) => agentNode(id)),
+  ],
+  edges: [
+    { from: "decide", to: "inner", when: "decide.go", equals: true },
+    { from: "decide", to: "skip", default: true },
+    { from: "inner", to: "x", when: "inner.mode", equals: "x" },
+    { from: "inner", to: "y", default: true },
+    { from: "x", to: "merge" },
+    { from: "y", to: "merge" },
+    { from: "merge", to: "done" },
+    { from: "skip", to: "done" },
+  ],
+};
+
+async function driveCounted(
+  graph: DeliveryGraph,
+  facts: Record<string, Record<string, unknown>>,
+): Promise<{ state: string; runs: Record<string, number> }> {
+  const engine = await createWasmEngineClient();
+  try {
+    const runs: Record<string, number> = {};
+    for (const node of graph.nodes) {
+      const id = node.id;
+      runs[id] = 0;
+      await engine.registerWorker(`senior:t1083-${id}`, async () => {
+        runs[id] += 1;
+        return { status: "opened", summary: id, ...(facts[id] ?? {}) };
+      });
+    }
+    const run = await runDeliveryGraph(engine, graph, { repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+    let state = "?";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+    }
+    return { state, runs };
+  } finally {
+    await engine.close();
+  }
+}
+
+test("#1083 deploy+route: a fork/AND-join inside the taken arm runs both parallel branches once and completes", async () => {
+  const r = await driveCounted(FORK_IN_ARM, { decide: { go: true } });
+  assertEquals(r.state, "COMPLETED");
+  assertEquals(r.runs, { decide: 1, fork: 1, a: 1, b: 1, join: 1, skip: 0, done: 1 });
+});
+
+test("#1083 deploy+route: the default arm skips the in-arm fork/join and completes", async () => {
+  const r = await driveCounted(FORK_IN_ARM, { decide: { go: false } });
+  assertEquals(r.state, "COMPLETED");
+  assertEquals(r.runs, { decide: 1, fork: 0, a: 0, b: 0, join: 0, skip: 1, done: 1 });
+});
+
+test("#1083 deploy+route: a nested split runs each inner arm once, merges, and completes the outer merge", async () => {
+  for (const [mode, x, y] of [
+    ["x", 1, 0],
+    ["other", 0, 1],
+  ] as const) {
+    const r = await driveCounted(NESTED_SPLIT, { decide: { go: true }, inner: { mode } });
+    assertEquals(r.state, "COMPLETED", `inner mode ${mode}`);
+    assertEquals(r.runs, { decide: 1, inner: 1, x, y, merge: 1, skip: 0, done: 1 }, `inner mode ${mode}`);
+  }
+  const r = await driveCounted(NESTED_SPLIT, { decide: { go: false } });
+  assertEquals(r.state, "COMPLETED");
+  assertEquals(r.runs, { decide: 1, inner: 0, x: 0, y: 0, merge: 0, skip: 1, done: 1 });
+});

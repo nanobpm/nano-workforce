@@ -655,17 +655,11 @@ export async function compileDeliveryGraphSemantic(
     const consumers = consumersById.get(node.id) ?? [];
     const producers = producersById.get(node.id) ?? [];
     const forkExclusive = splitNodes.has(node.id);
-    // A fan-in is an EXCLUSIVE merge (first-token-proceeds) iff EVERY incoming branch is conditional —
-    // a split's own guarded/default out-edge, or a producer only conditionally reached. This is the
-    // SAME parity predicate the validator enforces (`edgeConditional`), so gateway-type selection never
-    // drifts from it. Deriving `joinExclusive` from `mergeNodes` alone over-fires: `analyzeExclusive
-    // Topology` marks every node reachable from >=2 branch targets as a merge, including nodes DOWNSTREAM
-    // of the real re-convergence — so a post-merge node that ALSO joins an independent always-firing
-    // producer would wrongly compile to an exclusive merge instead of the parallel AND-join both the
-    // validator and the semantics demand.
-    const joinExclusive =
-      producers.length > 1 &&
-      producers.every((p) => splitNodes.has(p) || topology.conditional.has(p));
+    // A fan-in is an EXCLUSIVE merge (first-token-proceeds) iff the canonical branch-context analysis
+    // (`analyzeExclusiveTopology`, shared with the validator) classifies it as the arms of ONE split
+    // re-converging; a fan-in whose producers share one branch context (including a fork/join inside
+    // a single exclusive arm) is a PARALLEL AND-join (issue #1083).
+    const joinExclusive = producers.length > 1 && topology.mergeNodes.has(node.id);
     const forkGateway =
       consumers.length > 1 ? (forkExclusive ? `gwx${splitSeq++}` : `gwf${forkSeq++}`) : undefined;
     const joinGateway =
@@ -690,7 +684,7 @@ export async function compileDeliveryGraphSemantic(
   // The End sink is an exclusive merge when its leaves are mutually-exclusive branch tails (only one
   // fires per run); a parallel AND-join there would deadlock on the untaken branch. The validator has
   // already rejected a leaf set that MIXES conditional and always-firing tails.
-  const endExclusive = leaves.length > 1 && leaves.some((n) => topology.conditional.has(n.id));
+  const endExclusive = leaves.length > 1 && topology.endExclusive;
   const endJoinGateway = leaves.length > 1 ? (endExclusive ? "gwm_end" : "gwj_end") : undefined;
 
   // ── Build the flow list in a DETERMINISTIC order, then assign `f0…` ids positionally ────────────

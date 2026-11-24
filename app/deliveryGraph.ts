@@ -3098,58 +3098,33 @@ function validateGuardedEdges(
   }
   const topo = analyzeExclusiveTopology([...allNodes], forwardAdj, splitNodes);
 
-  // producers per consumer (node id), from resolved edges.
-  const producersByNode = new Map<string, Set<string>>();
-  for (const e of guardEdges) {
-    const set = producersByNode.get(e.to) ?? new Set<string>();
-    set.add(e.fromNode);
-    producersByNode.set(e.to, set);
-  }
-  const edgeConditional = (fromNode: string): boolean => splitNodes.has(fromNode) || topo.conditional.has(fromNode);
-
-  for (const [node, producers] of producersByNode) {
-    if (producers.size < 2) continue;
-    const conditional = [...producers].filter(edgeConditional);
-    const unconditional = [...producers].filter((p) => !edgeConditional(p));
-    if (conditional.length > 0 && unconditional.length > 0) {
-      errors.push({
-        path: "edges",
-        message:
-          `node "${node}" joins a conditional (exclusive-split) branch with an always-firing branch — ` +
-          "a parallel AND-join here deadlocks (the untaken branch never arrives). Route both through " +
-          "one exclusive split so they re-converge as an exclusive merge",
-        code: "exclusive-merge-parity",
-      });
-    } else if (conditional.length === producers.size && !topo.mergeNodes.has(node)) {
-      errors.push({
-        path: "edges",
-        message:
-          `node "${node}" merges conditional branches that do not re-converge from a single exclusive ` +
-          "split — its incoming branches are not provably mutually exclusive, so it cannot merge safely",
-        code: "exclusive-merge-parity",
-      });
-    }
+  for (const [node, violation] of [...topo.violations].sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))) {
+    errors.push({
+      path: "edges",
+      message:
+        violation === "mixed"
+          ? `node "${node}" joins a conditional (exclusive-split) branch with an always-firing branch — ` +
+            "a parallel AND-join here deadlocks (the untaken branch never arrives). Route both through " +
+            "one exclusive split so they re-converge as an exclusive merge"
+          : `node "${node}" merges conditional branches that do not re-converge from a single exclusive ` +
+            "split — its incoming branches are not provably mutually exclusive, so it cannot merge safely",
+      code: "exclusive-merge-parity",
+    });
   }
 
   // Same parity, now for the implicit End sink: the compiler joins every LEAF (a node with no
-  // out-edge) at the process End. A leaf is conditional iff it may not fire on a given run
-  // (`topo.conditional`). A leaf set that MIXES a conditional tail with an always-firing one is the
-  // exact deadlock/double-fire shape the End gateway cannot wire — a parallel AND-join waits forever
-  // for the untaken branch, an exclusive merge double-fires when both arrive — so reject it here (this
-  // is the invariant the compiler's End-gateway selection relies on).
-  const leaves = [...allNodes].filter((n) => (forwardAdj.get(n)?.length ?? 0) === 0);
-  if (leaves.length > 1) {
-    const conditionalLeaves = leaves.filter((n) => topo.conditional.has(n));
-    if (conditionalLeaves.length > 0 && conditionalLeaves.length < leaves.length) {
-      errors.push({
-        path: "edges",
-        message:
-          "the graph's terminal nodes mix a conditional (exclusive-split) tail with an always-firing " +
-          "tail — the End sink would deadlock as a parallel join (the untaken branch never arrives) or " +
-          "double-fire as an exclusive merge. Route the conditional tails so they re-converge before the end",
-        code: "exclusive-merge-parity",
-      });
-    }
+  // out-edge) at the process End. Leaves sharing one branch context AND-join; leaves that are the arms
+  // of one split exclusively merge; anything else (a conditional tail mixed with an always-firing one,
+  // or tails of different splits) would deadlock or double-fire at the End gateway.
+  if (topo.endViolation !== undefined) {
+    errors.push({
+      path: "edges",
+      message:
+        "the graph's terminal nodes mix a conditional (exclusive-split) tail with an always-firing " +
+        "tail — the End sink would deadlock as a parallel join (the untaken branch never arrives) or " +
+        "double-fire as an exclusive merge. Route the conditional tails so they re-converge before the end",
+      code: "exclusive-merge-parity",
+    });
   }
 }
 
@@ -3192,22 +3167,133 @@ function collectCycle(adjacency: Map<string, Set<string>>, errors: DeliveryGraph
 }
 
 /** The exclusive-split topology derived from a graph's node-level forward adjacency and its set of
- * exclusive-split node ids (ADR 0005 S7). This is the SINGLE canonical analysis both the semantic
- * validator (parity enforcement) and the S1 compiler (gateway-type selection) consume, so the two
- * never drift on which fan-in is an exclusive merge vs a parallel join:
+ * exclusive-split node ids (ADR 0005 S7, issue #1083). This is the SINGLE canonical analysis both the
+ * semantic validator (parity enforcement) and the S1 compiler (gateway-type selection) consume, so the
+ * two never drift on which fan-in is an exclusive merge vs a parallel join.
  *
- *   • `mergeNodes` — nodes where ≥2 DISTINCT branch targets of the SAME split re-converge (following
- *     edges forward). These fan-ins must compile to an exclusive/OR merge (first-token-proceeds), not
- *     a parallel AND-join, which would deadlock waiting for the untaken branch.
- *   • `conditional` — nodes that MAY NOT execute on a given run: reachable from some split's branch
- *     target and not yet re-established as always-firing by a re-convergence merge (a merge node and
- *     everything downstream of it is guaranteed again — exactly one branch always reaches the merge).
+ * Each node carries a BRANCH CONTEXT — the stack of `(split, arms)` frames it is reached under (an
+ * empty stack = always fires). A split's out-edge pushes `(split, {target})`. At a fan-in:
  *
- * Pure and deterministic — set iteration order does not affect membership, and callers sort before
- * emitting. */
+ *   • every producer edge has the SAME context → a PARALLEL AND-join (they always fire together), the
+ *     node inherits that context (so a fork/join inside one exclusive arm is legal);
+ *   • the edge contexts are `P + (s, armsᵢ)` for ONE split `s` with pairwise-disjoint arm sets → an
+ *     EXCLUSIVE merge; the node's context is `P` when the arms cover all of `s`'s arms (a nested merge
+ *     thus stays under its OUTER branch), else `P + (s, ∪armsᵢ)`;
+ *   • anything else is a parity violation: `mixed` when some producer is always-firing relative to the
+ *     others (its context is the common prefix — a conditional/always-firing AND-join deadlock), else
+ *     `non-reconverging` (arms of different splits, or overlapping arms that would double-fire).
+ *
+ * The implicit End sink applies the same rule to the leaves (`endExclusive` / `endViolation`).
+ *
+ *   • `mergeNodes` — fan-ins that compile to an exclusive merge (first-token-proceeds).
+ *   • `conditional` — nodes that MAY NOT execute on a given run (non-empty branch context).
+ *
+ * Pure and deterministic. Nodes on a cycle (rejected elsewhere) are simply left unanalysed. */
 export interface ExclusiveTopology {
   readonly mergeNodes: ReadonlySet<string>;
   readonly conditional: ReadonlySet<string>;
+  /** Fan-in nodes whose producers can neither AND-join nor exclusively merge. */
+  readonly violations: ReadonlyMap<string, "mixed" | "non-reconverging">;
+  /** The End sink joins >1 leaf as an exclusive merge. */
+  readonly endExclusive: boolean;
+  readonly endViolation?: "mixed" | "non-reconverging";
+}
+
+interface BranchFrame {
+  readonly split: string;
+  readonly arms: ReadonlySet<string>;
+}
+type BranchContext = readonly BranchFrame[];
+
+const sameArms = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean =>
+  a.size === b.size && [...a].every((x) => b.has(x));
+const sameFrame = (a: BranchFrame, b: BranchFrame): boolean => a.split === b.split && sameArms(a.arms, b.arms);
+const sameContext = (a: BranchContext, b: BranchContext): boolean =>
+  a.length === b.length && a.every((f, i) => sameFrame(f, b[i]));
+
+type JoinResult =
+  | { kind: "parallel"; context: BranchContext }
+  | { kind: "exclusive"; context: BranchContext }
+  | { kind: "violation"; violation: "mixed" | "non-reconverging" };
+
+/** Recursively fold fully-covered inner-arm groups (issue #1083 review): contexts `P + (s, armsᵢ)`
+ * sharing the SAME prefix `P` and split `s`, with pairwise-disjoint arms that together cover every
+ * arm of `s`, deliver exactly one token per run of `P` — so they collapse to `P`. Repeats until no
+ * group folds, so a nested XOR reconverging at an outer merge (or as End leaves) classifies like its
+ * already-merged form. Groups that overlap or only partially cover are left intact (and are judged by
+ * {@link joinContexts} as before), so unrelated splits are still rejected. */
+function foldCoveredGroups(
+  incoming: readonly BranchContext[],
+  splitArms: ReadonlyMap<string, ReadonlySet<string>>,
+): { contexts: BranchContext[]; folded: boolean } {
+  let cur = [...incoming];
+  let any = false;
+  for (;;) {
+    let folded = false;
+    const groups = new Map<string, number[]>();
+    cur.forEach((c, i) => {
+      if (c.length === 0) return;
+      const key = JSON.stringify(c.map((f, j) => (j === c.length - 1 ? [f.split] : [f.split, [...f.arms].sort()])));
+      const g = groups.get(key);
+      if (g) g.push(i);
+      else groups.set(key, [i]);
+    });
+    for (const idx of groups.values()) {
+      if (idx.length < 2) continue;
+      const last = cur[idx[0]];
+      const split = last[last.length - 1].split;
+      const union = new Set<string>();
+      let disjoint = true;
+      for (const i of idx) {
+        const c = cur[i];
+        for (const arm of c[c.length - 1].arms) {
+          if (union.has(arm)) disjoint = false;
+          union.add(arm);
+        }
+      }
+      const all = splitArms.get(split);
+      if (!disjoint || all === undefined || ![...all].every((a) => union.has(a))) continue;
+      const prefix = last.slice(0, -1);
+      const drop = new Set(idx);
+      cur = [...cur.filter((_, i) => !drop.has(i)), prefix];
+      folded = true;
+      any = true;
+      break;
+    }
+    if (!folded) return { contexts: cur, folded: any };
+  }
+}
+
+/** Classify a fan-in of ≥1 incoming edge contexts (see {@link ExclusiveTopology}). */
+function joinContexts(
+  rawIncoming: readonly BranchContext[],
+  splitArms: ReadonlyMap<string, ReadonlySet<string>>,
+): JoinResult {
+  const { contexts: incoming, folded } = foldCoveredGroups(rawIncoming, splitArms);
+  const first = incoming[0];
+  if (incoming.every((c) => sameContext(c, first))) {
+    // A folded group is an exclusive merge: alone it stays exclusive; AND-joined with anything else
+    // (a sibling that always fires relative to it) it is the mixed deadlock/double-fire shape.
+    if (!folded) return { kind: "parallel", context: first };
+    return incoming.length === 1 ? { kind: "exclusive", context: first } : { kind: "violation", violation: "mixed" };
+  }
+  let prefix = 0;
+  while (incoming.every((c) => c.length > prefix && sameFrame(c[prefix], first[prefix]))) prefix++;
+  if (incoming.some((c) => c.length === prefix)) return { kind: "violation", violation: "mixed" };
+  const split = first[prefix].split;
+  const union = new Set<string>();
+  for (const c of incoming) {
+    const frame = c[prefix];
+    if (c.length !== prefix + 1 || frame.split !== split) return { kind: "violation", violation: "non-reconverging" };
+    for (const arm of frame.arms) {
+      if (union.has(arm)) return { kind: "violation", violation: "non-reconverging" };
+      union.add(arm);
+    }
+  }
+  const base = first.slice(0, prefix);
+  const all = splitArms.get(split) ?? new Set<string>();
+  const covered = [...all].every((a) => union.has(a));
+  return { kind: "exclusive", context: covered ? base : [...base, { split, arms: union }] };
 }
 
 export function analyzeExclusiveTopology(
@@ -3215,46 +3301,73 @@ export function analyzeExclusiveTopology(
   forwardAdj: ReadonlyMap<string, readonly string[]>,
   splitNodes: ReadonlySet<string>,
 ): ExclusiveTopology {
-  const reachFrom = (start: string): Set<string> => {
-    const seen = new Set<string>();
-    const stack = [start];
-    while (stack.length > 0) {
-      const n = stack.pop();
-      if (n === undefined || seen.has(n)) continue;
-      seen.add(n);
-      for (const next of forwardAdj.get(n) ?? []) if (!seen.has(next)) stack.push(next);
-    }
-    return seen;
-  };
+  const all = new Set<string>(nodeIds);
+  for (const [from, tos] of forwardAdj) {
+    all.add(from);
+    for (const t of tos) all.add(t);
+  }
+  const preds = new Map<string, string[]>();
+  for (const n of all) preds.set(n, []);
+  for (const [from, tos] of forwardAdj) for (const t of new Set(tos)) preds.get(t)?.push(from);
+  const splitArms = new Map<string, ReadonlySet<string>>();
+  for (const s of splitNodes) splitArms.set(s, new Set(forwardAdj.get(s) ?? []));
 
+  // Kahn topological order (sorted for determinism); cyclic nodes never become ready and are skipped.
+  const indeg = new Map<string, number>();
+  for (const n of all) indeg.set(n, preds.get(n)?.length ?? 0);
+  const ready = [...all].filter((n) => indeg.get(n) === 0).sort();
+  const context = new Map<string, BranchContext>();
   const mergeNodes = new Set<string>();
-  const splitDownstream = new Set<string>();
-  for (const split of splitNodes) {
-    const branchTargets = forwardAdj.get(split) ?? [];
-    const reachCount = new Map<string, number>();
-    for (const target of branchTargets) {
-      const reach = reachFrom(target);
-      for (const n of reach) {
-        splitDownstream.add(n);
-        reachCount.set(n, (reachCount.get(n) ?? 0) + 1);
+  const violations = new Map<string, "mixed" | "non-reconverging">();
+  const edgeContext = (from: string, to: string): BranchContext => {
+    const base = context.get(from) ?? [];
+    return splitNodes.has(from) ? [...base, { split: from, arms: new Set([to]) }] : base;
+  };
+  while (ready.length > 0) {
+    const n = ready.shift();
+    if (n === undefined) break;
+    const ps = preds.get(n) ?? [];
+    if (ps.length === 0) context.set(n, []);
+    else {
+      const res = joinContexts(
+        ps.map((p) => edgeContext(p, n)),
+        splitArms,
+      );
+      if (res.kind === "violation") {
+        violations.set(n, res.violation);
+        context.set(n, edgeContext(ps[0], n)); // best effort so downstream analysis continues
+      } else {
+        context.set(n, res.context);
+        if (res.kind === "exclusive") mergeNodes.add(n);
       }
     }
-    for (const [n, count] of reachCount) if (count >= 2) mergeNodes.add(n);
+    for (const next of new Set(forwardAdj.get(n) ?? [])) {
+      const d = (indeg.get(next) ?? 0) - 1;
+      indeg.set(next, d);
+      if (d === 0) {
+        ready.push(next);
+        ready.sort();
+      }
+    }
   }
 
-  // A merge node (and everything reachable from it) is guaranteed to fire again — exactly one branch of
-  // the split always reaches the merge — so it is NOT conditional even though it sits downstream of a
-  // split. Subtract that closure from the raw split-downstream set.
-  const guaranteedAgain = new Set<string>();
-  for (const merge of mergeNodes) for (const n of reachFrom(merge)) guaranteedAgain.add(n);
-
   const conditional = new Set<string>();
-  for (const n of splitDownstream) if (!guaranteedAgain.has(n)) conditional.add(n);
+  for (const [n, c] of context) if (c.length > 0) conditional.add(n);
 
-  // `nodeIds` participates only to keep the surface honest (every referenced node is known); the sets
-  // above are already complete over the reachable graph.
-  void nodeIds;
-  return { mergeNodes, conditional };
+  const leaves = [...context.keys()].filter((n) => (forwardAdj.get(n)?.length ?? 0) === 0).sort();
+  let endExclusive = false;
+  let endViolation: "mixed" | "non-reconverging" | undefined;
+  if (leaves.length > 1) {
+    const res = joinContexts(
+      leaves.map((n) => context.get(n) ?? []),
+      splitArms,
+    );
+    if (res.kind === "violation") endViolation = res.violation;
+    else endExclusive = res.kind === "exclusive";
+  }
+  return endViolation === undefined
+    ? { mergeNodes, conditional, violations, endExclusive }
+    : { mergeNodes, conditional, violations, endExclusive, endViolation };
 }
 
 /** Build the `nodeId → declared-fact-names` map for a graph that has ALREADY passed
