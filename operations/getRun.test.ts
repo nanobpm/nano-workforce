@@ -212,3 +212,16 @@ test("an unknown key is a 404", async () => {
   const res = (await handler(input("o/r#404"), memApp({}, PKS))) as Row;
   assertEquals(res.status, 404);
 });
+
+test("a PR's humanApproval reflects the submitted setting, not the merge-gate outcome", async () => {
+  // autoMerge NOT requested → blockedBy would be null; the run was still submitted with humanApproval.
+  const gated = memApp({ pull_requests: [pr({ merge_requested: 0, merge_human_approval: 1 })] }, PKS);
+  assertEquals(((await handler(input("o/r#9"), gated)) as Row).body.settings.humanApproval, true);
+  // Approval granted (column stamped 0) — the root var still carries the submitted setting.
+  const approved = memApp({ pull_requests: [pr({ merge_human_approval: 0 })] }, PKS, [
+    { name: "humanApproval", processInstanceKey: "proc-p", scopeKey: "proc-p", value: "true" },
+  ]);
+  assertEquals(((await handler(input("o/r#9"), approved)) as Row).body.settings.humanApproval, true);
+  const off = memApp({ pull_requests: [pr()] }, PKS);
+  assertEquals(((await handler(input("o/r#9"), off)) as Row).body.settings.humanApproval, false);
+});

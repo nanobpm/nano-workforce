@@ -108,6 +108,21 @@ function asNumber(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
+/** The human-approval setting the PR run was SUBMITTED with — never the merge-gate outcome
+ *  (`merge.blockedBy` reports "env"/null ahead of "human-approval" and clears once approved).
+ *  The loop's `humanApproval` root var is the submission-time truth; the writer-stamped
+ *  `merge_human_approval` column is the fallback when the engine var is unreadable. */
+async function prHumanApproval(
+  engine: Engine | undefined,
+  processKey: string | null,
+  row: TrackedPullRequest,
+): Promise<boolean | null> {
+  const v = await readRootVar(engine, processKey, "humanApproval");
+  if (typeof v === "boolean") return v;
+  const col = row.merge_human_approval;
+  return col === null || col === undefined ? null : col === 1;
+}
+
 async function prView(
   data: DataLayer,
   engine: Engine | undefined,
@@ -128,7 +143,7 @@ async function prView(
       ...emptySettings(),
       converge: true,
       autoMerge: p.merge.requested,
-      humanApproval: p.merge.blockedBy === "human-approval",
+      humanApproval: await prHumanApproval(engine, p.processKey, row),
       maxRounds: asNumber(await readRootVar(engine, p.processKey, "maxRounds")),
       autoResolveEscalations: p.autoResolveEscalations,
       hasCustomInstructions: p.hasCustomInstructions,
