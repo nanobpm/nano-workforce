@@ -1,3 +1,9 @@
+## [0.224.0](https://github.com/nanobpm/nano-workforce/compare/v0.223.8...v0.224.0) (2026-11-24)
+
+### Features
+
+* **sequence:** gate a sequence on several PRs/issues (after list) ([#1070](https://github.com/nanobpm/nano-workforce/issues/1070)) ([a5c528a](https://github.com/nanobpm/nano-workforce/commit/a5c528aaaeccdcd2f430a5461fd518fa9719efb4)), closes [#1056](https://github.com/nanobpm/nano-workforce/issues/1056)
+
 ## [0.223.8](https://github.com/nanobpm/nano-workforce/compare/v0.223.7...v0.223.8) (2026-11-24)
 
 ### Code Refactoring
