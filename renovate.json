@@ -3,6 +3,11 @@
   "extends": ["config:recommended"],
   "packageRules": [
     {
+      "description": "Pin @nanobpm/engine-wasm EXACTLY (issue #1049). A caret range let engine-wasm 0.11.2 (Zeebe output-mapping scope semantics) slip in without a Renovate PR, so nwf CI never ran against the engine merlin used (#1045). With rangeStrategy pin, every engine release - patch included - opens a PR whose CI (typecheck, test, e2e) is the compatibility check; a red PR signals a compatibility break. Renovate updates both the devDependencies entry and the overrides entry; scripts/engine-wasm-pin.test.ts guards that they stay exact and equal. Automerge of green non-major updates comes from the @nanobpm/* rule below.",
+      "matchPackageNames": ["@nanobpm/engine-wasm"],
+      "rangeStrategy": "pin"
+    },
+    {
       "description": "Auto-merge non-major @nanobpm/* updates once CI is green. These are first-party packages we publish from nano-ide; CI (typecheck + test) is the gate. For 0.x pins a caret range locks the minor, so Renovate's range bump is what actually pulls a new minor through; automerging it keeps nwf on the latest agentic/urban without manual PRs. platformAutomerge is ON because main is now protected by an active ruleset with a GitHub merge queue (merge_queue rule): a direct self-merge is rejected by the queue, so Renovate must enable GitHub-native auto-merge, which ENQUEUES the PR and lets it land when the queue's speculative checks pass. (Historically this was false when main was unprotected; leaving it false silently wedged green update PRs open — e.g. the agentic 0.11->0.12 bump sat unmerged for weeks.)",
       "matchPackageNames": ["/^@nanobpm//"],
       "matchUpdateTypes": ["minor", "patch"],
