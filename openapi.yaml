@@ -3671,6 +3671,129 @@ components:
         inProgress:
           type: integer
           description: Jobs of this type being processed.
+    DeliveryGraphRunProgress:
+      type: object
+      additionalProperties: false
+      required: [runKey, title, status, phase, digest, processInstanceKey, instanceState, nodes, mermaid, note, truncated]
+      properties:
+        runKey:
+          type: string
+        title:
+          type: string
+          nullable: true
+        status:
+          type: string
+          description: The run lifecycle status (awaiting-approval / running / done / failed / abandoned).
+        phase:
+          type: string
+          nullable: true
+        digest:
+          type: string
+        processInstanceKey:
+          type: string
+          nullable: true
+        instanceState:
+          type: string
+          nullable: true
+          description: The engine's process-instance state (ACTIVE / COMPLETED / TERMINATED); null before launch.
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryGraphNodeProgress"
+        mermaid:
+          type: string
+          nullable: true
+          description: The graph as a mermaid flowchart with one state class per node.
+        note:
+          type: string
+          nullable: true
+          description: Why the per-node view is empty (e.g. the dispatched graph is no longer stored); null otherwise.
+        truncated:
+          type: boolean
+          description: True when an engine read came back as a full result page, so some facts (bound facts, probe results, child PR keys, element instances) may be missing and node states may be incomplete.
+    DeliveryGraphNodeProgress:
+      type: object
+      additionalProperties: false
+      required: [id, kind, element, state, dependsOn, activeElements, boundFacts, lastProbe, pollEvery, childRunKeys, escalation, incident]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [agent, wait, human, connector]
+        element:
+          type: string
+          description: The compiled BPMN subProcess id of this node.
+        state:
+          type: string
+          enum: [pending, active, satisfied, escalated, skipped, failed]
+        dependsOn:
+          type: array
+          items:
+            type: string
+        activeElements:
+          type: array
+          items:
+            type: string
+          description: The node's inner BPMN elements currently holding a token.
+        boundFacts:
+          type: object
+          additionalProperties: true
+          description: The declared emitted facts this node has bound, by fact name.
+        lastProbe:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [ready, detail, observed]
+          properties:
+            ready:
+              type: boolean
+              nullable: true
+            detail:
+              type: string
+              nullable: true
+            observed:
+              nullable: true
+              description: The probe's structured observation, when it reported one.
+        pollEvery:
+          type: string
+          nullable: true
+          description: Wait nodes — the configured probe poll interval (ISO-8601).
+        childRunKeys:
+          type: array
+          items:
+            type: string
+          description: Agent/connector nodes — the PR run keys (owner/repo#N) the node bound.
+        escalation:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [userTaskKey, elementId, reason]
+          properties:
+            userTaskKey:
+              type: string
+            elementId:
+              type: string
+            reason:
+              type: string
+              enum: [timeout, contract, human]
+        incident:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [incidentKey, elementId, errorType, errorMessage]
+          properties:
+            incidentKey:
+              type: string
+            elementId:
+              type: string
+              nullable: true
+            errorType:
+              type: string
+              nullable: true
+            errorMessage:
+              type: string
+              nullable: true
     StagedProposalDetail:
       type: object
       additionalProperties: false
@@ -7366,6 +7489,57 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
         "404":
           description: No live staged proposal for this digest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /delivery-graph/runs/{runKey}:
+    get:
+      operationId: getDeliveryGraphRun
+      x-cli:
+        command: [graph, progress]
+        positional: [runKey]
+      summary: "Per-node progress of a dispatched delivery-graph run (issue 1055)."
+      description: >-
+        Where a running graph is, node by node — instead of the bare `status: running` the status
+        endpoint shows. For every node of the dispatched graph: its `state` (`pending` not yet reached,
+        `active` holding a token, `satisfied` completed, `escalated` parked on an escalation /
+        contract-repair task, `skipped` withdrawn or never reached by an ended instance, `failed` an
+        active incident on one of its elements), the elements currently holding a token, for `wait`
+        nodes the last probe result (`ready`/`detail`/`observed`) and configured poll cadence, the
+        facts the node bound (e.g. an agent's `pr`, a wait's `mergedSha`), the child PR run keys an
+        agent/connector node bound, and any open escalation or incident. Also returns a mermaid
+        rendering of the graph with per-node state classes. Everything is derived at request time
+        from engine truth (element instances, variables, open user tasks, incidents of the run's
+        process instance) — nothing is cached. The engine read model carries no element-instance
+        timestamps or timer due dates, so per-node start/finish times and the absolute next-poll time
+        are not reported. Read-only; an unknown run key is a 404.
+      parameters:
+        - name: runKey
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: The delivery-graph run key (as `status` / the Active Delivery Graphs grid list it).
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The run and its per-node progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphRunProgress"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: No delivery-graph run with this key.
           content:
             application/json:
               schema:

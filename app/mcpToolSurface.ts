@@ -159,8 +159,12 @@ export const MCP_TOOL_COUNT_BUDGET = 61;
  * RAISE PROVENANCE — 95_000 → 96_000 (#1060): server-side filter query params (`kind`, `repo`,
  * `key`, `status`, `hasEscalation`, `updatedSince`) on `listActivePrs` and `listEscalations`.
  * Measured 95,273 bytes serialized. Deliberate, documented growth of a real new read surface.
+ *
+ * RAISE PROVENANCE — 96_000 → 97_000 (#1055): the read-only `getDeliveryGraphRun` per-node progress
+ * tool (`DeliveryGraphRunProgress` / `DeliveryGraphNodeProgress` schemas). Measured 96,089 bytes
+ * serialized. Deliberate, documented growth of a real new read surface — not schema fat.
  */
-export const MCP_SURFACE_BYTES_BUDGET = 96_000;
+export const MCP_SURFACE_BYTES_BUDGET = 97_000;
 
 /**
  * The eagerly-loaded curated subset MUST stay materially smaller than the full surface — otherwise it

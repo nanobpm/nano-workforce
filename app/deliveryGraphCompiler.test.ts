@@ -2983,6 +2983,14 @@ test("#778 the wait + human inner tasks carry the descriptive display name (not 
   assert(r.bpmn.includes(`<bpmn:subProcess id="${waitEl}_probeLoop" name="Probe readiness loop: Wait: pr owner/repo#42 · gate">`), "probe loop uses the display name");
   assert(r.bpmn.includes(`<bpmn:serviceTask id="${waitEl}_task" name="Probe readiness: Wait: pr owner/repo#42 · gate">`), "probe task uses the display name");
   assert(r.bpmn.includes(`<bpmn:serviceTask id="${waitEl}_lastAttempt" name="Probe readiness at boundary: Wait: pr owner/repo#42 · gate">`), "boundary probe uses the display name");
+  // Issue #1055: the probe result is seeded INTO the probeLoop scope so each poll overwrites it there
+  // (not at the run root), ahead of the loop's output mapping.
+  const loopXml = r.bpmn.slice(r.bpmn.indexOf(`<bpmn:subProcess id="${waitEl}_probeLoop"`));
+  const loopIo = loopXml.slice(0, loopXml.indexOf("</zeebe:ioMapping>"));
+  for (const v of ["ready", "detail", "observed"]) {
+    assert(loopIo.includes(`<zeebe:input source="=null" target="${v}" />`), `probeLoop seeds ${v} to null`);
+  }
+  assert(loopIo.indexOf("<zeebe:input") < loopIo.indexOf("<zeebe:output"), "inputs precede outputs");
   // The old bare `...: <id>` inner names are gone.
   assert(!r.bpmn.includes('name="Probe readiness: gate"'), "no bare probe id name remains");
   // The human user task uses the descriptive display name too.

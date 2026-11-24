@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { CommandResult, HttpResponse, ProbeExec, ReadinessProbe } from "../../app/readiness.ts";
 import { parseProbe } from "../../app/readiness.ts";
-import handler, { __setProbeExecForTest, probeSingleShot, READINESS_READY_MESSAGE, readGateVars, safeBind } from "./worker.ts";
+import handler, { __setProbeExecForTest, probeSingleShot, READINESS_READY_MESSAGE, probeResultVars, readGateVars, safeBind } from "./worker.ts";
 
 function execReturning(seq: Array<HttpResponse>, counts: { http: number } = { http: 0 }): ProbeExec {
   let i = 0;
@@ -348,4 +348,13 @@ test("readGateVars: a missing/blank probeTimeout fails fast rather than silently
 test("readGateVars: passes a valid probeTimeout through raw (the engine timer evaluates the same string)", () => {
   const { probeTimeout } = readGateVars({ gateKey: "gate-1", probeTimeout: "PT45M" });
   assertEquals(probeTimeout, "PT45M", "the seeded probeTimeout string flows through unchanged");
+});
+
+test("#1055 probeResultVars: a poll with no observation CLEARS `observed` (empty) so a reused probe-loop scope never pairs a stale observation with fresh ready/detail", () => {
+  const first = probeResultVars({ ready: false, detail: "d1", observed: "obs-1" });
+  assertEquals(first.observed, "obs-1");
+  const second = probeResultVars({ ready: false, detail: "d2" });
+  assertEquals("observed" in second, true, "observed must be emitted even when absent");
+  assertEquals(second.observed, "");
+  assertEquals(second.detail, "d2");
 });

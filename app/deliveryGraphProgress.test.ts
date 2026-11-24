@@ -1,0 +1,647 @@
+// Unit coverage for the per-node progress projection of a running delivery graph (issue #1055):
+// engine element instances / variables / user tasks / incidents → per-node state, bound facts, last
+// probe, child PR run keys and open escalation.
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  deriveNodeProgress,
+  ENGINE_MAX_CALLS,
+  ENGINE_MAX_IN_FLIGHT,
+  createReadLimiter,
+  ENGINE_SEARCH_PAGE,
+  type ElementInstanceFact,
+  owningNodeElement,
+  prKeyOf,
+  type ResolvedNodeRef,
+  readEngineFacts,
+  renderProgressMermaid,
+  type VariableFact,
+} from "./deliveryGraphProgress.ts";
+
+const PIK = "100";
+const NODES: ResolvedNodeRef[] = [
+  { id: "gate", kind: "wait", element: "n0", emits: [], dependsOn: [] },
+  { id: "build", kind: "agent", element: "n1", emits: [{ name: "pr", type: "pr" }], dependsOn: ["gate"] },
+  { id: "landed", kind: "wait", element: "n2", emits: [{ name: "mergedSha", type: "string" }], dependsOn: ["build"] },
+  { id: "ok", kind: "human", element: "n3", emits: [], dependsOn: ["landed"] },
+];
+
+test("owningNodeElement maps inner and human-task element ids to their node element", () => {
+  const els = new Set(["n1", "n12"]);
+  assert.equal(owningNodeElement("n1", els), "n1");
+  assert.equal(owningNodeElement("n1_task", els), "n1");
+  assert.equal(owningNodeElement("n12_probeLoop", els), "n12");
+  assert.equal(owningNodeElement("delivery-human-task__n12__esc", els), "n12");
+  assert.equal(owningNodeElement("delivery-human-task__n1", els), "n1");
+  assert.equal(owningNodeElement("Start", els), null);
+  assert.equal(owningNodeElement("gwj_end", els), null);
+});
+
+test("prKeyOf normalises keys, URLs and objects", () => {
+  assert.equal(prKeyOf("nanobpm/nano-coder#340"), "nanobpm/nano-coder#340");
+  assert.equal(prKeyOf("https://github.com/nanobpm/nano-coder/pull/340"), "nanobpm/nano-coder#340");
+  assert.equal(prKeyOf({ url: "https://github.com/a/b/pull/2" }), "a/b#2");
+  assert.equal(prKeyOf("not a pr"), null);
+  assert.equal(prKeyOf(7), null);
+});
+
+test("derives satisfied / active / pending, bound facts, child runs and the last probe", () => {
+  const nodes = deriveNodeProgress({
+    nodes: NODES,
+    processInstanceKey: PIK,
+    elements: [
+      { elementId: "n0", elementInstanceKey: "1", state: "COMPLETED" },
+      { elementId: "n1", elementInstanceKey: "2", state: "COMPLETED" },
+      { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+      { elementId: "n2_probeLoop", elementInstanceKey: "4", state: "COMPLETED" },
+      { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "ACTIVE" },
+      { elementId: "n2_waitPoll", elementInstanceKey: "6", state: "ACTIVE" },
+    ],
+    variables: [
+      { name: "n1_pr", value: '"nanobpm/nano-coder#340"', scopeKey: PIK },
+      { name: "ready", value: "false", scopeKey: "4" },
+      { name: "detail", value: '"open"', scopeKey: "4" },
+      { name: "ready", value: "false", scopeKey: "5" },
+      { name: "detail", value: '"still open"', scopeKey: "5" },
+      { name: "observed", value: '{"prState":"open"}', scopeKey: "5" },
+    ],
+    userTasks: [],
+    incidents: [],
+    pollEveryByNode: { landed: "PT5M" },
+  });
+  const by = new Map(nodes.map((n) => [n.id, n]));
+  assert.equal(by.get("gate")?.state, "satisfied");
+  assert.equal(by.get("build")?.state, "satisfied");
+  assert.deepEqual(by.get("build")?.boundFacts, { pr: "nanobpm/nano-coder#340" });
+  assert.deepEqual(by.get("build")?.childRunKeys, ["nanobpm/nano-coder#340"]);
+  const landed = by.get("landed");
+  assert.equal(landed?.state, "active");
+  assert.deepEqual(landed?.activeElements, ["n2_probeLoop", "n2_waitPoll"]);
+  assert.deepEqual(landed?.lastProbe, { ready: false, detail: "still open", observed: { prState: "open" } });
+  assert.equal(landed?.pollEvery, "PT5M");
+  assert.equal(by.get("ok")?.state, "pending");
+  assert.equal(by.get("ok")?.pollEvery, null);
+});
+
+test("an escalation twin parks the node as escalated; a human node's own task stays active", () => {
+  const nodes = deriveNodeProgress({
+    nodes: NODES,
+    processInstanceKey: PIK,
+    elements: [
+      { elementId: "n1", elementInstanceKey: "2", state: "ACTIVE" },
+      { elementId: "delivery-human-task__n1__esc", elementInstanceKey: "7", state: "ACTIVE" },
+      { elementId: "n3", elementInstanceKey: "8", state: "ACTIVE" },
+      { elementId: "delivery-human-task__n3", elementInstanceKey: "9", state: "ACTIVE" },
+    ],
+    variables: [],
+    userTasks: [
+      { userTaskKey: "u1", elementId: "delivery-human-task__n1__esc" },
+      { userTaskKey: "u2", elementId: "delivery-human-task__n3" },
+    ],
+    incidents: [],
+  });
+  const by = new Map(nodes.map((n) => [n.id, n]));
+  assert.equal(by.get("build")?.state, "escalated");
+  assert.deepEqual(by.get("build")?.escalation, { userTaskKey: "u1", elementId: "delivery-human-task__n1__esc", reason: "timeout" });
+  assert.equal(by.get("ok")?.state, "active");
+  assert.equal(by.get("ok")?.escalation?.reason, "human");
+});
+
+test("an incident fails the node; an ended instance skips unreached nodes; a terminated body is skipped", () => {
+  const nodes = deriveNodeProgress({
+    nodes: NODES,
+    processInstanceKey: PIK,
+    elements: [
+      { elementId: "n0", elementInstanceKey: "1", state: "TERMINATED" },
+      { elementId: "n1", elementInstanceKey: "2", state: "ACTIVE" },
+      { elementId: "n1_task", elementInstanceKey: "3", state: "ACTIVE" },
+    ],
+    variables: [],
+    userTasks: [],
+    incidents: [{ incidentKey: "i1", elementId: "n1_task", errorType: "JOB_NO_RETRIES", errorMessage: "boom" }],
+    instanceEnded: true,
+  });
+  const by = new Map(nodes.map((n) => [n.id, n]));
+  assert.equal(by.get("gate")?.state, "skipped");
+  assert.equal(by.get("build")?.state, "failed");
+  assert.deepEqual(by.get("build")?.incident, { incidentKey: "i1", elementId: "n1_task", errorType: "JOB_NO_RETRIES", errorMessage: "boom" });
+  assert.deepEqual(by.get("build")?.activeElements, ["n1_task"]);
+  assert.equal(by.get("ok")?.state, "skipped");
+});
+
+test("renderProgressMermaid appends one state class per node", () => {
+  const nodes = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, elements: [], variables: [], userTasks: [], incidents: [] });
+  const out = renderProgressMermaid('flowchart TD\n  n0["gate"]\n', nodes);
+  assert.match(out, /classDef active /);
+  assert.match(out, /\n {2}class n0 pending\n/);
+  assert.match(out, /\n {2}class n3 pending\n$/);
+});
+
+test("lastProbe never attributes a run-root probe result (no provenance) to a wait", () => {
+  const base = {
+    nodes: NODES,
+    processInstanceKey: PIK,
+    variables: [
+      { name: "ready", value: "true", scopeKey: PIK },
+      { name: "detail", value: '"merged"', scopeKey: PIK },
+    ],
+    userTasks: [],
+    incidents: [],
+  };
+  // Wait A (n0) completed with a root-propagated result; wait B (n2) just started and has not probed.
+  const out = deriveNodeProgress({
+    ...base,
+    elements: [
+      { elementId: "n0", elementInstanceKey: "1", state: "COMPLETED" },
+      { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+      { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "ACTIVE" },
+    ],
+  });
+  assert.equal(out.find((n) => n.id === "landed")?.lastProbe, null);
+  assert.equal(out.find((n) => n.id === "gate")?.lastProbe, null);
+});
+
+test("an expired wait's `__esc__wait` twin is classified as a timeout escalation", () => {
+  const out = deriveNodeProgress({
+    nodes: NODES,
+    processInstanceKey: PIK,
+    elements: [{ elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" }],
+    variables: [],
+    userTasks: [{ userTaskKey: "u9", elementId: "delivery-human-task__n2__esc__wait" }],
+    incidents: [],
+  });
+  const landed = out.find((n) => n.id === "landed");
+  assert.equal(landed?.escalation?.reason, "timeout");
+  assert.equal(landed?.state, "escalated");
+});
+
+test("a no-emits converge connector reports the PR it resolved from its task-local inputs", () => {
+  const nodes = [{ id: "merge", kind: "connector" as const, element: "n5", emits: [], dependsOn: [] }];
+  const mk = (payload: string, boundFacts: string) =>
+    deriveNodeProgress({
+      nodes,
+      processInstanceKey: PIK,
+      elements: [
+        { elementId: "n5", elementInstanceKey: "50", state: "COMPLETED" },
+        { elementId: "n5_connector", elementInstanceKey: "51", state: "COMPLETED" },
+      ],
+      variables: [
+        { name: "target", value: '"converge-merge"', scopeKey: "51" },
+        { name: "payload", value: payload, scopeKey: "51" },
+        { name: "boundFacts", value: boundFacts, scopeKey: "51" },
+      ],
+      userTasks: [],
+      incidents: [],
+    })[0]?.childRunKeys;
+  assert.deepEqual(mk('{"pr":"o/r#7"}', "[]"), ["o/r#7"]);
+  assert.deepEqual(mk("{}", '[{"from":"impl","name":"pr","value":"https://github.com/o/r/pull/8"}]'), ["o/r#8"]);
+  assert.deepEqual(mk('{"pr":"impl.pr"}', '[{"from":"impl","name":"pr","value":"o/r#9"}]'), ["o/r#9"]);
+});
+
+test("lastProbe reads the node element scope when the result propagated there", () => {
+  const out = deriveNodeProgress({
+    nodes: NODES,
+    processInstanceKey: PIK,
+    elements: [
+      { elementId: "n0", elementInstanceKey: "1", state: "ACTIVE" },
+      { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+    ],
+    variables: [{ name: "ready", value: "true", scopeKey: "3" }],
+    userTasks: [],
+    incidents: [],
+  });
+  assert.deepEqual(out.find((n) => n.id === "landed")?.lastProbe, { ready: true, detail: null, observed: null });
+});
+
+test("an agent's node-local PR result is visible (no-emits agent, and an emitting agent before publish)", () => {
+  for (const emits of [[], [{ name: "pr", type: "pr" }]]) {
+    for (const name of ["pr", "prUrl", "pullRequest"]) {
+      const out = deriveNodeProgress({
+        nodes: [{ id: "impl", kind: "agent", element: "n7", emits, dependsOn: [] }],
+        processInstanceKey: PIK,
+        elements: [
+          { elementId: "n7", elementInstanceKey: "70", state: "ACTIVE" },
+          { elementId: "n7_task", elementInstanceKey: "71", state: "COMPLETED" },
+        ],
+        variables: [{ name, value: '"https://github.com/o/r/pull/11"', scopeKey: "70" }],
+        userTasks: [],
+        incidents: [],
+      });
+      assert.deepEqual(out[0]?.childRunKeys, ["o/r#11"], `${name} with ${emits.length} emits`);
+    }
+  }
+});
+
+test("truncated variable previews are treated as absent, never parsed as complete values", () => {
+  const out = deriveNodeProgress({
+    nodes: NODES,
+    processInstanceKey: PIK,
+    elements: [
+      { elementId: "n1", elementInstanceKey: "2", state: "COMPLETED" },
+      { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+    ],
+    variables: [
+      { name: "n2_mergedSha", value: '"abc', scopeKey: PIK, isTruncated: true },
+      { name: "n1_pr", value: '"o/r#1', scopeKey: PIK, isTruncated: true },
+      { name: "ready", value: "tr", scopeKey: "3", isTruncated: true },
+    ],
+    userTasks: [],
+    incidents: [],
+  });
+  const landed = out.find((n) => n.id === "landed");
+  assert.deepEqual(landed?.boundFacts, {});
+  assert.equal(landed?.lastProbe, null);
+  assert.deepEqual(out.find((n) => n.id === "build")?.childRunKeys, []);
+});
+
+test("a __proto__ fact name or wait-node id is kept as an own property, not swallowed by the prototype setter", () => {
+  const nodes = deriveNodeProgress({
+    nodes: [
+      { id: "__proto__", kind: "wait", element: "n0", emits: [], dependsOn: [] },
+      { id: "b", kind: "agent", element: "n1", emits: [{ name: "__proto__", type: "string" }], dependsOn: [] },
+    ],
+    processInstanceKey: PIK,
+    elements: [{ elementId: "n1", elementInstanceKey: "2", state: "COMPLETED" }],
+    variables: [{ name: "n1___proto__", value: '"x"', scopeKey: PIK }],
+    userTasks: [],
+    incidents: [],
+    pollEveryByNode: JSON.parse('{"__proto__":"PT1M"}'),
+  });
+  assert.equal(Object.hasOwn(nodes[1]?.boundFacts ?? {}, "__proto__"), true);
+  assert.equal(JSON.stringify(nodes[1]?.boundFacts), '{"__proto__":"x"}');
+  assert.equal(nodes[0]?.pollEvery, "PT1M");
+});
+
+test("an unconfigured wait node never reads an inherited cadence", () => {
+  const nodes = deriveNodeProgress({
+    nodes: [{ id: "constructor", kind: "wait", element: "n0", emits: [], dependsOn: [] }],
+    processInstanceKey: PIK, elements: [], variables: [], userTasks: [], incidents: [], pollEveryByNode: {},
+  });
+  assert.equal(nodes[0]?.pollEvery, null);
+});
+
+/** A fake engine that, like the real one behind the urban client, answers every search with ONE page. */
+function pagedEngine(all: { elements: ElementInstanceFact[]; variables: VariableFact[] }) {
+  const one = <T>(rows: T[]): T[] => rows.slice(0, ENGINE_SEARCH_PAGE);
+  return {
+    searchProcessInstances: async () => [{ state: "ACTIVE" }],
+    searchElementInstances: async (f: { elementId?: string; state?: string } = {}) =>
+      one(all.elements.filter((e) => (f.elementId === undefined || e.elementId === f.elementId) && (f.state === undefined || e.state === f.state)).map((e) => ({ ...e, processInstanceKey: PIK }))),
+    getElementInstance: async (k: string) => {
+      const e = all.elements.find((x) => x.elementInstanceKey === k);
+      return e ? { ...e, processInstanceKey: PIK } : null;
+    },
+    searchVariables: async (f: { scopeKey?: string; name?: string } = {}) =>
+      one(
+        all.variables
+          .filter((v) => (f.scopeKey === undefined || v.scopeKey === f.scopeKey) && (f.name === undefined || v.name === f.name))
+          .map((v, i) => ({ ...v, variableKey: v.variableKey ?? String(i), processInstanceKey: PIK, isTruncated: v.isTruncated === true })),
+      ),
+    searchUserTasks: async () => [],
+    searchIncidents: async () => [],
+  };
+}
+
+test("a run with more variables and element instances than one page still yields complete facts and states", async () => {
+  const elements: ElementInstanceFact[] = [
+    { elementId: "n0", elementInstanceKey: "1", state: "COMPLETED" },
+    { elementId: "n1", elementInstanceKey: "2", state: "COMPLETED" },
+    { elementId: "n1_task", elementInstanceKey: "3", state: "COMPLETED" },
+    { elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" },
+  ];
+  const variables: VariableFact[] = [];
+  // 300 unrelated element instances and variables listed FIRST: a single broad page would hold only these.
+  for (let i = 0; i < 300; i++) {
+    elements.unshift({ elementId: `other_${i}`, elementInstanceKey: String(1000 + i), state: "COMPLETED" });
+    variables.push({ name: `noise${i}`, value: "1", scopeKey: PIK });
+  }
+  // The wait's ONE probeLoop scope, with repeated poll task/timer instances inside it (the real shape).
+  elements.push(
+    { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "ACTIVE" },
+    { elementId: "n2_task", elementInstanceKey: "6", state: "COMPLETED" },
+    { elementId: "n2_waitPoll", elementInstanceKey: "7", state: "COMPLETED" },
+    { elementId: "n2_task", elementInstanceKey: "8", state: "COMPLETED" },
+    { elementId: "n2_waitPoll", elementInstanceKey: "9", state: "ACTIVE" },
+  );
+  variables.push(
+    { name: "ready", value: "false", scopeKey: "5" },
+    { name: "detail", value: '"newest"', scopeKey: "5" },
+    { name: "n1_pr", value: '"a/b#7"', scopeKey: PIK },
+    { name: "pr", value: '"a/b#8"', scopeKey: "3" },
+    { name: "nodeInputs", value: JSON.stringify({ n2: { probePollEvery: "PT5M" } }), scopeKey: PIK },
+  );
+  const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
+  assert.equal(read.truncated, false);
+  const nodes = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read, pollEveryByNode: { landed: "PT5M" } });
+  const by = new Map(nodes.map((n) => [n.id, n]));
+  assert.equal(by.get("gate")?.state, "satisfied");
+  assert.equal(by.get("build")?.state, "satisfied");
+  assert.deepEqual(by.get("build")?.boundFacts, { pr: "a/b#7" });
+  assert.deepEqual(by.get("build")?.childRunKeys, ["a/b#7", "a/b#8"]);
+  assert.equal(by.get("landed")?.state, "active");
+  assert.deepEqual(by.get("landed")?.lastProbe, { ready: false, detail: "newest", observed: null });
+});
+
+test("a narrowed read that still fills a whole page is reported as truncated", async () => {
+  const elements: ElementInstanceFact[] = [{ elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" }];
+  const variables: VariableFact[] = [];
+  for (let i = 0; i < ENGINE_SEARCH_PAGE + 5; i++) {
+    elements.push({ elementId: "n2_probeLoop", elementInstanceKey: String(10 + i), state: "COMPLETED" });
+    variables.push({ name: "ready", value: "false", scopeKey: String(10 + i) });
+  }
+  const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
+  assert.equal(read.truncated, true);
+});
+
+test("a re-entered wait picks its newest probeLoop instance by numeric (BigInt) key order, never lexical order", () => {
+  for (const [older, newer] of [["9", "10"], ["2251799813685249", "2251799813685250"]] as const) {
+    const out = deriveNodeProgress({
+      nodes: NODES,
+      processInstanceKey: PIK,
+      elements: [
+        { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+        { elementId: "n2_probeLoop", elementInstanceKey: newer, state: "ACTIVE" },
+        { elementId: "n2_probeLoop", elementInstanceKey: older, state: "COMPLETED" },
+      ],
+      variables: [
+        { name: "ready", value: "true", scopeKey: older },
+        { name: "detail", value: '"stale"', scopeKey: older },
+        { name: "ready", value: "false", scopeKey: newer },
+        { name: "detail", value: '"newest"', scopeKey: newer },
+      ],
+      userTasks: [],
+      incidents: [],
+    });
+    assert.deepEqual(out.find((n) => n.id === "landed")?.lastProbe, { ready: false, detail: "newest", observed: null }, `${older} vs ${newer}`);
+  }
+});
+
+test("a live wait reads each poll's overwrite of its ONE probeLoop scope (repeated _task/_waitPoll inside it)", async () => {
+  // Real compiled shape: one ACTIVE `n2_probeLoop`; polls loop `_task` → `_gw` → `_waitPoll` → `_task`
+  // INSIDE it, each overwriting the null-seeded `ready`/`detail`/`observed` in that one scope. Run-root
+  // probe vars (another wait's result) must never be attributed to this node.
+  const elements: ElementInstanceFact[] = [
+    { elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" },
+    { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "ACTIVE" },
+    { elementId: "n2_task", elementInstanceKey: "6", state: "COMPLETED" },
+    { elementId: "n2_waitPoll", elementInstanceKey: "7", state: "ACTIVE" },
+  ];
+  const variables: VariableFact[] = [
+    { name: "ready", value: "false", scopeKey: "5" },
+    { name: "detail", value: '"poll 1"', scopeKey: "5" },
+    { name: "observed", value: '{"prState":"open"}', scopeKey: "5" },
+    { name: "ready", value: "true", scopeKey: PIK },
+    { name: "detail", value: '"root leak"', scopeKey: PIK },
+  ];
+  const engine = pagedEngine({ elements, variables });
+  const first = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...(await readEngineFacts(engine, PIK, NODES)) });
+  assert.deepEqual(first.find((n) => n.id === "landed")?.lastProbe, { ready: false, detail: "poll 1", observed: { prState: "open" } });
+
+  // The next poll: the timer fires, `_task` runs again in the SAME scope and overwrites its variables.
+  elements[3] = { ...elements[3], state: "COMPLETED" };
+  elements.push({ elementId: "n2_task", elementInstanceKey: "8", state: "COMPLETED" }, { elementId: "n2_waitPoll", elementInstanceKey: "9", state: "ACTIVE" });
+  variables[1] = { ...variables[1], value: '"poll 2"' };
+  variables[2] = { ...variables[2], value: '{"prState":"merged"}' };
+  const read = await readEngineFacts(engine, PIK, NODES);
+  assert.equal(read.truncated, false);
+  const second = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read });
+  assert.deepEqual(second.find((n) => n.id === "landed")?.lastProbe, { ready: false, detail: "poll 2", observed: { prState: "merged" } });
+});
+
+test("a wait whose probeLoop has not been written yet reports no probe, never a run-root value", async () => {
+  const elements: ElementInstanceFact[] = [
+    { elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" },
+    { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "ACTIVE" },
+    { elementId: "n2_task", elementInstanceKey: "6", state: "ACTIVE" },
+  ];
+  const variables: VariableFact[] = [{ name: "ready", value: "true", scopeKey: PIK }];
+  const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
+  const landed = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read }).find((n) => n.id === "landed");
+  assert.equal(landed?.lastProbe, null);
+});
+
+test("an emitted issue reference (non-PR fact) is not reported as a child PR run", () => {
+  const nodes: ResolvedNodeRef[] = [
+    { id: "triage", kind: "agent", element: "n1", emits: [{ name: "issue", type: "string" }], dependsOn: [] },
+  ];
+  const out = deriveNodeProgress({
+    nodes,
+    processInstanceKey: PIK,
+    elements: [{ elementId: "n1", elementInstanceKey: "2", state: "COMPLETED" }],
+    variables: [{ name: "n1_issue", value: '"o/r#5"', scopeKey: PIK }],
+    userTasks: [],
+    incidents: [],
+    pollEveryByNode: {},
+  });
+  assert.deepEqual(out[0]?.boundFacts, { issue: "o/r#5" });
+  assert.deepEqual(out[0]?.childRunKeys, []);
+});
+
+/** Wraps a fake engine so every search counts toward total calls and the in-flight high-water mark. */
+function countingEngine(inner: ReturnType<typeof pagedEngine>, delay: (call: number) => Promise<unknown> = () => new Promise((r) => setTimeout(r, 1))) {
+  const stats = { calls: 0, inFlight: 0, maxInFlight: 0 };
+  const wrap =
+    <A extends unknown[], R>(fn: (...a: A) => Promise<R>) =>
+    async (...a: A): Promise<R> => {
+      stats.calls++;
+      stats.inFlight++;
+      stats.maxInFlight = Math.max(stats.maxInFlight, stats.inFlight);
+      try {
+        await delay(stats.calls);
+        return await fn(...a);
+      } finally {
+        stats.inFlight--;
+      }
+    };
+  return {
+    stats,
+    engine: {
+      ...inner,
+      searchProcessInstances: wrap(inner.searchProcessInstances),
+      searchElementInstances: wrap(inner.searchElementInstances),
+      searchVariables: wrap(inner.searchVariables),
+      searchUserTasks: wrap(inner.searchUserTasks),
+      searchIncidents: wrap(inner.searchIncidents),
+    },
+  };
+}
+
+test("a large graph with many iterations stays under the in-flight and total engine-call limits", async () => {
+  const nodes: ResolvedNodeRef[] = [];
+  const elements: ElementInstanceFact[] = [];
+  for (let i = 0; i < 80; i++) {
+    const kind = i % 2 === 0 ? "wait" : "agent";
+    nodes.push({ id: `n${i}`, kind, element: `e${i}`, emits: [], dependsOn: [] });
+    for (let j = 0; j < 5; j++) elements.push({ elementId: `e${i}`, elementInstanceKey: String(i * 100 + j + 1), state: "COMPLETED" });
+    if (kind === "wait") for (let j = 0; j < 5; j++) elements.push({ elementId: `e${i}_probeLoop`, elementInstanceKey: String(i * 100 + 50 + j), state: "COMPLETED" });
+  }
+  const { engine, stats } = countingEngine(pagedEngine({ elements, variables: [] }));
+  const read = await readEngineFacts(engine, PIK, nodes);
+  assert.ok(stats.calls <= ENGINE_MAX_CALLS, `calls ${stats.calls}`);
+  assert.ok(stats.maxInFlight <= ENGINE_MAX_IN_FLIGHT, `in flight ${stats.maxInFlight}`);
+  assert.equal(stats.calls, ENGINE_MAX_CALLS);
+  assert.equal(read.truncated, true);
+});
+
+test("a small graph stays under the call cap and is not truncated", async () => {
+  const { engine, stats } = countingEngine(pagedEngine({ elements: [], variables: [] }));
+  const read = await readEngineFacts(engine, PIK, NODES);
+  assert.equal(read.truncated, false);
+  assert.ok(stats.maxInFlight <= ENGINE_MAX_IN_FLIGHT);
+});
+
+test("a read finishing while new reads are still being scheduled never pushes in-flight past the cap", async () => {
+  const nodes: ResolvedNodeRef[] = [];
+  const elements: ElementInstanceFact[] = [];
+  for (let i = 0; i < 40; i++) {
+    nodes.push({ id: `n${i}`, kind: "wait", element: `e${i}`, emits: [], dependsOn: [] });
+    for (let j = 0; j < 3; j++) elements.push({ elementId: `e${i}`, elementInstanceKey: String(i * 10 + j + 1), state: "COMPLETED" });
+  }
+  // Mixed latency: some reads settle within a microtask (racing the scheduler), others take a macrotask.
+  const { engine, stats } = countingEngine(pagedEngine({ elements, variables: [] }), (call) =>
+    call % 3 === 0 ? Promise.resolve() : new Promise((r) => setTimeout(r, call % 2)),
+  );
+  await readEngineFacts(engine, PIK, nodes);
+  assert.ok(stats.maxInFlight <= ENGINE_MAX_IN_FLIGHT, `in flight ${stats.maxInFlight}`);
+});
+
+test("the read limiter hands a freed slot to the waiter, so a caller arriving mid-hand-off can't exceed the cap", async () => {
+  const limited = createReadLimiter(2, 100, () => {});
+  let inFlight = 0;
+  let peak = 0;
+  const releases: (() => void)[] = [];
+  const read = () => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    return new Promise<number[]>((r) =>
+      releases.push(() => {
+        inFlight--;
+        r([]);
+      }),
+    );
+  };
+  const a = limited(read);
+  limited(read);
+  const waiter = limited(read); // queued: both slots taken
+  await Promise.resolve();
+  releases[0]?.(); // A finishes -> wakes the waiter
+  // New callers arrive on every microtask tick of the hand-off, so one lands between the
+  // wake-up and the woken waiter's resume.
+  for (let i = 0; i < 10; i++) {
+    limited(read);
+    await Promise.resolve();
+  }
+  await a;
+  assert.ok(peak <= 2, `peak ${peak}`);
+  for (const r of releases) r();
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  for (const r of releases) r();
+  await waiter;
+});
+
+test("a clipped bound fact is resolved by the full-value fetch and the view stays complete", async () => {
+  const variables: VariableFact[] = [{ name: "n1_pr", value: '"a/b#', scopeKey: PIK, isTruncated: true, variableKey: "vk1" }];
+  const fetched: string[] = [];
+  const read = await readEngineFacts(pagedEngine({ elements: [], variables }), PIK, NODES, async (k) => {
+    fetched.push(k);
+    return '"a/b#7"';
+  });
+  assert.deepEqual(fetched, ["vk1"]);
+  assert.equal(read.truncated, false);
+  const v = read.variables.find((x) => x.name === "n1_pr");
+  assert.equal(v?.value, '"a/b#7"');
+  assert.equal(v?.isTruncated, false);
+});
+
+test("a clipped fact whose full-value fetch fails, or is absent, flags the view truncated and stays unknown", async () => {
+  const variables: VariableFact[] = [{ name: "n1_pr", value: '"a/b#', scopeKey: PIK, isTruncated: true, variableKey: "vk1" }];
+  for (const fetchFull of [async () => undefined, undefined]) {
+    const read = await readEngineFacts(pagedEngine({ elements: [], variables }), PIK, NODES, fetchFull);
+    assert.equal(read.truncated, true);
+    assert.equal(read.variables.find((x) => x.name === "n1_pr")?.isTruncated, true);
+  }
+});
+
+test("a clipped fact beyond the per-request call cap is not fetched and flags the view truncated", async () => {
+  const nodes: ResolvedNodeRef[] = [];
+  const elements: ElementInstanceFact[] = [];
+  for (let i = 0; i < 80; i++) {
+    nodes.push({ id: `n${i}`, kind: "agent", element: `e${i}`, emits: [], dependsOn: [] });
+    for (let j = 0; j < 5; j++) elements.push({ elementId: `e${i}`, elementInstanceKey: String(i * 100 + j + 1), state: "COMPLETED" });
+  }
+  const variables: VariableFact[] = [{ name: "e0_pr", value: '"a/b#', scopeKey: PIK, isTruncated: true, variableKey: "vk1" }];
+  const { engine, stats } = countingEngine(pagedEngine({ elements, variables }));
+  let fetches = 0;
+  const read = await readEngineFacts(engine, PIK, nodes, async () => {
+    fetches++;
+    return '"a/b#7"';
+  });
+  assert.equal(stats.calls + fetches, ENGINE_MAX_CALLS);
+  assert.equal(fetches, 0);
+  assert.equal(read.truncated, true);
+  assert.equal(read.variables.find((x) => x.name === "e0_pr")?.isTruncated, true);
+});
+
+test("fetchFullVariableValue sends CAMUNDA_TOKEN as a bearer credential (and none when unset)", async () => {
+  const { fetchFullVariableValue } = await import("./deliveryGraphProgress.ts");
+  const seen: (string | null)[] = [];
+  const fetchImpl: typeof fetch = async (_url, init) => {
+    seen.push(new Headers(init?.headers).get("authorization"));
+    return new Response(JSON.stringify({ value: "full", isTruncated: false }), { status: 200 });
+  };
+  assert.equal(await fetchFullVariableValue("7", { token: "s3cret", fetchImpl }), "full");
+  assert.equal(await fetchFullVariableValue("7", { token: undefined, fetchImpl }), "full");
+  assert.deepEqual(seen, ["Bearer s3cret", null]);
+});
+
+test("a completed `_lastAttempt` probe result wins over the cancelled probe loop's older result", () => {
+  const base = {
+    nodes: NODES,
+    processInstanceKey: PIK,
+    variables: [
+      { name: "ready", value: "false", scopeKey: "5" },
+      { name: "ready", value: "true", scopeKey: "3" },
+      { name: "detail", value: '"merged"', scopeKey: "3" },
+    ],
+    userTasks: [],
+    incidents: [],
+  };
+  const elements: ElementInstanceFact[] = [
+    { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+    { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "TERMINATED" },
+  ];
+  const before = deriveNodeProgress({ ...base, elements }).find((n) => n.id === "landed");
+  assert.equal(before?.lastProbe?.ready, false);
+  const after = deriveNodeProgress({ ...base, elements: [...elements, { elementId: "n2_lastAttempt", elementInstanceKey: "7", state: "COMPLETED" }] }).find(
+    (n) => n.id === "landed",
+  );
+  assert.equal(after?.lastProbe?.ready, true);
+  assert.equal(after?.lastProbe?.detail, "merged");
+});
+
+test("numeric engine keys (scopeKey / elementInstanceKey) are normalised so root facts and node scopes still match", async () => {
+  const elements: ElementInstanceFact[] = [
+    { elementId: "n1", elementInstanceKey: "2", state: "COMPLETED" },
+    { elementId: "n1_task", elementInstanceKey: "3", state: "COMPLETED" },
+  ];
+  const variables: VariableFact[] = [
+    { name: "n1_pr", value: '"a/b#7"', scopeKey: PIK },
+    { name: "pr", value: '"a/b#8"', scopeKey: "3" },
+  ];
+  const base = pagedEngine({ elements, variables });
+  // Simulate an engine that serialises keys as JSON numbers despite the typed string shape.
+  const numeric = <T extends object>(rows: T[], field: string): T[] =>
+    rows.map((r) => (field in r ? { ...r, [field]: Number(Reflect.get(r, field)) } : r));
+  const engine: typeof base = {
+    ...base,
+    searchElementInstances: async (f) => numeric(await base.searchElementInstances(f), "elementInstanceKey"),
+    searchVariables: async (f) => numeric(await base.searchVariables(f), "scopeKey"),
+  };
+  const read = await readEngineFacts(engine, PIK, NODES);
+  for (const v of read.variables) assert.equal(typeof v.scopeKey, "string");
+  for (const e of read.elements) assert.equal(typeof e.elementInstanceKey, "string");
+  const nodes = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read, pollEveryByNode: {} });
+  const build = nodes.find((n) => n.id === "build");
+  assert.deepEqual(build?.boundFacts, { pr: "a/b#7" });
+  assert.deepEqual(build?.childRunKeys, ["a/b#7", "a/b#8"]);
+});

@@ -207,12 +207,27 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     log: (msg) => app.log.info(msg),
     warn: (msg) => app.log.warn(msg),
   });
+  return probeResultVars(result);
+};
+
+/**
+ * The job-completion variables for one probe poll. `observed` is ALWAYS emitted
+ * ("" when this poll produced none — the envelope types it a string): the probe loop reuses one scope across
+ * polls, so omitting it would leave the previous poll's observation beside this
+ * poll's `ready`/`detail` in `lastProbe` (#1055).
+ */
+export function probeResultVars(result: {
+  ready: boolean;
+  detail: string;
+  observed?: string;
+  bind?: Record<string, string>;
+}): { ready: boolean; detail: string; observed: string } & Record<string, string | boolean> {
   return {
     ready: result.ready,
     detail: result.detail,
-    ...(result.observed !== undefined ? { observed: result.observed } : {}),
+    observed: result.observed ?? "",
     ...safeBind(result.bind),
   };
-};
+}
 
 export default handler;
