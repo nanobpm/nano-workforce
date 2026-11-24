@@ -12,8 +12,10 @@
 // (a gate override / Mergify / a manual merge landed it), there is nothing to reconverge — the worker
 // stamps the row `merged`, records the already-merged audit, kicks the retrospective, and ends the
 // loop cleanly instead of restarting convergence against a deleted head branch.
+
 import type { AppJobHandler } from "@nanobpm/urban";
 import { classifyPrLiveness, fetchPrHead, fetchPrState } from "../../app/github.ts";
+import { recordMergedOnce } from "../../app/mergeAudit.ts";
 import { parsePr } from "../../app/prParse.ts";
 import { maybeStartRetro } from "../../app/retro.ts";
 import { abandonClosedPr, MAX_ROUNDS, submitPr } from "../../app/service.ts";
@@ -91,9 +93,8 @@ export function makeHandler(
     if (liveness === "merged") {
       const ts = new Date().toISOString();
       await app.data.table("pull_requests", "pr_key").update(prKey, { status: "merged", merged_at: ts, updated_at: ts });
-      await app.data.table("merges", "id").insert({
+      await recordMergedOnce(app.data, {
         pr_key: prKey,
-        outcome: "merged",
         method: "already-merged",
         detail: "PR was already merged on GitHub (landed out-of-band) — ending the merge loop instead of reconverging",
         at: ts,

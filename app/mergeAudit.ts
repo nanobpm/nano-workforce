@@ -22,7 +22,7 @@ export interface MergeAuditRow {
 /** Record the terminal `merged` row at most once per PR. Returns true when a row was written. */
 export async function recordMergedOnce(data: DataLayer, row: Omit<MergeAuditRow, "outcome">): Promise<boolean> {
   const merges = data.table("merges", "id");
-  if ((await merges.findOne({ pr_key: row.pr_key, outcome: "merged" })) !== null) return false;
+  if ((await merges.findOne({ pr_key: row.pr_key, outcome: "merged" })) != null) return false;
   try {
     await merges.insert({ ...row, outcome: "merged" });
     return true;
@@ -33,19 +33,36 @@ export async function recordMergedOnce(data: DataLayer, row: Omit<MergeAuditRow,
   }
 }
 
-/** Append `row` unless the PR's newest audit row already records the same outcome/method/detail. */
+/** The audit outcomes that make up one review-wait cycle (park → ask → re-arm). */
+const WAIT_CYCLE_OUTCOMES: readonly string[] = ["review-pending", "review-requested", "review-wait-ended"];
+
+/**
+ * Record a repeatable wait-state row (e.g. `review-pending` for the same unreviewed head), bounded per
+ * PR/head across the WHOLE wait cycle. A same-head re-park runs `review-pending` → `review-requested`
+ * (pr.request-review) → `review-wait-ended` (pr.arm-merge) → `review-pending` again, so a newest-row
+ * comparison never sees the repeat. Instead scan the PR's trailing run of wait-cycle rows: when it
+ * already holds an identical row, that run is a previous lap of THIS wait — collapse it (delete its
+ * rows, keeping only the poller's head-marked asks, which `requestHeadReviewIfMissing` budgets per
+ * head) and append the fresh row. The newest row is then the live wait, so `reviewWaitReason` still
+ * reports `waiting_review(<sha7>)`, and the per-PR/head lifecycle stays bounded to one lap.
+ */
 export async function recordUnlessRepeat(data: DataLayer, row: MergeAuditRow): Promise<boolean> {
   const merges = data.table("merges", "id");
-  const rows = await merges.find({ pr_key: row.pr_key });
-  let newest: Record<string, unknown> | undefined;
-  for (const r of rows) if (newest === undefined || Number(r.id ?? 0) > Number(newest.id ?? 0)) newest = r;
-  if (
-    newest !== undefined &&
-    newest.outcome === row.outcome &&
-    newest.method === row.method &&
-    newest.detail === row.detail
-  ) {
-    return false;
+  const rows = [...(await merges.find({ pr_key: row.pr_key }))].sort((a, b) => Number(b.id ?? 0) - Number(a.id ?? 0));
+  const run: Record<string, unknown>[] = [];
+  for (const r of rows) {
+    if (!WAIT_CYCLE_OUTCOMES.includes(String(r.outcome ?? ""))) break;
+    run.push(r);
+  }
+  const same = (r: Record<string, unknown>) =>
+    r.outcome === row.outcome && r.method === row.method && r.detail === row.detail;
+  // Already the live wait (newest row identical) — nothing new to record.
+  if (rows.length > 0 && same(rows[0])) return false;
+  if (run.some(same)) {
+    for (const r of run) {
+      const pollerAsk = r.outcome === "review-requested" && /\[head [0-9a-fA-F]{7,64}\]/.test(String(r.detail ?? ""));
+      if (!pollerAsk) await merges.delete(r.id);
+    }
   }
   await merges.insert({ ...row });
   return true;
