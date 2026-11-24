@@ -467,10 +467,12 @@ opt-in to all interfaces):
 `@nanobpm/engine-wasm` is pinned to an **exact** version in `package.json`
 (`devDependencies` and `overrides`, kept equal by `scripts/engine-wasm-pin.test.ts`), and
 Renovate opens a PR for every engine release, patch included, so nwf's typecheck, unit and
-e2e suites run against each one (issue #1049). Since nano-bpm#1871, engine-wasm X.Y.Z is the
-same engine as Nano server X.Y.Z, so **the pinned engine-wasm version is the Nano server
-release this nwf version is verified against** — deploy nwf onto that server version (or
-check the pin before upgrading the server).
+e2e suites run against each one (issue #1049). What this verifies today is the **WASM
+engine only**: engine-wasm and the Nano server are currently released independently, so the
+pinned engine-wasm version does **not** by itself identify a verified Nano server version.
+Once upstream unifies engine releases (nano-bpm#1871, still open), engine-wasm X.Y.Z will be
+the same engine as Nano server X.Y.Z and the pin will name the server release this nwf version
+is verified against; until then, confirm server compatibility separately before upgrading.
 
 #### Choose a path: direct LAN bind vs console proxy
 
