@@ -4866,7 +4866,7 @@ paths:
             type: array
             items:
               type: string
-              enum: [converging, waiting_review, escalated, waiting_deps, waiting_merge, waiting_lane, queued, converged, merged, abandoned, incident, orphaned, awaiting-approval, running, done, failed]
+              enum: [converging, waiting_review, escalated, waiting_deps, waiting_merge, merging, waiting_lane, queued, converged, merged, abandoned, incident, orphaned, awaiting-approval, running, done, failed]
           description: "Only rows in this status (repeatable)."
         - name: hasEscalation
           in: query
@@ -4880,7 +4880,7 @@ paths:
           schema:
             type: string
             format: date-time
-          description: "Only rows updated at or after this ISO-8601 timestamp."
+          description: "Only rows updated at or after this ISO-8601 date-time, which must carry a timezone (Z or ±hh:mm); a malformed or timezone-less value is a 400."
       responses:
         "200":
           description: The active PRs.

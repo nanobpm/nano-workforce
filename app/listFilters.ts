@@ -15,6 +15,7 @@ export const PR_STATUS_VALUES: readonly string[] = [
   "escalated",
   "waiting_deps",
   "waiting_merge",
+  "merging",
   "waiting_lane",
   "queued",
   "converged",
@@ -57,15 +58,33 @@ export interface EscalationFilter {
   keys: string[];
 }
 
-/** All values of one query param, trimmed, blanks dropped; accepts a repeated param (array) and a
- *  comma-separated single value. */
-function values(query: RawQuery, name: string): string[] {
+/** All values of one query param, trimmed; accepts a repeated param (array). Enum-like params also
+ *  accept a comma-separated single value (`split`); opaque values (`key`) never split, since a run
+ *  key may itself contain a comma. Supplied blank values are KEPT so validation can reject them
+ *  (a blank filter must 400, not silently widen to the whole list). */
+function values(query: RawQuery, name: string, split = true): string[] {
   const raw = query[name];
   const list = Array.isArray(raw) ? raw : raw === undefined || raw === null ? [] : [raw];
-  return list
-    .flatMap((v) => String(v).split(","))
-    .map((v) => v.trim())
-    .filter((v) => v !== "");
+  return list.flatMap((v) => (split ? String(v).split(",") : [String(v)])).map((v) => v.trim());
+}
+
+function checkBlank(name: string, got: string[]): string | null {
+  return got.includes("") ? `blank ${name} filter value` : null;
+}
+
+/** An ISO-8601 date-time WITH an explicit timezone (Z or ±hh:mm) and a real calendar date. */
+const ISO_TS_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+
+/** Parse a timezone-bearing ISO-8601 timestamp to epoch ms, or null if malformed/invalid. */
+export function parseIsoTimestamp(v: string): number | null {
+  const m = ISO_TS_RE.exec(v);
+  if (!m) return null;
+  const [y, mo, d, h, mi, sec] = [m[1], m[2], m[3], m[4], m[5], m[6] ?? "0"].map(Number);
+  if (mo < 1 || mo > 12 || d < 1 || h > 23 || mi > 59 || sec > 59) return null;
+  const dim = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+  if (d > dim) return null;
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : t;
 }
 
 function checkEnum(name: string, got: string[], allowed: readonly string[]): string | null {
@@ -82,19 +101,26 @@ function checkRepos(got: string[]): string | null {
 export function parseStatusFilter(query: RawQuery): FilterParse<StatusFilter> {
   const kinds = values(query, "kind");
   const repos = values(query, "repo");
-  const keys = values(query, "key");
+  const keys = values(query, "key", false);
   const statuses = values(query, "status");
   const hasEsc = values(query, "hasEscalation");
   const since = values(query, "updatedSince");
+  const sinceMs = since.length === 1 ? parseIsoTimestamp(since[0] ?? "") : null;
   const err =
+    checkBlank("kind", kinds) ??
+    checkBlank("repo", repos) ??
+    checkBlank("key", keys) ??
+    checkBlank("status", statuses) ??
+    checkBlank("hasEscalation", hasEsc) ??
+    checkBlank("updatedSince", since) ??
     checkEnum("kind", kinds, STATUS_KIND_VALUES) ??
     checkRepos(repos) ??
     checkEnum("status", statuses, STATUS_FILTER_VALUES) ??
     checkEnum("hasEscalation", hasEsc, ["true", "false"]) ??
     (hasEsc.length > 1 ? "hasEscalation may be given once" : null) ??
     (since.length > 1 ? "updatedSince may be given once" : null) ??
-    (since.length === 1 && Number.isNaN(Date.parse(since[0] ?? ""))
-      ? `invalid updatedSince "${since[0]}" (expected an ISO-8601 timestamp)`
+    (since.length === 1 && sinceMs === null
+      ? `invalid updatedSince "${since[0]}" (expected an ISO-8601 date-time with a timezone, e.g. 2026-01-01T00:00:00Z)`
       : null);
   if (err) return { ok: false, error: err };
   return {
@@ -105,7 +131,7 @@ export function parseStatusFilter(query: RawQuery): FilterParse<StatusFilter> {
       keys,
       statuses,
       hasEscalation: hasEsc.length === 0 ? null : hasEsc[0] === "true",
-      updatedSince: since.length === 0 ? null : Date.parse(since[0] ?? ""),
+      updatedSince: sinceMs,
     },
   };
 }
@@ -114,8 +140,11 @@ export function parseStatusFilter(query: RawQuery): FilterParse<StatusFilter> {
 export function parseEscalationFilter(query: RawQuery): FilterParse<EscalationFilter> {
   const kinds = values(query, "kind");
   const repos = values(query, "repo");
-  const keys = values(query, "key");
+  const keys = values(query, "key", false);
   const err =
+    checkBlank("kind", kinds) ??
+    checkBlank("repo", repos) ??
+    checkBlank("key", keys) ??
     checkEnum("kind", kinds, ESCALATION_KIND_VALUES) ??
     checkRepos(repos);
   if (err) return { ok: false, error: err };

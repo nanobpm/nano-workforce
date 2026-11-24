@@ -15,7 +15,7 @@ test("parseStatusFilter accepts repeated and comma-separated values", () => {
 
 test("parseStatusFilter rejects a repeated hasEscalation / updatedSince", () => {
   assert(!parseStatusFilter({ hasEscalation: ["true", "false"] }).ok);
-  assert(!parseStatusFilter({ updatedSince: ["2026-01-01", "2026-01-02"] }).ok);
+  assert(!parseStatusFilter({ updatedSince: ["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"] }).ok);
 });
 
 test("parseEscalationFilter maps the epic alias onto plan", () => {
@@ -28,4 +28,34 @@ test("repoOfKey derives owner/repo from a PR key", () => {
   assertEquals(repoOfKey("o/r#12"), "o/r");
   assertEquals(repoOfKey("plan-1"), null);
   assertEquals(repoOfKey(null), null);
+});
+
+test("parseStatusFilter accepts the merging status", () => {
+  assert(parseStatusFilter({ status: "merging" }).ok);
+});
+
+test("key values are opaque: a comma inside a key is preserved (both endpoints)", () => {
+  const s = parseStatusFilter({ key: ["release,prod", "o/r#1"] });
+  assert(s.ok);
+  if (s.ok) assertEquals(s.filter.keys, ["release,prod", "o/r#1"]);
+  const e = parseEscalationFilter({ key: "release,prod" });
+  assert(e.ok);
+  if (e.ok) assertEquals(e.filter.keys, ["release,prod"]);
+});
+
+test("a supplied blank filter value is rejected, not dropped", () => {
+  for (const q of [{ repo: "" }, { repo: "  " }, { key: "" }, { kind: "" }, { status: "converging," }, { hasEscalation: "" }, { updatedSince: "" }]) {
+    assert(!parseStatusFilter(q).ok, JSON.stringify(q));
+  }
+  for (const q of [{ repo: "" }, { key: " " }, { kind: "pr," }]) assert(!parseEscalationFilter(q).ok, JSON.stringify(q));
+});
+
+test("updatedSince must be a valid timezone-bearing ISO date-time", () => {
+  for (const v of ["0", "2026-02-30T00:00:00Z", "2026-01-01T00:00:00", "2026-01-01", "2026-13-01T00:00:00Z"]) {
+    assert(!parseStatusFilter({ updatedSince: v }).ok, v);
+  }
+  const r = parseStatusFilter({ updatedSince: "2026-01-01T00:00:00+02:00" });
+  assert(r.ok);
+  if (r.ok) assertEquals(r.filter.updatedSince, Date.parse("2026-01-01T00:00:00+02:00"));
+  assert(parseStatusFilter({ updatedSince: "2024-02-29T12:30:00.5Z" }).ok);
 });
