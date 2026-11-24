@@ -198,6 +198,12 @@ export const MAX_ROUNDS = clampRounds(process.env.NANO_PR_MAX_ROUNDS, 20);
 
 /** The round budget persisted on a PR row (`max_rounds`, issue #1088), clamped; the default when
  *  absent (no row, or a pre-154 row). The ONE reader handoffs, re-enrolls and `/run` share. */
+/** Sentinel `submitPr` round budget: "keep the budget already persisted on this PR's row" (issue
+ *  #1088 review). Resolved INSIDE the per-PR submit lock against the row as it is then, so a
+ *  handoff/re-enroll never writes a stale snapshot (or the default) over a concurrently-stamped one. */
+export const PERSISTED_MAX_ROUNDS = "persisted";
+export type MaxRoundsArg = number | typeof PERSISTED_MAX_ROUNDS;
+
 export function persistedMaxRounds(row: { max_rounds?: number | null } | null | undefined): number {
   const v = row?.max_rounds;
   return typeof v === "number" && v > 0 ? clampRounds(v, MAX_ROUNDS) : MAX_ROUNDS;
@@ -751,7 +757,7 @@ export async function submitPr(
   engine: EngineClient,
   parsed: ParsedPr,
   dependsOn: string[] = [],
-  maxRounds: number = MAX_ROUNDS,
+  maxRoundsArg: MaxRoundsArg = MAX_ROUNDS,
   convergeOnly = false,
   rootRequestKey: string | null = null,
   humanApproval = false,
@@ -762,7 +768,7 @@ export async function submitPr(
   customInstructions: string | null = null,
 ) {
   return withPrSubmitLock(parsed.prKey, () =>
-    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom, headShaOverride, customInstructions),
+    submitPrCritical(data, engine, parsed, dependsOn, maxRoundsArg, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom, headShaOverride, customInstructions),
   );
 }
 
@@ -771,7 +777,7 @@ async function submitPrCritical(
   engine: EngineClient,
   parsed: ParsedPr,
   dependsOn: string[] = [],
-  maxRounds: number = MAX_ROUNDS,
+  maxRoundsArg: MaxRoundsArg = MAX_ROUNDS,
   convergeOnly = false,
   rootRequestKey: string | null = null,
   humanApproval = false,
@@ -802,6 +808,8 @@ async function submitPrCritical(
     : null;
   const table = prs(data);
   const existing = await table.get(parsed.prKey);
+  // Resolve a `persisted` budget under the lock, from the row as it is NOW (issue #1088 review).
+  const maxRounds = maxRoundsArg === PERSISTED_MAX_ROUNDS ? persistedMaxRounds(existing) : maxRoundsArg;
   // ADR-0065: classify "already running" on the DERIVED terminal edge, not the base transient. A
   // PR whose engine instance was terminated out-of-band (or by an ordinary in-app cancel — derive-only
   // under urban 0.81.0) has a base row frozen at its last worker transient (e.g. `converging`) but a
@@ -2633,8 +2641,8 @@ export async function handoffWaitingMergeToConvergence(
       engine,
       { repo: pr.repo, number: pr.number, url: pr.url, prKey },
       [],
-      // The run's persisted round budget (issue #1088), never a silent reset to the default.
-      persistedMaxRounds(pr),
+      // The run's persisted round budget (issue #1088), resolved under the submit lock.
+      PERSISTED_MAX_ROUNDS,
       false,
       null,
       false,
@@ -4401,8 +4409,9 @@ export async function pollFeatureDelivery(
             engine,
             parsed,
             [],
-            // A partially-enrolled row keeps its persisted round budget (issue #1088).
-            persistedMaxRounds(trackedPr),
+            // A partially-enrolled row keeps its persisted round budget (issue #1088), resolved
+            // under the submit lock so a concurrent stamp is never overwritten by this snapshot.
+            PERSISTED_MAX_ROUNDS,
             false,
             run.feature_key,
             run.human_approval === 1,

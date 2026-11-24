@@ -11,7 +11,7 @@ import { memDataFor } from "../test/worldDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
 import { WorldStore } from "./world/index.ts";
-import { abandonClosedPr, isPrSettled, MAX_ACK_RETRIES, MAX_ADVERSARIAL_PASSES, MAX_ROUNDS, parsePr, persistedMaxRounds, pollCapabilityGatesImpl, pollIncidentsImpl, pollJobActivationImpl, pollReviews, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
+import { abandonClosedPr, isPrSettled, MAX_ACK_RETRIES, MAX_ADVERSARIAL_PASSES, MAX_ROUNDS, PERSISTED_MAX_ROUNDS, parsePr, persistedMaxRounds, pollCapabilityGatesImpl, pollIncidentsImpl, pollJobActivationImpl, pollReviews, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
 import { trackingTargetFor } from "./instanceTracking.ts";
 import type { DataLayer } from "@nanobpm/urban";
 import { READINESS_READY_MESSAGE } from "./readiness.ts";
@@ -2006,6 +2006,25 @@ test("submitPr persists maxRounds on the row at submit and keeps it across the m
     assertEquals(vars().maxRounds, 3, "the handed-back loop gets the persisted budget");
     assertEquals((stores.pull_requests.rows[0] as Record<string, unknown>).max_rounds, 3);
     assertEquals(persistedMaxRounds({ max_rounds: null }), MAX_ROUNDS, "NULL reads as the default");
+  });
+});
+
+test("PERSISTED_MAX_ROUNDS resolves the budget from the row under the submit lock, not a stale snapshot (#1088 review)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, vars } = captureRoot();
+    const parsed = { repo: "owner/repo", number: 36, url: "https://github.com/owner/repo/pull/36", prKey: "owner/repo#36" };
+    // A competing submit stamped 3 rounds then lost its instance (keyless partial enrollment).
+    await submitPr(data, engine, parsed, [], 3);
+    const row = stores.pull_requests.rows[0] as Record<string, unknown>;
+    row.process_key = null;
+    // The recovery (e.g. the poller re-enroll, or the merge hand-back) asks for the persisted budget.
+    await submitPr(data, engine, parsed, [], PERSISTED_MAX_ROUNDS);
+    assertEquals(vars().maxRounds, 3, "the live row's budget seeds the instance");
+    assertEquals((stores.pull_requests.rows[0] as Record<string, unknown>).max_rounds, 3, "never overwritten by the default");
+    // Merge hand-back with the sentinel keeps it too.
+    (stores.pull_requests.rows[0] as Record<string, unknown>).process_key = "PI-MERGE";
+    await submitPr(data, engine, parsed, [], PERSISTED_MAX_ROUNDS, false, null, false, false, undefined, "PI-MERGE");
+    assertEquals(vars().maxRounds, 3);
   });
 });
 
