@@ -609,6 +609,13 @@ failed/garbled `gh` read is "not ready" (the bounded wait routes via `onTimeout`
 
 ---
 
+> **Graph agents must never block on ALL CI checks (#1087).** A bare `gh pr checks --watch`
+> returns only when every check finishes, and a merge-queue check (`Mergify Merge Queue`) stays
+> pending until the PR merges — so after a failed required check it hangs until the agent's SLA
+> expires. Every compiled `agent` node's prompt carries this rule (`renderCiWaitContract` in
+> `app/deliveryRunner.ts`): hand CI off to the convergence/merge loop, or wait with
+> `gh pr checks <n> --required --watch --fail-fast`.
+
 ## 10. Tool ↔ curl crosswalk (MCP-first, curl is the no-MCP fallback)
 
 | Action | Tool | No-MCP fallback |
