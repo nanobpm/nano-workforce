@@ -811,3 +811,68 @@ test("redact masks quoted Authorization headers in TEXT results (#1074 review)",
     assert(!out.includes("dXNlcjpwYXNz") && !out.includes("abcdefghijklmnop"), out);
   }
 });
+
+// ── #1074 round-2 maintainer guidance ──────────────────────────────────────────────────────────
+
+test("an incident created AND resolved between two sweeps is still collected", async () => {
+  await withData(async (data) => {
+    // Sweep 1 sees nothing; the incident is raised and resolved before sweep 2 runs.
+    let incidents: { incidentKey: string; processInstanceKey: string; errorType: string; errorMessage: string; state: string }[] = [];
+    const engine = {
+      searchAgentInstances: async () => [],
+      searchAgentInstanceHistory: async () => [],
+      searchJobs: async () => [],
+      searchIncidents: async (f?: { state?: string }) => incidents.filter((i) => !f?.state || i.state === f.state),
+    } as any;
+    await collectFriction({ data, engine, sweepKey: "IR1", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    incidents = [{ incidentKey: "I9", processInstanceKey: "P9", errorType: "E", errorMessage: "m", state: "RESOLVED" }];
+    await collectFriction({ data, engine, sweepKey: "IR2", now: new Date("2026-01-02T01:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    const rows = data.source().db.all<{ id: string }>("SELECT id FROM friction_signals WHERE sweep_key = 'IR2' AND kind = 'incident'");
+    assertEquals(rows.map((r) => r.id), ["incident:I9"]);
+    // And a third sweep does not re-count it.
+    await collectFriction({ data, engine, sweepKey: "IR3", now: new Date("2026-01-02T02:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(data.source().db.all("SELECT id FROM friction_signals WHERE sweep_key = 'IR3'").length, 0);
+  });
+});
+
+test("a job whose lease expired (TIMED_OUT) is collected as a lease-expiry signal", async () => {
+  await withData(async (data) => {
+    // Fake clock: the job was activated at T with a 5-minute lease; the sweep runs well past expiry,
+    // and the engine reports the job TIMED_OUT only once that deadline has passed.
+    const activatedAt = Date.parse("2026-01-02T00:00:00.000Z");
+    const leaseMs = 5 * 60 * 1000;
+    const clock = { now: activatedAt };
+    const engine = {
+      searchAgentInstances: async () => [],
+      searchAgentInstanceHistory: async () => [],
+      searchJobs: async ({ state }: { state: string }) =>
+        state === "TIMED_OUT" && clock.now > activatedAt + leaseMs ? [{ jobKey: "J5", type: "senior:implement", processInstanceKey: "P5", elementId: "impl" }] : [],
+      searchIncidents: async () => [],
+    } as any;
+    // Before expiry: no signal.
+    await collectFriction({ data, engine, sweepKey: "LE1", now: new Date(clock.now), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(data.source().db.all("SELECT id FROM friction_signals WHERE sweep_key = 'LE1'").length, 0);
+    // Advance the fake clock past the lease: the expiry is now observed and signalled.
+    clock.now = activatedAt + leaseMs + 60_000;
+    await collectFriction({ data, engine, sweepKey: "LE2", now: new Date(clock.now), config: CONFIG, baseUrl: "http://h" });
+    const rows = data.source().db.all<{ id: string; excerpt: string; fingerprint: string }>("SELECT id, excerpt, fingerprint FROM friction_signals WHERE sweep_key = 'LE2'");
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0]?.id, "failed_job:J5");
+    assert(rows[0]?.excerpt.includes("lease expired"), rows[0]?.excerpt ?? "");
+    assert(rows[0]?.fingerprint.includes("timed_out"), rows[0]?.fingerprint ?? "");
+  });
+});
+
+test("merging 3 same-fingerprint findings counts 3 distinct runs, not 1", async () => {
+  const { github, created } = githubStub();
+  const res = await fileFindings(
+    { github, config: CONFIG, window: WINDOW, observed: () => ({ occurrences: 3, runs: 3 }), leaseHeld: HELD, evidenceLinks: NOLINKS },
+    parseFindings([
+      finding({ occurrences: 1, runs: 1, evidence: "- run A" }),
+      finding({ occurrences: 1, runs: 1, evidence: "- run B" }),
+      finding({ occurrences: 1, runs: 1, evidence: "- run C" }),
+    ]).findings,
+  );
+  assertEquals(res.created.length, 1);
+  assert(created[0]?.body.includes("3 occurrence(s) across 3 run(s)"), created[0]?.body ?? "");
+});

@@ -686,8 +686,14 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
       });
     }
   }
-  const incidents = await engine.searchIncidents({ state: "ACTIVE" });
-  warnIfFullPage(deps.log, "incidents", incidents.length);
+  // ACTIVE *and* RESOLVED: an incident raised and resolved between two sweeps is still friction, and
+  // incidents carry no timestamp to window on — the recorded-id fence (`seen`) stops a re-count.
+  const incidents: Awaited<ReturnType<EngineClient["searchIncidents"]>>[number][] = [];
+  for (const state of ["ACTIVE", "RESOLVED"] as const) {
+    const page = await engine.searchIncidents({ state });
+    warnIfFullPage(deps.log, `incidents (${state})`, page.length);
+    incidents.push(...page);
+  }
   for (const inc of incidents) {
     const id = `incident:${inc.incidentKey}`;
     if (seen.has(id)) continue;
@@ -758,6 +764,10 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
   }
 
   // ── Commit: signals + sweep row + watermark CAS, atomically. ──
+  // KNOWN LIMITATION (maintainer-waived, #1074 review): the watermark advances over a window whose
+  // agent history was read COMMITTED-only (see `fetchRunHistory`), so PENDING/DISCARDED records in it
+  // are not collected. Reading all three statuses with paging before advancing is tracked in
+  // nanobpm/nano-workforce#1095 (readiness-gated on nanobpm/nano-ide#630).
   const counts = countByKind(signals);
   const at = deps.now.toISOString();
   const status: CollectResult["status"] = signals.length > 0 ? "collected" : "noop";
@@ -983,7 +993,10 @@ export async function fileFindings(deps: FileDeps, findingsIn: readonly Friction
     const prev = byFp.get(f.fingerprint);
     if (prev) {
       prev.occurrences += f.occurrences;
-      prev.runs = Math.max(prev.runs, f.runs);
+      // Sum, not max: merged findings usually cite DIFFERENT runs, and max() collapses N single-run
+      // findings to 1. The sum is only an upper bound — the host recount below (COUNT DISTINCT
+      // run_key) caps it to the true distinct-run figure, so shared runs never overcount.
+      prev.runs += f.runs;
       prev.evidence = [prev.evidence, f.evidence].filter(Boolean).join("\n");
       prev.existingIssue = prev.existingIssue ?? f.existingIssue;
       prev.signalFingerprints = [...new Set([...(prev.signalFingerprints ?? []), ...(f.signalFingerprints ?? [])])];
