@@ -14,6 +14,7 @@ import { deliveryGraphRunsTracking } from "./deliveryGraphRun.ts";
 import { featureRunsTracking } from "./feature.ts";
 import { plansTracking, planTasks } from "./plan.ts";
 import { parsePr } from "./prParse.ts";
+import { effectiveTerminalStatus, RUN_TERMINAL_STATUS, readRunCancellation } from "./runTerminal.ts";
 import {
   type ActiveDelivery,
   type ActivePr,
@@ -86,10 +87,25 @@ async function readRootVar(engine: Engine | undefined, processKey: string | null
   }
 }
 
-async function openEscalationFor(data: DataLayer, subjectKey: string): Promise<OpenEscalation | null> {
-  const rows: UserTaskRow[] = await userTasks(data).find({ subject_key: subjectKey }).catch(() => []);
+/** The run's open user tasks, scoped to its OWN subject type: a feature and an epic may share an issue
+ *  key, so an unscoped `subject_key` read would leak the sibling's completable task into this run. */
+async function subjectTasks(data: DataLayer, subjectType: "feature" | "plan", subjectKey: string): Promise<UserTaskRow[]> {
+  return await userTasks(data).find({ subject_type: subjectType, subject_key: subjectKey }).catch(() => []);
+}
+
+function newestEscalation(rows: readonly UserTaskRow[]): OpenEscalation | null {
   const newest = [...rows].sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0))[0];
   return newest ? toOpenEscalation(newest) : null;
+}
+
+/** The run's effective status: the tracking VIEW's terminal-folded `derived_status`, with an
+ *  out-of-band-terminate edge promoted to `cancelled` by a COMMITTED operator cancel — the one rule
+ *  (`effectiveTerminalStatus`) the read models share, so a lookup never reports an operator cancel as
+ *  `abandoned`. */
+async function effectiveStatus(data: DataLayer, derivedStatus: string, processKey: string | null | undefined): Promise<string> {
+  if (derivedStatus !== RUN_TERMINAL_STATUS.outOfBandTerminate || !processKey) return derivedStatus;
+  const cx = await readRunCancellation(data, processKey).catch(() => undefined);
+  return effectiveTerminalStatus(derivedStatus, cx?.cancelled_at, cx?.committed === 1);
 }
 
 function emptySettings(): RunSettings {
@@ -134,7 +150,8 @@ async function prViews(
       if (!p) throw new Error(`projectPrRows dropped ${row.pr_key}`);
       // `projectPrRows` reports the in-flight workflow status; past the terminal edge the folded
       // `derived_status` (merged/converged/abandoned) is the truth for a lookup at any stage.
-      const terminal = row.derived_status !== row.status && p.status === row.status ? row.derived_status : p.status;
+      const folded = row.derived_status !== row.status && p.status === row.status ? row.derived_status : p.status;
+      const terminal = await effectiveStatus(data, folded, row.process_key);
       return {
         key: p.prKey,
         kind: "pr" as const,
@@ -198,9 +215,9 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
   const feature = await featureRunsTracking(data).get(key);
   const plan = await plansTracking(data).get(key);
   if (feature && !(plan && isNewer(plan, feature))) {
-    const openEsc = await openEscalationFor(data, key);
-    const tasks: UserTaskRow[] = await userTasks(data).find({ subject_key: key }).catch(() => []);
-    const status = feature.derived_status;
+    const tasks = await subjectTasks(data, "feature", key);
+    const openEsc = newestEscalation(tasks);
+    const status = await effectiveStatus(data, feature.derived_status, feature.process_key);
     const derived = deriveStage({
       status,
       pr_key: feature.pr_key,
@@ -248,12 +265,13 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
     const slices = await planTasks(data).find({ plan_key: key });
     const prKeys = slices.map((t) => t.pr_key).filter((k): k is string => typeof k === "string" && k !== "");
     const children = await childPrViews(data, engine, prKeys);
+    const planStatus = await effectiveStatus(data, plan.derived_status, plan.process_key);
     return withChildKeys({
       key,
       kind: "epic",
       title: plan.title ?? null,
-      status: plan.derived_status,
-      stage: plan.epic_phase ?? plan.derived_status,
+      status: planStatus,
+      stage: plan.epic_phase ?? planStatus,
       settings: {
         ...emptySettings(),
         converge: true,
@@ -265,7 +283,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       activeWorker: null,
       leaseUntil: null,
       prUrl: null,
-      openEscalation: await openEscalationFor(data, key),
+      openEscalation: newestEscalation(await subjectTasks(data, "plan", key)),
       incident: null,
       acknowledgedAt: plan.acknowledged_at ?? null,
       createdAt: plan.created_at,
@@ -280,7 +298,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
   const run = await deliveryGraphRunsTracking(data).get(key);
   if (run) {
     const [d]: ActiveDelivery[] = await projectDeliveryRows(data, [run]);
-    const status = d.incident ? d.status : run.derived_status;
+    const status = d.incident ? d.status : await effectiveStatus(data, run.derived_status, run.process_key);
     return {
       key,
       kind: "delivery",
