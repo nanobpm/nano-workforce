@@ -256,7 +256,9 @@ test("an operator-cancelled run reads `cancelled` (committed run_cancellations r
   assertEquals(((await handler(input("run-x"), oob)) as Row).body.status, "abandoned");
   // Same rule for a feature and an epic.
   const f = memApp({ feature_runs: [feature({ status: "abandoned", process_key: "proc-d" })], run_cancellations: cx(1) }, PKX);
-  assertEquals(((await handler(input("o/r#5"), f)) as Row).body.status, "cancelled");
+  const fb = ((await handler(input("o/r#5"), f)) as Row).body;
+  assertEquals(fb.status, "cancelled");
+  assertEquals(fb.stage, "Done");
   const e = memApp(
     {
       plans: [{ plan_key: "o/r#5", repo: "o/r", title: "E", status: "abandoned", process_key: "proc-d", epic_phase: null, auto_merge: 0, auto_resolve_escalations: 0, acknowledged_at: null, created_at: T0, updated_at: T0 }],

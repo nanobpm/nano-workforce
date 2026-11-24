@@ -218,8 +218,10 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
     const tasks = await subjectTasks(data, "feature", key);
     const openEsc = newestEscalation(tasks);
     const status = await effectiveStatus(data, feature.derived_status, feature.process_key);
+    // Stage derives from the tracking VIEW's terminal-folded status (`abandoned` ∈ Done), not the
+    // presentational `cancelled` promotion, so an operator cancel still lands on the `Done` stage.
     const derived = deriveStage({
-      status,
+      status: feature.derived_status,
       pr_key: feature.pr_key,
       converge: feature.converge,
       auto_merge: feature.auto_merge,
