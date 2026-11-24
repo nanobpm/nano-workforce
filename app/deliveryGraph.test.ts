@@ -3549,3 +3549,140 @@ test("#1033 a padded `target: \" converge \"` connector is validated as a PR-bin
   const unbound = validateDeliveryGraph(g).filter((e) => e.code === "unbound-pr");
   assert(unbound.some((e) => e.path === "nodes[1].connector.payload.pr"), JSON.stringify(unbound));
 });
+
+// ── #1083: branch-context parity — conditional sub-flows may contain parallel fan-out and nested splits ──
+const w1083 = (id: string) => ({ id, kind: "wait", wait: { kind: "command", target: "true" } });
+const decide1083 = (id = "decide", name = "go", type = "boolean") => ({
+  id,
+  kind: "agent",
+  emits: [{ name, type }],
+  agent: { jobType: "senior:feature", repository: "nanobpm/nano-workforce", prompt: id },
+});
+const parity1083 = (graph: { nodes: unknown[]; edges: unknown[] }) =>
+  validateDeliveryGraph(graph).filter((e) => e.code === "exclusive-merge-parity");
+
+test("#1083 a parallel fork + AND-join inside ONE exclusive arm validates (repro 1)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [decide1083(), ...["fork", "a", "b", "join", "skip", "done"].map(w1083)],
+      edges: [
+        { from: "decide", to: "fork", when: "decide.go", equals: true },
+        { from: "decide", to: "skip", default: true },
+        { from: "fork", to: "a" },
+        { from: "fork", to: "b" },
+        { from: "a", to: "join" },
+        { from: "b", to: "join" },
+        { from: "join", to: "done" },
+        { from: "skip", to: "done" },
+      ],
+    }),
+    [],
+  );
+});
+
+const nested1083Edges = [
+  { from: "decide", to: "inner", when: "decide.go", equals: true },
+  { from: "decide", to: "skip", default: true },
+  { from: "inner", to: "x", when: "inner.mode", equals: "x" },
+  { from: "inner", to: "y", default: true },
+  { from: "x", to: "merge" },
+  { from: "y", to: "merge" },
+];
+
+test("#1083 a nested exclusive split whose merge stays under the outer arm validates (repro 2)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [decide1083(), decide1083("inner", "mode", "string"), ...["x", "y", "merge", "skip", "done"].map(w1083)],
+      edges: [...nested1083Edges, { from: "merge", to: "done" }, { from: "skip", to: "done" }],
+    }),
+    [],
+  );
+});
+
+test("#1083 a nested split's merge AND-joins a sibling inside the outer arm, then the outer arms merge", () => {
+  // Inside the go-arm, `prep` forks into the nested split AND an always-in-arm sibling.
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [
+        decide1083(),
+        decide1083("inner", "mode", "string"),
+        ...["prep", "x", "y", "merge", "sib", "join", "skip", "done"].map(w1083),
+      ],
+      edges: [
+        { from: "decide", to: "prep", when: "decide.go", equals: true },
+        { from: "decide", to: "skip", default: true },
+        { from: "prep", to: "inner" },
+        { from: "prep", to: "sib" },
+        ...nested1083Edges.slice(2),
+        { from: "merge", to: "join" },
+        { from: "sib", to: "join" },
+        { from: "join", to: "done" },
+        { from: "skip", to: "done" },
+      ],
+    }),
+    [],
+  );
+});
+
+test("#1083 still rejected: joining a conditional arm with an always-firing node", () => {
+  const errors = parity1083({
+    nodes: [decide1083(), ...["a", "skip", "indep", "sink"].map(w1083)],
+    edges: [
+      { from: "decide", to: "a", when: "decide.go", equals: true },
+      { from: "decide", to: "skip", default: true },
+      { from: "a", to: "sink" },
+      { from: "indep", to: "sink" },
+    ],
+  });
+  assert(errors.some((e) => e.message.includes('node "sink" joins a conditional (exclusive-split) branch with an always-firing branch')));
+});
+
+test("#1083 still rejected: an inner merge AND-joined with an always-firing node outside the outer arm", () => {
+  const errors = parity1083({
+    nodes: [decide1083(), decide1083("inner", "mode", "string"), ...["x", "y", "merge", "skip", "indep", "done"].map(w1083)],
+    edges: [...nested1083Edges, { from: "merge", to: "done" }, { from: "indep", to: "done" }, { from: "skip", to: "done" }],
+  });
+  assert(errors.some((e) => e.message.includes('node "done"')), JSON.stringify(errors));
+});
+
+test("#1083 still rejected: merging arms of two DIFFERENT splits", () => {
+  const errors = parity1083({
+    nodes: [decide1083("s1"), decide1083("s2"), ...["a1", "b1", "a2", "b2", "m"].map(w1083)],
+    edges: [
+      { from: "s1", to: "a1", when: "s1.go", equals: true },
+      { from: "s1", to: "b1", default: true },
+      { from: "s2", to: "a2", when: "s2.go", equals: true },
+      { from: "s2", to: "b2", default: true },
+      { from: "a1", to: "m" },
+      { from: "a2", to: "m" },
+    ],
+  });
+  assert(
+    errors.some((e) => e.message.includes('node "m" merges conditional branches that do not re-converge from a single exclusive split')),
+    JSON.stringify(errors),
+  );
+});
+
+test("#1083 still rejected: a fork inside one arm feeding an exclusive merge twice (double-fire)", () => {
+  const errors = parity1083({
+    nodes: [decide1083(), ...["fork", "a", "b", "skip", "m"].map(w1083)],
+    edges: [
+      { from: "decide", to: "fork", when: "decide.go", equals: true },
+      { from: "decide", to: "skip", default: true },
+      { from: "fork", to: "a" },
+      { from: "fork", to: "b" },
+      { from: "a", to: "m" },
+      { from: "b", to: "m" },
+      { from: "skip", to: "m" },
+    ],
+  });
+  assert(errors.some((e) => e.message.includes('node "m"')), JSON.stringify(errors));
+});
+
+test("#1083 still rejected: mixed leaves (a nested-arm tail beside an always-firing tail)", () => {
+  const errors = parity1083({
+    nodes: [decide1083(), decide1083("inner", "mode", "string"), ...["x", "y", "merge", "skip", "indep"].map(w1083)],
+    edges: nested1083Edges,
+  });
+  assert(errors.some((e) => e.message.includes("terminal nodes mix")), JSON.stringify(errors));
+});
