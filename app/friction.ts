@@ -271,7 +271,9 @@ export function extractRunSignals(runKey: string, runUrl: string | null, records
     iterations.add(rec.loopIteration);
     if (rec.metrics) tokens += (rec.metrics.inputTokens ?? 0) + (rec.metrics.outputTokens ?? 0);
     if (rec.role === "TOOL_RESULT") {
-      const text = recordText(rec);
+      // Redact the WHOLE result before classifying: an anchor inside a quoted secret would otherwise
+      // slice off the credential syntax and leak the value into the fingerprint (#1074 review).
+      const text = redact(recordText(rec));
       const hit = classifyToolResult(text);
       if (hit) {
         const line = text.slice(hit.index).split("\n")[0] ?? "";

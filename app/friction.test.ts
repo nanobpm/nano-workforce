@@ -773,3 +773,16 @@ test("an escalation and the transcript signals of one execution count as ONE run
     assertEquals([...new Set(rows.map((r) => r.run_key))], ["pi:P1"]);
   });
 });
+
+test("extractRunSignals never leaks a quoted secret into ANY signal field (#1074 review)", () => {
+  for (const text of [
+    "tool --client-secret 'Error: opaque-credential' and more",
+    'run PASSWORD="Error: opaque-credential" now',
+    '{"api_key":"Error: opaque-credential"}',
+  ]) {
+    const { signals } = extractRunSignals("R1", null, [rec("TOOL_RESULT", text)]);
+    for (const s of signals) {
+      for (const [k, v] of Object.entries(s)) assert(!String(v).includes("opaque-credential"), `leak in ${k}: ${v}`);
+    }
+  }
+});
