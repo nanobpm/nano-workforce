@@ -48,6 +48,15 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
   // The guarded feature CAS (foldCompletedFeatureRun) is the only raw SQL this reconciler issues.
   const exec = async (sql: string, args: any[]) => {
     if (!/^UPDATE "feature_runs"/.test(sql)) throw new Error(`unexpected sql: ${sql}`);
+    if (/"process_key" IS NULL/.test(sql)) {
+      const [st, lb, ts, fk, prKey, exp, seenAt] = args;
+      const k = (stores.feature_runs ?? []).find(
+        (row) =>
+          row.feature_key === fk && row.process_key == null && row.pr_key === prKey && row.status === exp && row.updated_at === seenAt,
+      );
+      if (k) Object.assign(k, { status: st, delivery_label: lb, updated_at: ts });
+      return { changed: k ? 1 : 0 };
+    }
     const [status, label, at, featureKey, processKey, expect] = args;
     const r = (stores.feature_runs ?? []).find(
       (row) => row.feature_key === featureKey && row.process_key === processKey && row.status === expect,
@@ -373,4 +382,77 @@ test("delivery edge (3) leaves a verified-absent mid-handoff feature to the grac
   await reconcileMissingPrRows(data, "", { lookup: lookupOf("not_found"), nowMs: T0 + MISSING_PR_GRACE_MS, lastChecked, notFound });
   assertEquals(stores.feature_runs[0].status, "failed");
   assertEquals(/not found on GitHub/.test(stores.feature_runs[0].delivery_label), true);
+});
+
+test("an UNKNOWN first lookup does not let edge (1) enroll the PR, so a later definitive miss still fails it past grace", async () => {
+  const { data, stores } = memData();
+  seedFeature(stores, "o/r#30");
+  const notFound = new Set<string>();
+  const unverified = new Set<string>();
+  const lastChecked = new Map<string, number>();
+  let creates = 0;
+  const engine = {
+    createInstance: async () => {
+      creates++;
+      return { processInstanceKey: "x" };
+    },
+    searchProcessInstances: async () => [],
+  } as any;
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf(null), nowMs: T0 + 1000, lastChecked, notFound, unverified });
+  assertEquals(unverified.has("o/r#30"), true);
+  await pollFeatureDelivery(data, engine, { missingPrNotFound: notFound, missingPrUnverified: unverified });
+  assertEquals(creates, 0);
+  assertEquals(stores.pull_requests ?? [], []);
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("not_found"), nowMs: T0 + MISSING_PR_GRACE_MS, lastChecked, notFound, unverified });
+  assertEquals(stores.feature_runs[0].status, "failed");
+  assertEquals(unverified.size, 0);
+});
+
+test("a positive open answer clears the unknown verdict so the PR becomes re-enrollable", async () => {
+  const { data, stores } = memData();
+  seedFeature(stores, "o/r#31");
+  const unverified = new Set<string>(["o/r#31"]);
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("open"), nowMs: T0, lastChecked: new Map(), notFound: new Set(), unverified });
+  assertEquals(unverified.has("o/r#31"), false);
+});
+
+test("recovered rows carry the origin root_request_key (feature, else epic) for lineage drill-down", async () => {
+  for (const answer of ["merged", "closed", "not_found"] as MissingPrLookup[]) {
+    const { data, stores } = memData();
+    seedEpic(stores, "o/r#32");
+    seedFeature(stores, "o/r#33");
+    await reconcileMissingPrRows(data, "", { lookup: lookupOf(answer), nowMs: T0 + MISSING_PR_GRACE_MS, lastChecked: new Map(), notFound: new Set(), unverified: new Set() });
+    assertEquals(stores.pull_requests.find((r: any) => r.pr_key === "o/r#32").root_request_key, "o/r#1");
+    assertEquals(stores.pull_requests.find((r: any) => r.pr_key === "o/r#33").root_request_key, "o/r#2");
+  }
+});
+
+test("a KEYLESS opened+converge feature is failed past grace; a re-seeded keyless run is not", async () => {
+  for (const reseed of [false, true]) {
+    const { data, stores } = memData();
+    stores.feature_runs = [
+      { feature_key: "o/r#2", process_key: null, status: "opened", pr_key: "o/r#34", converge: 1, created_at: ISO0, updated_at: ISO0 },
+    ];
+    const lookup = async () => {
+      if (reseed) Object.assign(stores.feature_runs[0], { updated_at: new Date(T0 + 5).toISOString() });
+      return "not_found" as MissingPrLookup;
+    };
+    await reconcileMissingPrRows(data, "", { lookup, nowMs: T0 + MISSING_PR_GRACE_MS, lastChecked: new Map(), notFound: new Set(), unverified: new Set() });
+    assertEquals(stores.feature_runs[0].status, reseed ? "opened" : "failed");
+  }
+});
+
+test("lookupMissingPr (token): a stalled request is bounded by the lookup deadline → unknown", async () => {
+  const prevFetch = globalThis.fetch;
+  const prevT = process.env.NANO_PR_GITHUB_TRANSPORT;
+  process.env.NANO_PR_GITHUB_TRANSPORT = "token";
+  globalThis.fetch = ((_u: string, init: any) =>
+    new Promise((_res, rej) => init.signal.addEventListener("abort", () => rej(init.signal.reason)))) as any;
+  try {
+    assertEquals(await lookupMissingPr("o/r", 1, "t", 20), null);
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevT === undefined) delete process.env.NANO_PR_GITHUB_TRANSPORT;
+    else process.env.NANO_PR_GITHUB_TRANSPORT = prevT;
+  }
 });
