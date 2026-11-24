@@ -10,6 +10,12 @@
     },
     {
       "type": "textarea",
+      "key": "summary",
+      "label": "Agent-reported reason (summary)",
+      "readonly": true
+    },
+    {
+      "type": "textarea",
       "key": "note",
       "label": "Disposition note (what you did / why — recorded on the run)"
     }

@@ -30,7 +30,7 @@
 // draft one from the branch) and continues to the converge path; only a run with NO commit to
 // deliver parks for a human.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { type FeatureRunStatus, featureRuns } from "../../app/feature.ts";
+import { blockedFeatureQuestion, type FeatureRunStatus, featureRuns, recordFeatureEscalation } from "../../app/feature.ts";
 import { reconcileBlockedFeature, shouldReconcileBlockedFeature } from "../../app/featureReconcile.ts";
 import { compareCommits, createPullRequest, fetchBranchHead, listPrsForHead } from "../../app/github.ts";
 import { requestIssuePrLink } from "../../app/issuePrLink.ts";
@@ -65,8 +65,13 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // reconcile (stamped with KEYLESS_OPENED_SUMMARY by `reconcileImplement`) reaches here only via an
   // Abandon / escalation-SLA auto-abandon. That human/SLA decision must stand — never let the blocked
   // recovery adopt/create a PR over it and proceed to convergence.
+  // Issue #1081 review — the general case of the same class: ANY cell that ended through an Abandon
+  // (operator or escalation-SLA auto-abandon) carries `cellResolution = "abandon"` (the cell's
+  // human-escalation resolution, output-mapped by feature.bpmn). E.g. a `blocked` WITH a question now
+  // escalates; abandoning it must not let blocked-delivery recovery adopt/create a PR over that decision.
+  const abandonedEscalation = str(job.variables.cellResolution) === "abandon";
   const abandonedKeyless = (str(job.variables.summary) ?? "").startsWith(KEYLESS_OPENED_SUMMARY);
-  if (!abandonedKeyless && shouldReconcileBlockedFeature(rawStatus)) {
+  if (!abandonedEscalation && !abandonedKeyless && shouldReconcileBlockedFeature(rawStatus)) {
     // Framework-injected (`io.nanobpm.agentResult`) — read through the Record-typed seam, like the
     // other agent-result consumers (workers/persist-escalation et al.); it is not an envelope field.
     // biome-ignore lint/plugin: runtime/framework contract boundary for the reserved agent-result envelope
@@ -131,6 +136,16 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     updated_at: ts,
   });
   app.log.info("record-feature", { featureKey, featureStatus, rowStatus, prKey });
+  // Issue #1081: persist WHY the run is blocked so the `feature-blocked` inbox task renders the agent's
+  // reported question (else summary) — appended to the same `feature_escalations` audit log the
+  // projection reads, as the newest row for this feature. Never blank (canonical builder fallback).
+  if (status === "blocked") {
+    await recordFeatureEscalation(app.data, {
+      featureKey,
+      question: blockedFeatureQuestion({ question: job.variables.question, summary }),
+      jobKey: job.jobKey,
+    });
+  }
 
   // Issue #907: announce the delivered PR on the claimed issue — ONE idempotent comment, posted by
   // the HOST so every delivery path (agent-opened, retry-opened, reconcile-adopted) covers it.

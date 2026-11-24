@@ -42,7 +42,7 @@ import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEffectiveSettings } from "./effectiveSettings.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
 import { ESCALATION_STEWARD_PROCESS_ID } from "./escalationSteward.ts";
-import { deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun } from "./feature.ts";
+import { blockedFeatureQuestion, deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun } from "./feature.ts";
 import {
   classifyMergeability,
   classifyPrLiveness,
@@ -5109,7 +5109,13 @@ export async function pollUserTasks(
         question = latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: subjectKey }));
         break;
       case FEATURE_BLOCKED_ELEMENT:
-        question = subj?.deliveryLabel ?? null;
+        // Issue #1081: record-feature appends the run's reported question/summary (never blank) as the
+        // newest `feature_escalations` row on a `blocked` outcome; fall back to the delivery label, then
+        // the canonical static reason, so the operator never sees a blank question.
+        question =
+          latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: subjectKey })) ??
+          subj?.deliveryLabel ??
+          blockedFeatureQuestion({});
         break;
       case PLAN_REVIEW_ELEMENT:
         question = latestPlanReviewFindings(await planReviews(data).find({ plan_key: subjectKey }));

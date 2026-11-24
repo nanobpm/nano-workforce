@@ -41,3 +41,14 @@ test("ic_gw: the escalate flow carries no condition — it is the unconditional 
   assert(!icEscalate.includes("conditionExpression"), "escalate is the default flow and must carry no condition");
   assert(!icEscalate.includes("not("), "escalate must not depend on a not(...) negation that FEEL leaves null for a missing status");
 });
+
+// Issue #1081: a `blocked` report carrying an answerable `question` is NOT a clean terminal — it must
+// fall to the escalate default (reconcile → human-escalation), whose answer resumes the run. Only a
+// question-less `blocked` stays the human-only `feature-blocked` ack.
+test("ic_gw: blocked is a clean terminal ONLY when it carries no answerable question", () => {
+  assertStringIncludes(
+    icDone,
+    '(status = "blocked" and (question = null or string length(trim(string(question))) = 0))',
+    "a blocked result with a question must route to the answerable escalation",
+  );
+});

@@ -187,3 +187,23 @@ test("claimed-completion (off-vocabulary status) with no question: accurate reas
   assertEquals(rows[0].status, "escalated");
   assertEquals(app.stores.feature_escalations[0].question, out.question);
 });
+
+// Issue #1081: a `blocked` result that carries an answerable question no longer ends the cell at ic_gw —
+// it falls to the escalation arm, so this recorder must flip the run to `escalated` (the answerable
+// `feature-escalation` path whose answer re-dispatches the implement agent) and lead with the agent's
+// own question rather than a synthesised no-result reason.
+test("blocked + question: escalates the run with the agent's own question (answer resumes the run)", async () => {
+  const rows = [{ feature_key: "owner/repo#7", status: "running" }];
+  const app = fakeApp(rows);
+  const out = await handler(
+    {
+      jobKey: "job-b",
+      variables: { subjectKey: "owner/repo#7", status: "blocked", summary: "scope unclear", question: "Option A or B?" },
+    } as never,
+    app,
+  );
+  assertEquals(rows[0].status, "escalated");
+  const q = String((out as { question: string }).question);
+  assertEquals(q.startsWith("Option A or B?"), true);
+  assertEquals(String(app.stores.feature_escalations[0].question), q);
+});

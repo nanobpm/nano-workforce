@@ -148,6 +148,7 @@
           "engineForm": {
             "formKeyField": "form_key",
             "userTaskKeyField": "user_task_key",
+            "processInstanceKeyField": "process_key",
             "completePath": "/app/api/actions/complete-user-task"
           }
         },

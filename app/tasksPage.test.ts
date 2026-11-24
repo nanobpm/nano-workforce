@@ -39,6 +39,9 @@ test("Tasks grid completes each row via its engine-declared form (nano-ide#457),
   assert(detail?.engineForm, "the grid detail must opt into engineForm rendering");
   assertEquals(detail.engineForm.formKeyField, "form_key");
   assertEquals(detail.engineForm.userTaskKeyField, "user_task_key");
+  // Rows carry the run key as `process_key`, not the renderer's default `process_instance_key`;
+  // without this the engine form can't load run variables and read-only summaries render blank.
+  assertEquals(detail.engineForm.processInstanceKeyField, "process_key");
   // Completion routes through nwf's canonical completion door (operations/completeUserTask.ts,
   // issue #728 / nano-ide#552) — NOT the runtime's generic `/app/actions/complete` seam — so it
   // records `task_completions` attribution, enforces HUMAN_COMPLETABLE_ELEMENTS, and drops the
