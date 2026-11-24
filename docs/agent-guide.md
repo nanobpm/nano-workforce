@@ -114,6 +114,22 @@ curl -sS -X POST __BASE__/actions/start/feature \
   -d '{ "issue": "owner/repo#123", "baseBranch": "main", "confirmDefaultBase": true, "converge": true, "autoMerge": true }'
 ```
 
+**`start/feature` merge-intent flags.** The flags form an implication chain —
+`humanApproval ⇒ autoMerge ⇒ converge` — so a `true` flag is never silently dropped:
+
+| `converge` | `autoMerge` | `humanApproval` | Result |
+|---|---|---|---|
+| omitted/`false` | omitted/`false` | omitted/`false` | implement + open the PR, then stop (no review, no merge) |
+| `true` | omitted/`false` | omitted/`false` | converge review, no merge |
+| omitted/`true` | `true` | omitted/`false` | `autoMerge: true` **implies `converge: true`** — converge, then merge |
+| omitted/`true` | omitted/`true` | `true` | implies `autoMerge` + `converge` — converge, human approval, merge |
+| `false` | `true` | any | `400` — `autoMerge requires converge: true` (contradiction) |
+| `false` | omitted | `true` | `400` — `humanApproval requires converge: true` (contradiction) |
+| any | `false` | `true` | `400` — `humanApproval requires autoMerge: true` |
+
+A started run's 202 echoes the **effective** `converge`, `autoMerge`, `humanApproval`, so the
+caller sees the implied value. A non-boolean flag (e.g. `"true"`) is a `400`.
+
 Idempotent on the plan key. The 202 response echoes `planKey` and `processInstanceKey`, and the
 plan's PRs appear in `/status` as ordinary convergence loops. Both doors accept
 `autoResolveEscalations` (default `false`), and it propagates to every child the run spawns.
