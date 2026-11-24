@@ -190,6 +190,14 @@ export const featureDismissableTerminal: Expr = and(
   not(openedMidHandoff),
 );
 
+/** The row-level twin of {@link featureDismissableTerminal} for an in-memory tracking row (the run
+ *  lookup's feature-vs-epic choice): terminal IFF the status is in {@link FEATURE_ACK_TERMINAL_STATUSES}
+ *  and the row is not a mid-handoff `opened` (`converge = 1` with a `pr_key`). Same set, same exception. */
+export function isFeatureDismissableTerminal(row: { derived_status: string; converge?: number | null; pr_key?: string | null }): boolean {
+  if (!FEATURE_ACK_TERMINAL_STATUSES.includes(row.derived_status)) return false;
+  return !(row.derived_status === "opened" && row.converge === 1 && row.pr_key != null);
+}
+
 /** The Active/History partition: `history` IFF the row is DISMISSABLE-terminal AND has been
  * acknowledged; otherwise `active` (live runs + terminal-but-UNACKNOWLEDGED runs). Delegates to the ONE
  * shared oracle (app/listBucket.ts, issue #641) over the feature {@link featureDismissableTerminal}

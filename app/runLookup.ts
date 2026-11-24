@@ -13,6 +13,7 @@ import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRunsTracking } from "./deliveryGraphRun.ts";
 import { TERMINAL_STATUSES } from "./deliveryStatuses.ts";
 import { featureRunsTracking } from "./feature.ts";
+import { isFeatureDismissableTerminal } from "./featureReadModel.ts";
 import { PLAN_TERMINAL_STATUSES, plansTracking, planTasks } from "./plan.ts";
 import { parsePr } from "./prParse.ts";
 import { effectiveTerminalStatus, RUN_TERMINAL_STATUS, readRunCancellation } from "./runTerminal.ts";
@@ -26,7 +27,7 @@ import {
   type StatusIncident,
   type TrackedPullRequest,
 } from "./service.ts";
-import { deriveStage, STAGE_DONE_STATUSES } from "./stage.ts";
+import { deriveStage } from "./stage.ts";
 import { type OpenEscalation, toOpenEscalation, type UserTaskRow, userTasks } from "./userTasks.ts";
 
 export type RunKind = "feature" | "epic" | "pr" | "delivery";
@@ -201,8 +202,8 @@ async function terminalPrStatus(data: DataLayer, row: TrackedPullRequest, overla
   return eff === RUN_TERMINAL_STATUS.outOfBandTerminate && overlaid === ORPHANED_PR_STATUS ? ORPHANED_PR_STATUS : eff;
 }
 
-function featureLive(f: { derived_status: string }): boolean {
-  return !STAGE_DONE_STATUSES.includes(f.derived_status);
+function featureLive(f: { derived_status: string; converge?: number | null; pr_key?: string | null }): boolean {
+  return !isFeatureDismissableTerminal(f);
 }
 
 function planLive(p: { derived_status: string }): boolean {
@@ -213,7 +214,7 @@ function planLive(p: { derived_status: string }): boolean {
  *  both or neither are live does the newest `created_at` decide. Never `updated_at` — acknowledge and
  *  phase polling bump it, so a dismissed finished run could shadow a live one and the choice flip. */
 function preferPlan(
-  feature: { derived_status: string; created_at?: string | null },
+  feature: { derived_status: string; converge?: number | null; pr_key?: string | null; created_at?: string | null },
   plan: { derived_status: string; created_at?: string | null },
 ): boolean {
   const fl = featureLive(feature);

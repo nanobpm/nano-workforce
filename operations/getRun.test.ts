@@ -251,6 +251,16 @@ test("a feature and an epic for the same issue: the live run wins, else the newe
     PKS,
   );
   assertEquals(((await handler(input("o/r#5"), acked)) as Row).body.kind, "epic");
+  // A FINISHED raise-only feature (`opened`, converge=0) is terminal: it never shadows an older live
+  // epic, and a newer terminal epic beats it on created_at (featureDismissableTerminal parity).
+  const raiseOnly = { status: "opened", converge: 0, pr_key: "o/r#6" };
+  const raisedVsLive = memApp({ feature_runs: [feature({ ...raiseOnly, created_at: later })], plans: [epic()] }, PKS);
+  assertEquals(((await handler(input("o/r#5"), raisedVsLive)) as Row).body.kind, "epic");
+  const raisedVsNewerDone = memApp({ feature_runs: [feature(raiseOnly)], plans: [epic({ status: "done", created_at: later })] }, PKS);
+  assertEquals(((await handler(input("o/r#5"), raisedVsNewerDone)) as Row).body.kind, "epic");
+  // ...but a mid-handoff `opened` (converge=1 with a PR) is still live and wins over an older live epic.
+  const handoff = memApp({ feature_runs: [feature({ status: "opened", converge: 1, pr_key: "o/r#6", created_at: later })], plans: [epic({ status: "done" })] }, PKS);
+  assertEquals(((await handler(input("o/r#5"), handoff)) as Row).body.kind, "feature");
 });
 
 test("a live epic parked on its readiness wait surfaces the gate as stage + blockedOn", async () => {
