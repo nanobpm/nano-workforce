@@ -196,6 +196,19 @@ export { clampCiFixBudget, clampRounds, MAX_CI_FIX_CEILING, MAX_ROUNDS_CEILING }
 import { clampCiFixBudget, clampRounds } from "./rounds.ts";
 export const MAX_ROUNDS = clampRounds(process.env.NANO_PR_MAX_ROUNDS, 20);
 
+/** Sentinel `submitPr` round budget: "keep the budget already persisted on this PR's row" (issue
+ *  #1088 review). Resolved INSIDE the per-PR submit lock against the row as it is then, so a
+ *  handoff/re-enroll never writes a stale snapshot (or the default) over a concurrently-stamped one. */
+export const PERSISTED_MAX_ROUNDS = "persisted";
+export type MaxRoundsArg = number | typeof PERSISTED_MAX_ROUNDS;
+
+/** The round budget persisted on a PR row (`max_rounds`, issue #1088), clamped; the default when
+ *  absent (no row, or a pre-154 row). The ONE reader handoffs, re-enrolls and `/run` share. */
+export function persistedMaxRounds(row: { max_rounds?: number | null } | null | undefined): number {
+  const v = row?.max_rounds;
+  return typeof v === "number" && v > 0 ? clampRounds(v, MAX_ROUNDS) : MAX_ROUNDS;
+}
+
 /** How many times the merge stage will dispatch a `senior:fix-ci` agent to make a blocked PR's
  * failing required checks green before giving up and escalating to a human. Default 3; set
  * `NANO_PR_MAX_CI_FIX_ROUNDS=0` to disable auto-fix (a blocked PR escalates immediately). Unlike
@@ -477,6 +490,9 @@ export interface PullRequest {
   // The human-approval SETTING the run was submitted with (148, issue #1054) — unlike
   // `merge_human_approval` it is never cleared by an approve or `startMerge`. NULL = pre-152 row.
   human_approval_submitted?: number | null;
+  // The run's round budget (154, issue #1088): stamped by `submitPr` at submit/reopen and passed back
+  // on a merge->convergence handoff / feature re-enroll so a custom budget survives. NULL = default.
+  max_rounds?: number | null;
   // Operator-steering projection (134_pull_requests_custom_instructions.sql, issue #956): 1 ⇒ this
   // run's converge agents carry `customInstructions` (stamped by `submitPr` at submit/reopen, run-
   // scoped like the merge policy), so `/status` shows the loop is steered with no engine read. NULL
@@ -741,7 +757,7 @@ export async function submitPr(
   engine: EngineClient,
   parsed: ParsedPr,
   dependsOn: string[] = [],
-  maxRounds: number = MAX_ROUNDS,
+  maxRoundsArg: MaxRoundsArg = MAX_ROUNDS,
   convergeOnly = false,
   rootRequestKey: string | null = null,
   humanApproval = false,
@@ -752,7 +768,7 @@ export async function submitPr(
   customInstructions: string | null = null,
 ) {
   return withPrSubmitLock(parsed.prKey, () =>
-    submitPrCritical(data, engine, parsed, dependsOn, maxRounds, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom, headShaOverride, customInstructions),
+    submitPrCritical(data, engine, parsed, dependsOn, maxRoundsArg, convergeOnly, rootRequestKey, humanApproval, autoResolveEscalations, autoMerge, handoffFrom, headShaOverride, customInstructions),
   );
 }
 
@@ -761,7 +777,7 @@ async function submitPrCritical(
   engine: EngineClient,
   parsed: ParsedPr,
   dependsOn: string[] = [],
-  maxRounds: number = MAX_ROUNDS,
+  maxRoundsArg: MaxRoundsArg = MAX_ROUNDS,
   convergeOnly = false,
   rootRequestKey: string | null = null,
   humanApproval = false,
@@ -792,6 +808,8 @@ async function submitPrCritical(
     : null;
   const table = prs(data);
   const existing = await table.get(parsed.prKey);
+  // Resolve a `persisted` budget under the lock, from the row as it is NOW (issue #1088 review).
+  const maxRounds = maxRoundsArg === PERSISTED_MAX_ROUNDS ? persistedMaxRounds(existing) : maxRoundsArg;
   // ADR-0065: classify "already running" on the DERIVED terminal edge, not the base transient. A
   // PR whose engine instance was terminated out-of-band (or by an ordinary in-app cancel — derive-only
   // under urban 0.81.0) has a base row frozen at its last worker transient (e.g. `converging`) but a
@@ -1019,6 +1037,7 @@ async function submitPrCritical(
       merge_human_approval: gated ? 1 : 0,
       // The SUBMITTED human-approval setting (148, issue #1054): never cleared by approve/startMerge.
       human_approval_submitted: humanApproval ? 1 : 0,
+      max_rounds: clampRounds(maxRounds, MAX_ROUNDS),
       // Operator-steering projection (issue #956): 1 ⇒ this run's converge agents carry custom
       // instructions, so `/status` can show the loop is steered with no engine read. The TEXT is
       // durable alongside (issue #956 review) so a handoff/re-enrollment can re-supply it.
@@ -1137,6 +1156,7 @@ async function submitPrCritical(
         merge_requested: existing.merge_requested ?? null,
         merge_human_approval: existing.merge_human_approval ?? null,
         human_approval_submitted: existing.human_approval_submitted ?? null,
+        max_rounds: existing.max_rounds ?? null,
         // The operator-steering projection (issue #956) rolls back with the same ownership.
         custom_instructions: existing.custom_instructions ?? null,
         custom_instructions_text: existing.custom_instructions_text ?? null,
@@ -1206,6 +1226,8 @@ async function submitPrCritical(
         // (`handingBack`) passes `humanApproval=false` because the gate was already decided, so it must
         // keep the stamp the run was submitted with (else `/run` reports approval as disabled).
         human_approval_submitted: handingBack ? (existing?.human_approval_submitted ?? null) : humanApproval ? 1 : 0,
+        // The run's round budget (issue #1088): run-scoped, the fresh run's (clamped) budget wins.
+        max_rounds: clampRounds(maxRounds, MAX_ROUNDS),
         // Operator-steering projection (issue #956): run-scoped too — the fresh run's steering wins.
         custom_instructions: instructions != null ? 1 : 0,
         custom_instructions_text: instructions,
@@ -2619,7 +2641,8 @@ export async function handoffWaitingMergeToConvergence(
       engine,
       { repo: pr.repo, number: pr.number, url: pr.url, prKey },
       [],
-      MAX_ROUNDS,
+      // The run's persisted round budget (issue #1088), resolved under the submit lock.
+      PERSISTED_MAX_ROUNDS,
       false,
       null,
       false,
@@ -4386,7 +4409,9 @@ export async function pollFeatureDelivery(
             engine,
             parsed,
             [],
-            MAX_ROUNDS,
+            // A partially-enrolled row keeps its persisted round budget (issue #1088), resolved
+            // under the submit lock so a concurrent stamp is never overwritten by this snapshot.
+            PERSISTED_MAX_ROUNDS,
             false,
             run.feature_key,
             run.human_approval === 1,
