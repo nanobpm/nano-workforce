@@ -161,11 +161,29 @@ export function deriveNodeProgress(input: {
 
     let lastProbe: DeliveryNodeProbe | null = null;
     if (node.kind === "wait") {
-      // The most recent probe-loop scope that carries a probe result (the last element instance listed wins).
-      const loops = own.filter((e) => e.elementId === `${node.element}_probeLoop`);
-      for (const loop of loops) {
-        const scope = varsByScope.get(loop.elementInstanceKey);
-        if (scope === undefined || !scope.has("ready")) continue;
+      // Where the probe job's result vars (`ready`/`detail`/`observed`) land depends on engine scope
+      // propagation: the probeLoop subProcess declares them only as OUTPUTS, so under Zeebe-parity
+      // propagation a job result lands in the nearest scope already defining the name — else the
+      // process root. Read, innermost first: a probeLoop scope, then the node's own element scope,
+      // then the root — the root only when this is the sole active wait node (a root `ready` is shared
+      // by parallel waits, so attributing it to one of several would be a guess; report null instead).
+      const activeWaits = input.nodes.filter(
+        (n) => n.kind === "wait" && input.elements.some((e) => e.state === "ACTIVE" && owningNodeElement(e.elementId, nodeElements) === n.element),
+      );
+      const rootOk = activeWaits.length === 1 && activeWaits[0]?.element === node.element;
+      const scopes: Map<string, string>[] = [];
+      for (const id of [`${node.element}_probeLoop`, node.element]) {
+        // The last element instance listed wins (most recent loop iteration).
+        const found = own
+          .filter((e) => e.elementId === id)
+          .map((e) => varsByScope.get(e.elementInstanceKey))
+          .filter((m): m is Map<string, string> => m?.has("ready") === true);
+        const last = found[found.length - 1];
+        if (last) scopes.push(last);
+      }
+      if (rootOk && rootVars.has("ready")) scopes.push(rootVars);
+      const scope = scopes[0];
+      if (scope !== undefined) {
         const ready = parseJson(scope.get("ready") ?? "null");
         const detail = parseJson(scope.get("detail") ?? "null");
         lastProbe = {

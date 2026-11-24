@@ -123,3 +123,48 @@ test("renderProgressMermaid appends one state class per node", () => {
   assert.match(out, /\n {2}class n0 pending\n/);
   assert.match(out, /\n {2}class n3 pending\n$/);
 });
+
+test("lastProbe reads a root-propagated probe result only when the wait node is the sole active wait", () => {
+  const base = {
+    nodes: NODES,
+    processInstanceKey: PIK,
+    variables: [
+      { name: "ready", value: "false", scopeKey: PIK },
+      { name: "detail", value: '"pending"', scopeKey: PIK },
+    ],
+    userTasks: [],
+    incidents: [],
+  };
+  const sole = deriveNodeProgress({
+    ...base,
+    elements: [
+      { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+      { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "ACTIVE" },
+    ],
+  });
+  assert.deepEqual(sole.find((n) => n.id === "landed")?.lastProbe, { ready: false, detail: "pending", observed: null });
+  const parallel = deriveNodeProgress({
+    ...base,
+    elements: [
+      { elementId: "n0", elementInstanceKey: "1", state: "ACTIVE" },
+      { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+    ],
+  });
+  assert.equal(parallel.find((n) => n.id === "landed")?.lastProbe, null);
+  assert.equal(parallel.find((n) => n.id === "gate")?.lastProbe, null);
+});
+
+test("lastProbe reads the node element scope when the result propagated there", () => {
+  const out = deriveNodeProgress({
+    nodes: NODES,
+    processInstanceKey: PIK,
+    elements: [
+      { elementId: "n0", elementInstanceKey: "1", state: "ACTIVE" },
+      { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+    ],
+    variables: [{ name: "ready", value: "true", scopeKey: "3" }],
+    userTasks: [],
+    incidents: [],
+  });
+  assert.deepEqual(out.find((n) => n.id === "landed")?.lastProbe, { ready: true, detail: null, observed: null });
+});
