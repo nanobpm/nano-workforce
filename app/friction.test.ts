@@ -12,6 +12,7 @@ import {
   acquireLease,
   buildDigest,
   collectFriction,
+  excerptAround,
   extractRunSignals,
   type FrictionConfig,
   type FrictionGithub,
@@ -320,4 +321,17 @@ test("only the holder releases the lease; a released lease is free for the next 
     assertEquals(leaseHolder(data), null);
     assert((await acquireLease(data, engine, "P2", T0, LEASE)).acquired);
   });
+});
+
+test("excerptAround redacts before windowing: a secret cut by the window edge never leaks", () => {
+  const tok = `ghp_${"A".repeat(36)}`;
+  const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END RSA PRIVATE KEY-----";
+  for (const secret of [tok, "Authorization: Bearer abcdefghijklmnopqrstuvwx", pem]) {
+    const text = `${"x ".repeat(200)}${secret} ${"y ".repeat(5)}Error: boom ${"z ".repeat(200)}`;
+    const idx = text.indexOf("Error:");
+    for (let r = 5; r < 200; r += 3) {
+      const ex = excerptAround(text, idx, r);
+      assert.ok(!/AAAAAAAA|abcdefgh|MIIBOg|tPf9Cnz/.test(ex), `leak at radius ${r}: ${ex}`);
+    }
+  }
 });

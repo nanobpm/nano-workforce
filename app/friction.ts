@@ -130,10 +130,30 @@ export function normaliseMessage(text: string): string {
 
 /** A short excerpt around `index` in `text`, redacted and single-lined. */
 export function excerptAround(text: string, index: number, radius = 160): string {
-  const start = Math.max(0, index - radius);
-  const end = Math.min(text.length, index + radius);
-  const body = text.slice(start, end).replace(/\s+/g, " ").trim();
-  return redact(`${start > 0 ? "…" : ""}${body}${end < text.length ? "…" : ""}`);
+  // Redact the WHOLE text first, then window: slicing first could cut a secret's recognisable
+  // prefix at the window edge so it escapes every REDACTIONS pattern. A private-use sentinel marks
+  // the anchor so the index survives redaction's length changes.
+  const MARK = "\uE000";
+  const clean = text.replaceAll(MARK, "");
+  let at = Math.max(0, Math.min(clean.length, index));
+  // Anchor on a whitespace boundary so the sentinel never splits a token a pattern must match whole.
+  while (at > 0 && !/\s/.test(clean[at - 1] ?? "")) at--;
+  const marked = redact(`${clean.slice(0, at)}${MARK}${clean.slice(at)}`);
+  let pos = marked.indexOf(MARK);
+  const red = marked.replaceAll(MARK, "");
+  if (pos < 0) pos = Math.min(red.length, at);
+  let start = Math.max(0, pos - radius);
+  let end = Math.min(red.length, pos + radius);
+  // Never cut through a redaction placeholder (keeps a "[REDACTED…]" marker whole).
+  const ph = /\[[A-Z_-]*REDACTED[^\]]*\]/g;
+  for (const m of red.matchAll(ph)) {
+    const a = m.index ?? 0;
+    const b = a + m[0].length;
+    if (a < start && b > start) start = a;
+    if (a < end && b > end) end = b;
+  }
+  const body = red.slice(start, end).replace(/\s+/g, " ").trim();
+  return `${start > 0 ? "…" : ""}${body}${end < red.length ? "…" : ""}`;
 }
 
 // ── Signal extraction ────────────────────────────────────────────────────────────────────────────
