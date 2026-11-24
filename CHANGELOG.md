@@ -1,3 +1,9 @@
+## [0.228.0](https://github.com/nanobpm/nano-workforce/compare/v0.227.0...v0.228.0) (2026-11-24)
+
+### Features
+
+* **delivery-graph:** allow parallel joins and nested splits inside a conditional branch ([#1084](https://github.com/nanobpm/nano-workforce/issues/1084)) ([c7144cb](https://github.com/nanobpm/nano-workforce/commit/c7144cbb792a6f92589ff46d0442f23fa82d3347)), closes [#1083](https://github.com/nanobpm/nano-workforce/issues/1083)
+
 ## [0.227.0](https://github.com/nanobpm/nano-workforce/compare/v0.226.1...v0.227.0) (2026-11-24)
 
 ### Features
