@@ -5813,6 +5813,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "429":
+          description: >-
+            Too many concurrently held waits (global cap `NANO_RUN_WAIT_MAX_WAITERS`, default 64). Retry
+            after the `Retry-After` seconds.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before re-issuing the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
   /workers:
     get:
       operationId: listWorkers

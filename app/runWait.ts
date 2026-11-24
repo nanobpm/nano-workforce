@@ -96,13 +96,66 @@ export function waitReason(until: WaitUntil, view: RunView, initialFingerprint: 
 
 export interface WaitClock {
   now(): number;
-  sleep(ms: number): Promise<void>;
+  /** Sleep `ms`; MUST resolve early once `signal` aborts (client disconnect). */
+  sleep(ms: number, signal?: AbortSignal): Promise<void>;
+}
+
+/** Resolve when `signal` aborts (never, without one); `off()` detaches the listener. */
+function onAbort(signal: AbortSignal | undefined): { done: Promise<void>; off: () => void } {
+  if (!signal) return { done: new Promise<void>(() => {}), off: () => {} };
+  let off = () => {};
+  const done = new Promise<void>((r) => {
+    if (signal.aborted) return r();
+    const h = () => r();
+    signal.addEventListener("abort", h, { once: true });
+    off = () => signal.removeEventListener("abort", h);
+  });
+  return { done, off: () => off() };
 }
 
 export const realClock: WaitClock = {
   now: () => Date.now(),
-  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  sleep: (ms, signal) => {
+    if (signal?.aborted) return Promise.resolve();
+    const abort = onAbort(signal);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const slept = new Promise<void>((r) => {
+      timer = setTimeout(r, ms);
+    });
+    return Promise.race([slept, abort.done]).finally(() => {
+      clearTimeout(timer);
+      abort.off();
+    });
+  },
 };
+
+/** Global cap on concurrently held waits (a reconnecting client must not pile up orphan waiters). */
+export const WAIT_MAX_WAITERS_DEFAULT = 64;
+/** `Retry-After` (seconds) advertised on a 429 when the waiter cap is reached. */
+export const WAIT_RETRY_AFTER_S = 5;
+
+/** A counting gate for concurrent waiters. `tryAcquire` returns a release fn (idempotent), or null at
+ *  the cap. */
+export class WaiterGate {
+  #held = 0;
+  readonly cap: number;
+  constructor(cap: number) {
+    this.cap = Number.isInteger(cap) && cap > 0 ? cap : WAIT_MAX_WAITERS_DEFAULT;
+  }
+  get held(): number {
+    return this.#held;
+  }
+  tryAcquire(): (() => void) | null {
+    if (this.#held >= this.cap) return null;
+    this.#held++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#held--;
+    };
+  }
+}
 
 export type WaitResult =
   | { found: false }
@@ -116,20 +169,22 @@ const EXPIRED = Symbol("expired");
 export const INITIAL_LOOKUP_FLOOR_MS = 5_000;
 
 /** Race `p` against the remaining budget so a stalled lookup can never outlive the wait deadline. */
-async function bounded<T>(start: () => Promise<T>, ms: number): Promise<T | typeof EXPIRED> {
+async function bounded<T>(start: () => Promise<T>, ms: number, signal?: AbortSignal): Promise<T | typeof EXPIRED> {
   // Never START a lookup once the budget is exhausted (it could reject unhandled), and absorb a
   // late rejection from a lookup that lost the race.
-  if (ms <= 0) return EXPIRED;
+  if (ms <= 0 || signal?.aborted) return EXPIRED;
   const p = start();
   p.catch(() => {});
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expiry = new Promise<typeof EXPIRED>((r) => {
     timer = setTimeout(() => r(EXPIRED), ms);
   });
+  const abort = onAbort(signal);
   try {
-    return await Promise.race([p, expiry]);
+    return await Promise.race([p, expiry, abort.done.then((): typeof EXPIRED => EXPIRED)]);
   } finally {
     clearTimeout(timer);
+    abort.off();
   }
 }
 
@@ -146,7 +201,7 @@ export async function waitForRun(
   signal?: AbortSignal,
 ): Promise<WaitResult> {
   const deadline = clock.now() + timeoutMs;
-  const first = await bounded(lookup, Math.max(timeoutMs, INITIAL_LOOKUP_FLOOR_MS));
+  const first = await bounded(lookup, Math.max(timeoutMs, INITIAL_LOOKUP_FLOOR_MS), signal);
   if (first === EXPIRED) return { found: true, timedOut: true, reason: null, until, view: null };
   if (!first) return { found: false };
   let view: RunView = first;
@@ -156,9 +211,9 @@ export async function waitForRun(
     if (reason) return { found: true, timedOut: false, reason, until, view };
     const left = deadline - clock.now();
     if (left <= 0 || signal?.aborted) return { found: true, timedOut: true, reason: null, until, view };
-    await clock.sleep(Math.min(pollMs, left));
+    await clock.sleep(Math.min(pollMs, left), signal);
     if (signal?.aborted) return { found: true, timedOut: true, reason: null, until, view };
-    const next = await bounded(lookup, deadline - clock.now());
+    const next = await bounded(lookup, deadline - clock.now(), signal);
     if (next === EXPIRED) return { found: true, timedOut: true, reason: null, until, view };
     if (next) view = next;
   }

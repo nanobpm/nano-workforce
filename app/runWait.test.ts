@@ -2,7 +2,17 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { RunView } from "./runLookup.ts";
-import { parseWaitUntil, runFingerprint, WAIT_MAX_MS, type WaitClock, waitForRun, waitReason, waitTimeoutMs } from "./runWait.ts";
+import {
+  parseWaitUntil,
+  realClock,
+  runFingerprint,
+  WAIT_MAX_MS,
+  type WaitClock,
+  WaiterGate,
+  waitForRun,
+  waitReason,
+  waitTimeoutMs,
+} from "./runWait.ts";
 
 function view(over: Partial<RunView> = {}): RunView {
   return {
@@ -203,4 +213,69 @@ test("waitForRun: never starts a lookup after the final sleep exhausts the deadl
   };
   const res = await waitForRun(lookup, "merged", 2_500, clock, 1_000);
   assertEquals(res.found && res.timedOut, true);
+});
+
+/** A clock whose sleep NEVER resolves unless its signal aborts. */
+function abortOnlyClock(): WaitClock & { sleeping: Promise<void> } {
+  let entered: () => void = () => {};
+  const sleeping = new Promise<void>((r) => {
+    entered = r;
+  });
+  return {
+    sleeping,
+    now: () => 0,
+    sleep(_ms, signal) {
+      entered();
+      return new Promise<void>((r) => {
+        if (signal?.aborted) return r();
+        signal?.addEventListener("abort", () => r(), { once: true });
+      });
+    },
+  };
+}
+
+test("waitForRun: an abort mid-sleep resolves promptly with no further lookup", async () => {
+  const clock = abortOnlyClock();
+  const ac = new AbortController();
+  let calls = 0;
+  const lookup = async () => {
+    calls++;
+    return view();
+  };
+  const p = waitForRun(lookup, "merged", 60_000, clock, 1_000, ac.signal);
+  await clock.sleeping;
+  assertEquals(calls, 1);
+  ac.abort();
+  const res = await p;
+  assertEquals(res.found && res.timedOut, true);
+  assertEquals(calls, 1);
+});
+
+test("waitForRun: an abort ends a stalled lookup race", async () => {
+  const ac = new AbortController();
+  const p = waitForRun(() => new Promise<RunView | null>(() => {}), "merged", 60_000, fakeClock(), 1_000, ac.signal);
+  ac.abort();
+  const res = await p;
+  assertEquals(res.found && res.view, null);
+});
+
+test("realClock.sleep resolves early on abort and detaches its listener", async () => {
+  const ac = new AbortController();
+  const t0 = Date.now();
+  const p = realClock.sleep(60_000, ac.signal);
+  ac.abort();
+  await p;
+  assertEquals(Date.now() - t0 < 1_000, true);
+});
+
+test("WaiterGate: caps concurrent holders; release is idempotent", () => {
+  const g = new WaiterGate(2);
+  const a = g.tryAcquire();
+  const b = g.tryAcquire();
+  assertEquals(g.tryAcquire(), null);
+  a?.();
+  a?.();
+  assertEquals(g.held, 1);
+  assertEquals(typeof g.tryAcquire(), "function");
+  b?.();
 });
