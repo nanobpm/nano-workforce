@@ -11,7 +11,7 @@ import { memDataFor } from "../test/worldDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
 import { WorldStore } from "./world/index.ts";
-import { abandonClosedPr, isPrSettled, MAX_ACK_RETRIES, MAX_ADVERSARIAL_PASSES, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollJobActivationImpl, pollReviews, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
+import { abandonClosedPr, isPrSettled, MAX_ACK_RETRIES, MAX_ADVERSARIAL_PASSES, MAX_ROUNDS, parsePr, persistedMaxRounds, pollCapabilityGatesImpl, pollIncidentsImpl, pollJobActivationImpl, pollReviews, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
 import { trackingTargetFor } from "./instanceTracking.ts";
 import type { DataLayer } from "@nanobpm/urban";
 import { READINESS_READY_MESSAGE } from "./readiness.ts";
@@ -1992,6 +1992,22 @@ test("startMerge stamps the merge-stage policy on the row (issue #947)", async (
 // `handoffWaitingMergeToConvergence`, the poller's feature-delivery re-enroll) silently dropped the
 // steering and reset the flag. The text is now persisted on the row (`custom_instructions_text`)
 // and re-seeded by `startMerge`, so a steered run stays steered across the whole lifecycle.
+
+test("submitPr persists maxRounds on the row at submit and keeps it across the merge handoff (#1088)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, vars } = captureRoot();
+    const parsed = { repo: "owner/repo", number: 35, url: "https://github.com/owner/repo/pull/35", prKey: "owner/repo#35" };
+    await submitPr(data, engine, parsed, [], 3);
+    const row = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(row.max_rounds, 3, "the submitted budget is durable on the row");
+    assertEquals(vars().maxRounds, 3);
+    row.process_key = "PI-MERGE";
+    await submitPr(data, engine, parsed, [], persistedMaxRounds(row), false, null, false, false, undefined, "PI-MERGE");
+    assertEquals(vars().maxRounds, 3, "the handed-back loop gets the persisted budget");
+    assertEquals((stores.pull_requests.rows[0] as Record<string, unknown>).max_rounds, 3);
+    assertEquals(persistedMaxRounds({ max_rounds: null }), MAX_ROUNDS, "NULL reads as the default");
+  });
+});
 
 test("submitPr persists the instruction TEXT on the row (insert path) (#956 review)", async () => {
   await withGithubOff(async () => {
