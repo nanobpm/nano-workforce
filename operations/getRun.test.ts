@@ -261,6 +261,26 @@ test("a feature and an epic for the same issue: the live run wins, else the newe
   // ...but a mid-handoff `opened` (converge=1 with a PR) is still live and wins over an older live epic.
   const handoff = memApp({ feature_runs: [feature({ status: "opened", converge: 1, pr_key: "o/r#6", created_at: later })], plans: [epic({ status: "done" })] }, PKS);
   assertEquals(((await handler(input("o/r#5"), handoff)) as Row).body.kind, "feature");
+  // Key resolution uses the SAME rolled-up feature terminal as the view: a feature row lagging at
+  // `converging` whose child PR already merged (or was cancelled) is finished and never shadows an
+  // older live epic, even though it is newer.
+  const cancelled = { process_key: "proc-p", run_table: "x", cancelled_by: "op", cancel_reason: null, cancelled_at: T0, committed: 1 };
+  const cases: [string, Row, Row[]][] = [
+    ["merged", { status: "merged", merged_at: T0, active_worker: null }, []],
+    ["cancelled", { status: "abandoned", active_worker: null }, [cancelled]],
+  ];
+  for (const [label, prOver, cancellations] of cases) {
+    const lagging = memApp(
+      {
+        feature_runs: [feature({ status: "converging", pr_key: "o/r#9", created_at: later })],
+        pull_requests: [pr(prOver)],
+        plans: [epic()],
+        run_cancellations: cancellations,
+      },
+      { ...PKS, run_cancellations: "process_key" },
+    );
+    assertEquals(((await handler(input("o/r#5"), lagging)) as Row).body.kind, "epic", label);
+  }
 });
 
 test("a live epic parked on its readiness wait surfaces the gate as stage + blockedOn", async () => {

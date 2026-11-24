@@ -210,8 +210,31 @@ async function terminalPrStatus(data: DataLayer, row: TrackedPullRequest, overla
   return eff === RUN_TERMINAL_STATUS.outOfBandTerminate && overlaid === ORPHANED_PR_STATUS ? ORPHANED_PR_STATUS : eff;
 }
 
-function featureLive(f: { derived_status: string; converge?: number | null; pr_key?: string | null }): boolean {
-  return !isFeatureDismissableTerminal(f);
+type FeatureRow = NonNullable<Awaited<ReturnType<ReturnType<typeof featureRunsTracking>["get"]>>>;
+
+/** The ONE rolled-up feature terminal, shared by key resolution and the returned view. The feature
+ *  row's `derived_status` is synced from its PR only once per poll cycle, and reads `opened`
+ *  mid-handoff: while the feature delegates to its child PR, the (already cancel/terminal-folded)
+ *  child status is the truth, mapped through the ONE `deriveFeatureDelivery` rollup. */
+async function featureRollup(data: DataLayer, engine: Engine | undefined, feature: FeatureRow) {
+  const children = feature.pr_key ? await childPrViews(data, engine, [feature.pr_key]) : [];
+  const child: RunView | undefined = children[0];
+  const delegating =
+    child !== undefined &&
+    (feature.derived_status === "converging" || (feature.derived_status === "opened" && feature.converge === 1 && feature.pr_key != null));
+  let rolledStatus: string | null = null;
+  let terminalBasis = feature.derived_status;
+  if (delegating && child) {
+    if (child.terminal && (child.status === "cancelled" || child.status === ORPHANED_PR_STATUS)) {
+      rolledStatus = child.status;
+      terminalBasis = "abandoned";
+    } else {
+      rolledStatus = deriveFeatureDelivery(child.status).status;
+      terminalBasis = rolledStatus;
+    }
+  }
+  const terminal = isFeatureDismissableTerminal({ derived_status: terminalBasis, converge: feature.converge, pr_key: feature.pr_key });
+  return { children, child, terminalBasis, rolledStatus, terminal };
 }
 
 function planLive(p: { derived_status: string }): boolean {
@@ -232,12 +255,8 @@ async function epicTerminal(data: DataLayer, plan: PlanRow): Promise<boolean> {
 /** Pick between a feature and an epic sharing one key: the LIVE (non-terminal) run wins; only when
  *  both or neither are live does the newest `created_at` decide. Never `updated_at` — acknowledge and
  *  phase polling bump it, so a dismissed finished run could shadow a live one and the choice flip. */
-async function preferPlan(
-  data: DataLayer,
-  feature: { derived_status: string; converge?: number | null; pr_key?: string | null; created_at?: string | null },
-  plan: PlanRow,
-): Promise<boolean> {
-  const fl = featureLive(feature);
+async function preferPlan(data: DataLayer, engine: Engine | undefined, feature: FeatureRow, plan: PlanRow): Promise<boolean> {
+  const fl = !(await featureRollup(data, engine, feature)).terminal;
   const pl = !(await epicTerminal(data, plan));
   if (fl !== pl) return pl;
   return (plan.created_at ?? "") > (feature.created_at ?? "");
@@ -257,30 +276,13 @@ function withChildKeys(view: RunView): RunView {
 export async function lookupRun(data: DataLayer, engine: Engine | undefined, key: string): Promise<RunView | null> {
   const feature = await featureRunsTracking(data).get(key);
   const plan = await plansTracking(data).get(key);
-  if (feature && !(plan && (await preferPlan(data, feature, plan)))) {
+  if (feature && !(plan && (await preferPlan(data, engine, feature, plan)))) {
     const tasks = await subjectTasks(data, "feature", key);
     const openEsc = newestEscalation(tasks);
     const status = await effectiveStatus(data, feature.derived_status, feature.process_key);
     const probes = await readRootVar(engine, feature.process_key, "readinessProbes");
-    const children = feature.pr_key ? await childPrViews(data, engine, [feature.pr_key]) : [];
-    const child = children[0];
-    // The feature row's `derived_status` is synced from its PR only once per poll cycle, and reads
-    // `opened` mid-handoff: while the feature delegates to its child PR, the (already cancel/terminal-
-    // folded) child status is the truth, mapped through the ONE `deriveFeatureDelivery` rollup.
-    const delegating =
-      child !== undefined &&
-      (feature.derived_status === "converging" || (feature.derived_status === "opened" && feature.converge === 1 && feature.pr_key != null));
-    let topStatus = status;
-    let terminalBasis = feature.derived_status;
-    if (delegating && child) {
-      if (child.terminal && (child.status === "cancelled" || child.status === ORPHANED_PR_STATUS)) {
-        topStatus = child.status;
-        terminalBasis = "abandoned";
-      } else {
-        topStatus = deriveFeatureDelivery(child.status).status;
-        terminalBasis = topStatus;
-      }
-    }
+    const { children, child, terminalBasis, rolledStatus, terminal } = await featureRollup(data, engine, feature);
+    const topStatus = rolledStatus ?? status;
     // Stage derives from the SAME rolled-up basis as `terminal` (a lagging feature row must not read
     // `Converging` beside a merged child), keeping the tracking VIEW's raw `abandoned` (∈ Done) rather
     // than the presentational `cancelled` promotion, so an operator cancel lands on the `Done` stage.
@@ -297,7 +299,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       kind: "feature",
       title: feature.title ?? null,
       status: topStatus,
-      terminal: isFeatureDismissableTerminal({ derived_status: terminalBasis, converge: feature.converge, pr_key: feature.pr_key }),
+      terminal,
       stage: derived.stage,
       settings: {
         ...emptySettings(),
