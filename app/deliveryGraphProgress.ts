@@ -397,6 +397,34 @@ function byKeyDesc(a: ElementInstanceFact, b: ElementInstanceFact): number {
   return ka > kb ? -1 : ka < kb ? 1 : 0;
 }
 
+/**
+ * A concurrency limiter (at most `maxInFlight` reads at once) with a total-call budget (`maxCalls`;
+ * past it a read is skipped, returns `[]`, and `onCap` fires). A finishing read hands its slot
+ * straight to the next waiter (inFlight unchanged), so a caller arriving between the wake-up and the
+ * waiter's resume cannot steal the slot and push concurrency past the cap.
+ */
+export function createReadLimiter(maxInFlight: number, maxCalls: number, onCap: () => void) {
+  let calls = 0;
+  let inFlight = 0;
+  const queue: (() => void)[] = [];
+  return async <T>(read: () => Promise<T[]>): Promise<T[]> => {
+    if (calls >= maxCalls) {
+      onCap();
+      return [];
+    }
+    calls++;
+    if (inFlight >= maxInFlight) await new Promise<void>((resolve) => queue.push(resolve));
+    else inFlight++;
+    try {
+      return await read();
+    } finally {
+      const next = queue.shift();
+      if (next) next();
+      else inFlight--;
+    }
+  };
+}
+
 /** The engine reads {@link loadDeliveryGraphProgress} folds, gathered by narrow (page-bounded) queries. */
 export async function readEngineFacts(
   engine: Pick<AppApi["engine"], "searchProcessInstances" | "searchElementInstances" | "searchVariables" | "searchUserTasks" | "searchIncidents">,
@@ -412,24 +440,9 @@ export async function readEngineFacts(
 }> {
   let truncated = false;
   // Concurrency limiter + total-call budget shared by every engine read of this request.
-  let calls = 0;
-  let inFlight = 0;
-  const queue: (() => void)[] = [];
-  const limited = async <T>(read: () => Promise<T[]>): Promise<T[]> => {
-    if (calls >= ENGINE_MAX_CALLS) {
-      truncated = true;
-      return [];
-    }
-    calls++;
-    if (inFlight >= ENGINE_MAX_IN_FLIGHT) await new Promise<void>((resolve) => queue.push(resolve));
-    inFlight++;
-    try {
-      return await read();
-    } finally {
-      inFlight--;
-      queue.shift()?.();
-    }
-  };
+  const limited = createReadLimiter(ENGINE_MAX_IN_FLIGHT, ENGINE_MAX_CALLS, () => {
+    truncated = true;
+  });
   const page = <T>(rows: T[]): T[] => {
     if (rows.length >= ENGINE_SEARCH_PAGE) truncated = true;
     return rows;

@@ -7,6 +7,7 @@ import {
   deriveNodeProgress,
   ENGINE_MAX_CALLS,
   ENGINE_MAX_IN_FLIGHT,
+  createReadLimiter,
   ENGINE_SEARCH_PAGE,
   type ElementInstanceFact,
   owningNodeElement,
@@ -437,7 +438,7 @@ test("an emitted issue reference (non-PR fact) is not reported as a child PR run
 });
 
 /** Wraps a fake engine so every search counts toward total calls and the in-flight high-water mark. */
-function countingEngine(inner: ReturnType<typeof pagedEngine>) {
+function countingEngine(inner: ReturnType<typeof pagedEngine>, delay: (call: number) => Promise<unknown> = () => new Promise((r) => setTimeout(r, 1))) {
   const stats = { calls: 0, inFlight: 0, maxInFlight: 0 };
   const wrap =
     <A extends unknown[], R>(fn: (...a: A) => Promise<R>) =>
@@ -446,7 +447,7 @@ function countingEngine(inner: ReturnType<typeof pagedEngine>) {
       stats.inFlight++;
       stats.maxInFlight = Math.max(stats.maxInFlight, stats.inFlight);
       try {
-        await new Promise((r) => setTimeout(r, 1));
+        await delay(stats.calls);
         return await fn(...a);
       } finally {
         stats.inFlight--;
@@ -487,4 +488,53 @@ test("a small graph stays under the call cap and is not truncated", async () => 
   const read = await readEngineFacts(engine, PIK, NODES);
   assert.equal(read.truncated, false);
   assert.ok(stats.maxInFlight <= ENGINE_MAX_IN_FLIGHT);
+});
+
+test("a read finishing while new reads are still being scheduled never pushes in-flight past the cap", async () => {
+  const nodes: ResolvedNodeRef[] = [];
+  const elements: ElementInstanceFact[] = [];
+  for (let i = 0; i < 40; i++) {
+    nodes.push({ id: `n${i}`, kind: "wait", element: `e${i}`, emits: [], dependsOn: [] });
+    for (let j = 0; j < 3; j++) elements.push({ elementId: `e${i}`, elementInstanceKey: String(i * 10 + j + 1), state: "COMPLETED" });
+  }
+  // Mixed latency: some reads settle within a microtask (racing the scheduler), others take a macrotask.
+  const { engine, stats } = countingEngine(pagedEngine({ elements, variables: [] }), (call) =>
+    call % 3 === 0 ? Promise.resolve() : new Promise((r) => setTimeout(r, call % 2)),
+  );
+  await readEngineFacts(engine, PIK, nodes);
+  assert.ok(stats.maxInFlight <= ENGINE_MAX_IN_FLIGHT, `in flight ${stats.maxInFlight}`);
+});
+
+test("the read limiter hands a freed slot to the waiter, so a caller arriving mid-hand-off can't exceed the cap", async () => {
+  const limited = createReadLimiter(2, 100, () => {});
+  let inFlight = 0;
+  let peak = 0;
+  const releases: (() => void)[] = [];
+  const read = () => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    return new Promise<number[]>((r) =>
+      releases.push(() => {
+        inFlight--;
+        r([]);
+      }),
+    );
+  };
+  const a = limited(read);
+  limited(read);
+  const waiter = limited(read); // queued: both slots taken
+  await Promise.resolve();
+  releases[0]?.(); // A finishes -> wakes the waiter
+  // New callers arrive on every microtask tick of the hand-off, so one lands between the
+  // wake-up and the woken waiter's resume.
+  for (let i = 0; i < 10; i++) {
+    limited(read);
+    await Promise.resolve();
+  }
+  await a;
+  assert.ok(peak <= 2, `peak ${peak}`);
+  for (const r of releases) r();
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  for (const r of releases) r();
+  await waiter;
 });
