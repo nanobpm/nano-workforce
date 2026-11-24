@@ -194,6 +194,10 @@ test("a verified-absent feature PR is not re-enrolled between passes, so grace e
     searchProcessInstances: async () => [],
   } as any;
   await reconcileMissingPrRows(data, "", { lookup: lookupOf("not_found"), nowMs: T0 + 1000, lastChecked, notFound });
+  // A second, throttled pass must not drop the verdict (it once was, as the stale-verdict sweep ran
+  // before feature runs were noted).
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("not_found"), nowMs: T0 + 2000, lastChecked, notFound });
+  assertEquals(notFound.has("o/r#20"), true);
   await pollFeatureDelivery(data, engine, { missingPrNotFound: notFound });
   assertEquals(creates, 0);
   assertEquals(stores.pull_requests ?? [], []);

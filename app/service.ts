@@ -4254,8 +4254,6 @@ export async function reconcileMissingPrRows(
       if (t.pr_key && donePlanKeys.has(t.plan_key)) note(t.pr_key, t.updated_at ?? t.created_at);
     }
   }
-  // Drop stale verdicts for keys that are now tracked (or no longer referenced).
-  for (const k of notFound) if (!refs.has(k)) notFound.delete(k);
   for (const status of ["converging", "opened"] as const) {
     for (const run of await featureRuns(data).find({ status })) {
       if (!run.pr_key) continue;
@@ -4263,6 +4261,9 @@ export async function reconcileMissingPrRows(
       note(run.pr_key, run.updated_at ?? run.created_at, { featureKey: run.feature_key, processKey: run.process_key, status });
     }
   }
+  // Drop stale verdicts for keys that are now tracked (or no longer referenced). Only after EVERY
+  // reference (done-epic slices AND feature runs) is noted, or a throttled pass wipes live verdicts.
+  for (const k of notFound) if (!refs.has(k)) notFound.delete(k);
   for (const [prKey, ref] of refs) {
     try {
       const parsed = parsePr(prKey);
