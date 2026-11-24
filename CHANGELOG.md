@@ -1,3 +1,9 @@
+## [0.225.0](https://github.com/nanobpm/nano-workforce/compare/v0.224.0...v0.225.0) (2026-11-24)
+
+### Features
+
+* **api:** echo the run's effective settings in start responses ([#1072](https://github.com/nanobpm/nano-workforce/issues/1072)) ([d65498b](https://github.com/nanobpm/nano-workforce/commit/d65498b4a1baf6c07b3e31e7ead6c0be9206308f)), closes [#1059](https://github.com/nanobpm/nano-workforce/issues/1059)
+
 ## [0.224.0](https://github.com/nanobpm/nano-workforce/compare/v0.223.8...v0.224.0) (2026-11-24)
 
 ### Features
