@@ -26,7 +26,9 @@ function walk(p: string, out: string[]): void {
 
 /** Offending lines: mention `gh pr checks` with `--watch` but no `--fail-fast`, outside a prohibition. */
 export function bareWatchViolations(text: string): string[] {
+  // Join shell line-continuations (`\` + newline) so a split command is matched as one line.
   return text
+    .replace(/\\\r?\n[ \t]*/g, " ")
     .split("\n")
     .filter((l) => /gh pr checks[^\n]*--watch/.test(l) && !l.includes("--fail-fast") && !/\bbare\b/i.test(l));
 }
@@ -34,6 +36,8 @@ export function bareWatchViolations(text: string): string[] {
 test("bareWatchViolations flags an unbounded watch and accepts --fail-fast / prohibitions", () => {
   assert.equal(bareWatchViolations("run `gh pr checks 1 --watch --interval 60`").length, 1);
   assert.equal(bareWatchViolations("run `gh pr checks 1 --required --watch --fail-fast`").length, 0);
+  assert.equal(bareWatchViolations("gh pr checks 1 \\\n  --watch").length, 1);
+  assert.equal(bareWatchViolations("gh pr checks 1 \\\r\n  --watch \\\n  --fail-fast").length, 0);
   assert.equal(bareWatchViolations("never a bare `gh pr checks --watch`").length, 0);
 });
 
