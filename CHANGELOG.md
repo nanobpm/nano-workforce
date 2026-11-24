@@ -1,3 +1,9 @@
+## [0.223.8](https://github.com/nanobpm/nano-workforce/compare/v0.223.7...v0.223.8) (2026-11-24)
+
+### Code Refactoring
+
+* **implement-cell:** drop keyless-opened wave/record guards made redundant by the pr output mapping ([#1068](https://github.com/nanobpm/nano-workforce/issues/1068)) ([bf9cd97](https://github.com/nanobpm/nano-workforce/commit/bf9cd97c156f62417561e50d8f7eafa13859efda)), closes [#1067](https://github.com/nanobpm/nano-workforce/issues/1067)
+
 ## [0.223.7](https://github.com/nanobpm/nano-workforce/compare/v0.223.6...v0.223.7) (2026-11-24)
 
 ### Documentation
