@@ -786,3 +786,28 @@ test("extractRunSignals never leaks a quoted secret into ANY signal field (#1074
     }
   }
 });
+
+test("a still-THINKING run is collected by lastUpdatedDate, not deferred until it settles (#1074 review)", async () => {
+  await withData(async (data) => {
+    const records = [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")];
+    const engine = {
+      searchAgentInstances: async () => [{ agentInstanceKey: "R1", status: "THINKING", lastUpdatedDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
+      searchAgentInstanceHistory: async () => records,
+      searchJobs: async () => [],
+      searchIncidents: async () => [],
+    } as any;
+    const res = await collectFriction({ data, engine, sweepKey: "S1", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(res.signalCount, 1);
+  });
+});
+
+test("redact masks quoted Authorization headers in TEXT results (#1074 review)", () => {
+  for (const msg of [
+    'Error: request failed; headers={"Authorization":"Basic dXNlcjpwYXNz"}',
+    "headers={'Authorization': 'Bearer abcdefghijklmnop'}",
+    "AUTHORIZATION=Basic dXNlcjpwYXNz",
+  ]) {
+    const out = redact(msg);
+    assert(!out.includes("dXNlcjpwYXNz") && !out.includes("abcdefghijklmnop"), out);
+  }
+});

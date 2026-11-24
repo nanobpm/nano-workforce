@@ -103,13 +103,13 @@ const REDACTIONS: readonly [RegExp, string][] = [
   // PEM private keys.
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[REDACTED:private-key]"],
   // Bearer / Basic auth headers.
-  [/\b(authorization\s*[:=]\s*)(?:bearer|basic|token)\s+[^\s"']+/gi, "$1[REDACTED]"],
+  [/\b(authorization["']?\s*[:=]\s*["']?)(?:bearer|basic|token)\s+[^\s"']+/gi, "$1[REDACTED]"],
   [/\bbearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer [REDACTED]"],
   // Credentials embedded in URLs.
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1[REDACTED]@"],
   // KEY=value / "key": "value" for secret-looking names.
   [
-    /(["']?)\b((?:[A-Z0-9_-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[-_]?KEY|PRIVATE[-_]?KEY|CREDENTIALS?|AUTH(?![A-Z]))[A-Z0-9_-]*)|(?:[A-Z0-9_-]*[-_])?KEY)\1(\s*[=:]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^\s"',;}]+)/gi,
+    /(["']?)\b((?:[A-Z0-9_-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[-_]?KEY|PRIVATE[-_]?KEY|CREDENTIALS?|AUTH(?:ORIZATION)?(?![A-Z]))[A-Z0-9_-]*)|(?:[A-Z0-9_-]*[-_])?KEY)\1(\s*[=:]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^\s"',;}]+)/gi,
     "$1$2$1$3[REDACTED]",
   ],
   // netrc-style `password <value>` / `passwd <value>` (fail closed: the next word is always masked).
@@ -323,12 +323,11 @@ export async function fetchRunHistory(engine: EngineClient, agentInstanceKey: st
   return all.length > 0 ? all : first;
 }
 
-const ACTIVE_AGENT_STATUSES = new Set(["INITIALIZING", "THINKING", "TOOL_CALLING"]);
-
-/** The instant an agent run finished (or last moved), used to place it in a window. */
+/** The instant an agent run last moved, used to place it in a window. Selected by `lastUpdatedDate`
+ *  REGARDLESS of status: waiting for a long run to settle would let the engine's 24h transcript
+ *  retention expire its early records before the first read. Stable signal ids dedupe re-reads. */
 function runInstant(run: AgentInstanceSummary): string | null {
-  if (ACTIVE_AGENT_STATUSES.has(run.status)) return null; // still running — swept once it settles
-  return run.completionDate ?? run.lastUpdatedDate ?? null;
+  return run.lastUpdatedDate ?? run.completionDate ?? null;
 }
 
 function inWindow(ts: string | null | undefined, start: string, end: string): boolean {
