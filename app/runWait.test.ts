@@ -193,3 +193,14 @@ test("a zero timeout is a non-blocking peek: unknown key is found:false, known k
   const res = await waitForRun(seq(view()), "merged", 0, fakeClock());
   assertEquals(res.found && res.timedOut && res.view !== null, true);
 });
+
+test("waitForRun: never starts a lookup after the final sleep exhausts the deadline", async () => {
+  const clock = fakeClock();
+  const deadline = clock.now() + 2_500;
+  const lookup = async (): Promise<RunView | null> => {
+    if (clock.now() >= deadline) throw new Error("lookup started after deadline");
+    return view();
+  };
+  const res = await waitForRun(lookup, "merged", 2_500, clock, 1_000);
+  assertEquals(res.found && res.timedOut, true);
+});

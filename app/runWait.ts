@@ -116,8 +116,12 @@ const EXPIRED = Symbol("expired");
 export const INITIAL_LOOKUP_FLOOR_MS = 5_000;
 
 /** Race `p` against the remaining budget so a stalled lookup can never outlive the wait deadline. */
-async function bounded<T>(p: Promise<T>, ms: number): Promise<T | typeof EXPIRED> {
+async function bounded<T>(start: () => Promise<T>, ms: number): Promise<T | typeof EXPIRED> {
+  // Never START a lookup once the budget is exhausted (it could reject unhandled), and absorb a
+  // late rejection from a lookup that lost the race.
   if (ms <= 0) return EXPIRED;
+  const p = start();
+  p.catch(() => {});
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expiry = new Promise<typeof EXPIRED>((r) => {
     timer = setTimeout(() => r(EXPIRED), ms);
@@ -142,7 +146,7 @@ export async function waitForRun(
   signal?: AbortSignal,
 ): Promise<WaitResult> {
   const deadline = clock.now() + timeoutMs;
-  const first = await bounded(lookup(), Math.max(timeoutMs, INITIAL_LOOKUP_FLOOR_MS));
+  const first = await bounded(lookup, Math.max(timeoutMs, INITIAL_LOOKUP_FLOOR_MS));
   if (first === EXPIRED) return { found: true, timedOut: true, reason: null, until, view: null };
   if (!first) return { found: false };
   let view: RunView = first;
@@ -154,7 +158,7 @@ export async function waitForRun(
     if (left <= 0 || signal?.aborted) return { found: true, timedOut: true, reason: null, until, view };
     await clock.sleep(Math.min(pollMs, left));
     if (signal?.aborted) return { found: true, timedOut: true, reason: null, until, view };
-    const next = await bounded(lookup(), deadline - clock.now());
+    const next = await bounded(lookup, deadline - clock.now());
     if (next === EXPIRED) return { found: true, timedOut: true, reason: null, until, view };
     if (next) view = next;
   }
