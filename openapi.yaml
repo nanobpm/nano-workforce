@@ -2253,7 +2253,7 @@ components:
           nullable: true
           items:
             type: string
-          description: The readiness-gate probe targets the run parks on; null when ungated.
+          description: "The readiness-gate probe targets the run parks on, REDACTED for display (a `command` probe shows `<redacted>`; an `http` URL has embedded credentials stripped); null when ungated."
         autoResolveEscalations:
           type: boolean
         customInstructions:

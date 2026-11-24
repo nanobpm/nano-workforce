@@ -80,7 +80,7 @@ export { redactFreeText };
  * (which is not URL-shaped) is left untouched. The RAW target is retained only in runtime variables (the
  * probe config + the escalation diagnostics), never in the deployed documentation the explorer/modeler
  * shows. */
-export function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait" }>["wait"]): string {
+export function redactProbeTargetForDisplay(probe: { readonly kind: string; readonly target: string }): string {
   // NORMALIZE the kind first — `parseProbe` (`readiness.ts`) trims `wait.kind` before the worker keys
   // on it, and the semantic validator only requires a non-empty string, so an internal/direct graph
   // with `kind: " command "` runs as a COMMAND probe at runtime. Comparing the RAW (padded) kind here

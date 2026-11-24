@@ -46,3 +46,20 @@ test("customInstructionsWarnings: blank is ignored, padding is trimmed", () => {
   assertEquals(customInstructionsWarnings("x"), []);
   assertEquals(customInstructionsWarnings(undefined), []);
 });
+
+test("deriveEffectiveSettings: blockedOn redacts credential-bearing probe targets (never echoes raw secrets)", () => {
+  const eff = deriveEffectiveSettings({
+    readinessProbes: [
+      { kind: "command", target: "curl -H 'Authorization: token s3cret' x" },
+      { kind: "http", target: "https://user:s3cret@example.com/health" },
+      { target: "opaque-s3cret" },
+      { kind: "capability", target: "owner/up#1" },
+    ],
+  });
+  const shown = eff.blockedOn ?? [];
+  assertEquals(shown.length, 4);
+  assertEquals(shown.some((t) => t.includes("s3cret")), false);
+  assertEquals(shown[0], "<redacted>");
+  assertEquals(shown[2], "<redacted>");
+  assertEquals(shown[3], "owner/up#1");
+});
