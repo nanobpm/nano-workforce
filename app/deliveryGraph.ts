@@ -3216,13 +3216,67 @@ type JoinResult =
   | { kind: "exclusive"; context: BranchContext }
   | { kind: "violation"; violation: "mixed" | "non-reconverging" };
 
-/** Classify a fan-in of ≥1 incoming edge contexts (see {@link ExclusiveTopology}). */
-function joinContexts(
+/** Recursively fold fully-covered inner-arm groups (issue #1083 review): contexts `P + (s, armsᵢ)`
+ * sharing the SAME prefix `P` and split `s`, with pairwise-disjoint arms that together cover every
+ * arm of `s`, deliver exactly one token per run of `P` — so they collapse to `P`. Repeats until no
+ * group folds, so a nested XOR reconverging at an outer merge (or as End leaves) classifies like its
+ * already-merged form. Groups that overlap or only partially cover are left intact (and are judged by
+ * {@link joinContexts} as before), so unrelated splits are still rejected. */
+function foldCoveredGroups(
   incoming: readonly BranchContext[],
   splitArms: ReadonlyMap<string, ReadonlySet<string>>,
+): { contexts: BranchContext[]; folded: boolean } {
+  let cur = [...incoming];
+  let any = false;
+  for (;;) {
+    let folded = false;
+    const groups = new Map<string, number[]>();
+    cur.forEach((c, i) => {
+      if (c.length === 0) return;
+      const key = JSON.stringify(c.map((f, j) => (j === c.length - 1 ? [f.split] : [f.split, [...f.arms].sort()])));
+      const g = groups.get(key);
+      if (g) g.push(i);
+      else groups.set(key, [i]);
+    });
+    for (const idx of groups.values()) {
+      if (idx.length < 2) continue;
+      const last = cur[idx[0]];
+      const split = last[last.length - 1].split;
+      const union = new Set<string>();
+      let disjoint = true;
+      for (const i of idx) {
+        const c = cur[i];
+        for (const arm of c[c.length - 1].arms) {
+          if (union.has(arm)) disjoint = false;
+          union.add(arm);
+        }
+      }
+      const all = splitArms.get(split);
+      if (!disjoint || all === undefined || ![...all].every((a) => union.has(a))) continue;
+      const prefix = last.slice(0, -1);
+      const drop = new Set(idx);
+      cur = [...cur.filter((_, i) => !drop.has(i)), prefix];
+      folded = true;
+      any = true;
+      break;
+    }
+    if (!folded) return { contexts: cur, folded: any };
+  }
+}
+
+/** Classify a fan-in of ≥1 incoming edge contexts (see {@link ExclusiveTopology}). */
+function joinContexts(
+  rawIncoming: readonly BranchContext[],
+  splitArms: ReadonlyMap<string, ReadonlySet<string>>,
 ): JoinResult {
+  const { contexts: incoming, folded } = foldCoveredGroups(rawIncoming, splitArms);
   const first = incoming[0];
-  if (incoming.every((c) => sameContext(c, first))) return { kind: "parallel", context: first };
+  if (incoming.every((c) => sameContext(c, first))) {
+    // A folded group is an exclusive merge: alone it stays exclusive; AND-joined with anything else
+    // (a sibling that always fires relative to it) it is the mixed deadlock/double-fire shape.
+    if (!folded) return { kind: "parallel", context: first };
+    return incoming.length === 1 ? { kind: "exclusive", context: first } : { kind: "violation", violation: "mixed" };
+  }
   let prefix = 0;
   while (incoming.every((c) => c.length > prefix && sameFrame(c[prefix], first[prefix]))) prefix++;
   if (incoming.some((c) => c.length === prefix)) return { kind: "violation", violation: "mixed" };

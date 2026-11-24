@@ -3599,6 +3599,36 @@ test("#1083 a nested exclusive split whose merge stays under the outer arm valid
   );
 });
 
+const flatNested1083Edges = nested1083Edges.slice(0, 4);
+
+test("#1083 a nested split's arms reconverge DIRECTLY at the outer merge (recursive fold)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [decide1083(), decide1083("inner", "mode", "string"), ...["x", "y", "skip", "done"].map(w1083)],
+      edges: [...flatNested1083Edges, { from: "x", to: "done" }, { from: "y", to: "done" }, { from: "skip", to: "done" }],
+    }),
+    [],
+  );
+});
+
+test("#1083 a nested split's arms and the outer skip are all terminal leaves (recursive fold at End)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [decide1083(), decide1083("inner", "mode", "string"), ...["x", "y", "skip"].map(w1083)],
+      edges: flatNested1083Edges,
+    }),
+    [],
+  );
+});
+
+test("#1083 still rejected: only PART of a nested split's arms reach the outer merge", () => {
+  const errors = parity1083({
+    nodes: [decide1083(), decide1083("inner", "mode", "string"), ...["x", "y", "skip", "done", "tail"].map(w1083)],
+    edges: [...flatNested1083Edges, { from: "x", to: "done" }, { from: "skip", to: "done" }, { from: "y", to: "tail" }],
+  });
+  assertEquals(errors.length > 0, true);
+});
+
 test("#1083 a nested split's merge AND-joins a sibling inside the outer arm, then the outer arms merge", () => {
   // Inside the go-arm, `prep` forks into the nested split AND an always-in-arm sibling.
   assertEquals(
