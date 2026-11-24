@@ -114,19 +114,3 @@ export function waveMergeTargets(
   }
   return keys;
 }
-
-/** Defence in depth for issue #1011: the count of `gateWave` tasks recorded `opened` WITHOUT a PR key.
- * Such a task claims delivery but gives the barrier nothing to wait on — {@link waveMergeTargets} skips
- * it, so without this guard the wave would clear VACUOUSLY ("merged") while its real PR is still open,
- * releasing dependants against an un-merged dependency. The poller must HOLD the gate while this is
- * non-zero (the implement-cell reconcile step is the canonical place that fills the key in). */
-export function waveUnkeyedOpened(
-  tasks: readonly WaveGateTask[],
-  gateWave: number,
-): number {
-  let n = 0;
-  for (const t of tasks) {
-    if (t.wave === gateWave && t.status === "opened" && !t.pr_key?.trim()) n++;
-  }
-  return n;
-}

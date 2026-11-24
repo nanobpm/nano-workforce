@@ -170,3 +170,9 @@ test("shared-secret guard rejects a missing/wrong secret when configured", async
     else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
   }
 });
+
+test("the guide documents start/feature autoMerge implying converge (issue #1058)", async () => {
+  const md = ((await handler(input(), app)) as any).body.instructions as string;
+  assert(md.includes("`autoMerge: true` **implies `converge: true`**"), "documents the implication");
+  assert(md.includes("autoMerge requires converge: true"), "documents the contradiction 400");
+});
