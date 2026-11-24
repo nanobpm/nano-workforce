@@ -711,6 +711,9 @@ components:
       additionalProperties: true
       description: "Answer variables for an escalation whose form is `feature-blocked` (see Escalation.formKey / expectedFields)."
       properties:
+        summary:
+          type: string
+          description: "Agent-reported reason (summary)"
         note:
           type: string
           description: "Disposition note (what you did / why — recorded on the run)"
@@ -8777,6 +8780,8 @@ paths:
                     - title: feature-blocked
                       type: object
                       properties:
+                        summary:
+                          type: string
                         note:
                           type: string
                     - title: feature-escalation

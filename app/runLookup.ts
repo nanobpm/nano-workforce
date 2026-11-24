@@ -184,7 +184,9 @@ async function prViews(
           converge: true,
           autoMerge: p.merge.requested,
           humanApproval: prHumanApproval(row),
-          maxRounds: asNumber(await readRootVar(engine, p.processKey, "maxRounds")),
+          // The persisted budget (154, issue #1088) — survives handoffs, and is readable while the merge
+          // process owns the run; a pre-154 (NULL) row falls back to the loop's root variable.
+          maxRounds: asNumber(row.max_rounds) ?? asNumber(await readRootVar(engine, p.processKey, "maxRounds")),
           autoResolveEscalations: p.autoResolveEscalations,
           hasCustomInstructions: p.hasCustomInstructions,
         },
