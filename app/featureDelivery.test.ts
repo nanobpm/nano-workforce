@@ -645,3 +645,8 @@ test("RED/GREEN pollFeatureDelivery: a running run edge (2) folds to `opened` in
   assertEquals(stores.feature_runs[0].status, "opened", "edge (2)'s terminal outcome stands — the same-pass handoff edge leaves it alone");
   assertEquals(stores.feature_runs[0].delivery_label, "PR raised");
 });
+
+test("deriveFeatureDelivery: a closed or failed PR is a terminal (abandoned) outcome, never converging", () => {
+  assertEquals(deriveFeatureDelivery("closed"), { status: "abandoned", label: "PR closed" });
+  assertEquals(deriveFeatureDelivery("failed"), { status: "abandoned", label: "PR failed" });
+});

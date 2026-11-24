@@ -62,11 +62,12 @@ function memOpen(stores: Record<string, { rows: any[]; key: string }>, ops?: str
         }
         return { changed };
       }
-      if (/^UPDATE "pull_requests" SET "merge_human_approval" = 1 WHERE "pr_key" = \? AND "process_key" = \? AND "converged_at" IS NULL$/.test(sql)) {
+      if (/^UPDATE "pull_requests" SET "merge_human_approval" = 1, "human_approval_submitted" = 1 WHERE "pr_key" = \? AND "process_key" = \? AND "converged_at" IS NULL$/.test(sql)) {
         let changed = 0;
         for (const r of stores.pull_requests?.rows ?? []) {
           if (r.pr_key === params[0] && r.process_key === params[1] && r.converged_at == null) {
             r.merge_human_approval = 1;
+            r.human_approval_submitted = 1;
             changed++;
           }
         }
@@ -1919,8 +1920,10 @@ test("a gated submitPr adopting a live loop stamps merge_human_approval on the r
     await submitPr(live.data, live.engine, pr, [], 20, false, null, true);
     const row = (await live.data.table("pull_requests", "pr_key").get(pr.prKey)) as {
       merge_human_approval?: number | null;
+      human_approval_submitted?: number | null;
     } | null;
     assertEquals(row?.merge_human_approval, 1, "the gate is mirrored onto the /status projection");
+    assertEquals(row?.human_approval_submitted, 1, "adoption records the submitted gate for run lookup");
 
     const ungated = adoptLoop("converging", "ACTIVE");
     await submitPr(ungated.data, ungated.engine, pr);
@@ -3304,6 +3307,32 @@ test("submitPr handoffFrom: only the owning merge-loop instance may re-enter con
     const row = a.stores.pull_requests.rows[0];
     assertEquals(row.status, "converging");
     assertEquals(row.process_key, "PI-CONV-1");
+  });
+});
+
+test("submitPr handoffFrom: the merge->convergence handoff keeps the SUBMITTED human-approval setting (#1054)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#78";
+    for (const submitted of [1, 0, null]) {
+      const stores: Record<string, { rows: any[]; key: string }> = {
+        pull_requests: {
+          rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 78, url: "https://github.com/owner/repo/pull/78", title: "t", status: "waiting_merge", current_round: 4, process_key: "PI-MERGE", human_approval_submitted: submitted }],
+          key: "pr_key",
+        },
+        escalations: { rows: [], key: "id" },
+        pr_adjudications: { rows: [], key: "id" },
+        pr_dependencies: { rows: [], key: "pr_key" },
+      };
+      const data = { table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)), open: () => memOpen(stores) } as any;
+      const engine = { createInstance: async () => ({ processInstanceKey: "PI-CONV" }) } as any;
+      const parsed = { repo: "owner/repo", number: 78, url: "https://github.com/owner/repo/pull/78", prKey: PR_KEY };
+      // The internal handoff passes humanApproval=false (the gate was already decided) — that must not
+      // rewrite what the run was SUBMITTED with, or /run reports approval as disabled.
+      await submitPr(data, engine, parsed, [], undefined, false, null, false, false, undefined, "PI-MERGE");
+      const row = stores.pull_requests.rows[0];
+      assertEquals(row.process_key, "PI-CONV");
+      assertEquals(row.human_approval_submitted, submitted, `handoff preserves submitted=${submitted}`);
+    }
   });
 });
 

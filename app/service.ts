@@ -36,7 +36,7 @@ import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
 import { DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
-import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRuns, deliveryGraphRunsTracking, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
+import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRuns, deliveryGraphRunsTracking, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim, type TrackedDeliveryGraphRun } from "./deliveryGraphRun.ts";
 import { decodeLivePrompt, deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement, needsLiveDeliveryPrompt } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEffectiveSettings } from "./effectiveSettings.ts";
@@ -474,6 +474,9 @@ export interface PullRequest {
   // rows fall back to the #937 batched engine read. Run-scoped: reset by the atomic reopen.
   merge_requested?: number | null;
   merge_human_approval?: number | null;
+  // The human-approval SETTING the run was submitted with (148, issue #1054) — unlike
+  // `merge_human_approval` it is never cleared by an approve or `startMerge`. NULL = pre-152 row.
+  human_approval_submitted?: number | null;
   // Operator-steering projection (134_pull_requests_custom_instructions.sql, issue #956): 1 ⇒ this
   // run's converge agents carry `customInstructions` (stamped by `submitPr` at submit/reopen, run-
   // scoped like the merge policy), so `/status` shows the loop is steered with no engine read. NULL
@@ -509,12 +512,12 @@ const prs = (data: DataLayer) => data.table<PullRequest>("pull_requests", "pr_ke
 /** A PR row as seen through its derived tracking VIEW (`pull_requests__tracking`): the base columns
  * plus urban's ADR-0065 `derived_status`, which folds the reconciler's terminal edge
  * (out-of-band terminate → `abandoned`) over the worker-owned transient. */
-type TrackedPullRequest = PullRequest & { derived_status: string };
+export type TrackedPullRequest = PullRequest & { derived_status: string };
 /** Read-only accessor over the PR derived tracking VIEW. Use this — and read `derived_status`, not
  * `status` — for any terminal-edge classification (delivery/promotion/feature reconciliation), so an
  * out-of-band-terminated PR (whose base row is still `converging`) is correctly seen as `abandoned`.
  * Worker-written terminals (`merged`/`converged`) pass through unchanged. Writes stay on `prs`. */
-const prsTracking = (data: DataLayer) =>
+export const prsTracking = (data: DataLayer) =>
   derivedTrackingTable<TrackedPullRequest>(data, "pull_requests", "pr_key");
 const escs = (data: DataLayer) => data.table<Escalation>("escalations", "id");
 const deps = (data: DataLayer) => data.table<PrDependency>("pr_dependencies", "pr_key");
@@ -857,7 +860,7 @@ async function submitPrCritical(
         // merge handoff (re-pointed key) or reopen between the read and this write leaves its own
         // policy intact instead of being overwritten with a stale gate.
         await data.open().exec(
-          `UPDATE "pull_requests" SET "merge_human_approval" = 1 WHERE "pr_key" = ? AND "process_key" = ? AND "converged_at" IS NULL`,
+          `UPDATE "pull_requests" SET "merge_human_approval" = 1, "human_approval_submitted" = 1 WHERE "pr_key" = ? AND "process_key" = ? AND "converged_at" IS NULL`,
           [parsed.prKey, loopKey],
         );
         });
@@ -1014,6 +1017,8 @@ async function submitPrCritical(
       // Mirror the engine seed EXACTLY (PR #950 review): an ungated loop is seeded
       // `humanApproval: false` (decided — no gate), a gated one `true` (outstanding).
       merge_human_approval: gated ? 1 : 0,
+      // The SUBMITTED human-approval setting (148, issue #1054): never cleared by approve/startMerge.
+      human_approval_submitted: humanApproval ? 1 : 0,
       // Operator-steering projection (issue #956): 1 ⇒ this run's converge agents carry custom
       // instructions, so `/status` can show the loop is steered with no engine read. The TEXT is
       // durable alongside (issue #956 review) so a handoff/re-enrollment can re-supply it.
@@ -1131,6 +1136,7 @@ async function submitPrCritical(
         // authoritative (`stale: false`) in `/status`.
         merge_requested: existing.merge_requested ?? null,
         merge_human_approval: existing.merge_human_approval ?? null,
+        human_approval_submitted: existing.human_approval_submitted ?? null,
         // The operator-steering projection (issue #956) rolls back with the same ownership.
         custom_instructions: existing.custom_instructions ?? null,
         custom_instructions_text: existing.custom_instructions_text ?? null,
@@ -1196,6 +1202,10 @@ async function submitPrCritical(
         // the fresh run's intent wins, and the approval state mirrors the fresh loop's `humanApproval` seed.
         merge_requested: mergeIntent ? 1 : 0,
         merge_human_approval: gated ? 1 : 0,
+        // The SUBMITTED setting is the RUN's, not this call's: an internal merge->convergence handoff
+        // (`handingBack`) passes `humanApproval=false` because the gate was already decided, so it must
+        // keep the stamp the run was submitted with (else `/run` reports approval as disabled).
+        human_approval_submitted: handingBack ? (existing?.human_approval_submitted ?? null) : humanApproval ? 1 : 0,
         // Operator-steering projection (issue #956): run-scoped too — the fresh run's steering wins.
         custom_instructions: instructions != null ? 1 : 0,
         custom_instructions_text: instructions,
@@ -1474,7 +1484,8 @@ export async function activePrs(
   engine?: Pick<EngineClient, "searchVariables">,
 ): Promise<ActivePr[]> {
   const all = await prsTracking(data).all();
-  const active = all
+  return projectPrRows(data, engine, all
+
     // ADR-0065: classify "in flight" on the DERIVED terminal edge, not the base transient. A PR whose
     // engine instance was terminated out-of-band (or by an ordinary in-app cancel — derive-only under
     // urban 0.81.0) keeps its base `status` frozen at the last worker transient but reads `abandoned`
@@ -1484,7 +1495,17 @@ export async function activePrs(
     // `base.*`), and `pull_requests` has no `onWaitingHuman` edge, so for a still-active PR
     // `derived_status === status`.
     .filter((p) => !TERMINAL_STATUSES.includes(p.derived_status) || isOrphanedPr(p))
-    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0)));
+}
+
+/** The ONE `/status` PR-row projection (issue #1054): `activePrs` feeds it the in-flight set, and the
+ *  single-run lookup (`GET /run?key=<key>`, app/runLookup.ts) feeds it one tracked row at ANY stage, so
+ *  both reads share a single derivation of status/overlay/escalation/merge policy/wait reason. */
+export async function projectPrRows(
+  data: DataLayer,
+  engine: Pick<EngineClient, "searchVariables"> | undefined,
+  active: readonly TrackedPullRequest[],
+): Promise<ActivePr[]> {
   // Derive the STRUCTURED open-escalation pointer from the ONE `user_tasks` read model (issue #666) —
   // the same user-task surface `listEscalations` and the Convergence/Tasks page consume — so `/status`
   // carries the completable `userTaskKey` (plus the escalation `kind` and a one-line `summary`) without
@@ -1902,6 +1923,15 @@ export async function activeDeliveries(data: DataLayer): Promise<ActiveDelivery[
   const active = (await deliveryGraphRunsTracking(data).all())
     .filter((r) => !terminal.includes(r.derived_status))
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+  return projectDeliveryRows(data, active);
+}
+
+/** The ONE `/status` delivery-row projection, shared by `activeDeliveries` and the single-run lookup
+ *  (issue #1054) — see {@link projectPrRows}. */
+export async function projectDeliveryRows(
+  data: DataLayer,
+  active: readonly TrackedDeliveryGraphRun[],
+): Promise<ActiveDelivery[]> {
   const openEscByRun = new Map<string, OpenEscalation>();
   for (const t of (await userTasks(data).find({ subject_type: "delivery" })).sort((a, b) =>
     a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0,
