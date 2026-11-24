@@ -295,7 +295,7 @@ function pagedEngine(all: { elements: ElementInstanceFact[]; variables: Variable
       one(
         all.variables
           .filter((v) => (f.scopeKey === undefined || v.scopeKey === f.scopeKey) && (f.name === undefined || v.name === f.name))
-          .map((v, i) => ({ ...v, variableKey: String(i), processInstanceKey: PIK, isTruncated: false })),
+          .map((v, i) => ({ ...v, variableKey: v.variableKey ?? String(i), processInstanceKey: PIK, isTruncated: v.isTruncated === true })),
       ),
     searchUserTasks: async () => [],
     searchIncidents: async () => [],
@@ -537,4 +537,47 @@ test("the read limiter hands a freed slot to the waiter, so a caller arriving mi
   for (let i = 0; i < 10; i++) await Promise.resolve();
   for (const r of releases) r();
   await waiter;
+});
+
+test("a clipped bound fact is resolved by the full-value fetch and the view stays complete", async () => {
+  const variables: VariableFact[] = [{ name: "n1_pr", value: '"a/b#', scopeKey: PIK, isTruncated: true, variableKey: "vk1" }];
+  const fetched: string[] = [];
+  const read = await readEngineFacts(pagedEngine({ elements: [], variables }), PIK, NODES, async (k) => {
+    fetched.push(k);
+    return '"a/b#7"';
+  });
+  assert.deepEqual(fetched, ["vk1"]);
+  assert.equal(read.truncated, false);
+  const v = read.variables.find((x) => x.name === "n1_pr");
+  assert.equal(v?.value, '"a/b#7"');
+  assert.equal(v?.isTruncated, false);
+});
+
+test("a clipped fact whose full-value fetch fails, or is absent, flags the view truncated and stays unknown", async () => {
+  const variables: VariableFact[] = [{ name: "n1_pr", value: '"a/b#', scopeKey: PIK, isTruncated: true, variableKey: "vk1" }];
+  for (const fetchFull of [async () => undefined, undefined]) {
+    const read = await readEngineFacts(pagedEngine({ elements: [], variables }), PIK, NODES, fetchFull);
+    assert.equal(read.truncated, true);
+    assert.equal(read.variables.find((x) => x.name === "n1_pr")?.isTruncated, true);
+  }
+});
+
+test("a clipped fact beyond the per-request call cap is not fetched and flags the view truncated", async () => {
+  const nodes: ResolvedNodeRef[] = [];
+  const elements: ElementInstanceFact[] = [];
+  for (let i = 0; i < 80; i++) {
+    nodes.push({ id: `n${i}`, kind: "agent", element: `e${i}`, emits: [], dependsOn: [] });
+    for (let j = 0; j < 5; j++) elements.push({ elementId: `e${i}`, elementInstanceKey: String(i * 100 + j + 1), state: "COMPLETED" });
+  }
+  const variables: VariableFact[] = [{ name: "e0_pr", value: '"a/b#', scopeKey: PIK, isTruncated: true, variableKey: "vk1" }];
+  const { engine, stats } = countingEngine(pagedEngine({ elements, variables }));
+  let fetches = 0;
+  const read = await readEngineFacts(engine, PIK, nodes, async () => {
+    fetches++;
+    return '"a/b#7"';
+  });
+  assert.equal(stats.calls + fetches, ENGINE_MAX_CALLS);
+  assert.equal(fetches, 0);
+  assert.equal(read.truncated, true);
+  assert.equal(read.variables.find((x) => x.name === "e0_pr")?.isTruncated, true);
 });

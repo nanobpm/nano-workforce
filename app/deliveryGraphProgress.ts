@@ -26,6 +26,7 @@ import { type BoundFact, resolveConvergePr } from "./deliveryConnector.ts";
 import { compileDeliveryGraphSemantic } from "./deliveryGraphCompiler.ts";
 import { deliveryGraphProposals } from "./deliveryGraphProposals.ts";
 import { type DeliveryGraphRun, deliveryGraphRuns } from "./deliveryGraphRun.ts";
+import { resolveEngineAddress } from "./enginePreflight.ts";
 import { parsePr } from "./prParse.ts";
 
 /** A node's derived lifecycle state. */
@@ -44,6 +45,8 @@ export interface VariableFact {
   scopeKey: string;
   /** The engine clipped `value` to a preview — it is NOT the complete value and must not be parsed as one. */
   isTruncated?: boolean;
+  /** The engine's key for this variable — what a full-value fetch (`GET /variables/{variableKey}`) addresses. */
+  variableKey?: string;
 }
 /** One open user task (the subset this projection reads). */
 export interface UserTaskFact {
@@ -346,7 +349,7 @@ export async function loadDeliveryGraphProgress(
     const pending = deriveNodeProgress({ nodes, elements: [], variables: [], userTasks: [], incidents: [], processInstanceKey: "" });
     return { ...base, nodes: pending, mermaid: renderProgressMermaid(compiled.diagram, pending) };
   }
-  const read = await readEngineFacts(app.engine, pik, nodes);
+  const read = await readEngineFacts(app.engine, pik, nodes, fetchFullVariableValue);
   const { instances, elements, variables, userTasks, incidents } = read;
   const instanceState = instances[0]?.state ?? null;
   const nodeInputsVar = variables.find((v) => v.scopeKey === pik && v.name === "nodeInputs");
@@ -425,11 +428,35 @@ export function createReadLimiter(maxInFlight: number, maxCalls: number, onCap: 
   };
 }
 
+/**
+ * Fetch a variable's FULL value from the engine (`GET /variables/{variableKey}`), for a row the search
+ * clipped (`isTruncated`). The urban `EngineClient` exposes no single-variable read, so this goes to the
+ * canonical engine REST address directly. Answers `undefined` on any failure or a still-clipped answer —
+ * the caller then flags the view `truncated` and leaves the fact unknown.
+ */
+export async function fetchFullVariableValue(variableKey: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(`${resolveEngineAddress().restAddress}/variables/${encodeURIComponent(variableKey)}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return undefined;
+    const body: unknown = await res.json();
+    if (typeof body !== "object" || body === null || !("value" in body)) return undefined;
+    if ("isTruncated" in body && body.isTruncated === true) return undefined;
+    const { value } = body;
+    return typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
 /** The engine reads {@link loadDeliveryGraphProgress} folds, gathered by narrow (page-bounded) queries. */
 export async function readEngineFacts(
   engine: Pick<AppApi["engine"], "searchProcessInstances" | "searchElementInstances" | "searchVariables" | "searchUserTasks" | "searchIncidents">,
   pik: string,
   nodes: readonly ResolvedNodeRef[],
+  /** Full-value fetch for a clipped row; absent → every clipped row is left unknown and flags `truncated`. */
+  fetchFull?: (variableKey: string) => Promise<string | undefined>,
 ): Promise<{
   instances: { state: string }[];
   elements: ElementInstanceFact[];
@@ -516,6 +543,27 @@ export async function readEngineFacts(
         }
       }
     }),
+  );
+  // Clipped rows (bound facts, probe results, child PR keys, the nodeInputs seed) are resolved to their
+  // full value through the SAME limiter and call budget. Any row that cannot be resolved (no fetcher,
+  // budget exhausted, fetch failed) stays clipped — so it is read as unknown — and flags the view
+  // `truncated`, never silently claiming completeness.
+  await Promise.all(
+    [...variables.entries()]
+      .filter(([, v]) => v.isTruncated === true)
+      .map(async ([key, v]) => {
+        const full =
+          fetchFull && v.variableKey
+            ? (
+                await limited(async () => {
+                  const value = await fetchFull(v.variableKey ?? "");
+                  return value === undefined ? [] : [value];
+                })
+              )[0]
+            : undefined;
+        if (full === undefined) truncated = true;
+        else variables.set(key, { ...v, value: full, isTruncated: false });
+      }),
   );
   return {
     instances,
