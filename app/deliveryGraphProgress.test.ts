@@ -240,3 +240,29 @@ test("truncated variable previews are treated as absent, never parsed as complet
   assert.equal(landed?.lastProbe, null);
   assert.deepEqual(out.find((n) => n.id === "build")?.childRunKeys, []);
 });
+
+test("a __proto__ fact name or wait-node id is kept as an own property, not swallowed by the prototype setter", () => {
+  const nodes = deriveNodeProgress({
+    nodes: [
+      { id: "__proto__", kind: "wait", element: "n0", emits: [], dependsOn: [] },
+      { id: "b", kind: "agent", element: "n1", emits: [{ name: "__proto__", type: "string" }], dependsOn: [] },
+    ],
+    processInstanceKey: PIK,
+    elements: [{ elementId: "n1", elementInstanceKey: "2", state: "COMPLETED" }],
+    variables: [{ name: "n1___proto__", value: '"x"', scopeKey: PIK }],
+    userTasks: [],
+    incidents: [],
+    pollEveryByNode: JSON.parse('{"__proto__":"PT1M"}'),
+  });
+  assert.equal(Object.hasOwn(nodes[1]?.boundFacts ?? {}, "__proto__"), true);
+  assert.equal(JSON.stringify(nodes[1]?.boundFacts), '{"__proto__":"x"}');
+  assert.equal(nodes[0]?.pollEvery, "PT1M");
+});
+
+test("an unconfigured wait node never reads an inherited cadence", () => {
+  const nodes = deriveNodeProgress({
+    nodes: [{ id: "constructor", kind: "wait", element: "n0", emits: [], dependsOn: [] }],
+    processInstanceKey: PIK, elements: [], variables: [], userTasks: [], incidents: [], pollEveryByNode: {},
+  });
+  assert.equal(nodes[0]?.pollEvery, null);
+});

@@ -164,7 +164,7 @@ export function deriveNodeProgress(input: {
       const raw = rootVars.get(`${node.element}_${fact.name}`);
       if (raw === undefined) continue;
       const value = parseJson(raw);
-      if (value !== null) boundFacts[fact.name] = value;
+      if (value !== null) Object.defineProperty(boundFacts, fact.name, { value, enumerable: true, writable: true, configurable: true });
     }
 
     let lastProbe: DeliveryNodeProbe | null = null;
@@ -252,7 +252,7 @@ export function deriveNodeProgress(input: {
       activeElements: state === "active" || state === "escalated" || state === "failed" ? activeElements : [],
       boundFacts,
       lastProbe,
-      pollEvery: node.kind === "wait" ? (input.pollEveryByNode?.[node.id] ?? null) : null,
+      pollEvery: node.kind === "wait" ? (input.pollEveryByNode && Object.hasOwn(input.pollEveryByNode, node.id) ? input.pollEveryByNode[node.id] : null) : null,
       childRunKeys,
       escalation,
       incident,
@@ -286,7 +286,7 @@ function pollEveryFromSeed(raw: string | undefined, nodes: readonly ResolvedNode
     const entry: unknown = Reflect.get(seed, n.element) ?? Reflect.get(seed, n.id);
     if (entry !== null && typeof entry === "object") {
       const every: unknown = Reflect.get(entry, "probePollEvery");
-      if (typeof every === "string" && every !== "") out[n.id] = every;
+      if (typeof every === "string" && every !== "") Object.defineProperty(out, n.id, { value: every, enumerable: true, writable: true, configurable: true });
     }
   }
   return out;
