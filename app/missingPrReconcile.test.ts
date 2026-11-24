@@ -2,7 +2,7 @@
 // reconciler looks the PR up on GitHub: merged/closed → a terminal row is written; absent past the
 // grace period → the slice/feature is failed with a reason. Waiters then see a terminal state.
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { memBlackboardSource } from "../test/blackboardDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
@@ -546,4 +546,52 @@ test("an opened feature whose first lookup is UNKNOWN is not handoff-abandoned; 
     if (answer === "merged") await pollFeatureDelivery(data, engine, { missingPrNotFound: notFound, missingPrUnverified: unverified });
     assertEquals(stores.feature_runs[0].status, want);
   }
+});
+
+test("a keyed run whose failed fold is lost after the missing-PR row is written is failed on a later pass", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#2", process_key: "p1", status: "opened", pr_key: "o/r#43", converge: 1, created_at: ISO0, updated_at: ISO0 },
+  ];
+  const open = (data as any).open;
+  let thrown = false;
+  (data as any).open = () => {
+    const o = open();
+    return {
+      ...o,
+      exec: async (sql: string, args: any[]) => {
+        if (!thrown && /"process_key" = \?/.test(sql)) {
+          thrown = true;
+          throw new Error("SQLITE_BUSY");
+        }
+        return o.exec(sql, args);
+      },
+    };
+  };
+  const opts = () => ({ lookup: lookupOf("not_found"), nowMs: T0 + MISSING_PR_GRACE_MS, lastChecked: new Map(), notFound: new Set<string>(), unverified: new Set<string>() });
+  await reconcileMissingPrRows(data, "", opts());
+  assertEquals(stores.pull_requests[0].status, "abandoned");
+  assertEquals(stores.feature_runs[0].status, "opened");
+  await reconcileMissingPrRows(data, "", opts());
+  assertEquals(stores.feature_runs[0].status, "failed");
+  assertEquals(/not found on GitHub after/.test(stores.feature_runs[0].delivery_label), true);
+});
+
+test("a recovered merged slice whose retro already started is not re-driven every pass", async () => {
+  const { data, stores } = memData();
+  seedEpic(stores, "o/r#44");
+  const engine = { createInstance: async () => ({ processInstanceKey: "r" }), searchProcessInstances: async () => [] } as any;
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("merged"), nowMs: T0, lastChecked: new Map(), engine });
+  assert(stores.plans[0].retro_started_at, "retro started on recovery");
+  const orig = (data as any).table;
+  let planGets = 0;
+  (data as any).table = (n: string, pk?: string) => {
+    const t = orig(n, pk);
+    if (n !== "plans") return t;
+    return { ...t, get: async (id: any) => (planGets++, t.get(id)) };
+  };
+  for (let i = 1; i < 4; i++) {
+    await reconcileMissingPrRows(data, "", { lookup: lookupOf("merged"), nowMs: T0 + i, lastChecked: new Map(), engine });
+  }
+  assertEquals(planGets, 0);
 });

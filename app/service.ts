@@ -4383,13 +4383,8 @@ export async function reconcileMissingPrRows(
       } else if (found === "not_found" && nowMs - ref.since >= MISSING_PR_GRACE_MS) {
         const reason = `PR ${prKey} not found on GitHub after ${MISSING_PR_GRACE_MS / 60000}m grace`;
         await writeTerminalPrRow(data, prKey, "abandoned", reason, root);
-        // Guarded CAS (issue #808), never a blind update keyed on feature_key: a concurrent re-seed of the
-        // same feature_key to a fresh incarnation must not be clobbered. A KEYLESS run (crash between the
-        // engine start and the key save) guards on the observed null key + pr_key + status + updated_at.
-        // KEYLESS runs are folded by the idempotent sweep below (it reads the row just written).
-        for (const f of ref.features) {
-          if (f.processKey) await foldCompletedFeatureRun(data, f.featureKey, f.processKey, "failed", reason, f.status);
-        }
+        // Referencing feature runs (keyed AND keyless) are folded `failed` by the idempotent sweep below,
+        // which re-derives the fold from this PERSISTED row — so a crash after this write is recovered.
         lastChecked.delete(prKey);
         notFound.delete(prKey);
         unverified.delete(prKey);
@@ -4411,24 +4406,31 @@ const RECOVERED_MERGED_OUTCOME = "merged on GitHub (PR row was missing)";
  * pass re-derives the fold from the PERSISTED row rather than from the in-pass lookup:
  *   • a KEYLESS converging / opened+converge run whose PR row is `merged`/`abandoned` is folded
  *     (`merged` → merged; a grace-expiry `abandoned` → failed with that reason; else → closed);
- *   • a recovered `merged` slice of a done epic re-runs the fire-once `maybeStartRetro`, so a retro start
+ *   • a KEYED run on a grace-expiry `abandoned` row is folded `failed` with that reason (guarded CAS);
+ *   • a recovered `merged` slice of a done epic whose retro is unclaimed re-runs the fire-once `maybeStartRetro`, so a retro start
  *     that failed on the recovery pass is retried. Best-effort per row; never throws. */
 async function sweepRecoveredPrRows(data: DataLayer, engine: EngineClient | undefined): Promise<void> {
   try {
     const rows = new Map((await prsTracking(data).all()).map((r) => [r.pr_key, r]));
     for (const status of ["converging", "opened"] as const) {
       for (const run of await featureRuns(data).find({ status })) {
-        if (run.process_key || !run.pr_key) continue;
+        if (!run.pr_key) continue;
         if (status === "opened" && run.converge !== 1) continue;
         const row = rows.get(run.pr_key);
         const st = row?.derived_status;
         if (!row || (st !== "merged" && st !== ABANDONED_STATUS)) continue;
         try {
           const outcome = row.outcome ?? "";
-          const { status: to, label } =
-            st === ABANDONED_STATUS && /^PR .* not found on GitHub/.test(outcome)
-              ? { status: "failed", label: outcome }
-              : deriveFeatureDelivery(st === "merged" ? "merged" : "closed");
+          const missing = st === ABANDONED_STATUS && /^PR .* not found on GitHub/.test(outcome);
+          if (run.process_key) {
+            // A KEYED run is otherwise settled by delivery polling, which cannot know the PR went
+            // missing — so only the grace-expiry `failed` verdict is replayed here (guarded CAS, #808).
+            if (missing) await foldCompletedFeatureRun(data, run.feature_key, run.process_key, "failed", outcome, status);
+            continue;
+          }
+          const { status: to, label } = missing
+            ? { status: "failed", label: outcome }
+            : deriveFeatureDelivery(st === "merged" ? "merged" : "closed");
           await foldKeylessFeatureRun(
             data,
             run.feature_key,
@@ -4444,15 +4446,21 @@ async function sweepRecoveredPrRows(data: DataLayer, engine: EngineClient | unde
     if (!engine) return;
     const recovered = [...rows.values()].filter((r) => r.derived_status === "merged" && r.outcome === RECOVERED_MERGED_OUTCOME);
     if (recovered.length === 0) return;
-    const donePlanKeys = new Set((await plans(data).find({ status: "done" })).map((p) => p.plan_key));
-    if (donePlanKeys.size === 0) return;
-    const doneSlices = new Set(
-      (await planTasks(data).all()).filter((t) => t.pr_key && donePlanKeys.has(t.plan_key)).map((t) => t.pr_key),
+    // Only done epics whose retro is still unclaimed: a started retro drops out, so this work is bounded
+    // by pending retros, not by settled history. One hook call per plan (not per recovered slice).
+    const pendingPlanKeys = new Set(
+      (await plans(data).find({ status: "done" })).filter((p) => !p.retro_started_at).map((p) => p.plan_key),
     );
-    for (const r of recovered) {
-      // Fire-once (plan.retro_started_at guard) and never throws — mirrors retireTerminalReviewWait.
-      if (doneSlices.has(r.pr_key)) await maybeStartRetro(data, engine, r.pr_key);
+    if (pendingPlanKeys.size === 0) return;
+    const recoveredKeys = new Set(recovered.map((r) => r.pr_key));
+    const slicePerPlan = new Map<string, string>();
+    for (const t of await planTasks(data).all()) {
+      if (t.pr_key && pendingPlanKeys.has(t.plan_key) && recoveredKeys.has(t.pr_key) && !slicePerPlan.has(t.plan_key)) {
+        slicePerPlan.set(t.plan_key, t.pr_key);
+      }
     }
+    // Fire-once (plan.retro_started_at guard) and never throws — mirrors retireTerminalReviewWait.
+    for (const prKey of slicePerPlan.values()) await maybeStartRetro(data, engine, prKey);
   } catch (err) {
     console.error(`[poller] recovered PR row sweep: ${err}`);
   }
