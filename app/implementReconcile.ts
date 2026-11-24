@@ -207,7 +207,7 @@ export async function reconcileImplement(
 
 /** Prefix the shared keyless-`opened` marker onto a summary (idempotent). The marker is the ONE
  *  provenance channel downstream consumers key on: record-feature refuses blocked-delivery recovery for
- *  it, and record-wave / the finalizer name it instead of "blocked or skipped". */
+ *  it. */
 export function stampKeylessOpened(summary: string | null): string {
   if (!summary) return KEYLESS_OPENED_SUMMARY;
   if (summary.startsWith(KEYLESS_OPENED_SUMMARY)) return summary;
