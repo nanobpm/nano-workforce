@@ -231,3 +231,15 @@ test("a PR's humanApproval reflects the SUBMITTED setting, surviving approval an
   const legacy = memApp({ pull_requests: [pr({ merge_human_approval: 0 })] }, PKS);
   assertEquals(((await handler(input("o/r#9"), legacy)) as Row).body.settings.humanApproval, null);
 });
+
+test("a feature and an epic for the same issue: the most recently updated run wins", async () => {
+  const epic = (updated_at: string) => ({
+    plan_key: "o/r#5", repo: "o/r", title: "Epic", status: "dispatched", process_key: "proc-e", epic_phase: "Implementing",
+    auto_merge: 0, auto_resolve_escalations: 0, acknowledged_at: null, created_at: T0, updated_at,
+  });
+  const later = "2026-11-02T00:00:00Z";
+  const liveEpic = memApp({ feature_runs: [feature()], plans: [epic(later)] }, PKS);
+  assertEquals(((await handler(input("o/r#5"), liveEpic)) as Row).body.kind, "epic");
+  const liveFeature = memApp({ feature_runs: [feature({ updated_at: later })], plans: [epic(T0)] }, PKS);
+  assertEquals(((await handler(input("o/r#5"), liveFeature)) as Row).body.kind, "feature");
+});

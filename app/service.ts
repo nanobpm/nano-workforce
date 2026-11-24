@@ -858,7 +858,7 @@ async function submitPrCritical(
         // merge handoff (re-pointed key) or reopen between the read and this write leaves its own
         // policy intact instead of being overwritten with a stale gate.
         await data.open().exec(
-          `UPDATE "pull_requests" SET "merge_human_approval" = 1 WHERE "pr_key" = ? AND "process_key" = ? AND "converged_at" IS NULL`,
+          `UPDATE "pull_requests" SET "merge_human_approval" = 1, "human_approval_submitted" = 1 WHERE "pr_key" = ? AND "process_key" = ? AND "converged_at" IS NULL`,
           [parsed.prKey, loopKey],
         );
         });

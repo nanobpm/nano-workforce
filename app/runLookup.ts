@@ -172,6 +172,17 @@ async function childPrViews(data: DataLayer, engine: Engine | undefined, prKeys:
   return prViews(data, engine, rows.filter((r): r is TrackedPullRequest => r != null));
 }
 
+/** True when run `a` is more current than run `b` (later `updated_at`, then `created_at`). */
+function isNewer(
+  a: { updated_at?: string | null; created_at?: string | null },
+  b: { updated_at?: string | null; created_at?: string | null },
+): boolean {
+  const au = a.updated_at ?? a.created_at ?? "";
+  const bu = b.updated_at ?? b.created_at ?? "";
+  if (au !== bu) return au > bu;
+  return (a.created_at ?? "") > (b.created_at ?? "");
+}
+
 function withChildKeys(view: RunView): RunView {
   const keys = [...view.processInstanceKeys];
   for (const c of view.children) for (const k of c.processInstanceKeys) if (!keys.includes(k)) keys.push(k);
@@ -179,12 +190,14 @@ function withChildKeys(view: RunView): RunView {
 }
 
 /** Look one run up by key — `owner/repo#N` (feature, epic, or PR) or a delivery-graph runKey — at any
- *  stage. Resolution order for an `owner/repo#N` key: feature run, epic, then PR (an issue and a PR
- *  never share a number in one repo; a feature and an epic for the same issue are both returned via
- *  the first match). Null only when nwf has never tracked the key. */
+ *  stage. Resolution order for an `owner/repo#N` key: the CURRENT issue run (feature or epic), then
+ *  PR (an issue and a PR never share a number in one repo). A feature and an epic for the same issue
+ *  can coexist (admission checks separate tables), so the most recently updated one wins — a stale
+ *  feature never shadows a live epic, nor a stale epic a live feature. Null only when nwf has never tracked the key. */
 export async function lookupRun(data: DataLayer, engine: Engine | undefined, key: string): Promise<RunView | null> {
   const feature = await featureRunsTracking(data).get(key);
-  if (feature) {
+  const plan = await plansTracking(data).get(key);
+  if (feature && !(plan && isNewer(plan, feature))) {
     const openEsc = await openEscalationFor(data, key);
     const tasks: UserTaskRow[] = await userTasks(data).find({ subject_key: key }).catch(() => []);
     const status = feature.derived_status;
@@ -231,7 +244,6 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
     });
   }
 
-  const plan = await plansTracking(data).get(key);
   if (plan) {
     const slices = await planTasks(data).find({ plan_key: key });
     const prKeys = slices.map((t) => t.pr_key).filter((k): k is string => typeof k === "string" && k !== "");

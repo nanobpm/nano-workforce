@@ -62,11 +62,12 @@ function memOpen(stores: Record<string, { rows: any[]; key: string }>, ops?: str
         }
         return { changed };
       }
-      if (/^UPDATE "pull_requests" SET "merge_human_approval" = 1 WHERE "pr_key" = \? AND "process_key" = \? AND "converged_at" IS NULL$/.test(sql)) {
+      if (/^UPDATE "pull_requests" SET "merge_human_approval" = 1, "human_approval_submitted" = 1 WHERE "pr_key" = \? AND "process_key" = \? AND "converged_at" IS NULL$/.test(sql)) {
         let changed = 0;
         for (const r of stores.pull_requests?.rows ?? []) {
           if (r.pr_key === params[0] && r.process_key === params[1] && r.converged_at == null) {
             r.merge_human_approval = 1;
+            r.human_approval_submitted = 1;
             changed++;
           }
         }
@@ -1919,8 +1920,10 @@ test("a gated submitPr adopting a live loop stamps merge_human_approval on the r
     await submitPr(live.data, live.engine, pr, [], 20, false, null, true);
     const row = (await live.data.table("pull_requests", "pr_key").get(pr.prKey)) as {
       merge_human_approval?: number | null;
+      human_approval_submitted?: number | null;
     } | null;
     assertEquals(row?.merge_human_approval, 1, "the gate is mirrored onto the /status projection");
+    assertEquals(row?.human_approval_submitted, 1, "adoption records the submitted gate for run lookup");
 
     const ungated = adoptLoop("converging", "ACTIVE");
     await submitPr(ungated.data, ungated.engine, pr);
