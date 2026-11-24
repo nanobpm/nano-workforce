@@ -14,7 +14,7 @@
 // rewrite, removed in 1.0.0. This guard pins the decomposition so the shared cells can't silently
 // drift back into per-caller copies.
 import { test } from "node:test";
-import { assert } from "#test-assert";
+import { assert, assertEquals } from "#test-assert";
 import { readFileSync } from "node:fs";
 
 function model(name: string): string {
@@ -295,4 +295,24 @@ test("implement-cell sends a keyless 'opened' to reconcile rather than straight 
   const xml = flat("implement-cell");
   const done = xml.match(/<bpmn:sequenceFlow\b[^>]*\bid="ic_done"[\s\S]*?<\/bpmn:sequenceFlow>/)?.[0] ?? "";
   assert(/status = "opened" and is defined\(pr\) and pr != null/.test(done), "ic_done requires a PR key for an opened slice");
+});
+
+// Issue #1067: the downstream keyless-`opened` guards (wave-gate hold, record-wave marker, finalizer
+// listing) were removed because implement-cell itself never completes `opened` without a `pr`. Pin
+// that invariant at the source: every arc into `ic_end` must either require a PR key for `opened`,
+// come from a reconcile that adopted one, or come from the abandon arm (where reconcileImplement has
+// already rewritten an unreconciled keyless `opened` to `blocked`).
+test("implement-cell never completes `opened` without `pr` (issue #1067)", () => {
+  const xml = flat("implement-cell");
+  const into = [...xml.matchAll(/<bpmn:sequenceFlow\b[^>]*\btargetRef="ic_end"[^>]*?(?:\/>|>[\s\S]*?<\/bpmn:sequenceFlow>)/g)].map((m) => m[0]);
+  const ids = into.map((f) => f.match(/\bid="([^"]+)"/)?.[1]).sort();
+  assertEquals(ids, ["ic_abandon", "ic_done", "ic_reconciled"], "only the three audited arcs reach ic_end");
+  const done = into.find((f) => f.includes('id="ic_done"')) ?? "";
+  assert(/status = "opened" and is defined\(pr\) and pr != null and string length\(trim\(string\(pr\)\)\) &gt; 0/.test(done), "ic_done needs a non-blank pr for opened");
+  assert(/=reconciled = true/.test(into.find((f) => f.includes('id="ic_reconciled"')) ?? ""), "ic_reconciled requires an adoption");
+  // The implement task must export `pr` (task-local otherwise — nano-bpm#1717 scope parity).
+  assert(/<zeebe:output source="=if \(is defined\(pr\)\) then pr else null" target="pr" \/>/.test(xml), "implement-task maps pr out");
+  // Every answer resume nulls status AND pr before re-running the agent, so a stale pr can't pair with a new opened.
+  const reset = xml.match(/<bpmn:serviceTask\b[^>]*\bid="record-implementing"[\s\S]*?<\/bpmn:serviceTask>/)?.[0] ?? "";
+  assert(/source="=null" target="status"/.test(reset) && /source="=null" target="pr"/.test(reset), "resume resets status and pr");
 });

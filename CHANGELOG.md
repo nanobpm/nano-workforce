@@ -1,3 +1,15 @@
+## [0.223.8](https://github.com/nanobpm/nano-workforce/compare/v0.223.7...v0.223.8) (2026-11-24)
+
+### Code Refactoring
+
+* **implement-cell:** drop keyless-opened wave/record guards made redundant by the pr output mapping ([#1068](https://github.com/nanobpm/nano-workforce/issues/1068)) ([bf9cd97](https://github.com/nanobpm/nano-workforce/commit/bf9cd97c156f62417561e50d8f7eafa13859efda)), closes [#1067](https://github.com/nanobpm/nano-workforce/issues/1067)
+
+## [0.223.7](https://github.com/nanobpm/nano-workforce/compare/v0.223.6...v0.223.7) (2026-11-24)
+
+### Documentation
+
+* **api:** document start/feature autoMerge-implies-converge flag table ([#1063](https://github.com/nanobpm/nano-workforce/issues/1063)) ([99a3f2c](https://github.com/nanobpm/nano-workforce/commit/99a3f2c4cfb8a507c95800adef0947f7398253f3)), closes [#1058](https://github.com/nanobpm/nano-workforce/issues/1058)
+
 ## [0.223.6](https://github.com/nanobpm/nano-workforce/compare/v0.223.5...v0.223.6) (2026-11-24)
 
 ### Build System
