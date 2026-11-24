@@ -300,7 +300,13 @@ export function extractRunSignals(runKey: string, runUrl: string | null, records
 }
 
 /** History search has no paging parameter; the engine may cap one unfiltered page. When a page looks
- *  capped, re-read the run one loop iteration at a time so a long run is never silently truncated. */
+ *  capped, re-read the run one loop iteration at a time so a long run is never silently truncated.
+ *
+ *  KNOWN LIMITATION: the `EngineClient.searchAgentInstanceHistory` seam returns only COMMITTED history
+ *  items — in-flight (uncommitted/pending) records of a still-running agent are not visible here, so a
+ *  sweep can under-count friction for runs active at sweep time. Read through the seam only (never the
+ *  engine REST API directly). Follow-up nanobpm/nano-workforce#1095 covers all three commit statuses
+ *  with proper paging (gated on nano-ide#630). */
 export const HISTORY_PAGE_CAP = 100;
 const MAX_ITERATIONS = 5000;
 
