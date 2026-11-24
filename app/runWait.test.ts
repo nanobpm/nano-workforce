@@ -187,3 +187,9 @@ test("waitForRun: an aborted signal stops polling without further lookups", asyn
   assertEquals(res.found && res.timedOut, true);
   assertEquals(calls, 1);
 });
+
+test("a zero timeout is a non-blocking peek: unknown key is found:false, known key returns its snapshot", async () => {
+  assertEquals(await waitForRun(seq(null), "merged", 0, fakeClock()), { found: false });
+  const res = await waitForRun(seq(view()), "merged", 0, fakeClock());
+  assertEquals(res.found && res.timedOut && res.view !== null, true);
+});

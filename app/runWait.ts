@@ -111,6 +111,10 @@ export type WaitResult =
 
 const EXPIRED = Symbol("expired");
 
+/** Minimum budget for the INITIAL lookup, so a zero/near-zero timeout is a non-blocking peek (snapshot
+ *  or 404) rather than an unconditional 504. */
+export const INITIAL_LOOKUP_FLOOR_MS = 5_000;
+
 /** Race `p` against the remaining budget so a stalled lookup can never outlive the wait deadline. */
 async function bounded<T>(p: Promise<T>, ms: number): Promise<T | typeof EXPIRED> {
   if (ms <= 0) return EXPIRED;
@@ -138,7 +142,7 @@ export async function waitForRun(
   signal?: AbortSignal,
 ): Promise<WaitResult> {
   const deadline = clock.now() + timeoutMs;
-  const first = await bounded(lookup(), timeoutMs);
+  const first = await bounded(lookup(), Math.max(timeoutMs, INITIAL_LOOKUP_FLOOR_MS));
   if (first === EXPIRED) return { found: true, timedOut: true, reason: null, until, view: null };
   if (!first) return { found: false };
   let view: RunView = first;
