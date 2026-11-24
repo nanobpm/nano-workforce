@@ -1202,7 +1202,10 @@ async function submitPrCritical(
         // the fresh run's intent wins, and the approval state mirrors the fresh loop's `humanApproval` seed.
         merge_requested: mergeIntent ? 1 : 0,
         merge_human_approval: gated ? 1 : 0,
-        human_approval_submitted: humanApproval ? 1 : 0,
+        // The SUBMITTED setting is the RUN's, not this call's: an internal merge->convergence handoff
+        // (`handingBack`) passes `humanApproval=false` because the gate was already decided, so it must
+        // keep the stamp the run was submitted with (else `/run` reports approval as disabled).
+        human_approval_submitted: handingBack ? (existing?.human_approval_submitted ?? null) : humanApproval ? 1 : 0,
         // Operator-steering projection (issue #956): run-scoped too — the fresh run's steering wins.
         custom_instructions: instructions != null ? 1 : 0,
         custom_instructions_text: instructions,

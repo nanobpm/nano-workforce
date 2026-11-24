@@ -3298,6 +3298,32 @@ test("submitPr handoffFrom: only the owning merge-loop instance may re-enter con
   });
 });
 
+test("submitPr handoffFrom: the merge->convergence handoff keeps the SUBMITTED human-approval setting (#1054)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#78";
+    for (const submitted of [1, 0, null]) {
+      const stores: Record<string, { rows: any[]; key: string }> = {
+        pull_requests: {
+          rows: [{ pr_key: PR_KEY, repo: "owner/repo", number: 78, url: "https://github.com/owner/repo/pull/78", title: "t", status: "waiting_merge", current_round: 4, process_key: "PI-MERGE", human_approval_submitted: submitted }],
+          key: "pr_key",
+        },
+        escalations: { rows: [], key: "id" },
+        pr_adjudications: { rows: [], key: "id" },
+        pr_dependencies: { rows: [], key: "pr_key" },
+      };
+      const data = { table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)), open: () => memOpen(stores) } as any;
+      const engine = { createInstance: async () => ({ processInstanceKey: "PI-CONV" }) } as any;
+      const parsed = { repo: "owner/repo", number: 78, url: "https://github.com/owner/repo/pull/78", prKey: PR_KEY };
+      // The internal handoff passes humanApproval=false (the gate was already decided) — that must not
+      // rewrite what the run was SUBMITTED with, or /run reports approval as disabled.
+      await submitPr(data, engine, parsed, [], undefined, false, null, false, false, undefined, "PI-MERGE");
+      const row = stores.pull_requests.rows[0];
+      assertEquals(row.process_key, "PI-CONV");
+      assertEquals(row.human_approval_submitted, submitted, `handoff preserves submitted=${submitted}`);
+    }
+  });
+});
+
 // Issue #941 review: a redelivered `pr.reconverge` can arrive AFTER its successor has already
 // settled the PR (merged/abandoned). The stale job still carries the OLD merge-loop instance key as
 // `handoffFrom`, and the settled row's `process_key` still names that same instance, so an owner
