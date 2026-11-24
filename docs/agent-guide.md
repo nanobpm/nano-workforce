@@ -249,10 +249,10 @@ A terminal PR has left `/status`.
 
 ---
 
-### Look up ONE run by key — `GET /runs/{key}` (`d8ctl nwf show <key>`)
+### Look up ONE run by key — `GET /run?key=<key>` (`d8ctl nwf show <key>`)
 
 ```bash
-curl -sS "__BASE__/runs/$(jq -rn --arg k 'owner/repo#123' '$k|@uri')" | jq   # tool: getRun
+curl -sS "__BASE__/run?key=$(jq -rn --arg k 'owner/repo#123' '$k|@uri')" | jq   # tool: getRun
 ```
 
 `/status` only lists in-flight rows; to check a single run — at **any** stage — look it up by
@@ -555,7 +555,7 @@ failed/garbled `gh` read is "not ready" (the bounded wait routes via `onTimeout`
 |---|---|---|
 | Live version (§0) | `getVersion` | `GET __BASE__/version` |
 | PRs in flight (§0) | `listActivePrs` | `GET __BASE__/status` |
-| One run by key, any stage (§5) | `getRun` | `GET __BASE__/runs/{key}` (key URL-encoded) |
+| One run by key, any stage (§5) | `getRun` | `GET __BASE__/run?key=<key>` (key URL-encoded query value) |
 | Submit a PR / epic / feature (§1–2) | `startConvergenceLoop` / `startPlanFanout` / `startFeature` | `POST __BASE__/actions/start/{convergence-loop,plan-fanout,feature}` |
 | List escalations (§3) | `listEscalations` | `GET __BASE__/escalations` |
 | Answer an escalation (§3) | `completeUserTask` (as agent: `agentCompleteEscalation`) | `POST __BASE__/actions/complete-user-task` (as agent: `POST __BASE__/hooks/agent-complete` with `agentId` required) |

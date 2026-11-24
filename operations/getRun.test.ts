@@ -1,4 +1,4 @@
-// Tests for GET /app/api/runs/{key} → operation `getRun` (issue #1054): look up ONE run by key at any
+// Tests for GET /app/api/run?key=<key> → operation `getRun` (issue #1054): look up ONE run by key at any
 // stage. Headline: a feature run BEFORE its PR opens (absent from /status) is found; the same feature
 // once converging carries its convergence-loop PR as a child; a merged (terminal) PR is still found;
 // epics and delivery runs resolve; an unknown key is a 404; the shared-secret guard holds.
@@ -102,13 +102,13 @@ function input(key: string, headers: Record<string, string> = {}) {
   return {
     req: {
       method: "GET",
-      path: `/app/api/runs/${encodeURIComponent(key)}`,
-      query: new URLSearchParams(),
+      path: "/app/api/run",
+      query: new URLSearchParams({ key }),
       headers: new Headers(headers),
       text: async () => "",
     } as unknown,
-    params: { key },
-    query: {},
+    params: {},
+    query: { key },
     body: undefined,
   };
 }
@@ -213,15 +213,21 @@ test("an unknown key is a 404", async () => {
   assertEquals(res.status, 404);
 });
 
-test("a PR's humanApproval reflects the submitted setting, not the merge-gate outcome", async () => {
-  // autoMerge NOT requested → blockedBy would be null; the run was still submitted with humanApproval.
-  const gated = memApp({ pull_requests: [pr({ merge_requested: 0, merge_human_approval: 1 })] }, PKS);
+test("a PR's humanApproval reflects the SUBMITTED setting, surviving approval and the merge handoff", async () => {
+  // Submitted gated, approval still outstanding.
+  const gated = memApp({ pull_requests: [pr({ merge_human_approval: 1, human_approval_submitted: 1 })] }, PKS);
   assertEquals(((await handler(input("o/r#9"), gated)) as Row).body.settings.humanApproval, true);
-  // Approval granted (column stamped 0) — the root var still carries the submitted setting.
-  const approved = memApp({ pull_requests: [pr({ merge_human_approval: 0 })] }, PKS, [
-    { name: "humanApproval", processInstanceKey: "proc-p", scopeKey: "proc-p", value: "true" },
-  ]);
-  assertEquals(((await handler(input("o/r#9"), approved)) as Row).body.settings.humanApproval, true);
-  const off = memApp({ pull_requests: [pr()] }, PKS);
+  // After approve + startMerge: the loop var is cleared to false and merge_human_approval reset to 0,
+  // yet the run was still submitted with humanApproval.
+  const merging = memApp(
+    { pull_requests: [pr({ status: "merging", merge_requested: 1, merge_human_approval: 0, human_approval_submitted: 1 })] },
+    PKS,
+    [{ name: "humanApproval", processInstanceKey: "proc-p", scopeKey: "proc-p", value: "false" }],
+  );
+  assertEquals(((await handler(input("o/r#9"), merging)) as Row).body.settings.humanApproval, true);
+  const off = memApp({ pull_requests: [pr({ human_approval_submitted: 0 })] }, PKS);
   assertEquals(((await handler(input("o/r#9"), off)) as Row).body.settings.humanApproval, false);
+  // A pre-148 row has no record of the submitted setting: unknown, not a guess.
+  const legacy = memApp({ pull_requests: [pr({ merge_human_approval: 0 })] }, PKS);
+  assertEquals(((await handler(input("o/r#9"), legacy)) as Row).body.settings.humanApproval, null);
 });

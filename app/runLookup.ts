@@ -1,4 +1,4 @@
-// Single-run lookup (issue #1054): `GET /runs/{key}` answers "what is THIS run doing?" for ANY stage
+// Single-run lookup (issue #1054): `GET /run?key=<key>` answers "what is THIS run doing?" for ANY stage
 // — a feature before its PR opens, an epic fanning out, a PR converging/merging, a delivery-graph run,
 // and every one of them after it went terminal (until an operator acknowledges it, and beyond: the row
 // persists). `/status` only lists in-flight rows, so a caller driving nwf (d8ctl) had to filter the
@@ -108,67 +108,68 @@ function asNumber(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-/** The human-approval setting the PR run was SUBMITTED with — never the merge-gate outcome
- *  (`merge.blockedBy` reports "env"/null ahead of "human-approval" and clears once approved).
- *  The loop's `humanApproval` root var is the submission-time truth; the writer-stamped
- *  `merge_human_approval` column is the fallback when the engine var is unreadable. */
-async function prHumanApproval(
-  engine: Engine | undefined,
-  processKey: string | null,
-  row: TrackedPullRequest,
-): Promise<boolean | null> {
-  const v = await readRootVar(engine, processKey, "humanApproval");
-  if (typeof v === "boolean") return v;
-  const col = row.merge_human_approval;
-  return col === null || col === undefined ? null : col === 1;
+/** The human-approval setting the PR run was SUBMITTED with — never the merge-gate outcome. Both the
+ *  loop's `humanApproval` variable and `merge_human_approval` are the OUTSTANDING-approval state (an
+ *  approve and `startMerge` clear them), so only the write-once `human_approval_submitted` column
+ *  (148, stamped by `submitPr`) answers it. Null for a row written before that column existed. */
+function prHumanApproval(row: TrackedPullRequest): boolean | null {
+  const v = row.human_approval_submitted;
+  return v === null || v === undefined ? null : v === 1;
 }
 
-async function prView(
+/** Project PR rows into run views with ONE `projectPrRows` call (one user-task read for the whole
+ *  set) and the per-run `maxRounds` engine reads issued concurrently, so an epic's lookup does not
+ *  pay N sequential projections. */
+async function prViews(
   data: DataLayer,
   engine: Engine | undefined,
-  row: TrackedPullRequest,
-): Promise<RunView> {
-  const [projected] = await projectPrRows(data, engine, [row]);
-  // `projectPrRows` reports the in-flight workflow status; past the terminal edge the folded
-  // `derived_status` (merged/converged/abandoned) is the truth for a lookup at any stage.
-  const p: ActivePr = projected;
-  const terminal = row.derived_status !== row.status && p.status === row.status ? row.derived_status : p.status;
-  return {
-    key: p.prKey,
-    kind: "pr",
-    title: p.title,
-    status: terminal,
-    stage: terminal,
-    settings: {
-      ...emptySettings(),
-      converge: true,
-      autoMerge: p.merge.requested,
-      humanApproval: await prHumanApproval(engine, p.processKey, row),
-      maxRounds: asNumber(await readRootVar(engine, p.processKey, "maxRounds")),
-      autoResolveEscalations: p.autoResolveEscalations,
-      hasCustomInstructions: p.hasCustomInstructions,
-    },
-    processInstanceKey: p.processKey,
-    processInstanceKeys: p.processKey ? [p.processKey] : [],
-    activeWorker: p.activeWorker,
-    leaseUntil: p.leaseUntil,
-    prUrl: p.url,
-    openEscalation: p.openEscalation,
-    incident: p.incident,
-    acknowledgedAt: row.acknowledged_at ?? null,
-    createdAt: row.created_at ?? null,
-    updatedAt: p.updatedAt,
-    children: [],
-  };
+  rows: readonly TrackedPullRequest[],
+): Promise<RunView[]> {
+  if (rows.length === 0) return [];
+  const projected: ActivePr[] = await projectPrRows(data, engine, [...rows]);
+  const byKey = new Map(projected.map((p) => [p.prKey, p]));
+  return Promise.all(
+    rows.map(async (row) => {
+      const p = byKey.get(row.pr_key);
+      if (!p) throw new Error(`projectPrRows dropped ${row.pr_key}`);
+      // `projectPrRows` reports the in-flight workflow status; past the terminal edge the folded
+      // `derived_status` (merged/converged/abandoned) is the truth for a lookup at any stage.
+      const terminal = row.derived_status !== row.status && p.status === row.status ? row.derived_status : p.status;
+      return {
+        key: p.prKey,
+        kind: "pr" as const,
+        title: p.title,
+        status: terminal,
+        stage: terminal,
+        settings: {
+          ...emptySettings(),
+          converge: true,
+          autoMerge: p.merge.requested,
+          humanApproval: prHumanApproval(row),
+          maxRounds: asNumber(await readRootVar(engine, p.processKey, "maxRounds")),
+          autoResolveEscalations: p.autoResolveEscalations,
+          hasCustomInstructions: p.hasCustomInstructions,
+        },
+        processInstanceKey: p.processKey,
+        processInstanceKeys: p.processKey ? [p.processKey] : [],
+        activeWorker: p.activeWorker,
+        leaseUntil: p.leaseUntil,
+        prUrl: p.url,
+        openEscalation: p.openEscalation,
+        incident: p.incident,
+        acknowledgedAt: row.acknowledged_at ?? null,
+        createdAt: row.created_at ?? null,
+        updatedAt: p.updatedAt,
+        children: [],
+      };
+    }),
+  );
 }
 
 async function childPrViews(data: DataLayer, engine: Engine | undefined, prKeys: readonly string[]): Promise<RunView[]> {
-  const out: RunView[] = [];
-  for (const k of [...new Set(prKeys)]) {
-    const row = await prsTracking(data).get(k);
-    if (row) out.push(await prView(data, engine, row));
-  }
-  return out;
+  const table = prsTracking(data);
+  const rows = await Promise.all([...new Set(prKeys)].map((k) => table.get(k)));
+  return prViews(data, engine, rows.filter((r): r is TrackedPullRequest => r != null));
 }
 
 function withChildKeys(view: RunView): RunView {
@@ -262,7 +263,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
   }
 
   const pr = await prsTracking(data).get(key);
-  if (pr) return prView(data, engine, pr);
+  if (pr) return (await prViews(data, engine, [pr]))[0];
 
   const run = await deliveryGraphRunsTracking(data).get(key);
   if (run) {

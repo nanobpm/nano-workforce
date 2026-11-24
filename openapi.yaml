@@ -311,7 +311,7 @@ components:
               description: The commit the instance runs; null only when no source (env, .git, build-info.json) knows it.
     RunView:
       type: object
-      description: "One run looked up by key at any stage (issue #1054) — GET /runs/{key}."
+      description: "One run looked up by key at any stage (issue #1054) — GET /run?key=."
       additionalProperties: false
       required: [key, kind, title, status, stage, settings, processInstanceKey, processInstanceKeys, activeWorker, leaseUntil, prUrl, openEscalation, incident, acknowledgedAt, createdAt, updatedAt, children]
       properties:
@@ -5363,7 +5363,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
-  /runs/{key}:
+  /run:
     get:
       operationId: getRun
       x-cli:
@@ -5371,8 +5371,10 @@ paths:
         positional: [key]
       summary: "Look up ONE run by key at any stage (issue #1054) — queued, blocked-on, implementing, PR open, converging, merging, or terminal."
       description: >-
-        `d8ctl nwf show <key>`. The key is `owner/repo#N` (a feature run, an epic, or a PR — URL-encode
-        it, e.g. `nanobpm%2Fnano-coder%23332`) or a delivery-graph runKey. Unlike `/status` (in-flight
+        `d8ctl nwf show <key>`. The key is `owner/repo#N` (a feature run, an epic, or a PR) or a
+        delivery-graph runKey, passed as the `key` QUERY value (`/run?key=nanobpm%2Fnano-coder%23332`): the
+        Nano Console proxy peels one percent-encoding layer before routing, so an encoded slash in a
+        PATH segment would split the key and 404 (the #744 transcript failure class). Unlike `/status` (in-flight
         rows only) this answers for a feature BEFORE its PR opens, during convergence, and after merge.
         Returns the run's kind, status/stage, effective settings, engine processInstanceKey(s), active
         worker + lease, PR URL when known, open escalation, updatedAt, and child runs (feature → its
@@ -5380,12 +5382,12 @@ paths:
         `/status` serves. 404 only when nwf has never tracked the key.
       parameters:
         - name: key
-          in: path
+          in: query
           required: true
           schema:
             type: string
             minLength: 1
-          description: The run key — `owner/repo#N` (URL-encoded) or a delivery-graph runKey.
+          description: The run key — `owner/repo#N` (URL-encoded as a query value) or a delivery-graph runKey.
       security:
         - hookSecret: []
         - {}

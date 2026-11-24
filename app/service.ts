@@ -472,6 +472,9 @@ export interface PullRequest {
   // rows fall back to the #937 batched engine read. Run-scoped: reset by the atomic reopen.
   merge_requested?: number | null;
   merge_human_approval?: number | null;
+  // The human-approval SETTING the run was submitted with (148, issue #1054) — unlike
+  // `merge_human_approval` it is never cleared by an approve or `startMerge`. NULL = pre-148 row.
+  human_approval_submitted?: number | null;
   // Operator-steering projection (134_pull_requests_custom_instructions.sql, issue #956): 1 ⇒ this
   // run's converge agents carry `customInstructions` (stamped by `submitPr` at submit/reopen, run-
   // scoped like the merge policy), so `/status` shows the loop is steered with no engine read. NULL
@@ -1012,6 +1015,8 @@ async function submitPrCritical(
       // Mirror the engine seed EXACTLY (PR #950 review): an ungated loop is seeded
       // `humanApproval: false` (decided — no gate), a gated one `true` (outstanding).
       merge_human_approval: gated ? 1 : 0,
+      // The SUBMITTED human-approval setting (148, issue #1054): never cleared by approve/startMerge.
+      human_approval_submitted: humanApproval ? 1 : 0,
       // Operator-steering projection (issue #956): 1 ⇒ this run's converge agents carry custom
       // instructions, so `/status` can show the loop is steered with no engine read. The TEXT is
       // durable alongside (issue #956 review) so a handoff/re-enrollment can re-supply it.
@@ -1131,6 +1136,7 @@ async function submitPrCritical(
         // authoritative (`stale: false`) in `/status`.
         merge_requested: existing.merge_requested ?? null,
         merge_human_approval: existing.merge_human_approval ?? null,
+        human_approval_submitted: existing.human_approval_submitted ?? null,
         // The operator-steering projection (issue #956) rolls back with the same ownership.
         custom_instructions: existing.custom_instructions ?? null,
         custom_instructions_text: existing.custom_instructions_text ?? null,
@@ -1196,6 +1202,7 @@ async function submitPrCritical(
         // the fresh run's intent wins, and the approval state mirrors the fresh loop's `humanApproval` seed.
         merge_requested: mergeIntent ? 1 : 0,
         merge_human_approval: gated ? 1 : 0,
+        human_approval_submitted: humanApproval ? 1 : 0,
         // Operator-steering projection (issue #956): run-scoped too — the fresh run's steering wins.
         custom_instructions: instructions != null ? 1 : 0,
         custom_instructions_text: instructions,
@@ -1489,7 +1496,7 @@ export async function activePrs(
 }
 
 /** The ONE `/status` PR-row projection (issue #1054): `activePrs` feeds it the in-flight set, and the
- *  single-run lookup (`GET /runs/{key}`, app/runLookup.ts) feeds it one tracked row at ANY stage, so
+ *  single-run lookup (`GET /run?key=<key>`, app/runLookup.ts) feeds it one tracked row at ANY stage, so
  *  both reads share a single derivation of status/overlay/escalation/merge policy/wait reason. */
 export async function projectPrRows(
   data: DataLayer,
