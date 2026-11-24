@@ -1,0 +1,277 @@
+// Single-run lookup (issue #1054): `GET /runs/{key}` answers "what is THIS run doing?" for ANY stage
+// — a feature before its PR opens, an epic fanning out, a PR converging/merging, a delivery-graph run,
+// and every one of them after it went terminal (until an operator acknowledges it, and beyond: the row
+// persists). `/status` only lists in-flight rows, so a caller driving nwf (d8ctl) had to filter the
+// whole list client-side — and a feature run never appeared there before its PR existed.
+//
+// Derivation over duplication: the PR and delivery projections are the SAME `projectPrRows` /
+// `projectDeliveryRows` `/status` uses (app/service.ts), fed one tracked row at any stage instead of
+// the in-flight set; the feature stage is the canonical `deriveStage` (app/stage.ts); open escalations
+// come from the ONE `user_tasks` read model. Nothing here re-derives a status rule.
+
+import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { deliveryGraphRunsTracking } from "./deliveryGraphRun.ts";
+import { featureRunsTracking } from "./feature.ts";
+import { plansTracking, planTasks } from "./plan.ts";
+import { parsePr } from "./prParse.ts";
+import {
+  type ActiveDelivery,
+  type ActivePr,
+  projectDeliveryRows,
+  projectPrRows,
+  prsTracking,
+  type StatusIncident,
+  type TrackedPullRequest,
+} from "./service.ts";
+import { deriveStage } from "./stage.ts";
+import { type OpenEscalation, toOpenEscalation, type UserTaskRow, userTasks } from "./userTasks.ts";
+
+export type RunKind = "feature" | "epic" | "pr" | "delivery";
+
+/** The effective settings a run was submitted with. A field the run's kind does not carry is null. */
+export interface RunSettings {
+  converge: boolean | null;
+  autoMerge: boolean | null;
+  humanApproval: boolean | null;
+  /** The feature's readiness gate (the desugared `blockedOn`/`readiness` probes), read best-effort
+   *  from the run's root-scope `readinessProbes` variable; null when none/unreadable. */
+  blockedOn: unknown[] | null;
+  /** The PR loop's round budget (`maxRounds` root variable), best-effort; null when unset/unreadable. */
+  maxRounds: number | null;
+  autoResolveEscalations: boolean;
+  hasCustomInstructions: boolean;
+}
+
+export interface RunView {
+  key: string;
+  kind: RunKind;
+  title: string | null;
+  /** The run's workflow status (the effective, terminal-folded status; `incident` while parked on one). */
+  status: string;
+  /** The pipeline stage/phase: a feature's derived pipeline stage, an epic's phase, a PR's status, a
+   *  delivery run's phase. */
+  stage: string | null;
+  settings: RunSettings;
+  processInstanceKey: string | null;
+  /** Every engine instance this run spans (its own, then its children's). */
+  processInstanceKeys: string[];
+  activeWorker: string | null;
+  leaseUntil: string | null;
+  prUrl: string | null;
+  openEscalation: OpenEscalation | null;
+  incident: StatusIncident | null;
+  acknowledgedAt: string | null;
+  createdAt: string | null;
+  updatedAt: string;
+  /** Child runs (feature → its convergence loop PR; epic → its slice PRs). Children carry no children. */
+  children: RunView[];
+}
+
+type Engine = Pick<EngineClient, "searchVariables">;
+
+/** Best-effort root-scope variable read (JSON-decoded); undefined when absent or unreadable. */
+async function readRootVar(engine: Engine | undefined, processKey: string | null, name: string): Promise<unknown> {
+  if (!engine || !processKey) return undefined;
+  try {
+    const rows = await engine.searchVariables({ processInstanceKey: processKey, scopeKey: processKey, name });
+    const row = rows.find((r) => r.name === name && String(r.scopeKey) === processKey);
+    if (!row) return undefined;
+    try {
+      return JSON.parse(row.value);
+    } catch {
+      return row.value;
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+async function openEscalationFor(data: DataLayer, subjectKey: string): Promise<OpenEscalation | null> {
+  const rows: UserTaskRow[] = await userTasks(data).find({ subject_key: subjectKey }).catch(() => []);
+  const newest = [...rows].sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0))[0];
+  return newest ? toOpenEscalation(newest) : null;
+}
+
+function emptySettings(): RunSettings {
+  return {
+    converge: null,
+    autoMerge: null,
+    humanApproval: null,
+    blockedOn: null,
+    maxRounds: null,
+    autoResolveEscalations: false,
+    hasCustomInstructions: false,
+  };
+}
+
+function asNumber(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+async function prView(
+  data: DataLayer,
+  engine: Engine | undefined,
+  row: TrackedPullRequest,
+): Promise<RunView> {
+  const [projected] = await projectPrRows(data, engine, [row]);
+  // `projectPrRows` reports the in-flight workflow status; past the terminal edge the folded
+  // `derived_status` (merged/converged/abandoned) is the truth for a lookup at any stage.
+  const p: ActivePr = projected;
+  const terminal = row.derived_status !== row.status && p.status === row.status ? row.derived_status : p.status;
+  return {
+    key: p.prKey,
+    kind: "pr",
+    title: p.title,
+    status: terminal,
+    stage: terminal,
+    settings: {
+      ...emptySettings(),
+      converge: true,
+      autoMerge: p.merge.requested,
+      humanApproval: p.merge.blockedBy === "human-approval",
+      maxRounds: asNumber(await readRootVar(engine, p.processKey, "maxRounds")),
+      autoResolveEscalations: p.autoResolveEscalations,
+      hasCustomInstructions: p.hasCustomInstructions,
+    },
+    processInstanceKey: p.processKey,
+    processInstanceKeys: p.processKey ? [p.processKey] : [],
+    activeWorker: p.activeWorker,
+    leaseUntil: p.leaseUntil,
+    prUrl: p.url,
+    openEscalation: p.openEscalation,
+    incident: p.incident,
+    acknowledgedAt: row.acknowledged_at ?? null,
+    createdAt: row.created_at ?? null,
+    updatedAt: p.updatedAt,
+    children: [],
+  };
+}
+
+async function childPrViews(data: DataLayer, engine: Engine | undefined, prKeys: readonly string[]): Promise<RunView[]> {
+  const out: RunView[] = [];
+  for (const k of [...new Set(prKeys)]) {
+    const row = await prsTracking(data).get(k);
+    if (row) out.push(await prView(data, engine, row));
+  }
+  return out;
+}
+
+function withChildKeys(view: RunView): RunView {
+  const keys = [...view.processInstanceKeys];
+  for (const c of view.children) for (const k of c.processInstanceKeys) if (!keys.includes(k)) keys.push(k);
+  return { ...view, processInstanceKeys: keys };
+}
+
+/** Look one run up by key — `owner/repo#N` (feature, epic, or PR) or a delivery-graph runKey — at any
+ *  stage. Resolution order for an `owner/repo#N` key: feature run, epic, then PR (an issue and a PR
+ *  never share a number in one repo; a feature and an epic for the same issue are both returned via
+ *  the first match). Null only when nwf has never tracked the key. */
+export async function lookupRun(data: DataLayer, engine: Engine | undefined, key: string): Promise<RunView | null> {
+  const feature = await featureRunsTracking(data).get(key);
+  if (feature) {
+    const openEsc = await openEscalationFor(data, key);
+    const tasks: UserTaskRow[] = await userTasks(data).find({ subject_key: key }).catch(() => []);
+    const status = feature.derived_status;
+    const derived = deriveStage({
+      status,
+      pr_key: feature.pr_key,
+      converge: feature.converge,
+      auto_merge: feature.auto_merge,
+      hasOpenBlockedTask: tasks.some((t) => t.element_id === "feature-blocked"),
+      hasOpenEscalationTask: tasks.some((t) => t.element_id === "feature-escalation"),
+    });
+    const probes = await readRootVar(engine, feature.process_key, "readinessProbes");
+    const children = feature.pr_key ? await childPrViews(data, engine, [feature.pr_key]) : [];
+    const child = children[0];
+    return withChildKeys({
+      key,
+      kind: "feature",
+      title: feature.title ?? null,
+      status,
+      stage: derived.stage,
+      settings: {
+        ...emptySettings(),
+        converge: feature.converge === 1,
+        autoMerge: feature.auto_merge === 1,
+        humanApproval: feature.human_approval === 1,
+        blockedOn: Array.isArray(probes) && probes.length > 0 ? probes : null,
+        maxRounds: child?.settings.maxRounds ?? null,
+        autoResolveEscalations: feature.auto_resolve_escalations === 1,
+        hasCustomInstructions: typeof feature.custom_instructions === "string" && feature.custom_instructions !== "",
+      },
+      processInstanceKey: feature.process_key ?? null,
+      processInstanceKeys: feature.process_key ? [feature.process_key] : [],
+      // While implementing, the lease lives on the agent job, not a tracked row; once the PR is in
+      // its loop, the loop's worker/lease is the active one.
+      activeWorker: child?.activeWorker ?? null,
+      leaseUntil: child?.leaseUntil ?? null,
+      prUrl: child?.prUrl ?? (parsePr(feature.pr_key)?.url ?? null),
+      openEscalation: openEsc ?? child?.openEscalation ?? null,
+      incident: null,
+      acknowledgedAt: feature.acknowledged_at ?? null,
+      createdAt: feature.created_at,
+      updatedAt: feature.updated_at,
+      children,
+    });
+  }
+
+  const plan = await plansTracking(data).get(key);
+  if (plan) {
+    const slices = await planTasks(data).find({ plan_key: key });
+    const prKeys = slices.map((t) => t.pr_key).filter((k): k is string => typeof k === "string" && k !== "");
+    const children = await childPrViews(data, engine, prKeys);
+    return withChildKeys({
+      key,
+      kind: "epic",
+      title: plan.title ?? null,
+      status: plan.derived_status,
+      stage: plan.epic_phase ?? plan.derived_status,
+      settings: {
+        ...emptySettings(),
+        converge: true,
+        autoMerge: plan.auto_merge === 1,
+        autoResolveEscalations: plan.auto_resolve_escalations === 1,
+      },
+      processInstanceKey: plan.process_key ?? null,
+      processInstanceKeys: plan.process_key ? [plan.process_key] : [],
+      activeWorker: null,
+      leaseUntil: null,
+      prUrl: null,
+      openEscalation: await openEscalationFor(data, key),
+      incident: null,
+      acknowledgedAt: plan.acknowledged_at ?? null,
+      createdAt: plan.created_at,
+      updatedAt: plan.updated_at,
+      children,
+    });
+  }
+
+  const pr = await prsTracking(data).get(key);
+  if (pr) return prView(data, engine, pr);
+
+  const run = await deliveryGraphRunsTracking(data).get(key);
+  if (run) {
+    const [d]: ActiveDelivery[] = await projectDeliveryRows(data, [run]);
+    const status = d.incident ? d.status : run.derived_status;
+    return {
+      key,
+      kind: "delivery",
+      title: d.title,
+      status,
+      stage: d.phase ?? status,
+      settings: { ...emptySettings(), autoResolveEscalations: d.autoResolveEscalations },
+      processInstanceKey: d.processKey,
+      processInstanceKeys: d.processKey ? [d.processKey] : [],
+      activeWorker: null,
+      leaseUntil: null,
+      prUrl: null,
+      openEscalation: d.openEscalation,
+      incident: d.incident,
+      acknowledgedAt: run.acknowledged_at ?? null,
+      createdAt: run.created_at,
+      updatedAt: d.updatedAt,
+      children: [],
+    };
+  }
+  return null;
+}

@@ -35,7 +35,7 @@ import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
 import { DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
-import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRuns, deliveryGraphRunsTracking, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim } from "./deliveryGraphRun.ts";
+import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRuns, deliveryGraphRunsTracking, deriveDeliveryPhase, parseHumanLabels, reconcileOriginalInstanceBeforeRelaunch, reconcileStaleLaunchClaim, type TrackedDeliveryGraphRun } from "./deliveryGraphRun.ts";
 import { decodeLivePrompt, deliveryHumanContextQuestion, deliveryHumanContextUrl, isDeliveryHumanElement, needsLiveDeliveryPrompt } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
@@ -507,12 +507,12 @@ const prs = (data: DataLayer) => data.table<PullRequest>("pull_requests", "pr_ke
 /** A PR row as seen through its derived tracking VIEW (`pull_requests__tracking`): the base columns
  * plus urban's ADR-0065 `derived_status`, which folds the reconciler's terminal edge
  * (out-of-band terminate → `abandoned`) over the worker-owned transient. */
-type TrackedPullRequest = PullRequest & { derived_status: string };
+export type TrackedPullRequest = PullRequest & { derived_status: string };
 /** Read-only accessor over the PR derived tracking VIEW. Use this — and read `derived_status`, not
  * `status` — for any terminal-edge classification (delivery/promotion/feature reconciliation), so an
  * out-of-band-terminated PR (whose base row is still `converging`) is correctly seen as `abandoned`.
  * Worker-written terminals (`merged`/`converged`) pass through unchanged. Writes stay on `prs`. */
-const prsTracking = (data: DataLayer) =>
+export const prsTracking = (data: DataLayer) =>
   derivedTrackingTable<TrackedPullRequest>(data, "pull_requests", "pr_key");
 const escs = (data: DataLayer) => data.table<Escalation>("escalations", "id");
 const deps = (data: DataLayer) => data.table<PrDependency>("pr_dependencies", "pr_key");
@@ -1474,7 +1474,8 @@ export async function activePrs(
   engine?: Pick<EngineClient, "searchVariables">,
 ): Promise<ActivePr[]> {
   const all = await prsTracking(data).all();
-  const active = all
+  return projectPrRows(data, engine, all
+
     // ADR-0065: classify "in flight" on the DERIVED terminal edge, not the base transient. A PR whose
     // engine instance was terminated out-of-band (or by an ordinary in-app cancel — derive-only under
     // urban 0.81.0) keeps its base `status` frozen at the last worker transient but reads `abandoned`
@@ -1484,7 +1485,17 @@ export async function activePrs(
     // `base.*`), and `pull_requests` has no `onWaitingHuman` edge, so for a still-active PR
     // `derived_status === status`.
     .filter((p) => !TERMINAL_STATUSES.includes(p.derived_status) || isOrphanedPr(p))
-    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0)));
+}
+
+/** The ONE `/status` PR-row projection (issue #1054): `activePrs` feeds it the in-flight set, and the
+ *  single-run lookup (`GET /runs/{key}`, app/runLookup.ts) feeds it one tracked row at ANY stage, so
+ *  both reads share a single derivation of status/overlay/escalation/merge policy/wait reason. */
+export async function projectPrRows(
+  data: DataLayer,
+  engine: Pick<EngineClient, "searchVariables"> | undefined,
+  active: readonly TrackedPullRequest[],
+): Promise<ActivePr[]> {
   // Derive the STRUCTURED open-escalation pointer from the ONE `user_tasks` read model (issue #666) —
   // the same user-task surface `listEscalations` and the Convergence/Tasks page consume — so `/status`
   // carries the completable `userTaskKey` (plus the escalation `kind` and a one-line `summary`) without
@@ -1902,6 +1913,15 @@ export async function activeDeliveries(data: DataLayer): Promise<ActiveDelivery[
   const active = (await deliveryGraphRunsTracking(data).all())
     .filter((r) => !terminal.includes(r.derived_status))
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+  return projectDeliveryRows(data, active);
+}
+
+/** The ONE `/status` delivery-row projection, shared by `activeDeliveries` and the single-run lookup
+ *  (issue #1054) — see {@link projectPrRows}. */
+export async function projectDeliveryRows(
+  data: DataLayer,
+  active: readonly TrackedDeliveryGraphRun[],
+): Promise<ActiveDelivery[]> {
   const openEscByRun = new Map<string, OpenEscalation>();
   for (const t of (await userTasks(data).find({ subject_type: "delivery" })).sort((a, b) =>
     a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0,

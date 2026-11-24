@@ -249,6 +249,25 @@ A terminal PR has left `/status`.
 
 ---
 
+### Look up ONE run by key — `GET /runs/{key}` (`d8ctl nwf show <key>`)
+
+```bash
+curl -sS "__BASE__/runs/$(jq -rn --arg k 'owner/repo#123' '$k|@uri')" | jq   # tool: getRun
+```
+
+`/status` only lists in-flight rows; to check a single run — at **any** stage — look it up by
+key instead of filtering the whole list. The key is `owner/repo#N` (a feature run, an epic, or a
+PR; URL-encode the `/` and `#`) or a delivery-graph `runKey`. It answers for a feature **before
+its PR opens** (right after `start feature …`), while it converges/merges, and after it went
+terminal. The body carries `kind` (`feature`/`epic`/`pr`/`delivery`), `status` (terminal-folded,
+with the same `incident`/`orphaned` overlays as `/status`), `stage` (feature pipeline stage, epic
+phase, PR status, delivery phase), effective `settings` (`converge`, `autoMerge`,
+`humanApproval`, `blockedOn`, `maxRounds`, `autoResolveEscalations`,
+`hasCustomInstructions`; null where the kind doesn't carry it), `processInstanceKey` plus
+`processInstanceKeys` (own + children), `activeWorker`/`leaseUntil`, `prUrl`, `openEscalation`,
+`incident`, `acknowledgedAt`, `updatedAt`, and `children` (feature → its convergence-loop PR;
+epic → its slice PRs). A `404` means nwf has never tracked the key.
+
 ## 6. Debug the models and the prompts
 
 - **Processes.** Engine truth is the deployed XML (`urban_debug_get_process_definition_xml`).
@@ -536,6 +555,7 @@ failed/garbled `gh` read is "not ready" (the bounded wait routes via `onTimeout`
 |---|---|---|
 | Live version (§0) | `getVersion` | `GET __BASE__/version` |
 | PRs in flight (§0) | `listActivePrs` | `GET __BASE__/status` |
+| One run by key, any stage (§5) | `getRun` | `GET __BASE__/runs/{key}` (key URL-encoded) |
 | Submit a PR / epic / feature (§1–2) | `startConvergenceLoop` / `startPlanFanout` / `startFeature` | `POST __BASE__/actions/start/{convergence-loop,plan-fanout,feature}` |
 | List escalations (§3) | `listEscalations` | `GET __BASE__/escalations` |
 | Answer an escalation (§3) | `completeUserTask` (as agent: `agentCompleteEscalation`) | `POST __BASE__/actions/complete-user-task` (as agent: `POST __BASE__/hooks/agent-complete` with `agentId` required) |
