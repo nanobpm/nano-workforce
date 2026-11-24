@@ -46,6 +46,10 @@ const READ_MODEL_MIGRATION = "097_plan_read_model_terminal_dismiss.sql";
 // `acknowledgeVia` helper reads to tell an already-acknowledged epic (idempotent 200) from a live one
 // (409). Supersedes 097's VIEW body verbatim except for that one added base pass-through.
 const READ_MODEL_ACK_PASSTHROUGH_MIGRATION = "100_plan_read_model_pass_acknowledged_at.sql";
+// The LATEST migration defining plan_read_model (urban 0.100 / nano-ide#625 un-COALESCEd predicates):
+// re-emits 100's body with the current sqlSelectFor output. The DRIFT GUARDs read THIS file — 097/100
+// are immutable history whose frozen bodies legitimately lag the declaration.
+const READ_MODEL_LATEST_MIGRATION = "150_plan_read_model_uncoalesced_predicates.sql";
 // The forward chain whose net effect the end-to-end tests exercise: the original hand-authored VIEWs
 // (059/060/061/074/080), the declare-once supersessions (082/083), then the terminal-dismiss
 // supersession (097), then the `acknowledged_at` pass-through (100). Mirrors the runtime migrator.
@@ -60,6 +64,7 @@ const MIGRATION_CHAIN = [
   "084_plan_wave_tasks_effective_status.sql",
   READ_MODEL_MIGRATION,
   READ_MODEL_ACK_PASSTHROUGH_MIGRATION,
+  READ_MODEL_LATEST_MIGRATION,
 ];
 
 // The base `plans` / `plan_tasks` / `pull_requests` shapes the VIEWs read, plus a stand-in for the
@@ -184,12 +189,12 @@ test("DRIFT GUARD: migration 082 embeds each rollup's VIEW DDL VERBATIM from rol
 });
 
 test("DRIFT GUARD: migration 097 embeds each derived column VERBATIM from planReadModel.sqlSelectFor (the VIEW cannot drift from the declaration)", () => {
-  const sql = MIG(READ_MODEL_MIGRATION);
+  const sql = MIG(READ_MODEL_LATEST_MIGRATION);
   for (const col of PLAN_READ_MODEL_DERIVED) {
     const emitted = planReadModel.sqlSelectFor(col, { baseAlias: PLAN_READ_MODEL_BASE_ALIAS });
     assert(
       sql.includes(`${emitted} AS ${col}`),
-      `migration ${READ_MODEL_MIGRATION} no longer embeds the declaration's SQL for "${col}" — regenerate it ` +
+      `migration ${READ_MODEL_LATEST_MIGRATION} no longer embeds the declaration's SQL for "${col}" — regenerate it ` +
         `from app/planReadModel.ts (or add a new superseding migration). Expected to contain:\n  ${emitted} AS ${col}`,
     );
   }
@@ -246,7 +251,7 @@ const EPIC_ACK_SURFACE = {
 } as const;
 
 test("DRIFT GUARD: migration 100 supersedes the plan_read_model VIEW, adding the acknowledged_at pass-through while re-embedding every derived column VERBATIM from planReadModel.sqlSelectFor", () => {
-  const sql = MIG(READ_MODEL_ACK_PASSTHROUGH_MIGRATION);
+  const sql = MIG(READ_MODEL_LATEST_MIGRATION);
   assert(/DROP VIEW IF EXISTS plan_read_model;/.test(sql), "100 must DROP the superseded plan_read_model first");
   assert(/CREATE VIEW plan_read_model AS/.test(sql), "100 must (re)create plan_read_model");
   // The one reason this migration exists: expose `acknowledged_at` as a projected column (the shared
@@ -257,7 +262,7 @@ test("DRIFT GUARD: migration 100 supersedes the plan_read_model VIEW, adding the
     const emitted = planReadModel.sqlSelectFor(col, { baseAlias: PLAN_READ_MODEL_BASE_ALIAS });
     assert(
       sql.includes(`${emitted} AS ${col}`),
-      `migration ${READ_MODEL_ACK_PASSTHROUGH_MIGRATION} no longer embeds the declaration's SQL for "${col}" — regenerate it ` +
+      `migration ${READ_MODEL_LATEST_MIGRATION} no longer embeds the declaration's SQL for "${col}" — regenerate it ` +
         `from app/planReadModel.ts (or add a new superseding migration). Expected to contain:\n  ${emitted} AS ${col}`,
     );
   }
