@@ -434,14 +434,27 @@ export async function readEngineFacts(
         // The newest probe-loop iteration: the ACTIVE one (bounded to the live iteration) wins over the
         // one-page history, which a wait polling for hours outgrows. Then read that scope's probe result,
         // falling back to the previous iteration when the newest has not written `ready` yet.
-        const [active, history] = await Promise.all([elementSearch(`${n.element}_probeLoop`, "ACTIVE"), elementSearch(`${n.element}_probeLoop`)]);
-        const iterations = [...new Map([...history, ...active].map((e) => [e.elementInstanceKey, e])).values()].sort(byKeyDesc);
-        for (const e of iterations.slice(0, 2)) {
+        // A FULL history page cannot be trusted to hold the previous iteration (it may be any page of a
+        // long poll), so then the fallback is skipped and the probe is reported only from the ACTIVE
+        // iteration — flagging truncation only when that leaves the probe result unresolved.
+        const [active, history] = await Promise.all([
+          elementSearch(`${n.element}_probeLoop`, "ACTIVE"),
+          engine.searchElementInstances({ processInstanceKey: pik, elementId: `${n.element}_probeLoop` }),
+        ]);
+        const historyFull = history.length >= ENGINE_SEARCH_PAGE;
+        const pool = historyFull ? active : [...history, ...active];
+        const iterations = [...new Map(pool.map((e) => [e.elementInstanceKey, e])).values()].sort(byKeyDesc);
+        let resolved = false;
+        for (const e of iterations.slice(0, historyFull ? 1 : 2)) {
           elements.set(e.elementInstanceKey, e);
           const rows = await scopeVars(e.elementInstanceKey);
           addVars(rows);
-          if (rows.some((v) => v.name === "ready" && v.isTruncated !== true)) break;
+          if (rows.some((v) => v.name === "ready" && v.isTruncated !== true)) {
+            resolved = true;
+            break;
+          }
         }
+        if (historyFull && !resolved) truncated = true;
         for (const e of bodies) addVars(await scopeVars(e.elementInstanceKey));
       } else if (n.kind === "agent" || n.kind === "connector") {
         const inner = await Promise.all(PR_SCOPE_SUFFIXES.map((s) => elementSearch(`${n.element}${s}`)));

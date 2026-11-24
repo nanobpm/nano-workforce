@@ -381,8 +381,25 @@ test("a wait with more than one page of probe iterations still reports its newes
     variables.push({ name: "ready", value: "false", scopeKey: key }, { name: "detail", value: JSON.stringify(newest ? "newest" : `old ${i}`), scopeKey: key });
   }
   const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
+  assert.equal(read.truncated, false, "the ACTIVE iteration resolved the newest probe; the full history page is irrelevant");
   const landed = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read }).find((n) => n.id === "landed");
   assert.deepEqual(landed?.lastProbe, { ready: false, detail: "newest", observed: null });
+});
+
+test("past one page of probe history, an ACTIVE iteration without `ready` never falls back to a stale page row", async () => {
+  const elements: ElementInstanceFact[] = [{ elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" }];
+  const variables: VariableFact[] = [];
+  const iterations = ENGINE_SEARCH_PAGE * 5;
+  for (let i = 0; i < iterations; i++) {
+    const key = String(2251799813685000 + i);
+    const newest = i === iterations - 1;
+    elements.push({ elementId: "n2_probeLoop", elementInstanceKey: key, state: newest ? "ACTIVE" : "COMPLETED" });
+    if (!newest) variables.push({ name: "ready", value: "true", scopeKey: key }, { name: "detail", value: JSON.stringify(`old ${i}`), scopeKey: key });
+  }
+  const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
+  assert.equal(read.truncated, true);
+  const landed = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read }).find((n) => n.id === "landed");
+  assert.ok(!String(landed?.lastProbe?.detail ?? "").startsWith("old"), JSON.stringify(landed?.lastProbe));
 });
 
 test("a newest probe iteration that has not written `ready` yet falls back to the previous one", async () => {
