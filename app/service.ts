@@ -4382,6 +4382,15 @@ export async function reconcileMissingPrRows(
         if (opts.engine) await maybeStartRetro(data, opts.engine, prKey);
       } else if (found === "closed") {
         await writeTerminalPrRow(data, prKey, "abandoned", "closed on GitHub (PR row was missing)", root);
+      }
+      if (found === "merged" || found === "closed") {
+        // A KEYLESS run is never reached by the delivery edges (they need a process_key), and once the PR
+        // row exists this reconciler skips the key — so fold it here or it is stranded non-dismissable.
+        const { status, label } = deriveFeatureDelivery(found === "merged" ? "merged" : "closed");
+        for (const f of ref.features) {
+          if (f.processKey) continue;
+          await foldKeylessFeatureRun(data, f.featureKey, { prKey, status: f.status, updatedAt: f.updatedAt }, status, label);
+        }
       } else if (found === "not_found" && nowMs - ref.since >= MISSING_PR_GRACE_MS) {
         const reason = `PR ${prKey} not found on GitHub after ${MISSING_PR_GRACE_MS / 60000}m grace`;
         await writeTerminalPrRow(data, prKey, "abandoned", reason, root);
@@ -4799,7 +4808,9 @@ export async function pollFeatureDelivery(
       // A key the missing-PR reconciler verified ABSENT on GitHub is owned by its grace-period verdict
       // (issue #1089): folding it `abandoned`/`handoff interrupted` here would bypass the grace window
       // and the intended `failed` outcome (with its missing-PR reason). Leave it to the reconciler.
-      if (notFound.has(run.pr_key)) continue;
+      // Likewise an UNKNOWN lookup (unverified): the PR may yet be found merged, or fail past grace —
+      // abandoning here would drop it from every later missing-PR pass and lose that outcome.
+      if (notFound.has(run.pr_key) || unverified.has(run.pr_key)) continue;
       const snapshots = await engine.searchProcessInstances({ processInstanceKeys: [processKey] });
       const match = snapshots.find((s) => String(s.processInstanceKey) === processKey);
       // Interpret the snapshot with the SAME tri-state semantics as the reconcile engine-probe

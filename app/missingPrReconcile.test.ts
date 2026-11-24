@@ -456,3 +456,33 @@ test("lookupMissingPr (token): a stalled request is bounded by the lookup deadli
     else process.env.NANO_PR_GITHUB_TRANSPORT = prevT;
   }
 });
+
+test("a KEYLESS opened+converge feature is folded on a recovered merged/closed PR, not stranded", async () => {
+  for (const [answer, want] of [["merged", "merged"], ["closed", "abandoned"]] as const) {
+    const { data, stores } = memData();
+    stores.feature_runs = [
+      { feature_key: "o/r#2", process_key: null, status: "opened", pr_key: "o/r#35", converge: 1, created_at: ISO0, updated_at: ISO0 },
+    ];
+    await reconcileMissingPrRows(data, "", { lookup: lookupOf(answer), nowMs: T0, lastChecked: new Map(), notFound: new Set(), unverified: new Set() });
+    assertEquals(stores.feature_runs[0].status, want);
+  }
+});
+
+test("an opened feature whose first lookup is UNKNOWN is not handoff-abandoned; a later definitive answer decides it", async () => {
+  for (const [answer, want] of [["merged", "merged"], ["not_found", "failed"]] as const) {
+    const { data, stores } = memData();
+    stores.feature_runs = [
+      { feature_key: "o/r#2", process_key: "p1", status: "opened", pr_key: "o/r#36", converge: 1, created_at: ISO0, updated_at: ISO0 },
+    ];
+    const notFound = new Set<string>();
+    const unverified = new Set<string>();
+    const lastChecked = new Map<string, number>();
+    const engine = { createInstance: async () => ({ processInstanceKey: "x" }), searchProcessInstances: async () => [] } as any;
+    await reconcileMissingPrRows(data, "", { lookup: lookupOf(null), nowMs: T0 + 1000, lastChecked, notFound, unverified });
+    await pollFeatureDelivery(data, engine, { missingPrNotFound: notFound, missingPrUnverified: unverified });
+    assertEquals(stores.feature_runs[0].status, "opened");
+    await reconcileMissingPrRows(data, "", { lookup: lookupOf(answer), nowMs: T0 + MISSING_PR_GRACE_MS, lastChecked, notFound, unverified });
+    if (answer === "merged") await pollFeatureDelivery(data, engine, { missingPrNotFound: notFound, missingPrUnverified: unverified });
+    assertEquals(stores.feature_runs[0].status, want);
+  }
+});
