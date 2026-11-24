@@ -655,3 +655,32 @@ test("startPlan persists the real epic issue title when the fetch succeeds", asy
     else process.env["GITHUB_TOKEN"] = prevTok;
   }
 });
+
+test("startPlan: `effective` echoes exactly the seeded variables (issue #1059)", async () => {
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [], key: "plan_key" },
+  };
+  const data = {
+    table: withTrackingViews((name: string, key: string) =>
+      memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
+  } as any;
+  let vars: any = null;
+  const engine = {
+    createInstance: (req: any) => {
+      vars = req.variables;
+      return Promise.resolve({ processInstanceKey: "PI-1" });
+    },
+  } as any;
+  const result = await startPlan(data, engine, {
+    repo: "owner/repo",
+    number: 7,
+    url: "https://github.com/owner/repo/issues/7",
+    planKey: "owner/repo#7",
+  }, "epic/agent-protocol", { autoMerge: false, autoResolveEscalations: true });
+  if (!("effective" in result)) throw new Error("expected a started plan");
+  assertEquals(result.effective.autoMerge, vars.autoMerge);
+  assertEquals(result.effective.autoMerge, false);
+  assertEquals(result.effective.autoResolveEscalations, vars.autoResolveEscalations);
+  assertEquals(result.effective.baseBranch, vars.baseBranch);
+  assertEquals(result.effective.blockedOn, null);
+});

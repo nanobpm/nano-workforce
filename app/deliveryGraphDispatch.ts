@@ -30,6 +30,7 @@ import {
 } from "./deliveryGraphRun.ts";
 import type { DeliveryRunTimeouts } from "./deliveryRunner.ts";
 import { deliveryGraphDigest, runDeliveryGraph } from "./deliveryRunner.ts";
+import type { EffectiveSettings } from "./effectiveSettings.ts";
 
 /** The outcome of a dispatch attempt — mirrors the retained run lifecycle. `ok:false` carries the
  * path-qualified compile/validation errors (a staged graph should always recompile, but a corrupt
@@ -52,6 +53,8 @@ export type DispatchDeliveryGraphResult =
       identityConfirmed: boolean;
       processInstanceKey?: string;
       processDefinitionId?: string;
+      /** The settings seeded on the instance this dispatch started (issue #1059); absent on a short-circuit. */
+      effective?: EffectiveSettings;
     }
   | { ok: false; errors: { path: string; message: string }[] };
 
@@ -394,5 +397,6 @@ export async function dispatchDeliveryGraphRun(
     identityConfirmed: true,
     processInstanceKey: launched.handle.processInstanceKey,
     processDefinitionId: launched.handle.processDefinitionId,
+    effective: launched.handle.effective,
   };
 }

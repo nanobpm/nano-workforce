@@ -2043,11 +2043,23 @@ test("submitPr's run-scoped reopen carries a re-supplied text (and a handoff re-
       null,
       row.custom_instructions_text as string,
     );
-    assertEquals(handedBack, { prKey: "owner/repo#32", processKey: "PI-1" }, "the owning merge loop's hand-back mints a SUCCESSOR, not alreadyRunning");
+    const { effective: _effective, ...handedBackKeys } = handedBack as Record<string, unknown>;
+    assertEquals(handedBackKeys, { prKey: "owner/repo#32", processKey: "PI-1" }, "the owning merge loop's hand-back mints a SUCCESSOR, not alreadyRunning");
     const after = stores.pull_requests.rows[0] as Record<string, unknown>;
     assertEquals(after.custom_instructions, 1, "the flag survives the handoff reopen");
     assertEquals(after.custom_instructions_text, "steer me", "the text survives the handoff reopen");
     const successorVars = vars();
+    // Issue #1059: the echoed `effective` equals the variables seeded on the successor instance.
+    assertEquals(_effective, {
+      converge: null,
+      autoMerge: successorVars.autoMerge,
+      convergeOnly: successorVars.convergeOnly,
+      maxRounds: successorVars.maxRounds,
+      blockedOn: null,
+      autoResolveEscalations: successorVars.autoResolveEscalations === true,
+      customInstructions: { present: true, length: "steer me".length },
+      baseBranch: null,
+    });
     assertEquals(successorVars.customInstructions, "steer me", "the fresh convergence instance is re-seeded with the steering");
     assert(successorVars !== firstVars, "a successor instance was actually created (not the first submission's captured variables)");
     assertEquals(after.process_key, "PI-1", "the successor instance now owns the row (the fake engine mints PI-1 per capture)");

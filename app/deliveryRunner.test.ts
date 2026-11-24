@@ -13,6 +13,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import { AGENT_TERMINAL_SUCCESS_STATUSES } from "./deliveryGraphCompiler.ts";
 import { prepareDeliveryGraph, renderEmitContract, renderIdempotencyPreamble, renderProducerContract, runDeliveryGraph } from "./deliveryRunner.ts";
+import { deriveEffectiveSettings } from "./effectiveSettings.ts";
 import { RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError, agentNodeRepoEnvelope } from "./repoEnvelope.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 
@@ -826,4 +827,23 @@ test("#962 a policy node with no fact-qualified outgoing edge still renders pr a
   const plainPrompt = String((p.nodeInputs.n1 as Record<string, unknown>).appendPrompt);
   assert(policyPrompt !== plainPrompt, "the policy node's prompt must differ from a policy-less node's (pr is required there)");
   assert(policyPrompt.length > plainPrompt.length && policyPrompt.includes("`pr`"), `the policy prompt names pr in its required contract: ${policyPrompt}`);
+});
+
+test("#1059 runDeliveryGraph echoes `effective` derived from the EXACT seeded variables (default + opted-in escalation)", async () => {
+  for (const autoResolveEscalations of [undefined, true]) {
+    let captured: Record<string, unknown> | undefined;
+    const engine = {
+      deployResources: async () => [],
+      createInstance: async (args: { variables: Record<string, unknown> }) => {
+        captured = args.variables;
+        return { processInstanceKey: "556" };
+      },
+    };
+    const r = await runDeliveryGraph(engine, GRAPH, { repoless: true, autoResolveEscalations });
+    assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
+    assert(captured, "createInstance was called with a variables argument");
+    assertEquals(r.handle.effective, deriveEffectiveSettings(captured), "the echo is the seed, not a re-derivation from the request");
+    assertEquals(r.handle.effective.autoResolveEscalations, autoResolveEscalations === true);
+    assertEquals(captured.autoResolveEscalations, autoResolveEscalations === true);
+  }
 });

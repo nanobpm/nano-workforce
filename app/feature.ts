@@ -14,9 +14,11 @@
 // the existing convergence loop (`submitPr`), keyed on `pr_key` → `pull_requests`.
 // Data access goes through the record gateway (`data.table`), never hand-written
 // SQL — matching app/plan.ts and app/service.ts.
+
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 import { AGENT_SLA_TIMEOUT } from "./agentSla.ts";
+import { deriveEffectiveSettings, type EffectiveSettings } from "./effectiveSettings.ts";
 import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { derivedTrackingTable } from "./instanceTracking.ts";
 import { issueReadCommand } from "./operatorFeedback.ts";
@@ -354,6 +356,8 @@ export type StartFeatureResult = {
   /** The base branch the run ACTUALLY targets: the admitted request base for `started`/`noop-terminal`,
    *  but the LIVE run's persisted `base_branch` for `already-active` (the request did not change it). */
   baseBranch: string;
+  /** The settings seeded on the instance this request started (issue #1059); absent on `already-active`. */
+  effective?: EffectiveSettings;
 };
 
 /** The deterministic task id for a single-issue run — the implementation agent branches
@@ -524,105 +528,103 @@ export async function startFeature(
   // epic plan-fanout's per-slice emission can never drift into two branch-naming sources. A single-issue
   // task id is always `issue-<number>`, so the derivation is never null here.
   const prePrBranch = sliceBranchCreate(taskId) ?? `feat/${taskId}`;
-  const { processInstanceKey } = await engine.createInstance({
-    processDefinitionId: FEATURE_PROCESS_ID,
-    variables: {
-      featureKey: parsed.planKey,
-      repo: parsed.repo,
-      // The parent issue reference (`owner/repo#123`) the agent reads for context (`issueReadCommand`).
-      issue: parsed.planKey,
-      issueNumber: parsed.number,
-      issueUrl: parsed.url,
-      // The single slice the implementation agent builds. `task.prompt` is its primary instruction
-      // (resources/prompts/feature.md); `task.id` fixes its deterministic branch `feat/<task.id>` across a
-      // resume. Unlike an epic, there is no planner — the whole issue IS the slice.
-      task: {
-        id: taskId,
-        title: parsed.planKey,
-        prompt:
-          `Implement the GitHub issue ${parsed.planKey} end to end. Read it in full first ` +
-          `(\`${issueReadCommand(parsed.number, parsed.repo)}\` — body AND every comment; operator comments are scope), implement it completely, ` +
-          `and open exactly one pull request that closes it.`,
-      },
-      // Follow-on knobs, read by the record/converge workers. `autoMerge` is the canonical
-      // positive merge intent (issue #916), threaded to `submitPr` as-is: converge-only stops at
-      // `converged`; auto-merge drives the merge-loop. `converge=false` ⇒ merge is moot.
-      converge,
-      autoMerge,
-      // Park the converged PR at a human approval user task before the merge-loop (issue #826).
-      humanApproval,
-      // Opt-in escalation steward (issue #889): seeded as an engine-owned process variable so the
-      // run's escalations carry the opt-in, AND persisted on the `feature_runs` row (above) — the
-      // steward's eligibility derivation reads the ROW (the durable source), so an agent-completion
-      // clobber of the variable can never silently opt a run in or out (#887/#888).
-      autoResolveEscalations,
-      // A single-issue feature run OWNS its issue (the whole issue is the slice), so the agent may
-      // claim it with a "starting work" comment on a first run (resources/prompts/feature.md). Epic slices
-      // (plan-fanout) deliberately DO NOT set this — their `issue` is the shared parent epic, which
-      // must never be claimed per-slice.
-      claimIssue: true,
-      // Seed the agent-result variables so the escalation loop + record worker can reference them
-      // before the first `senior:feature` job completes (the harness merges the real values in).
-      answer: null,
-      status: null,
-      question: null,
-      summary: null,
-      pr: null,
-      // Escalation SLA + optional assignee — identical to the epic path (plan-fanout), read by the
-      // `feature-escalation` user task's interrupting timer boundary and assignment definition.
-      escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
-      escalationAssignee: null,
-      // Agent-task liveness SLA (issue #849): bounds the implement-cell's external agent task
-      // (`implement-task`) — its interrupting timer boundary evaluates `=agentSlaTimeout` at timer
-      // creation, so a hung or looping implementation agent escalates instead of parking forever.
-      agentSlaTimeout: AGENT_SLA_TIMEOUT,
-      // Base branch (ADR 0003): the branch the agent branches off and opens its PR against. The
-      // brief rides `appendPrompt` in the implement task, exactly like the epic implementer.
-      baseBranch: base,
-      baseBranchBrief: renderBaseBranchBrief(base),
-      // Optional operator steering, appended to the implement agent's prompt via the implement
-      // task's `appendPrompt` FEEL (feature.bpmn). Null when none was supplied; persists on the
-      // instance so it also rides the answer-loop redispatch back into the same implement task.
-      customInstructions: instructions,
-      // Intake-time readiness gate (issue #295): the leading preflight the feature run parks on until
-      // every declared probe goes green (feature.bpmn `gw-readiness` → `readiness-preflight`). A
-      // submission with NO readiness carries `null` here, so the gateway routes straight to
-      // `ensure-base-branch` and the run implements immediately — behaviour unchanged for today's
-      // features. `probeTimeout` bounds the preflight's escalation timers (derived once from the same
-      // probes); `gateKey` is the non-blank correlation key the probe worker publishes
-      // `readiness-ready` on (required even in the preflight, which reads the probe's synchronous
-      // result); `resolvedArtifacts` is filled by the preflight on green — the exact `pkg@version`s
-      // first carrying each awaited capability — and rides the implement task's `appendPrompt` so the
-      // agent bumps the consumer dependency to exactly the bound version. Seeded `null` so a
-      // gate-less run still resolves the variable in that FEEL instead of raising an incident.
-      readinessProbes,
-      probeTimeout: readinessProbes ? (readiness.probeTimeout ?? null) : null,
-      probePollEvery: readinessProbes ? (readiness.probePollEvery ?? null) : null,
-      gateKey: readinessProbes ? `feature-readiness:${parsed.planKey}` : null,
-      resolvedArtifacts: null,
-      // Stage 0 transcript correlation (#543): the transcript-endpoint base the `implement-task` agent
-      // worker appends its jobKey-scoped stream to, to emit a `transcriptUrl` output variable that
-      // links this feature run to its agent transcript in Nano Explorer (feature.bpmn `implement-task`
-      // ioMapping). Read down into the job via `=transcriptUrlBase`.
-      [TRANSCRIPT_URL_BASE_VAR]: transcriptUrlBaseFor(),
-      // Host-git provisioning (c8ctl, issue #684): deliver the repository envelope so the
-      // `senior:feature` implementation agent gets an ISOLATED throwaway clone instead of inheriting
-      // the worker's launch dir (which, with several copilot workers on one host, means concurrent
-      // implementation jobs share — and clobber — one checkout, violating the durable-resume design).
-      // A feature run is PRE-PR: there is no head branch yet, so the harness checks out the BASE
-      // branch (`ref = base`) and creates the deterministic `feat/<task.id>` feature branch itself
-      // (`branchCreate`), matching the agent-guide's `feat/*` convention. This is a fan-out seed, so it
-      // is REQUIRED (issue #729): `parsed.repo` is regex-bound (`parseIssue`) and `base` is
-      // `normalizeBaseBranch`-validated non-blank, so the `requireRepoEnvelopeVars` guard never trips
-      // here — but it turns an unresolved repo/base into a HARD launch failure rather than a silent `{}`
-      // that would degrade the agent to the shared launch dir.
-      ...requireRepoEnvelopeVars(parsed.repo, base, null, null, prePrBranch),
+  const seeded = {
+    featureKey: parsed.planKey,
+    repo: parsed.repo,
+    // The parent issue reference (`owner/repo#123`) the agent reads for context (`issueReadCommand`).
+    issue: parsed.planKey,
+    issueNumber: parsed.number,
+    issueUrl: parsed.url,
+    // The single slice the implementation agent builds. `task.prompt` is its primary instruction
+    // (resources/prompts/feature.md); `task.id` fixes its deterministic branch `feat/<task.id>` across a
+    // resume. Unlike an epic, there is no planner — the whole issue IS the slice.
+    task: {
+      id: taskId,
+      title: parsed.planKey,
+      prompt:
+        `Implement the GitHub issue ${parsed.planKey} end to end. Read it in full first ` +
+        `(\`${issueReadCommand(parsed.number, parsed.repo)}\` — body AND every comment; operator comments are scope), implement it completely, ` +
+        `and open exactly one pull request that closes it.`,
     },
-  });
+    // Follow-on knobs, read by the record/converge workers. `autoMerge` is the canonical
+    // positive merge intent (issue #916), threaded to `submitPr` as-is: converge-only stops at
+    // `converged`; auto-merge drives the merge-loop. `converge=false` ⇒ merge is moot.
+    converge,
+    autoMerge,
+    // Park the converged PR at a human approval user task before the merge-loop (issue #826).
+    humanApproval,
+    // Opt-in escalation steward (issue #889): seeded as an engine-owned process variable so the
+    // run's escalations carry the opt-in, AND persisted on the `feature_runs` row (above) — the
+    // steward's eligibility derivation reads the ROW (the durable source), so an agent-completion
+    // clobber of the variable can never silently opt a run in or out (#887/#888).
+    autoResolveEscalations,
+    // A single-issue feature run OWNS its issue (the whole issue is the slice), so the agent may
+    // claim it with a "starting work" comment on a first run (resources/prompts/feature.md). Epic slices
+    // (plan-fanout) deliberately DO NOT set this — their `issue` is the shared parent epic, which
+    // must never be claimed per-slice.
+    claimIssue: true,
+    // Seed the agent-result variables so the escalation loop + record worker can reference them
+    // before the first `senior:feature` job completes (the harness merges the real values in).
+    answer: null,
+    status: null,
+    question: null,
+    summary: null,
+    pr: null,
+    // Escalation SLA + optional assignee — identical to the epic path (plan-fanout), read by the
+    // `feature-escalation` user task's interrupting timer boundary and assignment definition.
+    escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
+    escalationAssignee: null,
+    // Agent-task liveness SLA (issue #849): bounds the implement-cell's external agent task
+    // (`implement-task`) — its interrupting timer boundary evaluates `=agentSlaTimeout` at timer
+    // creation, so a hung or looping implementation agent escalates instead of parking forever.
+    agentSlaTimeout: AGENT_SLA_TIMEOUT,
+    // Base branch (ADR 0003): the branch the agent branches off and opens its PR against. The
+    // brief rides `appendPrompt` in the implement task, exactly like the epic implementer.
+    baseBranch: base,
+    baseBranchBrief: renderBaseBranchBrief(base),
+    // Optional operator steering, appended to the implement agent's prompt via the implement
+    // task's `appendPrompt` FEEL (feature.bpmn). Null when none was supplied; persists on the
+    // instance so it also rides the answer-loop redispatch back into the same implement task.
+    customInstructions: instructions,
+    // Intake-time readiness gate (issue #295): the leading preflight the feature run parks on until
+    // every declared probe goes green (feature.bpmn `gw-readiness` → `readiness-preflight`). A
+    // submission with NO readiness carries `null` here, so the gateway routes straight to
+    // `ensure-base-branch` and the run implements immediately — behaviour unchanged for today's
+    // features. `probeTimeout` bounds the preflight's escalation timers (derived once from the same
+    // probes); `gateKey` is the non-blank correlation key the probe worker publishes
+    // `readiness-ready` on (required even in the preflight, which reads the probe's synchronous
+    // result); `resolvedArtifacts` is filled by the preflight on green — the exact `pkg@version`s
+    // first carrying each awaited capability — and rides the implement task's `appendPrompt` so the
+    // agent bumps the consumer dependency to exactly the bound version. Seeded `null` so a
+    // gate-less run still resolves the variable in that FEEL instead of raising an incident.
+    readinessProbes,
+    probeTimeout: readinessProbes ? (readiness.probeTimeout ?? null) : null,
+    probePollEvery: readinessProbes ? (readiness.probePollEvery ?? null) : null,
+    gateKey: readinessProbes ? `feature-readiness:${parsed.planKey}` : null,
+    resolvedArtifacts: null,
+    // Stage 0 transcript correlation (#543): the transcript-endpoint base the `implement-task` agent
+    // worker appends its jobKey-scoped stream to, to emit a `transcriptUrl` output variable that
+    // links this feature run to its agent transcript in Nano Explorer (feature.bpmn `implement-task`
+    // ioMapping). Read down into the job via `=transcriptUrlBase`.
+    [TRANSCRIPT_URL_BASE_VAR]: transcriptUrlBaseFor(),
+    // Host-git provisioning (c8ctl, issue #684): deliver the repository envelope so the
+    // `senior:feature` implementation agent gets an ISOLATED throwaway clone instead of inheriting
+    // the worker's launch dir (which, with several copilot workers on one host, means concurrent
+    // implementation jobs share — and clobber — one checkout, violating the durable-resume design).
+    // A feature run is PRE-PR: there is no head branch yet, so the harness checks out the BASE
+    // branch (`ref = base`) and creates the deterministic `feat/<task.id>` feature branch itself
+    // (`branchCreate`), matching the agent-guide's `feat/*` convention. This is a fan-out seed, so it
+    // is REQUIRED (issue #729): `parsed.repo` is regex-bound (`parseIssue`) and `base` is
+    // `normalizeBaseBranch`-validated non-blank, so the `requireRepoEnvelopeVars` guard never trips
+    // here — but it turns an unresolved repo/base into a HARD launch failure rather than a silent `{}`
+    // that would degrade the agent to the shared launch dir.
+    ...requireRepoEnvelopeVars(parsed.repo, base, null, null, prePrBranch),
+  };
+  const { processInstanceKey } = await engine.createInstance({ processDefinitionId: FEATURE_PROCESS_ID, variables: seeded });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
   if (processKey != null) {
     await table.update(parsed.planKey, { process_key: processKey, updated_at: now() });
-    return { featureKey: parsed.planKey, outcome: "started", processKey, alreadyRunning: false, baseBranch: base };
+    return { featureKey: parsed.planKey, outcome: "started", processKey, alreadyRunning: false, baseBranch: base, effective: deriveEffectiveSettings(seeded) };
   }
   // The engine accepted the start but returned NO instance key — nothing was actually dispatched.
   // Report a discriminated no-op (issue #704) so the caller can surface it as a distinct non-success

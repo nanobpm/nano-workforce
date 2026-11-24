@@ -423,3 +423,16 @@ test("#853 dispatchDeliveryGraphRun: a reconcile-read failure reverts the row to
   assertEquals(cancelled, ["PI-orig"], "the recovered reconcile cancels the live original before relaunch");
   assertEquals(started.length, 1, "exactly one replacement instance launches across the two dispatches");
 });
+
+test("#1059 dispatchDeliveryGraphRun: a fresh launch carries `effective`; an already-running short-circuit carries none", async () => {
+  const { app } = makeApp();
+  const first = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true, autoResolveEscalations: true });
+  assert(first.ok);
+  if (!first.ok) return;
+  assertEquals(first.effective?.autoResolveEscalations, true, "the seeded opt-in reaches the dispatch response");
+  const second = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
+  assert(second.ok);
+  if (!second.ok) return;
+  assertEquals(second.alreadyRunning, true);
+  assertEquals(second.effective, undefined, "no request-derived settings are echoed for a run this call did not start");
+});
