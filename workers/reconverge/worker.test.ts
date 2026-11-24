@@ -154,6 +154,7 @@ test("re-submits through submitPr with auto-merge on and handoffFrom = this merg
   assertEquals(args[8], true, "steward opt-in carried from the row");
   assertEquals(args[9], true, "auto-merge stays on");
   assertEquals(args[10], "4242", "hand-off source is this merge-loop instance");
+  assertEquals(args[4], "persisted", "the run's persisted round budget is kept, never reset to the default (#1088)");
   assertEquals(merges[0].outcome, "reconverge");
 });
 

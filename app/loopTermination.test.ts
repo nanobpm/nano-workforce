@@ -414,3 +414,36 @@ test("PR#944 round 6: a successor-owned converging row is NEVER demoted by a red
 test("#959 isOrphanedPr: an audit-only landing (derived merged, base merging, no merged_at) is never orphaned", () => {
   assert(!isOrphanedPr({ status: "merging", derived_status: "merged", termination_reason: null, merged_at: null }));
 });
+
+test("#1088: the merge->convergence handoff restarts the loop with the run's PERSISTED maxRounds, not the default", async () => {
+  const prevTransport = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevToken = process.env["GITHUB_TOKEN"];
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  delete process.env["GITHUB_TOKEN"];
+  try {
+    const { data, stores } = handoffData(
+      [{ pr_key: "o/r#1", repo: "o/r", number: 1, url: "u", process_key: "merge-1", status: "waiting_merge", max_rounds: 3 }],
+      [{ pr_key: "o/r#1", derived_status: "waiting_merge" }],
+    );
+    // The handoff replaces the (empty) dependency set in one transaction: a no-op double suffices.
+    const noop = { exec: async () => ({ changed: 0 }) };
+    (data as unknown as { open: () => unknown }).open = () => ({ ...noop, tx: async (fn: (q: typeof noop) => Promise<unknown>) => fn(noop) });
+    let seeded: Record<string, unknown> | undefined;
+    const engine = {
+      createInstance: async (req: { variables?: Record<string, unknown> }) => {
+        seeded = req.variables;
+        return { processInstanceKey: "succ" };
+      },
+      cancelInstance: async () => {},
+    };
+    await handoffWaitingMergeToConvergence(data, engine as never, stores.pull_requests[0], "test");
+    assertEquals(seeded?.maxRounds, 3, "the successor loop keeps the custom budget");
+    assertEquals(stores.pull_requests[0].process_key, "succ");
+    assertEquals(stores.pull_requests[0].max_rounds, 3, "the reopened row still carries the budget");
+  } finally {
+    if (prevTransport === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevTransport;
+    if (prevToken === undefined) delete process.env["GITHUB_TOKEN"];
+    else process.env["GITHUB_TOKEN"] = prevToken;
+  }
+});

@@ -650,3 +650,22 @@ test("deriveFeatureDelivery: a closed or failed PR is a terminal (abandoned) out
   assertEquals(deriveFeatureDelivery("closed"), { status: "abandoned", label: "PR closed" });
   assertEquals(deriveFeatureDelivery("failed"), { status: "abandoned", label: "PR failed" });
 });
+
+test("pollFeatureDelivery: a partial re-enroll keeps the PR row's persisted maxRounds (issue #1088)", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [{ feature_key: "o/r#41", status: "converging", pr_key: "o/r#441", auto_merge: 1, delivery_label: null }];
+  stores.pull_requests = [{ pr_key: "o/r#441", status: "converging", process_key: null, max_rounds: 3 }];
+  let vars: Record<string, unknown> | undefined;
+  const engine = {
+    searchProcessInstances: async () => [],
+    createInstance: async (req: { variables?: Record<string, unknown> }) => {
+      vars = req.variables;
+      return { processInstanceKey: "pi-441" };
+    },
+  } as any;
+
+  await pollFeatureDelivery(data, engine);
+
+  assertEquals(vars?.maxRounds, 3, "the re-enrolled loop must not reset a custom budget to the default");
+  assertEquals(stores.pull_requests[0].max_rounds, 3);
+});

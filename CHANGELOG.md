@@ -1,3 +1,9 @@
+## [0.229.2](https://github.com/nanobpm/nano-workforce/compare/v0.229.1...v0.229.2) (2026-11-24)
+
+### Bug Fixes
+
+* **loops:** persist maxRounds across handoffs and re-enroll ([#1092](https://github.com/nanobpm/nano-workforce/issues/1092)) ([5a1315f](https://github.com/nanobpm/nano-workforce/commit/5a1315fcb4c197aa36fcde046b3000c2d4da04bf)), closes [#1088](https://github.com/nanobpm/nano-workforce/issues/1088)
+
 ## [0.229.1](https://github.com/nanobpm/nano-workforce/compare/v0.229.0...v0.229.1) (2026-11-24)
 
 ### Bug Fixes

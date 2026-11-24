@@ -255,6 +255,17 @@ test("a PR's humanApproval reflects the SUBMITTED setting, surviving approval an
   assertEquals(((await handler(input("o/r#9"), legacy)) as Row).body.settings.humanApproval, null);
 });
 
+test("a PR's maxRounds is read from the persisted row, even while the merge process owns the run (issue #1088)", async () => {
+  // The merge instance carries no `maxRounds` variable; the column is the truth.
+  const merging = memApp({ pull_requests: [pr({ status: "merging", max_rounds: 3 })] }, PKS);
+  assertEquals(((await handler(input("o/r#9"), merging)) as Row).body.settings.maxRounds, 3);
+  // A pre-154 row (NULL) falls back to the loop's root variable.
+  const legacy = memApp({ pull_requests: [pr({})] }, PKS, [
+    { name: "maxRounds", processInstanceKey: "proc-p", scopeKey: "proc-p", value: "7" },
+  ]);
+  assertEquals(((await handler(input("o/r#9"), legacy)) as Row).body.settings.maxRounds, 7);
+});
+
 test("a feature and an epic for the same issue: the live run wins, else the newest-created", async () => {
   const epic = (over: Row = {}) => ({
     plan_key: "o/r#5", repo: "o/r", title: "Epic", status: "dispatched", process_key: "proc-e", epic_phase: "Implementing",

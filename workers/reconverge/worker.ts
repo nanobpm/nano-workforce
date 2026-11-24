@@ -18,7 +18,7 @@ import { classifyPrLiveness, fetchPrHead, fetchPrState } from "../../app/github.
 import { recordMergedOnce } from "../../app/mergeAudit.ts";
 import { parsePr } from "../../app/prParse.ts";
 import { maybeStartRetro } from "../../app/retro.ts";
-import { abandonClosedPr, MAX_ROUNDS, submitPr } from "../../app/service.ts";
+import { abandonClosedPr, PERSISTED_MAX_ROUNDS, submitPr } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`ReconvergeIn` in merge-loop.bpmn) — ADR 0040.
@@ -119,7 +119,8 @@ export function makeHandler(
       app.engine,
       parsed,
       [],
-      MAX_ROUNDS,
+      // Keep the run's persisted round budget across the merge hand-back (issue #1088 review).
+      PERSISTED_MAX_ROUNDS,
       false,
       null,
       false,
