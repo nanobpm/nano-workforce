@@ -65,6 +65,8 @@ import {
   type PrState,
   removeCopilotReviewer,
   requestCopilotReview,
+  runGh,
+  useGh,
 } from "./github.ts";
 import { assessmentAcceptor, assessmentHeadFromQuestion } from "./humanAssessment.ts";
 import { activeStatusesFor, derivedTrackingTable } from "./instanceTracking.ts";
@@ -4123,18 +4125,53 @@ export const MISSING_PR_GRACE_MS = 60 * 60 * 1000;
  * an unknown answer never advances the grace clock into a failure verdict on its own. */
 export type MissingPrLookup = "merged" | "closed" | "open" | "not_found" | null;
 
-/** Default GitHub lookup for {@link reconcileMissingPrRows}, over the canonical `fetchPrState`. A
- * 404 / "Could not resolve" error is a definitive `not_found`; any other failure is unknown (`null`). */
+/** Classify a failed PR lookup (issue #1089). Only a PR-LEVEL miss is a definitive `not_found`:
+ * gh's GraphQL "Could not resolve to a PullRequest" (the repository resolved, the number did not). A
+ * repo-level "Could not resolve to a Repository", auth/permission errors, rate limits, 5xx and transport
+ * failures are all UNKNOWN (`null`) — a token without access to a private repo also sees those, and
+ * failing a healthy run on them would be fail-open. A token-mode 404 is ambiguous on its own and is
+ * classified by the caller only after confirming the repo itself is visible. */
+export function classifyMissingPrError(err: unknown): "not_found" | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /could not resolve to a pullrequest/i.test(msg) ? "not_found" : null;
+}
+
+/** Default GitHub lookup for {@link reconcileMissingPrRows}: a LIGHTWEIGHT state-only read (`state`,
+ * `mergedAt`) — never the full `fetchPrState` (rollup enrichment + thread GraphQL), since this runs per
+ * missing key per pass. A token-mode 404 counts as `not_found` only when the repo itself is readable
+ * with the same token; otherwise (and on any other failure) the answer is unknown (`null`). */
 export async function lookupMissingPr(repo: string, number: number, token: string): Promise<MissingPrLookup> {
+  const settle = (merged: boolean, state: string | undefined): MissingPrLookup =>
+    merged ? "merged" : (state ?? "").toUpperCase() === "CLOSED" ? "closed" : "open";
   try {
-    const st = await fetchPrState(repo, number, token);
-    if (!st) return null;
-    return st.merged ? "merged" : st.state === "closed" ? "closed" : "open";
+    if (await useGh()) {
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const j = JSON.parse(await runGh(["pr", "view", String(number), "--repo", repo, "--json", "state,mergedAt"])) as {
+        state?: string;
+        mergedAt?: string | null;
+      };
+      return settle(j.state === "MERGED" || !!j.mergedAt, j.state);
+    }
+    if (!token) return null;
+    const headers = { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" };
+    const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, { headers });
+    if (r.status === 404) {
+      const repoRes = await fetch(`https://api.github.com/repos/${repo}`, { headers });
+      return repoRes.ok ? "not_found" : null;
+    }
+    if (!r.ok) return null;
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const j = (await r.json()) as { merged?: boolean; merged_at?: string | null; state?: string };
+    return settle(!!j.merged || !!j.merged_at, j.state);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return /\b404\b|not found|could not resolve/i.test(msg) ? "not_found" : null;
+    return classifyMissingPrError(err);
   }
 }
+
+/** Minimum interval between GitHub lookups for the SAME missing key (issue #1089): an `open`/unknown key
+ * is otherwise re-queried every poll pass forever. */
+export const MISSING_PR_RECHECK_MS = 5 * 60 * 1000;
+const missingPrLastChecked = new Map<string, number>();
 
 /** Insert a TERMINAL `pull_requests` row for a PR the app lost track of, so every reader (epic delivery,
  * feature rollup, run waiters) sees a settled state. `merged` lands; anything else is `abandoned` (the
@@ -4178,14 +4215,21 @@ async function writeTerminalPrRow(data: DataLayer, prKey: string, status: "merge
 export async function reconcileMissingPrRows(
   data: DataLayer,
   token: string,
-  opts: { lookup?: (repo: string, number: number, token: string) => Promise<MissingPrLookup>; nowMs?: number } = {},
+  opts: {
+    lookup?: (repo: string, number: number, token: string) => Promise<MissingPrLookup>;
+    nowMs?: number;
+    lastChecked?: Map<string, number>;
+  } = {},
 ): Promise<void> {
   const lookup = opts.lookup ?? lookupMissingPr;
   const nowMs = opts.nowMs ?? Date.now();
+  const lastChecked = opts.lastChecked ?? missingPrLastChecked;
   const known = new Set((await prs(data).all()).map((r) => r.pr_key));
   // pr_key → the newest referencing timestamp, plus the feature runs referencing it.
-  const refs = new Map<string, { since: number; features: string[] }>();
-  const note = (prKey: string, at: string | null | undefined, feature?: string) => {
+  // Each feature carries the incarnation we OBSERVED (process_key + status) for the guarded CAS fold.
+  type FeatureRef = { featureKey: string; processKey: string | null; status: FeatureRunStatus };
+  const refs = new Map<string, { since: number; features: FeatureRef[] }>();
+  const note = (prKey: string, at: string | null | undefined, feature?: FeatureRef) => {
     if (known.has(prKey)) return;
     const t = Date.parse(at ?? "");
     const e = refs.get(prKey) ?? { since: Number.isFinite(t) ? t : nowMs, features: [] };
@@ -4202,14 +4246,18 @@ export async function reconcileMissingPrRows(
     for (const run of await featureRuns(data).find({ status })) {
       if (!run.pr_key) continue;
       if (status === "opened" && run.converge !== 1) continue;
-      note(run.pr_key, run.updated_at ?? run.created_at, run.feature_key);
+      note(run.pr_key, run.updated_at ?? run.created_at, { featureKey: run.feature_key, processKey: run.process_key, status });
     }
   }
   for (const [prKey, ref] of refs) {
     try {
       const parsed = parsePr(prKey);
       if (!parsed) continue;
+      const last = lastChecked.get(prKey);
+      if (last !== undefined && nowMs - last < MISSING_PR_RECHECK_MS) continue;
+      lastChecked.set(prKey, nowMs);
       const found = await lookup(parsed.repo, parsed.number, token);
+      if (found === "merged" || found === "closed") lastChecked.delete(prKey);
       if (found === "merged") {
         await writeTerminalPrRow(data, prKey, "merged", "merged on GitHub (PR row was missing)");
       } else if (found === "closed") {
@@ -4217,9 +4265,14 @@ export async function reconcileMissingPrRows(
       } else if (found === "not_found" && nowMs - ref.since >= MISSING_PR_GRACE_MS) {
         const reason = `PR ${prKey} not found on GitHub after ${MISSING_PR_GRACE_MS / 60000}m grace`;
         await writeTerminalPrRow(data, prKey, "abandoned", reason);
-        for (const featureKey of ref.features) {
-          await featureRuns(data).update(featureKey, { status: "failed", delivery_label: reason, updated_at: now() });
+        // Guarded CAS (issue #808), never a blind update keyed on feature_key: a concurrent re-seed of the
+        // same feature_key to a fresh incarnation must not be clobbered. No process_key → nothing to guard
+        // on, so leave the run (the terminal PR row alone already settles its rollup).
+        for (const f of ref.features) {
+          if (!f.processKey) continue;
+          await foldCompletedFeatureRun(data, f.featureKey, f.processKey, "failed", reason, f.status);
         }
+        lastChecked.delete(prKey);
         console.warn(`[poller] missing PR row: ${reason}`);
       }
     } catch (err) {
