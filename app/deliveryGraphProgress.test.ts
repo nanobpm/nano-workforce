@@ -315,13 +315,17 @@ test("a run with more variables and element instances than one page still yields
     elements.unshift({ elementId: `other_${i}`, elementInstanceKey: String(1000 + i), state: "COMPLETED" });
     variables.push({ name: `noise${i}`, value: "1", scopeKey: PIK });
   }
-  // Probe-loop iterations listed newest-FIRST: the newest scope (highest key) must win, not array order.
-  elements.push({ elementId: "n2_probeLoop", elementInstanceKey: "9", state: "ACTIVE" }, { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "COMPLETED" });
+  // The wait's ONE probeLoop scope, with repeated poll task/timer instances inside it (the real shape).
+  elements.push(
+    { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "ACTIVE" },
+    { elementId: "n2_task", elementInstanceKey: "6", state: "COMPLETED" },
+    { elementId: "n2_waitPoll", elementInstanceKey: "7", state: "COMPLETED" },
+    { elementId: "n2_task", elementInstanceKey: "8", state: "COMPLETED" },
+    { elementId: "n2_waitPoll", elementInstanceKey: "9", state: "ACTIVE" },
+  );
   variables.push(
-    { name: "ready", value: "false", scopeKey: "9" },
-    { name: "detail", value: '"newest"', scopeKey: "9" },
-    { name: "ready", value: "true", scopeKey: "5" },
-    { name: "detail", value: '"stale"', scopeKey: "5" },
+    { name: "ready", value: "false", scopeKey: "5" },
+    { name: "detail", value: '"newest"', scopeKey: "5" },
     { name: "n1_pr", value: '"a/b#7"', scopeKey: PIK },
     { name: "pr", value: '"a/b#8"', scopeKey: "3" },
     { name: "nodeInputs", value: JSON.stringify({ n2: { probePollEvery: "PT5M" } }), scopeKey: PIK },
@@ -349,7 +353,7 @@ test("a narrowed read that still fills a whole page is reported as truncated", a
   assert.equal(read.truncated, true);
 });
 
-test("the newest probe scope is chosen by numeric (BigInt) key order, never lexical order", () => {
+test("a re-entered wait picks its newest probeLoop instance by numeric (BigInt) key order, never lexical order", () => {
   for (const [older, newer] of [["9", "10"], ["2251799813685249", "2251799813685250"]] as const) {
     const out = deriveNodeProgress({
       nodes: NODES,
@@ -372,52 +376,48 @@ test("the newest probe scope is chosen by numeric (BigInt) key order, never lexi
   }
 });
 
-test("a wait with more than one page of probe iterations still reports its newest probe", async () => {
-  const elements: ElementInstanceFact[] = [{ elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" }];
-  const variables: VariableFact[] = [];
-  const iterations = ENGINE_SEARCH_PAGE * 3;
-  // Oldest-first: the one-page history holds only stale iterations.
-  for (let i = 0; i < iterations; i++) {
-    const key = String(2251799813685000 + i);
-    const newest = i === iterations - 1;
-    elements.push({ elementId: "n2_probeLoop", elementInstanceKey: key, state: newest ? "ACTIVE" : "COMPLETED" });
-    variables.push({ name: "ready", value: "false", scopeKey: key }, { name: "detail", value: JSON.stringify(newest ? "newest" : `old ${i}`), scopeKey: key });
-  }
-  const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
-  assert.equal(read.truncated, false, "the ACTIVE iteration resolved the newest probe; the full history page is irrelevant");
-  const landed = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read }).find((n) => n.id === "landed");
-  assert.deepEqual(landed?.lastProbe, { ready: false, detail: "newest", observed: null });
-});
-
-test("past one page of probe history, an ACTIVE iteration without `ready` never falls back to a stale page row", async () => {
-  const elements: ElementInstanceFact[] = [{ elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" }];
-  const variables: VariableFact[] = [];
-  const iterations = ENGINE_SEARCH_PAGE * 5;
-  for (let i = 0; i < iterations; i++) {
-    const key = String(2251799813685000 + i);
-    const newest = i === iterations - 1;
-    elements.push({ elementId: "n2_probeLoop", elementInstanceKey: key, state: newest ? "ACTIVE" : "COMPLETED" });
-    if (!newest) variables.push({ name: "ready", value: "true", scopeKey: key }, { name: "detail", value: JSON.stringify(`old ${i}`), scopeKey: key });
-  }
-  const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
-  assert.equal(read.truncated, true);
-  const landed = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read }).find((n) => n.id === "landed");
-  assert.ok(!String(landed?.lastProbe?.detail ?? "").startsWith("old"), JSON.stringify(landed?.lastProbe));
-});
-
-test("a newest probe iteration that has not written `ready` yet falls back to the previous one", async () => {
+test("a live wait reads each poll's overwrite of its ONE probeLoop scope (repeated _task/_waitPoll inside it)", async () => {
+  // Real compiled shape: one ACTIVE `n2_probeLoop`; polls loop `_task` → `_gw` → `_waitPoll` → `_task`
+  // INSIDE it, each overwriting the null-seeded `ready`/`detail`/`observed` in that one scope. Run-root
+  // probe vars (another wait's result) must never be attributed to this node.
   const elements: ElementInstanceFact[] = [
     { elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" },
-    { elementId: "n2_probeLoop", elementInstanceKey: "10", state: "COMPLETED" },
-    { elementId: "n2_probeLoop", elementInstanceKey: "11", state: "ACTIVE" },
+    { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "ACTIVE" },
+    { elementId: "n2_task", elementInstanceKey: "6", state: "COMPLETED" },
+    { elementId: "n2_waitPoll", elementInstanceKey: "7", state: "ACTIVE" },
   ];
   const variables: VariableFact[] = [
-    { name: "ready", value: "true", scopeKey: "10" },
-    { name: "detail", value: '"previous"', scopeKey: "10" },
+    { name: "ready", value: "false", scopeKey: "5" },
+    { name: "detail", value: '"poll 1"', scopeKey: "5" },
+    { name: "observed", value: '{"prState":"open"}', scopeKey: "5" },
+    { name: "ready", value: "true", scopeKey: PIK },
+    { name: "detail", value: '"root leak"', scopeKey: PIK },
   ];
+  const engine = pagedEngine({ elements, variables });
+  const first = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...(await readEngineFacts(engine, PIK, NODES)) });
+  assert.deepEqual(first.find((n) => n.id === "landed")?.lastProbe, { ready: false, detail: "poll 1", observed: { prState: "open" } });
+
+  // The next poll: the timer fires, `_task` runs again in the SAME scope and overwrites its variables.
+  elements[3] = { ...elements[3], state: "COMPLETED" };
+  elements.push({ elementId: "n2_task", elementInstanceKey: "8", state: "COMPLETED" }, { elementId: "n2_waitPoll", elementInstanceKey: "9", state: "ACTIVE" });
+  variables[1] = { ...variables[1], value: '"poll 2"' };
+  variables[2] = { ...variables[2], value: '{"prState":"merged"}' };
+  const read = await readEngineFacts(engine, PIK, NODES);
+  assert.equal(read.truncated, false);
+  const second = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read });
+  assert.deepEqual(second.find((n) => n.id === "landed")?.lastProbe, { ready: false, detail: "poll 2", observed: { prState: "merged" } });
+});
+
+test("a wait whose probeLoop has not been written yet reports no probe, never a run-root value", async () => {
+  const elements: ElementInstanceFact[] = [
+    { elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" },
+    { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "ACTIVE" },
+    { elementId: "n2_task", elementInstanceKey: "6", state: "ACTIVE" },
+  ];
+  const variables: VariableFact[] = [{ name: "ready", value: "true", scopeKey: PIK }];
   const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
   const landed = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read }).find((n) => n.id === "landed");
-  assert.deepEqual(landed?.lastProbe, { ready: true, detail: "previous", observed: null });
+  assert.equal(landed?.lastProbe, null);
 });
 
 test("an emitted issue reference (non-PR fact) is not reported as a child PR run", () => {

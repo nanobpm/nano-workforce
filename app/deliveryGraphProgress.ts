@@ -190,8 +190,9 @@ export function deriveNodeProgress(input: {
       const finalDone = own.some((e) => e.elementId === `${node.element}_lastAttempt` && e.state === "COMPLETED");
       const scopes: Map<string, string>[] = [];
       for (const id of finalDone ? [node.element, `${node.element}_probeLoop`] : [`${node.element}_probeLoop`, node.element]) {
-        // The NEWEST scope wins (the most recent loop iteration) — chosen by element-instance key, which
-        // the engine allocates monotonically, never by the engine's (unspecified) result order.
+        // A wait has ONE probeLoop instance (polls loop inside it, overwriting its seeded `ready`); if the
+        // node was ever re-entered, the newest instance wins — chosen by element-instance key, which the
+        // engine allocates monotonically, never by the engine's (unspecified) result order.
         let newest: { key: bigint; scope: Map<string, string> } | null = null;
         for (const e of own) {
           if (e.elementId !== id) continue;
@@ -379,8 +380,8 @@ export async function loadDeliveryGraphProgress(
  * at most ONE page. Instead of paginating, every read below is NARROWED — exact root-variable names,
  * node-owned scope keys, element ids, or the ACTIVE state — so it stays well under a page in practice,
  * and any read that still comes back with a full page sets `truncated: true` rather than silently
- * dropping facts. Reads whose result must be the NEWEST (a wait's last probe) never depend on the page:
- * the newest probe-loop iteration is found first (its ACTIVE instance) and its scope is read by key.
+ * dropping facts. A wait's last probe never depends on the page: each poll overwrites the result in the
+ * node's single probeLoop scope, which is found (its ACTIVE instance first) and read by key.
  */
 export const ENGINE_SEARCH_PAGE = 100;
 
@@ -526,36 +527,23 @@ export async function readEngineFacts(
   for (const rows of rootPages) addVars(page(rows));
 
   // Node-owned scopes are read by SCOPE KEY of the node's own element instances — never by a process-wide
-  // name search, which a long-running wait (one probe scope per poll) would overflow past one page.
+  // name search, which other nodes' same-named variables would overflow past one page.
   await Promise.all(
     nodes.map(async (n) => {
       const bodies = await elementSearch(n.element);
       for (const e of bodies) setEl(e);
       if (n.kind === "wait") {
-        // The newest probe-loop iteration: the ACTIVE one (bounded to the live iteration) wins over the
-        // one-page history, which a wait polling for hours outgrows. Then read that scope's probe result,
-        // falling back to the previous iteration when the newest has not written `ready` yet.
-        // A FULL history page cannot be trusted to hold the previous iteration (it may be any page of a
-        // long poll), so then the fallback is skipped and the probe is reported only from the ACTIVE
-        // iteration — flagging truncation only when that leaves the probe result unresolved.
-        const [active, history] = await Promise.all([
-          elementSearch(`${n.element}_probeLoop`, "ACTIVE"),
-          limited(() => engine.searchElementInstances({ processInstanceKey: pik, elementId: `${n.element}_probeLoop` })).then((rows) => rows.map(normEl)),
-        ]);
-        const historyFull = history.length >= ENGINE_SEARCH_PAGE;
-        const pool = historyFull ? active : [...history, ...active];
-        const iterations = [...new Map(pool.map((e) => [String(e.elementInstanceKey), normEl(e)])).values()].sort(byKeyDesc);
-        let resolved = false;
-        for (const e of iterations.slice(0, historyFull ? 1 : 2)) {
-          setEl(e);
-          const rows = await scopeVars(e.elementInstanceKey);
-          addVars(rows);
-          if (rows.some((v) => v.name === "ready" && v.isTruncated !== true)) {
-            resolved = true;
-            break;
-          }
+        // A wait node has ONE `<el>_probeLoop` subProcess instance; polls loop INSIDE it (`_task` →
+        // `_gw` → `_waitPoll` → `_task`), and the compiler seeds `ready`/`detail`/`observed` to null on
+        // that probeLoop, so every poll OVERWRITES the latest result in that single scope. Read it: the
+        // ACTIVE instance while the wait is live, else the newest (completed/terminated) one.
+        const active = await elementSearch(`${n.element}_probeLoop`, "ACTIVE");
+        const loops = active.length > 0 ? active : await elementSearch(`${n.element}_probeLoop`);
+        const loop = [...loops].sort(byKeyDesc)[0];
+        if (loop !== undefined) {
+          setEl(loop);
+          addVars(await scopeVars(loop.elementInstanceKey));
         }
-        if (historyFull && !resolved) truncated = true;
         for (const e of await elementSearch(`${n.element}_lastAttempt`)) setEl(e);
         for (const e of bodies) addVars(await scopeVars(e.elementInstanceKey));
       } else if (n.kind === "agent" || n.kind === "connector") {

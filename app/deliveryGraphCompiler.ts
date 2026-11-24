@@ -2781,6 +2781,14 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
     `      <bpmn:subProcess id="${el}_probeLoop" name="Probe readiness loop: ${name}">`,
     "        <bpmn:extensionElements>",
     "          <zeebe:ioMapping>",
+    // Seed the probe result INTO the probeLoop scope (issue #1055): polls loop inside this ONE scope
+    // (`_task` → `_gw` → `_waitPoll` → `_task`), so each poll's `ready`/`detail`/`observed` overwrites
+    // the latest value HERE instead of escaping to the shared run root — where progress cannot attribute
+    // it to this node. The `ready?` gateway reads `ready` only after `_task` writes it (the job writes
+    // the nearest declaring scope = this one), so the null seed never shadows the gateway.
+    '            <zeebe:input source="=null" target="ready" />',
+    '            <zeebe:input source="=null" target="detail" />',
+    '            <zeebe:input source="=null" target="observed" />',
     '            <zeebe:output source="=ready" target="ready" />',
     '            <zeebe:output source="=if (is defined(detail)) then detail else null" target="detail" />',
     '            <zeebe:output source="=if (is defined(resolvedArtifact)) then resolvedArtifact else null" target="resolvedArtifact" />',
