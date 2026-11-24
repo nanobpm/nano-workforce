@@ -466,3 +466,16 @@ test("an agent-supplied existingIssue with a different fingerprint is never trus
   assertEquals(res.updated, []);
   assertEquals(res.skipped, 1);
 });
+
+test("extractRunSignals ids are stable across transcript prefix expiry (no ordinal collision)", () => {
+  const old = rec("TOOL_RESULT", "fatal: first failure");
+  const cmd = { toolName: "bash", arguments: { command: "npm test" } };
+  const calls = [1, 2, 3].map(() => rec("ASSISTANT", "run", [cmd]));
+  const before = extractRunSignals("A9", null, [old, ...calls]).signals.map((s) => s.id);
+  const fresh = rec("TOOL_RESULT", "fatal: second failure", [], 1);
+  const after = extractRunSignals("A9", null, [...calls, fresh]).signals;
+  const newErr = after.find((s) => s.excerpt.includes("second"));
+  assert(newErr !== undefined && !before.includes(newErr.id));
+  const rep = (ids: string[]) => ids.filter((i) => i.startsWith("repeated_command:"));
+  assertEquals(rep(after.map((s) => s.id)), rep(before));
+});

@@ -17,6 +17,7 @@
 //   3. FILE (`pr.friction-file` → {@link fileFindings}) — deterministic host code. Dedupes by
 //      fingerprint against the open `friction` issues, applies the occurrence/run thresholds, and
 //      opens or comments. The agent never writes to GitHub itself.
+import { createHash } from "node:crypto";
 import type { AgentHistoryRecord, AgentInstanceSummary, DataLayer, EngineClient } from "@nanobpm/urban";
 import { publicBaseUrl } from "./blackboard.ts";
 import { readEnvOr } from "./contracts.ts";
@@ -234,11 +235,11 @@ export interface RunExtraction {
 /** Extract every friction signal from one agent run's history. Pure — the unit-tested core. */
 export function extractRunSignals(runKey: string, runUrl: string | null, records: readonly AgentHistoryRecord[]): RunExtraction {
   const signals: FrictionSignal[] = [];
-  const perKind = new Map<SignalKind, number>();
-  const push = (kind: SignalKind, fingerprintSource: string, excerpt: string) => {
-    const n = perKind.get(kind) ?? 0;
-    perKind.set(kind, n + 1);
-    signals.push({ id: `${kind}:${runKey}:${n}`, kind, runKey, runUrl, fingerprint: normaliseMessage(fingerprintSource), excerpt });
+  // Ids derive from a STABLE identity (the history item key, or a hash of the exact command), never an
+  // ordinal: after a transcript prefix expires an ordinal shifts, so a new signal could inherit an id a
+  // prior sweep already recorded and be discarded as a duplicate (issue #1074 review).
+  const push = (kind: SignalKind, identity: string, fingerprintSource: string, excerpt: string) => {
+    signals.push({ id: `${kind}:${runKey}:${identity}`, kind, runKey, runUrl, fingerprint: normaliseMessage(fingerprintSource), excerpt });
   };
   const callCounts = new Map<string, { count: number; label: string }>();
   let tokens = 0;
@@ -251,7 +252,7 @@ export function extractRunSignals(runKey: string, runUrl: string | null, records
       const hit = classifyToolResult(text);
       if (hit) {
         const line = text.slice(hit.index).split("\n")[0] ?? "";
-        push(hit.kind, line, excerptAround(text, hit.index));
+        push(hit.kind, rec.historyItemKey, line, excerptAround(text, hit.index));
       }
     }
     // Only ASSISTANT records issue calls; a TOOL_RESULT's `toolCalls` merely references the originating
@@ -264,7 +265,7 @@ export function extractRunSignals(runKey: string, runUrl: string | null, records
     }
   }
   for (const { count, label } of callCounts.values()) {
-    if (count >= REPEAT_THRESHOLD) push("repeated_command", label, redact(`${count}× ${label}`).slice(0, 300));
+    if (count >= REPEAT_THRESHOLD) push("repeated_command", createHash("sha256").update(label).digest("hex").slice(0, 16), label, redact(`${count}× ${label}`).slice(0, 300));
   }
   return { signals, tokens, turns: iterations.size };
 }
