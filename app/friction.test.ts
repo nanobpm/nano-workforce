@@ -736,3 +736,40 @@ test("signalRunUrls and leaseHeldBy read the persisted signals and lease", async
     assert(!leaseHeldBy(data, "H1", new Date(now.getTime() + 2000)));
   });
 });
+
+test("excerptAround never splits a quoted secret: classifier anchors inside a quoted value (#1074 review)", () => {
+  for (const text of [
+    "tool --client-secret 'Error: opaque-credential' and more",
+    'run PASSWORD="Blocked by nano-coder permissions: opaque-credential" now',
+    '{"api_key":"Error: opaque-credential"}',
+  ]) {
+    for (const anchor of ["Error:", "Blocked by"]) {
+      const idx = text.indexOf(anchor);
+      if (idx < 0) continue;
+      const ex = excerptAround(text, idx);
+      assert(!ex.includes("opaque-credential"), `leak: ${ex}`);
+    }
+  }
+});
+
+test("an escalation and the transcript signals of one execution count as ONE run (#1074 review)", async () => {
+  await withData(async (data) => {
+    const db = data.source().db;
+    db.run("PRAGMA foreign_keys = OFF");
+    db.run(
+      "INSERT INTO pull_requests (pr_key, repo, number, url, status, process_key, created_at, updated_at) VALUES ('o/r#9', 'o/r', 9, 'https://github.com/o/r/pull/9', 'escalated', 'P1', '2026-01-01', '2026-01-01')",
+    );
+    db.run("INSERT INTO escalations (pr_key, round_no, kind, question, status, asked_at) VALUES ('o/r#9', 1, 'question', 'Blocker', 'open', '2026-01-01T06:00:00.000Z')");
+    const engine = {
+      searchAgentInstances: async () => [{ agentInstanceKey: "A1", processInstanceKey: "P1", status: "COMPLETED", completionDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
+      searchAgentInstanceHistory: async () => [rec("TOOL_RESULT", "Error: one"), rec("TOOL_RESULT", "Error: two")],
+      searchJobs: async () => [],
+      searchIncidents: async () => [],
+    } as any;
+    await collectFriction({ data, engine, sweepKey: "SX", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    const rows = db.all<{ run_key: string; kind: string }>("SELECT run_key, kind FROM friction_signals WHERE sweep_key = 'SX'");
+    assert(rows.some((r) => r.kind === "escalation"));
+    assert(rows.length >= 2);
+    assertEquals([...new Set(rows.map((r) => r.run_key))], ["pi:P1"]);
+  });
+});

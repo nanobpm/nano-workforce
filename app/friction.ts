@@ -161,18 +161,14 @@ export function normaliseMessage(text: string): string {
 
 /** A short excerpt around `index` in `text`, redacted and single-lined. */
 export function excerptAround(text: string, index: number, radius = 160): string {
-  // Redact the WHOLE text first, then window: slicing first could cut a secret's recognisable
-  // prefix at the window edge so it escapes every REDACTIONS pattern. A private-use sentinel marks
-  // the anchor so the index survives redaction's length changes.
-  const MARK = "\uE000";
-  const clean = text.replaceAll(MARK, "");
-  let at = Math.max(0, Math.min(clean.length, index));
-  // Anchor on a whitespace boundary so the sentinel never splits a token a pattern must match whole.
-  while (at > 0 && !/\s/.test(clean[at - 1] ?? "")) at--;
-  const marked = redact(`${clean.slice(0, at)}${MARK}${clean.slice(at)}`);
-  let pos = marked.indexOf(MARK);
-  const red = marked.replaceAll(MARK, "");
-  if (pos < 0) pos = Math.min(red.length, at);
+  // Redact the UNCHANGED whole text first, then window: slicing first could cut a secret's
+  // recognisable prefix so it escapes every REDACTIONS pattern, and inserting an anchor marker before
+  // redaction could interrupt credential syntax (e.g. inside a quoted secret value) so the redactor
+  // masks only part of it (issue #1074 review). The anchor is mapped by redacting the prefix alone —
+  // only the window position depends on it; the emitted text is always the fully redacted input.
+  const red = redact(text);
+  const at = Math.max(0, Math.min(text.length, index));
+  const pos = Math.min(red.length, redact(text.slice(0, at)).length);
   let start = Math.max(0, pos - radius);
   let end = Math.min(red.length, pos + radius);
   // Never cut through a redaction placeholder (keeps a "[REDACTED…]" marker whole).
@@ -702,14 +698,14 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
   const db = data.source().db;
   const escalationRows = [
     ...db
-      .all<{ id: number; question: string | null; at: string; subject: string | null }>(
-        "SELECT id, question, asked_at AS at, pr_key AS subject FROM escalations WHERE asked_at > ? AND asked_at <= ?",
+      .all<{ id: number; question: string | null; at: string; subject: string | null; pik: string | null }>(
+        "SELECT e.id, e.question, e.asked_at AS at, e.pr_key AS subject, p.process_key AS pik FROM escalations e LEFT JOIN pull_requests p ON p.pr_key = e.pr_key WHERE e.asked_at > ? AND e.asked_at <= ?",
         [windowStart, windowEnd],
       )
       .map((r) => ({ ...r, src: "pr" })),
     ...db
-      .all<{ id: number; question: string | null; at: string; subject: string | null }>(
-        "SELECT id, question, created_at AS at, feature_key AS subject FROM feature_escalations WHERE created_at > ? AND created_at <= ?",
+      .all<{ id: number; question: string | null; at: string; subject: string | null; pik: string | null }>(
+        "SELECT e.id, e.question, e.created_at AS at, e.feature_key AS subject, f.process_key AS pik FROM feature_escalations e LEFT JOIN feature_runs f ON f.feature_key = e.feature_key WHERE e.created_at > ? AND e.created_at <= ?",
         [windowStart, windowEnd],
       )
       .map((r) => ({ ...r, src: "feature" })),
@@ -719,9 +715,10 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     signals.push({
       id: `escalation:${e.src}:${e.id}`,
       kind: "escalation",
-      // Key by the run SUBJECT (pr_key / feature_key), not the escalation id: N escalations of one PR
-      // are one run, not N (issue #1074 review). A subject-less escalation falls back to its own id.
-      runKey: e.subject ? `${e.src}:${e.subject}` : `${e.src}-escalation:${e.id}`,
+      // The ONE canonical run identity (the subject's owning process instance), so an escalation and
+      // the transcript/job/incident signals of the same execution count as ONE run (issue #1074
+      // review). Fallback: the run SUBJECT (pr_key / feature_key), then the escalation's own id.
+      runKey: canonicalRunKey(e.pik, e.subject ? `${e.src}:${e.subject}` : `${e.src}-escalation:${e.id}`),
       runUrl: escalationSubjectUrl(e.subject),
       fingerprint: normaliseMessage(q.split("\n")[0] ?? q),
       excerpt: redact(e.subject ? `[${e.subject}] ${q}` : q).replace(/\s+/g, " ").slice(0, 400),
