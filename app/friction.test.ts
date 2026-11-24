@@ -602,6 +602,23 @@ test("run links are browser-facing cockpit links, never the protected history JS
   });
 });
 
+test("failed-job and incident signals carry cockpit run links for their process instance", async () => {
+  await withData(async (data) => {
+    const engine = {
+      searchAgentInstances: async () => [],
+      searchAgentInstanceHistory: async () => [],
+      searchJobs: async ({ state }: { state: string }) => (state === "FAILED" ? [{ jobKey: "J7", type: "t", processInstanceKey: "P7", retries: 0 }] : []),
+      searchIncidents: async () => [{ incidentKey: "I7", processInstanceKey: "P8", errorType: "E", errorMessage: "m" }],
+    } as any;
+    await collectFriction({ data, engine, sweepKey: "SJ", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    const rows = data.source().db.all<{ kind: string; run_url: string }>("SELECT kind, run_url FROM friction_signals WHERE sweep_key = 'SJ' ORDER BY kind");
+    assertEquals(rows.map((r) => [r.kind, r.run_url]), [
+      ["failed_job", "http://h/app/pages/cockpit#/cockpit/P7"],
+      ["incident", "http://h/app/pages/cockpit#/cockpit/P8"],
+    ]);
+  });
+});
+
 test("a fingerprint survives the digest's redaction pass and recounts (digest-to-recount)", async () => {
   for (const msg of ["error: api_key=sekrit123 rejected", "Authorization: Bearer abcdefghijklmnopqrstu failed", "password hunter2 bad"]) {
     const fp = normaliseMessage(msg);

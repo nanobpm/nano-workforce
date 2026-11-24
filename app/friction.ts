@@ -677,7 +677,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
         id,
         kind: "failed_job",
         runKey: canonicalRunKey(job.processInstanceKey, `job:${job.jobKey}`),
-        runUrl: null,
+        runUrl: job.processInstanceKey ? cockpitUrlFor(deps.baseUrl, String(job.processInstanceKey)) : null,
         fingerprint: normaliseMessage(`${job.type} ${state.toLowerCase()}`),
         excerpt: redact(`${job.type} @ ${job.elementId ?? "?"} (instance ${job.processInstanceKey}): ${what}`),
       });
@@ -694,7 +694,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
       id,
       kind: "incident",
       runKey: canonicalRunKey(inc.processInstanceKey, `incident:${inc.incidentKey}`),
-      runUrl: null,
+      runUrl: inc.processInstanceKey ? cockpitUrlFor(deps.baseUrl, String(inc.processInstanceKey)) : null,
       fingerprint: normaliseMessage(msg),
       excerpt: redact(`${inc.elementId ?? "?"} (instance ${inc.processInstanceKey}): ${msg}`).slice(0, 400),
     });
