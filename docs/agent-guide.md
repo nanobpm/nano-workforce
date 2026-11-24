@@ -295,6 +295,22 @@ merge-to-convergence handoff, so a poller that treats stage order as progress (o
 string as "done") stops early. A feature delegating to its PR reports the PR's rolled-up status
 (e.g. `merged` as soon as the PR merges, even before the poller syncs the feature row).
 
+### Wait for a run to reach a state — `GET /run/wait?key=<key>&until=<cond>` (`d8ctl nwf wait <key> --until=…`)
+
+```bash
+curl -sS "__BASE__/run/wait?key=$(jq -rn --arg k 'owner/repo#123' '$k|@uri')&until=merged&timeout=PT25M" | jq   # tool: waitRun
+```
+
+Don't poll `/status` or guess a timer: this long-poll holds the request and returns
+`{ timedOut, reason, until, view }` (`view` is the `GET /run` body) as soon as `until` holds —
+`pr-opened`, `converged`, `merged`, `escalated`, `terminal`, or `any-change` (default; any field of
+the view changed since the request began). Each request is bounded server-side to **≤ 25 min**
+(`timeout` is clamped); on expiry it returns `timedOut: true` with the current view — re-issue it
+(d8ctl loops for you up to its own deadline). **An open escalation always ends the wait**
+(`reason: "escalated"`) whatever you waited for, so you cannot miss one; a **terminal** run also always
+ends it (`reason: "terminal"`), so e.g. `until=merged` on a PR closed unmerged returns at once. Check
+`reason`, not just `timedOut`.
+
 ## 6. Debug the models and the prompts
 
 - **Processes.** Engine truth is the deployed XML (`urban_debug_get_process_definition_xml`).
@@ -623,6 +639,7 @@ failed/garbled `gh` read is "not ready" (the bounded wait routes via `onTimeout`
 | Live version (§0) | `getVersion` | `GET __BASE__/version` |
 | PRs in flight (§0) | `listActivePrs` | `GET __BASE__/status` |
 | One run by key, any stage (§5) | `getRun` | `GET __BASE__/run?key=<key>` (key URL-encoded query value) |
+| Wait for a run to reach a state (§5) | `waitRun` | `GET __BASE__/run/wait?key=<key>&until=<cond>&timeout=PT25M` (long-poll, ≤ 25 min per request) |
 | Submit a PR / epic / feature (§1–2) | `startConvergenceLoop` / `startPlanFanout` / `startFeature` | `POST __BASE__/actions/start/{convergence-loop,plan-fanout,feature}` |
 | List escalations (§3) | `listEscalations` | `GET __BASE__/escalations` |
 | Answer an escalation (§3) | `completeUserTask` (as agent: `agentCompleteEscalation`) | `POST __BASE__/actions/complete-user-task` (as agent: `POST __BASE__/hooks/agent-complete` with `agentId` required) |
