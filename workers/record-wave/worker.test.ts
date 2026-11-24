@@ -460,7 +460,7 @@ test("record-wave includes a no-result slice's retained draft PR in the D2 confl
   }
 });
 
-test("record-wave stamps a keyless `opened` slice with the shared marker so the finalizer can name it (issue #1011)", async () => {
+test("record-wave demotes a keyless `opened` slice to blocked, summary unchanged (issue #1067)", async () => {
   const rows: Row[] = [{ id: 1, plan_key: "owner/repo#64", task_id: "seam", status: "pending", wave: 0 }];
   const { app } = fakeApp(rows);
   await handler(
@@ -477,7 +477,7 @@ test("record-wave stamps a keyless `opened` slice with the shared marker so the 
   );
   const row = rows[0] as unknown as Record<string, unknown>;
   assertEquals(row.status, "blocked");
-  assertEquals(row.summary, `${KEYLESS_OPENED_SUMMARY} — opened it`);
+  assertEquals(row.summary, "opened it");
 });
 
 // Issue #1011 review: after escalation → Abandon/SLA auto-abandon, the unreconciled keyless `opened`
