@@ -35,6 +35,8 @@ import {
   recordSkipped,
   releaseLease,
   redact,
+  normaliseMessage,
+  SWEEP_OVERLAP_MS,
   summaryMarkdown,
 } from "./friction.ts";
 
@@ -551,4 +553,88 @@ test("N escalations of one PR count as ONE run (keyed by subject, #1074 assessme
     assertEquals(rows.length, 3);
     assertEquals(new Set(rows.map((r) => r.run_key)).size, 1);
   });
+});
+
+// ── #1074 review round: overlap, command identity, links, stable fingerprints, canonical runs ────
+
+test("a completion first visible in the NEXT sweep (inside the overlap) is still collected, once", async () => {
+  await withData(async (data) => {
+    const runs: { key: string; at: string; records: AgentHistoryRecord[] }[] = [];
+    const { engine } = engineStub({ runs });
+    const w1 = new Date("2026-01-02T00:00:00.000Z");
+    await collectFriction({ data, engine, sweepKey: "S1", now: w1, config: CONFIG, baseUrl: "http://h" });
+    // Completed just before the S1 watermark, but only became visible after S1 committed.
+    runs.push({ key: "LATE", at: new Date(w1.getTime() - SWEEP_OVERLAP_MS / 2).toISOString(), records: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")] });
+    const s2 = await collectFriction({ data, engine, sweepKey: "S2", now: new Date("2026-01-02T06:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(s2.signalCount, 1);
+    const s3 = await collectFriction({ data, engine, sweepKey: "S3", now: new Date("2026-01-02T06:10:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(s3.signalCount, 0, "the overlap re-read never double-counts");
+    assertEquals(s3.runsSwept, 0);
+  });
+});
+
+test("different repeated commands never share a fingerprint", () => {
+  const calls = (cmd: string) => [0, 1, 2].map(() => rec("ASSISTANT", "", [{ toolName: "bash", arguments: { command: cmd } }]));
+  const a = extractRunSignals("R", null, calls("npm test")).signals;
+  const b = extractRunSignals("R", null, calls("curl --fail https://example.invalid/artifact")).signals;
+  const a2 = extractRunSignals("R2", null, calls("npm test")).signals;
+  assertEquals(a.length, 1);
+  assert(a[0]?.fingerprint !== b[0]?.fingerprint, "distinct commands merged");
+  assertEquals(a[0]?.fingerprint, a2[0]?.fingerprint, "the same command groups across runs");
+});
+
+test("run links are browser-facing cockpit links, never the protected history JSON", async () => {
+  await withData(async (data) => {
+    const engine = {
+      searchAgentInstances: async () => [{ agentInstanceKey: "A9", processInstanceKey: "P9", status: "COMPLETED", completionDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
+      searchAgentInstanceHistory: async () => [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")],
+      searchJobs: async () => [],
+      searchIncidents: async () => [],
+    } as any;
+    await collectFriction({ data, engine, sweepKey: "SL", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    const row = data.source().db.all<{ run_url: string }>("SELECT run_url FROM friction_signals WHERE sweep_key = 'SL'")[0];
+    assertEquals(row?.run_url, "http://h/app/pages/cockpit#/cockpit/P9");
+  });
+});
+
+test("a fingerprint survives the digest's redaction pass and recounts (digest-to-recount)", async () => {
+  for (const msg of ["error: api_key=sekrit123 rejected", "Authorization: Bearer abcdefghijklmnopqrstu failed", "password hunter2 bad"]) {
+    const fp = normaliseMessage(msg);
+    assertEquals(redact(fp), fp, `unstable: ${fp}`);
+    const digest = buildDigest({ start: "a", end: "b" }, [{ id: "1", kind: "tool_error", runKey: "r", runUrl: null, fingerprint: fp, excerpt: "e" }], [], 24000);
+    assert(digest.includes(`\`${fp}\``), `digest rewrote ${fp}`);
+  }
+  await withData(async (data) => {
+    const fp = normaliseMessage("error: api_key=sekrit123 rejected");
+    data.source().db.run("INSERT INTO friction_signals (id, sweep_key, kind, run_key, run_url, fingerprint, excerpt, created_at) VALUES ('x', 's', 'tool_error', 'r', NULL, ?, '', 't')", [fp]);
+    assertEquals(observedSignalCounts(data, "s", [redact(fp)]).occurrences, 1);
+  });
+});
+
+test("a tool error, failed job and incident of ONE process instance count as one run", async () => {
+  await withData(async (data) => {
+    const engine = {
+      searchAgentInstances: async () => [{ agentInstanceKey: "A1", processInstanceKey: "P1", status: "COMPLETED", completionDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
+      searchAgentInstanceHistory: async () => [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")],
+      searchJobs: async ({ state }: { state: string }) => (state === "FAILED" ? [{ jobKey: "J1", type: "t", processInstanceKey: "P1", retries: 0 }] : []),
+      searchIncidents: async () => [{ incidentKey: "I1", processInstanceKey: "P1", errorType: "E", errorMessage: "m" }],
+    } as any;
+    await collectFriction({ data, engine, sweepKey: "SC", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    const rows = data.source().db.all<{ run_key: string }>("SELECT run_key FROM friction_signals WHERE sweep_key = 'SC'");
+    assertEquals(rows.length, 3);
+    assertEquals(new Set(rows.map((r) => r.run_key)).size, 1);
+  });
+});
+
+test("a recurrence is recounted and clamped; an unsupported one is skipped", async () => {
+  const open = [{ number: 7, url: "https://github.com/acme/friction/issues/7", title: "t", body: fingerprintMarker("redirect-blocked") }];
+  const clamped = githubStub(open);
+  const comments: string[] = [];
+  const gh = { ...clamped.github, comment: async (r: string, n: number, body: string) => (comments.push(body), clamped.github.comment(r, n, body)) };
+  await fileFindings({ github: gh, config: CONFIG, window: WINDOW, observed: () => ({ occurrences: 1, runs: 1 }) }, parseFindings([finding({ occurrences: 50, runs: 20 })]).findings);
+  assert(comments[0]?.includes("1 occurrence(s) across 1 run(s)"), comments[0] ?? "");
+  const none = githubStub(open);
+  const res = await fileFindings({ github: none.github, config: CONFIG, window: WINDOW, observed: () => ({ occurrences: 0, runs: 0 }) }, parseFindings([finding()]).findings);
+  assertEquals(none.calls, ["list"]);
+  assertEquals(res.skipped, 1);
 });

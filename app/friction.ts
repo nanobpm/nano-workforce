@@ -38,6 +38,11 @@ export const FRICTION_LABEL = "friction";
 export const FIRST_SWEEP_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 /** The singleton watermark row id. */
 const WATERMARK_ID = "sweep";
+/** The agent-instance search is eventually consistent (zero wait): a completion can become visible
+ *  only AFTER a sweep committed host `now` as the watermark. Each sweep therefore re-reads this much
+ *  overlap before the watermark; the stable signal ids (dedup against `friction_signals`) stop the
+ *  overlap from double-counting anything an earlier sweep already recorded (issue #1074 review). */
+export const SWEEP_OVERLAP_MS = 60 * 60 * 1000;
 
 /** The fix surfaces a finding may name (issue #1073 "Classification"). */
 export const FIX_SURFACES = ["AGENTS.md", "prompt", "skill", "permission-rule", "worker-config", "missing-tool"] as const;
@@ -124,7 +129,7 @@ export function redact(text: string): string {
 /** Normalise a message into a grouping fingerprint: redacted, lower-cased, volatile tokens (numbers,
  *  hex ids, quoted strings, temp paths) collapsed so the same friction across runs groups together. */
 export function normaliseMessage(text: string): string {
-  return redact(text)
+  let out = redact(text)
     .toLowerCase()
     .replace(/\/(?:tmp|var\/folders|private\/var)\/\S*/g, "<tmp>")
     .replace(/\b[0-9a-f]{7,}\b/g, "<hex>")
@@ -133,6 +138,15 @@ export function normaliseMessage(text: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 160);
+  // Lower-casing turns placeholders (`[REDACTED]`) into text a later redact() pass rewrites, so a
+  // fingerprint would change on its way through the digest and never recount. Settle it to a
+  // fixed point of redact() so the identifier the analyst copies is the one stored.
+  for (let i = 0; i < 4; i++) {
+    const next = redact(out);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }
 
 /** A short excerpt around `index` in `text`, redacted and single-lined. */
@@ -241,8 +255,8 @@ export function extractRunSignals(runKey: string, runUrl: string | null, records
   // Ids derive from a STABLE identity (the history item key, or a hash of the exact command), never an
   // ordinal: after a transcript prefix expires an ordinal shifts, so a new signal could inherit an id a
   // prior sweep already recorded and be discarded as a duplicate (issue #1074 review).
-  const push = (kind: SignalKind, identity: string, fingerprintSource: string, excerpt: string) => {
-    signals.push({ id: `${kind}:${runKey}:${identity}`, kind, runKey, runUrl, fingerprint: normaliseMessage(fingerprintSource), excerpt });
+  const push = (kind: SignalKind, identity: string, fingerprint: string, excerpt: string) => {
+    signals.push({ id: `${kind}:${runKey}:${identity}`, kind, runKey, runUrl, fingerprint, excerpt });
   };
   const callCounts = new Map<string, { count: number; label: string }>();
   let tokens = 0;
@@ -255,7 +269,7 @@ export function extractRunSignals(runKey: string, runUrl: string | null, records
       const hit = classifyToolResult(text);
       if (hit) {
         const line = text.slice(hit.index).split("\n")[0] ?? "";
-        push(hit.kind, rec.historyItemKey, line, excerptAround(text, hit.index));
+        push(hit.kind, rec.historyItemKey, normaliseMessage(line), excerptAround(text, hit.index));
       }
     }
     // Only ASSISTANT records issue calls; a TOOL_RESULT's `toolCalls` merely references the originating
@@ -267,8 +281,12 @@ export function extractRunSignals(runKey: string, runUrl: string | null, records
       callCounts.set(key, { count: (prev?.count ?? 0) + 1, label: key });
     }
   }
-  for (const { count, label } of callCounts.values()) {
-    if (count >= REPEAT_THRESHOLD) push("repeated_command", createHash("sha256").update(label).digest("hex").slice(0, 16), label, redact(`${count}× ${label}`).slice(0, 300));
+  for (const [key, { count, label }] of callCounts) {
+    if (count < REPEAT_THRESHOLD) continue;
+    // Group by the EXACT redacted command identity (hashed), never a normalised label: normalising
+    // collapses distinct commands (`npm test` vs `curl …`) into one `{<str>:<str>}` group.
+    const hash = createHash("sha256").update(key).digest("hex").slice(0, 16);
+    push("repeated_command", hash, `cmd:${hash}`, redact(`${count}× ${label}`).slice(0, 300));
   }
   return { signals, tokens, turns: iterations.size };
 }
@@ -477,8 +495,17 @@ export interface CollectResult {
   openFindings: string[];
 }
 
-function runUrlFor(baseUrl: string, agentInstanceKey: string): string {
-  return `${baseUrl}/app/api/agentic/agent-instances/${encodeURIComponent(agentInstanceKey)}/history`;
+/** A BROWSER-facing link to a run: the Cockpit page focused on the owning process instance. Never the
+ *  protected history JSON endpoint, which 401s on navigation when a hook secret is configured. */
+export function cockpitUrlFor(baseUrl: string, processInstanceKey: string): string {
+  return `${baseUrl}/app/pages/cockpit#/cockpit/${encodeURIComponent(processInstanceKey)}`;
+}
+
+/** The ONE canonical run identity every signal source counts distinct runs by: the owning process
+ *  instance (`pi:<key>`), falling back to the source record's own key only when none is known. */
+export function canonicalRunKey(processInstanceKey: string | number | null | undefined, fallback: string): string {
+  const k = processInstanceKey == null ? "" : String(processInstanceKey).trim();
+  return k ? `pi:${k}` : fallback;
 }
 
 function countByKind(signals: readonly FrictionSignal[]): Record<SignalKind, number> {
@@ -490,6 +517,10 @@ function countByKind(signals: readonly FrictionSignal[]): Record<SignalKind, num
 
 interface RunSummary {
   runKey: string;
+  /** Internal: ids of this run's signals (for the post-dedup recount); not rendered. */
+  signalIds?: Set<string>;
+  /** Internal: read only through the overlap before the watermark. */
+  overlapOnly?: boolean;
   elementId: string;
   tokens: number;
   turns: number;
@@ -590,6 +621,8 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
   const priorWatermark = readWatermark(data);
   const windowEnd = deps.now.toISOString();
   const windowStart = priorWatermark ?? new Date(deps.now.getTime() - FIRST_SWEEP_LOOKBACK_MS).toISOString();
+  // The READ window reaches SWEEP_OVERLAP_MS behind the watermark (late-visible completions).
+  const readStart = priorWatermark === null ? windowStart : new Date(Date.parse(priorWatermark) - SWEEP_OVERLAP_MS).toISOString();
 
   // ── Read (no writes yet: any throw here leaves the watermark where it was). ──
   const signals: FrictionSignal[] = [];
@@ -597,12 +630,19 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
   const allRuns = await engine.searchAgentInstances();
   warnIfFullPage(deps.log, "agent instances", allRuns.length);
   for (const run of allRuns) {
-    if (!inWindow(runInstant(run), windowStart, windowEnd)) continue;
+    const instant = runInstant(run);
+    if (!inWindow(instant, readStart, windowEnd)) continue;
     const history = await fetchRunHistory(engine, run.agentInstanceKey);
-    const ex = extractRunSignals(run.agentInstanceKey, runUrlFor(deps.baseUrl, run.agentInstanceKey), history);
+    const ex = extractRunSignals(run.agentInstanceKey, cockpitUrlFor(deps.baseUrl, run.processInstanceKey), history);
     const metricTokens = run.metrics ? run.metrics.inputTokens + run.metrics.outputTokens : 0;
-    signals.push(...ex.signals);
+    // Count runs by the CANONICAL run identity (the owning process instance) shared with failed-job and
+    // incident signals; the signal id keeps the source-record key for dedup (issue #1074 review).
+    const canonical = canonicalRunKey(run.processInstanceKey, run.agentInstanceKey);
+    const runSignals = ex.signals.map((s) => ({ ...s, runKey: canonical }));
+    signals.push(...runSignals);
     runs.push({
+      overlapOnly: !inWindow(instant, windowStart, windowEnd),
+      signalIds: new Set(runSignals.map((s) => s.id)),
       runKey: run.agentInstanceKey,
       elementId: run.elementId ?? "?",
       tokens: ex.tokens || metricTokens,
@@ -626,7 +666,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
       signals.push({
         id,
         kind: "failed_job",
-        runKey: job.jobKey,
+        runKey: canonicalRunKey(job.processInstanceKey, `job:${job.jobKey}`),
         runUrl: null,
         fingerprint: normaliseMessage(`${job.type} ${state.toLowerCase()}`),
         excerpt: redact(`${job.type} @ ${job.elementId ?? "?"} (instance ${job.processInstanceKey}): ${what}`),
@@ -643,7 +683,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     signals.push({
       id,
       kind: "incident",
-      runKey: inc.incidentKey,
+      runKey: canonicalRunKey(inc.processInstanceKey, `incident:${inc.incidentKey}`),
       runUrl: null,
       fingerprint: normaliseMessage(msg),
       excerpt: redact(`${inc.elementId ?? "?"} (instance ${inc.processInstanceKey}): ${msg}`).slice(0, 400),
@@ -687,8 +727,10 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     const fresh = signals.filter((s) => !recorded.has(s.id));
     signals.length = 0;
     signals.push(...fresh);
-    for (const r of runs) r.signals = fresh.filter((s) => s.runKey === r.runKey).length;
+    for (const r of runs) r.signals = fresh.filter((s) => r.signalIds?.has(s.id)).length;
   }
+  // A run re-read only through the overlap that yielded nothing new was already swept: drop it.
+  for (let i = runs.length - 1; i >= 0; i--) if (runs[i]?.overlapOnly && runs[i]?.signals === 0) runs.splice(i, 1);
 
   const digest = signals.length > 0 ? buildDigest({ start: windowStart, end: windowEnd }, signals, runs, config.digestMaxChars) : "";
   let openFindings: string[] = [];
@@ -905,15 +947,20 @@ export async function fileFindings(deps: FileDeps, findingsIn: readonly Friction
     // Match by fingerprint only: an agent-supplied `existingIssue` is untrusted — a stale or wrong
     // number would attach evidence to an unrelated finding and bypass the new-finding thresholds.
     const match = openByFp.get(f.fingerprint);
+    // Never trust the analyst's counts alone: take the smaller of its figure and the host recount —
+    // for recurrences too, and skip one the persisted signals do not support at all.
+    const seen = deps.observed(f.signalFingerprints ?? []);
+    f.occurrences = Math.min(f.occurrences, seen.occurrences);
+    f.runs = Math.min(f.runs, seen.runs);
     if (match) {
+      if (f.occurrences < 1 || f.runs < 1) {
+        result.skipped++;
+        continue;
+      }
       await deps.github.comment(deps.config.repo, match.number, recurrenceComment(f, deps.window));
       result.updated.push(match.url || `https://github.com/${deps.config.repo}/issues/${match.number}`);
       continue;
     }
-    // Never trust the analyst's counts alone: take the smaller of its figure and the host recount.
-    const seen = deps.observed(f.signalFingerprints ?? []);
-    f.occurrences = Math.min(f.occurrences, seen.occurrences);
-    f.runs = Math.min(f.runs, seen.runs);
     if (f.occurrences < deps.config.minOccurrences || f.runs < deps.config.minRuns) {
       result.skipped++;
       continue;
