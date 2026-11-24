@@ -1,3 +1,9 @@
+## [0.229.4](https://github.com/nanobpm/nano-workforce/compare/v0.229.3...v0.229.4) (2026-11-24)
+
+### Bug Fixes
+
+* **runs:** reconcile missing PR rows so epics and features reach a terminal state ([#1093](https://github.com/nanobpm/nano-workforce/issues/1093)) ([9cd832d](https://github.com/nanobpm/nano-workforce/commit/9cd832d9bc95144bb1068c94ec3a90c4aa1440d1)), closes [#1089](https://github.com/nanobpm/nano-workforce/issues/1089)
+
 ## [0.229.3](https://github.com/nanobpm/nano-workforce/compare/v0.229.2...v0.229.3) (2026-11-24)
 
 ### Bug Fixes
