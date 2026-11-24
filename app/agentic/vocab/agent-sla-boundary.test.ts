@@ -155,7 +155,7 @@ test("externalAgentTasksMissingSlaBoundary rejects a timer with no timeDuration,
 // guard and wedging claim recovery); its boundary routes to `done` (the steward has no escalation
 // path of its own — on SLA the tick ends and the 15-min claim TTL frees its claims for the next
 // tick), which satisfies the guard's "routes somewhere" requirement.
-const BOUNDED_PROCESSES = ["implement-cell.bpmn", "merge-cell.bpmn", "merge-loop.bpmn", "retro.bpmn", "escalation-steward.bpmn"] as const;
+const BOUNDED_PROCESSES = ["implement-cell.bpmn", "merge-cell.bpmn", "merge-loop.bpmn", "retro.bpmn", "escalation-steward.bpmn", "friction-sweep.bpmn"] as const;
 
 test("DEFECT-CLASS GUARD: every external agent task in a bounded process carries an interrupting timer SLA boundary", () => {
   let anyAgentTasks = false;

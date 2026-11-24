@@ -1,0 +1,293 @@
+{
+  "schemaVersion": "1.0",
+  "title": "Friction",
+  "nodes": [
+    {
+      "type": "nav",
+      "id": "nav",
+      "props": {
+        "variant": "bar",
+        "title": "Nano Workforce",
+        "items": [
+          {
+            "label": "Overview",
+            "page": "overview"
+          },
+          {
+            "label": "Connect over MCP",
+            "page": "mcp"
+          },
+          {
+            "label": "Lineage",
+            "page": "lineage"
+          },
+          {
+            "label": "Convergence",
+            "page": "home"
+          },
+          {
+            "label": "Epics",
+            "page": "epic"
+          },
+          {
+            "label": "Feature",
+            "page": "feature"
+          },
+          {
+            "label": "Delivery Graphs",
+            "page": "delivery-graphs",
+            "badge": {
+              "source": "app",
+              "table": "delivery_graph_proposals",
+              "filter": [
+                {
+                  "field": "status",
+                  "eq": "staged"
+                }
+              ],
+              "tone": "ok",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
+            "label": "Tasks",
+            "page": "tasks",
+            "badge": {
+              "source": "app",
+              "table": "user_tasks",
+              "filter": [],
+              "tone": "danger",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
+            "label": "Auto-resolutions",
+            "page": "auto-resolutions",
+            "badge": {
+              "source": "app",
+              "table": "escalation_auto_resolutions__read_model",
+              "filter": [
+                {
+                  "field": "review_state",
+                  "eq": "pending"
+                }
+              ],
+              "tone": "warn",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
+            "label": "Cockpit",
+            "page": "cockpit"
+          },
+          {
+            "label": "Board",
+            "page": "board"
+          },
+          {
+            "label": "Velocity",
+            "page": "velocity"
+          },
+          {
+            "label": "Friction",
+            "page": "friction"
+          }
+        ],
+        "sticky": true
+      }
+    },
+    {
+      "type": "text",
+      "id": "title",
+      "props": {
+        "text": "Friction",
+        "variant": "heading"
+      }
+    },
+    {
+      "type": "text",
+      "id": "subtitle",
+      "props": {
+        "variant": "sub",
+        "text": "Every 12-hourly agent friction sweep (issue #1073): the window it covered, how many agent runs it read, what kinds of friction it found (failed tool calls, permission blocks, timeouts, missing nano-generated facades, repeated commands, failed/lease-expired jobs, incidents, escalations), and which findings it opened or updated in the findings repo. Watch the per-kind counts fall as fixes land. Sources are engine records and engine-stored transcripts only; excerpts are redacted."
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "friction-sweeps",
+      "props": {
+        "title": "Sweeps",
+        "rowKey": "sweep_key",
+        "refreshMs": 10000,
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "friction_sweeps",
+          "orderBy": {
+            "field": "window_end",
+            "dir": "desc"
+          }
+        },
+        "columns": [
+          {
+            "field": "window_end",
+            "header": "Window end",
+            "format": "datetime"
+          },
+          {
+            "field": "status",
+            "header": "Status",
+            "badge": true
+          },
+          {
+            "field": "runs_swept",
+            "header": "Runs"
+          },
+          {
+            "field": "signal_count",
+            "header": "Signals"
+          },
+          {
+            "field": "tool_error_count",
+            "header": "Tool errors"
+          },
+          {
+            "field": "permission_block_count",
+            "header": "Permission blocks"
+          },
+          {
+            "field": "timeout_count",
+            "header": "Timeouts"
+          },
+          {
+            "field": "missing_generated_count",
+            "header": "nano-generated missing"
+          },
+          {
+            "field": "repeated_command_count",
+            "header": "Repeated cmds"
+          },
+          {
+            "field": "failed_job_count",
+            "header": "Failed jobs"
+          },
+          {
+            "field": "incident_count",
+            "header": "Incidents"
+          },
+          {
+            "field": "escalation_count",
+            "header": "Escalations"
+          },
+          {
+            "field": "created_count",
+            "header": "Opened"
+          },
+          {
+            "field": "updated_count",
+            "header": "Updated"
+          },
+          {
+            "field": "sweep_key",
+            "header": "Engine instance",
+            "truncate": true
+          }
+        ],
+        "detail": {
+          "fields": [
+            {
+              "field": "window_start",
+              "label": "Window start"
+            },
+            {
+              "field": "window_end",
+              "label": "Window end"
+            },
+            {
+              "field": "tokens_total",
+              "label": "Tokens (swept runs)"
+            },
+            {
+              "field": "created_issues",
+              "label": "Opened issues"
+            },
+            {
+              "field": "updated_issues",
+              "label": "Updated issues"
+            },
+            {
+              "field": "skipped_count",
+              "label": "Not filed (below threshold / malformed)"
+            },
+            {
+              "field": "digest",
+              "label": "Digest handed to the analyst (redacted)"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "friction-signals",
+      "props": {
+        "title": "Signals",
+        "rowKey": "id",
+        "refreshMs": 10000,
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "friction_signals",
+          "orderBy": {
+            "field": "created_at",
+            "dir": "desc"
+          }
+        },
+        "columns": [
+          {
+            "field": "created_at",
+            "header": "Swept",
+            "format": "datetime"
+          },
+          {
+            "field": "kind",
+            "header": "Kind",
+            "badge": true
+          },
+          {
+            "field": "fingerprint",
+            "header": "Message",
+            "truncate": true
+          },
+          {
+            "field": "run_key",
+            "header": "Run",
+            "truncate": true,
+            "linkField": "run_url"
+          },
+          {
+            "field": "excerpt",
+            "header": "Excerpt",
+            "truncate": true
+          }
+        ],
+        "detail": {
+          "linkField": "run_url",
+          "fields": [
+            {
+              "field": "excerpt",
+              "label": "Excerpt (redacted)"
+            },
+            {
+              "field": "sweep_key",
+              "label": "Sweep"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

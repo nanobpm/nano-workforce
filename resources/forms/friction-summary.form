@@ -1,0 +1,17 @@
+{
+  "id": "friction-summary",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "text",
+      "text": "=frictionSummary",
+      "label": "Friction sweep summary"
+    },
+    {
+      "type": "text",
+      "text": "Informational only — the findings are already filed. Acknowledge to close this summary (it closes itself after 24h if left unread).",
+      "label": "Note"
+    }
+  ]
+}

@@ -281,6 +281,22 @@
       "handler": "workers/escalation-steward-record/worker.ts"
     },
     {
+      "taskType": "pr.friction-lease",
+      "handler": "workers/friction-lease/worker.ts"
+    },
+    {
+      "taskType": "pr.friction-collect",
+      "handler": "workers/friction-collect/worker.ts"
+    },
+    {
+      "taskType": "pr.friction-release",
+      "handler": "workers/friction-release/worker.ts"
+    },
+    {
+      "taskType": "pr.friction-file",
+      "handler": "workers/friction-file/worker.ts"
+    },
+    {
       "taskType": "pr.start-feature-mcp",
       "handler": "workers/start-feature-mcp/worker.ts"
     },
@@ -305,7 +321,8 @@
     "senior:conformance",
     "senior:scope-classify",
     "senior:adversarial-review",
-    "senior:escalation-steward"
+    "senior:escalation-steward",
+    "senior:friction-analyst"
   ],
   "surfaces": {
     "taskInbox": {

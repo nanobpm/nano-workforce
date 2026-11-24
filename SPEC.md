@@ -1391,6 +1391,37 @@ the subject row) is ever touched; everything else is fail-closed out.
   Auto-resolutions, attributed to the steward agent, where an operator can **Dismiss** (reviewed, no
   action) or **Intervene** (stepped in) with a note — a record is never a hidden machine decision.
 
+## 13.5 Friction sweep (`friction-sweep.bpmn`) — issue #1073
+
+Every 12 hours the app reviews what agents did since the last sweep and files deduplicated,
+actionable friction findings to `NANO_FRICTION_REPO` (default `jwulf/friction`).
+
+- **One schedule.** The process's `R/PT12H` timer start is the ONLY starter (no API action, poller
+  or boot hook). The interval is a BPMN literal: a timer start has no variables and deploy-time
+  templating is gone (ADR 0062). A changed redeploy replaces the old timer and re-anchors the
+  schedule to the deploy time.
+- **Singleton lease.** `pr.friction-lease` takes the one-row `friction_sweep_lock` lease (atomic
+  conditional write, holder = the instance key, expiry `NANO_FRICTION_LEASE_MS`, default 6h). A
+  firing that finds it held by a live instance records a `skipped` sweep and ends at `skipped`. An
+  expired lease, or one whose holder is no longer running, is taken over.
+- **collect → analyse → file.** `pr.friction-collect` (deterministic) reads `(watermark, now]`:
+  engine-stored agent transcripts (failed tool calls, nano-coder permission blocks, timeouts,
+  `nano-generated` `ERR_MODULE_NOT_FOUND`, repeated commands, tokens/turns), failed and lease-expired
+  jobs, incidents, and escalations. It redacts and persists signals and advances the watermark in one
+  transaction; a failure commits nothing. Only a bounded, redacted digest
+  (`NANO_FRICTION_DIGEST_MAX_CHARS`) reaches the `senior:friction-analyst` agent
+  (`prompts/friction-analyst.md`), which proposes findings (fingerprint, fix surface, target repo,
+  evidence, proposed fix) and never writes to GitHub. `pr.friction-file` dedupes by fingerprint
+  against the open `friction` issues (a match gets a recurrence comment), opens new issues only
+  above `NANO_FRICTION_MIN_OCCURRENCES` / `NANO_FRICTION_MIN_RUNS`, and makes no GitHub call when
+  there's nothing to file.
+- **Release before the summary.** `pr.friction-release` runs on every way out (no-op, collect/file
+  failure reported as a status rather than an incident, analyst SLA) and BEFORE the
+  `friction-summary` user task, so an unread summary never blocks the next sweep. The summary
+  (Tasks kind "Friction summary") links every issue opened or updated and closes itself after 24h.
+- **Friction page** (`pages/friction.page.json`): per-sweep window, runs, per-kind counts and
+  filed issues, plus the redacted signals, so the trend is visible as fixes land.
+
 ## 14. Open questions / future
 
 - **Provisioning the existing PR branch** — resolved: the `c8ctl` host-git

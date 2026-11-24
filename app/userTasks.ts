@@ -21,6 +21,7 @@ import type { DataLayer } from "@nanobpm/urban";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureEscalationRow } from "./feature.ts";
+import { FRICTION_SUMMARY_ELEMENT } from "./friction.ts";
 import type { PlanReview } from "./plan.ts";
 import { parsePr } from "./prParse.ts";
 import type { TrialMergeAuditRow } from "./trialMerge.ts";
@@ -250,6 +251,9 @@ export const USER_TASK_KIND_LABELS: Readonly<Record<string, string>> = {
   [READINESS_ESCALATION_ELEMENT]: "Readiness escalation",
   [DELIVERY_HUMAN_ELEMENT]: "Delivery: human step",
   [ACP_PERMISSION_ELEMENT]: "Agent permission",
+  // Informational operator summary of a friction sweep (issue #1073) — acknowledge-only, auto-closed
+  // after 24h by its timer boundary (resources/processes/friction-sweep.bpmn).
+  [FRICTION_SUMMARY_ELEMENT]: "Friction summary",
 };
 
 /** The Tasks-inbox label for an open user-task `elementId`, or `undefined` when the element is not a
@@ -266,7 +270,7 @@ export function userTaskKindLabel(elementId: string): string | undefined {
 export interface UserTaskContext {
   userTaskKey: string;
   elementId: string;
-  subjectType: "feature" | "plan" | "pr" | "delivery" | "agent";
+  subjectType: "feature" | "plan" | "pr" | "delivery" | "agent" | "friction";
   subjectKey: string;
   /** The subject's human-readable title from its own row (`feature_runs`/`plans`/`pull_requests`.
    *  `title`). Optional/blank tolerated — `buildUserTaskRow` coalesces it to `subjectKey` so the

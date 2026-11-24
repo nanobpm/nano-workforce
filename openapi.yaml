@@ -727,6 +727,12 @@ components:
         answer:
           type: string
           description: "Answer / guidance for the implementation agent Required when resolution == \"answer\"."
+    EscalationAnswerFrictionSummary:
+      title: friction-summary
+      type: object
+      additionalProperties: true
+      description: "Answer variables for an escalation whose form is `friction-summary` (see Escalation.formKey / expectedFields). Acknowledge-only: the friction-sweep summary carries no fields."
+      properties: {}
     EscalationAnswerMergeApproval:
       title: merge-approval
       type: object
@@ -3669,6 +3675,7 @@ components:
             - $ref: "#/components/schemas/EscalationAnswerEmptyPlanEscalation"
             - $ref: "#/components/schemas/EscalationAnswerFeatureBlocked"
             - $ref: "#/components/schemas/EscalationAnswerFeatureEscalation"
+            - $ref: "#/components/schemas/EscalationAnswerFrictionSummary"
             - $ref: "#/components/schemas/EscalationAnswerMergeApproval"
             - $ref: "#/components/schemas/EscalationAnswerPlanReviewDecision"
             - $ref: "#/components/schemas/EscalationAnswerPrEscalation"
@@ -8712,6 +8719,9 @@ paths:
                             - abandon
                         answer:
                           type: string
+                    - title: friction-summary
+                      type: object
+                      properties: {}
                     - title: merge-approval
                       type: object
                       required:

@@ -49,7 +49,8 @@
       },
       { "label": "Cockpit", "page": "cockpit" },
       { "label": "Board", "page": "board" },
-      { "label": "Velocity", "page": "velocity" }
+      { "label": "Velocity", "page": "velocity" },
+      { "label": "Friction", "page": "friction" }
     ],
     "sticky": true
   }
