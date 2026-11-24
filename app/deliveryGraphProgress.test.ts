@@ -199,3 +199,44 @@ test("lastProbe reads the node element scope when the result propagated there", 
   });
   assert.deepEqual(out.find((n) => n.id === "landed")?.lastProbe, { ready: true, detail: null, observed: null });
 });
+
+test("an agent's node-local PR result is visible (no-emits agent, and an emitting agent before publish)", () => {
+  for (const emits of [[], [{ name: "pr", type: "pr" }]]) {
+    for (const name of ["pr", "prUrl", "pullRequest"]) {
+      const out = deriveNodeProgress({
+        nodes: [{ id: "impl", kind: "agent", element: "n7", emits, dependsOn: [] }],
+        processInstanceKey: PIK,
+        elements: [
+          { elementId: "n7", elementInstanceKey: "70", state: "ACTIVE" },
+          { elementId: "n7_task", elementInstanceKey: "71", state: "COMPLETED" },
+        ],
+        variables: [{ name, value: '"https://github.com/o/r/pull/11"', scopeKey: "70" }],
+        userTasks: [],
+        incidents: [],
+      });
+      assert.deepEqual(out[0]?.childRunKeys, ["o/r#11"], `${name} with ${emits.length} emits`);
+    }
+  }
+});
+
+test("truncated variable previews are treated as absent, never parsed as complete values", () => {
+  const out = deriveNodeProgress({
+    nodes: NODES,
+    processInstanceKey: PIK,
+    elements: [
+      { elementId: "n1", elementInstanceKey: "2", state: "COMPLETED" },
+      { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+    ],
+    variables: [
+      { name: "n2_mergedSha", value: '"abc', scopeKey: PIK, isTruncated: true },
+      { name: "n1_pr", value: '"o/r#1', scopeKey: PIK, isTruncated: true },
+      { name: "ready", value: "tr", scopeKey: "3", isTruncated: true },
+    ],
+    userTasks: [],
+    incidents: [],
+  });
+  const landed = out.find((n) => n.id === "landed");
+  assert.deepEqual(landed?.boundFacts, {});
+  assert.equal(landed?.lastProbe, null);
+  assert.deepEqual(out.find((n) => n.id === "build")?.childRunKeys, []);
+});

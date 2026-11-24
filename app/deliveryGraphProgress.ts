@@ -42,6 +42,8 @@ export interface VariableFact {
   name: string;
   value: string;
   scopeKey: string;
+  /** The engine clipped `value` to a preview — it is NOT the complete value and must not be parsed as one. */
+  isTruncated?: boolean;
 }
 /** One open user task (the subset this projection reads). */
 export interface UserTaskFact {
@@ -128,10 +130,13 @@ export function deriveNodeProgress(input: {
   instanceEnded?: boolean;
 }): DeliveryNodeProgress[] {
   const nodeElements = new Set(input.nodes.map((n) => n.element));
+  // A truncated row is only a clipped preview: parsing it would surface malformed/partial progress, so it
+  // is treated exactly like an absent variable (fail closed to "unknown") everywhere below.
+  const variables = input.variables.filter((v) => v.isTruncated !== true);
   const rootVars = new Map<string, string>();
-  for (const v of input.variables) if (v.scopeKey === input.processInstanceKey) rootVars.set(v.name, v.value);
+  for (const v of variables) if (v.scopeKey === input.processInstanceKey) rootVars.set(v.name, v.value);
   const varsByScope = new Map<string, Map<string, string>>();
-  for (const v of input.variables) {
+  for (const v of variables) {
     const m = varsByScope.get(v.scopeKey) ?? new Map<string, string>();
     m.set(v.name, v.value);
     varsByScope.set(v.scopeKey, m);
@@ -196,6 +201,19 @@ export function deriveNodeProgress(input: {
       for (const fact of ["pr", "prUrl"]) {
         const raw = rootVars.get(`${node.element}_${fact}`);
         if (raw !== undefined) candidates.push(parseJson(raw));
+      }
+      if (node.kind === "agent") {
+        // Agent PR results are node-LOCAL (AGENT_RESULT_LOCAL_VARS): the root `<element>_pr` exists only for
+        // a declared emit and only after the subProcess completes, so also read the node's own scopes —
+        // covering a no-emits agent and an emitting agent still parked (e.g. in enrollment).
+        for (const e of own) {
+          const scope = varsByScope.get(e.elementInstanceKey);
+          if (!scope) continue;
+          for (const name of ["pr", "prUrl", "pullRequest"]) {
+            const raw = scope.get(name);
+            if (raw !== undefined) candidates.push(parseJson(raw));
+          }
+        }
       }
       if (node.kind === "connector") {
         // A converge connector with no declared emits enrolls the PR it resolves from its own task-local
@@ -320,7 +338,9 @@ export async function loadDeliveryGraphProgress(
     app.engine.searchIncidents({ processInstanceKey: pik, state: "ACTIVE" }),
   ]);
   const instanceState = instances[0]?.state ?? null;
-  const nodeInputs = variables.find((v) => v.scopeKey === pik && v.name === "nodeInputs")?.value;
+  const nodeInputsVar = variables.find((v) => v.scopeKey === pik && v.name === "nodeInputs");
+  // A truncated seed is a clipped preview: leave cadences unknown rather than parse partial JSON.
+  const nodeInputs = nodeInputsVar?.isTruncated ? undefined : nodeInputsVar?.value;
   const progress = deriveNodeProgress({
     nodes,
     elements,
