@@ -124,6 +124,7 @@ curl -sS -X POST __BASE__/actions/start/feature \
 | omitted/`true` | `true` | omitted/`false` | `autoMerge: true` **implies `converge: true`** — converge, then merge |
 | omitted/`true` | omitted/`true` | `true` | implies `autoMerge` + `converge` — converge, human approval, merge |
 | `false` | `true` | any | `400` — `autoMerge requires converge: true` (contradiction) |
+| `false` | omitted | `true` | `400` — `humanApproval requires converge: true` (contradiction) |
 | any | `false` | `true` | `400` — `humanApproval requires autoMerge: true` |
 
 A started run's 202 echoes the **effective** `converge`, `autoMerge`, `humanApproval`, so the
