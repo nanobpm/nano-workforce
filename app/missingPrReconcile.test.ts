@@ -353,6 +353,9 @@ test("a recovered merged row runs the epic's merged-completion retro hook", asyn
   assertEquals(stores.pull_requests[0].status, "merged");
   // maybeStartRetro resolves the PR's plan via `plan_tasks`; the lookup proves the hook ran.
   assertEquals(lookups, [{ pr_key: "o/r#40" }]);
+  // A second pass sees the restored row, so the PR is no longer missing and the hook does not re-fire.
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("merged"), nowMs: T0 + 1, lastChecked: new Map(), engine });
+  assertEquals(lookups, [{ pr_key: "o/r#40" }]);
 });
 
 test("delivery edge (3) leaves a verified-absent mid-handoff feature to the grace verdict", async () => {
@@ -369,4 +372,5 @@ test("delivery edge (3) leaves a verified-absent mid-handoff feature to the grac
   assertEquals(stores.feature_runs[0].status, "opened");
   await reconcileMissingPrRows(data, "", { lookup: lookupOf("not_found"), nowMs: T0 + MISSING_PR_GRACE_MS, lastChecked, notFound });
   assertEquals(stores.feature_runs[0].status, "failed");
+  assertEquals(/not found on GitHub/.test(stores.feature_runs[0].delivery_label), true);
 });
