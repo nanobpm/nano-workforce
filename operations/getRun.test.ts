@@ -232,16 +232,52 @@ test("a PR's humanApproval reflects the SUBMITTED setting, surviving approval an
   assertEquals(((await handler(input("o/r#9"), legacy)) as Row).body.settings.humanApproval, null);
 });
 
-test("a feature and an epic for the same issue: the most recently updated run wins", async () => {
-  const epic = (updated_at: string) => ({
+test("a feature and an epic for the same issue: the live run wins, else the newest-created", async () => {
+  const epic = (over: Row = {}) => ({
     plan_key: "o/r#5", repo: "o/r", title: "Epic", status: "dispatched", process_key: "proc-e", epic_phase: "Implementing",
-    auto_merge: 0, auto_resolve_escalations: 0, acknowledged_at: null, created_at: T0, updated_at,
+    auto_merge: 0, auto_resolve_escalations: 0, acknowledged_at: null, created_at: T0, updated_at: T0, ...over,
   });
   const later = "2026-11-02T00:00:00Z";
-  const liveEpic = memApp({ feature_runs: [feature()], plans: [epic(later)] }, PKS);
-  assertEquals(((await handler(input("o/r#5"), liveEpic)) as Row).body.kind, "epic");
-  const liveFeature = memApp({ feature_runs: [feature({ updated_at: later })], plans: [epic(T0)] }, PKS);
-  assertEquals(((await handler(input("o/r#5"), liveFeature)) as Row).body.kind, "feature");
+  const newerEpic = memApp({ feature_runs: [feature()], plans: [epic({ created_at: later })] }, PKS);
+  assertEquals(((await handler(input("o/r#5"), newerEpic)) as Row).body.kind, "epic");
+  const newerFeature = memApp({ feature_runs: [feature({ created_at: later })], plans: [epic()] }, PKS);
+  assertEquals(((await handler(input("o/r#5"), newerFeature)) as Row).body.kind, "feature");
+  // updated_at never decides: a bumped (e.g. phase-polled) epic does not shadow a same-age feature.
+  const bumped = memApp({ feature_runs: [feature()], plans: [epic({ updated_at: later })] }, PKS);
+  assertEquals(((await handler(input("o/r#5"), bumped)) as Row).body.kind, "feature");
+  // A terminal, acknowledged (updated_at-stamped) feature never shadows a live epic.
+  const acked = memApp(
+    { feature_runs: [feature({ status: "merged", acknowledged_at: later, updated_at: later, created_at: later })], plans: [epic()] },
+    PKS,
+  );
+  assertEquals(((await handler(input("o/r#5"), acked)) as Row).body.kind, "epic");
+});
+
+test("a live epic parked on its readiness wait surfaces the gate as stage + blockedOn", async () => {
+  const app = memApp(
+    {
+      plans: [{ plan_key: "o/r#5", repo: "o/r", title: "E", status: "dispatched", process_key: "proc-e", epic_phase: "Implementing", wait_gate: "waiting", wait_gate_label: "Waiting on o/p capability", auto_merge: 0, auto_resolve_escalations: 0, acknowledged_at: null, created_at: T0, updated_at: T0 }],
+    },
+    PKS,
+  );
+  const b = ((await handler(input("o/r#5"), app)) as Row).body;
+  assertEquals(b.stage, "Waiting on o/p capability");
+  assertEquals(b.settings.blockedOn, [{ waitGate: "waiting", label: "Waiting on o/p capability" }]);
+});
+
+test("a cancelled PR run and a cancelled delivery run with a stale incident_key read `cancelled`", async () => {
+  const PKX = { ...PKS, run_cancellations: "process_key" };
+  const cx = (pk: string) => ({ process_key: pk, run_table: "x", cancelled_by: "op", cancel_reason: null, cancelled_at: T0, committed: 1 });
+  const inc = { incident_key: "inc-1", incident_since: T0, incident_message: "boom", incident_element: "x" };
+  const prApp = memApp({ pull_requests: [pr({ status: "abandoned", ...inc })], run_cancellations: [cx("proc-p")] }, PKX);
+  const pb = ((await handler(input("o/r#9"), prApp)) as Row).body;
+  assertEquals(pb.status, "cancelled");
+  assertEquals(pb.incident, null);
+  const run = { run_key: "run-x", title: "G", status: "abandoned", phase: "Running", process_key: "proc-d", auto_resolve_escalations: 0, created_at: T0, updated_at: T0, ...inc };
+  const dApp = memApp({ delivery_graph_runs: [run], run_cancellations: [cx("proc-d")] }, PKX);
+  const db = ((await handler(input("run-x"), dApp)) as Row).body;
+  assertEquals(db.status, "cancelled");
+  assertEquals(db.incident, null);
 });
 
 test("an operator-cancelled run reads `cancelled` (committed run_cancellations row), an out-of-band terminate stays `abandoned`", async () => {
@@ -275,10 +311,10 @@ test("a feature and an epic sharing an issue key never expose each other's open 
   });
   const later = "2026-11-03T00:00:00Z";
   const epicRow = { plan_key: "o/r#5", repo: "o/r", title: "E", status: "dispatched", process_key: "proc-e", epic_phase: "Implementing", auto_merge: 0, auto_resolve_escalations: 0, acknowledged_at: null, created_at: T0, updated_at: T0 };
-  // Feature selected (newer), epic owns the newest task — and an epic task must not drive feature stage.
+  // Feature selected (newer-created), epic owns the newest task — and an epic task must not drive feature stage.
   const app = memApp(
     {
-      feature_runs: [feature({ updated_at: "2026-11-02T00:00:00Z" })],
+      feature_runs: [feature({ created_at: "2026-11-02T00:00:00Z" })],
       plans: [epicRow],
       user_tasks: [task("ut-f", "feature", "feature-escalation", T0), task("ut-e", "plan", "feature-blocked", later)],
     },
@@ -287,11 +323,11 @@ test("a feature and an epic sharing an issue key never expose each other's open 
   const fb = ((await handler(input("o/r#5"), app)) as Row).body;
   assertEquals(fb.kind, "feature");
   assertEquals(fb.openEscalation.userTaskKey, "ut-f");
-  // Epic selected (newer), feature owns the newest task.
+  // Epic selected (newer-created), feature owns the newest task.
   const app2 = memApp(
     {
       feature_runs: [feature()],
-      plans: [{ ...epicRow, updated_at: "2026-11-02T00:00:00Z" }],
+      plans: [{ ...epicRow, created_at: "2026-11-02T00:00:00Z" }],
       user_tasks: [task("ut-f", "feature", "feature-escalation", later), task("ut-e", "plan", "x", T0)],
     },
     PKS,

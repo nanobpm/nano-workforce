@@ -10,21 +10,23 @@
 // come from the ONE `user_tasks` read model. Nothing here re-derives a status rule.
 
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
-import { deliveryGraphRunsTracking } from "./deliveryGraphRun.ts";
+import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRunsTracking } from "./deliveryGraphRun.ts";
+import { TERMINAL_STATUSES } from "./deliveryStatuses.ts";
 import { featureRunsTracking } from "./feature.ts";
-import { plansTracking, planTasks } from "./plan.ts";
+import { PLAN_TERMINAL_STATUSES, plansTracking, planTasks } from "./plan.ts";
 import { parsePr } from "./prParse.ts";
 import { effectiveTerminalStatus, RUN_TERMINAL_STATUS, readRunCancellation } from "./runTerminal.ts";
 import {
   type ActiveDelivery,
   type ActivePr,
+  ORPHANED_PR_STATUS,
   projectDeliveryRows,
   projectPrRows,
   prsTracking,
   type StatusIncident,
   type TrackedPullRequest,
 } from "./service.ts";
-import { deriveStage } from "./stage.ts";
+import { deriveStage, STAGE_DONE_STATUSES } from "./stage.ts";
 import { type OpenEscalation, toOpenEscalation, type UserTaskRow, userTasks } from "./userTasks.ts";
 
 export type RunKind = "feature" | "epic" | "pr" | "delivery";
@@ -150,8 +152,13 @@ async function prViews(
       if (!p) throw new Error(`projectPrRows dropped ${row.pr_key}`);
       // `projectPrRows` reports the in-flight workflow status; past the terminal edge the folded
       // `derived_status` (merged/converged/abandoned) is the truth for a lookup at any stage.
-      const folded = row.derived_status !== row.status && p.status === row.status ? row.derived_status : p.status;
-      const terminal = await effectiveStatus(data, folded, row.process_key);
+      // Past the terminal edge the folded status is the truth: compute it FIRST, and apply the
+      // `/status` incident/orphaned overlay only to a non-terminal row — a cancelled run with a stale
+      // `incident_key` must never read `incident`. `orphaned` survives only for an `abandoned` run
+      // without a committed operator cancel.
+      const terminal = TERMINAL_STATUSES.includes(row.derived_status)
+        ? await terminalPrStatus(data, row, p.status)
+        : p.status;
       return {
         key: p.prKey,
         kind: "pr" as const,
@@ -173,7 +180,7 @@ async function prViews(
         leaseUntil: p.leaseUntil,
         prUrl: p.url,
         openEscalation: p.openEscalation,
-        incident: p.incident,
+        incident: TERMINAL_STATUSES.includes(row.derived_status) ? null : p.incident,
         acknowledgedAt: row.acknowledged_at ?? null,
         createdAt: row.created_at ?? null,
         updatedAt: p.updatedAt,
@@ -189,15 +196,30 @@ async function childPrViews(data: DataLayer, engine: Engine | undefined, prKeys:
   return prViews(data, engine, rows.filter((r): r is TrackedPullRequest => r != null));
 }
 
-/** True when run `a` is more current than run `b` (later `updated_at`, then `created_at`). */
-function isNewer(
-  a: { updated_at?: string | null; created_at?: string | null },
-  b: { updated_at?: string | null; created_at?: string | null },
+async function terminalPrStatus(data: DataLayer, row: TrackedPullRequest, overlaid: string): Promise<string> {
+  const eff = await effectiveStatus(data, row.derived_status, row.process_key);
+  return eff === RUN_TERMINAL_STATUS.outOfBandTerminate && overlaid === ORPHANED_PR_STATUS ? ORPHANED_PR_STATUS : eff;
+}
+
+function featureLive(f: { derived_status: string }): boolean {
+  return !STAGE_DONE_STATUSES.includes(f.derived_status);
+}
+
+function planLive(p: { derived_status: string }): boolean {
+  return !PLAN_TERMINAL_STATUSES.some((s) => s === p.derived_status);
+}
+
+/** Pick between a feature and an epic sharing one key: the LIVE (non-terminal) run wins; only when
+ *  both or neither are live does the newest `created_at` decide. Never `updated_at` — acknowledge and
+ *  phase polling bump it, so a dismissed finished run could shadow a live one and the choice flip. */
+function preferPlan(
+  feature: { derived_status: string; created_at?: string | null },
+  plan: { derived_status: string; created_at?: string | null },
 ): boolean {
-  const au = a.updated_at ?? a.created_at ?? "";
-  const bu = b.updated_at ?? b.created_at ?? "";
-  if (au !== bu) return au > bu;
-  return (a.created_at ?? "") > (b.created_at ?? "");
+  const fl = featureLive(feature);
+  const pl = planLive(plan);
+  if (fl !== pl) return pl;
+  return (plan.created_at ?? "") > (feature.created_at ?? "");
 }
 
 function withChildKeys(view: RunView): RunView {
@@ -209,12 +231,12 @@ function withChildKeys(view: RunView): RunView {
 /** Look one run up by key — `owner/repo#N` (feature, epic, or PR) or a delivery-graph runKey — at any
  *  stage. Resolution order for an `owner/repo#N` key: the CURRENT issue run (feature or epic), then
  *  PR (an issue and a PR never share a number in one repo). A feature and an epic for the same issue
- *  can coexist (admission checks separate tables), so the most recently updated one wins — a stale
- *  feature never shadows a live epic, nor a stale epic a live feature. Null only when nwf has never tracked the key. */
+ *  can coexist (admission checks separate tables): the live one wins, else the newest-created
+ *  (see `preferPlan`). Null only when nwf has never tracked the key. */
 export async function lookupRun(data: DataLayer, engine: Engine | undefined, key: string): Promise<RunView | null> {
   const feature = await featureRunsTracking(data).get(key);
   const plan = await plansTracking(data).get(key);
-  if (feature && !(plan && isNewer(plan, feature))) {
+  if (feature && !(plan && preferPlan(feature, plan))) {
     const tasks = await subjectTasks(data, "feature", key);
     const openEsc = newestEscalation(tasks);
     const status = await effectiveStatus(data, feature.derived_status, feature.process_key);
@@ -268,16 +290,21 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
     const prKeys = slices.map((t) => t.pr_key).filter((k): k is string => typeof k === "string" && k !== "");
     const children = await childPrViews(data, engine, prKeys);
     const planStatus = await effectiveStatus(data, plan.derived_status, plan.process_key);
+    // The inter-epic readiness wait (`wait_gate`, #292) is the epic's analogue of a feature's
+    // `blockedOn` gate: surface it while the epic is live and parked on it.
+    const gated = planLive(plan) && (plan.wait_gate === "waiting" || plan.wait_gate === "escalated");
+    const gateLabel = plan.wait_gate_label ?? plan.wait_gate;
     return withChildKeys({
       key,
       kind: "epic",
       title: plan.title ?? null,
       status: planStatus,
-      stage: plan.epic_phase ?? planStatus,
+      stage: gated ? gateLabel : (plan.epic_phase ?? planStatus),
       settings: {
         ...emptySettings(),
         converge: true,
         autoMerge: plan.auto_merge === 1,
+        blockedOn: gated ? [{ waitGate: plan.wait_gate, label: gateLabel }] : null,
         autoResolveEscalations: plan.auto_resolve_escalations === 1,
       },
       processInstanceKey: plan.process_key ?? null,
@@ -300,7 +327,8 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
   const run = await deliveryGraphRunsTracking(data).get(key);
   if (run) {
     const [d]: ActiveDelivery[] = await projectDeliveryRows(data, [run]);
-    const status = d.incident ? d.status : await effectiveStatus(data, run.derived_status, run.process_key);
+    const terminal = DELIVERY_GRAPH_TERMINAL_STATUSES.some((s) => s === run.derived_status);
+    const status = d.incident && !terminal ? d.status : await effectiveStatus(data, run.derived_status, run.process_key);
     return {
       key,
       kind: "delivery",
@@ -314,7 +342,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       leaseUntil: null,
       prUrl: null,
       openEscalation: d.openEscalation,
-      incident: d.incident,
+      incident: terminal ? null : d.incident,
       acknowledgedAt: run.acknowledged_at ?? null,
       createdAt: run.created_at,
       updatedAt: d.updatedAt,
