@@ -210,7 +210,7 @@ export function deriveNodeProgress(input: {
         lastProbe = {
           ready: typeof ready === "boolean" ? ready : null,
           detail: typeof detail === "string" ? detail : detail === null ? null : JSON.stringify(detail),
-          observed: scope.has("observed") ? parseJson(scope.get("observed") ?? "null") : null,
+          observed: scope.has("observed") ? parseJson(scope.get("observed") ?? "null") || null : null,
         };
       }
     }
