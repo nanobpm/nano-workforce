@@ -51,6 +51,35 @@ test("an already-merged PR ends the loop cleanly instead of reconverging (#959)"
   assertEquals(landing[0].method, "already-merged");
 });
 
+// Issue #1047: with the `ux_merges_merged_pr` fence installed, a REDELIVERED already-merged hand-off
+// (the merged row is already recorded) must not throw on the insert — it completes cleanly.
+test("a replayed already-merged hand-off does not trip the merged-row unique fence (#1047)", async () => {
+  const merges: Record<string, unknown>[] = [{ pr_key: "acme/w#7", outcome: "merged", method: "squash" }];
+  const app = {
+    data: {
+      table: (name: string) => ({
+        get: async () => (name === "pull_requests" ? { auto_resolve_escalations: 0 } : undefined),
+        find: async () => [],
+        findOne: async (q: Record<string, unknown>) =>
+          name === "merges" ? (merges.find((m) => m.pr_key === q.pr_key && m.outcome === q.outcome) ?? null) : undefined,
+        insert: async (r: Record<string, unknown>) => {
+          if (r.outcome === "merged" && merges.some((m) => m.outcome === "merged")) throw new Error("UNIQUE constraint failed: merges.pr_key");
+          merges.push(r);
+          return 1;
+        },
+        update: async () => undefined,
+      }),
+      source: () => ({ on: () => {}, off: () => {}, emit: () => {} }),
+    },
+    engine: { createInstance: async () => ({ processInstanceKey: "retro-1" }) },
+    log: noopLog(),
+  } as any;
+  const submit = (async () => ({ prKey: "acme/w#7", processKey: "999" })) as unknown as Submit;
+  const out = await makeHandler(submit, nullHead, async () => "merged")({ processInstanceKey: "4242", variables: { prKey: "acme/w#7" } } as any, app);
+  assertEquals(out, {});
+  assertEquals(merges.filter((m) => m.outcome === "merged").length, 1);
+});
+
 // The guard must NOT fire on a still-open PR: the normal reconverge hand-off proceeds.
 test("a still-open PR proceeds with the normal reconverge hand-off", async () => {
   const app = {
