@@ -52,6 +52,7 @@ test("every corpus model is either ported or has a documented blocker", () => {
     "merge-loop",
     "plan-fanout",
     "delivery-human",
+    "friction-sweep",
     "implement-cell",
     "converge-cell",
     "merge-cell",
@@ -88,6 +89,7 @@ test("class-1 blocked goldens genuinely have multiple top-level start/end events
     "merge-loop",
     "plan-fanout",
     "delivery-human",
+    "friction-sweep",
     // Since issue #976 (the MCP tool message start + terminate end alongside the API's none start).
     "convergence-loop",
   ]);
