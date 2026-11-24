@@ -102,6 +102,17 @@ test("pr.merge short-circuits an already-merged PR without re-running the land p
   });
 });
 
+test("repeated pr.merge attempts on an already-merged PR leave exactly one merged row (#1047)", async () => {
+  await withMergedPr(async () => {
+    const { app, stores } = fakeApp();
+    const job = { variables: { prKey: "nanobpm/nano-bpm#723", repo: "nanobpm/nano-bpm", prNumber: 723 } } as any;
+    for (let i = 0; i < 5; i++) {
+      assertEquals(await handler(job, app), { mergeStatus: "merged" });
+    }
+    assertEquals(stores.merges.filter((r) => r.outcome === "merged").length, 1);
+  });
+});
+
 // The land protocol has three terminal outcomes, dispatched by the worker's exhaustive `matchTags`
 // (worker.ts §"Exhaustive dispatch"). The already-merged short-circuit above never reaches that
 // dispatch, so the two land branches below — `queued` (repo lands via an on-demand merge queue) and

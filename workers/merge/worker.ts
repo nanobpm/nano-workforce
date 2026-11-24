@@ -18,6 +18,7 @@
 // landing (escalating to a human) instead of enqueueing/merging unreviewed code. An UNREADABLE
 // review/head ALSO blocks (fails CLOSED, issue #927) — the old fail-open let nano-bpm#1467 land
 // 49 s before its first review.
+
 import type { AppJobHandler } from "@nanobpm/urban";
 import { matchTags, tag } from "@nanobpm/urban/effect";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
@@ -49,6 +50,7 @@ import {
   verifiedAssessmentAnswer,
 } from "../../app/humanAssessment.ts";
 import { type IssueComment, listIssueComments } from "../../app/issuePrLink.ts";
+import { recordMergedOnce, recordUnlessRepeat } from "../../app/mergeAudit.ts";
 import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { isReviewMissingOrStale, parseReviewHead, REVIEW_WAIT_ENDED_OUTCOME, reviewHeadToken } from "../../app/reviewWait.ts";
 import { abandonClosedPr, ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
@@ -135,9 +137,8 @@ export function makeHandler(deps: {
   const pre = await fetchPrState(repo, prNumber, token).catch(() => null);
   const liveness = classifyPrLiveness(pre);
   if (liveness === "merged") {
-    await app.data.table("merges", "id").insert({
+    await recordMergedOnce(app.data, {
       pr_key: prKey,
-      outcome: "merged",
       method: "already-merged",
       detail: "PR was already merged on GitHub (landed out-of-band)",
       at: now,
@@ -190,7 +191,7 @@ export function makeHandler(deps: {
   // remedy is "request a Copilot review and wait for it". Return `review-pending` so the model
   // requests the review itself and waits on a bounded timer, escalating only when it never arrives.
   if (!unverifiable && isReviewMissingOrStale(backstopReview.commitId, headTrimmed)) {
-    await app.data.table("merges", "id").insert({
+    await recordUnlessRepeat(app.data, {
       pr_key: prKey,
       outcome: "review-pending",
       method: "review-backstop",
@@ -416,13 +417,9 @@ export function makeHandler(deps: {
     auditMethod = outcome === "queued" ? "queue" : MERGE_METHOD;
   }
 
-  await app.data.table("merges", "id").insert({
-    pr_key: prKey,
-    outcome,
-    method: auditMethod,
-    detail,
-    at: now,
-  });
+  const auditRow = { pr_key: prKey, method: auditMethod, detail, at: now };
+  if (outcome === "merged") await recordMergedOnce(app.data, auditRow);
+  else await app.data.table("merges", "id").insert({ ...auditRow, outcome });
 
   // Exhaustive dispatch on the land outcome. Modelled as a tagged value so
   // `matchTags` forces a handler for every case — adding a new outcome to the
