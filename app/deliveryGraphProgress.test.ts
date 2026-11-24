@@ -345,3 +345,57 @@ test("a narrowed read that still fills a whole page is reported as truncated", a
   const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
   assert.equal(read.truncated, true);
 });
+
+test("the newest probe scope is chosen by numeric (BigInt) key order, never lexical order", () => {
+  for (const [older, newer] of [["9", "10"], ["2251799813685249", "2251799813685250"]] as const) {
+    const out = deriveNodeProgress({
+      nodes: NODES,
+      processInstanceKey: PIK,
+      elements: [
+        { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+        { elementId: "n2_probeLoop", elementInstanceKey: newer, state: "ACTIVE" },
+        { elementId: "n2_probeLoop", elementInstanceKey: older, state: "COMPLETED" },
+      ],
+      variables: [
+        { name: "ready", value: "true", scopeKey: older },
+        { name: "detail", value: '"stale"', scopeKey: older },
+        { name: "ready", value: "false", scopeKey: newer },
+        { name: "detail", value: '"newest"', scopeKey: newer },
+      ],
+      userTasks: [],
+      incidents: [],
+    });
+    assert.deepEqual(out.find((n) => n.id === "landed")?.lastProbe, { ready: false, detail: "newest", observed: null }, `${older} vs ${newer}`);
+  }
+});
+
+test("a wait with more than one page of probe iterations still reports its newest probe", async () => {
+  const elements: ElementInstanceFact[] = [{ elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" }];
+  const variables: VariableFact[] = [];
+  const iterations = ENGINE_SEARCH_PAGE * 3;
+  // Oldest-first: the one-page history holds only stale iterations.
+  for (let i = 0; i < iterations; i++) {
+    const key = String(2251799813685000 + i);
+    const newest = i === iterations - 1;
+    elements.push({ elementId: "n2_probeLoop", elementInstanceKey: key, state: newest ? "ACTIVE" : "COMPLETED" });
+    variables.push({ name: "ready", value: "false", scopeKey: key }, { name: "detail", value: JSON.stringify(newest ? "newest" : `old ${i}`), scopeKey: key });
+  }
+  const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
+  const landed = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read }).find((n) => n.id === "landed");
+  assert.deepEqual(landed?.lastProbe, { ready: false, detail: "newest", observed: null });
+});
+
+test("a newest probe iteration that has not written `ready` yet falls back to the previous one", async () => {
+  const elements: ElementInstanceFact[] = [
+    { elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" },
+    { elementId: "n2_probeLoop", elementInstanceKey: "10", state: "COMPLETED" },
+    { elementId: "n2_probeLoop", elementInstanceKey: "11", state: "ACTIVE" },
+  ];
+  const variables: VariableFact[] = [
+    { name: "ready", value: "true", scopeKey: "10" },
+    { name: "detail", value: '"previous"', scopeKey: "10" },
+  ];
+  const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
+  const landed = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read }).find((n) => n.id === "landed");
+  assert.deepEqual(landed?.lastProbe, { ready: true, detail: "previous", observed: null });
+});

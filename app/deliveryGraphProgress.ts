@@ -362,20 +362,28 @@ export async function loadDeliveryGraphProgress(
 /**
  * The page size the engine's search endpoints answer with when no page is requested. The urban
  * `EngineClient` sends no `page`/`searchAfter` and drops `page.totalItems`, so any single search returns
- * at most ONE page. Rather than treat a page as exhaustive, every read below is NARROWED (by element id,
- * variable name, scope or state) so that it stays far below a page in practice, and a read that comes
- * back with a full page is reported as possibly truncated (`truncated: true`) instead of silently
- * dropping facts.
+ * at most ONE page. Instead of paginating, every read below is NARROWED — exact root-variable names,
+ * node-owned scope keys, element ids, or the ACTIVE state — so it stays well under a page in practice,
+ * and any read that still comes back with a full page sets `truncated: true` rather than silently
+ * dropping facts. Reads whose result must be the NEWEST (a wait's last probe) never depend on the page:
+ * the newest probe-loop iteration is found first (its ACTIVE instance) and its scope is read by key.
  */
 export const ENGINE_SEARCH_PAGE = 100;
 
-/** Variable names read from node-owned (non-root) scopes: a wait's probe result, an agent's PR result,
- * a converge connector's task-local inputs. */
-const SCOPED_VARIABLE_NAMES = ["ready", "detail", "observed", "pr", "prUrl", "pullRequest", "target", "payload", "boundFacts"] as const;
+/** Inner elements of an agent/connector node whose scopes hold its node-local PR result / converge inputs. */
+const PR_SCOPE_SUFFIXES = ["_work", "_task"] as const;
+
+/** Descending engine-key order (keys are allocated monotonically; compared as BigInt, never as strings). */
+function byKeyDesc(a: ElementInstanceFact, b: ElementInstanceFact): number {
+  const ka = keyOrder(a.elementInstanceKey);
+  const kb = keyOrder(b.elementInstanceKey);
+  if (ka === null || kb === null) return ka === null ? (kb === null ? 0 : 1) : -1;
+  return ka > kb ? -1 : ka < kb ? 1 : 0;
+}
 
 /** The engine reads {@link loadDeliveryGraphProgress} folds, gathered by narrow (page-bounded) queries. */
 export async function readEngineFacts(
-  engine: Pick<AppApi["engine"], "searchProcessInstances" | "searchElementInstances" | "searchVariables" | "searchUserTasks" | "searchIncidents" | "getElementInstance">,
+  engine: Pick<AppApi["engine"], "searchProcessInstances" | "searchElementInstances" | "searchVariables" | "searchUserTasks" | "searchIncidents">,
   pik: string,
   nodes: readonly ResolvedNodeRef[],
 ): Promise<{
@@ -397,29 +405,53 @@ export async function readEngineFacts(
     for (const f of n.emits) rootNames.add(`${n.element}_${f.name}`);
     if (n.kind === "agent" || n.kind === "connector") for (const f of ["pr", "prUrl"]) rootNames.add(`${n.element}_${f}`);
   }
-  // Element instances: each node's body (one per node, bounded), every wait's probe-loop iterations, and
-  // every ACTIVE element (bounded by the run's concurrency) for `activeElements`.
-  const elementQueries: { processInstanceKey: string; elementId?: string; state?: "ACTIVE" }[] = [{ processInstanceKey: pik, state: "ACTIVE" }];
-  for (const n of nodes) {
-    elementQueries.push({ processInstanceKey: pik, elementId: n.element });
-    if (n.kind === "wait") elementQueries.push({ processInstanceKey: pik, elementId: `${n.element}_probeLoop` });
-  }
-  const [instances, elementPages, rootPages, scopedPages, userTasks, incidents] = await Promise.all([
+  const elementSearch = async (elementId: string, state?: "ACTIVE") =>
+    page(await engine.searchElementInstances(state ? { processInstanceKey: pik, elementId, state } : { processInstanceKey: pik, elementId }));
+  const scopeVars = async (scopeKey: string) => page(await engine.searchVariables({ processInstanceKey: pik, scopeKey }));
+
+  const [instances, activeElements, rootPages, userTasks, incidents] = await Promise.all([
     engine.searchProcessInstances({ processInstanceKeys: [pik] }),
-    Promise.all(elementQueries.map((q) => engine.searchElementInstances(q))),
+    engine.searchElementInstances({ processInstanceKey: pik, state: "ACTIVE" }),
     Promise.all([...rootNames].map((name) => engine.searchVariables({ processInstanceKey: pik, scopeKey: pik, name }))),
-    Promise.all(SCOPED_VARIABLE_NAMES.map((name) => engine.searchVariables({ processInstanceKey: pik, name }))),
     engine.searchUserTasks({ processInstanceKey: pik, state: "CREATED" }),
     engine.searchIncidents({ processInstanceKey: pik, state: "ACTIVE" }),
   ]);
   const elements = new Map<string, ElementInstanceFact>();
-  for (const rows of elementPages) for (const e of page(rows)) elements.set(e.elementInstanceKey, e);
+  for (const e of page(activeElements)) elements.set(e.elementInstanceKey, e);
   const variables = new Map<string, VariableFact>();
-  for (const rows of [...rootPages, ...scopedPages]) for (const v of page(rows)) variables.set(`${v.scopeKey}\u0000${v.name}`, v);
-  // A node-local variable's scope may be an inner element no query above returned (e.g. a completed
-  // agent task): resolve each unseen scope by key so its owning node is known.
-  const unseen = [...new Set([...variables.values()].map((v) => v.scopeKey))].filter((k) => k !== pik && !elements.has(k));
-  for (const e of await Promise.all(unseen.map((k) => engine.getElementInstance(k)))) if (e) elements.set(e.elementInstanceKey, e);
+  const addVars = (rows: readonly VariableFact[]) => {
+    for (const v of rows) variables.set(`${v.scopeKey}\u0000${v.name}`, v);
+  };
+  for (const rows of rootPages) addVars(page(rows));
+
+  // Node-owned scopes are read by SCOPE KEY of the node's own element instances — never by a process-wide
+  // name search, which a long-running wait (one probe scope per poll) would overflow past one page.
+  await Promise.all(
+    nodes.map(async (n) => {
+      const bodies = await elementSearch(n.element);
+      for (const e of bodies) elements.set(e.elementInstanceKey, e);
+      if (n.kind === "wait") {
+        // The newest probe-loop iteration: the ACTIVE one (bounded to the live iteration) wins over the
+        // one-page history, which a wait polling for hours outgrows. Then read that scope's probe result,
+        // falling back to the previous iteration when the newest has not written `ready` yet.
+        const [active, history] = await Promise.all([elementSearch(`${n.element}_probeLoop`, "ACTIVE"), elementSearch(`${n.element}_probeLoop`)]);
+        const iterations = [...new Map([...history, ...active].map((e) => [e.elementInstanceKey, e])).values()].sort(byKeyDesc);
+        for (const e of iterations.slice(0, 2)) {
+          elements.set(e.elementInstanceKey, e);
+          const rows = await scopeVars(e.elementInstanceKey);
+          addVars(rows);
+          if (rows.some((v) => v.name === "ready" && v.isTruncated !== true)) break;
+        }
+        for (const e of bodies) addVars(await scopeVars(e.elementInstanceKey));
+      } else if (n.kind === "agent" || n.kind === "connector") {
+        const inner = await Promise.all(PR_SCOPE_SUFFIXES.map((s) => elementSearch(`${n.element}${s}`)));
+        for (const e of [...bodies, ...inner.flat()]) {
+          elements.set(e.elementInstanceKey, e);
+          addVars(await scopeVars(e.elementInstanceKey));
+        }
+      }
+    }),
+  );
   return {
     instances,
     elements: [...elements.values()],
