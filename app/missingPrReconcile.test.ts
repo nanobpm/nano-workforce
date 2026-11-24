@@ -337,3 +337,36 @@ test("lookupMissingPr (token): parses merged / closed-unmerged / open; non-404 e
     assertEquals(await lookupMissingPr("o/r", 1, ""), null);
   });
 });
+
+test("a recovered merged row runs the epic's merged-completion retro hook", async () => {
+  const { data, stores } = memData();
+  seedEpic(stores, "o/r#40");
+  const lookups: unknown[] = [];
+  const orig = (data as any).table;
+  (data as any).table = (n: string, pk?: string) => {
+    const t = orig(n, pk);
+    if (n !== "plan_tasks") return t;
+    return { ...t, findOne: async (w: any) => (lookups.push(w), t.findOne(w)) };
+  };
+  const engine = { createInstance: async () => ({ processInstanceKey: "r" }), searchProcessInstances: async () => [] } as any;
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("merged"), nowMs: T0, lastChecked: new Map(), engine });
+  assertEquals(stores.pull_requests[0].status, "merged");
+  // maybeStartRetro resolves the PR's plan via `plan_tasks`; the lookup proves the hook ran.
+  assertEquals(lookups, [{ pr_key: "o/r#40" }]);
+});
+
+test("delivery edge (3) leaves a verified-absent mid-handoff feature to the grace verdict", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#2", process_key: "p1", status: "opened", pr_key: "o/r#41", converge: 1, created_at: ISO0, updated_at: ISO0 },
+  ];
+  const notFound = new Set<string>();
+  const lastChecked = new Map<string, number>();
+  // Feature instance gone: without the guard, edge (3) folds `abandoned` / `handoff interrupted`.
+  const engine = { createInstance: async () => ({ processInstanceKey: "x" }), searchProcessInstances: async () => [] } as any;
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("not_found"), nowMs: T0 + 1000, lastChecked, notFound });
+  await pollFeatureDelivery(data, engine, { missingPrNotFound: notFound });
+  assertEquals(stores.feature_runs[0].status, "opened");
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("not_found"), nowMs: T0 + MISSING_PR_GRACE_MS, lastChecked, notFound });
+  assertEquals(stores.feature_runs[0].status, "failed");
+});

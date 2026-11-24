@@ -4241,6 +4241,10 @@ export async function reconcileMissingPrRows(
     nowMs?: number;
     lastChecked?: Map<string, number>;
     notFound?: Set<string>;
+    /** When supplied, a recovered `merged` row runs the SAME idempotent merged-completion hook
+     * (`maybeStartRetro`) as `retireTerminalReviewWait`, so a recovered last slice still starts its
+     * epic's automatic retrospective. */
+    engine?: EngineClient;
   } = {},
 ): Promise<void> {
   const lookup = opts.lookup ?? lookupMissingPr;
@@ -4291,6 +4295,8 @@ export async function reconcileMissingPrRows(
       if (found === "merged" || found === "closed") lastChecked.delete(prKey);
       if (found === "merged") {
         await writeTerminalPrRow(data, prKey, "merged", "merged on GitHub (PR row was missing)");
+        // Best-effort, never throws, idempotent (fire-once guard) — mirrors retireTerminalReviewWait.
+        if (opts.engine) await maybeStartRetro(data, opts.engine, prKey);
       } else if (found === "closed") {
         await writeTerminalPrRow(data, prKey, "abandoned", "closed on GitHub (PR row was missing)");
       } else if (found === "not_found" && nowMs - ref.since >= MISSING_PR_GRACE_MS) {
@@ -4693,6 +4699,10 @@ export async function pollFeatureDelivery(
         await foldCompletedFeatureRun(data, run.feature_key, processKey, status, label, "opened");
         continue;
       }
+      // A key the missing-PR reconciler verified ABSENT on GitHub is owned by its grace-period verdict
+      // (issue #1089): folding it `abandoned`/`handoff interrupted` here would bypass the grace window
+      // and the intended `failed` outcome (with its missing-PR reason). Leave it to the reconciler.
+      if (notFound.has(run.pr_key)) continue;
       const snapshots = await engine.searchProcessInstances({ processInstanceKeys: [processKey] });
       const match = snapshots.find((s) => String(s.processInstanceKey) === processKey);
       // Interpret the snapshot with the SAME tri-state semantics as the reconcile engine-probe
@@ -5782,7 +5792,7 @@ export async function pollOnce(
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
   await pollWaitGate(data);
-  await reconcileMissingPrRows(data, token);
+  await reconcileMissingPrRows(data, token, { engine });
   await pollPromotion(data, engine, token);
   await pollFeatureDelivery(data, engine);
   // Issue #907: retry every owed-but-unconfirmed "PR opened" issue link (best-effort, never throws).
