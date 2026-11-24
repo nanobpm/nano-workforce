@@ -28,6 +28,15 @@ function fakeApp(rows: Record<string, unknown>[]): { app: any; linkWrites: strin
             // biome-ignore lint/suspicious/noExplicitAny: test double
             get: (k: any) => Promise.resolve(store.find((r) => r[key] === k)),
             // biome-ignore lint/suspicious/noExplicitAny: test double
+            findOne: (q: any) => Promise.resolve(store.find((r) => Object.entries(q).every(([f, v]) => r[f] === v))),
+            // biome-ignore lint/suspicious/noExplicitAny: test double
+            find: (q: any) => Promise.resolve(store.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v))),
+            // biome-ignore lint/suspicious/noExplicitAny: test double
+            insert: (row: any) => {
+              store.push({ id: store.length + 1, ...row });
+              return Promise.resolve(row);
+            },
+            // biome-ignore lint/suspicious/noExplicitAny: test double
             update: (k: any, patch: any) => {
               const row = store.find((r) => r[key] === k);
               if (row) Object.assign(row, patch);
@@ -291,3 +300,68 @@ test("a failed comment POST never fails the job — the run still records opened
     }
   });
 }
+
+// Issue #1081 review: a blocked-WITH-question result now escalates; when that escalation is abandoned
+// (operator Abandon or escalation-SLA auto-abandon — both set resolution "abandon"), the cell ends with
+// status "blocked" and pushed commits may exist. Recovery must NOT adopt/create a PR over the decision.
+for (const via of ["operator abandon", "escalation SLA auto-abandon"]) {
+  test(`an abandoned blocked-with-question escalation stays blocked and never recovers (${via})`, async () => {
+    const gh = stubGithubComments();
+    const { app } = fakeApp([{ ...ROW }]);
+    try {
+      const out = await handler(
+        {
+          jobKey: "ja",
+          variables: {
+            featureKey: "owner/repo#7",
+            status: "blocked",
+            question: "A or B?",
+            cellResolution: "abandon",
+            task: { id: "t1" },
+            baseBranch: "main",
+            "io.nanobpm.agentResult": { headSha: "abc", branch: "feat/t1" },
+          },
+        } as never,
+        app,
+      );
+      assertEquals(out.featureStatus, "blocked");
+      assertEquals(out.prKey, null);
+      assertEquals(gh.calls.filter((c) => /\/(pulls|branches|compare|git)\b/.test(c)).length, 0);
+    } finally {
+      gh.restore();
+    }
+  });
+}
+
+// Issue #1081: a blocked run's reported question/summary must reach the `feature-blocked` inbox task —
+// record-feature appends it (never blank) as the newest `feature_escalations` row the projection reads.
+for (const [name, vars, expected] of [
+  ["the question wins", { summary: "needs scope call", question: "A or B?" }, "A or B?"],
+  ["the summary is the fallback", { summary: "needs scope call" }, "needs scope call"],
+] as const) {
+  test(`a blocked run persists its reason for the feature-blocked task: ${name}`, async () => {
+    const gh = stubGithubComments();
+    const { app } = fakeApp([{ ...ROW }]);
+    try {
+      await handler({ jobKey: "jb", variables: { featureKey: "owner/repo#7", status: "blocked", ...vars } } as never, app);
+      const rows = app.stores.feature_escalations as Record<string, unknown>[];
+      assertEquals(rows.length, 1);
+      assertEquals(rows[0].question, expected);
+      assertEquals(rows[0].feature_key, "owner/repo#7");
+    } finally {
+      gh.restore();
+    }
+  });
+}
+
+test("a blocked run with no reason still persists a non-blank question", async () => {
+  const gh = stubGithubComments();
+  const { app } = fakeApp([{ ...ROW }]);
+  try {
+    await handler({ jobKey: "jc", variables: { featureKey: "owner/repo#7", status: "blocked" } } as never, app);
+    const rows = app.stores.feature_escalations as Record<string, unknown>[];
+    assert(String(rows[0].question).trim().length > 0, "never blank");
+  } finally {
+    gh.restore();
+  }
+});

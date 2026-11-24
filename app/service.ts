@@ -42,7 +42,7 @@ import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEffectiveSettings } from "./effectiveSettings.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
 import { ESCALATION_STEWARD_PROCESS_ID } from "./escalationSteward.ts";
-import { deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun, foldKeylessFeatureRun } from "./feature.ts";
+import { blockedFeatureQuestion, deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun, foldKeylessFeatureRun } from "./feature.ts";
 import {
   classifyMergeability,
   classifyPrLiveness,
@@ -4377,38 +4377,18 @@ export async function reconcileMissingPrRows(
       const root = ref.featureRoot ?? ref.planRoot;
       if (found === "merged" || found === "closed") lastChecked.delete(prKey);
       if (found === "merged") {
-        await writeTerminalPrRow(data, prKey, "merged", "merged on GitHub (PR row was missing)", root);
-        // Best-effort, never throws, idempotent (fire-once guard) — mirrors retireTerminalReviewWait.
-        if (opts.engine) await maybeStartRetro(data, opts.engine, prKey);
+        await writeTerminalPrRow(data, prKey, "merged", RECOVERED_MERGED_OUTCOME, root);
       } else if (found === "closed") {
         await writeTerminalPrRow(data, prKey, "abandoned", "closed on GitHub (PR row was missing)", root);
-      }
-      if (found === "merged" || found === "closed") {
-        // A KEYLESS run is never reached by the delivery edges (they need a process_key), and once the PR
-        // row exists this reconciler skips the key — so fold it here or it is stranded non-dismissable.
-        const { status, label } = deriveFeatureDelivery(found === "merged" ? "merged" : "closed");
-        for (const f of ref.features) {
-          if (f.processKey) continue;
-          await foldKeylessFeatureRun(data, f.featureKey, { prKey, status: f.status, updatedAt: f.updatedAt }, status, label);
-        }
       } else if (found === "not_found" && nowMs - ref.since >= MISSING_PR_GRACE_MS) {
         const reason = `PR ${prKey} not found on GitHub after ${MISSING_PR_GRACE_MS / 60000}m grace`;
         await writeTerminalPrRow(data, prKey, "abandoned", reason, root);
         // Guarded CAS (issue #808), never a blind update keyed on feature_key: a concurrent re-seed of the
         // same feature_key to a fresh incarnation must not be clobbered. A KEYLESS run (crash between the
         // engine start and the key save) guards on the observed null key + pr_key + status + updated_at.
+        // KEYLESS runs are folded by the idempotent sweep below (it reads the row just written).
         for (const f of ref.features) {
-          if (f.processKey) {
-            await foldCompletedFeatureRun(data, f.featureKey, f.processKey, "failed", reason, f.status);
-          } else {
-            await foldKeylessFeatureRun(
-              data,
-              f.featureKey,
-              { prKey, status: f.status, updatedAt: f.updatedAt },
-              "failed",
-              reason,
-            );
-          }
+          if (f.processKey) await foldCompletedFeatureRun(data, f.featureKey, f.processKey, "failed", reason, f.status);
         }
         lastChecked.delete(prKey);
         notFound.delete(prKey);
@@ -4418,6 +4398,63 @@ export async function reconcileMissingPrRows(
     } catch (err) {
       console.error(`[poller] missing PR row ${prKey}: ${err}`);
     }
+  }
+  await sweepRecoveredPrRows(data, opts.engine);
+}
+
+/** `outcome` of a `merged` row this reconciler recovered (its retro hook is re-driven by the sweep). */
+const RECOVERED_MERGED_OUTCOME = "merged on GitHub (PR row was missing)";
+
+/** Idempotent follow-up to {@link reconcileMissingPrRows} (issue #1089): the terminal PR row is written
+ * BEFORE the referencing keyless feature run is folded, and once the row exists the key is "known" and
+ * never re-scanned. A failure or restart between the two writes would strand the run forever, so every
+ * pass re-derives the fold from the PERSISTED row rather than from the in-pass lookup:
+ *   • a KEYLESS converging / opened+converge run whose PR row is `merged`/`abandoned` is folded
+ *     (`merged` → merged; a grace-expiry `abandoned` → failed with that reason; else → closed);
+ *   • a recovered `merged` slice of a done epic re-runs the fire-once `maybeStartRetro`, so a retro start
+ *     that failed on the recovery pass is retried. Best-effort per row; never throws. */
+async function sweepRecoveredPrRows(data: DataLayer, engine: EngineClient | undefined): Promise<void> {
+  try {
+    const rows = new Map((await prsTracking(data).all()).map((r) => [r.pr_key, r]));
+    for (const status of ["converging", "opened"] as const) {
+      for (const run of await featureRuns(data).find({ status })) {
+        if (run.process_key || !run.pr_key) continue;
+        if (status === "opened" && run.converge !== 1) continue;
+        const row = rows.get(run.pr_key);
+        const st = row?.derived_status;
+        if (!row || (st !== "merged" && st !== ABANDONED_STATUS)) continue;
+        try {
+          const outcome = row.outcome ?? "";
+          const { status: to, label } =
+            st === ABANDONED_STATUS && /^PR .* not found on GitHub/.test(outcome)
+              ? { status: "failed", label: outcome }
+              : deriveFeatureDelivery(st === "merged" ? "merged" : "closed");
+          await foldKeylessFeatureRun(
+            data,
+            run.feature_key,
+            { prKey: run.pr_key, status, updatedAt: run.updated_at },
+            to,
+            label,
+          );
+        } catch (err) {
+          console.error(`[poller] keyless feature ${run.feature_key} fold: ${err}`);
+        }
+      }
+    }
+    if (!engine) return;
+    const recovered = [...rows.values()].filter((r) => r.derived_status === "merged" && r.outcome === RECOVERED_MERGED_OUTCOME);
+    if (recovered.length === 0) return;
+    const donePlanKeys = new Set((await plans(data).find({ status: "done" })).map((p) => p.plan_key));
+    if (donePlanKeys.size === 0) return;
+    const doneSlices = new Set(
+      (await planTasks(data).all()).filter((t) => t.pr_key && donePlanKeys.has(t.plan_key)).map((t) => t.pr_key),
+    );
+    for (const r of recovered) {
+      // Fire-once (plan.retro_started_at guard) and never throws — mirrors retireTerminalReviewWait.
+      if (doneSlices.has(r.pr_key)) await maybeStartRetro(data, engine, r.pr_key);
+    }
+  } catch (err) {
+    console.error(`[poller] recovered PR row sweep: ${err}`);
   }
 }
 
@@ -5407,7 +5444,13 @@ export async function pollUserTasks(
         question = latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: subjectKey }));
         break;
       case FEATURE_BLOCKED_ELEMENT:
-        question = subj?.deliveryLabel ?? null;
+        // Issue #1081: record-feature appends the run's reported question/summary (never blank) as the
+        // newest `feature_escalations` row on a `blocked` outcome; fall back to the delivery label, then
+        // the canonical static reason, so the operator never sees a blank question.
+        question =
+          latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: subjectKey })) ??
+          subj?.deliveryLabel ??
+          blockedFeatureQuestion({});
         break;
       case PLAN_REVIEW_ELEMENT:
         question = latestPlanReviewFindings(await planReviews(data).find({ plan_key: subjectKey }));

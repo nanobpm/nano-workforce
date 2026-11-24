@@ -1,3 +1,9 @@
+## [0.229.3](https://github.com/nanobpm/nano-workforce/compare/v0.229.2...v0.229.3) (2026-11-24)
+
+### Bug Fixes
+
+* **feature:** surface a blocked run's question/summary and make blocked+question answerable ([#1094](https://github.com/nanobpm/nano-workforce/issues/1094)) ([f10c97d](https://github.com/nanobpm/nano-workforce/commit/f10c97db9067390b68fc1206ecf5d7dc16b8ebb7)), closes [#1081](https://github.com/nanobpm/nano-workforce/issues/1081) [#1081](https://github.com/nanobpm/nano-workforce/issues/1081) [#1081](https://github.com/nanobpm/nano-workforce/issues/1081)
+
 ## [0.229.2](https://github.com/nanobpm/nano-workforce/compare/v0.229.1...v0.229.2) (2026-11-24)
 
 ### Bug Fixes

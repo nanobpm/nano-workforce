@@ -48,6 +48,8 @@
           <nano:extend name="status" type="string" optional="true" />
           <nano:extend name="pr" type="string" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
+          <nano:extend name="question" type="string" optional="true" />
+          <nano:extend name="cellResolution" type="string" optional="true" />
           <nano:extend name="claimIssue" type="boolean" optional="true" />
           <nano:reference name="task" ref="RecordFeatureTaskRef" optional="true" />
           <nano:extend name="baseBranch" type="string" optional="true" />
@@ -279,6 +281,7 @@
           <zeebe:output source="=if (is defined(pr)) then pr else null" target="pr" />
           <zeebe:output source="=if (is defined(question)) then question else null" target="question" />
           <zeebe:output source="=if (is defined(transcriptUrl)) then transcriptUrl else null" target="transcriptUrl" />
+          <zeebe:output source="=if (is defined(resolution)) then resolution else null" target="cellResolution" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_implementing</bpmn:incoming>

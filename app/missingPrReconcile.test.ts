@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
+import { memBlackboardSource } from "../test/blackboardDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import { deriveFeatureDelivery } from "./feature.ts";
 import {
@@ -66,6 +67,7 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
   };
   const data = {
     table: withTrackingViews((n: string, pk?: string) => tbl(n, pk)),
+    source: memBlackboardSource().source,
     open: () => ({ exec, tx: async (fn: any) => fn({ exec: async () => ({ changed: 0 }) }) }),
   } as any as DataLayer;
   return { data, stores };
@@ -362,9 +364,67 @@ test("a recovered merged row runs the epic's merged-completion retro hook", asyn
   assertEquals(stores.pull_requests[0].status, "merged");
   // maybeStartRetro resolves the PR's plan via `plan_tasks`; the lookup proves the hook ran.
   assertEquals(lookups, [{ pr_key: "o/r#40" }]);
-  // A second pass sees the restored row, so the PR is no longer missing and the hook does not re-fire.
-  await reconcileMissingPrRows(data, "", { lookup: lookupOf("merged"), nowMs: T0 + 1, lastChecked: new Map(), engine });
-  assertEquals(lookups, [{ pr_key: "o/r#40" }]);
+});
+
+function failOnceFoldExec(data: DataLayer) {
+  const open = (data as any).open;
+  let thrown = false;
+  (data as any).open = () => {
+    const o = open();
+    return {
+      ...o,
+      exec: async (sql: string, args: any[]) => {
+        if (!thrown && /"process_key" IS NULL/.test(sql)) {
+          thrown = true;
+          throw new Error("SQLITE_BUSY");
+        }
+        return o.exec(sql, args);
+      },
+    };
+  };
+}
+
+test("a keyless fold that fails after the terminal PR row is written is recovered on a later pass", async () => {
+  for (const [answer, want] of [["not_found", "failed"], ["merged", "merged"], ["closed", "abandoned"]] as const) {
+    const { data, stores } = memData();
+    stores.feature_runs = [
+      { feature_key: "o/r#2", process_key: null, status: "opened", pr_key: "o/r#34", converge: 1, created_at: ISO0, updated_at: ISO0 },
+    ];
+    failOnceFoldExec(data);
+    const opts = () => ({ lookup: lookupOf(answer), nowMs: T0 + MISSING_PR_GRACE_MS, lastChecked: new Map(), notFound: new Set<string>(), unverified: new Set<string>() });
+    await reconcileMissingPrRows(data, "", opts());
+    assertEquals(stores.pull_requests[0].status, answer === "merged" ? "merged" : "abandoned");
+    assertEquals(stores.feature_runs[0].status, "opened");
+    await reconcileMissingPrRows(data, "", opts());
+    assertEquals(stores.feature_runs[0].status, want);
+    if (answer === "not_found") assertEquals(/not found on GitHub after/.test(stores.feature_runs[0].delivery_label), true);
+  }
+});
+
+test("a recovered merged slice whose first retro start fails starts its retro exactly once later", async () => {
+  const { data, stores } = memData();
+  seedEpic(stores, "o/r#42");
+  Object.assign(stores.plan_tasks[0], { status: "opened" });
+  // The retro hook's first attempt fails BEFORE its fire-once claim (a transient plan read error).
+  const orig = (data as any).table;
+  let planGets = 0;
+  (data as any).table = (n: string, pk?: string) => {
+    const t = orig(n, pk);
+    if (n !== "plans") return t;
+    return { ...t, get: async (id: any) => (++planGets === 1 ? Promise.reject(new Error("SQLITE_BUSY")) : t.get(id)) };
+  };
+  let starts = 0;
+  const engine = {
+    createInstance: async () => (starts++, { processInstanceKey: "r" }),
+    searchProcessInstances: async () => [],
+  } as any;
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("merged"), nowMs: T0, lastChecked: new Map(), engine });
+  assertEquals(stores.pull_requests[0].status, "merged");
+  assertEquals(starts, 0);
+  for (let i = 1; i < 4; i++) {
+    await reconcileMissingPrRows(data, "", { lookup: lookupOf("merged"), nowMs: T0 + i, lastChecked: new Map(), engine });
+  }
+  assertEquals(starts, 1);
 });
 
 test("delivery edge (3) leaves a verified-absent mid-handoff feature to the grace verdict", async () => {
@@ -434,11 +494,12 @@ test("a KEYLESS opened+converge feature is failed past grace; a re-seeded keyles
       { feature_key: "o/r#2", process_key: null, status: "opened", pr_key: "o/r#34", converge: 1, created_at: ISO0, updated_at: ISO0 },
     ];
     const lookup = async () => {
-      if (reseed) Object.assign(stores.feature_runs[0], { updated_at: new Date(T0 + 5).toISOString() });
+      // startFeature re-seeds: fresh status + updated_at (still keyless until the start returns).
+      if (reseed) Object.assign(stores.feature_runs[0], { status: "running", updated_at: new Date(T0 + 5).toISOString() });
       return "not_found" as MissingPrLookup;
     };
     await reconcileMissingPrRows(data, "", { lookup, nowMs: T0 + MISSING_PR_GRACE_MS, lastChecked: new Map(), notFound: new Set(), unverified: new Set() });
-    assertEquals(stores.feature_runs[0].status, reseed ? "opened" : "failed");
+    assertEquals(stores.feature_runs[0].status, reseed ? "running" : "failed");
   }
 });
 
