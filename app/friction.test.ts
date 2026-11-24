@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { AgentHistoryRecord, DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
 import {
@@ -19,6 +19,9 @@ import {
   type FrictionIssue,
   fetchRunHistory,
   fileFindings,
+  LeaseLostError,
+  leaseHeldBy,
+  signalRunUrls,
   observedSignalCounts,
   redactStructured,
   HISTORY_PAGE_CAP,
@@ -214,6 +217,8 @@ function githubStub(open: FrictionIssue[] = []) {
 
 /** A recount that agrees with whatever the analyst claimed (isolates the non-threshold tests). */
 const TRUST = () => ({ occurrences: 1e9, runs: 1e9 });
+const HELD = () => true;
+const NOLINKS = (): string[] => [];
 const WINDOW = { start: "2026-01-01T00:00:00.000Z", end: "2026-01-01T12:00:00.000Z" };
 function finding(over: Record<string, unknown> = {}) {
   return { fingerprint: "redirect-blocked", title: "Redirects blocked", occurrences: 5, runs: 3, fixSurface: "permission-rule", targetRepo: "nanobpm/nano-coder", evidence: "- x", proposedFix: "allow", ...over };
@@ -222,7 +227,7 @@ function finding(over: Record<string, unknown> = {}) {
 test("a new fingerprint above threshold opens an issue carrying its fingerprint marker and label", async () => {
   const { github, created } = githubStub();
   const { findings } = parseFindings([finding()]);
-  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST }, findings);
+  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: HELD, evidenceLinks: NOLINKS }, findings);
   assertEquals(res.created, ["https://github.com/acme/friction/issues/101"]);
   assertEquals(created[0]?.labels, ["friction"]);
   assertEquals(parseFingerprintMarker(created[0]?.body ?? ""), "redirect-blocked");
@@ -231,7 +236,7 @@ test("a new fingerprint above threshold opens an issue carrying its fingerprint 
 test("an existing open fingerprint gets a recurrence comment, never a second issue", async () => {
   const open = [{ number: 7, url: "https://github.com/acme/friction/issues/7", title: "t", body: fingerprintMarker("redirect-blocked") }];
   const { github, calls } = githubStub(open);
-  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST }, parseFindings([finding({ occurrences: 1, runs: 1 })]).findings);
+  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: HELD, evidenceLinks: NOLINKS }, parseFindings([finding({ occurrences: 1, runs: 1 })]).findings);
   assertEquals(calls, ["list", "comment:7"]);
   assertEquals(res.updated, ["https://github.com/acme/friction/issues/7"]);
   assertEquals(res.created, []);
@@ -240,7 +245,7 @@ test("an existing open fingerprint gets a recurrence comment, never a second iss
 test("a new finding below the occurrence or run threshold is not filed", async () => {
   const { github, calls } = githubStub();
   const res = await fileFindings(
-    { github, config: CONFIG, window: WINDOW, observed: TRUST },
+    { github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: HELD, evidenceLinks: NOLINKS },
     parseFindings([finding({ fingerprint: "a", occurrences: 1 }), finding({ fingerprint: "b", runs: 1 })]).findings,
   );
   assertEquals(calls, ["list"]);
@@ -249,7 +254,7 @@ test("a new finding below the occurrence or run threshold is not filed", async (
 
 test("no findings → no GitHub call at all", async () => {
   const { github, calls } = githubStub();
-  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST }, []);
+  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: HELD, evidenceLinks: NOLINKS }, []);
   assertEquals(calls, []);
   assertEquals(res, { created: [], updated: [], skipped: 0 });
 });
@@ -467,7 +472,7 @@ test("fetchRunHistory reads past an expired history prefix (#1074 review)", asyn
 test("an agent-supplied existingIssue with a different fingerprint is never trusted (#1074 review)", async () => {
   const open = [{ number: 9, url: "https://github.com/acme/friction/issues/9", title: "t", body: fingerprintMarker("something-else") }];
   const { github, calls } = githubStub(open);
-  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST }, parseFindings([finding({ occurrences: 1, runs: 1, existingIssue: 9 })]).findings);
+  const res = await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: HELD, evidenceLinks: NOLINKS }, parseFindings([finding({ occurrences: 1, runs: 1, existingIssue: 9 })]).findings);
   assertEquals(calls, ["list"]);
   assertEquals(res.updated, []);
   assertEquals(res.skipped, 1);
@@ -514,7 +519,7 @@ test("an inflated analyst count does not file: thresholds use the host recount (
   const { github, calls } = githubStub();
   const cited: string[][] = [];
   const res = await fileFindings(
-    { github, config: CONFIG, window: WINDOW, observed: (fps) => (cited.push([...fps]), { occurrences: 1, runs: 1 }) },
+    { github, config: CONFIG, window: WINDOW, observed: (fps) => (cited.push([...fps]), { occurrences: 1, runs: 1 }), leaseHeld: HELD, evidenceLinks: NOLINKS },
     parseFindings([finding({ occurrences: 50, runs: 20, signalFingerprints: ["fp-a"] })]).findings,
   );
   assertEquals(cited, [["fp-a"]]);
@@ -631,10 +636,86 @@ test("a recurrence is recounted and clamped; an unsupported one is skipped", asy
   const clamped = githubStub(open);
   const comments: string[] = [];
   const gh = { ...clamped.github, comment: async (r: string, n: number, body: string) => (comments.push(body), clamped.github.comment(r, n, body)) };
-  await fileFindings({ github: gh, config: CONFIG, window: WINDOW, observed: () => ({ occurrences: 1, runs: 1 }) }, parseFindings([finding({ occurrences: 50, runs: 20 })]).findings);
+  await fileFindings({ github: gh, config: CONFIG, window: WINDOW, observed: () => ({ occurrences: 1, runs: 1 }), leaseHeld: HELD, evidenceLinks: NOLINKS }, parseFindings([finding({ occurrences: 50, runs: 20 })]).findings);
   assert(comments[0]?.includes("1 occurrence(s) across 1 run(s)"), comments[0] ?? "");
   const none = githubStub(open);
-  const res = await fileFindings({ github: none.github, config: CONFIG, window: WINDOW, observed: () => ({ occurrences: 0, runs: 0 }) }, parseFindings([finding()]).findings);
+  const res = await fileFindings({ github: none.github, config: CONFIG, window: WINDOW, observed: () => ({ occurrences: 0, runs: 0 }), leaseHeld: HELD, evidenceLinks: NOLINKS }, parseFindings([finding()]).findings);
   assertEquals(none.calls, ["list"]);
   assertEquals(res.skipped, 1);
+});
+
+test("redact masks CLI secrets passed as separate arguments (#1074 changes requested)", () => {
+  const cases: [string, string][] = [
+    ["gh auth --token abc123", "gh auth --token [REDACTED]"],
+    ["tool --api-key abc123 run", "tool --api-key [REDACTED] run"],
+    ["tool --api_key abc123", "tool --api_key [REDACTED]"],
+    ["tool --secret abc123", "tool --secret [REDACTED]"],
+    ["tool --client-secret 'abc 123'", "tool --client-secret [REDACTED]"],
+    ["tool --password-file /etc/pw", "tool --password-file [REDACTED]"],
+    ["tool --credential abc123", "tool --credential [REDACTED]"],
+    ["curl -u user:pass https://x", "curl -u [REDACTED] https://x"],
+    ["curl -s --user user:pass https://x", "curl -s --user [REDACTED] https://x"],
+    ["curl -uuser:pass https://x", "curl -u[REDACTED] https://x"],
+    ["mysql -u root -p hunter2 db", "mysql -u root -p [REDACTED] db"],
+    ["mysqldump -phunter2 db", "mysqldump -p[REDACTED] db"],
+    ["psql -h h -p s3cret", "psql -h h -p [REDACTED]"],
+  ];
+  for (const [raw, want] of cases) assertEquals(redact(raw), want, raw);
+  // Negatives: already-redacted, prose, `-p` outside the DB clients, flags with no value.
+  assertEquals(redact("tool --token=[REDACTED]"), "tool --token=[REDACTED]");
+  assertEquals(redact("tool --token [REDACTED]"), "tool --token [REDACTED]");
+  assertEquals(redact("the token was rejected"), "the token was rejected");
+  assertEquals(redact("docker run -p 8080:80 img"), "docker run -p 8080:80 img");
+  assertEquals(redact("ssh -p 2222 host"), "ssh -p 2222 host");
+  assertEquals(redact("tool --token --verbose"), "tool --token --verbose");
+  assertEquals(redact("curl -s https://x"), "curl -s https://x");
+});
+
+test("filing stops before any GitHub write once the sweep lease is lost (#1074)", async () => {
+  const { github, calls } = githubStub();
+  await assertRejects(
+    () =>
+      fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: () => false, evidenceLinks: NOLINKS }, parseFindings([finding()]).findings),
+    LeaseLostError,
+  );
+  assertEquals(calls, ["list"]);
+  const open = [{ number: 7, url: "https://github.com/acme/friction/issues/7", title: "t", body: fingerprintMarker("redirect-blocked") }];
+  const two = githubStub(open);
+  await assertRejects(
+    () =>
+      fileFindings({ github: two.github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: () => false, evidenceLinks: NOLINKS }, parseFindings([finding()]).findings),
+    LeaseLostError,
+  );
+  assertEquals(two.calls, ["list"]);
+});
+
+test("issue bodies and recurrence comments carry host-built, deduped, capped evidence links (#1074)", async () => {
+  const links = [...Array.from({ length: 15 }, (_, i) => `https://h/run/${i}`), "https://h/run/0", "javascript:alert(1)"];
+  const { github, created } = githubStub();
+  await fileFindings({ github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: HELD, evidenceLinks: () => links }, parseFindings([finding()]).findings);
+  const body = created[0]?.body ?? "";
+  assertEquals((body.match(/^- https:\/\/h\/run\//gm) ?? []).length, 10);
+  assert(!body.includes("javascript:"));
+  const open = [{ number: 7, url: "https://github.com/acme/friction/issues/7", title: "t", body: fingerprintMarker("redirect-blocked") }];
+  const bodies: string[] = [];
+  const two = githubStub(open);
+  two.github.comment = async (_r, n, b) => (bodies.push(b), { url: `u${n}` });
+  await fileFindings({ github: two.github, config: CONFIG, window: WINDOW, observed: TRUST, leaseHeld: HELD, evidenceLinks: () => ["https://h/run/a"] }, parseFindings([finding()]).findings);
+  assert(bodies[0]?.includes("- https://h/run/a"));
+});
+
+test("signalRunUrls and leaseHeldBy read the persisted signals and lease", async () => {
+  await withData(async (data) => {
+    const db = data.source().db;
+    for (const [id, url, fp] of [["1", "https://h/r1", "f"], ["2", "https://h/r1", "f"], ["3", "https://h/r2", "f"], ["4", null, "f"], ["5", "https://h/r3", "g"]]) {
+      db.run("INSERT INTO friction_signals (id, sweep_key, kind, run_key, run_url, fingerprint, excerpt, created_at) VALUES (?, 'SU', 'tool_error', ?, ?, ?, '', 't')", [id, id, url, fp]);
+    }
+    assertEquals(signalRunUrls(data, "SU", ["f"]), ["https://h/r1", "https://h/r2"]);
+    assertEquals(signalRunUrls(data, "SU", []), []);
+    const now = new Date("2026-01-01T00:00:00Z");
+    await acquireLease(data, liveEngine(new Set()), "H1", now, 1000);
+    assert(leaseHeldBy(data, "H1", now));
+    assert(!leaseHeldBy(data, "H2", now));
+    assert(!leaseHeldBy(data, "H1", new Date(now.getTime() + 2000)));
+  });
 });

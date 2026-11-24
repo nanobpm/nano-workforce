@@ -114,6 +114,16 @@ const REDACTIONS: readonly [RegExp, string][] = [
   ],
   // netrc-style `password <value>` / `passwd <value>` (fail closed: the next word is always masked).
   [/\b(password|passwd)([ \t]+)(?!\[REDACTED)[^\s]+/gi, "$1$2[REDACTED]"],
+  // CLI secrets passed as a SEPARATE argument: `--token abc`, `--api-key abc`, `--client-secret abc`,
+  // `--password-file x`. Keeps the flag, masks the value (fail closed: any secret-named flag).
+  [
+    /(^|[\s"'(=])(--?[A-Za-z0-9_-]*(?:token|secret|password|passwd|api[-_]key|credential)[A-Za-z0-9_-]*)([ \t]+)(?!\[REDACTED)(?!-)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^\s"']+)/gi,
+    "$1$2$3[REDACTED]",
+  ],
+  // curl `-u user:pass` / `--user user:pass` (attached `-uuser:pass` too): the whole pair is masked.
+  [/(\bcurl\b[^\n|;&]*?\s(?:-u[ \t]*|--user(?:[ \t]+|=)))(?!\[REDACTED)(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/gi, "$1[REDACTED]"],
+  // mysql / mysqldump / psql `-p value` or `-pvalue` (scoped to those commands: `-p` is a port elsewhere).
+  [/(\b(?:mysql|mysqldump|psql)\b[^\n|;&]*?\s-p)([ \t]*)(?!\[REDACTED)(?!-)([^\s"']+)/gi, "$1$2[REDACTED]"],
   // Home-directory paths leak the operator's username.
   [/\/(Users|home)\/[^/\s"']+/g, "/$1/[user]"],
 ];
@@ -869,6 +879,42 @@ export interface FileDeps {
    *  `friction_signals`): occurrences = matching rows, runs = distinct `run_key`. The filing threshold
    *  uses the SMALLER of this and the analyst's figure, so an inflated agent count never files. */
   observed: (signalFingerprints: readonly string[]) => { occurrences: number; runs: number };
+  /** Whether this sweep still holds the singleton lease. Re-checked immediately before EVERY GitHub
+   *  write: an expired holder whose successor took over must not file too (duplicate issues). */
+  leaseHeld: () => boolean;
+  /** Host-built evidence links (the `run_url` of each persisted signal behind `signalFingerprints`),
+   *  deduplicated — appended to every issue body / recurrence comment, never left to the analyst. */
+  evidenceLinks: (signalFingerprints: readonly string[]) => string[];
+}
+
+/** Thrown when the sweep lost its lease mid-filing: the worker stops and reports `failed`. */
+export class LeaseLostError extends Error {}
+
+/** Cap on host-built evidence links per issue/comment. */
+export const MAX_EVIDENCE_LINKS = 10;
+
+/** The distinct `run_url`s of this sweep's signals behind `signalFingerprints` (capped). */
+export function signalRunUrls(data: DataLayer, sweepKey: string, signalFingerprints: readonly string[]): string[] {
+  const fps = [...new Set(signalFingerprints)].slice(0, 200);
+  if (sweepKey === "" || fps.length === 0) return [];
+  return data
+    .source()
+    .db.all<{ u: string }>(
+      `SELECT DISTINCT run_url AS u FROM friction_signals WHERE sweep_key = ? AND fingerprint IN (${fps.map(() => "?").join(", ")}) AND run_url IS NOT NULL AND run_url <> '' ORDER BY run_url LIMIT ?`,
+      [sweepKey, ...fps, MAX_EVIDENCE_LINKS],
+    )
+    .map((r) => String(r.u));
+}
+
+/** Whether `holder` holds the sweep lease right now (unexpired). */
+export function leaseHeldBy(data: DataLayer, holder: string, now: Date): boolean {
+  const cur = readLease(data);
+  return holder !== "" && cur?.holder === holder && !!cur.expires_at && Date.parse(cur.expires_at) > now.getTime();
+}
+
+function evidenceSection(links: readonly string[]): string[] {
+  const uniq = [...new Set(links.filter((l) => /^https?:\/\//.test(l)))].slice(0, MAX_EVIDENCE_LINKS);
+  return uniq.length === 0 ? [] : ["", "## Evidence runs", ...uniq.map((l) => `- ${l}`)];
 }
 
 /** Recount `signalFingerprints` from this sweep's persisted `friction_signals`. */
@@ -890,7 +936,7 @@ export interface FileResult {
   skipped: number;
 }
 
-function issueBody(f: FrictionFinding, window: { start: string; end: string }): string {
+function issueBody(f: FrictionFinding, window: { start: string; end: string }, links: readonly string[]): string {
   return redact(
     [
       fingerprintMarker(f.fingerprint),
@@ -900,6 +946,7 @@ function issueBody(f: FrictionFinding, window: { start: string; end: string }): 
       "",
       "## Evidence",
       f.evidence || "_(none supplied)_",
+      ...evidenceSection(links),
       "",
       "## Proposed fix",
       f.proposedFix || "_(none supplied)_",
@@ -909,12 +956,13 @@ function issueBody(f: FrictionFinding, window: { start: string; end: string }): 
   );
 }
 
-function recurrenceComment(f: FrictionFinding, window: { start: string; end: string }): string {
+function recurrenceComment(f: FrictionFinding, window: { start: string; end: string }, links: readonly string[]): string {
   return redact(
     [
       `Seen again: ${f.occurrences} occurrence(s) across ${f.runs} run(s) in ${window.start} → ${window.end}.`,
       "",
       f.evidence || "_(no new evidence supplied)_",
+      ...evidenceSection(links),
     ].join("\n"),
   );
 }
@@ -957,7 +1005,8 @@ export async function fileFindings(deps: FileDeps, findingsIn: readonly Friction
         result.skipped++;
         continue;
       }
-      await deps.github.comment(deps.config.repo, match.number, recurrenceComment(f, deps.window));
+      if (!deps.leaseHeld()) throw new LeaseLostError("friction sweep lease lost before posting a recurrence comment");
+      await deps.github.comment(deps.config.repo, match.number, recurrenceComment(f, deps.window, deps.evidenceLinks(f.signalFingerprints ?? [])));
       result.updated.push(match.url || `https://github.com/${deps.config.repo}/issues/${match.number}`);
       continue;
     }
@@ -965,9 +1014,10 @@ export async function fileFindings(deps: FileDeps, findingsIn: readonly Friction
       result.skipped++;
       continue;
     }
+    if (!deps.leaseHeld()) throw new LeaseLostError("friction sweep lease lost before creating an issue");
     const made = await deps.github.createIssue(deps.config.repo, {
       title: redact(f.title).slice(0, 200),
-      body: issueBody(f, deps.window),
+      body: issueBody(f, deps.window, deps.evidenceLinks(f.signalFingerprints ?? [])),
       labels: [FRICTION_LABEL],
     });
     result.created.push(made.url || `https://github.com/${deps.config.repo}/issues/${made.number}`);

@@ -10,10 +10,12 @@ import {
   frictionConfig,
   frictionGithub,
   frictionSweeps,
+  leaseHeldBy,
   markFailed,
   observedSignalCounts,
   parseFindings,
   recordFiled,
+  signalRunUrls,
 } from "../../app/friction.ts";
 
 interface Out extends Record<string, unknown> {
@@ -37,6 +39,8 @@ const handler: AppJobHandler<Record<string, unknown>, Out> = async (job, app) =>
     res = await fileFindings(
       { github: frictionGithub(process.env.GITHUB_TOKEN ?? ""), config: frictionConfig(), window: { start: windowStart, end: windowEnd },
         observed: (fps) => observedSignalCounts(app.data, sweepKey, fps),
+        leaseHeld: () => leaseHeldBy(app.data, sweepKey, new Date()),
+        evidenceLinks: (fps) => signalRunUrls(app.data, sweepKey, fps),
       },
       findings,
       malformed,
