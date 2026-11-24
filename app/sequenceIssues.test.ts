@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import { compileDeliveryGraph } from "../app/deliveryGraphCompiler.ts";
 import { validateDeliveryGraph } from "../app/deliveryGraph.ts";
-import { buildSequenceGraph, MAX_SEQUENCE_ISSUES, MERGE_POLL } from "./sequenceIssues.ts";
+import { AFTER_POLL, buildSequenceGraph, MAX_SEQUENCE_AFTER, MAX_SEQUENCE_ISSUES, MERGE_POLL, sequenceAgentPrompt } from "./sequenceIssues.ts";
 
 type AnyGraph = { name?: string; nodes: any[]; edges: any[] };
 
@@ -37,7 +37,7 @@ function handAuthored(behind: string | null, issues: string[]): AnyGraph {
       kind: "agent",
       // #739: the generator stamps each agent cell with the issue's OWN repository, so a multi-repo
       // sequence provisions each cell's isolation envelope from that issue's repo.
-      agent: { jobType: "senior:feature", prompt: `Implement ${issue} and open a PR.`, repository: issue.split("#")[0] },
+      agent: { jobType: "senior:feature", prompt: sequenceAgentPrompt(issue), repository: issue.split("#")[0] },
       emits: [{ name: "pr", type: "pr" }],
     });
     nodes.push({ id: `land-${n}`, kind: "connector", connector: { target: "converge-merge", payload: { pr: `open-${n}.pr` } } });
@@ -136,7 +136,7 @@ test("sequenceIssues: the generated graph passes validateDeliveryGraph AND compi
 test("sequenceIssues: an issue URL is accepted and normalised to owner/repo#N", () => {
   const graph = ok({ issues: ["https://github.com/acme/repo/issues/42"] });
   const open = graph.nodes.find((n) => n.id === "open-1");
-  assertEquals(open.agent.prompt, "Implement acme/repo#42 and open a PR.");
+  assertEquals(open.agent.prompt, sequenceAgentPrompt("acme/repo#42"));
 });
 
 // ── Validation: the uniform issues[{path,message}] contract ─────────────────────────────────────
@@ -325,4 +325,113 @@ test("sequenceIssues: a fully-gated max-length sequence behind an epic gate exce
   // 64 × 4 nodes + 1 epic gate = 257 > 256.
   const issues = rejects({ behind: "acme/repo#999", issues: many });
   assert(issues.some((i) => i.path === "issues" && /too many nodes/.test(i.message)), `expected a node-ceiling rejection, got ${JSON.stringify(issues)}`);
+});
+
+// ── issue #1056: `after[]` AND-gate, `parallel` fan-out, full-scope-acknowledging prompts ────────────
+
+/** The hand-written graph from the #1056 evidence: N `wait[pr, merged]` gates (7-day budget) joined
+ * as an AND before the first issue, then the canonical chain. */
+function handAuthoredAfter(prs: string[], issues: string[]): AnyGraph {
+  const g = handAuthored(null, issues);
+  prs.forEach((pr, k) => {
+    g.nodes.push({
+      id: `after-${k + 1}`,
+      kind: "wait",
+      wait: { kind: "pr", target: pr, match: { prState: "merged" }, poll: { ...AFTER_POLL }, onTimeout: "escalate" },
+    });
+    g.edges.push({ from: `after-${k + 1}`, to: "open-1" });
+  });
+  return g;
+}
+
+test("sequenceIssues #1056: `after` four PRs → the hand-written AND-gated chain, compiles", async () => {
+  const prs = ["o/r#317", "o/r#318", "o/r#319", "o/r#320"];
+  const graph = ok({ issues: ["o/r#312", "o/r#313"], after: prs });
+  assertEquivalent(graph, handAuthoredAfter(prs, ["o/r#312", "o/r#313"]));
+  assertEquals(validateDeliveryGraph(graph), []);
+  const compiled = await compileDeliveryGraph(graph);
+  assert(compiled.ok, `expected compile ok, got ${JSON.stringify(compiled)}`);
+});
+
+test("sequenceIssues #1056: `after` gates default to a 7-day poll budget", () => {
+  const graph = ok({ issues: ["o/r#1"], after: ["o/r#2"] });
+  const gate = graph.nodes.find((n) => n.id === "after-1");
+  assertEquals(gate.wait.poll, { everyMs: 300_000, timeoutMs: 7 * 24 * 60 * 60 * 1000 });
+});
+
+test("sequenceIssues #1056: `after` entry forms resolve to pr / issue / epic waits", async () => {
+  const graph = ok({
+    issues: ["o/r#1"],
+    behind: "o/r#50",
+    after: [
+      "o/r#2",
+      "pr:o/r#3",
+      "issue:o/r#4",
+      "epic:o/r#5",
+      "https://github.com/o/r/pull/6",
+      "https://github.com/o/r/issues/7",
+      { kind: "issue", ref: "o/r#8" },
+    ],
+  });
+  const waits = graph.nodes.filter((n) => n.id.startsWith("after-")).map((n) => [n.wait.kind, n.wait.target, n.wait.match]);
+  assertEquals(waits, [
+    ["pr", "o/r#2", { prState: "merged" }],
+    ["pr", "o/r#3", { prState: "merged" }],
+    ["issue", "o/r#4", { issueState: "completed" }],
+    ["epic", "o/r#5", { epicState: "merged" }],
+    ["pr", "o/r#6", { prState: "merged" }],
+    ["issue", "o/r#7", { issueState: "completed" }],
+    ["issue", "o/r#8", { issueState: "completed" }],
+  ]);
+  // Every gate (and `behind`) feeds the first agent — an AND join.
+  const into = graph.edges.filter((e) => e.to === "open-1").map((e) => e.from).sort();
+  assertEquals(into, ["after-1", "after-2", "after-3", "after-4", "after-5", "after-6", "after-7", "gate-epic"]);
+  assertEquals(validateDeliveryGraph(graph), []);
+  const compiled = await compileDeliveryGraph(graph);
+  assert(compiled.ok, `expected compile ok, got ${JSON.stringify(compiled)}`);
+});
+
+test("sequenceIssues #1056: invalid `after` input is rejected path-qualified", () => {
+  for (const [after, path] of [
+    ["nope", "after"],
+    [["bogus"], "after[0]"],
+    [["o/r#0"], "after[0]"],
+    [[{ kind: "command", ref: "o/r#1" }], "after[0]"],
+    [["issue:https://github.com/o/r/pull/3"], "after[0]"],
+    [["o/r#1", "pr:o/r#1"], "after[1]"],
+    [Array.from({ length: MAX_SEQUENCE_AFTER + 1 }, (_, i) => `o/r#${i + 1}`), "after"],
+  ] as const) {
+    const res = buildSequenceGraph({ issues: ["o/r#9"], after });
+    assert(!res.ok, `expected rejection for ${JSON.stringify(after)}`);
+    assert(res.issues.some((x) => x.path === path), `expected path ${path}, got ${JSON.stringify(res.issues)}`);
+  }
+  const res = buildSequenceGraph({ issues: ["o/r#9"], parallel: "yes" });
+  assert(!res.ok && res.issues.some((x) => x.path === "parallel"));
+});
+
+test("sequenceIssues #1056: `parallel: true` fans every issue out after the gates (no chaining)", async () => {
+  const graph = ok({ issues: ["o/r#1", "o/r#2", "o/r#3"], after: ["o/r#10", "o/r#11"], parallel: true });
+  for (const n of [1, 2, 3]) {
+    const into = graph.edges.filter((e) => e.to === `open-${n}`).map((e) => e.from).sort();
+    assertEquals(into, ["after-1", "after-2"], `open-${n} released by the gates only`);
+  }
+  assert(!graph.edges.some((e) => /^merged-/.test(e.from)), "no merged→open chaining in parallel mode");
+  assertEquals(validateDeliveryGraph(graph), []);
+  const compiled = await compileDeliveryGraph(graph);
+  assert(compiled.ok, `expected compile ok, got ${JSON.stringify(compiled)}`);
+});
+
+test("sequenceIssues #1056: `parallel` without gates starts every issue immediately", () => {
+  const graph = ok({ issues: ["o/r#1", "o/r#2"], parallel: true });
+  assert(!graph.edges.some((e) => e.to.startsWith("open-")), "no predecessor edges");
+});
+
+test("sequenceIssues #1056: generated prompts close their issue AND satisfy the full-scope rule", () => {
+  const prompt = sequenceAgentPrompt("o/r#312");
+  assert(/closes o\/r#312/.test(prompt));
+  const graph = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature", prompt }, emits: [{ name: "pr", type: "pr" }] }], edges: [] };
+  assertEquals(validateDeliveryGraph(graph), []);
+  // Control: the same close WITHOUT the acknowledgement is rejected — the rule is live.
+  const bare = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature", prompt: "Implement o/r#312 and open a PR that closes o/r#312." } }], edges: [] };
+  assert(validateDeliveryGraph(bare).length > 0, "control: a bare close must be rejected");
 });

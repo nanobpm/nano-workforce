@@ -471,6 +471,15 @@ compile rejects it (`unbound-pr`). A connector with no `payload.pr` binds the si
 > `{ "issues": ["owner/repo#A", "owner/repo#B"], "behind"?: "owner/repo#NN" }`). It builds the
 > chain above for each issue, with an optional leading `wait[epic]` gate, and stages it through
 > compile (it never dispatches).
+>
+> **Gate on several PRs / issues — `after`.** Add `"after": ["o/r#317", "o/r#318"]` to start the
+> first issue only once **all** of them have landed (a parallel AND gate). A bare `owner/repo#N` (or
+> a `/pull/N` URL) is a PR → `wait[pr, merged]`; `issue:owner/repo#N` (or an `/issues/N` URL) →
+> `wait[issue, completed]`; `epic:owner/repo#N` → `wait[epic]`; or pass `{ "kind", "ref" }`. Each
+> gate gets a 7-day poll budget (not the 30-minute default). Add `"parallel": true` to fan every
+> issue out after the gates instead of chaining them. The generated agent prompts already carry the
+> full-scope acknowledgement for the issue they close, so the graph passes the partial-scope-close
+> compile rule as-is. CLI: `sequence --issues='["o/r#312","o/r#313"]' --after='["o/r#317","o/r#318"]'`.
 
 ### 9.5 Gate a graph on an epic reaching "fully merged" (`wait[epic]`)
 

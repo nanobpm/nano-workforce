@@ -24,6 +24,7 @@ import { CONVERGE_MERGE_TARGET } from "./convergeTargets.ts";
 import { GRAPH_MAX_NODES } from "./deliveryGraph.ts";
 import { deliveryGraphVocabulary } from "./deliveryGraphVocabulary.ts";
 import { type ParsedIssue, parseIssue } from "./plan.ts";
+import { parsePr } from "./prParse.ts";
 
 /** A path-qualified validation failure — the uniform door error contract `issues[{path,message}]`
  * (the same shape the runtime request-validator and the S1 harness assert). */
@@ -67,7 +68,23 @@ export interface SequenceIssueEntry {
  * `wait` gate before that issue's agent (issue #740). */
 export interface SequenceIssuesIntent {
   behind?: string;
+  /** OPTIONAL parallel AND-gate before the first issue (issue #1056): each entry a PR, issue or
+   * epic/feature reference — see {@link SequenceAfterEntry}. */
+  after?: (string | SequenceAfterEntry)[];
+  /** When true, every issue fans out in PARALLEL once the leading gate(s) release, instead of each
+   * waiting on the prior issue's merge (issue #1056). */
+  parallel?: boolean;
   issues: (string | SequenceIssueEntry)[];
+}
+
+/** The kinds an `after[]` entry can gate on (issue #1056): a PR merging (`wait[pr, merged]`), an issue
+ * completing (`wait[issue, completed]`), or an epic/feature planKey fully merging (`wait[epic]`). */
+export type SequenceAfterKind = "pr" | "issue" | "epic";
+
+/** The object form of an `after[]` entry — an explicit `kind` plus its `owner/repo#N` ref. */
+export interface SequenceAfterEntry {
+  kind: SequenceAfterKind;
+  ref: string;
 }
 
 /** The result of {@link buildSequenceGraph}: either the constructed graph, or the path-qualified
@@ -81,6 +98,83 @@ export type SequenceIssuesResult =
  * 30-minute default poll budget is a trap — always set an explicit `poll.timeoutMs` on a merge/epic
  * gate. Exported so the regression test asserts the generated gate against the canonical values. */
 export const MERGE_POLL = { everyMs: 300_000, timeoutMs: 259_200_000 } as const;
+
+/** The default poll budget for an `after[]` gate (issue #1056): re-probe every 5 minutes, budget 7
+ * days. An `after` gate typically waits on OTHER in-flight work landing — longer-lived than the merge of
+ * a PR this sequence itself drives — so it gets a week rather than {@link MERGE_POLL}'s 3 days (and
+ * never the 30-minute default trap). */
+export const AFTER_POLL = { everyMs: 300_000, timeoutMs: 604_800_000 } as const;
+
+/** The upper bound on `after[]` entries — bounds the intent and the AND-join fan-in. */
+export const MAX_SEQUENCE_AFTER = 32;
+
+
+/** A validated `after[]` gate: its probe kind and normalised `owner/repo#N` target. */
+interface AfterGate {
+  kind: SequenceAfterKind;
+  target: string;
+}
+
+/** Parse one `after[]` entry. Accepted forms:
+ *   - `{ kind: "pr" | "issue" | "epic", ref: "owner/repo#N" }`;
+ *   - a `pr:` / `issue:` / `epic:` prefixed ref (`issue:owner/repo#N`);
+ *   - a GitHub `/pull/N` URL (→ pr) or `/issues/N` URL (→ issue);
+ *   - a bare `owner/repo#N` — a PR (`wait[pr, merged]`), the common "after these PRs merge" case.
+ * Returns null on anything else (unknown kind, unparseable ref, `#0`). */
+function parseAfterEntry(raw: unknown): AfterGate | null {
+  let kind: SequenceAfterKind | null = null;
+  let ref: unknown = raw;
+  if (isRecord(raw)) {
+    if (raw.kind !== "pr" && raw.kind !== "issue" && raw.kind !== "epic") return null;
+    kind = raw.kind;
+    ref = raw.ref;
+  }
+  if (typeof ref !== "string") return null;
+  let s = ref.trim();
+  if (kind === null) {
+    const prefixed = s.match(/^(pr|issue|epic):\s*(.+)$/i);
+    if (prefixed) {
+      const k = prefixed[1].toLowerCase();
+      kind = k === "pr" ? "pr" : k === "issue" ? "issue" : "epic";
+      s = prefixed[2].trim();
+    }
+  }
+  // A `/pull/` URL is a PR; everything else goes through the ONE issue grammar (shorthand or
+  // `/issues/` URL). A `/pull/` URL under an explicit non-pr kind is a contradiction → reject.
+  if (/github\.com\//i.test(s) && /\/pull\/\d+/.test(s)) {
+    if (kind !== null && kind !== "pr") return null;
+    const pr = parsePr(s);
+    if (!pr || !Number.isSafeInteger(pr.number) || pr.number < 1) return null;
+    return { kind: "pr", target: pr.prKey };
+  }
+  const parsed = parseIssueRef(s);
+  if (!parsed) return null;
+  if (kind === null) kind = /github\.com\//i.test(s) ? "issue" : "pr";
+  return { kind, target: parsed.planKey };
+}
+
+/** The `wait` node an `after[]` gate lowers to: `wait[pr, merged]`, `wait[issue, completed]` or
+ * `wait[epic]` (merged), each with the {@link AFTER_POLL} budget and `escalate` on timeout. */
+function afterWaitNode(id: string, gate: AfterGate): DeliveryNode {
+  const match: NonNullable<ReadinessProbe["match"]> =
+    gate.kind === "pr"
+      ? { prState: "merged" }
+      : gate.kind === "issue"
+        ? { issueState: "completed" }
+        : { epicState: "merged" };
+  return {
+    id,
+    kind: "wait",
+    wait: { kind: gate.kind, target: gate.target, match, poll: { ...AFTER_POLL }, onTimeout: "escalate" },
+  };
+}
+
+/** The agent brief for one issue. It CLOSES the issue it implements, so it carries an issue-anchored
+ * full-scope acknowledgement ("the whole issue … every acceptance criterion") — the generated graph
+ * then satisfies the compile-time partial-scope-close rule (#858) by construction (issue #1056). */
+export function sequenceAgentPrompt(issueKey: string): string {
+  return `Implement the whole issue ${issueKey} (its full stated scope — every acceptance criterion) and open a PR that closes ${issueKey}.`;
+}
 
 /** The wait-probe kind that observes a single in-flight PR's merge state (ADR 0005 §2). */
 const PR_PROBE_KIND = "pr";
@@ -244,6 +338,8 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
   const body = isRecord(intent) ? intent : {};
   const rawIssues = body.issues;
   const rawBehind = body.behind;
+  const rawAfter = body.after;
+  const rawParallel = body.parallel;
 
   // The vocabulary is needed up front to validate interleaved gate `kind`s as each entry is parsed.
   const vocab = deliveryGraphVocabulary();
@@ -302,6 +398,46 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
     }
   }
 
+  // ── `after` (optional): a bounded array of PR / issue / epic refs, joined as a parallel AND gate
+  // before the first issue (issue #1056). ──
+  const afterGates: AfterGate[] = [];
+  if (rawAfter !== undefined && rawAfter !== null) {
+    if (!Array.isArray(rawAfter)) {
+      issues.push({ path: "after", message: "`after`, when present, must be an array of PR / issue / epic references." });
+    } else if (rawAfter.length > MAX_SEQUENCE_AFTER) {
+      issues.push({ path: "after", message: `\`after\` has too many entries (${rawAfter.length}) — the limit is ${MAX_SEQUENCE_AFTER}.` });
+    } else {
+      const seen = new Set<string>();
+      rawAfter.forEach((entry, i) => {
+        const gate = parseAfterEntry(entry);
+        if (!gate) {
+          issues.push({
+            path: `after[${i}]`,
+            message: `\`${isRecord(entry) ? JSON.stringify(entry) : String(entry)}\` is not a valid \`after\` gate — use \`owner/repo#N\` (a PR), a \`pr:\`/\`issue:\`/\`epic:\` prefixed ref, a GitHub PR/issue URL, or \`{ kind, ref }\`.`,
+          });
+          return;
+        }
+        const key = `${gate.kind}:${gate.target}`;
+        if (seen.has(key)) {
+          issues.push({ path: `after[${i}]`, message: `duplicate \`after\` gate \`${key}\`.` });
+          return;
+        }
+        seen.add(key);
+        afterGates.push(gate);
+      });
+    }
+  }
+
+  // ── `parallel` (optional): fan the issues out after the gate instead of chaining them. ──
+  let parallel = false;
+  if (rawParallel !== undefined && rawParallel !== null) {
+    if (typeof rawParallel !== "boolean") {
+      issues.push({ path: "parallel", message: "`parallel`, when present, must be a boolean." });
+    } else {
+      parallel = rawParallel;
+    }
+  }
+
   // ── Vocabulary drift guard (S3): the target/probe kinds this generator emits MUST be known to the
   // structured vocabulary. This can only trip if the closed vocabulary changes underneath us — it is
   // surfaced as a door `issue` (not a throw) so the failure mode is a clean rejection, not a 500. ──
@@ -312,7 +448,8 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
       message: `connector target \`${CONVERGE_MERGE_TARGET}\` is not a real target in the delivery-graph vocabulary.`,
     });
   }
-  for (const kind of behindKey ? [PR_PROBE_KIND, EPIC_PROBE_KIND] : [PR_PROBE_KIND]) {
+  const emittedKinds = new Set<string>([PR_PROBE_KIND, ...(behindKey ? [EPIC_PROBE_KIND] : []), ...afterGates.map((g) => g.kind)]);
+  for (const kind of emittedKinds) {
     if (!probeKinds.has(kind)) {
       issues.push({ path: "issues", message: `wait-probe kind \`${kind}\` is not in the delivery-graph vocabulary.` });
     }
@@ -322,7 +459,7 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
   // sequence (plus the optional `behind` gate) can push past the compiler's node ceiling. Reject it
   // at the door so a SUCCESSFULLY generated graph always validates `by construction`. ──
   if (issues.length === 0) {
-    const projectedNodes = (behindKey ? 1 : 0) + parsedEntries.reduce((n, e) => n + 3 + (e.gate ? 1 : 0), 0);
+    const projectedNodes = (behindKey ? 1 : 0) + afterGates.length + parsedEntries.reduce((n, e) => n + 3 + (e.gate ? 1 : 0), 0);
     if (projectedNodes > GRAPH_MAX_NODES) {
       issues.push({
         path: "issues",
@@ -333,7 +470,7 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
 
   if (issues.length > 0) return { ok: false, issues };
 
-  return { ok: true, graph: assembleGraph(parsedEntries, behindKey) };
+  return { ok: true, graph: assembleGraph(parsedEntries, behindKey, afterGates, parallel) };
 }
 
 /** Assemble the canonical node/edge chain for the (already-validated) parsed entries + optional gate.
@@ -341,7 +478,7 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
  * interleaved `gate` gets a leading `wait[<gate.kind>]` node spliced between the prior sequence step
  * and its agent, so the agent starts only once the prior issue merged AND the gate went green. Each
  * agent node is stamped with its own `repository` (issue #739) from the issue it implements. */
-function assembleGraph(entries: ParsedEntry[], behindKey: string | null): DeliveryGraph {
+function assembleGraph(entries: ParsedEntry[], behindKey: string | null, afterGates: AfterGate[], parallel: boolean): DeliveryGraph {
   const nodes: DeliveryNode[] = [];
   const edges: DeliveryEdge[] = [];
 
@@ -362,6 +499,16 @@ function assembleGraph(entries: ParsedEntry[], behindKey: string | null): Delive
     });
   }
 
+  // `after[]` gates (issue #1056): one `wait` node each, all feeding the first issue (or, `parallel`,
+  // every issue) — multiple incoming edges join as an AND, so the gated agent starts only once EVERY
+  // gate (and `behind`, when present) has released.
+  const leadingGates: string[] = behindKey ? [EPIC_GATE_ID] : [];
+  afterGates.forEach((gate, k) => {
+    const id = `after-${k + 1}`;
+    nodes.push(afterWaitNode(id, gate));
+    leadingGates.push(id);
+  });
+
   entries.forEach((entry, i) => {
     const issue = entry.issue;
     const n = i + 1;
@@ -373,12 +520,13 @@ function assembleGraph(entries: ParsedEntry[], behindKey: string | null): Delive
 
     // The sequence predecessor whose completion releases THIS issue: the prior issue's merge, else the
     // leading epic gate for the first issue (null when the first issue is ungated by `behind`).
-    const predecessor = i === 0 ? (behindKey ? EPIC_GATE_ID : null) : `merged-${i}`;
+    // In `parallel` mode every issue is released by the leading gates alone.
+    const predecessors: string[] = i === 0 || parallel ? leadingGates : [`merged-${i}`];
 
     // Interleaved gate (issue #740): a `wait[<kind>]` node the issue's agent waits on. It inherits the
     // sequence predecessor's edge (so it only starts probing once the prior issue merged) and the
     // agent then waits on the gate — gating the agent on the prior merge AND the gate condition.
-    let agentPredecessor = predecessor;
+    let agentPredecessors = predecessors;
     if (entry.gate) {
       const gateId = `gate-${n}`;
       const g = entry.gate;
@@ -394,8 +542,8 @@ function assembleGraph(entries: ParsedEntry[], behindKey: string | null): Delive
           ...(g.credentialEnv ? { credentialEnv: g.credentialEnv } : {}),
         },
       });
-      if (predecessor) edges.push({ from: predecessor, to: gateId });
-      agentPredecessor = gateId;
+      for (const p of predecessors) edges.push({ from: p, to: gateId });
+      agentPredecessors = [gateId];
     }
 
     // agent → opens the PR, emits it as a typed `pr` fact the downstream nodes late-bind. Stamp the
@@ -405,7 +553,7 @@ function assembleGraph(entries: ParsedEntry[], behindKey: string | null): Delive
     nodes.push({
       id: openId,
       kind: "agent",
-      agent: { jobType: AGENT_JOB_TYPE, prompt: `Implement ${issueKey} and open a PR.`, repository: issue.repo },
+      agent: { jobType: AGENT_JOB_TYPE, prompt: sequenceAgentPrompt(issueKey), repository: issue.repo },
       emits: [{ ...PR_EMIT }],
     });
     // connector[converge-merge] → drive the opened PR through review convergence + the merge loop.
@@ -433,14 +581,14 @@ function assembleGraph(entries: ParsedEntry[], behindKey: string | null): Delive
 
     // Sequence: this issue's agent starts once its predecessor (prior merge / epic gate / interleaved
     // gate) released. A first ungated issue has no predecessor edge (it starts immediately).
-    if (agentPredecessor) edges.push({ from: agentPredecessor, to: openId });
+    for (const p of agentPredecessors) edges.push({ from: p, to: openId });
   });
 
   const gateCount = entries.filter((e) => e.gate).length;
   const name =
     entries.length === 1
       ? `sequence ${entries[0].issue.planKey}`
-      : `sequence ${entries.length} issues${gateCount > 0 ? ` with ${gateCount} gate${gateCount === 1 ? "" : "s"}` : ""}${behindKey ? ` behind ${behindKey}` : ""}`;
+      : `${parallel ? "parallel" : "sequence"} ${entries.length} issues${gateCount > 0 ? ` with ${gateCount} gate${gateCount === 1 ? "" : "s"}` : ""}${behindKey ? ` behind ${behindKey}` : ""}${afterGates.length > 0 ? ` after ${afterGates.length} gate${afterGates.length === 1 ? "" : "s"}` : ""}`;
 
   return { name, nodes, edges };
 }
