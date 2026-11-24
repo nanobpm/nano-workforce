@@ -31,6 +31,7 @@ function view(over: Partial<RunView> = {}): RunView {
     acknowledgedAt: null,
     createdAt: null,
     updatedAt: "t0",
+    plannedChildren: null,
     children: [],
     ...over,
   };
@@ -125,9 +126,26 @@ test("epic: merged/converged require every slice, not the first", () => {
   const merged = view({ key: "a", kind: "pr", status: "merged" });
   const open = view({ key: "b", kind: "pr", status: "waiting_review" });
   const conv = view({ key: "b", kind: "pr", status: "converged" });
-  const epic = (children: RunView[]) => view({ kind: "epic", children });
+  const epic = (children: RunView[], planned = children.length) => view({ kind: "epic", children, plannedChildren: planned });
   assertEquals(waitReason("merged", epic([merged, open]), fp), null);
   assertEquals(waitReason("converged", epic([merged, open]), fp), null);
   assertEquals(waitReason("converged", epic([merged, conv]), fp), "converged");
   assertEquals(waitReason("merged", epic([merged, view({ key: "b", kind: "pr", status: "merged" })]), fp), "merged");
+});
+
+test("epic: a planned slice with no PR yet blocks merged/converged", () => {
+  const fp = runFingerprint(view());
+  const merged = view({ key: "a", kind: "pr", status: "merged" });
+  const epic = view({ kind: "epic", children: [merged], plannedChildren: 2 });
+  assertEquals(waitReason("merged", epic, fp), null);
+  assertEquals(waitReason("converged", epic, fp), null);
+});
+
+test("any-change sees nonvolatile fields: settings, engine instance, acknowledgment (self and child)", () => {
+  const fp = runFingerprint(view());
+  assertEquals(waitReason("any-change", view({ processInstanceKey: "2", processInstanceKeys: ["2"] }), fp), "any-change");
+  assertEquals(waitReason("any-change", view({ settings: { ...view().settings, autoMerge: false } }), fp), "any-change");
+  assertEquals(waitReason("any-change", view({ acknowledgedAt: "t5" }), fp), "any-change");
+  const fpc = runFingerprint(view({ children: [view({ key: "c" })] }));
+  assertEquals(waitReason("any-change", view({ children: [view({ key: "c", processInstanceKey: "9" })] }), fpc), "any-change");
 });

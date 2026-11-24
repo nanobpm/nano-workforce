@@ -40,26 +40,30 @@ export function waitTimeoutMs(raw: unknown): number {
 const SETTLED_PR = new Set(["converged", "merged"]);
 const selfAndChildren = (v: RunView): RunView[] => [v, ...v.children];
 
-/** The MEANINGFUL state of one run — volatile bookkeeping (lease/heartbeat `leaseUntil`, `activeWorker`,
- *  `updatedAt`) is excluded, so a lease renewal on a running agent never ends an `any-change` wait. */
-const meaningful = (v: RunView) => ({
-  status: v.status,
-  stage: v.stage,
-  terminal: v.terminal,
-  prUrl: v.prUrl,
-  openEscalation: v.openEscalation,
-  incident: v.incident,
-});
+/** The MEANINGFUL state of one run: every field EXCEPT the volatile bookkeeping (lease/heartbeat
+ *  `leaseUntil`, `activeWorker`, `updatedAt`) — excluded by omission, so a newly added view field
+ *  (settings, a restarted engine instance, acknowledgment, …) is fingerprinted by default and a lease
+ *  renewal on a running agent never ends an `any-change` wait. */
+const meaningful = (v: RunView) => {
+  const { activeWorker: _w, leaseUntil: _l, updatedAt: _u, children: _c, ...rest } = v;
+  return rest;
+};
 
 /** A stable fingerprint of the meaningful run state (self + children), for `any-change`. */
 export function runFingerprint(v: RunView): string {
-  return JSON.stringify({ ...meaningful(v), children: v.children.map((c) => ({ key: c.key, ...meaningful(c) })) });
+  return JSON.stringify({ ...meaningful(v), children: v.children.map(meaningful) });
 }
 
 /** Does the run as a WHOLE satisfy a status predicate? Its own status, or — for a run with children —
- *  EVERY child (so an epic with one merged slice and one open slice is not yet "merged"). */
-const wholeRun = (v: RunView, ok: (s: string) => boolean): boolean =>
-  ok(v.status) || (v.children.length > 0 && v.children.every((c) => ok(c.status)));
+ *  EVERY child (so an epic with one merged slice and one open slice is not yet "merged"). A planned run
+ *  (epic) must also be COMPLETE: `children` lists only slices whose PR exists, so a slice still
+ *  implementing is absent — fail closed unless every planned slice is visible. */
+const wholeRun = (v: RunView, ok: (s: string) => boolean): boolean => {
+  if (ok(v.status)) return true;
+  if (v.children.length === 0) return false;
+  if (v.plannedChildren !== null && v.children.length < v.plannedChildren) return false;
+  return v.children.every((c) => ok(c.status));
+};
 
 export type WaitReason = WaitUntil;
 

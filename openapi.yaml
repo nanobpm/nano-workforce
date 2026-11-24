@@ -313,7 +313,7 @@ components:
       type: object
       description: "One run looked up by key at any stage (issue #1054) — GET /run?key=."
       additionalProperties: false
-      required: [key, kind, title, status, terminal, stage, settings, processInstanceKey, processInstanceKeys, activeWorker, leaseUntil, prUrl, openEscalation, incident, acknowledgedAt, createdAt, updatedAt, children]
+      required: [key, kind, title, status, terminal, stage, settings, processInstanceKey, processInstanceKeys, activeWorker, leaseUntil, prUrl, openEscalation, incident, acknowledgedAt, createdAt, updatedAt, plannedChildren, children]
       properties:
         key:
           type: string
@@ -376,6 +376,10 @@ components:
           items:
             type: string
           description: This run's engine instance plus its children's.
+        plannedChildren:
+          type: integer
+          nullable: true
+          description: Epic only — the number of planned slices (children lists only slices whose PR exists). Null for other kinds.
         activeWorker:
           type: string
           nullable: true
