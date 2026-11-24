@@ -5,7 +5,8 @@
 // success already sits on it — a gate that fires before main's own CI has registered could
 // release on the queue's result alone. This gate looks ONLY at jobs of workflow runs for the SHA
 // whose event is `push` (main's own runs). A `merge_group` result can never satisfy it, and a
-// missing push run counts as pending.
+// missing push run counts as pending — except for a manual `workflow_dispatch`, which falls back
+// to the SHA's `merge_group` jobs ONLY when no push run exists at all (the #722/#723 recovery).
 //
 // USAGE (in release.yml):
 //   node --experimental-strip-types scripts/release-gate.ts <owner/repo> <sha>
@@ -42,16 +43,29 @@ export interface CheckResult {
 export interface GateDecision {
   release: boolean;
   checks: CheckResult[];
+  /** Which run event the decision was read from (`merge_group` only via the dispatch fallback). */
+  source?: string;
 }
 
 /**
  * Pure gate logic. Considers only runs with `event === "push"` for `sha`; per required check
  * name the latest job (max job id — a re-run attempt always gets a newer job id) wins.
  */
-export function decideGate(sha: string, runs: readonly GateRun[], required: readonly string[] = REQUIRED_CHECKS): GateDecision {
+export function decideGate(
+  sha: string,
+  runs: readonly GateRun[],
+  required: readonly string[] = REQUIRED_CHECKS,
+  opts: { mergeGroupFallback?: boolean } = {},
+): GateDecision {
+  // Manual-recovery fallback (workflow_dispatch only): when the SHA has NO push run at all — the
+  // #722/#723 dropped-`push:main` wedge — a human-dispatched gate may count the `merge_group` jobs
+  // the queue attached to this exact SHA. Never used while any push run exists (push is
+  // authoritative), and never for the automatic workflow_run/schedule triggers.
+  const hasPush = runs.some((r) => r.event === "push" && r.head_sha === sha);
+  const event = !hasPush && opts.mergeGroupFallback === true ? "merge_group" : "push";
   const latest = new Map<string, GateJob>();
   for (const run of runs) {
-    if (run.event !== "push" || run.head_sha !== sha) continue;
+    if (run.event !== event || run.head_sha !== sha) continue;
     for (const job of run.jobs) {
       const prev = latest.get(job.name);
       if (prev === undefined || job.id > prev.id) latest.set(job.name, job);
@@ -63,7 +77,7 @@ export function decideGate(sha: string, runs: readonly GateRun[], required: read
     if (job.status !== "completed" || job.conclusion === null) return { name, state: "pending" };
     return { name, state: job.conclusion };
   });
-  return { release: checks.every((c) => c.state === "success"), checks };
+  return { release: checks.every((c) => c.state === "success"), checks, source: event };
 }
 
 export function renderSummary(sha: string, d: GateDecision): string {
@@ -74,7 +88,11 @@ export function renderSummary(sha: string, d: GateDecision): string {
         .map((c) => `\`${c.name}\` (${c.state})`)
         .join(", ")}`;
   const rows = d.checks.map((c) => `| ${c.name} | ${c.state} |`).join("\n");
-  return `${head}\n\nOnly \`push\` runs on \`main\` count; merge-queue (\`merge_group\`) results are ignored.\n\n| check | state (push run) |\n|---|---|\n${rows}\n`;
+  const note =
+    d.source === "merge_group"
+      ? "Manual dispatch fallback: no `push` run exists for this SHA, so its merge-queue (`merge_group`) results were used."
+      : "Only `push` runs on `main` count; merge-queue (`merge_group`) results are ignored.";
+  return `${head}\n\n${note}\n\n| check | state (${d.source ?? "push"} run) |\n|---|---|\n${rows}\n`;
 }
 
 function ghJson(path: string): unknown[] {
@@ -100,8 +118,8 @@ function listOf(pages: unknown[], key: string): Record<string, unknown>[] {
   return all;
 }
 
-export function fetchPushRuns(repo: string, sha: string): GateRun[] {
-  const runs = listOf(ghJson(`repos/${repo}/actions/runs?head_sha=${sha}&event=push&per_page=100`), "workflow_runs");
+export function fetchRuns(repo: string, sha: string, event: string): GateRun[] {
+  const runs = listOf(ghJson(`repos/${repo}/actions/runs?head_sha=${sha}&event=${event}&per_page=100`), "workflow_runs");
   return runs.map((r): GateRun => {
     const id = Number(r.id);
     const jobs = listOf(ghJson(`repos/${repo}/actions/runs/${id}/jobs?filter=latest&per_page=100`), "jobs").map(
@@ -122,7 +140,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     console.error("usage: release-gate.ts <owner/repo> <sha>");
     process.exit(2);
   }
-  const d = decideGate(sha, fetchPushRuns(repo, sha));
+  const fallback = process.env.EVENT === "workflow_dispatch";
+  const runs = fetchRuns(repo, sha, "push");
+  if (fallback && runs.length === 0) runs.push(...fetchRuns(repo, sha, "merge_group"));
+  const d = decideGate(sha, runs, REQUIRED_CHECKS, { mergeGroupFallback: fallback });
   for (const c of d.checks) console.error(`gate: '${c.name}' = ${c.state}`);
   const summaryFile = process.env.GITHUB_STEP_SUMMARY;
   if (summaryFile) appendFileSync(summaryFile, renderSummary(sha, d));

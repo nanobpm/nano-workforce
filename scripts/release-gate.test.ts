@@ -67,3 +67,21 @@ test("summary names the outcome and what it is waiting on", () => {
   const g = renderSummary(SHA, { release: true, checks: [] });
   assert(g.includes("proceeding to semantic-release"));
 });
+
+test("workflow_dispatch recovery: no push run → merge_group jobs count", () => {
+  const d = decideGate(SHA, [mergeGroupGreen], undefined, { mergeGroupFallback: true });
+  assertEquals(d.release, true);
+  assertEquals(d.source, "merge_group");
+  assert(renderSummary(SHA, d).includes("Manual dispatch fallback"));
+});
+
+test("workflow_dispatch recovery never overrides an existing push run", () => {
+  const runs: GateRun[] = [mergeGroupGreen, { id: 2, event: "push", head_sha: SHA, jobs: [pending(20, "typecheck + test (Node)")] }];
+  const d = decideGate(SHA, runs, undefined, { mergeGroupFallback: true });
+  assertEquals(d.release, false);
+  assertEquals(d.source, "push");
+});
+
+test("automatic triggers (no fallback) never count merge_group", () => {
+  assertEquals(decideGate(SHA, [mergeGroupGreen]).release, false);
+});

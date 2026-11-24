@@ -17,9 +17,11 @@ on:
   # [skip ci]` commit from the release App) races the queue's merge — the merged
   # commit then lands with only its `merge_group` run and no `push` run, so the
   # `workflow_run` trigger never sees `event == 'push'` and the release wedges
-  # with no way to retrigger. Dispatching runs the SAME green-gate against
-  # `main`'s HEAD (the merge_group checks are attached to that commit), so a
-  # manual recovery still never ships from a red `main`.
+  # with no way to retrigger. Dispatching runs the gate against `main`'s HEAD;
+  # ONLY on dispatch, and ONLY when that SHA has no `push` run at all, the gate
+  # falls back to the SHA's `merge_group` jobs (scripts/release-gate.ts,
+  # #1085), so a manual recovery still never ships from a red `main`. The
+  # automatic workflow_run/schedule triggers never use that fallback.
   workflow_dispatch:
   # Self-heal a dropped `push:main` event (#725). The `push`→`workflow_run` chain
   # is the ONLY automatic release path, so a single dropped event (a transient
@@ -86,7 +88,9 @@ jobs:
           set -euo pipefail
           # #1085: gate ONLY on jobs from this SHA's `push` workflow runs (main's own CI).
           # The landed commit is the same SHA the merge queue built, so its `merge_group`
-          # success must never satisfy the gate; a missing push run counts as pending.
+          # success must never satisfy the automatic gate; a missing push run counts as
+          # pending. Exception: a manual workflow_dispatch with NO push run for the SHA
+          # falls back to its merge_group jobs (the #722/#723 recovery path).
           # Required set + logic live in scripts/release-gate.ts (tested by
           # scripts/release-gate.test.ts); it writes the decision to the job summary.
           out="$(node --experimental-strip-types scripts/release-gate.ts "$REPO" "$SHA")"
