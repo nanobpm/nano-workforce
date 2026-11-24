@@ -22,7 +22,7 @@ import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 // widen it BEFORE importing them so the overlap below (an analyst still running when the next 12h
 // firing lands) is not cut short by the 2h default.
 process.env.NANO_PR_AGENT_SLA_TIMEOUT = "PT48H";
-const { FRICTION_PROCESS_ID, FRICTION_SUMMARY_ELEMENT, frictionSweeps, leaseHolder, parseFingerprintMarker } = await import("../app/friction.ts");
+const { FRICTION_PROCESS_ID, FRICTION_SUMMARY_ELEMENT, frictionSweeps, leaseHolder, normaliseMessage, parseFingerprintMarker } = await import("../app/friction.ts");
 const { pollUserTasks } = await import("../app/service.ts");
 const { userTasks } = await import("../app/userTasks.ts");
 
@@ -150,8 +150,14 @@ describe("friction sweep (engine-level)", () => {
             targetRepo: "nanobpm/nano-workforce",
             evidence: "- escalation: which migration prefix?",
             proposedFix: "Point to the migration section.",
+            // The filer recounts these host-side; cite the persisted escalation groups (both the
+            // redacted-token variant and the plain question) via the canonical normaliser.
+            signalFingerprints: [
+              normaliseMessage("Which migration prefix should I use? token ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+              normaliseMessage("Which migration prefix should I use?"),
+            ],
           },
-          { fingerprint: "existing-root-cause", title: "Recurring", occurrences: 1, runs: 1, fixSurface: "permission-rule", targetRepo: "nanobpm/nano-coder", evidence: "- again", proposedFix: "Allow it." },
+          { fingerprint: "existing-root-cause", title: "Recurring", occurrences: 1, runs: 1, fixSurface: "permission-rule", targetRepo: "nanobpm/nano-coder", evidence: "- again", proposedFix: "Allow it.", signalFingerprints: [normaliseMessage("Which migration prefix should I use?")] },
         ],
       };
     });
