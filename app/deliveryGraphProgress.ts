@@ -21,6 +21,7 @@
 
 import type { AppApi } from "@nanobpm/urban";
 import type { DeliveryGraph, DeliveryGraphNodeProgress, DeliveryGraphRunProgress } from "../nano-generated/api-io.d.ts";
+import { readEnv } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { type BoundFact, resolveConvergePr } from "./deliveryConnector.ts";
 import { compileDeliveryGraphSemantic } from "./deliveryGraphCompiler.ts";
@@ -183,8 +184,12 @@ export function deriveNodeProgress(input: {
       // probeLoop scope, then the node's own element scope. A run-ROOT `ready` carries no producer
       // provenance — it may be a previous (now completed) wait's result — so attributing it to this
       // node would be a guess; report null instead.
+      // After the boundary timer cancels the loop, the `_lastAttempt` probe runs outside it and its
+      // result lands in the node's element scope — once that final attempt COMPLETED it is newer than
+      // any (cancelled) loop iteration, so the node scope then wins.
+      const finalDone = own.some((e) => e.elementId === `${node.element}_lastAttempt` && e.state === "COMPLETED");
       const scopes: Map<string, string>[] = [];
-      for (const id of [`${node.element}_probeLoop`, node.element]) {
+      for (const id of finalDone ? [node.element, `${node.element}_probeLoop`] : [`${node.element}_probeLoop`, node.element]) {
         // The NEWEST scope wins (the most recent loop iteration) — chosen by element-instance key, which
         // the engine allocates monotonically, never by the engine's (unspecified) result order.
         let newest: { key: bigint; scope: Map<string, string> } | null = null;
@@ -349,7 +354,7 @@ export async function loadDeliveryGraphProgress(
     const pending = deriveNodeProgress({ nodes, elements: [], variables: [], userTasks: [], incidents: [], processInstanceKey: "" });
     return { ...base, nodes: pending, mermaid: renderProgressMermaid(compiled.diagram, pending) };
   }
-  const read = await readEngineFacts(app.engine, pik, nodes, fetchFullVariableValue);
+  const read = await readEngineFacts(app.engine, pik, nodes, (k) => fetchFullVariableValue(k));
   const { instances, elements, variables, userTasks, incidents } = read;
   const instanceState = instances[0]?.state ?? null;
   const nodeInputsVar = variables.find((v) => v.scopeKey === pik && v.name === "nodeInputs");
@@ -434,9 +439,17 @@ export function createReadLimiter(maxInFlight: number, maxCalls: number, onCap: 
  * canonical engine REST address directly. Answers `undefined` on any failure or a still-clipped answer —
  * the caller then flags the view `truncated` and leaves the fact unknown.
  */
-export async function fetchFullVariableValue(variableKey: string): Promise<string | undefined> {
+export async function fetchFullVariableValue(
+  variableKey: string,
+  /** `token` defaults to the canonical `CAMUNDA_TOKEN` (the bearer the engine client uses); `fetchImpl` is a test seam. */
+  opts: { token?: string; fetchImpl?: typeof fetch } = {},
+): Promise<string | undefined> {
   try {
-    const res = await fetch(`${resolveEngineAddress().restAddress}/variables/${encodeURIComponent(variableKey)}`, {
+    const token = "token" in opts ? opts.token : readEnv("CAMUNDA_TOKEN");
+    const headers: Record<string, string> = {};
+    if (token) headers.authorization = `Bearer ${token}`;
+    const res = await (opts.fetchImpl ?? fetch)(`${resolveEngineAddress().restAddress}/variables/${encodeURIComponent(variableKey)}`, {
+      headers,
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return undefined;
@@ -534,6 +547,7 @@ export async function readEngineFacts(
           }
         }
         if (historyFull && !resolved) truncated = true;
+        for (const e of await elementSearch(`${n.element}_lastAttempt`)) elements.set(e.elementInstanceKey, e);
         for (const e of bodies) addVars(await scopeVars(e.elementInstanceKey));
       } else if (n.kind === "agent" || n.kind === "connector") {
         const inner = await Promise.all(PR_SCOPE_SUFFIXES.map((s) => elementSearch(`${n.element}${s}`)));

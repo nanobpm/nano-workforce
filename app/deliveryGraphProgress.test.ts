@@ -581,3 +581,40 @@ test("a clipped fact beyond the per-request call cap is not fetched and flags th
   assert.equal(read.truncated, true);
   assert.equal(read.variables.find((x) => x.name === "e0_pr")?.isTruncated, true);
 });
+
+test("fetchFullVariableValue sends CAMUNDA_TOKEN as a bearer credential (and none when unset)", async () => {
+  const { fetchFullVariableValue } = await import("./deliveryGraphProgress.ts");
+  const seen: (string | null)[] = [];
+  const fetchImpl: typeof fetch = async (_url, init) => {
+    seen.push(new Headers(init?.headers).get("authorization"));
+    return new Response(JSON.stringify({ value: "full", isTruncated: false }), { status: 200 });
+  };
+  assert.equal(await fetchFullVariableValue("7", { token: "s3cret", fetchImpl }), "full");
+  assert.equal(await fetchFullVariableValue("7", { token: undefined, fetchImpl }), "full");
+  assert.deepEqual(seen, ["Bearer s3cret", null]);
+});
+
+test("a completed `_lastAttempt` probe result wins over the cancelled probe loop's older result", () => {
+  const base = {
+    nodes: NODES,
+    processInstanceKey: PIK,
+    variables: [
+      { name: "ready", value: "false", scopeKey: "5" },
+      { name: "ready", value: "true", scopeKey: "3" },
+      { name: "detail", value: '"merged"', scopeKey: "3" },
+    ],
+    userTasks: [],
+    incidents: [],
+  };
+  const elements: ElementInstanceFact[] = [
+    { elementId: "n2", elementInstanceKey: "3", state: "ACTIVE" },
+    { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "TERMINATED" },
+  ];
+  const before = deriveNodeProgress({ ...base, elements }).find((n) => n.id === "landed");
+  assert.equal(before?.lastProbe?.ready, false);
+  const after = deriveNodeProgress({ ...base, elements: [...elements, { elementId: "n2_lastAttempt", elementInstanceKey: "7", state: "COMPLETED" }] }).find(
+    (n) => n.id === "landed",
+  );
+  assert.equal(after?.lastProbe?.ready, true);
+  assert.equal(after?.lastProbe?.detail, "merged");
+});
