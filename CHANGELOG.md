@@ -1,3 +1,9 @@
+## [0.227.0](https://github.com/nanobpm/nano-workforce/compare/v0.226.1...v0.227.0) (2026-11-24)
+
+### Features
+
+* **delivery-graph:** per-node progress for a running graph ([#1066](https://github.com/nanobpm/nano-workforce/issues/1066)) ([fc4fb2f](https://github.com/nanobpm/nano-workforce/commit/fc4fb2f0d242e5e8b449d3e5d536c91881a6e708)), closes [#1055](https://github.com/nanobpm/nano-workforce/issues/1055) [#1065](https://github.com/nanobpm/nano-workforce/issues/1065) [#1055](https://github.com/nanobpm/nano-workforce/issues/1055) [#1055](https://github.com/nanobpm/nano-workforce/issues/1055) [#1055](https://github.com/nanobpm/nano-workforce/issues/1055) [#1055](https://github.com/nanobpm/nano-workforce/issues/1055)
+
 ## [0.226.1](https://github.com/nanobpm/nano-workforce/compare/v0.226.0...v0.226.1) (2026-11-24)
 
 ### Bug Fixes
