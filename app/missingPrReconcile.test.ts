@@ -9,6 +9,7 @@ import { deriveFeatureDelivery } from "./feature.ts";
 import {
   classifyMissingPrError,
   derivePlanDelivery,
+  pollFeatureDelivery,
   MISSING_PR_GRACE_MS,
   MISSING_PR_RECHECK_MS, type MissingPrLookup,
   reconcileMissingPrRows,
@@ -177,4 +178,52 @@ test("classifyMissingPrError: only a PR-level miss is not_found", () => {
   ]) {
     assertEquals(classifyMissingPrError(new Error(msg)), null);
   }
+});
+
+test("a verified-absent feature PR is not re-enrolled between passes, so grace expiry still fails it", async () => {
+  const { data, stores } = memData();
+  seedFeature(stores, "o/r#20");
+  const notFound = new Set<string>();
+  const lastChecked = new Map<string, number>();
+  let creates = 0;
+  const engine = {
+    createInstance: async () => {
+      creates++;
+      return { processInstanceKey: "x" };
+    },
+    searchProcessInstances: async () => [],
+  } as any;
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("not_found"), nowMs: T0 + 1000, lastChecked, notFound });
+  await pollFeatureDelivery(data, engine, { missingPrNotFound: notFound });
+  assertEquals(creates, 0);
+  assertEquals(stores.pull_requests ?? [], []);
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("not_found"), nowMs: T0 + MISSING_PR_GRACE_MS, lastChecked, notFound });
+  assertEquals(stores.feature_runs[0].status, "failed");
+  assertEquals(notFound.size, 0);
+});
+
+test("a key GitHub reports again (open) loses its absent verdict and is re-enrollable", async () => {
+  const { data, stores } = memData();
+  seedFeature(stores, "o/r#21");
+  const notFound = new Set<string>(["o/r#21"]);
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf("open"), nowMs: T0, lastChecked: new Map(), notFound });
+  assertEquals(notFound.has("o/r#21"), false);
+});
+
+test("settled done epics cost one task read per pass, not one per epic", async () => {
+  const { data, stores } = memData();
+  stores.plans = Array.from({ length: 5 }, (_, i) => ({ plan_key: `o/r#${100 + i}`, status: "done" }));
+  stores.plan_tasks = [];
+  const tasks = (data as any).table("plan_tasks");
+  let finds = 0;
+  let alls = 0;
+  const orig = (data as any).table;
+  (data as any).table = (n: string, pk?: string) => {
+    const t = orig(n, pk);
+    if (n !== "plan_tasks") return t;
+    return { ...t, find: async (w: any) => (finds++, t.find(w)), all: async () => (alls++, t.all()) };
+  };
+  void tasks;
+  await reconcileMissingPrRows(data, "", { lookup: lookupOf(null), nowMs: T0, lastChecked: new Map(), notFound: new Set() });
+  assertEquals({ finds, alls }, { finds: 0, alls: 1 });
 });

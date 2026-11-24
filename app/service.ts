@@ -4129,8 +4129,9 @@ export type MissingPrLookup = "merged" | "closed" | "open" | "not_found" | null;
  * gh's GraphQL "Could not resolve to a PullRequest" (the repository resolved, the number did not). A
  * repo-level "Could not resolve to a Repository", auth/permission errors, rate limits, 5xx and transport
  * failures are all UNKNOWN (`null`) — a token without access to a private repo also sees those, and
- * failing a healthy run on them would be fail-open. A token-mode 404 is ambiguous on its own and is
- * classified by the caller only after confirming the repo itself is visible. */
+ * failing a healthy run on them would be fail-open. A token-mode 404 is ambiguous on its own (GitHub
+ * masks a denied PR read as 404) and is classified by the caller only after confirming the token can
+ * read the repo's PULL REQUESTS — repo metadata visibility alone does not prove PR access. */
 export function classifyMissingPrError(err: unknown): "not_found" | null {
   const msg = err instanceof Error ? err.message : String(err);
   return /could not resolve to a pullrequest/i.test(msg) ? "not_found" : null;
@@ -4138,8 +4139,9 @@ export function classifyMissingPrError(err: unknown): "not_found" | null {
 
 /** Default GitHub lookup for {@link reconcileMissingPrRows}: a LIGHTWEIGHT state-only read (`state`,
  * `mergedAt`) — never the full `fetchPrState` (rollup enrichment + thread GraphQL), since this runs per
- * missing key per pass. A token-mode 404 counts as `not_found` only when the repo itself is readable
- * with the same token; otherwise (and on any other failure) the answer is unknown (`null`). */
+ * missing key per pass. A token-mode 404 counts as `not_found` only when the SAME token can read the
+ * repo's pull-request API (`GET /repos/{repo}/pulls`) — repo metadata visibility is not enough, since a
+ * fine-grained PAT / App token can read metadata while PR reads are denied with a masked 404; otherwise (and on any other failure) the answer is unknown (`null`). */
 export async function lookupMissingPr(repo: string, number: number, token: string): Promise<MissingPrLookup> {
   const settle = (merged: boolean, state: string | undefined): MissingPrLookup =>
     merged ? "merged" : (state ?? "").toUpperCase() === "CLOSED" ? "closed" : "open";
@@ -4156,8 +4158,8 @@ export async function lookupMissingPr(repo: string, number: number, token: strin
     const headers = { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" };
     const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, { headers });
     if (r.status === 404) {
-      const repoRes = await fetch(`https://api.github.com/repos/${repo}`, { headers });
-      return repoRes.ok ? "not_found" : null;
+      const probe = await fetch(`https://api.github.com/repos/${repo}/pulls?state=all&per_page=1`, { headers });
+      return probe.ok ? "not_found" : null;
     }
     if (!r.ok) return null;
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
@@ -4172,6 +4174,11 @@ export async function lookupMissingPr(repo: string, number: number, token: strin
  * is otherwise re-queried every poll pass forever. */
 export const MISSING_PR_RECHECK_MS = 5 * 60 * 1000;
 const missingPrLastChecked = new Map<string, number>();
+/** PR keys the reconciler last saw DEFINITIVELY `not_found` on GitHub (issue #1089). `pollFeatureDelivery`
+ * edge (1) must NOT re-enroll such a key: `submitPr` would insert a `converging` row for a PR that does not
+ * exist, the key would then read as "known", and the grace-expiry verdict could never fail the run. Any
+ * other answer (or a terminal write) clears the key. */
+const missingPrNotFound = new Set<string>();
 
 /** Insert a TERMINAL `pull_requests` row for a PR the app lost track of, so every reader (epic delivery,
  * feature rollup, run waiters) sees a settled state. `merged` lands; anything else is `abandoned` (the
@@ -4219,11 +4226,13 @@ export async function reconcileMissingPrRows(
     lookup?: (repo: string, number: number, token: string) => Promise<MissingPrLookup>;
     nowMs?: number;
     lastChecked?: Map<string, number>;
+    notFound?: Set<string>;
   } = {},
 ): Promise<void> {
   const lookup = opts.lookup ?? lookupMissingPr;
   const nowMs = opts.nowMs ?? Date.now();
   const lastChecked = opts.lastChecked ?? missingPrLastChecked;
+  const notFound = opts.notFound ?? missingPrNotFound;
   const known = new Set((await prs(data).all()).map((r) => r.pr_key));
   // pr_key → the newest referencing timestamp, plus the feature runs referencing it.
   // Each feature carries the incarnation we OBSERVED (process_key + status) for the guarded CAS fold.
@@ -4237,11 +4246,16 @@ export async function reconcileMissingPrRows(
     if (feature) e.features.push(feature);
     refs.set(prKey, e);
   };
-  for (const plan of await plans(data).find({ status: "done" })) {
-    for (const t of await planTasks(data).find({ plan_key: plan.plan_key })) {
-      if (t.pr_key) note(t.pr_key, t.updated_at ?? t.created_at);
+  // One task read per pass (not one per done epic — that grows with settled history), filtered to
+  // done epics' slices. Skip the read entirely when no epic is done.
+  const donePlanKeys = new Set((await plans(data).find({ status: "done" })).map((p) => p.plan_key));
+  if (donePlanKeys.size > 0) {
+    for (const t of await planTasks(data).all()) {
+      if (t.pr_key && donePlanKeys.has(t.plan_key)) note(t.pr_key, t.updated_at ?? t.created_at);
     }
   }
+  // Drop stale verdicts for keys that are now tracked (or no longer referenced).
+  for (const k of notFound) if (!refs.has(k)) notFound.delete(k);
   for (const status of ["converging", "opened"] as const) {
     for (const run of await featureRuns(data).find({ status })) {
       if (!run.pr_key) continue;
@@ -4257,6 +4271,8 @@ export async function reconcileMissingPrRows(
       if (last !== undefined && nowMs - last < MISSING_PR_RECHECK_MS) continue;
       lastChecked.set(prKey, nowMs);
       const found = await lookup(parsed.repo, parsed.number, token);
+      if (found === "not_found") notFound.add(prKey);
+      else if (found !== null) notFound.delete(prKey);
       if (found === "merged" || found === "closed") lastChecked.delete(prKey);
       if (found === "merged") {
         await writeTerminalPrRow(data, prKey, "merged", "merged on GitHub (PR row was missing)");
@@ -4273,6 +4289,7 @@ export async function reconcileMissingPrRows(
           await foldCompletedFeatureRun(data, f.featureKey, f.processKey, "failed", reason, f.status);
         }
         lastChecked.delete(prKey);
+        notFound.delete(prKey);
         console.warn(`[poller] missing PR row: ${reason}`);
       }
     } catch (err) {
@@ -4507,7 +4524,9 @@ export async function pollFeatureDelivery(
   // Full `EngineClient`: edge (1) re-enrolls a converging run whose PR row is still missing via
   // `submitPr` (which needs `createInstance`), not just the `searchProcessInstances` the fold edges use.
   engine: EngineClient,
+  opts: { missingPrNotFound?: Set<string> } = {},
 ) {
+  const notFound = opts.missingPrNotFound ?? missingPrNotFound;
   // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
   // Read the ADR-0065 derived edge (`derived_status`) so a terminated run reads `abandoned`.
   const statusByPrKey = new Map<string, string>();
@@ -4545,7 +4564,11 @@ export async function pollFeatureDelivery(
       // `humanApproval` mirror `converge-feature` — derived from the run's `auto_merge`/`human_approval`.
       const partiallyEnrolled =
         trackedPr != null && trackedPr.process_key == null && !TERMINAL_STATUSES.includes(trackedPr.derived_status);
-      if (prStatus === null || partiallyEnrolled) {
+      // A key the missing-PR reconciler saw definitively absent on GitHub is NOT re-enrolled (issue
+      // #1089): enrolling would insert a row for a nonexistent PR and hide it from the grace-expiry
+      // failure verdict. The reconciler clears the verdict the moment GitHub reports it again.
+      const verifiedAbsent = prStatus === null && notFound.has(run.pr_key);
+      if ((prStatus === null && !verifiedAbsent) || partiallyEnrolled) {
         const parsed = parsePr(run.pr_key);
         if (parsed) {
           await submitPr(
