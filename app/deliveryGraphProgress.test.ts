@@ -3,7 +3,17 @@
 // probe, child PR run keys and open escalation.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deriveNodeProgress, owningNodeElement, prKeyOf, type ResolvedNodeRef, renderProgressMermaid } from "./deliveryGraphProgress.ts";
+import {
+  deriveNodeProgress,
+  ENGINE_SEARCH_PAGE,
+  type ElementInstanceFact,
+  owningNodeElement,
+  prKeyOf,
+  type ResolvedNodeRef,
+  readEngineFacts,
+  renderProgressMermaid,
+  type VariableFact,
+} from "./deliveryGraphProgress.ts";
 
 const PIK = "100";
 const NODES: ResolvedNodeRef[] = [
@@ -265,4 +275,73 @@ test("an unconfigured wait node never reads an inherited cadence", () => {
     processInstanceKey: PIK, elements: [], variables: [], userTasks: [], incidents: [], pollEveryByNode: {},
   });
   assert.equal(nodes[0]?.pollEvery, null);
+});
+
+/** A fake engine that, like the real one behind the urban client, answers every search with ONE page. */
+function pagedEngine(all: { elements: ElementInstanceFact[]; variables: VariableFact[] }) {
+  const one = <T>(rows: T[]): T[] => rows.slice(0, ENGINE_SEARCH_PAGE);
+  return {
+    searchProcessInstances: async () => [{ state: "ACTIVE" }],
+    searchElementInstances: async (f: { elementId?: string; state?: string } = {}) =>
+      one(all.elements.filter((e) => (f.elementId === undefined || e.elementId === f.elementId) && (f.state === undefined || e.state === f.state)).map((e) => ({ ...e, processInstanceKey: PIK }))),
+    getElementInstance: async (k: string) => {
+      const e = all.elements.find((x) => x.elementInstanceKey === k);
+      return e ? { ...e, processInstanceKey: PIK } : null;
+    },
+    searchVariables: async (f: { scopeKey?: string; name?: string } = {}) =>
+      one(
+        all.variables
+          .filter((v) => (f.scopeKey === undefined || v.scopeKey === f.scopeKey) && (f.name === undefined || v.name === f.name))
+          .map((v, i) => ({ ...v, variableKey: String(i), processInstanceKey: PIK, isTruncated: false })),
+      ),
+    searchUserTasks: async () => [],
+    searchIncidents: async () => [],
+  };
+}
+
+test("a run with more variables and element instances than one page still yields complete facts and states", async () => {
+  const elements: ElementInstanceFact[] = [
+    { elementId: "n0", elementInstanceKey: "1", state: "COMPLETED" },
+    { elementId: "n1", elementInstanceKey: "2", state: "COMPLETED" },
+    { elementId: "n1_task", elementInstanceKey: "3", state: "COMPLETED" },
+    { elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" },
+  ];
+  const variables: VariableFact[] = [];
+  // 300 unrelated element instances and variables listed FIRST: a single broad page would hold only these.
+  for (let i = 0; i < 300; i++) {
+    elements.unshift({ elementId: `other_${i}`, elementInstanceKey: String(1000 + i), state: "COMPLETED" });
+    variables.push({ name: `noise${i}`, value: "1", scopeKey: PIK });
+  }
+  // Probe-loop iterations listed newest-FIRST: the newest scope (highest key) must win, not array order.
+  elements.push({ elementId: "n2_probeLoop", elementInstanceKey: "9", state: "ACTIVE" }, { elementId: "n2_probeLoop", elementInstanceKey: "5", state: "COMPLETED" });
+  variables.push(
+    { name: "ready", value: "false", scopeKey: "9" },
+    { name: "detail", value: '"newest"', scopeKey: "9" },
+    { name: "ready", value: "true", scopeKey: "5" },
+    { name: "detail", value: '"stale"', scopeKey: "5" },
+    { name: "n1_pr", value: '"a/b#7"', scopeKey: PIK },
+    { name: "pr", value: '"a/b#8"', scopeKey: "3" },
+    { name: "nodeInputs", value: JSON.stringify({ n2: { probePollEvery: "PT5M" } }), scopeKey: PIK },
+  );
+  const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
+  assert.equal(read.truncated, false);
+  const nodes = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read, pollEveryByNode: { landed: "PT5M" } });
+  const by = new Map(nodes.map((n) => [n.id, n]));
+  assert.equal(by.get("gate")?.state, "satisfied");
+  assert.equal(by.get("build")?.state, "satisfied");
+  assert.deepEqual(by.get("build")?.boundFacts, { pr: "a/b#7" });
+  assert.deepEqual(by.get("build")?.childRunKeys, ["a/b#7", "a/b#8"]);
+  assert.equal(by.get("landed")?.state, "active");
+  assert.deepEqual(by.get("landed")?.lastProbe, { ready: false, detail: "newest", observed: null });
+});
+
+test("a narrowed read that still fills a whole page is reported as truncated", async () => {
+  const elements: ElementInstanceFact[] = [{ elementId: "n2", elementInstanceKey: "4", state: "ACTIVE" }];
+  const variables: VariableFact[] = [];
+  for (let i = 0; i < ENGINE_SEARCH_PAGE + 5; i++) {
+    elements.push({ elementId: "n2_probeLoop", elementInstanceKey: String(10 + i), state: "COMPLETED" });
+    variables.push({ name: "ready", value: "false", scopeKey: String(10 + i) });
+  }
+  const read = await readEngineFacts(pagedEngine({ elements, variables }), PIK, NODES);
+  assert.equal(read.truncated, true);
 });

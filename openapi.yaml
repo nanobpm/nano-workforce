@@ -3610,7 +3610,7 @@ components:
     DeliveryGraphRunProgress:
       type: object
       additionalProperties: false
-      required: [runKey, title, status, phase, digest, processInstanceKey, instanceState, nodes, mermaid, note]
+      required: [runKey, title, status, phase, digest, processInstanceKey, instanceState, nodes, mermaid, note, truncated]
       properties:
         runKey:
           type: string
@@ -3644,6 +3644,9 @@ components:
           type: string
           nullable: true
           description: Why the per-node view is empty (e.g. the dispatched graph is no longer stored); null otherwise.
+        truncated:
+          type: boolean
+          description: True when an engine read came back as a full result page, so some facts (bound facts, probe results, child PR keys, element instances) may be missing and node states may be incomplete.
     DeliveryGraphNodeProgress:
       type: object
       additionalProperties: false

@@ -93,6 +93,11 @@ export function owningNodeElement(elementId: string, nodeElements: ReadonlySet<s
   return null;
 }
 
+/** A numeric engine key as a bigint for ordering; null when it is not a decimal key. */
+function keyOrder(key: string): bigint | null {
+  return /^\d+$/.test(key) ? BigInt(key) : null;
+}
+
 function parseJson(raw: string): unknown {
   try {
     return JSON.parse(raw);
@@ -175,13 +180,17 @@ export function deriveNodeProgress(input: {
       // node would be a guess; report null instead.
       const scopes: Map<string, string>[] = [];
       for (const id of [`${node.element}_probeLoop`, node.element]) {
-        // The last element instance listed wins (most recent loop iteration).
-        const found = own
-          .filter((e) => e.elementId === id)
-          .map((e) => varsByScope.get(e.elementInstanceKey))
-          .filter((m): m is Map<string, string> => m?.has("ready") === true);
-        const last = found[found.length - 1];
-        if (last) scopes.push(last);
+        // The NEWEST scope wins (the most recent loop iteration) — chosen by element-instance key, which
+        // the engine allocates monotonically, never by the engine's (unspecified) result order.
+        let newest: { key: bigint; scope: Map<string, string> } | null = null;
+        for (const e of own) {
+          if (e.elementId !== id) continue;
+          const scope = varsByScope.get(e.elementInstanceKey);
+          const key = keyOrder(e.elementInstanceKey);
+          if (scope?.has("ready") !== true || key === null) continue;
+          if (newest === null || key > newest.key) newest = { key, scope };
+        }
+        if (newest) scopes.push(newest.scope);
       }
       const scope = scopes[0];
       if (scope !== undefined) {
@@ -311,6 +320,7 @@ export async function loadDeliveryGraphProgress(
     nodes: [],
     mermaid: null,
     note: null,
+    truncated: false,
   };
   const proposal = await deliveryGraphProposals(app.data).get(run.digest);
   if (!proposal) return { ...base, note: `the dispatched graph for digest ${run.digest} is no longer stored, so per-node progress cannot be derived` };
@@ -330,13 +340,8 @@ export async function loadDeliveryGraphProgress(
     const pending = deriveNodeProgress({ nodes, elements: [], variables: [], userTasks: [], incidents: [], processInstanceKey: "" });
     return { ...base, nodes: pending, mermaid: renderProgressMermaid(compiled.diagram, pending) };
   }
-  const [instances, elements, variables, userTasks, incidents] = await Promise.all([
-    app.engine.searchProcessInstances({ processInstanceKeys: [pik] }),
-    app.engine.searchElementInstances({ processInstanceKey: pik }),
-    app.engine.searchVariables({ processInstanceKey: pik }),
-    app.engine.searchUserTasks({ processInstanceKey: pik, state: "CREATED" }),
-    app.engine.searchIncidents({ processInstanceKey: pik, state: "ACTIVE" }),
-  ]);
+  const read = await readEngineFacts(app.engine, pik, nodes);
+  const { instances, elements, variables, userTasks, incidents } = read;
   const instanceState = instances[0]?.state ?? null;
   const nodeInputsVar = variables.find((v) => v.scopeKey === pik && v.name === "nodeInputs");
   // A truncated seed is a clipped preview: leave cadences unknown rather than parse partial JSON.
@@ -351,5 +356,76 @@ export async function loadDeliveryGraphProgress(
     pollEveryByNode: pollEveryFromSeed(nodeInputs, nodes),
     instanceEnded: instanceState !== null && instanceState !== "ACTIVE",
   });
-  return { ...base, instanceState, nodes: progress, mermaid: renderProgressMermaid(compiled.diagram, progress) };
+  return { ...base, instanceState, nodes: progress, mermaid: renderProgressMermaid(compiled.diagram, progress), truncated: read.truncated };
+}
+
+/**
+ * The page size the engine's search endpoints answer with when no page is requested. The urban
+ * `EngineClient` sends no `page`/`searchAfter` and drops `page.totalItems`, so any single search returns
+ * at most ONE page. Rather than treat a page as exhaustive, every read below is NARROWED (by element id,
+ * variable name, scope or state) so that it stays far below a page in practice, and a read that comes
+ * back with a full page is reported as possibly truncated (`truncated: true`) instead of silently
+ * dropping facts.
+ */
+export const ENGINE_SEARCH_PAGE = 100;
+
+/** Variable names read from node-owned (non-root) scopes: a wait's probe result, an agent's PR result,
+ * a converge connector's task-local inputs. */
+const SCOPED_VARIABLE_NAMES = ["ready", "detail", "observed", "pr", "prUrl", "pullRequest", "target", "payload", "boundFacts"] as const;
+
+/** The engine reads {@link loadDeliveryGraphProgress} folds, gathered by narrow (page-bounded) queries. */
+export async function readEngineFacts(
+  engine: Pick<AppApi["engine"], "searchProcessInstances" | "searchElementInstances" | "searchVariables" | "searchUserTasks" | "searchIncidents" | "getElementInstance">,
+  pik: string,
+  nodes: readonly ResolvedNodeRef[],
+): Promise<{
+  instances: { state: string }[];
+  elements: ElementInstanceFact[];
+  variables: VariableFact[];
+  userTasks: UserTaskFact[];
+  incidents: IncidentFact[];
+  truncated: boolean;
+}> {
+  let truncated = false;
+  const page = <T>(rows: T[]): T[] => {
+    if (rows.length >= ENGINE_SEARCH_PAGE) truncated = true;
+    return rows;
+  };
+  // Root facts: one exact-name read per compiled `<element>_<fact>` (plus the PR fallbacks and the seed).
+  const rootNames = new Set<string>(["nodeInputs"]);
+  for (const n of nodes) {
+    for (const f of n.emits) rootNames.add(`${n.element}_${f.name}`);
+    if (n.kind === "agent" || n.kind === "connector") for (const f of ["pr", "prUrl"]) rootNames.add(`${n.element}_${f}`);
+  }
+  // Element instances: each node's body (one per node, bounded), every wait's probe-loop iterations, and
+  // every ACTIVE element (bounded by the run's concurrency) for `activeElements`.
+  const elementQueries: { processInstanceKey: string; elementId?: string; state?: "ACTIVE" }[] = [{ processInstanceKey: pik, state: "ACTIVE" }];
+  for (const n of nodes) {
+    elementQueries.push({ processInstanceKey: pik, elementId: n.element });
+    if (n.kind === "wait") elementQueries.push({ processInstanceKey: pik, elementId: `${n.element}_probeLoop` });
+  }
+  const [instances, elementPages, rootPages, scopedPages, userTasks, incidents] = await Promise.all([
+    engine.searchProcessInstances({ processInstanceKeys: [pik] }),
+    Promise.all(elementQueries.map((q) => engine.searchElementInstances(q))),
+    Promise.all([...rootNames].map((name) => engine.searchVariables({ processInstanceKey: pik, scopeKey: pik, name }))),
+    Promise.all(SCOPED_VARIABLE_NAMES.map((name) => engine.searchVariables({ processInstanceKey: pik, name }))),
+    engine.searchUserTasks({ processInstanceKey: pik, state: "CREATED" }),
+    engine.searchIncidents({ processInstanceKey: pik, state: "ACTIVE" }),
+  ]);
+  const elements = new Map<string, ElementInstanceFact>();
+  for (const rows of elementPages) for (const e of page(rows)) elements.set(e.elementInstanceKey, e);
+  const variables = new Map<string, VariableFact>();
+  for (const rows of [...rootPages, ...scopedPages]) for (const v of page(rows)) variables.set(`${v.scopeKey}\u0000${v.name}`, v);
+  // A node-local variable's scope may be an inner element no query above returned (e.g. a completed
+  // agent task): resolve each unseen scope by key so its owning node is known.
+  const unseen = [...new Set([...variables.values()].map((v) => v.scopeKey))].filter((k) => k !== pik && !elements.has(k));
+  for (const e of await Promise.all(unseen.map((k) => engine.getElementInstance(k)))) if (e) elements.set(e.elementInstanceKey, e);
+  return {
+    instances,
+    elements: [...elements.values()],
+    variables: [...variables.values()],
+    userTasks: page(userTasks),
+    incidents: page(incidents),
+    truncated,
+  };
 }
