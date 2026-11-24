@@ -1,3 +1,9 @@
+## [0.226.0](https://github.com/nanobpm/nano-workforce/compare/v0.225.0...v0.226.0) (2026-11-24)
+
+### Features
+
+* **api:** server-side filters on /status and /escalations ([#1064](https://github.com/nanobpm/nano-workforce/issues/1064)) ([d83485a](https://github.com/nanobpm/nano-workforce/commit/d83485ad6cf4de24ca45005230f4e7b7cc60f540)), closes [#1060](https://github.com/nanobpm/nano-workforce/issues/1060) [#1060](https://github.com/nanobpm/nano-workforce/issues/1060)
+
 ## [0.225.0](https://github.com/nanobpm/nano-workforce/compare/v0.224.0...v0.225.0) (2026-11-24)
 
 ### Features
