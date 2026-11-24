@@ -106,6 +106,8 @@ function parseJson(raw: string): unknown {
   }
 }
 
+const PR_FACT_NAMES: readonly string[] = ["pr", "prUrl", "pullRequest"];
+
 /** An `owner/repo#N` PR key from a bound fact value (a key string, a GitHub PR URL, or `{ key|url }`). */
 export function prKeyOf(value: unknown): string | null {
   if (typeof value === "string") {
@@ -206,7 +208,11 @@ export function deriveNodeProgress(input: {
 
     const childRunKeys: string[] = [];
     if (node.kind === "agent" || node.kind === "connector") {
-      const candidates = [...Object.values(boundFacts)];
+      // Only PR-typed (or PR-named) emitted facts can name a child PR run — an issue reference like
+      // `o/r#5` emitted as a plain string must NOT be misreported as a child PR.
+      const candidates: unknown[] = node.emits
+        .filter((e) => e.type === "pr" || PR_FACT_NAMES.includes(e.name))
+        .flatMap((e) => (Object.hasOwn(boundFacts, e.name) ? [Reflect.get(boundFacts, e.name)] : []));
       for (const fact of ["pr", "prUrl"]) {
         const raw = rootVars.get(`${node.element}_${fact}`);
         if (raw !== undefined) candidates.push(parseJson(raw));

@@ -416,3 +416,20 @@ test("a newest probe iteration that has not written `ready` yet falls back to th
   const landed = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read }).find((n) => n.id === "landed");
   assert.deepEqual(landed?.lastProbe, { ready: true, detail: "previous", observed: null });
 });
+
+test("an emitted issue reference (non-PR fact) is not reported as a child PR run", () => {
+  const nodes: ResolvedNodeRef[] = [
+    { id: "triage", kind: "agent", element: "n1", emits: [{ name: "issue", type: "string" }], dependsOn: [] },
+  ];
+  const out = deriveNodeProgress({
+    nodes,
+    processInstanceKey: PIK,
+    elements: [{ elementId: "n1", elementInstanceKey: "2", state: "COMPLETED" }],
+    variables: [{ name: "n1_issue", value: '"o/r#5"', scopeKey: PIK }],
+    userTasks: [],
+    incidents: [],
+    pollEveryByNode: {},
+  });
+  assert.deepEqual(out[0]?.boundFacts, { issue: "o/r#5" });
+  assert.deepEqual(out[0]?.childRunKeys, []);
+});
