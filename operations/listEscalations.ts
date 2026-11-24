@@ -15,17 +15,21 @@
 // open (unchanged default), mirroring `listActivePrs`.
 import { escalationExpectedFields } from "../app/agentCompletion.ts";
 import { listEnvelope, withProcessInstanceKey } from "../app/apiShape.ts";
+import { applyEscalationFilter, parseEscalationFilter } from "../app/listFilters.ts";
 import { toEscalationView, userTasks } from "../app/userTasks.ts";
 import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
-export default defineOperation("listEscalations", async ({ req }, app) => {
+export default defineOperation("listEscalations", async ({ req, query }, app) => {
   if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
     app.log.warn("listEscalations rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
   }
+  // Issue #1060: server-side filters (kind/repo/key), AND-combined; page.totalItems is the filtered count.
+  const parsed = parseEscalationFilter({ ...query });
+  if (!parsed.ok) return { status: 400, body: { error: parsed.error } };
   const rows = await userTasks(app.data).all();
   const escalations = rows
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0))
@@ -35,5 +39,5 @@ export default defineOperation("listEscalations", async ({ req }, app) => {
       // completer enforces), so a caller can build `escalations answer` variables from the listing.
       expectedFields: escalationExpectedFields(row.element_id, row.form_key),
     }));
-  return { status: 200, body: listEnvelope(escalations) };
+  return { status: 200, body: listEnvelope(applyEscalationFilter(escalations, parsed.filter)) };
 });

@@ -4829,10 +4829,58 @@ paths:
       operationId: listActivePrs
       x-cli:
         command: [status]
-      summary: List every tracked PR currently in flight (not converged/abandoned), newest-updated first.
+      summary: List every tracked PR currently in flight (not converged/abandoned), newest-updated first. Optional filters (issue 1060) combine with AND; page.totalItems is the filtered count.
       security:
         - hookSecret: []
         - {}
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [pr, delivery]
+          description: "Only rows of this kind (repeatable; OR within, AND with other filters)."
+        - name: repo
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+          description: "Only rows in this owner/repo (repeatable)."
+        - name: key
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+          description: "Only the row with this key — a PR's prKey (owner/repo#N) or a delivery run's runKey (repeatable)."
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [converging, waiting_review, escalated, waiting_deps, waiting_merge, waiting_lane, queued, converged, merged, abandoned, incident, orphaned, awaiting-approval, running, done, failed]
+          description: "Only rows in this status (repeatable)."
+        - name: hasEscalation
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: "true → only rows parked on an open escalation; false → only rows without one."
+        - name: updatedSince
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: "Only rows updated at or after this ISO-8601 timestamp."
       responses:
         "200":
           description: The active PRs.
@@ -4840,6 +4888,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ActivePrList"
+        "400":
+          description: An unknown/invalid filter value.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
@@ -5168,10 +5222,37 @@ paths:
         `agentCompleteEscalation` — so a tool-aware agent never has to curl the un-projected
         `/tasks/api/tasks` inbox to find keys. Read-only projection over the ONE `user_tasks` read
         model the Tasks inbox and Convergence page consume (no second source of truth); a row is
-        present iff its task is open, so the list reflects live pending work.
+        present iff its task is open, so the list reflects live pending work. Optional filters (issue 1060)
+        combine with AND; page.totalItems is the filtered count.
       security:
         - hookSecret: []
         - {}
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [feature, epic, plan, pr, delivery, agent]
+          description: "Only escalations whose subjectType is this kind (repeatable; `epic` is an alias of `plan`)."
+        - name: repo
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+          description: "Only escalations whose subject is in this owner/repo (repeatable)."
+        - name: key
+          in: query
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+          description: "Only escalations whose subjectKey or prKey is this key, e.g. owner/repo#N (repeatable)."
       responses:
         "200":
           description: The open escalations.
@@ -5179,6 +5260,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EscalationList"
+        "400":
+          description: An unknown/invalid filter value.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:

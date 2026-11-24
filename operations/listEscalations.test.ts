@@ -235,3 +235,44 @@ test("listEscalations: each escalation carries the expectedFields its .form take
   assertEquals(answer.requiredWhen, 'resolution == "answer"');
   assert(Array.isArray(acp.expectedFields), "a kind with no form still lists an (empty) array");
 });
+
+// ── Issue #1060: server-side filters ────────────────────────────────────────────────────────────
+// biome-ignore lint/suspicious/noExplicitAny: test harness cast, mirrors sibling op tests
+async function callFiltered(app: AppApi, query: Record<string, unknown>): Promise<any> {
+  // biome-ignore lint/suspicious/noExplicitAny: see above
+  return (await listHandler({ req: { headers: new Headers() } as any, params: {}, query, body: undefined } as any, app)) as any;
+}
+
+test("filters /escalations by kind, repo and key with the filtered totalItems (issue #1060)", async () => {
+  const { app } = memApp(
+    [
+      utRow({ user_task_key: "ut-pr", subject_type: "pr", subject_key: "acme/repo#7", updated_at: "2026-01-03" }),
+      utRow({ user_task_key: "ut-feat", element_id: "feature-escalation", subject_type: "feature", subject_key: "other/repo#9", subject_url: "https://github.com/other/repo/issues/9", updated_at: "2026-01-02" }),
+      utRow({ user_task_key: "ut-plan", element_id: "plan-review-decision", subject_type: "plan", subject_key: "plan-1", subject_url: "https://github.com/acme/repo/issues/1", updated_at: "2026-01-01" }),
+    ],
+    [],
+  );
+  const cases: [Record<string, unknown>, string[]][] = [
+    [{}, ["ut-pr", "ut-feat", "ut-plan"]],
+    [{ kind: ["feature"] }, ["ut-feat"]],
+    [{ kind: ["epic"] }, ["ut-plan"]],
+    [{ repo: ["acme/repo"] }, ["ut-pr", "ut-plan"]],
+    [{ key: ["other/repo#9"] }, ["ut-feat"]],
+    [{ repo: ["acme/repo"], kind: ["pr", "feature"] }, ["ut-pr"]],
+    [{ repo: ["acme/repo"], key: ["other/repo#9"] }, []],
+  ];
+  for (const [query, expected] of cases) {
+    const res = await callFiltered(app, query);
+    assertEquals(res.status, 200, JSON.stringify(query));
+    assertEquals(res.body.items.map((e: { userTaskKey: string }) => e.userTaskKey), expected, JSON.stringify(query));
+    assertEquals(res.body.page.totalItems, expected.length);
+  }
+});
+
+test("rejects unknown /escalations filter values with 400 (issue #1060)", async () => {
+  const { app } = memApp([], []);
+  for (const query of [{ kind: ["bogus"] }, { repo: ["nope"] }]) {
+    const res = await callFiltered(app, query);
+    assertEquals(res.status, 400, JSON.stringify(query));
+  }
+});
