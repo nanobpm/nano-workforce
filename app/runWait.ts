@@ -40,10 +40,26 @@ export function waitTimeoutMs(raw: unknown): number {
 const SETTLED_PR = new Set(["converged", "merged"]);
 const selfAndChildren = (v: RunView): RunView[] => [v, ...v.children];
 
-/** A stable fingerprint of the observable run state, for `any-change` (ignores nothing but key order). */
+/** The MEANINGFUL state of one run — volatile bookkeeping (lease/heartbeat `leaseUntil`, `activeWorker`,
+ *  `updatedAt`) is excluded, so a lease renewal on a running agent never ends an `any-change` wait. */
+const meaningful = (v: RunView) => ({
+  status: v.status,
+  stage: v.stage,
+  terminal: v.terminal,
+  prUrl: v.prUrl,
+  openEscalation: v.openEscalation,
+  incident: v.incident,
+});
+
+/** A stable fingerprint of the meaningful run state (self + children), for `any-change`. */
 export function runFingerprint(v: RunView): string {
-  return JSON.stringify(v);
+  return JSON.stringify({ ...meaningful(v), children: v.children.map((c) => ({ key: c.key, ...meaningful(c) })) });
 }
+
+/** Does the run as a WHOLE satisfy a status predicate? Its own status, or — for a run with children —
+ *  EVERY child (so an epic with one merged slice and one open slice is not yet "merged"). */
+const wholeRun = (v: RunView, ok: (s: string) => boolean): boolean =>
+  ok(v.status) || (v.children.length > 0 && v.children.every((c) => ok(c.status)));
 
 export type WaitReason = WaitUntil;
 
@@ -57,10 +73,10 @@ export function waitReason(until: WaitUntil, view: RunView, initialFingerprint: 
       if (runs.some((r) => r.prUrl != null || r.kind === "pr")) return "pr-opened";
       break;
     case "converged":
-      if (runs.some((r) => SETTLED_PR.has(r.status))) return "converged";
+      if (wholeRun(view, (s) => SETTLED_PR.has(s))) return "converged";
       break;
     case "merged":
-      if (runs.some((r) => r.status === "merged")) return "merged";
+      if (wholeRun(view, (s) => s === "merged")) return "merged";
       break;
     case "any-change":
       if (runFingerprint(view) !== initialFingerprint) return "any-change";

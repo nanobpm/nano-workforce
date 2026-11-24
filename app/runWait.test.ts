@@ -111,3 +111,23 @@ test("waitForRun: an escalation ends a merged-wait immediately", async () => {
 test("waitForRun: unknown key is not found", async () => {
   assertEquals(await waitForRun(seq(null), "terminal", 1_000, fakeClock()), { found: false });
 });
+
+test("any-change ignores volatile lease/heartbeat fields", () => {
+  const fp = runFingerprint(view());
+  assertEquals(waitReason("any-change", view({ leaseUntil: "t9", activeWorker: "w", updatedAt: "t9" }), fp), null);
+  const fpc = runFingerprint(view({ children: [view({ key: "c" })] }));
+  assertEquals(waitReason("any-change", view({ children: [view({ key: "c", leaseUntil: "t9", updatedAt: "t9" })] }), fpc), null);
+  assertEquals(waitReason("any-change", view({ children: [view({ key: "c", status: "merged" })] }), fpc), "any-change");
+});
+
+test("epic: merged/converged require every slice, not the first", () => {
+  const fp = runFingerprint(view());
+  const merged = view({ key: "a", kind: "pr", status: "merged" });
+  const open = view({ key: "b", kind: "pr", status: "waiting_review" });
+  const conv = view({ key: "b", kind: "pr", status: "converged" });
+  const epic = (children: RunView[]) => view({ kind: "epic", children });
+  assertEquals(waitReason("merged", epic([merged, open]), fp), null);
+  assertEquals(waitReason("converged", epic([merged, open]), fp), null);
+  assertEquals(waitReason("converged", epic([merged, conv]), fp), "converged");
+  assertEquals(waitReason("merged", epic([merged, view({ key: "b", kind: "pr", status: "merged" })]), fp), "merged");
+});
