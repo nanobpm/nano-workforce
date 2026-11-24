@@ -1,3 +1,9 @@
+## [0.223.6](https://github.com/nanobpm/nano-workforce/compare/v0.223.5...v0.223.6) (2026-11-24)
+
+### Build System
+
+* **deps:** pin @nanobpm/engine-wasm exactly so every engine release runs CI ([#1050](https://github.com/nanobpm/nano-workforce/issues/1050)) ([2699746](https://github.com/nanobpm/nano-workforce/commit/269974638fde241961be1a90ae517044c81731c2)), closes [#1049](https://github.com/nanobpm/nano-workforce/issues/1049) [nano-bpm#1871](https://github.com/nanobpm/nano-bpm/issues/1871)
+
 ## [0.223.5](https://github.com/nanobpm/nano-workforce/compare/v0.223.4...v0.223.5) (2026-11-24)
 
 ### Bug Fixes
