@@ -618,3 +618,30 @@ test("a completed `_lastAttempt` probe result wins over the cancelled probe loop
   assert.equal(after?.lastProbe?.ready, true);
   assert.equal(after?.lastProbe?.detail, "merged");
 });
+
+test("numeric engine keys (scopeKey / elementInstanceKey) are normalised so root facts and node scopes still match", async () => {
+  const elements: ElementInstanceFact[] = [
+    { elementId: "n1", elementInstanceKey: "2", state: "COMPLETED" },
+    { elementId: "n1_task", elementInstanceKey: "3", state: "COMPLETED" },
+  ];
+  const variables: VariableFact[] = [
+    { name: "n1_pr", value: '"a/b#7"', scopeKey: PIK },
+    { name: "pr", value: '"a/b#8"', scopeKey: "3" },
+  ];
+  const base = pagedEngine({ elements, variables });
+  // Simulate an engine that serialises keys as JSON numbers despite the typed string shape.
+  const numeric = <T extends object>(rows: T[], field: string): T[] =>
+    rows.map((r) => (field in r ? { ...r, [field]: Number(Reflect.get(r, field)) } : r));
+  const engine: typeof base = {
+    ...base,
+    searchElementInstances: async (f) => numeric(await base.searchElementInstances(f), "elementInstanceKey"),
+    searchVariables: async (f) => numeric(await base.searchVariables(f), "scopeKey"),
+  };
+  const read = await readEngineFacts(engine, PIK, NODES);
+  for (const v of read.variables) assert.equal(typeof v.scopeKey, "string");
+  for (const e of read.elements) assert.equal(typeof e.elementInstanceKey, "string");
+  const nodes = deriveNodeProgress({ nodes: NODES, processInstanceKey: PIK, ...read, pollEveryByNode: {} });
+  const build = nodes.find((n) => n.id === "build");
+  assert.deepEqual(build?.boundFacts, { pr: "a/b#7" });
+  assert.deepEqual(build?.childRunKeys, ["a/b#7", "a/b#8"]);
+});

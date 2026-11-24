@@ -493,13 +493,18 @@ export async function readEngineFacts(
     for (const f of n.emits) rootNames.add(`${n.element}_${f.name}`);
     if (n.kind === "agent" || n.kind === "connector") for (const f of ["pr", "prUrl"]) rootNames.add(`${n.element}_${f}`);
   }
+  // The engine may return keys as numbers despite the typed shape; normalise every key to a string so root
+  // (`scopeKey === pik`) and node-local (`varsByScope.get(elementInstanceKey)`) lookups share one representation.
+  const normEl = (e: ElementInstanceFact): ElementInstanceFact => ({ ...e, elementInstanceKey: String(e.elementInstanceKey) });
+  const normVar = (v: VariableFact): VariableFact => ({ ...v, scopeKey: String(v.scopeKey) });
   const elementSearch = async (elementId: string, state?: "ACTIVE") =>
     page(
       await limited(() =>
         engine.searchElementInstances(state ? { processInstanceKey: pik, elementId, state } : { processInstanceKey: pik, elementId }),
       ),
-    );
-  const scopeVars = async (scopeKey: string) => page(await limited(() => engine.searchVariables({ processInstanceKey: pik, scopeKey })));
+    ).map(normEl);
+  const scopeVars = async (scopeKey: string) =>
+    page(await limited(() => engine.searchVariables({ processInstanceKey: pik, scopeKey }))).map(normVar);
 
   const [instances, activeElements, rootPages, userTasks, incidents] = await Promise.all([
     limited(() => engine.searchProcessInstances({ processInstanceKeys: [pik] })),
@@ -509,10 +514,14 @@ export async function readEngineFacts(
     limited(() => engine.searchIncidents({ processInstanceKey: pik, state: "ACTIVE" })),
   ]);
   const elements = new Map<string, ElementInstanceFact>();
-  for (const e of page(activeElements)) elements.set(e.elementInstanceKey, e);
+  const setEl = (e: ElementInstanceFact) => elements.set(String(e.elementInstanceKey), normEl(e));
+  for (const e of page(activeElements)) setEl(e);
   const variables = new Map<string, VariableFact>();
   const addVars = (rows: readonly VariableFact[]) => {
-    for (const v of rows) variables.set(`${v.scopeKey}\u0000${v.name}`, v);
+    for (const raw of rows) {
+      const v = normVar(raw);
+      variables.set(`${v.scopeKey}\u0000${v.name}`, v);
+    }
   };
   for (const rows of rootPages) addVars(page(rows));
 
@@ -521,7 +530,7 @@ export async function readEngineFacts(
   await Promise.all(
     nodes.map(async (n) => {
       const bodies = await elementSearch(n.element);
-      for (const e of bodies) elements.set(e.elementInstanceKey, e);
+      for (const e of bodies) setEl(e);
       if (n.kind === "wait") {
         // The newest probe-loop iteration: the ACTIVE one (bounded to the live iteration) wins over the
         // one-page history, which a wait polling for hours outgrows. Then read that scope's probe result,
@@ -531,14 +540,14 @@ export async function readEngineFacts(
         // iteration — flagging truncation only when that leaves the probe result unresolved.
         const [active, history] = await Promise.all([
           elementSearch(`${n.element}_probeLoop`, "ACTIVE"),
-          limited(() => engine.searchElementInstances({ processInstanceKey: pik, elementId: `${n.element}_probeLoop` })),
+          limited(() => engine.searchElementInstances({ processInstanceKey: pik, elementId: `${n.element}_probeLoop` })).then((rows) => rows.map(normEl)),
         ]);
         const historyFull = history.length >= ENGINE_SEARCH_PAGE;
         const pool = historyFull ? active : [...history, ...active];
-        const iterations = [...new Map(pool.map((e) => [e.elementInstanceKey, e])).values()].sort(byKeyDesc);
+        const iterations = [...new Map(pool.map((e) => [String(e.elementInstanceKey), normEl(e)])).values()].sort(byKeyDesc);
         let resolved = false;
         for (const e of iterations.slice(0, historyFull ? 1 : 2)) {
-          elements.set(e.elementInstanceKey, e);
+          setEl(e);
           const rows = await scopeVars(e.elementInstanceKey);
           addVars(rows);
           if (rows.some((v) => v.name === "ready" && v.isTruncated !== true)) {
@@ -547,12 +556,12 @@ export async function readEngineFacts(
           }
         }
         if (historyFull && !resolved) truncated = true;
-        for (const e of await elementSearch(`${n.element}_lastAttempt`)) elements.set(e.elementInstanceKey, e);
+        for (const e of await elementSearch(`${n.element}_lastAttempt`)) setEl(e);
         for (const e of bodies) addVars(await scopeVars(e.elementInstanceKey));
       } else if (n.kind === "agent" || n.kind === "connector") {
         const inner = await Promise.all(PR_SCOPE_SUFFIXES.map((s) => elementSearch(`${n.element}${s}`)));
         for (const e of [...bodies, ...inner.flat()]) {
-          elements.set(e.elementInstanceKey, e);
+          setEl(e);
           addVars(await scopeVars(e.elementInstanceKey));
         }
       }
