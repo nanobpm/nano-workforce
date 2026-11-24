@@ -35,6 +35,10 @@ everyone polls answers "is the fix live?" in one call.
 `items` (with `page.totalItems`); each row has a `kind` of `"pr"` or `"delivery"`. (The
 legacy `prs`/`deliveries` arrays and `count` were removed in the breaking release after v0.212.0 — #972.)
 
+**Filter server-side, not with `jq`** (#1060): `/status?kind=pr|delivery&repo=o/r&key=o/r%23N&status=escalated&hasEscalation=true&updatedSince=<ISO>`;
+`/escalations?kind=feature|epic|plan|pr|delivery|agent&repo=o/r&key=o/r%23N`. Filters AND together,
+repeated values OR (URL-encode `#` in `key` as `%23`), `page.totalItems` is the filtered count, an unknown value is a `400`.
+
 Each PR row carries `prKey` (`owner/repo#123`), `status`, `round`, `processInstanceKey`
 (the **engine process-instance key**, the bridge to §5), `openEscalation`,
 `activeWorker`/`leaseUntil` (an agent holds the round, or the job is just queued), and
