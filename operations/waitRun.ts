@@ -20,5 +20,8 @@ export default defineOperation("waitRun", async ({ req, query }, app) => {
   if (key === "") return { status: 404, body: { error: "nwf has never tracked a run with key " } };
   const res = await waitForRun(() => lookupRun(app.data, app.engine, key), until, waitTimeoutMs(query.timeout));
   if (!res.found) return { status: 404, body: { error: `nwf has never tracked a run with key ${key}` } };
+  if (res.view === null) {
+    return { status: 504, body: { error: `run lookup for ${key} did not complete before the wait deadline` } };
+  }
   return { status: 200, body: { timedOut: res.timedOut, reason: res.reason, until: res.until, view: res.view } };
 });

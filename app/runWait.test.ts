@@ -159,3 +159,31 @@ test("converged: an auto-merge handoff into the merge stage counts as converged"
   }
   assertEquals(waitReason("converged", view({ children: [view({ key: "o/r#9", kind: "pr", status: "waiting_review" })] }), fp), null);
 });
+
+test("waitForRun: a stalled initial lookup is bounded by the deadline (timedOut, view:null)", async () => {
+  const res = await waitForRun(() => new Promise(() => {}), "merged", 20, fakeClock(), 1_000);
+  assertEquals(res, { found: true, timedOut: true, reason: null, until: "merged", view: null });
+});
+
+test("waitForRun: a stalled later lookup returns the last view on expiry", async () => {
+  let n = 0;
+  const lookup = () => (n++ === 0 ? Promise.resolve(view()) : new Promise<never>(() => {}));
+  const clock = { now: () => 0, sleep: async () => {} };
+  const res = await waitForRun(lookup, "merged", 20, clock, 1);
+  assertEquals(res.found && res.timedOut, true);
+  assertEquals(res.found && res.view?.key, view().key);
+});
+
+test("waitForRun: an aborted signal stops polling without further lookups", async () => {
+  let calls = 0;
+  const ac = new AbortController();
+  const clock = fakeClock();
+  const lookup = async () => {
+    calls++;
+    ac.abort();
+    return view();
+  };
+  const res = await waitForRun(lookup, "merged", 60_000, clock, 1_000, ac.signal);
+  assertEquals(res.found && res.timedOut, true);
+  assertEquals(calls, 1);
+});

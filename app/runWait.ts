@@ -106,28 +106,52 @@ export const realClock: WaitClock = {
 
 export type WaitResult =
   | { found: false }
+  | { found: true; timedOut: true; reason: null; until: WaitUntil; view: null }
   | { found: true; timedOut: boolean; reason: WaitReason | null; until: WaitUntil; view: RunView };
 
+const EXPIRED = Symbol("expired");
+
+/** Race `p` against the remaining budget so a stalled lookup can never outlive the wait deadline. */
+async function bounded<T>(p: Promise<T>, ms: number): Promise<T | typeof EXPIRED> {
+  if (ms <= 0) return EXPIRED;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<typeof EXPIRED>((r) => {
+    timer = setTimeout(() => r(EXPIRED), ms);
+  });
+  try {
+    return await Promise.race([p, expiry]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Hold until `until` holds (or escalation/terminal), or `timeoutMs` elapses. `lookup` returns null for
- *  an unknown key (→ `found:false`, a 404). */
+ *  an unknown key (→ `found:false`, a 404). Every lookup is bounded by the deadline; if the INITIAL
+ *  lookup has not produced a view by then the result is `timedOut` with `view:null`. An aborted
+ *  `signal` (client disconnect) stops the loop before any further lookup. */
 export async function waitForRun(
   lookup: () => Promise<RunView | null>,
   until: WaitUntil,
   timeoutMs: number,
   clock: WaitClock = realClock,
   pollMs: number = WAIT_POLL_MS,
+  signal?: AbortSignal,
 ): Promise<WaitResult> {
   const deadline = clock.now() + timeoutMs;
-  let view = await lookup();
-  if (!view) return { found: false };
+  const first = await bounded(lookup(), timeoutMs);
+  if (first === EXPIRED) return { found: true, timedOut: true, reason: null, until, view: null };
+  if (!first) return { found: false };
+  let view: RunView = first;
   const initial = runFingerprint(view);
   for (;;) {
     const reason = waitReason(until, view, initial);
     if (reason) return { found: true, timedOut: false, reason, until, view };
     const left = deadline - clock.now();
-    if (left <= 0) return { found: true, timedOut: true, reason: null, until, view };
+    if (left <= 0 || signal?.aborted) return { found: true, timedOut: true, reason: null, until, view };
     await clock.sleep(Math.min(pollMs, left));
-    const next = await lookup();
+    if (signal?.aborted) return { found: true, timedOut: true, reason: null, until, view };
+    const next = await bounded(lookup(), deadline - clock.now());
+    if (next === EXPIRED) return { found: true, timedOut: true, reason: null, until, view };
     if (next) view = next;
   }
 }
