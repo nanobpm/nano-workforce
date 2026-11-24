@@ -20,7 +20,7 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { assertReadModelParity, type ParityDb, type ParitySample } from "@nanobpm/urban";
+import { assertReadModelParity, type ParityDb, type ParitySample, registerCanonicalProjections } from "@nanobpm/urban";
 import { assert, assertEquals } from "#test-assert";
 import { applyMigrationSet, readMigrationSetFromDisk } from "../test/migrations.ts";
 import {
@@ -33,7 +33,7 @@ import {
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const READ_MODEL_MIGRATION = "138_pull_requests_read_model_custom_instructions_text.sql";
+const READ_MODEL_MIGRATION = "151_pull_requests_read_model_uncoalesced_predicates.sql";
 
 // The real base `pull_requests` columns, in schema order — DERIVED from the migration chain (not a
 // hand-kept list that could silently omit one), used by both the drift guard and the e2e stand-in.
@@ -206,3 +206,38 @@ for (const { pageName, title } of [
     assert(sawListBucket, `${pageName} "${title}" must filter the derived list_bucket`);
   });
 }
+
+// ── QUERY-PLAN GUARD (urban 0.100 / nano-ide#625) ──────────────────────────────────────────────────
+// The tracking VIEW's landed-signal `EXISTS (SELECT … FROM merges WHERE pr_key = … AND outcome =
+// 'merged')` used to be COALESCE-wrapped, which hid the predicate from SQLite's planner and forced a
+// full SCAN of `merges` per pull request. Assert, over the REAL migration chain + the REAL tracking
+// VIEW DDL, that reading `pull_requests_read_model` probes `merges` through an index (SEARCH), never a
+// SCAN — so a regression of the lowering (or a dropped index) fails here rather than in production.
+test("QUERY PLAN: pull_requests_read_model reaches merges via an index SEARCH, never a full SCAN", async () => {
+  const { pullRequestTrackingReadModel } = await import("./prTrackingReadModel.ts");
+  // Map the canonical `urban_instance_state` projection onto its physical sidecar, as the runtime does.
+  registerCanonicalProjections();
+  const db = new DatabaseSync(":memory:");
+  applyMigrationSet(db, readMigrationSetFromDisk());
+  // urban-managed at mount (not a migration): the instance-state table the tracking VIEW reads, and the
+  // tracking VIEW itself, compiled from the ONE declaration.
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS _urban_instance_state (process_instance_key TEXT PRIMARY KEY, state TEXT, waiting_on_human INTEGER NOT NULL DEFAULT 0, updated_at TEXT);",
+  );
+  db.exec("DROP VIEW IF EXISTS pull_requests__tracking;");
+  db.exec(pullRequestTrackingReadModel.viewDdl());
+  for (const q of ["SELECT * FROM pull_requests_read_model", "SELECT * FROM pull_requests_read_model WHERE pr_key = 'o/r#1'"]) {
+    const plan = (db.prepare(`EXPLAIN QUERY PLAN ${q}`).all() as { detail: string }[]).map((r) => r.detail);
+    const dump = plan.join("\n");
+    // urban aliases each EXISTS subquery's table (`__urban_proj_N`), so identify the merges probe by its
+    // index (idx_merges_pr / ux_merges_merged_pr) and forbid ANY full scan of a projected subquery table.
+    assert(
+      plan.some((d) => /^SEARCH\b.*\bINDEX \w*merges\w*/.test(d)),
+      `expected "${q}" to probe merges via an index SEARCH:\n${dump}`,
+    );
+    for (const d of plan) {
+      assert(!/^SCAN __urban_proj/.test(d) && !/^SCAN merges\b/.test(d), `a projected subquery must not full-SCAN ("${d}") in "${q}":\n${dump}`);
+    }
+  }
+  db.close();
+});

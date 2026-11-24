@@ -35,6 +35,10 @@ everyone polls answers "is the fix live?" in one call.
 `items` (with `page.totalItems`); each row has a `kind` of `"pr"` or `"delivery"`. (The
 legacy `prs`/`deliveries` arrays and `count` were removed in the breaking release after v0.212.0 — #972.)
 
+**Filter server-side, not with `jq`** (#1060): `/status?kind=pr|delivery&repo=o/r&key=o/r%23N&status=escalated&hasEscalation=true&updatedSince=<ISO>`;
+`/escalations?kind=feature|epic|plan|pr|delivery|agent&repo=o/r&key=o/r%23N`. Filters AND together,
+repeated values OR (URL-encode `#` in `key` as `%23`), `page.totalItems` is the filtered count, an unknown value is a `400`.
+
 Each PR row carries `prKey` (`owner/repo#123`), `status`, `round`, `processInstanceKey`
 (the **engine process-instance key**, the bridge to §5), `openEscalation`,
 `activeWorker`/`leaseUntil` (an agent holds the round, or the job is just queued), and
@@ -113,6 +117,22 @@ curl -sS -X POST __BASE__/actions/start/feature \
   -H 'content-type: application/json' \
   -d '{ "issue": "owner/repo#123", "baseBranch": "main", "confirmDefaultBase": true, "converge": true, "autoMerge": true }'
 ```
+
+**`start/feature` merge-intent flags.** The flags form an implication chain —
+`humanApproval ⇒ autoMerge ⇒ converge` — so a `true` flag is never silently dropped:
+
+| `converge` | `autoMerge` | `humanApproval` | Result |
+|---|---|---|---|
+| omitted/`false` | omitted/`false` | omitted/`false` | implement + open the PR, then stop (no review, no merge) |
+| `true` | omitted/`false` | omitted/`false` | converge review, no merge |
+| omitted/`true` | `true` | omitted/`false` | `autoMerge: true` **implies `converge: true`** — converge, then merge |
+| omitted/`true` | omitted/`true` | `true` | implies `autoMerge` + `converge` — converge, human approval, merge |
+| `false` | `true` | any | `400` — `autoMerge requires converge: true` (contradiction) |
+| `false` | omitted | `true` | `400` — `humanApproval requires converge: true` (contradiction) |
+| any | `false` | `true` | `400` — `humanApproval requires autoMerge: true` |
+
+A started run's 202 echoes the **effective** `converge`, `autoMerge`, `humanApproval`, so the
+caller sees the implied value. A non-boolean flag (e.g. `"true"`) is a `400`.
 
 Idempotent on the plan key. The 202 response echoes `planKey` and `processInstanceKey`, and the
 plan's PRs appear in `/status` as ordinary convergence loops. Both doors accept
@@ -486,6 +506,15 @@ compile rejects it (`unbound-pr`). A connector with no `payload.pr` binds the si
 > `{ "issues": ["owner/repo#A", "owner/repo#B"], "behind"?: "owner/repo#NN" }`). It builds the
 > chain above for each issue, with an optional leading `wait[epic]` gate, and stages it through
 > compile (it never dispatches).
+>
+> **Gate on several PRs / issues — `after`.** Add `"after": ["o/r#317", "o/r#318"]` to start the
+> first issue only once **all** of them have landed (a parallel AND gate). A bare `owner/repo#N` (or
+> a `/pull/N` URL) is a PR → `wait[pr, merged]`; `issue:owner/repo#N` (or an `/issues/N` URL) →
+> `wait[issue, completed]`; `epic:owner/repo#N` → `wait[epic]`; or pass `{ "kind", "ref" }`. Each
+> gate gets a 7-day poll budget (not the 30-minute default). Add `"parallel": true` to fan every
+> issue out after the gates instead of chaining them. The generated agent prompts already carry the
+> full-scope acknowledgement for the issue they close, so the graph passes the partial-scope-close
+> compile rule as-is. CLI: `sequence --issues='["o/r#312","o/r#313"]' --after='["o/r#317","o/r#318"]'`.
 
 ### 9.5 Gate a graph on an epic reaching "fully merged" (`wait[epic]`)
 

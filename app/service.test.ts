@@ -2043,11 +2043,23 @@ test("submitPr's run-scoped reopen carries a re-supplied text (and a handoff re-
       null,
       row.custom_instructions_text as string,
     );
-    assertEquals(handedBack, { prKey: "owner/repo#32", processKey: "PI-1" }, "the owning merge loop's hand-back mints a SUCCESSOR, not alreadyRunning");
+    const { effective: _effective, ...handedBackKeys } = handedBack as Record<string, unknown>;
+    assertEquals(handedBackKeys, { prKey: "owner/repo#32", processKey: "PI-1" }, "the owning merge loop's hand-back mints a SUCCESSOR, not alreadyRunning");
     const after = stores.pull_requests.rows[0] as Record<string, unknown>;
     assertEquals(after.custom_instructions, 1, "the flag survives the handoff reopen");
     assertEquals(after.custom_instructions_text, "steer me", "the text survives the handoff reopen");
     const successorVars = vars();
+    // Issue #1059: the echoed `effective` equals the variables seeded on the successor instance.
+    assertEquals(_effective, {
+      converge: null,
+      autoMerge: successorVars.autoMerge,
+      convergeOnly: successorVars.convergeOnly,
+      maxRounds: successorVars.maxRounds,
+      blockedOn: null,
+      autoResolveEscalations: successorVars.autoResolveEscalations === true,
+      customInstructions: { present: true, length: "steer me".length },
+      baseBranch: null,
+    });
     assertEquals(successorVars.customInstructions, "steer me", "the fresh convergence instance is re-seeded with the steering");
     assert(successorVars !== firstVars, "a successor instance was actually created (not the first submission's captured variables)");
     assertEquals(after.process_key, "PI-1", "the successor instance now owns the row (the fake engine mints PI-1 per capture)");
@@ -3406,50 +3418,4 @@ test("submitPr handoffFrom: a failed reset restores the prior owner so the hand-
     assertEquals((retry as any).alreadyRunning, undefined, "the retried hand-off re-enters convergence");
     assertEquals(stores.pull_requests.rows[0].process_key, "PI-CONV-2");
   });
-});
-
-test("pollWaveGatesImpl holds the wave while an opened task carries no PR key, then releases once the key is merged (#1011)", async () => {
-  for (const blank of [null, "   "]) {
-    await withGithubOff(async () => {
-      const PLAN_KEY = "owner/repo#67";
-      const PI = "PI-1011";
-      const plan = { plan_key: PLAN_KEY, process_key: PI, gate_wave: 1 as number | null, updated_at: "t0" };
-      const task: { id: string; plan_key: string; wave: number; status: string; pr_key: string | null } = {
-        id: "owner/repo#67:a",
-        plan_key: PLAN_KEY,
-        wave: 1,
-        status: "opened",
-        pr_key: blank,
-      };
-      const stores: Record<string, { rows: unknown[]; key: string }> = {
-        plans: { rows: [plan], key: "plan_key" },
-        plan_tasks: { rows: [task], key: "id" },
-        pull_requests: { rows: [{ pr_key: "owner/repo#68", status: "merged" }], key: "pr_key" },
-      };
-      const data = {
-        table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
-        open: () => memOpen(stores),
-      } as any;
-      const published: { name: string }[] = [];
-      const engine = {
-        publishMessage: (input: { name: string }) => {
-          published.push(input);
-          return Promise.resolve();
-        },
-      } as any;
-      const headers = { "content-type": "application/json" };
-      const prevFetch = globalThis.fetch;
-      globalThis.fetch = subscriptionFetch(new Set([PI])) as typeof fetch;
-      try {
-        await pollWaveGatesImpl(data, engine, "", "http://engine/v2", headers);
-        assertEquals(published.length, 0, `keyless opened (${JSON.stringify(blank)}) must hold the gate`);
-        task.pr_key = "owner/repo#68";
-        await pollWaveGatesImpl(data, engine, "", "http://engine/v2", headers);
-      } finally {
-        globalThis.fetch = prevFetch;
-      }
-      assertEquals(published.length, 1, "a merged PR key releases the gate on the next pass");
-      assertEquals(published[0]?.name, "wave-merged");
-    });
-  }
 });

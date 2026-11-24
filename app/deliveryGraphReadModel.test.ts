@@ -40,7 +40,10 @@ import { applyMigrationSet, readMigrationSetFromDisk } from "../test/migrations.
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const READ_MODEL_MIGRATION = "146_delivery_graph_read_model_committed_cancel.sql";
+// The latest migration defining the rollup VIEWs (its read-model VIEW body is superseded by 149).
+const READ_MODEL_MIGRATION_ROLLUPS = "146_delivery_graph_read_model_committed_cancel.sql";
+// The latest migration defining delivery_graph_read_model (urban 0.100 un-COALESCEd predicates).
+const READ_MODEL_MIGRATION = "149_delivery_graph_read_model_uncoalesced_predicates.sql";
 
 // A minimal in-memory DB carrying the base `delivery_graph_runs` / `pull_requests` shapes the VIEW
 // reads, plus stand-ins for the managed `<table>__tracking` derived VIEWs urban provisions at mount
@@ -71,6 +74,7 @@ function viewDb(): DatabaseSync {
      CREATE VIEW pull_requests__tracking AS
        SELECT p.*, COALESCE(p.derived_status_override, p.status) AS derived_status FROM pull_requests p;`,
   );
+  db.exec(MIG(READ_MODEL_MIGRATION_ROLLUPS));
   db.exec(MIG(READ_MODEL_MIGRATION));
   return db;
 }
@@ -142,11 +146,11 @@ function parityDb(db: DatabaseSync): ParityDb {
 // ── 1. DRIFT GUARD ────────────────────────────────────────────────────────────────────────────────
 
 test("DRIFT GUARD: migration 087 embeds the rollup VIEW DDL VERBATIM from rollup.viewDdl() (the VIEW cannot drift from defineRollup)", () => {
-  const sql = MIG(READ_MODEL_MIGRATION);
+  const sql = MIG(READ_MODEL_MIGRATION_ROLLUPS);
   for (const rollup of DELIVERY_GRAPH_ROLLUPS) {
     assert(
       sql.includes(rollup.viewDdl()),
-      `migration ${READ_MODEL_MIGRATION} no longer embeds the declaration's VIEW DDL for rollup "${rollup.decl.name}" — ` +
+      `migration ${READ_MODEL_MIGRATION_ROLLUPS} no longer embeds the declaration's VIEW DDL for rollup "${rollup.decl.name}" — ` +
         `regenerate it from app/deliveryGraphReadModel.ts. Expected to contain:\n${rollup.viewDdl()}`,
     );
     assert(new RegExp(`DROP VIEW IF EXISTS ${rollup.decl.name};`).test(sql), `087 must DROP "${rollup.decl.name}" first`);

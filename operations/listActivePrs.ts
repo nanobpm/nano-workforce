@@ -8,6 +8,7 @@
 // callers must present it via the x-hook-secret header. Unset → open (unchanged default).
 
 import { listEnvelope, withProcessInstanceKey } from "../app/apiShape.ts";
+import { applyStatusFilter, parseStatusFilter, type StatusFilter } from "../app/listFilters.ts";
 import { activeDeliveries, activePrs } from "../app/service.ts";
 import { buildVersionInfo, envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -16,11 +17,15 @@ import { defineOperation } from "../nano-generated/operations.ts";
 // the x-hook-secret header. Captured once, at module load.
 const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
-export default defineOperation("listActivePrs", async ({ req }, app) => {
+export default defineOperation("listActivePrs", async ({ req, query }, app) => {
   if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
     app.log.warn("listActivePrs rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
   }
+  // Issue #1060: server-side filters (kind/repo/key/status/hasEscalation/updatedSince), validated
+  // BEFORE the read so a bad value is a cheap 400.
+  const parsed = parseStatusFilter({ ...query });
+  if (!parsed.ok) return { status: 400, body: { error: parsed.error } };
   // Per-phase timing (issue #936, budget raised for #947): /status regressed to ~13 s (and
   // serialised concurrent callers into proxy 502s) on an unprofiled per-row engine fan-out, then
   // to ~30 s on merlin when the batched fallback's page-cut probes still scaled with the fleet.
@@ -42,7 +47,7 @@ export default defineOperation("listActivePrs", async ({ req }, app) => {
   if (readMs > STATUS_SLOW_MS) {
     app.log.warn("listActivePrs slow", { ms: readMs, prRows: prs.length, deliveryRows: deliveries.length });
   }
-  return { status: 200, body: activePrsBody(prs, deliveries, { version, gitSha }) };
+  return { status: 200, body: activePrsBody(prs, deliveries, { version, gitSha }, parsed.filter) };
 });
 
 /** The wall-clock budget over which a /status serve is logged as slow (issue #947: raised from the
@@ -54,10 +59,13 @@ const STATUS_SLOW_MS = 5_000;
 
 /** The /status body: the Camunda `{ items, page }` list — ONE list over both kinds, discriminated by
  *  `kind` (`pr` | `delivery`; docs/api-conventions.md), each row keyed by `processInstanceKey`. */
-export function activePrsBody<P extends { processKey: string | null }, D extends { processKey: string | null }, V>(
+type Filterable = { processKey: string | null; status: string; updatedAt: string; openEscalation: unknown };
+
+export function activePrsBody<P extends Filterable, D extends Filterable, V>(
   prs: readonly P[],
   deliveries: readonly D[],
   version: V,
+  filter?: StatusFilter,
 ) {
   const prRows = prs.map(withProcessInstanceKey);
   const deliveryRows = deliveries.map(withProcessInstanceKey);
@@ -65,5 +73,6 @@ export function activePrsBody<P extends { processKey: string | null }, D extends
     ...prRows.map((r) => ({ kind: "pr" as const, ...r })),
     ...deliveryRows.map((r) => ({ kind: "delivery" as const, ...r })),
   ];
-  return { ...listEnvelope(items), version };
+  // `page.totalItems` reflects the FILTERED count (issue #1060).
+  return { ...listEnvelope(filter ? applyStatusFilter(items, filter) : items), version };
 }

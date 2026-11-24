@@ -99,3 +99,21 @@ test("sequence-issues: a missing body folds into the same 400 contract (not a 50
     assert(Array.isArray(res.body.issues) && res.body.issues.length > 0);
   });
 });
+
+test("sequence-issues #1056: an `after` AND-gate + `parallel` intent stages (200 ready)", async () => {
+  await withApp(async (app, data) => {
+    const res = await call(app, { issues: ["o/r#312", "o/r#313"], after: ["o/r#317", "issue:o/r#318"], parallel: true });
+    assertEquals(res.status, 200);
+    assertEquals(res.body.status, "ready");
+    const row = await deliveryGraphProposals(data).get(res.body.digest);
+    assertEquals(row?.status, "staged");
+  });
+});
+
+test("sequence-issues #1056: an invalid `after` entry → 400 path-qualified", async () => {
+  await withApp(async (app) => {
+    const res = await call(app, { issues: ["o/r#312"], after: ["not a ref"] });
+    assertEquals(res.status, 400);
+    assert(res.body.issues.some((i: any) => i.path === "after[0]"));
+  });
+});

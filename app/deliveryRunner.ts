@@ -24,6 +24,7 @@ import { redactConnectorValue } from "./deliveryGraph.ts";
 import { AGENT_REPO_SPEC_HEADER, AGENT_SLA_CHECK_MAX_INTERVAL, AGENT_TERMINAL_SUCCESS_STATUSES, agentEnrollmentTarget, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID, DELIVERY_NODE_DEFAULT_TIMEOUT, redactFreeText, redactProbeTargetForDisplay, requiredEmitsByNodeId } from "./deliveryGraphCompiler.ts";
 import { GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
 import type { DeliveryLayoutInfo, LayoutWithFallbackOptions } from "./deliveryLayout.ts";
+import { deriveEffectiveSettings, type EffectiveSettings } from "./effectiveSettings.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
@@ -153,6 +154,8 @@ export type PrepareDeliveryResult =
 /** A live delivery-graph run: the deployed definition + the started instance + the seed it ran with. */
 export interface DeliveryRunHandle extends PreparedDeliveryGraph {
   processInstanceKey: string;
+  /** The settings seeded on the started instance (issue #1059). */
+  effective: EffectiveSettings;
 }
 
 export type RunDeliveryResult =
@@ -244,30 +247,28 @@ export async function runDeliveryGraph(
   // instance of this content-addressed definition carries its run key, so
   // `searchProcessInstances({ processDefinitionId, state:"ACTIVE" })` + a `runKey` variable match
   // identifies the live duplicate a timeout-only reclaim cannot distinguish from a dead claim.
-  const { processInstanceKey } = await engine.createInstance({
-    processDefinitionId,
-    variables: {
-      nodeInputs,
-      runKey,
-      // Run-level node SLA fallback (issue #872): the bounded-timeout ioMapping reads this when a node's
-      // per-node `nodeInputs.<el>.timeout` is null, so a node released without a per-node timeout gets a
-      // real SLA instead of a null `=nodeTimeout` that fires the boundary timer instantly.
-      runNodeTimeout,
-      // Stage 0 transcript correlation (#543): the transcript-endpoint base every agent node's
-      // completing worker appends its jobKey-scoped stream to, to emit `transcriptUrl` (see the agent
-      // node ioMapping in deliveryGraphCompiler). Seeded once at the run root — the same value for
-      // every node — and read down into each agent job via `=transcriptUrlBase`.
-      [TRANSCRIPT_URL_BASE_VAR]: transcriptUrlBaseFor(),
-      // Agent-task liveness SLA (issue #849): the compiled graph's per-node `=nodeTimeout` boundary
-      // bounds a node's whole retry budget; this seeds the shared `agentSlaTimeout` knob so any
-      // agent cell modelled with the fleet-wide SLA boundary resolves it too.
-      agentSlaTimeout: AGENT_SLA_TIMEOUT,
-      // Opt-in escalation steward (issue #889): seeded as a run-root variable so every node's
-      // escalation (and the delivery-connector's `converge*` enrollment) inherits the opt-in. The
-      // durable record the steward's eligibility reads is the `delivery_graph_runs` row (dispatch).
-      autoResolveEscalations: options.autoResolveEscalations === true,
-    },
-  });
+  const seeded = {
+    nodeInputs,
+    runKey,
+    // Run-level node SLA fallback (issue #872): the bounded-timeout ioMapping reads this when a node's
+    // per-node `nodeInputs.<el>.timeout` is null, so a node released without a per-node timeout gets a
+    // real SLA instead of a null `=nodeTimeout` that fires the boundary timer instantly.
+    runNodeTimeout,
+    // Stage 0 transcript correlation (#543): the transcript-endpoint base every agent node's
+    // completing worker appends its jobKey-scoped stream to, to emit `transcriptUrl` (see the agent
+    // node ioMapping in deliveryGraphCompiler). Seeded once at the run root — the same value for
+    // every node — and read down into each agent job via `=transcriptUrlBase`.
+    [TRANSCRIPT_URL_BASE_VAR]: transcriptUrlBaseFor(),
+    // Agent-task liveness SLA (issue #849): the compiled graph's per-node `=nodeTimeout` boundary
+    // bounds a node's whole retry budget; this seeds the shared `agentSlaTimeout` knob so any
+    // agent cell modelled with the fleet-wide SLA boundary resolves it too.
+    agentSlaTimeout: AGENT_SLA_TIMEOUT,
+    // Opt-in escalation steward (issue #889): seeded as a run-root variable so every node's
+    // escalation (and the delivery-connector's `converge*` enrollment) inherits the opt-in. The
+    // durable record the steward's eligibility reads is the `delivery_graph_runs` row (dispatch).
+    autoResolveEscalations: options.autoResolveEscalations === true,
+  };
+  const { processInstanceKey } = await engine.createInstance({ processDefinitionId, variables: seeded });
   // The engine can yield a numeric key; `DeliveryRunHandle.processInstanceKey` is typed `string` and
   // downstream consumers expect a string — coerce (codebase-wide `String(...)` pattern, e.g. app/plan.ts).
   return {
@@ -280,6 +281,7 @@ export async function runDeliveryGraph(
       runNodeTimeout,
       layout,
       processInstanceKey: String(processInstanceKey),
+      effective: deriveEffectiveSettings(seeded),
     },
   };
 }

@@ -17,6 +17,7 @@ import { digestInvisibleRawValues, graphCarriesRedactedSecrets } from "../app/de
 import { dispatchDeliveryGraphRun } from "../app/deliveryGraphDispatch.ts";
 import { getStagedProposal, markProposalDispatched, markProposalExpired } from "../app/deliveryGraphProposals.ts";
 import { unresolvedAgentRepoNodes } from "../app/deliveryRunner.ts";
+import { ALREADY_RUNNING_WARNING } from "../app/effectiveSettings.ts";
 import { isValidIsoDuration } from "../app/reviewWait.ts";
 import type { DeliveryGraph, DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -394,5 +395,7 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
   };
   if (dispatched.processInstanceKey !== undefined) outBody.processInstanceKey = dispatched.processInstanceKey;
   if (dispatched.processDefinitionId !== undefined) outBody.processDefinitionId = dispatched.processDefinitionId;
+  if (dispatched.effective !== undefined) outBody.effective = dispatched.effective;
+  outBody.warnings = dispatched.alreadyRunning ? [ALREADY_RUNNING_WARNING] : [];
   return { status: 202, body: outBody };
 });

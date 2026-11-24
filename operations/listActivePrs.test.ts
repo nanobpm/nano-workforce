@@ -736,3 +736,63 @@ test("PR #950 review: the bounded probe window rotates so unhydratable leading r
   for (let i = 0; i < 3; i++) await handler(input(), { ...memApp(rows), engine } as AppApi);
   assertEquals(probed.size, N, "every legacy row is eventually probed");
 });
+
+// ── Issue #1060: server-side filters ────────────────────────────────────────────────────────────
+function filterInput(query: Record<string, unknown>) {
+  return { ...input(), query };
+}
+
+function filterFixture(): AppApi {
+  return memApp(
+    [
+      { pr_key: "o/r#1", repo: "o/r", number: 1, url: "u1", title: "a", status: "converging", current_round: 1, process_key: "p1", updated_at: "2026-05-03T00:00:00Z" },
+      { pr_key: "o/r#2", repo: "o/r", number: 2, url: "u2", title: "b", status: "escalated", current_round: 2, process_key: "p2", updated_at: "2026-05-01T00:00:00Z" },
+      { pr_key: "x/y#3", repo: "x/y", number: 3, url: "u3", title: "c", status: "converging", current_round: 1, process_key: "p3", updated_at: "2026-05-02T00:00:00Z" },
+    ],
+    [
+      { user_task_key: "ut-2", element_id: "wait-answer", kind_label: "PR review", subject_type: "pr", subject_key: "o/r#2", subject_title: "b", subject_url: null, question: "q?", process_key: "p2", form_key: null, created_at: "2026-05-01", updated_at: "2026-05-01" },
+    ],
+    [{ run_key: "run-1", process_key: "pk", status: "running", phase: "Running", title: "R", auto_resolve_escalations: 0, updated_at: "2026-05-04T00:00:00Z" }],
+  );
+}
+
+const keysOf = (body: any): string[] => body.items.map((i: any) => i.prKey ?? i.runKey);
+
+test("filters /status by each parameter and reports the filtered totalItems (issue #1060)", async () => {
+  const app = filterFixture();
+  const cases: [Record<string, unknown>, string[]][] = [
+    [{}, ["o/r#1", "x/y#3", "o/r#2", "run-1"]],
+    [{ kind: ["delivery"] }, ["run-1"]],
+    [{ kind: ["pr"] }, ["o/r#1", "x/y#3", "o/r#2"]],
+    [{ repo: ["x/y"] }, ["x/y#3"]],
+    [{ key: ["o/r#1", "run-1"] }, ["o/r#1", "run-1"]],
+    [{ status: ["escalated"] }, ["o/r#2"]],
+    [{ hasEscalation: true }, ["o/r#2"]],
+    [{ hasEscalation: false }, ["o/r#1", "x/y#3", "run-1"]],
+    [{ updatedSince: "2026-05-02T00:00:00Z" }, ["o/r#1", "x/y#3", "run-1"]],
+    // AND across parameters, OR within a repeatable one.
+    [{ repo: ["o/r"], status: ["converging", "escalated"], hasEscalation: false }, ["o/r#1"]],
+    [{ kind: ["pr"], updatedSince: "2026-05-02T00:00:00Z", status: ["converging"] }, ["o/r#1", "x/y#3"]],
+  ];
+  for (const [query, expected] of cases) {
+    const res = (await handler(filterInput(query), app)) as any;
+    assertEquals(res.status, 200, JSON.stringify(query));
+    assertEquals(keysOf(res.body), expected, JSON.stringify(query));
+    assertEquals(res.body.page.totalItems, expected.length, `totalItems for ${JSON.stringify(query)}`);
+  }
+});
+
+test("rejects unknown /status filter values with 400 (issue #1060)", async () => {
+  const app = filterFixture();
+  for (const query of [
+    { kind: ["feature"] },
+    { status: ["bogus"] },
+    { repo: ["not-a-repo"] },
+    { hasEscalation: "maybe" },
+    { updatedSince: "yesterday" },
+  ]) {
+    const res = (await handler(filterInput(query), app)) as any;
+    assertEquals(res.status, 400, JSON.stringify(query));
+    assert(typeof res.body.error === "string" && res.body.error.length > 0);
+  }
+});

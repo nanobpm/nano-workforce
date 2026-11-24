@@ -13,6 +13,10 @@
 // confirm-default / shared-base rules, with the same typed-error → HTTP mapping.
 
 import { withProcessInstanceKey } from "../app/apiShape.ts";
+import {
+  ALREADY_RUNNING_WARNING,
+  customInstructionsWarnings,
+} from "../app/effectiveSettings.ts";
 import { startFeature } from "../app/feature.ts";
 import { ContradictoryFeatureFlagsError, type FeatureFlags, resolveFeatureFlags } from "../app/featureFlags.ts";
 import { type FeatureReadiness, parseFeatureReadiness } from "../app/featureReadiness.ts";
@@ -269,6 +273,22 @@ export default defineOperation("startFeature", async ({ body }, app) => {
   // for a run this request actually started. On `already-active` the request's flags were NOT applied
   // (the live run keeps its own), so echoing them would misreport e.g. autoMerge:true on a review-only
   // run — the very silent drop #1041 fixes. Omit them there.
-  if (result.outcome === "already-active") return { status: 202, body: withProcessInstanceKey(result) };
-  return { status: 202, body: { ...withProcessInstanceKey(result), converge, autoMerge, humanApproval } };
+  if (result.outcome === "already-active") {
+    return { status: 202, body: { ...withProcessInstanceKey(result), warnings: [ALREADY_RUNNING_WARNING] } };
+  }
+  return {
+    status: 202,
+    body: { ...withProcessInstanceKey(result), converge, autoMerge, humanApproval, warnings: featureWarnings(body, flags, omittedBase, normalizedBase) },
+  };
 });
+
+/** What the feature door adjusted or ignored from the request (issue #1059). */
+function featureWarnings(body: object, flags: FeatureFlags, omittedBase: boolean, base: string): string[] {
+  const warnings: string[] = [];
+  for (const k of ["converge", "autoMerge"] as const) {
+    if (!(k in body) && flags[k]) warnings.push(`${k} was not requested but is implied true by another flag`);
+  }
+  if (omittedBase) warnings.push(`baseBranch was omitted — resolved to the repository default branch "${base}"`);
+  if ("customInstructions" in body) warnings.push(...customInstructionsWarnings(Reflect.get(body, "customInstructions")));
+  return warnings;
+}
