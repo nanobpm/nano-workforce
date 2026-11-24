@@ -1,3 +1,9 @@
+## [0.226.1](https://github.com/nanobpm/nano-workforce/compare/v0.226.0...v0.226.1) (2026-11-24)
+
+### Bug Fixes
+
+* **deps:** update dependency @nanobpm/urban to ^0.100.0 ([#1051](https://github.com/nanobpm/nano-workforce/issues/1051)) ([98a73ee](https://github.com/nanobpm/nano-workforce/commit/98a73eeb59571b985ec3acf5fd5fb7e0e84d239e)), closes [nano-ide#625](https://github.com/nanobpm/nano-ide/issues/625)
+
 ## [0.226.0](https://github.com/nanobpm/nano-workforce/compare/v0.225.0...v0.226.0) (2026-11-24)
 
 ### Features
