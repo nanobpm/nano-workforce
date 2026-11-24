@@ -73,6 +73,8 @@ const now = () => new Date().toISOString();
 // runtime identity + `planFindings`.
 
 export interface Plan {
+  /** Fire-once retro claim stamp (see app/retro.ts `maybeStartRetro`). */
+  retro_started_at?: string | null;
   plan_key: string;
   repo: string;
   issue_number: number;

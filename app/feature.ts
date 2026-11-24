@@ -329,6 +329,27 @@ export async function foldCompletedFeatureRun(
   return res.changed > 0;
 }
 
+/** Guarded fold for a KEYLESS run (issue #1089): a crash after the engine accepted a start but before
+ * its key was saved leaves `process_key` NULL, so {@link foldCompletedFeatureRun}'s key predicate cannot
+ * guard it. The incarnation marker is instead the exact row we observed — `process_key IS NULL` plus the
+ * same `pr_key`, `status` and `updated_at`. A re-seed (`startFeature` resets `status` and stamps a fresh
+ * `updated_at`) therefore matches zero rows, so recovery can never overwrite a newly seeded run. */
+export async function foldKeylessFeatureRun(
+  data: DataLayer,
+  featureKey: string,
+  observed: { prKey: string; status: FeatureRunStatus; updatedAt: string },
+  status: string,
+  label: string,
+): Promise<boolean> {
+  const res = await data
+    .open()
+    .exec(
+      `UPDATE "feature_runs" SET "status" = ?, "delivery_label" = ?, "updated_at" = ? WHERE "feature_key" = ? AND "process_key" IS NULL AND "pr_key" = ? AND "status" = ? AND "updated_at" = ?`,
+      [status, label, new Date().toISOString(), featureKey, observed.prKey, observed.status, observed.updatedAt],
+    );
+  return res.changed > 0;
+}
+
 /** A `feature_runs` row as seen through its derived tracking VIEW (`feature_runs__tracking`): the base
  * columns plus urban's ADR-0065 `derived_status`, which FOLDS the reconciler's terminal edge
  * (out-of-band terminate / in-app cancel → `abandoned`) over the worker-owned transient. Since urban
