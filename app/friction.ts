@@ -21,6 +21,7 @@ import type { AgentHistoryRecord, AgentInstanceSummary, DataLayer, EngineClient 
 import { publicBaseUrl } from "./blackboard.ts";
 import { readEnvOr } from "./contracts.ts";
 import { runGh, useGh } from "./github.ts";
+import { parsePr } from "./prParse.ts";
 
 /** The friction-sweep BPMN process id (resources/processes/friction-sweep.bpmn). */
 export const FRICTION_PROCESS_ID = "friction-sweep";
@@ -183,9 +184,31 @@ const TOOL_RESULT_CLASSIFIERS: readonly { kind: SignalKind; re: RegExp }[] = [
   },
 ];
 
+const SECRET_KEY = /(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTHORIZATION)/i;
+
+/** Redact a structured value BEFORE it is serialised (issue #1074 review): JSON-encoding first escapes
+ *  quotes (`PASSWORD="x"` → `PASSWORD=\"x\"`), which the text redactor cannot see through. Every string
+ *  leaf is redacted raw and every secret-named key's value is masked whole. Deterministic, so identical
+ *  inputs still serialise identically (exact repeated-command grouping is preserved). */
+export function redactStructured(value: unknown): unknown {
+  if (typeof value === "string") return redact(value);
+  if (Array.isArray(value)) return value.map(redactStructured);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = SECRET_KEY.test(k) ? "[REDACTED]" : redactStructured(v);
+    return out;
+  }
+  return value;
+}
+
+/** The ONE serialiser for structured transcript data: sanitise first, then stringify. */
+export function serialiseRedacted(value: unknown): string {
+  return JSON.stringify(redactStructured(value)) ?? "";
+}
+
 function recordText(rec: AgentHistoryRecord): string {
   return rec.content
-    .map((b) => (typeof b.text === "string" ? b.text : b.object !== undefined ? JSON.stringify(b.object) : ""))
+    .map((b) => (typeof b.text === "string" ? b.text : b.object !== undefined ? serialiseRedacted(b.object) : ""))
     .filter((t) => t !== "")
     .join("\n");
 }
@@ -231,8 +254,11 @@ export function extractRunSignals(runKey: string, runUrl: string | null, records
         push(hit.kind, line, excerptAround(text, hit.index));
       }
     }
+    // Only ASSISTANT records issue calls; a TOOL_RESULT's `toolCalls` merely references the originating
+    // tool (null arguments), so counting it would group unrelated commands into a false repeat.
+    if (rec.role !== "ASSISTANT") continue;
     for (const call of rec.toolCalls) {
-      const key = `${call.toolName} ${JSON.stringify(call.arguments)}`;
+      const key = `${call.toolName} ${serialiseRedacted(call.arguments)}`;
       const prev = callCounts.get(key);
       callCounts.set(key, { count: (prev?.count ?? 0) + 1, label: key });
     }
@@ -619,14 +645,14 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
   const db = data.source().db;
   const escalationRows = [
     ...db
-      .all<{ id: number; question: string | null; at: string }>(
-        "SELECT id, question, asked_at AS at FROM escalations WHERE asked_at > ? AND asked_at <= ?",
+      .all<{ id: number; question: string | null; at: string; subject: string | null }>(
+        "SELECT id, question, asked_at AS at, pr_key AS subject FROM escalations WHERE asked_at > ? AND asked_at <= ?",
         [windowStart, windowEnd],
       )
       .map((r) => ({ ...r, src: "pr" })),
     ...db
-      .all<{ id: number; question: string | null; at: string }>(
-        "SELECT id, question, created_at AS at FROM feature_escalations WHERE created_at > ? AND created_at <= ?",
+      .all<{ id: number; question: string | null; at: string; subject: string | null }>(
+        "SELECT id, question, created_at AS at, feature_key AS subject FROM feature_escalations WHERE created_at > ? AND created_at <= ?",
         [windowStart, windowEnd],
       )
       .map((r) => ({ ...r, src: "feature" })),
@@ -637,9 +663,9 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
       id: `escalation:${e.src}:${e.id}`,
       kind: "escalation",
       runKey: `${e.src}-escalation:${e.id}`,
-      runUrl: null,
+      runUrl: escalationSubjectUrl(e.subject),
       fingerprint: normaliseMessage(q.split("\n")[0] ?? q),
-      excerpt: redact(q).replace(/\s+/g, " ").slice(0, 400),
+      excerpt: redact(e.subject ? `[${e.subject}] ${q}` : q).replace(/\s+/g, " ").slice(0, 400),
     });
   }
 
@@ -915,14 +941,23 @@ export function frictionSweepSummary(row: FrictionSweepRow, baseUrl: string): st
   return summaryMarkdown(row, { created: split(row.created_issues), updated: split(row.updated_issues), skipped: row.skipped_count }, baseUrl);
 }
 
+/** Pure: a navigable GitHub link for an escalation subject key (`owner/repo#N`), or null. GitHub
+ *  redirects `/issues/N` to the PR when N is a PR, so one form covers PR and feature subjects. */
+export function escalationSubjectUrl(subject: string | null): string | null {
+  const p = parsePr(subject);
+  return p ? `https://github.com/${p.repo}/issues/${p.number}` : null;
+}
+
 /** The summary task's auto-close window (the `PT24H` boundary in friction-sweep.bpmn) plus slack. */
 export const FRICTION_SUMMARY_SCAN_MS = 48 * 60 * 60 * 1000;
 
 /** Pure: whether a sweep row can still hold an open summary task — filed within the scan window. The
- *  bpmn boundary auto-closes it after 24h, so older sweeps need no engine round trip. */
-export function frictionSummaryMayBeOpen(row: Pick<FrictionSweepRow, "status" | "window_end">, nowIso: string): boolean {
+ *  bpmn boundary auto-closes it 24h after filing, so older sweeps need no engine round trip. */
+export function frictionSummaryMayBeOpen(row: Pick<FrictionSweepRow, "status" | "updated_at">, nowIso: string): boolean {
   if (row.status !== "filed") return false;
-  const end = Date.parse(row.window_end);
+  // Measured from FILING (`updated_at`, stamped by recordFiled), not window_end: a slow analyst may
+  // file long after collection, and the 24h boundary starts at filing.
+  const end = Date.parse(row.updated_at);
   const now = Date.parse(nowIso);
   return Number.isFinite(end) && Number.isFinite(now) && now - end <= FRICTION_SUMMARY_SCAN_MS;
 }

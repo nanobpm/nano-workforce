@@ -19,6 +19,7 @@ import {
   type FrictionIssue,
   fileFindings,
   fingerprintMarker,
+  escalationSubjectUrl,
   frictionSummaryMayBeOpen,
   frictionSweeps,
   leaseHolder,
@@ -263,9 +264,11 @@ test("summaryMarkdown links every opened and updated issue", () => {
 });
 
 test("frictionSummaryMayBeOpen bounds the Tasks-inbox scan to recent filed sweeps", () => {
-  assert(frictionSummaryMayBeOpen({ status: "filed", window_end: "2026-01-01T00:00:00.000Z" }, "2026-01-02T00:00:00.000Z"));
-  assert(!frictionSummaryMayBeOpen({ status: "filed", window_end: "2026-01-01T00:00:00.000Z" }, "2026-01-04T00:00:00.000Z"));
-  assert(!frictionSummaryMayBeOpen({ status: "noop", window_end: "2026-01-01T00:00:00.000Z" }, "2026-01-01T01:00:00.000Z"));
+  assert(frictionSummaryMayBeOpen({ status: "filed", updated_at: "2026-01-01T00:00:00.000Z" }, "2026-01-02T00:00:00.000Z"));
+  assert(!frictionSummaryMayBeOpen({ status: "filed", updated_at: "2026-01-01T00:00:00.000Z" }, "2026-01-04T00:00:00.000Z"));
+  assert(!frictionSummaryMayBeOpen({ status: "noop", updated_at: "2026-01-01T00:00:00.000Z" }, "2026-01-01T01:00:00.000Z"));
+  // Delayed filing: window ended 47h before filing; the summary is still in scope an hour after filing.
+  assert(frictionSummaryMayBeOpen({ status: "filed", updated_at: "2026-01-02T23:00:00.000Z" }, "2026-01-03T00:00:00.000Z"));
 });
 
 // ── Singleton lease ────────────────────────────────────────────────────────────────────────────
@@ -412,4 +415,33 @@ test("the friction-summary form is static: no process-variable expression, links
   assert(texts.some((t) => t.includes("](./friction)")));
   const page = JSON.parse(readFileSync(resolve(APP_ROOT, "pages/friction.page.json"), "utf8"));
   assert(JSON.stringify(page).includes('"table":"friction_filings"'));
+});
+
+test("structured tool arguments and OBJECT results are redacted before serialisation", () => {
+  const quoted = { toolName: "bash", arguments: { command: 'PASSWORD="opaque-credential" npm run check' } };
+  const nested = { toolName: "http", arguments: { body: { api_key: "opaque-credential" } } };
+  const records = [0, 1, 2].flatMap((i) => [rec("ASSISTANT", "x", [quoted, nested], i)]);
+  const objResult = {
+    ...rec("TOOL_RESULT", "", [], 3),
+    content: [{ type: "object", object: { error: "Error: denied", api_key: "opaque-credential", cmd: 'TOKEN="opaque-credential"' } }],
+  } as any;
+  const ex = extractRunSignals("A1", null, [...records, objResult]);
+  const all = JSON.stringify(ex.signals);
+  assert(!all.includes("opaque-credential"), all);
+  assertEquals(ex.signals.filter((s) => s.kind === "repeated_command").length, 2);
+});
+
+test("TOOL_RESULT tool references never count as repeated commands", () => {
+  const ref = { toolName: "bash", arguments: null };
+  const records = [0, 1, 2].flatMap((i) => [
+    rec("ASSISTANT", "x", [{ toolName: "bash", arguments: { command: `cmd${i}` } }], i),
+    rec("TOOL_RESULT", "ok", [ref], i),
+  ]);
+  assertEquals(extractRunSignals("A1", null, records).signals.filter((s) => s.kind === "repeated_command").length, 0);
+});
+
+test("escalationSubjectUrl links the escalation subject", () => {
+  assertEquals(escalationSubjectUrl("o/r#12"), "https://github.com/o/r/issues/12");
+  assertEquals(escalationSubjectUrl(null), null);
+  assertEquals(escalationSubjectUrl("garbage"), null);
 });
