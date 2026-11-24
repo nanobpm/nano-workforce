@@ -49,6 +49,8 @@ const EXPECTED_EXCLUDED = [
   "acknowledgeEpic",
   "acknowledgePr",
   "acknowledgeDeliveryGraph",
+  // #1057: the run long-poll holds a call for up to 25 min — not a useful MCP tool (agents read getRun).
+  "waitRun",
 ];
 
 // A representative set of agent-facing operations that MUST stay exposed as tools — the drive doors

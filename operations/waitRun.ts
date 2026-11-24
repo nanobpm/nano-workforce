@@ -6,6 +6,9 @@
 // Liveness of the HOLD itself: the request's abort signal (client disconnect) stops the waiter, and a
 // global cap (`NANO_RUN_WAIT_MAX_WAITERS`) bounds concurrently held waits — beyond it a 429 with
 // Retry-After, so a reconnecting client can never accumulate orphan pollers without bound.
+// Known gap: the host does not yet propagate client disconnect into `req.signal` — tracked upstream as
+// https://github.com/nanobpm/nano-ide/issues/633. Until it lands, the waiter cap + server-side timeout
+// bound the cost of an abandoned hold.
 import { readEnvOr } from "../app/contracts.ts";
 import type { RunView } from "../app/runLookup.ts";
 import { lookupRun } from "../app/runLookup.ts";

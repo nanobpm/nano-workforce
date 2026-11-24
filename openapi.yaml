@@ -5739,6 +5739,11 @@ paths:
       x-cli:
         command: [wait]
         positional: [key]
+        audience: operator
+      # x-mcp exclusion: a long-poll is not a useful MCP tool (it holds the call for up to 25 min);
+      # agents read `GET /run?key=` instead. CLI-only door.
+      x-mcp:
+        exclude: true
       summary: "Long-poll ONE run until it reaches a state (issue #1057) — pr-opened, converged, merged, escalated, terminal, or any-change."
       description: >-
         `d8ctl nwf wait <key> --until=…`. Holds the request (server-side bounded to at most 25 minutes per
