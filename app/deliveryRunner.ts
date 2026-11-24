@@ -481,6 +481,29 @@ export function renderIdempotencyPreamble(): string {
 }
 
 
+/** The CI-wait contract prepended (after the idempotency preflight) to EVERY `agent` node's
+ * `appendPrompt` (issue #1087). A graph agent that queued its PR (e.g. `@mergifyio queue`) and then ran a
+ * bare `gh pr checks --watch` deadlocked until its SLA expired: `--watch` returns only once EVERY check
+ * finishes, and a merge-queue check (`Mergify Merge Queue`) stays pending until the PR merges — which a
+ * failed required check prevents. The class is "wait for ALL checks to finish"; this block forbids it and
+ * prescribes "first failure OR all required passed". Fixed wording, so compilation stays deterministic. */
+export function renderCiWaitContract(): string {
+  return [
+    "## Waiting on CI — never block on ALL checks",
+    "",
+    "Do NOT run a bare `gh pr checks --watch`: it returns only when EVERY check finishes, and a merge-queue",
+    "check (e.g. `Mergify Merge Queue`) stays pending until the PR merges — so after any failure it never",
+    "returns and you hang until your SLA expires. Prefer not to wait on CI in-process at all: once your PR is",
+    "open (and queued, if the repo requires it), report it and let the convergence/merge loop own CI. If you",
+    "must wait, exit on the FIRST failure or once all REQUIRED checks pass, ignoring merge-queue checks —",
+    "`gh pr checks <n> --required --watch --fail-fast` — then fix the failure, push, and re-queue.",
+    "",
+    "---",
+    "",
+    "",
+  ].join("\n");
+}
+
 /** Render the classifier-emit contract appended to an `agent` node's `appendPrompt` (issue #506) — the
  * instruction that turns a declared `emits[]` into completion variables a downstream guarded split (S7)
  * can route on. A `senior:*` fleet agent completes with the Output-contract envelope (`status`,
@@ -644,7 +667,7 @@ function buildNodeInput(
       const enrollmentTarget = agentEnrollmentTarget(node.agent);
       const enrollment = enrollmentTarget !== null ? { enrollment: { target: enrollmentTarget, dedupeKey: `${ctx.runKey}:${ctx.element}:enrollment` } } : {};
       const agentTimeout = isoDuration(node.agent.timeout, ctx.nodeTimeout);
-      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + basePrompt + renderEmitContract(emits) + renderProducerContract(requiredEmits), timeout: agentTimeout, slaCheckEvery: agentSlaCheckEvery(agentTimeout), ...enrollment };
+      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + renderCiWaitContract() + basePrompt + renderEmitContract(emits) + renderProducerContract(requiredEmits), timeout: agentTimeout, slaCheckEvery: agentSlaCheckEvery(agentTimeout), ...enrollment };
     }
     case "wait": {
       const probe = parseProbe(node.wait, { allowLateBoundTarget: true });
