@@ -329,7 +329,11 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       status: planStatus,
       // Delivery-aware: a `done` epic whose slice PRs are still converging (or missing) is NOT
       // terminal — the ONE canonical acknowledgeable predicate over the read-time delivery signal.
-      terminal: epicIsAcknowledgeable(plan.derived_status, await derivePlanDelivery(data, plan)),
+      // A `failed`/`abandoned` epic is terminal outright — only `done` waits on delivery.
+      terminal:
+        !planLive(plan) &&
+        (plan.derived_status !== "done" ||
+          epicIsAcknowledgeable(plan.derived_status, await derivePlanDelivery(data, plan))),
       stage: gated ? gateLabel : (plan.epic_phase ?? planStatus),
       settings: {
         ...emptySettings(),

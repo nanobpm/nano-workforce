@@ -407,3 +407,12 @@ test("a `done` epic is terminal only once its slice PRs resolved (converging or 
   assertEquals((await look(slice, [])).terminal, false);
   assertEquals((await look(slice, [pr({ status: "merged", merged_at: T0 })])).terminal, true);
 });
+
+test("a failed or abandoned epic is terminal regardless of its slice delivery", async () => {
+  for (const status of ["failed", "abandoned"]) {
+    const epic = { plan_key: "o/r#1", repo: "o/r", title: "Epic", status, process_key: "proc-e", epic_phase: null, auto_merge: 1, acknowledged_at: null, created_at: T0, updated_at: T0 };
+    const slice = [{ id: 1, plan_key: "o/r#1", task_id: "a", pr_key: "o/r#9" }];
+    const body = ((await handler(input("o/r#1"), memApp({ plans: [epic], plan_tasks: slice, pull_requests: [pr()] }, PKS))) as Row).body;
+    assertEquals(body.terminal, true, status);
+  }
+});
