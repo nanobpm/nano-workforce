@@ -12,6 +12,7 @@
 // Derivation over duplication: the view is `lookupRun`; terminality is the view's own `terminal` flag.
 // The clock is injected so the loop is tested with a fake clock (no wall-clock sleeps in tests).
 
+import { MERGE_STAGE_STATUSES } from "./deliveryStatuses.ts";
 import { isoDurationToMs } from "./reviewWait.ts";
 import type { RunView } from "./runLookup.ts";
 
@@ -37,7 +38,9 @@ export function waitTimeoutMs(raw: unknown): number {
   return Math.min(Math.max(ms, 0), WAIT_MAX_MS);
 }
 
-const SETTLED_PR = new Set(["converged", "merged"]);
+/** Converged-or-later: `converged`, `merged`, or any merge-stage status (with auto-merge, pr.finalize
+ *  moves a converged PR straight into waiting_deps, so `converged` itself may never be observed). */
+const SETTLED_PR = new Set(["converged", "merged", ...MERGE_STAGE_STATUSES]);
 const selfAndChildren = (v: RunView): RunView[] => [v, ...v.children];
 
 /** The MEANINGFUL state of one run: every field EXCEPT the volatile bookkeeping (lease/heartbeat

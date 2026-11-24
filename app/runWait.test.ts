@@ -149,3 +149,13 @@ test("any-change sees nonvolatile fields: settings, engine instance, acknowledgm
   const fpc = runFingerprint(view({ children: [view({ key: "c" })] }));
   assertEquals(waitReason("any-change", view({ children: [view({ key: "c", processInstanceKey: "9" })] }), fpc), "any-change");
 });
+
+test("converged: an auto-merge handoff into the merge stage counts as converged", () => {
+  const fp = runFingerprint(view());
+  for (const status of ["waiting_deps", "waiting_merge", "waiting_lane", "queued", "merging"]) {
+    const child = view({ key: "o/r#9", kind: "pr", status });
+    assertEquals(waitReason("converged", view({ children: [child] }), fp), "converged");
+    assertEquals(waitReason("merged", view({ children: [child] }), fp), null);
+  }
+  assertEquals(waitReason("converged", view({ children: [view({ key: "o/r#9", kind: "pr", status: "waiting_review" })] }), fp), null);
+});
