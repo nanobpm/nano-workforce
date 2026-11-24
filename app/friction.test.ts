@@ -331,7 +331,22 @@ test("excerptAround redacts before windowing: a secret cut by the window edge ne
     const idx = text.indexOf("Error:");
     for (let r = 5; r < 200; r += 3) {
       const ex = excerptAround(text, idx, r);
-      assert.ok(!/AAAAAAAA|abcdefgh|MIIBOg|tPf9Cnz/.test(ex), `leak at radius ${r}: ${ex}`);
+      assert(!/AAAAAAAA|abcdefgh|MIIBOg|tPf9Cnz/.test(ex), `leak at radius ${r}: ${ex}`);
     }
+  }
+});
+
+test("redact masks quoted JSON, single-quoted, escaped and netrc secret forms (#1074 review)", () => {
+  const cases = [
+    '{"api_key":"opaque-credential"}',
+    "PASSWORD='opaque-credential'",
+    'TOKEN="opaque\\"-credential"',
+    "machine host login me password opaque-credential",
+    "{'client_secret': 'opaque-credential'}",
+  ];
+  for (const c of cases) {
+    const out = redact(c);
+    assert(!out.includes("opaque"), `leaked: ${c} -> ${out}`);
+    assert(out.includes("[REDACTED]"), out);
   }
 });

@@ -99,9 +99,11 @@ const REDACTIONS: readonly [RegExp, string][] = [
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1[REDACTED]@"],
   // KEY=value / "key": "value" for secret-looking names.
   [
-    /\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|CLIENT_SECRET)[A-Z0-9_]*)(\s*[=:]\s*)("?)[^\s"']+\3/gi,
-    "$1$2$3[REDACTED]$3",
+    /(["']?)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|CLIENT_SECRET)[A-Z0-9_]*)\1(\s*[=:]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^\s"',;}]+)/gi,
+    "$1$2$1$3[REDACTED]",
   ],
+  // netrc-style `password <value>` / `passwd <value>` (fail closed: the next word is always masked).
+  [/\b(password|passwd)([ \t]+)(?!\[REDACTED)[^\s]+/gi, "$1$2[REDACTED]"],
   // Home-directory paths leak the operator's username.
   [/\/(Users|home)\/[^/\s"']+/g, "/$1/[user]"],
 ];
@@ -236,7 +238,7 @@ export function extractRunSignals(runKey: string, runUrl: string | null, records
     }
   }
   for (const { count, label } of callCounts.values()) {
-    if (count >= REPEAT_THRESHOLD) push("repeated_command", label, redact(`${count}× ${label.slice(0, 300)}`));
+    if (count >= REPEAT_THRESHOLD) push("repeated_command", label, redact(`${count}× ${label}`).slice(0, 300));
   }
   return { signals, tokens, turns: iterations.size };
 }
@@ -583,7 +585,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
       runKey: inc.incidentKey,
       runUrl: null,
       fingerprint: normaliseMessage(msg),
-      excerpt: redact(`${inc.elementId ?? "?"} (instance ${inc.processInstanceKey}): ${msg}`.slice(0, 400)),
+      excerpt: redact(`${inc.elementId ?? "?"} (instance ${inc.processInstanceKey}): ${msg}`).slice(0, 400),
     });
   }
   const db = data.source().db;
@@ -609,7 +611,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
       runKey: `${e.src}-escalation:${e.id}`,
       runUrl: null,
       fingerprint: normaliseMessage(q.split("\n")[0] ?? q),
-      excerpt: redact(q.replace(/\s+/g, " ").slice(0, 400)),
+      excerpt: redact(q).replace(/\s+/g, " ").slice(0, 400),
     });
   }
 
