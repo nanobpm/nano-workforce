@@ -435,3 +435,10 @@ test("sequenceIssues #1056: generated prompts close their issue AND satisfy the 
   const bare = { nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature", prompt: "Implement o/r#312 and open a PR that closes o/r#312." } }], edges: [] };
   assert(validateDeliveryGraph(bare).length > 0, "control: a bare close must be rejected");
 });
+
+test("sequenceIssues #1056: a parallel fan-out whose gates×issues edges exceed the compiler edge ceiling → rejected at `after`", () => {
+  const after = Array.from({ length: 32 }, (_, i) => `o/r#${1000 + i}`);
+  const issues = Array.from({ length: 64 }, (_, i) => `o/r#${i + 1}`);
+  const found = rejects({ issues, after, parallel: true });
+  assert(found.some((i) => i.path === "after" && /too many edges/.test(i.message)), `expected an edge-ceiling rejection, got ${JSON.stringify(found)}`);
+});

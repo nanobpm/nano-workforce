@@ -21,7 +21,7 @@
 // `issues[{path,message}]` rather than only surfacing at compile time.
 import type { DeliveryEdge, DeliveryGraph, DeliveryNode, ReadinessProbe } from "../nano-generated/api-io.d.ts";
 import { CONVERGE_MERGE_TARGET } from "./convergeTargets.ts";
-import { GRAPH_MAX_NODES } from "./deliveryGraph.ts";
+import { GRAPH_MAX_EDGES, GRAPH_MAX_NODES } from "./deliveryGraph.ts";
 import { deliveryGraphVocabulary } from "./deliveryGraphVocabulary.ts";
 import { type ParsedIssue, parseIssue } from "./plan.ts";
 import { parsePr } from "./prParse.ts";
@@ -470,7 +470,23 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
 
   if (issues.length > 0) return { ok: false, issues };
 
-  return { ok: true, graph: assembleGraph(parsedEntries, behindKey, afterGates, parallel) };
+  const graph = assembleGraph(parsedEntries, behindKey, afterGates, parallel);
+  const edgeCount = graph.edges?.length ?? 0;
+  // ── Edge-budget guard: a `parallel` fan-out joins EVERY `after` gate into EVERY issue, so edges grow
+  // multiplicatively (gates × issues) and can exceed the compiler's edge ceiling while staying under
+  // the node ceiling. Measure the assembled graph exactly (no projection to drift) and reject at the door.
+  if (edgeCount > GRAPH_MAX_EDGES) {
+    return {
+      ok: false,
+      issues: [
+        {
+          path: "after",
+          message: `the generated graph would have too many edges (${edgeCount}) — the limit is ${GRAPH_MAX_EDGES}; use fewer \`after\` gates or issues, or drop \`parallel\`.`,
+        },
+      ],
+    };
+  }
+  return { ok: true, graph };
 }
 
 /** Assemble the canonical node/edge chain for the (already-validated) parsed entries + optional gate.
