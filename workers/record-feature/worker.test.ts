@@ -301,6 +301,38 @@ test("a failed comment POST never fails the job — the run still records opened
   });
 }
 
+// Issue #1081 review: a blocked-WITH-question result now escalates; when that escalation is abandoned
+// (operator Abandon or escalation-SLA auto-abandon — both set resolution "abandon"), the cell ends with
+// status "blocked" and pushed commits may exist. Recovery must NOT adopt/create a PR over the decision.
+for (const via of ["operator abandon", "escalation SLA auto-abandon"]) {
+  test(`an abandoned blocked-with-question escalation stays blocked and never recovers (${via})`, async () => {
+    const gh = stubGithubComments();
+    const { app } = fakeApp([{ ...ROW }]);
+    try {
+      const out = await handler(
+        {
+          jobKey: "ja",
+          variables: {
+            featureKey: "owner/repo#7",
+            status: "blocked",
+            question: "A or B?",
+            cellResolution: "abandon",
+            task: { id: "t1" },
+            baseBranch: "main",
+            "io.nanobpm.agentResult": { headSha: "abc", branch: "feat/t1" },
+          },
+        } as never,
+        app,
+      );
+      assertEquals(out.featureStatus, "blocked");
+      assertEquals(out.prKey, null);
+      assertEquals(gh.calls.filter((c) => /\/(pulls|branches|compare|git)\b/.test(c)).length, 0);
+    } finally {
+      gh.restore();
+    }
+  });
+}
+
 // Issue #1081: a blocked run's reported question/summary must reach the `feature-blocked` inbox task —
 // record-feature appends it (never blank) as the newest `feature_escalations` row the projection reads.
 for (const [name, vars, expected] of [

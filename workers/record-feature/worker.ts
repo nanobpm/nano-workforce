@@ -65,8 +65,13 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // reconcile (stamped with KEYLESS_OPENED_SUMMARY by `reconcileImplement`) reaches here only via an
   // Abandon / escalation-SLA auto-abandon. That human/SLA decision must stand — never let the blocked
   // recovery adopt/create a PR over it and proceed to convergence.
+  // Issue #1081 review — the general case of the same class: ANY cell that ended through an Abandon
+  // (operator or escalation-SLA auto-abandon) carries `cellResolution = "abandon"` (the cell's
+  // human-escalation resolution, output-mapped by feature.bpmn). E.g. a `blocked` WITH a question now
+  // escalates; abandoning it must not let blocked-delivery recovery adopt/create a PR over that decision.
+  const abandonedEscalation = str(job.variables.cellResolution) === "abandon";
   const abandonedKeyless = (str(job.variables.summary) ?? "").startsWith(KEYLESS_OPENED_SUMMARY);
-  if (!abandonedKeyless && shouldReconcileBlockedFeature(rawStatus)) {
+  if (!abandonedEscalation && !abandonedKeyless && shouldReconcileBlockedFeature(rawStatus)) {
     // Framework-injected (`io.nanobpm.agentResult`) — read through the Record-typed seam, like the
     // other agent-result consumers (workers/persist-escalation et al.); it is not an envelope field.
     // biome-ignore lint/plugin: runtime/framework contract boundary for the reserved agent-result envelope
