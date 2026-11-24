@@ -297,6 +297,8 @@ export interface FrictionSweepRow {
   escalation_count: number;
   tokens_total: number;
   digest: string | null;
+  /** Why the filing stage failed (`markFailed`) — kept apart from `digest` so the findings survive. */
+  error: string | null;
   created_issues: string | null;
   updated_issues: string | null;
   created_count: number;
@@ -514,6 +516,27 @@ function openFindingLines(issues: readonly FrictionIssue[]): string[] {
   return issues.map((i) => `#${i.number} [${parseFingerprintMarker(i.body) ?? "no-fingerprint"}] ${i.title}`);
 }
 
+/** The engine seam's searches read ONE server page (no paging through the Urban adapter yet —
+ *  follow-up #1076). A result that fills a page may have been truncated: say so loudly. */
+export const ENGINE_DEFAULT_PAGE_SIZE = 100;
+function warnIfFullPage(log: CollectDeps["log"], what: string, n: number): void {
+  if (n >= ENGINE_DEFAULT_PAGE_SIZE) {
+    log?.warn(`friction collect: ${what} search returned a full page (${n}); results beyond it may be omitted`, { what, count: n });
+  }
+}
+
+/** The subset of `ids` already persisted in `friction_signals` (by any earlier sweep). */
+export function recordedSignalIds(data: DataLayer, ids: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  const db = data.source().db;
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    const rows = db.all<{ id: string }>(`SELECT id FROM friction_signals WHERE id IN (${chunk.map(() => "?").join(", ")})`, chunk);
+    for (const r of rows) out.add(r.id);
+  }
+  return out;
+}
+
 /** Collect one sweep window. Idempotent: a retried job with the same `sweepKey` returns the stored
  *  result without re-reading; a failure before the commit leaves the watermark untouched (the window
  *  is re-swept next time); a concurrent sweep that loses the watermark CAS persists nothing. */
@@ -539,6 +562,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
   const signals: FrictionSignal[] = [];
   const runs: RunSummary[] = [];
   const allRuns = await engine.searchAgentInstances();
+  warnIfFullPage(deps.log, "agent instances", allRuns.length);
   for (const run of allRuns) {
     if (!inWindow(runInstant(run), windowStart, windowEnd)) continue;
     const history = await fetchRunHistory(engine, run.agentInstanceKey);
@@ -559,7 +583,9 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     data.source().db.all<{ id: string }>("SELECT id FROM friction_signals WHERE kind IN ('failed_job','incident')").map((r) => r.id),
   );
   for (const state of ["FAILED", "TIMED_OUT"]) {
-    for (const job of await engine.searchJobs({ state })) {
+    const jobs = await engine.searchJobs({ state });
+    warnIfFullPage(deps.log, `jobs (${state})`, jobs.length);
+    for (const job of jobs) {
       const id = `failed_job:${job.jobKey}`;
       if (seen.has(id)) continue;
       seen.add(id);
@@ -574,7 +600,9 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
       });
     }
   }
-  for (const inc of await engine.searchIncidents({ state: "ACTIVE" })) {
+  const incidents = await engine.searchIncidents({ state: "ACTIVE" });
+  warnIfFullPage(deps.log, "incidents", incidents.length);
+  for (const inc of incidents) {
     const id = `incident:${inc.incidentKey}`;
     if (seen.has(id)) continue;
     seen.add(id);
@@ -613,6 +641,18 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
       fingerprint: normaliseMessage(q.split("\n")[0] ?? q),
       excerpt: redact(q).replace(/\s+/g, " ").slice(0, 400),
     });
+  }
+
+  // Drop every signal an EARLIER sweep already recorded (issue #1074 review): an agent swept while
+  // IDLE re-qualifies once its parent ends and supplies `completionDate`, and its transcript signals
+  // would otherwise re-enter this window's digest + counts (the INSERT OR IGNORE below only fences the
+  // rows, not the aggregation). Filtering here — before buildDigest/countByKind — fences all three.
+  const recorded = recordedSignalIds(data, signals.map((s) => s.id));
+  if (recorded.size > 0) {
+    const fresh = signals.filter((s) => !recorded.has(s.id));
+    signals.length = 0;
+    signals.push(...fresh);
+    for (const r of runs) r.signals = fresh.filter((s) => s.runKey === r.runKey).length;
   }
 
   const digest = signals.length > 0 ? buildDigest({ start: windowStart, end: windowEnd }, signals, runs, config.digestMaxChars) : "";
@@ -837,6 +877,14 @@ export async function recordFiled(data: DataLayer, sweepKey: string, res: FileRe
     skipped_count: res.skipped,
     updated_at: at,
   });
+  // One row per issue link so the Friction page can render each as a clickable grid link (detail
+  // fields are plain text). Idempotent: a redelivered record writes the same keys.
+  const db = data.source().db;
+  for (const [action, urls] of [["opened", res.created], ["updated", res.updated]] as const) {
+    for (const url of urls) {
+      db.run("INSERT OR IGNORE INTO friction_filings (sweep_key, action, issue_url, created_at) VALUES (?, ?, ?, ?)", [sweepKey, action, url, at]);
+    }
+  }
 }
 
 /** The operator summary (markdown) the `friction-summary` user task renders: the window, what was
@@ -861,7 +909,7 @@ export function summaryMarkdown(sweep: Pick<FrictionSweepRow, "window_start" | "
 }
 
 /** The summary for a persisted sweep row — the Tasks-inbox "Decision context" of its summary task,
- *  derived from the SAME renderer the form's `frictionSummary` comes from (no second wording). */
+ *  the ONE renderer of the summary wording (the form itself is static and links the Friction page). */
 export function frictionSweepSummary(row: FrictionSweepRow, baseUrl: string): string {
   const split = (v: string | null) => (v ? v.split("\n").filter((s) => s !== "") : []);
   return summaryMarkdown(row, { created: split(row.created_issues), updated: split(row.updated_issues), skipped: row.skipped_count }, baseUrl);
@@ -972,5 +1020,5 @@ export async function recordSkipped(data: DataLayer, sweepKey: string, heldBy: s
 
 /** Mark a sweep row `failed` (the filing step errored after collection). */
 export async function markFailed(data: DataLayer, sweepKey: string, error: string, now: Date): Promise<void> {
-  await frictionSweeps(data).update(sweepKey, { status: "failed", digest: redact(`failed: ${error}`).slice(0, 2000), updated_at: now.toISOString() });
+  await frictionSweeps(data).update(sweepKey, { status: "failed", error: redact(`failed: ${error}`).slice(0, 2000), updated_at: now.toISOString() });
 }

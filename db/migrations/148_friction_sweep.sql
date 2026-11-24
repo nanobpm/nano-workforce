@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS friction_sweeps (
   escalation_count        INTEGER NOT NULL DEFAULT 0,
   tokens_total            INTEGER NOT NULL DEFAULT 0,
   digest                  TEXT,              -- the bounded, redacted digest (never a raw transcript)
+  error                   TEXT,              -- why filing failed (status 'failed'); never overwrites digest
   created_issues          TEXT,              -- newline-separated issue URLs opened by pr.friction-file
   updated_issues          TEXT,              -- newline-separated issue URLs commented on by pr.friction-file
   created_count           INTEGER NOT NULL DEFAULT 0,
@@ -76,4 +77,14 @@ CREATE TABLE IF NOT EXISTS friction_sweep_lock (
   expires_at  TEXT,               -- ISO instant the lease lapses (NULL = free)
   acquired_at TEXT,
   updated_at  TEXT NOT NULL
+);
+
+-- One row per issue a sweep opened or commented on, so pages/friction.page.json can render each issue
+-- URL as a clickable grid link (detail fields render as plain text). Written by recordFiled.
+CREATE TABLE IF NOT EXISTS friction_filings (
+  sweep_key  TEXT NOT NULL,      -- the friction-sweep process-instance key
+  action     TEXT NOT NULL,      -- opened | updated
+  issue_url  TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (sweep_key, action, issue_url)
 );

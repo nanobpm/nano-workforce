@@ -223,11 +223,55 @@
               "label": "Not filed (below threshold / malformed)"
             },
             {
+              "field": "error",
+              "label": "Filing error (redacted)"
+            },
+            {
               "field": "digest",
               "label": "Digest handed to the analyst (redacted)"
             }
           ]
         }
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "friction-filings",
+      "props": {
+        "title": "Issues opened / updated",
+        "rowKey": "issue_url",
+        "refreshMs": 10000,
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "friction_filings",
+          "orderBy": {
+            "field": "created_at",
+            "dir": "desc"
+          }
+        },
+        "columns": [
+          {
+            "field": "created_at",
+            "header": "Filed",
+            "format": "datetime"
+          },
+          {
+            "field": "action",
+            "header": "Action",
+            "badge": true
+          },
+          {
+            "field": "issue_url",
+            "header": "Issue",
+            "linkField": "issue_url"
+          },
+          {
+            "field": "sweep_key",
+            "header": "Sweep",
+            "truncate": true
+          }
+        ]
       }
     },
     {

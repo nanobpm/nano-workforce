@@ -42,7 +42,6 @@
           <nano:extend name="createdCount" type="integer" />
           <nano:extend name="updatedCount" type="integer" />
           <nano:extend name="skippedCount" type="integer" />
-          <nano:extend name="frictionSummary" type="string" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>

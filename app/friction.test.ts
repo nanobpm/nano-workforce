@@ -1,7 +1,7 @@
 // Unit tests for the friction sweep core (issue #1073): signal extraction per kind from fixture
 // transcripts, redaction, the watermark (advance / no advance on failure / idempotent re-run), and
 // the filer (new vs existing fingerprint, threshold, no writes when no findings).
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -22,9 +22,11 @@ import {
   frictionSummaryMayBeOpen,
   frictionSweeps,
   leaseHolder,
+  markFailed,
   parseFindings,
   parseFingerprintMarker,
   readWatermark,
+  recordFiled,
   recordSkipped,
   releaseLease,
   redact,
@@ -349,4 +351,65 @@ test("redact masks quoted JSON, single-quoted, escaped and netrc secret forms (#
     assert(!out.includes("opaque"), `leaked: ${c} -> ${out}`);
     assert(out.includes("[REDACTED]"), out);
   }
+});
+
+// ── #1074 review: IDLE re-collection, failed-filing error, summary form ─────────────────────────
+
+test("an agent swept while IDLE and completed in a later window is counted once", async () => {
+  await withData(async (data) => {
+    const records = [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")];
+    const run = { agentInstanceKey: "R1", status: "IDLE", lastUpdatedDate: "2026-01-01T12:00:00.000Z", elementId: "implement-task" } as Record<string, unknown>;
+    const engine = {
+      searchAgentInstances: async () => [run],
+      searchAgentInstanceHistory: async () => records,
+      searchJobs: async () => [],
+      searchIncidents: async () => [],
+    } as any;
+    const first = await collectFriction({ data, engine, sweepKey: "S1", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(first.signalCount, 1);
+    run.status = "COMPLETED";
+    run.completionDate = "2026-01-02T06:00:00.000Z";
+    const second = await collectFriction({ data, engine, sweepKey: "S2", now: new Date("2026-01-02T12:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(second.signalCount, 0, "already-recorded signals are not re-counted");
+    assertEquals(second.digest, "");
+  });
+});
+
+test("markFailed records the error without overwriting the digest", async () => {
+  await withData(async (data) => {
+    const { engine } = engineStub({ runs: [{ key: "R1", at: "2026-01-01T12:00:00.000Z", records: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")] }] });
+    await collectFriction({ data, engine, sweepKey: "S1", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    const before = (await frictionSweeps(data).get("S1"))?.digest;
+    assert(before && before !== "");
+    await markFailed(data, "S1", "boom ghp_abcdefghijklmnopqrstuvwxyz0123456789", new Date("2026-01-02T00:01:00.000Z"));
+    const row = await frictionSweeps(data).get("S1");
+    assertEquals(row?.status, "failed");
+    assertEquals(row?.digest, before);
+    assert(row?.error?.includes("boom"));
+    assert(!row?.error?.includes("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+  });
+});
+
+test("recordFiled persists one linkable row per opened/updated issue, idempotently", async () => {
+  await withData(async (data) => {
+    const { engine } = engineStub({ runs: [{ key: "R1", at: "2026-01-01T12:00:00.000Z", records: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")] }] });
+    await collectFriction({ data, engine, sweepKey: "S1", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    const res = { created: ["https://github.com/acme/friction/issues/1"], updated: ["https://github.com/acme/friction/issues/2#c"], skipped: 0 };
+    await recordFiled(data, "S1", res as any, "2026-01-02T00:02:00.000Z");
+    await recordFiled(data, "S1", res as any, "2026-01-02T00:03:00.000Z");
+    const rows = data.source().db.all<{ action: string; issue_url: string }>("SELECT action, issue_url FROM friction_filings WHERE sweep_key = ? ORDER BY action", ["S1"]);
+    assertEquals(rows.map((r) => `${r.action} ${r.issue_url}`), [
+      "opened https://github.com/acme/friction/issues/1",
+      "updated https://github.com/acme/friction/issues/2#c",
+    ]);
+  });
+});
+
+test("the friction-summary form is static: no process-variable expression, links the Friction page", () => {
+  const form = JSON.parse(readFileSync(resolve(APP_ROOT, "resources/forms/friction-summary.form"), "utf8"));
+  const texts: string[] = form.components.map((c: { text?: string }) => c.text ?? "");
+  assert(texts.every((t) => !t.startsWith("=")), "the Tasks engineForm seeds no process variables");
+  assert(texts.some((t) => t.includes("](./friction)")));
+  const page = JSON.parse(readFileSync(resolve(APP_ROOT, "pages/friction.page.json"), "utf8"));
+  assert(JSON.stringify(page).includes('"table":"friction_filings"'));
 });
