@@ -309,6 +309,126 @@ components:
               type: string
               nullable: true
               description: The commit the instance runs; null only when no source (env, .git, build-info.json) knows it.
+    RunView:
+      type: object
+      description: "One run looked up by key at any stage (issue #1054) — GET /run?key=."
+      additionalProperties: false
+      required: [key, kind, title, status, terminal, stage, settings, processInstanceKey, processInstanceKeys, activeWorker, leaseUntil, prUrl, openEscalation, incident, acknowledgedAt, createdAt, updatedAt, children]
+      properties:
+        key:
+          type: string
+        kind:
+          type: string
+          enum: [feature, epic, pr, delivery]
+        title:
+          type: string
+          nullable: true
+        status:
+          type: string
+          description: The effective (terminal-folded) workflow status; `incident`/`orphaned` overlays as in /status. A feature delegating to its convergence-loop PR (`converging`, or a mid-handoff `opened`) reads its PR's rolled-up status.
+        terminal:
+          type: boolean
+          description: "True once the run reached its kind's terminal outcome. Wait on this flag — never on `status` strings or stage order: a PR stage can legitimately move `waiting_merge` → `waiting_review`/`converging` during a merge-to-convergence handoff, and a mid-handoff feature `opened` is not terminal."
+        stage:
+          type: string
+          nullable: true
+          description: Feature pipeline stage, epic phase, PR status, or delivery phase.
+        settings:
+          type: object
+          additionalProperties: false
+          required: [converge, autoMerge, humanApproval, blockedOn, maxRounds, autoResolveEscalations, hasCustomInstructions]
+          properties:
+            converge:
+              type: boolean
+              nullable: true
+            autoMerge:
+              type: boolean
+              nullable: true
+            humanApproval:
+              type: boolean
+              nullable: true
+            blockedOn:
+              type: array
+              nullable: true
+              items:
+                oneOf:
+                  - type: string
+                  - type: object
+                    properties:
+                      waitGate: {type: string, nullable: true}
+                      label: {type: string, nullable: true}
+              description: >-
+                A feature's readiness probe targets (desugared blockedOn), redacted for display (command
+                targets and unknown kinds are `<redacted>`, http userinfo is stripped) — strings only. An
+                epic parked on its inter-epic wait gate reports `{waitGate, label}` objects instead.
+            maxRounds:
+              type: number
+              nullable: true
+            autoResolveEscalations:
+              type: boolean
+            hasCustomInstructions:
+              type: boolean
+        processInstanceKey:
+          type: string
+          nullable: true
+        processInstanceKeys:
+          type: array
+          items:
+            type: string
+          description: This run's engine instance plus its children's.
+        activeWorker:
+          type: string
+          nullable: true
+        leaseUntil:
+          type: string
+          nullable: true
+        prUrl:
+          type: string
+          nullable: true
+        openEscalation:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [userTaskKey, kind, summary]
+          properties:
+            userTaskKey:
+              type: string
+            kind:
+              type: string
+            summary:
+              type: string
+              nullable: true
+          description: "Same shape as /status."
+        incident:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [key, type, message, since]
+          properties:
+            key:
+              type: string
+            type:
+              type: string
+              nullable: true
+            message:
+              type: string
+              nullable: true
+            since:
+              type: string
+              nullable: true
+          description: "Same shape as /status."
+        acknowledgedAt:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          nullable: true
+        updatedAt:
+          type: string
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunView"
     ActiveDelivery:
       type: object
       description: A delivery-graph run currently in flight, as reported by the status endpoint.
@@ -5558,6 +5678,53 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /run:
+    get:
+      operationId: getRun
+      x-cli:
+        command: [show]
+        positional: [key]
+      summary: "Look up ONE run by key at any stage (issue #1054) — queued, blocked-on, implementing, PR open, converging, merging, or terminal."
+      description: >-
+        `d8ctl nwf show <key>`. The key is `owner/repo#N` (a feature run, an epic, or a PR) or a
+        delivery-graph runKey, passed as the `key` QUERY value (`/run?key=nanobpm%2Fnano-coder%23332`): the
+        Nano Console proxy peels one percent-encoding layer before routing, so an encoded slash in a
+        PATH segment would split the key and 404 (the #744 transcript failure class). Unlike `/status` (in-flight
+        rows only) this answers for a feature BEFORE its PR opens, during convergence, and after merge.
+        Returns the run's kind, status/stage, effective settings, engine processInstanceKey(s), active
+        worker + lease, PR URL when known, open escalation, updatedAt, and child runs (feature → its
+        convergence-loop PR; epic → its slice PRs). The PR and delivery projections are the SAME ones
+        `/status` serves. 404 only when nwf has never tracked the key.
+      parameters:
+        - name: key
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: The run key — `owner/repo#N` (URL-encoded as a query value) or a delivery-graph runKey.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunView"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: nwf has never tracked this key.
           content:
             application/json:
               schema:

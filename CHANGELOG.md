@@ -1,3 +1,15 @@
+## [0.229.1](https://github.com/nanobpm/nano-workforce/compare/v0.229.0...v0.229.1) (2026-11-24)
+
+### Bug Fixes
+
+* **agents:** never block on all CI checks via bare gh pr checks --watch ([#1090](https://github.com/nanobpm/nano-workforce/issues/1090)) ([184249b](https://github.com/nanobpm/nano-workforce/commit/184249b30a67897380e4aed24b67f8ebafd00b12)), closes [#1087](https://github.com/nanobpm/nano-workforce/issues/1087)
+
+## [0.229.0](https://github.com/nanobpm/nano-workforce/compare/v0.228.0...v0.229.0) (2026-11-24)
+
+### Features
+
+* **api:** look up one run by key at any stage (GET /runs/{key}) ([#1069](https://github.com/nanobpm/nano-workforce/issues/1069)) ([f24d1f6](https://github.com/nanobpm/nano-workforce/commit/f24d1f69d1f1c152ea9c61dab4fa5a0a347c6559)), closes [#1054](https://github.com/nanobpm/nano-workforce/issues/1054)
+
 ## [0.228.0](https://github.com/nanobpm/nano-workforce/compare/v0.227.0...v0.228.0) (2026-11-24)
 
 ### Features

@@ -185,6 +185,12 @@ export function deriveFeatureDelivery(prStatus: string | null): FeatureDeliveryR
       return { status: "converged", label: "converged (not merged)" };
     case "abandoned":
       return { status: "abandoned", label: "PR abandoned" };
+    // The remaining PR terminals (`PR_TERMINAL_STATUSES`): a PR closed unmerged or failed is a
+    // finished, undelivered outcome — never `converging`, which would wedge the feature live forever.
+    case "closed":
+      return { status: "abandoned", label: "PR closed" };
+    case "failed":
+      return { status: "abandoned", label: "PR failed" };
     case null:
       return { status: "converging", label: "PR record missing" };
     default:

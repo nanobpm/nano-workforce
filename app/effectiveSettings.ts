@@ -37,7 +37,9 @@ export interface EffectiveSettings {
 
 const boolOrNull = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
 
-function blockedOnOf(probes: unknown): string[] | null {
+/** The ONE display rule for readiness probes: each target redacted via `redactProbeTargetForDisplay`;
+ *  no other probe field passes through. Shared by the start door and `GET /run`. */
+export function blockedOnOf(probes: unknown): string[] | null {
   if (!Array.isArray(probes) || probes.length === 0) return null;
   const targets: string[] = [];
   for (const p of probes) {

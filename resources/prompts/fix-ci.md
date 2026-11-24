@@ -39,6 +39,12 @@ The **failing check names** are appended to this prompt at dispatch — treat th
 list as the exact set of gates you must turn green. If the list is empty, inspect
 the PR's checks yourself (`gh pr checks`, `gh run view`).
 
+**Never wait on a bare `gh pr checks --watch`** — it returns only when *every* check
+finishes, and a merge-queue check (e.g. `Mergify Merge Queue`) stays pending until the
+PR merges, so it hangs forever after a failure. If you must wait, use
+`gh pr checks <n> --required --watch --fail-fast` (exits on the first failure or once
+all required checks pass); better, push your fix and let the convergence loop own CI.
+
 ## What to do
 
 1. Check out the PR's head branch (already provisioned as your `cwd` in host mode; else it
