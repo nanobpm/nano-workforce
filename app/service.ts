@@ -196,14 +196,14 @@ export { clampCiFixBudget, clampRounds, MAX_CI_FIX_CEILING, MAX_ROUNDS_CEILING }
 import { clampCiFixBudget, clampRounds } from "./rounds.ts";
 export const MAX_ROUNDS = clampRounds(process.env.NANO_PR_MAX_ROUNDS, 20);
 
-/** The round budget persisted on a PR row (`max_rounds`, issue #1088), clamped; the default when
- *  absent (no row, or a pre-154 row). The ONE reader handoffs, re-enrolls and `/run` share. */
 /** Sentinel `submitPr` round budget: "keep the budget already persisted on this PR's row" (issue
  *  #1088 review). Resolved INSIDE the per-PR submit lock against the row as it is then, so a
  *  handoff/re-enroll never writes a stale snapshot (or the default) over a concurrently-stamped one. */
 export const PERSISTED_MAX_ROUNDS = "persisted";
 export type MaxRoundsArg = number | typeof PERSISTED_MAX_ROUNDS;
 
+/** The round budget persisted on a PR row (`max_rounds`, issue #1088), clamped; the default when
+ *  absent (no row, or a pre-154 row). The ONE reader handoffs, re-enrolls and `/run` share. */
 export function persistedMaxRounds(row: { max_rounds?: number | null } | null | undefined): number {
   const v = row?.max_rounds;
   return typeof v === "number" && v > 0 ? clampRounds(v, MAX_ROUNDS) : MAX_ROUNDS;
