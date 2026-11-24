@@ -131,7 +131,30 @@ test("a feature run BEFORE its PR opens is found, with its settings and readines
   assertEquals(res.body.children, []);
   assertEquals(res.body.settings.converge, true);
   assertEquals(res.body.settings.autoMerge, true);
-  assertEquals(res.body.settings.blockedOn, [{ kind: "capability", target: "o/up#1" }]);
+  assertEquals(res.body.settings.blockedOn, ["o/up#1"]);
+});
+
+test("a feature's blockedOn is redacted display strings — never raw probes carrying credentials", async () => {
+  const app = memApp({ feature_runs: [feature()] }, PKS, [
+    {
+      name: "readinessProbes",
+      processInstanceKey: "proc-f",
+      scopeKey: "proc-f",
+      value: JSON.stringify([
+        { kind: "http", target: "https://user:TOKEN@host.example/health", headers: { Authorization: "x" } },
+        { kind: "command", target: "curl -H 'Authorization: Bearer TOKEN' x" },
+        { kind: "mystery", target: "TOKEN-opaque" },
+        { target: "TOKEN-kindless" },
+      ]),
+    },
+  ]);
+  const res = (await handler(input("o/r#5"), app)) as Row;
+  const shown: unknown[] = res.body.settings.blockedOn;
+  assertEquals(shown.length, 4);
+  for (const s of shown) assertEquals(typeof s, "string");
+  assertEquals(JSON.stringify(res.body).includes("TOKEN"), false);
+  assertEquals(String(shown[0]).includes("user:"), false);
+  assertEquals(shown.slice(1), ["<redacted>", "<redacted>", "<redacted>"]);
 });
 
 test("a converging feature carries its convergence-loop PR as a child, worker/lease and both instance keys", async () => {

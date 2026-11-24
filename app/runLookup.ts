@@ -12,6 +12,7 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { epicIsAcknowledgeable } from "./delivery.ts";
 import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRunsTracking } from "./deliveryGraphRun.ts";
+import { blockedOnOf } from "./effectiveSettings.ts";
 import { deriveFeatureDelivery, featureRunsTracking } from "./feature.ts";
 import { isFeatureDismissableTerminal } from "./featureReadModel.ts";
 import { PLAN_TERMINAL_STATUSES, plansTracking, planTasks } from "./plan.ts";
@@ -41,7 +42,7 @@ export interface RunSettings {
   humanApproval: boolean | null;
   /** The feature's readiness gate (the desugared `blockedOn`/`readiness` probes), read best-effort
    *  from the run's root-scope `readinessProbes` variable; null when none/unreadable. */
-  blockedOn: unknown[] | null;
+  blockedOn: Array<string | { waitGate: string | null; label: string | null }> | null;
   /** The PR loop's round budget (`maxRounds` root variable), best-effort; null when unset/unreadable. */
   maxRounds: number | null;
   autoResolveEscalations: boolean;
@@ -318,7 +319,8 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
         converge: feature.converge === 1,
         autoMerge: feature.auto_merge === 1,
         humanApproval: feature.human_approval === 1,
-        blockedOn: Array.isArray(probes) && probes.length > 0 ? probes : null,
+        // Redacted display strings only (never the raw probe: a target can carry credentials).
+        blockedOn: blockedOnOf(probes),
         maxRounds: child?.settings.maxRounds ?? null,
         autoResolveEscalations: feature.auto_resolve_escalations === 1,
         hasCustomInstructions: typeof feature.custom_instructions === "string" && feature.custom_instructions !== "",

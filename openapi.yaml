@@ -350,8 +350,17 @@ components:
             blockedOn:
               type: array
               nullable: true
-              items: {}
-              description: The feature's readiness probes (desugared blockedOn), best-effort from the engine.
+              items:
+                oneOf:
+                  - type: string
+                  - type: object
+                    properties:
+                      waitGate: {type: string, nullable: true}
+                      label: {type: string, nullable: true}
+              description: >-
+                A feature's readiness probe targets (desugared blockedOn), redacted for display (command
+                targets and unknown kinds are `<redacted>`, http userinfo is stripped) — strings only. An
+                epic parked on its inter-epic wait gate reports `{waitGate, label}` objects instead.
             maxRounds:
               type: number
               nullable: true
