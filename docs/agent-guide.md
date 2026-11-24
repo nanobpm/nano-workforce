@@ -394,6 +394,21 @@ clicks **Dispatch**. That click is the approval, bound to the previewed digest. 
 accepts `autoResolveEscalations` (§3). The running graph shows in **Active Delivery Graphs**,
 and `human` nodes are answered like escalations (§3), emitting their declared facts.
 
+**Watch a running graph node by node** (tool `getDeliveryGraphRun`, `d8ctl nwf graph progress <runKey>`):
+
+```bash
+curl -sS __BASE__/delivery-graph/runs/<runKey> | jq '.nodes[] | {id, state, boundFacts, lastProbe, escalation}'
+```
+
+Each node reports its `state` — `pending` (not reached), `active` (holds a token), `satisfied`
+(completed), `escalated` (parked on a timeout/contract escalation, see `escalation.userTaskKey`),
+`skipped` (withdrawn, or never reached by an ended run), `failed` (an active incident). Waits also
+carry `lastProbe` (`ready`/`detail`/`observed`) and `pollEvery`. `boundFacts` holds the facts a node
+bound (an agent's `pr`, a wait's `mergedSha`); `childRunKeys` lists the PR runs an agent/connector
+node bound. `mermaid` renders the graph with one state class per node. Everything is read live from
+the engine. Element start/finish times and the absolute next-poll time are not reported, because the
+engine's read model doesn't expose them.
+
 > **Completing a `wait` escalation proceeds *as not-ready*. It does NOT re-arm the gate.** With
 > `onTimeout: "escalate"` (default), an elapsed bound parks a task. Completing it releases the
 > token past the gate, so the downstream side-effecting node runs against the unmet dependency.
@@ -542,7 +557,7 @@ failed/garbled `gh` read is "not ready" (the bounded wait routes via `onTimeout`
 | Auto-resolutions (§3) | `listAutoResolutions` / `reviewAutoResolution` | `GET __BASE__/auto-resolutions` / `POST __BASE__/auto-resolutions/review` |
 | Cancel a run (§7) | `cancelInstance` | `POST __BASE__/actions/cancel` |
 | Publish a BPMN message | `postMessage` | `POST __BASE__/actions/message` |
-| Delivery graphs (§9) | `getDeliveryGraphVocabulary` / `compileDeliveryGraph` / `sequenceIssues` | `GET __BASE__/delivery-graph/vocabulary`, `POST __BASE__/actions/{compile-delivery-graph,start/sequence-issues}` |
+| Delivery graphs (§9) | `getDeliveryGraphVocabulary` / `compileDeliveryGraph` / `sequenceIssues` / `getDeliveryGraphRun` | `GET __BASE__/delivery-graph/vocabulary`, `POST __BASE__/actions/{compile-delivery-graph,start/sequence-issues}`, `GET __BASE__/delivery-graph/runs/<runKey>` |
 | This guide | `getAgentInstructions` (full) / `getAgentGuide(section?)` | `GET __BASE__/agent` / `GET __BASE__/agent/guide` |
 
 The engine-debug tools come from the urban framework and front `__ENGINE__` (§5).
