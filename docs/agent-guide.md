@@ -268,6 +268,13 @@ phase, PR status, delivery phase), effective `settings` (`converge`, `autoMerge`
 `incident`, `acknowledgedAt`, `updatedAt`, and `children` (feature → its convergence-loop PR;
 epic → its slice PRs). A `404` means nwf has never tracked the key.
 
+**Wait on `terminal`, not on `status`/`stage` order.** Each view carries a boolean `terminal`
+(the kind's own terminal set; a mid-handoff feature `opened` is NOT terminal). A PR stage can
+legitimately move **backwards** — `waiting_merge` → `waiting_review`/`converging` — during a
+merge-to-convergence handoff, so a poller that treats stage order as progress (or a status
+string as "done") stops early. A feature delegating to its PR reports the PR's rolled-up status
+(e.g. `merged` as soon as the PR merges, even before the poller syncs the feature row).
+
 ## 6. Debug the models and the prompts
 
 - **Processes.** Engine truth is the deployed XML (`urban_debug_get_process_definition_xml`).

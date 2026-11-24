@@ -357,3 +357,24 @@ test("an operator-cancelled PR run reads `cancelled`", async () => {
   );
   assertEquals(((await handler(input("o/r#9"), app)) as Row).body.status, "cancelled");
 });
+
+test("a feature delegating to its PR reads the PR's rollup status and a `terminal` flag (never status strings)", async () => {
+  const look = async (f: Row, p: Row) => ((await handler(input("o/r#5"), memApp({ feature_runs: [f], pull_requests: [p] }, PKS))) as Row).body;
+  // Mid-handoff `opened` (converge=1 with a pr_key) is NOT terminal while the PR still converges.
+  const mid = await look(feature({ status: "opened", pr_key: "o/r#9" }), pr());
+  assertEquals(mid.status, "converging");
+  assertEquals(mid.terminal, false);
+  // The feature row lags (still `converging`) but its PR merged: the lookup reads `merged`, terminal.
+  const merged = await look(feature({ status: "converging", pr_key: "o/r#9" }), pr({ status: "merged", merged_at: T0 }));
+  assertEquals(merged.status, "merged");
+  assertEquals(merged.terminal, true);
+  assertEquals(merged.children[0].terminal, true);
+  // A PR in a merge-to-convergence handoff (`waiting_review`) is not terminal.
+  const handoff = await look(feature({ status: "converging", pr_key: "o/r#9" }), pr({ status: "waiting_review" }));
+  assertEquals(handoff.terminal, false);
+  assertEquals(handoff.children[0].terminal, false);
+  // A raise-only finished `opened` (converge=0) stays terminal.
+  const raised = await look(feature({ status: "opened", converge: 0, pr_key: "o/r#9" }), pr());
+  assertEquals(raised.status, "opened");
+  assertEquals(raised.terminal, true);
+});

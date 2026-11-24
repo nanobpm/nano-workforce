@@ -12,7 +12,7 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRunsTracking } from "./deliveryGraphRun.ts";
 import { TERMINAL_STATUSES } from "./deliveryStatuses.ts";
-import { featureRunsTracking } from "./feature.ts";
+import { deriveFeatureDelivery, featureRunsTracking } from "./feature.ts";
 import { isFeatureDismissableTerminal } from "./featureReadModel.ts";
 import { PLAN_TERMINAL_STATUSES, plansTracking, planTasks } from "./plan.ts";
 import { parsePr } from "./prParse.ts";
@@ -52,6 +52,11 @@ export interface RunView {
   title: string | null;
   /** The run's workflow status (the effective, terminal-folded status; `incident` while parked on one). */
   status: string;
+  /** True once the run has reached its kind's terminal outcome (feature: the dismissable-terminal set,
+   *  excluding a mid-handoff `opened`; PR: converged/merged/abandoned; epic/delivery: their terminal
+   *  sets). Waiters MUST stop on this flag, never on `status` strings or stage order — a PR can move
+   *  `waiting_merge` → `waiting_review`/`converging` during a merge-to-convergence handoff. */
+  terminal: boolean;
   /** The pipeline stage/phase: a feature's derived pipeline stage, an epic's phase, a PR's status, a
    *  delivery run's phase. */
   stage: string | null;
@@ -165,6 +170,7 @@ async function prViews(
         kind: "pr" as const,
         title: p.title,
         status: terminal,
+        terminal: TERMINAL_STATUSES.includes(row.derived_status),
         stage: terminal,
         settings: {
           ...emptySettings(),
@@ -254,11 +260,29 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
     const probes = await readRootVar(engine, feature.process_key, "readinessProbes");
     const children = feature.pr_key ? await childPrViews(data, engine, [feature.pr_key]) : [];
     const child = children[0];
+    // The feature row's `derived_status` is synced from its PR only once per poll cycle, and reads
+    // `opened` mid-handoff: while the feature delegates to its child PR, the (already cancel/terminal-
+    // folded) child status is the truth, mapped through the ONE `deriveFeatureDelivery` rollup.
+    const delegating =
+      child !== undefined &&
+      (feature.derived_status === "converging" || (feature.derived_status === "opened" && feature.converge === 1 && feature.pr_key != null));
+    let topStatus = status;
+    let terminalBasis = feature.derived_status;
+    if (delegating && child) {
+      if (child.terminal && (child.status === "cancelled" || child.status === ORPHANED_PR_STATUS)) {
+        topStatus = child.status;
+        terminalBasis = "abandoned";
+      } else {
+        topStatus = deriveFeatureDelivery(child.status).status;
+        terminalBasis = topStatus;
+      }
+    }
     return withChildKeys({
       key,
       kind: "feature",
       title: feature.title ?? null,
-      status,
+      status: topStatus,
+      terminal: isFeatureDismissableTerminal({ derived_status: terminalBasis, converge: feature.converge, pr_key: feature.pr_key }),
       stage: derived.stage,
       settings: {
         ...emptySettings(),
@@ -300,6 +324,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       kind: "epic",
       title: plan.title ?? null,
       status: planStatus,
+      terminal: !planLive(plan),
       stage: gated ? gateLabel : (plan.epic_phase ?? planStatus),
       settings: {
         ...emptySettings(),
@@ -335,6 +360,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       kind: "delivery",
       title: d.title,
       status,
+      terminal,
       stage: d.phase ?? status,
       settings: { ...emptySettings(), autoResolveEscalations: d.autoResolveEscalations },
       processInstanceKey: d.processKey,

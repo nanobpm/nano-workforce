@@ -313,7 +313,7 @@ components:
       type: object
       description: "One run looked up by key at any stage (issue #1054) — GET /run?key=."
       additionalProperties: false
-      required: [key, kind, title, status, stage, settings, processInstanceKey, processInstanceKeys, activeWorker, leaseUntil, prUrl, openEscalation, incident, acknowledgedAt, createdAt, updatedAt, children]
+      required: [key, kind, title, status, terminal, stage, settings, processInstanceKey, processInstanceKeys, activeWorker, leaseUntil, prUrl, openEscalation, incident, acknowledgedAt, createdAt, updatedAt, children]
       properties:
         key:
           type: string
@@ -325,7 +325,10 @@ components:
           nullable: true
         status:
           type: string
-          description: The effective (terminal-folded) workflow status; `incident`/`orphaned` overlays as in /status.
+          description: The effective (terminal-folded) workflow status; `incident`/`orphaned` overlays as in /status. A feature delegating to its convergence-loop PR (`converging`, or a mid-handoff `opened`) reads its PR's rolled-up status.
+        terminal:
+          type: boolean
+          description: "True once the run reached its kind's terminal outcome. Wait on this flag — never on `status` strings or stage order: a PR stage can legitimately move `waiting_merge` → `waiting_review`/`converging` during a merge-to-convergence handoff, and a mid-handoff feature `opened` is not terminal."
         stage:
           type: string
           nullable: true
