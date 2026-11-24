@@ -4187,6 +4187,20 @@ const missingPrNotFound = new Set<string>();
 async function writeTerminalPrRow(data: DataLayer, prKey: string, status: "merged" | "abandoned", reason: string) {
   const parsed = parsePr(prKey);
   if (!parsed) return;
+  // Serialize with `submitPr` on the SAME per-PR lock: a concurrent enrollment (e.g. converge-feature
+  // calling submitPr mid-handoff) read "no row" and is awaiting metadata before its insert; without the
+  // lock this terminal insert lands in that window and the submit's insert fails on the primary key.
+  // Under the lock, whichever writer runs second re-reads the row and sees it.
+  await withPrSubmitLock(prKey, () => writeTerminalPrRowLocked(data, prKey, parsed, status, reason));
+}
+
+async function writeTerminalPrRowLocked(
+  data: DataLayer,
+  prKey: string,
+  parsed: ParsedPr,
+  status: "merged" | "abandoned",
+  reason: string,
+) {
   const table = prs(data);
   if (await table.get(prKey)) return;
   const ts = now();

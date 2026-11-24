@@ -9,6 +9,7 @@ import { deriveFeatureDelivery } from "./feature.ts";
 import {
   classifyMissingPrError,
   derivePlanDelivery,
+  lookupMissingPr,
   pollFeatureDelivery,
   MISSING_PR_GRACE_MS,
   MISSING_PR_RECHECK_MS, type MissingPrLookup,
@@ -56,7 +57,7 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
   };
   const data = {
     table: withTrackingViews((n: string, pk?: string) => tbl(n, pk)),
-    open: () => ({ exec }),
+    open: () => ({ exec, tx: async (fn: any) => fn({ exec: async () => ({ changed: 0 }) }) }),
   } as any as DataLayer;
   return { data, stores };
 }
@@ -230,4 +231,109 @@ test("settled done epics cost one task read per pass, not one per epic", async (
   void tasks;
   await reconcileMissingPrRows(data, "", { lookup: lookupOf(null), nowMs: T0, lastChecked: new Map(), notFound: new Set() });
   assertEquals({ finds, alls }, { finds: 0, alls: 1 });
+});
+
+test("a terminal write racing an in-flight submitPr enrollment waits for it (no PK conflict)", async () => {
+  const { data, stores } = memData();
+  seedFeature(stores, "o/r#30");
+  // Make submitPr's first PR-row read slow, so without the shared per-PR lock the reconciler's insert
+  // lands between submitPr's "no row" read and its own insert.
+  const orig = (data as any).table;
+  let gate!: () => void;
+  const held = new Promise<void>((r) => (gate = r));
+  let firstGet = true;
+  (data as any).table = (n: string, pk?: string) => {
+    const t = orig(n, pk);
+    if (n !== "pull_requests") return t;
+    return {
+      ...t,
+      get: async (id: any) => {
+        const v = await t.get(id);
+        if (firstGet) {
+          firstGet = false;
+          await held;
+        }
+        return v;
+      },
+      insert: async (row: any) => {
+        if (await t.get(row.pr_key)) throw new Error("UNIQUE constraint failed: pull_requests.pr_key");
+        return t.insert(row);
+      },
+    };
+  };
+  const engine = {
+    createInstance: async () => ({ processInstanceKey: "x" }),
+    searchProcessInstances: async () => [],
+    setVariables: async () => {},
+  } as any;
+  const { submitPr } = await import("./service.ts");
+  const prev = process.env.NANO_PR_GITHUB_TRANSPORT;
+  const prevFetch = globalThis.fetch;
+  process.env.NANO_PR_GITHUB_TRANSPORT = "token";
+  globalThis.fetch = (async () => new Response(JSON.stringify({ title: "t", body: "", head: { ref: "h", sha: "s" }, base: { ref: "main" } }), { status: 200 })) as typeof fetch;
+  try {
+    const sub = submitPr(data, engine, { repo: "o/r", number: 30, prKey: "o/r#30" } as any);
+    const rec = reconcileMissingPrRows(data, "", { lookup: lookupOf("merged"), nowMs: T0, lastChecked: new Map(), notFound: new Set() });
+    await new Promise((r) => setTimeout(r, 10));
+    gate();
+    await sub;
+    await rec;
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prev === undefined) delete process.env.NANO_PR_GITHUB_TRANSPORT;
+    else process.env.NANO_PR_GITHUB_TRANSPORT = prev;
+  }
+  assertEquals(stores.pull_requests.length, 1);
+});
+
+async function withFetch(responses: Array<{ status: number; body?: unknown } | Error>, fn: () => Promise<void>) {
+  const prevFetch = globalThis.fetch;
+  const prevT = process.env.NANO_PR_GITHUB_TRANSPORT;
+  process.env.NANO_PR_GITHUB_TRANSPORT = "token";
+  const queue = responses.slice();
+  globalThis.fetch = (async () => {
+    const next = queue.shift();
+    if (!next) throw new Error("unexpected fetch");
+    if (next instanceof Error) throw next;
+    return new Response(next.body === undefined ? null : JSON.stringify(next.body), { status: next.status });
+  }) as typeof fetch;
+  try {
+    await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevT === undefined) delete process.env.NANO_PR_GITHUB_TRANSPORT;
+    else process.env.NANO_PR_GITHUB_TRANSPORT = prevT;
+  }
+}
+
+test("lookupMissingPr (token): 404 + readable PR list → not_found", async () => {
+  await withFetch([{ status: 404 }, { status: 200, body: [] }], async () => {
+    assertEquals(await lookupMissingPr("o/r", 1, "t"), "not_found");
+  });
+});
+
+test("lookupMissingPr (token): 404 + denied/failed PR-list probe → unknown", async () => {
+  for (const probe of [{ status: 404 }, { status: 403 }, { status: 500 }, new Error("ECONNRESET")]) {
+    await withFetch([{ status: 404 }, probe], async () => {
+      assertEquals(await lookupMissingPr("o/r", 1, "t"), null);
+    });
+  }
+});
+
+test("lookupMissingPr (token): parses merged / closed-unmerged / open; non-404 error → unknown; no token → unknown", async () => {
+  await withFetch([{ status: 200, body: { state: "closed", merged: true, merged_at: "2026-01-01T00:00:00Z" } }], async () => {
+    assertEquals(await lookupMissingPr("o/r", 1, "t"), "merged");
+  });
+  await withFetch([{ status: 200, body: { state: "closed", merged: false, merged_at: null } }], async () => {
+    assertEquals(await lookupMissingPr("o/r", 1, "t"), "closed");
+  });
+  await withFetch([{ status: 200, body: { state: "open", merged: false } }], async () => {
+    assertEquals(await lookupMissingPr("o/r", 1, "t"), "open");
+  });
+  await withFetch([{ status: 502 }], async () => {
+    assertEquals(await lookupMissingPr("o/r", 1, "t"), null);
+  });
+  await withFetch([], async () => {
+    assertEquals(await lookupMissingPr("o/r", 1, ""), null);
+  });
 });
