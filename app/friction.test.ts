@@ -17,7 +17,9 @@ import {
   type FrictionConfig,
   type FrictionGithub,
   type FrictionIssue,
+  fetchRunHistory,
   fileFindings,
+  HISTORY_PAGE_CAP,
   fingerprintMarker,
   escalationSubjectUrl,
   frictionSummaryMayBeOpen,
@@ -444,4 +446,23 @@ test("escalationSubjectUrl links the escalation subject", () => {
   assertEquals(escalationSubjectUrl("o/r#12"), "https://github.com/o/r/issues/12");
   assertEquals(escalationSubjectUrl(null), null);
   assertEquals(escalationSubjectUrl("garbage"), null);
+});
+
+test("fetchRunHistory reads past an expired history prefix (#1074 review)", async () => {
+  // Iterations 0–9 expired; 10–209 retained, one record each. The first page is capped.
+  const retained = Array.from({ length: 200 }, (_, k) => rec("ASSISTANT", `r${k}`, [], k + 10));
+  const engine = {
+    searchAgentInstanceHistory: async (_key: string, f?: { loopIteration?: number }) =>
+      f?.loopIteration === undefined ? retained.slice(0, HISTORY_PAGE_CAP) : retained.filter((r) => r.loopIteration === f.loopIteration),
+  } as any;
+  assertEquals((await fetchRunHistory(engine, "A1")).length, 200);
+});
+
+test("an agent-supplied existingIssue with a different fingerprint is never trusted (#1074 review)", async () => {
+  const open = [{ number: 9, url: "https://github.com/acme/friction/issues/9", title: "t", body: fingerprintMarker("something-else") }];
+  const { github, calls } = githubStub(open);
+  const res = await fileFindings({ github, config: CONFIG, window: WINDOW }, parseFindings([finding({ occurrences: 1, runs: 1, existingIssue: 9 })]).findings);
+  assertEquals(calls, ["list"]);
+  assertEquals(res.updated, []);
+  assertEquals(res.skipped, 1);
 });

@@ -277,9 +277,12 @@ const MAX_ITERATIONS = 5000;
 export async function fetchRunHistory(engine: EngineClient, agentInstanceKey: string): Promise<AgentHistoryRecord[]> {
   const first = await engine.searchAgentInstanceHistory(agentInstanceKey);
   if (first.length < HISTORY_PAGE_CAP) return first;
+  // Retention may expire an early prefix of iterations, so never take the empty-streak exit before
+  // passing the highest iteration the capped first page proved exists.
+  const floor = first.reduce((m, r) => Math.max(m, r.loopIteration), -1);
   const all: AgentHistoryRecord[] = [];
   let emptyStreak = 0;
-  for (let i = 0; i < MAX_ITERATIONS && emptyStreak < 3; i++) {
+  for (let i = 0; i < MAX_ITERATIONS && (emptyStreak < 3 || i <= floor); i++) {
     const page = await engine.searchAgentInstanceHistory(agentInstanceKey, { loopIteration: i });
     if (page.length === 0) emptyStreak++;
     else {
@@ -865,14 +868,14 @@ export async function fileFindings(deps: FileDeps, findingsIn: readonly Friction
   }
   const open = await deps.github.listOpenIssues(deps.config.repo, FRICTION_LABEL);
   const openByFp = new Map<string, FrictionIssue>();
-  const openByNumber = new Map<number, FrictionIssue>();
   for (const issue of open) {
-    openByNumber.set(issue.number, issue);
     const fp = parseFingerprintMarker(issue.body);
     if (fp) openByFp.set(fp, issue);
   }
   for (const f of byFp.values()) {
-    const match = openByFp.get(f.fingerprint) ?? (f.existingIssue ? openByNumber.get(f.existingIssue) : undefined);
+    // Match by fingerprint only: an agent-supplied `existingIssue` is untrusted — a stale or wrong
+    // number would attach evidence to an unrelated finding and bypass the new-finding thresholds.
+    const match = openByFp.get(f.fingerprint);
     if (match) {
       await deps.github.comment(deps.config.repo, match.number, recurrenceComment(f, deps.window));
       result.updated.push(match.url || `https://github.com/${deps.config.repo}/issues/${match.number}`);
