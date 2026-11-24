@@ -378,3 +378,32 @@ test("a feature delegating to its PR reads the PR's rollup status and a `termina
   assertEquals(raised.status, "opened");
   assertEquals(raised.terminal, true);
 });
+
+test("a closed or failed PR is terminal (the canonical PR terminal set, not the epic-delivery one)", async () => {
+  for (const status of ["closed", "failed"]) {
+    const app = memApp({ pull_requests: [pr({ status })] }, PKS);
+    const body = ((await handler(input("o/r#9"), app)) as Row).body;
+    assertEquals(body.terminal, true, status);
+    assertEquals(body.incident, null, status);
+  }
+});
+
+test("a delegating feature's stage derives from the same rolled-up basis as its terminal flag", async () => {
+  const look = async (f: Row, p: Row) => ((await handler(input("o/r#5"), memApp({ feature_runs: [f], pull_requests: [p] }, PKS))) as Row).body;
+  const lagging = await look(feature({ status: "converging", pr_key: "o/r#9" }), pr({ status: "merged", merged_at: T0 }));
+  const mid = await look(feature({ status: "opened", pr_key: "o/r#9" }), pr({ status: "merged", merged_at: T0 }));
+  const done = await look(feature({ status: "merged", pr_key: "o/r#9" }), pr({ status: "merged", merged_at: T0 }));
+  assertEquals(lagging.stage, done.stage);
+  assertEquals(mid.stage, done.stage);
+  assertEquals(lagging.terminal, true);
+});
+
+test("a `done` epic is terminal only once its slice PRs resolved (converging or missing slices keep it live)", async () => {
+  const epic = { plan_key: "o/r#1", repo: "o/r", title: "Epic", status: "done", process_key: "proc-e", epic_phase: "Done", auto_merge: 1, acknowledged_at: null, created_at: T0, updated_at: T0 };
+  const look = async (tasks: Row[], prs: Row[]) =>
+    ((await handler(input("o/r#1"), memApp({ plans: [epic], plan_tasks: tasks, pull_requests: prs }, PKS))) as Row).body;
+  const slice = [{ id: 1, plan_key: "o/r#1", task_id: "a", pr_key: "o/r#9" }];
+  assertEquals((await look(slice, [pr()])).terminal, false);
+  assertEquals((await look(slice, [])).terminal, false);
+  assertEquals((await look(slice, [pr({ status: "merged", merged_at: T0 })])).terminal, true);
+});

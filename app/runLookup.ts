@@ -10,16 +10,18 @@
 // come from the ONE `user_tasks` read model. Nothing here re-derives a status rule.
 
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { epicIsAcknowledgeable } from "./delivery.ts";
 import { DELIVERY_GRAPH_TERMINAL_STATUSES, deliveryGraphRunsTracking } from "./deliveryGraphRun.ts";
-import { TERMINAL_STATUSES } from "./deliveryStatuses.ts";
 import { deriveFeatureDelivery, featureRunsTracking } from "./feature.ts";
 import { isFeatureDismissableTerminal } from "./featureReadModel.ts";
 import { PLAN_TERMINAL_STATUSES, plansTracking, planTasks } from "./plan.ts";
 import { parsePr } from "./prParse.ts";
+import { PR_TERMINAL_STATUSES } from "./pullRequestReadModel.ts";
 import { effectiveTerminalStatus, RUN_TERMINAL_STATUS, readRunCancellation } from "./runTerminal.ts";
 import {
   type ActiveDelivery,
   type ActivePr,
+  derivePlanDelivery,
   ORPHANED_PR_STATUS,
   projectDeliveryRows,
   projectPrRows,
@@ -53,7 +55,7 @@ export interface RunView {
   /** The run's workflow status (the effective, terminal-folded status; `incident` while parked on one). */
   status: string;
   /** True once the run has reached its kind's terminal outcome (feature: the dismissable-terminal set,
-   *  excluding a mid-handoff `opened`; PR: converged/merged/abandoned; epic/delivery: their terminal
+   *  excluding a mid-handoff `opened`; PR: `PR_TERMINAL_STATUSES` (incl. closed/failed); epic: acknowledgeable (done AND slices resolved); delivery: its terminal
    *  sets). Waiters MUST stop on this flag, never on `status` strings or stage order — a PR can move
    *  `waiting_merge` → `waiting_review`/`converging` during a merge-to-convergence handoff. */
   terminal: boolean;
@@ -162,7 +164,7 @@ async function prViews(
       // `/status` incident/orphaned overlay only to a non-terminal row — a cancelled run with a stale
       // `incident_key` must never read `incident`. `orphaned` survives only for an `abandoned` run
       // without a committed operator cancel.
-      const terminal = TERMINAL_STATUSES.includes(row.derived_status)
+      const terminal = PR_TERMINAL_STATUSES.includes(row.derived_status)
         ? await terminalPrStatus(data, row, p.status)
         : p.status;
       return {
@@ -170,7 +172,7 @@ async function prViews(
         kind: "pr" as const,
         title: p.title,
         status: terminal,
-        terminal: TERMINAL_STATUSES.includes(row.derived_status),
+        terminal: PR_TERMINAL_STATUSES.includes(row.derived_status),
         stage: terminal,
         settings: {
           ...emptySettings(),
@@ -187,7 +189,7 @@ async function prViews(
         leaseUntil: p.leaseUntil,
         prUrl: p.url,
         openEscalation: p.openEscalation,
-        incident: TERMINAL_STATUSES.includes(row.derived_status) ? null : p.incident,
+        incident: PR_TERMINAL_STATUSES.includes(row.derived_status) ? null : p.incident,
         acknowledgedAt: row.acknowledged_at ?? null,
         createdAt: row.created_at ?? null,
         updatedAt: p.updatedAt,
@@ -247,16 +249,6 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
     const tasks = await subjectTasks(data, "feature", key);
     const openEsc = newestEscalation(tasks);
     const status = await effectiveStatus(data, feature.derived_status, feature.process_key);
-    // Stage derives from the tracking VIEW's terminal-folded status (`abandoned` ∈ Done), not the
-    // presentational `cancelled` promotion, so an operator cancel still lands on the `Done` stage.
-    const derived = deriveStage({
-      status: feature.derived_status,
-      pr_key: feature.pr_key,
-      converge: feature.converge,
-      auto_merge: feature.auto_merge,
-      hasOpenBlockedTask: tasks.some((t) => t.element_id === "feature-blocked"),
-      hasOpenEscalationTask: tasks.some((t) => t.element_id === "feature-escalation"),
-    });
     const probes = await readRootVar(engine, feature.process_key, "readinessProbes");
     const children = feature.pr_key ? await childPrViews(data, engine, [feature.pr_key]) : [];
     const child = children[0];
@@ -277,6 +269,17 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
         terminalBasis = topStatus;
       }
     }
+    // Stage derives from the SAME rolled-up basis as `terminal` (a lagging feature row must not read
+    // `Converging` beside a merged child), keeping the tracking VIEW's raw `abandoned` (∈ Done) rather
+    // than the presentational `cancelled` promotion, so an operator cancel lands on the `Done` stage.
+    const derived = deriveStage({
+      status: terminalBasis,
+      pr_key: feature.pr_key,
+      converge: feature.converge,
+      auto_merge: feature.auto_merge,
+      hasOpenBlockedTask: tasks.some((t) => t.element_id === "feature-blocked"),
+      hasOpenEscalationTask: tasks.some((t) => t.element_id === "feature-escalation"),
+    });
     return withChildKeys({
       key,
       kind: "feature",
@@ -324,7 +327,9 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       kind: "epic",
       title: plan.title ?? null,
       status: planStatus,
-      terminal: !planLive(plan),
+      // Delivery-aware: a `done` epic whose slice PRs are still converging (or missing) is NOT
+      // terminal — the ONE canonical acknowledgeable predicate over the read-time delivery signal.
+      terminal: epicIsAcknowledgeable(plan.derived_status, await derivePlanDelivery(data, plan)),
       stage: gated ? gateLabel : (plan.epic_phase ?? planStatus),
       settings: {
         ...emptySettings(),
