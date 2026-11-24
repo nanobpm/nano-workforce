@@ -376,6 +376,16 @@ export async function loadDeliveryGraphProgress(
  */
 export const ENGINE_SEARCH_PAGE = 100;
 
+/** At most this many engine searches are in flight at once for one progress request. */
+export const ENGINE_MAX_IN_FLIGHT = 8;
+/**
+ * Hard cap on the engine searches ONE progress request may issue. The engine's search filters take a
+ * single `scopeKey`/`elementId` (no list selector — `VariableFilter`/`ElementInstanceFilter` in
+ * `@nanobpm/urban`), so reads cannot be batched; instead the total is bounded and, once exhausted,
+ * every further read answers empty and the result is flagged `truncated: true`.
+ */
+export const ENGINE_MAX_CALLS = 200;
+
 /** Inner elements of an agent/connector node whose scopes hold its node-local PR result / converge inputs. */
 const PR_SCOPE_SUFFIXES = ["_work", "_task"] as const;
 
@@ -401,6 +411,25 @@ export async function readEngineFacts(
   truncated: boolean;
 }> {
   let truncated = false;
+  // Concurrency limiter + total-call budget shared by every engine read of this request.
+  let calls = 0;
+  let inFlight = 0;
+  const queue: (() => void)[] = [];
+  const limited = async <T>(read: () => Promise<T[]>): Promise<T[]> => {
+    if (calls >= ENGINE_MAX_CALLS) {
+      truncated = true;
+      return [];
+    }
+    calls++;
+    if (inFlight >= ENGINE_MAX_IN_FLIGHT) await new Promise<void>((resolve) => queue.push(resolve));
+    inFlight++;
+    try {
+      return await read();
+    } finally {
+      inFlight--;
+      queue.shift()?.();
+    }
+  };
   const page = <T>(rows: T[]): T[] => {
     if (rows.length >= ENGINE_SEARCH_PAGE) truncated = true;
     return rows;
@@ -412,15 +441,19 @@ export async function readEngineFacts(
     if (n.kind === "agent" || n.kind === "connector") for (const f of ["pr", "prUrl"]) rootNames.add(`${n.element}_${f}`);
   }
   const elementSearch = async (elementId: string, state?: "ACTIVE") =>
-    page(await engine.searchElementInstances(state ? { processInstanceKey: pik, elementId, state } : { processInstanceKey: pik, elementId }));
-  const scopeVars = async (scopeKey: string) => page(await engine.searchVariables({ processInstanceKey: pik, scopeKey }));
+    page(
+      await limited(() =>
+        engine.searchElementInstances(state ? { processInstanceKey: pik, elementId, state } : { processInstanceKey: pik, elementId }),
+      ),
+    );
+  const scopeVars = async (scopeKey: string) => page(await limited(() => engine.searchVariables({ processInstanceKey: pik, scopeKey })));
 
   const [instances, activeElements, rootPages, userTasks, incidents] = await Promise.all([
-    engine.searchProcessInstances({ processInstanceKeys: [pik] }),
-    engine.searchElementInstances({ processInstanceKey: pik, state: "ACTIVE" }),
-    Promise.all([...rootNames].map((name) => engine.searchVariables({ processInstanceKey: pik, scopeKey: pik, name }))),
-    engine.searchUserTasks({ processInstanceKey: pik, state: "CREATED" }),
-    engine.searchIncidents({ processInstanceKey: pik, state: "ACTIVE" }),
+    limited(() => engine.searchProcessInstances({ processInstanceKeys: [pik] })),
+    limited(() => engine.searchElementInstances({ processInstanceKey: pik, state: "ACTIVE" })),
+    Promise.all([...rootNames].map((name) => limited(() => engine.searchVariables({ processInstanceKey: pik, scopeKey: pik, name })))),
+    limited(() => engine.searchUserTasks({ processInstanceKey: pik, state: "CREATED" })),
+    limited(() => engine.searchIncidents({ processInstanceKey: pik, state: "ACTIVE" })),
   ]);
   const elements = new Map<string, ElementInstanceFact>();
   for (const e of page(activeElements)) elements.set(e.elementInstanceKey, e);
@@ -445,7 +478,7 @@ export async function readEngineFacts(
         // iteration — flagging truncation only when that leaves the probe result unresolved.
         const [active, history] = await Promise.all([
           elementSearch(`${n.element}_probeLoop`, "ACTIVE"),
-          engine.searchElementInstances({ processInstanceKey: pik, elementId: `${n.element}_probeLoop` }),
+          limited(() => engine.searchElementInstances({ processInstanceKey: pik, elementId: `${n.element}_probeLoop` })),
         ]);
         const historyFull = history.length >= ENGINE_SEARCH_PAGE;
         const pool = historyFull ? active : [...history, ...active];

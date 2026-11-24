@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   deriveNodeProgress,
+  ENGINE_MAX_CALLS,
+  ENGINE_MAX_IN_FLIGHT,
   ENGINE_SEARCH_PAGE,
   type ElementInstanceFact,
   owningNodeElement,
@@ -432,4 +434,57 @@ test("an emitted issue reference (non-PR fact) is not reported as a child PR run
   });
   assert.deepEqual(out[0]?.boundFacts, { issue: "o/r#5" });
   assert.deepEqual(out[0]?.childRunKeys, []);
+});
+
+/** Wraps a fake engine so every search counts toward total calls and the in-flight high-water mark. */
+function countingEngine(inner: ReturnType<typeof pagedEngine>) {
+  const stats = { calls: 0, inFlight: 0, maxInFlight: 0 };
+  const wrap =
+    <A extends unknown[], R>(fn: (...a: A) => Promise<R>) =>
+    async (...a: A): Promise<R> => {
+      stats.calls++;
+      stats.inFlight++;
+      stats.maxInFlight = Math.max(stats.maxInFlight, stats.inFlight);
+      try {
+        await new Promise((r) => setTimeout(r, 1));
+        return await fn(...a);
+      } finally {
+        stats.inFlight--;
+      }
+    };
+  return {
+    stats,
+    engine: {
+      ...inner,
+      searchProcessInstances: wrap(inner.searchProcessInstances),
+      searchElementInstances: wrap(inner.searchElementInstances),
+      searchVariables: wrap(inner.searchVariables),
+      searchUserTasks: wrap(inner.searchUserTasks),
+      searchIncidents: wrap(inner.searchIncidents),
+    },
+  };
+}
+
+test("a large graph with many iterations stays under the in-flight and total engine-call limits", async () => {
+  const nodes: ResolvedNodeRef[] = [];
+  const elements: ElementInstanceFact[] = [];
+  for (let i = 0; i < 80; i++) {
+    const kind = i % 2 === 0 ? "wait" : "agent";
+    nodes.push({ id: `n${i}`, kind, element: `e${i}`, emits: [], dependsOn: [] });
+    for (let j = 0; j < 5; j++) elements.push({ elementId: `e${i}`, elementInstanceKey: String(i * 100 + j + 1), state: "COMPLETED" });
+    if (kind === "wait") for (let j = 0; j < 5; j++) elements.push({ elementId: `e${i}_probeLoop`, elementInstanceKey: String(i * 100 + 50 + j), state: "COMPLETED" });
+  }
+  const { engine, stats } = countingEngine(pagedEngine({ elements, variables: [] }));
+  const read = await readEngineFacts(engine, PIK, nodes);
+  assert.ok(stats.calls <= ENGINE_MAX_CALLS, `calls ${stats.calls}`);
+  assert.ok(stats.maxInFlight <= ENGINE_MAX_IN_FLIGHT, `in flight ${stats.maxInFlight}`);
+  assert.equal(stats.calls, ENGINE_MAX_CALLS);
+  assert.equal(read.truncated, true);
+});
+
+test("a small graph stays under the call cap and is not truncated", async () => {
+  const { engine, stats } = countingEngine(pagedEngine({ elements: [], variables: [] }));
+  const read = await readEngineFacts(engine, PIK, NODES);
+  assert.equal(read.truncated, false);
+  assert.ok(stats.maxInFlight <= ENGINE_MAX_IN_FLIGHT);
 });
