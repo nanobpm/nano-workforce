@@ -1,3 +1,9 @@
+## [0.231.0](https://github.com/nanobpm/nano-workforce/compare/v0.230.0...v0.231.0) (2026-11-25)
+
+### Features
+
+* **api:** wait for a run to reach a state (long-poll GET /run/wait) ([#1091](https://github.com/nanobpm/nano-workforce/issues/1091)) ([0b4a607](https://github.com/nanobpm/nano-workforce/commit/0b4a6077e3dd812e480c4f3f0cee7f9bd3e797b1)), closes [#1057](https://github.com/nanobpm/nano-workforce/issues/1057) [nano-ide#633](https://github.com/nanobpm/nano-ide/issues/633)
+
 ## [0.230.0](https://github.com/nanobpm/nano-workforce/compare/v0.229.4...v0.230.0) (2026-11-25)
 
 ### Features
