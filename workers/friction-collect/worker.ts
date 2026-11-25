@@ -8,7 +8,7 @@
 // variables, so the analyst's SLA boundary (`=agentSlaTimeout`) reads the value this step returns.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { AGENT_SLA_TIMEOUT } from "../../app/agentSla.ts";
-import { collectFriction, frictionAppBaseUrl, frictionConfig, frictionGithub } from "../../app/friction.ts";
+import { captureSelfReportedFriction, collectFriction, frictionAppBaseUrl, frictionConfig, frictionGithub } from "../../app/friction.ts";
 
 interface Out extends Record<string, unknown> {
   collectStatus: string;
@@ -25,6 +25,8 @@ const handler: AppJobHandler<Record<string, unknown>, Out> = async (job, app) =>
   const sweepKey = job.processInstanceKey != null ? String(job.processInstanceKey) : `friction-${Date.now()}`;
   let res: Awaited<ReturnType<typeof collectFriction>>;
   try {
+    // Fold in any self-reports (issue #1101) the poller has not captured yet, so the window is current.
+    await captureSelfReportedFriction(app.data, app.engine, new Date());
     res = await collectFriction({
     data: app.data,
     engine: app.engine,

@@ -115,3 +115,16 @@ of the form `::nano:result:: {json}`.
 every path. If you cannot complete the review (tooling failure, unreadable diff),
 return an empty `adversarialFindings` and explain why in `adversarialSummary`. A
 skipped local pass only means Copilot reviews as before, but a crash stalls the round.
+
+<!-- friction-notes:begin -->
+## Friction notes (optional result field)
+
+Keep brief friction notes as you go; report them in `friction`. Friction = time lost fighting the
+environment, docs or tooling, not the task's inherent difficulty. Empty is fine.
+
+Add them to the SAME result JSON you already write (no extra turn) as an optional top-level array:
+`"friction": [{ "what": "…", "turnsLost": 3, "surface": "AGENTS.md", "suggestedFix": "…", "targetRepo": "owner/repo" }]`
+— `what` and `surface` are required; `surface` is one of `AGENTS.md`, `prompt`, `skill`, `permission-rule`, `worker-config`, `missing-tool`.
+Be honest and concrete (a misleading doc you followed, a missing instruction you had to work out, a
+tool that fought you); omit `friction` entirely when there was none. Never put secrets in it.
+<!-- friction-notes:end -->

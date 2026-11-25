@@ -23,7 +23,26 @@ nano-coder permissions"), `timeout` (a bash/tool timeout), `missing_generated`
 (`ERR_MODULE_NOT_FOUND` for `nano-generated` — a single test file run without `npm run gen`),
 `repeated_command` (the same tool call 3+ times in one run), `failed_job` (a failed or
 lease-expired job), `incident`, `escalation` (an agent asked a human — check whether the
-target repo's `AGENTS.md` already answers it).
+target repo's `AGENTS.md` already answers it), `self_reported` (friction an agent reported
+**itself** in its result's optional `friction` array — `[surface] what (~N turns lost) — suggested
+fix: …`).
+
+### Weighing `self_reported` signals
+
+Self-reports are the only window onto **semantic** friction that leaves no mechanical trace — turns
+spent working out what an `AGENTS.md` should have said, a misleading doc or prompt followed and later
+undone, a wrong assumption corrected quietly. Use them, but treat them as **unreliable evidence**:
+
+- Agents **under-report** their own fumbles, and some reports are **confabulated** (plausible but
+  untrue, or blaming the environment for the task's inherent difficulty). The agent's proposed
+  `surface` / `suggestedFix` / `targetRepo` are hints, not conclusions.
+- **Prefer root causes that are corroborated** — by mechanical signals (a `tool_error`,
+  `permission_block`, `repeated_command`, … pointing the same way) or by self-reports from
+  **several distinct runs**. A single uncorroborated self-report is not a finding.
+- The filing thresholds (`NANO_FRICTION_MIN_OCCURRENCES` / `NANO_FRICTION_MIN_RUNS`) apply
+  **unchanged** to findings built on self-reports; count occurrences and distinct runs honestly.
+- The absence of self-reports proves nothing: a job that died or timed out reports none, and agents
+  rarely report a permission block as friction — the mechanical signals stay authoritative there.
 
 ## What to do
 
@@ -81,3 +100,16 @@ Write a JSON object to the file named by `AGENT_RESULT_FILE`:
 ```
 
 `findings` may be empty (`[]`) when nothing rises to a root cause.
+
+<!-- friction-notes:begin -->
+## Friction notes (optional result field)
+
+Keep brief friction notes as you go; report them in `friction`. Friction = time lost fighting the
+environment, docs or tooling, not the task's inherent difficulty. Empty is fine.
+
+Add them to the SAME result JSON you already write (no extra turn) as an optional top-level array:
+`"friction": [{ "what": "…", "turnsLost": 3, "surface": "AGENTS.md", "suggestedFix": "…", "targetRepo": "owner/repo" }]`
+— `what` and `surface` are required; `surface` is one of `AGENTS.md`, `prompt`, `skill`, `permission-rule`, `worker-config`, `missing-tool`.
+Be honest and concrete (a misleading doc you followed, a missing instruction you had to work out, a
+tool that fought you); omit `friction` entirely when there was none. Never put secrets in it.
+<!-- friction-notes:end -->

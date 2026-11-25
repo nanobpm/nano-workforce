@@ -11,6 +11,7 @@ import { bootTestApp } from "@nanobpm/urban-testkit";
 import {
   acquireLease,
   buildDigest,
+  captureSelfReportedFriction,
   collectFriction,
   excerptAround,
   extractRunSignals,
@@ -33,6 +34,7 @@ import {
   leaseHolder,
   markFailed,
   parseFindings,
+  parseFrictionNotes,
   parseFingerprintMarker,
   readWatermark,
   recordFiled,
@@ -1129,5 +1131,80 @@ test("an oversized oldest run never advances the watermark past later unread run
     await collectFriction({ data, engine, sweepKey: "S2", now: new Date(t0.getTime() + 24 * 3600_000), config: CONFIG, baseUrl: "http://h", historyByteCap: 5000 });
     const ex = data.source().db.all<{ excerpt: string }>("SELECT excerpt FROM friction_signals WHERE kind = 'permission_block'").map((r) => r.excerpt);
     assert(ex.some((e) => e.includes("next")), `NEXT was dropped: ${JSON.stringify(ex)}`);
+  });
+});
+
+// ── Self-reported friction (issue #1101) ─────────────────────────────────────────────────────
+
+test("parseFrictionNotes: absent/null/blank results are unchanged (no notes); valid notes are typed and redacted", () => {
+  for (const raw of [undefined, null, "", "  ", "null"]) assertEquals(parseFrictionNotes(raw), { notes: [], malformed: 0 });
+  const { notes, malformed } = parseFrictionNotes([
+    { what: "AGENTS.md never says to run npm run gen; token ghp_abcdefghijklmnopqrstuvwxyz0123", turnsLost: 4.4, surface: "AGENTS.md", suggestedFix: "say it", targetRepo: "acme/repo" },
+    { what: "x", surface: "not-a-surface" },
+    { surface: "prompt" },
+    "junk",
+  ]);
+  assertEquals(malformed, 3);
+  assertEquals(notes.length, 1);
+  assertEquals(notes[0]?.surface, "AGENTS.md");
+  assertEquals(notes[0]?.turnsLost, 4);
+  assertEquals(notes[0]?.targetRepo, "acme/repo");
+  assert(!notes[0]?.what.includes("ghp_"), "what is redacted");
+  assertEquals(parseFrictionNotes(JSON.stringify([{ what: "w", surface: "skill" }])).notes, [{ what: "w", surface: "skill" }]);
+});
+
+function varEngine(vars: { variableKey: string; value: unknown; processInstanceKey: string; scopeKey: string }[]) {
+  return {
+    searchVariables: async () => vars.map((v) => ({ ...v, name: "friction", value: JSON.stringify(v.value), isTruncated: false })),
+  };
+}
+
+test("captureSelfReportedFriction persists redacted notes with run linkage, idempotently", async () => {
+  await withData(async (data) => {
+    const engine = varEngine([
+      { variableKey: "V1", processInstanceKey: "P1", scopeKey: "E1", value: [{ what: "password hunter2 in docs", surface: "prompt", turnsLost: 2 }] },
+      { variableKey: "V2", processInstanceKey: "P2", scopeKey: "P2", value: null },
+    ]);
+    const now = new Date("2026-01-01T12:00:00.000Z");
+    assertEquals(await captureSelfReportedFriction(data, engine, now), 1);
+    assertEquals(await captureSelfReportedFriction(data, engine, now), 0, "re-capture inserts nothing");
+    const rows = data.source().db.all<{ process_instance_key: string; scope_key: string; what: string; turns_lost: number }>(
+      "SELECT process_instance_key, scope_key, what, turns_lost FROM friction_self_reports",
+    );
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0]?.process_instance_key, "P1");
+    assertEquals(rows[0]?.scope_key, "E1");
+    assertEquals(rows[0]?.turns_lost, 2);
+    assert(!rows[0]?.what.includes("hunter2"), "stored text is redacted");
+  });
+});
+
+test("collect emits self_reported signals into the digest, counts them, and respects digestMaxChars", async () => {
+  await withData(async (data) => {
+    const reports = Array.from({ length: 60 }, (_, i) => ({
+      variableKey: `V${i}`,
+      processInstanceKey: `P${i}`,
+      scopeKey: `E${i}`,
+      value: [{ what: `spent turns finding the build recipe ${"y".repeat(200)} ${i}`, surface: "AGENTS.md", suggestedFix: "document it" }],
+    }));
+    await captureSelfReportedFriction(data, varEngine(reports), new Date("2026-01-01T12:00:00.000Z"));
+    const { engine } = engineStub();
+    const res = await collectFriction({
+      data,
+      engine,
+      sweepKey: "SR",
+      now: new Date("2026-01-02T00:00:00.000Z"),
+      config: { ...CONFIG, digestMaxChars: 3000 },
+      baseUrl: "http://h",
+    });
+    assertEquals(res.status, "collected");
+    assertEquals(res.signalCount, 60);
+    assert(res.digest.includes("self_reported=60"), "per-kind count");
+    assert(res.digest.includes("### self_reported"), "self_reported group");
+    assert(res.digest.length <= 3000, "bounded digest");
+    const sweep = data.source().db.all<{ self_reported_count: number }>("SELECT self_reported_count FROM friction_sweeps WHERE sweep_key = 'SR'")[0];
+    assertEquals(sweep?.self_reported_count, 60);
+    const again = await collectFriction({ data, engine, sweepKey: "SR2", now: new Date("2026-01-02T06:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(again.signalCount, 0, "a later sweep never recounts a self-report");
   });
 });

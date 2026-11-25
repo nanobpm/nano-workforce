@@ -58,6 +58,8 @@ export const SIGNAL_KINDS = [
   "failed_job",
   "incident",
   "escalation",
+  // Issue #1101: friction an agent reported ITSELF in its result's optional `friction` array.
+  "self_reported",
 ] as const;
 export type SignalKind = (typeof SIGNAL_KINDS)[number];
 
@@ -379,6 +381,153 @@ function inWindow(ts: string | null | undefined, start: string, end: string): bo
   if (!ts) return false;
   const t = Date.parse(ts);
   return Number.isFinite(t) && t > Date.parse(start) && t <= Date.parse(end);
+}
+
+// ── Self-reported friction (issue #1101) ─────────────────────────────────────────────────────────
+
+/** The result key every `senior:*` agent MAY set in its canonical result (`AGENT_RESULT_FILE` /
+ *  `report_outcome`). One shape for every job type — no per-job variant. */
+export const AGENT_FRICTION_RESULT_KEY = "friction";
+
+/** One self-reported friction note: time the agent lost fighting the environment, docs or tooling. */
+export interface AgentFrictionNote {
+  what: string;
+  turnsLost?: number;
+  surface: FixSurface;
+  suggestedFix?: string;
+  targetRepo?: string;
+}
+
+const NOTE_TEXT_MAX = 600;
+
+function isFixSurface(v: unknown): v is FixSurface {
+  return typeof v === "string" && FIX_SURFACES.some((s) => s === v);
+}
+
+function optText(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() !== "" ? redact(v.trim()).slice(0, NOTE_TEXT_MAX) : undefined;
+}
+
+/** Validate an agent result's optional `friction` value (an array, or a JSON-encoded array). Absent /
+ *  null / blank is the common case and yields no notes; malformed entries (no `what`, unknown
+ *  `surface`) are dropped and counted. Every text field is REDACTED here, before anything stores it. */
+export function parseFrictionNotes(raw: unknown): { notes: AgentFrictionNote[]; malformed: number } {
+  let list: unknown = raw;
+  if (raw == null) return { notes: [], malformed: 0 };
+  if (typeof raw === "string") {
+    if (raw.trim() === "") return { notes: [], malformed: 0 };
+    try {
+      list = JSON.parse(raw);
+    } catch {
+      return { notes: [], malformed: 1 };
+    }
+  }
+  if (list == null) return { notes: [], malformed: 0 };
+  if (!Array.isArray(list)) return { notes: [], malformed: 1 };
+  const notes: AgentFrictionNote[] = [];
+  let malformed = 0;
+  for (const item of list) {
+    const what = isRecord(item) ? optText(item.what) : undefined;
+    if (!isRecord(item) || !what || !isFixSurface(item.surface)) {
+      malformed++;
+      continue;
+    }
+    const note: AgentFrictionNote = { what, surface: item.surface };
+    const turns = Number(item.turnsLost);
+    if (item.turnsLost != null && Number.isFinite(turns) && turns >= 0) note.turnsLost = Math.round(turns);
+    const fix = optText(item.suggestedFix);
+    if (fix) note.suggestedFix = fix;
+    const repo = typeof item.targetRepo === "string" && /^[\w.-]+\/[\w.-]+$/.test(item.targetRepo.trim()) ? item.targetRepo.trim() : undefined;
+    if (repo) note.targetRepo = repo;
+    notes.push(note);
+  }
+  return { notes, malformed };
+}
+
+/** Capture every reported `friction` result variable into `friction_self_reports` (redacted, with run
+ *  linkage). The engine propagates the agent's result key verbatim as a process variable, so a single
+ *  variable search finds them all. Idempotent: the row id hashes the variable key + value, so a re-read
+ *  inserts nothing and a later job overwriting the variable with a NEW report is captured as new. */
+export async function captureSelfReportedFriction(
+  data: DataLayer,
+  engine: Pick<EngineClient, "searchVariables">,
+  now: Date,
+): Promise<number> {
+  const vars = await engine.searchVariables({ name: AGENT_FRICTION_RESULT_KEY });
+  const at = now.toISOString();
+  const rows: unknown[][] = [];
+  for (const v of vars) {
+    if (v.isTruncated) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(v.value);
+    } catch {
+      continue;
+    }
+    const { notes } = parseFrictionNotes(value);
+    const base = createHash("sha256").update(`${v.variableKey}\u0000${v.value}`).digest("hex").slice(0, 16);
+    for (const [i, n] of notes.entries()) {
+      rows.push([
+        `${base}:${i}`,
+        v.processInstanceKey || null,
+        v.scopeKey || null,
+        v.variableKey,
+        n.what,
+        n.surface,
+        n.turnsLost ?? null,
+        n.suggestedFix ?? null,
+        n.targetRepo ?? null,
+        at,
+      ]);
+    }
+  }
+  if (rows.length === 0) return 0;
+  let inserted = 0;
+  await data.open().tx(async (t) => {
+    for (const r of rows) {
+      const res = await t.exec(
+        `INSERT OR IGNORE INTO friction_self_reports (id, process_instance_key, scope_key, variable_key, what, surface, turns_lost,
+           suggested_fix, target_repo, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        r,
+      );
+      inserted += res.changed;
+    }
+  });
+  return inserted;
+}
+
+interface SelfReportRow {
+  id: string;
+  process_instance_key: string | null;
+  what: string;
+  surface: string;
+  turns_lost: number | null;
+  suggested_fix: string | null;
+  target_repo: string | null;
+}
+
+/** The `self_reported` signals for the reports captured in `(start, end]`. */
+export function selfReportedSignals(data: DataLayer, start: string, end: string, baseUrl: string): FrictionSignal[] {
+  const rows = data
+    .source()
+    .db.all<SelfReportRow>(
+      "SELECT id, process_instance_key, what, surface, turns_lost, suggested_fix, target_repo FROM friction_self_reports WHERE captured_at > ? AND captured_at <= ? ORDER BY captured_at, id",
+      [start, end],
+    );
+  return rows.map((r) => {
+    const parts = [`[${r.surface}] ${r.what}`];
+    if (r.turns_lost != null) parts.push(`(~${r.turns_lost} turns lost)`);
+    if (r.suggested_fix) parts.push(`— suggested fix: ${r.suggested_fix}`);
+    if (r.target_repo) parts.push(`(repo ${r.target_repo})`);
+    return {
+      id: `self_reported:${r.id}`,
+      kind: "self_reported" as const,
+      runKey: canonicalRunKey(r.process_instance_key, `self:${r.id}`),
+      runUrl: r.process_instance_key ? cockpitUrlFor(baseUrl, r.process_instance_key) : null,
+      fingerprint: `${r.surface}:${normaliseMessage(r.what).slice(0, 120)}`,
+      excerpt: redact(parts.join(" ")).replace(/\s+/g, " ").slice(0, 400),
+    };
+  });
 }
 
 // ── Persistence ──────────────────────────────────────────────────────────────────────────────────
@@ -872,6 +1021,10 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     });
   }
 
+  // Agent self-reports (issue #1101), captured by the poller with run linkage. Read through the overlap
+  // like the transcripts; the recorded-id fence below drops anything an earlier sweep counted.
+  signals.push(...selfReportedSignals(data, readStart, windowEnd, deps.baseUrl));
+
   // Drop every signal an EARLIER sweep already recorded (issue #1074 review): an agent swept while
   // IDLE re-qualifies once its parent ends and supplies `completionDate`, and its transcript signals
   // would otherwise re-enter this window's digest + counts (the INSERT OR IGNORE below only fences the
@@ -933,8 +1086,8 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     await t.exec(
       `INSERT INTO friction_sweeps (sweep_key, window_start, window_end, status, runs_swept, signal_count,
          tool_error_count, permission_block_count, timeout_count, missing_generated_count, repeated_command_count,
-         failed_job_count, incident_count, escalation_count, tokens_total, digest, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         failed_job_count, incident_count, escalation_count, self_reported_count, tokens_total, digest, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sweepKey,
         windowStart,
@@ -950,6 +1103,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
         counts.failed_job,
         counts.incident,
         counts.escalation,
+        counts.self_reported,
         runs.reduce((n, r) => n + r.tokens, 0),
         digest || null,
         at,
