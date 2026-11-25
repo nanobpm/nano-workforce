@@ -24,7 +24,8 @@ import {
   signalRunUrls,
   observedSignalCounts,
   redactStructured,
-  HISTORY_PAGE_CAP,
+  HISTORY_PAGE_SIZE,
+  historyBudget,
   fingerprintMarker,
   escalationSubjectUrl,
   frictionSummaryMayBeOpen,
@@ -147,7 +148,7 @@ function engineStub(opts: { fail?: boolean; runs?: { key: string; at: string; re
       if (opts.fail) throw new Error("engine down");
       return (opts.runs ?? []).map((r) => ({ agentInstanceKey: r.key, status: "COMPLETED", completionDate: r.at, elementId: "implement-task" }));
     },
-    searchAgentInstanceHistory: async (key: string) => (opts.runs ?? []).find((r) => r.key === key)?.records ?? [],
+    searchAgentInstanceHistoryPage: async (key: string) => ({ items: (opts.runs ?? []).find((r) => r.key === key)?.records ?? [], page: {} }),
     searchJobs: async () => [],
     searchIncidents: async () => [],
   } as any;
@@ -177,6 +178,27 @@ test("collect advances the watermark, persists signals, and re-running the same 
     assertEquals(next.status, "noop");
     assertEquals(next.windowStart, now.toISOString());
     assertEquals(next.digest, "");
+  });
+});
+
+test("a byte-capped sweep does not advance the watermark past an unread run (#1095 review)", async () => {
+  await withData(async (data) => {
+    const big = (k: number) => rec("ASSISTANT", "y".repeat(4000), [], k);
+    const blocked = (who: string) => rec("TOOL_RESULT", `Blocked by nano-coder permissions: ${who}`, [], 99);
+    const { engine } = engineStub({
+      runs: [
+        // Listed out of instant order on purpose: the sweep must read oldest-first.
+        { key: "R2", at: "2026-01-01T18:00:00.000Z", records: [blocked("r2"), big(1), big(2)] },
+        { key: "R1", at: "2026-01-01T12:00:00.000Z", records: [blocked("r1"), big(1), big(2)] },
+      ],
+    });
+    const cap = 9_000; // fits R1's history, exhausts inside R2's
+    const first = await collectFriction({ data, engine, sweepKey: "S1", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h", historyByteCap: cap });
+    assert(Date.parse(first.windowEnd) < Date.parse("2026-01-01T18:00:00.000Z"), `watermark skipped the unread run: ${first.windowEnd}`);
+    assertEquals(readWatermark(data), first.windowEnd);
+    const second = await collectFriction({ data, engine, sweepKey: "S2", now: new Date("2026-01-02T00:01:00.000Z"), config: CONFIG, baseUrl: "http://h", historyByteCap: cap * 2 });
+    const ids = (await data.source().db.all<{ run_key: string }>("SELECT run_key FROM friction_signals")).map((r) => r.run_key);
+    assert(ids.some((k) => k.includes("R2")), `the capped run was never collected: ${JSON.stringify(ids)} ${JSON.stringify(second)}`);
   });
 });
 
@@ -385,7 +407,7 @@ test("an agent swept while IDLE and completed in a later window is counted once"
     const run = { agentInstanceKey: "R1", status: "IDLE", lastUpdatedDate: "2026-01-01T12:00:00.000Z", elementId: "implement-task" } as Record<string, unknown>;
     const engine = {
       searchAgentInstances: async () => [run],
-      searchAgentInstanceHistory: async () => records,
+      searchAgentInstanceHistoryPage: async () => ({ items: records, page: {} }),
       searchJobs: async () => [],
       searchIncidents: async () => [],
     } as any;
@@ -396,6 +418,31 @@ test("an agent swept while IDLE and completed in a later window is counted once"
     const second = await collectFriction({ data, engine, sweepKey: "S2", now: new Date("2026-01-02T12:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
     assertEquals(second.signalCount, 0, "already-recorded signals are not re-counted");
     assertEquals(second.digest, "");
+  });
+});
+
+test("a swept active run that gains new history is re-read, its new signal collected (#1098 review)", async () => {
+  await withData(async (data) => {
+    const records = [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x", [], 1)];
+    const run = { agentInstanceKey: "R1", status: "IDLE", lastUpdatedDate: "2026-01-01T12:00:00.000Z", elementId: "implement-task" } as Record<string, unknown>;
+    const engine = {
+      searchAgentInstances: async () => [run],
+      searchAgentInstanceHistoryPage: async () => ({ items: records, page: {} }),
+      searchJobs: async () => [],
+      searchIncidents: async () => [],
+    } as any;
+    const first = await collectFriction({ data, engine, sweepKey: "S1", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(first.signalCount, 1);
+    records.push(rec("TOOL_RESULT", "Blocked by nano-coder permissions: y", [], 2));
+    run.status = "COMPLETED";
+    run.lastUpdatedDate = "2026-01-02T06:00:00.000Z";
+    run.completionDate = "2026-01-02T06:00:00.000Z";
+    const second = await collectFriction({ data, engine, sweepKey: "S2", now: new Date("2026-01-02T06:30:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(second.signalCount, 1, "the new signal is collected; the old one is not re-counted");
+    const [row] = await data.source().db.all<{ run_instant: string }>("SELECT run_instant FROM friction_swept_runs WHERE run_key = ?", ["R1"]);
+    assertEquals(row?.run_instant, "2026-01-02T06:00:00.000Z", "the ledger is refreshed to the re-read instant");
+    const third = await collectFriction({ data, engine, sweepKey: "S3", now: new Date("2026-01-02T06:35:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(third.signalCount, 0);
   });
 });
 
@@ -467,14 +514,49 @@ test("escalationSubjectUrl links the escalation subject", () => {
   assertEquals(escalationSubjectUrl("garbage"), null);
 });
 
-test("fetchRunHistory reads past an expired history prefix (#1074 review)", async () => {
-  // Iterations 0–9 expired; 10–209 retained, one record each. The first page is capped.
-  const retained = Array.from({ length: 200 }, (_, k) => rec("ASSISTANT", `r${k}`, [], k + 10));
-  const engine = {
-    searchAgentInstanceHistory: async (_key: string, f?: { loopIteration?: number }) =>
-      f?.loopIteration === undefined ? retained.slice(0, HISTORY_PAGE_CAP) : retained.filter((r) => r.loopIteration === f.loopIteration),
+function pagedEngine(records: AgentHistoryRecord[], calls: { filter?: unknown; page?: { limit?: number; after?: string } }[] = []) {
+  return {
+    searchAgentInstanceHistoryPage: async (_key: string, q: { filter?: { commitStatus?: { $in?: string[] } }; page?: { limit?: number; after?: string } }) => {
+      calls.push(q);
+      const wanted = q.filter?.commitStatus?.$in ?? ["COMMITTED"];
+      const matching = records.filter((r) => wanted.includes(r.commitStatus));
+      const from = q.page?.after ? Number(q.page.after) : 0;
+      const limit = q.page?.limit ?? 100;
+      const items = matching.slice(from, from + limit);
+      return { items, page: { totalItems: matching.length, endCursor: items.length ? String(from + items.length) : undefined } };
+    },
   } as any;
-  assertEquals((await fetchRunHistory(engine, "A1")).length, 200);
+}
+
+for (const status of ["PENDING", "DISCARDED", "COMMITTED"]) {
+  test(`fetchRunHistory reads ${status} history records (#1095)`, async () => {
+    const r = { ...rec("TOOL_RESULT", "Blocked by nano-coder permissions: x"), commitStatus: status };
+    const got = await fetchRunHistory(pagedEngine([r]), "A1");
+    assertEquals(got.length, 1);
+    assertEquals(got[0].commitStatus, status);
+    const sig = extractRunSignals("A1", null, got).signals;
+    assertEquals(sig.length, 1);
+  });
+}
+
+test("fetchRunHistory pages across a page boundary until exhausted (#1095)", async () => {
+  const statuses = ["PENDING", "DISCARDED", "COMMITTED"];
+  const records = Array.from({ length: HISTORY_PAGE_SIZE * 2 + 7 }, (_, k) => ({ ...rec("ASSISTANT", `r${k}`, [], k), commitStatus: statuses[k % 3] }));
+  const calls: { page?: { limit?: number; after?: string } }[] = [];
+  const got = await fetchRunHistory(pagedEngine(records, calls), "A1");
+  assertEquals(got.length, records.length);
+  assertEquals(new Set(got.map((r) => r.historyItemKey)).size, records.length);
+  assertEquals(calls.length, 4, "paging stops on cursor exhaustion, not on a short page");
+  assertEquals(calls[1].page?.after, String(HISTORY_PAGE_SIZE));
+});
+
+test("fetchRunHistory stops at the per-sweep byte cap (#1095)", async () => {
+  const records = Array.from({ length: 50 }, (_, k) => rec("ASSISTANT", "y".repeat(1000), [], k));
+  const budget = historyBudget(10_000);
+  const got = await fetchRunHistory(pagedEngine(records), "A1", budget);
+  assert(got.length > 0 && got.length < 10);
+  assert(budget.exhausted);
+  assertEquals((await fetchRunHistory(pagedEngine(records), "A2", budget)).length, 0, "the cap spans the whole sweep");
 });
 
 test("an agent-supplied existingIssue with a different fingerprint is never trusted (#1074 review)", async () => {
@@ -600,7 +682,7 @@ test("run links are browser-facing cockpit links, never the protected history JS
   await withData(async (data) => {
     const engine = {
       searchAgentInstances: async () => [{ agentInstanceKey: "A9", processInstanceKey: "P9", status: "COMPLETED", completionDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
-      searchAgentInstanceHistory: async () => [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")],
+      searchAgentInstanceHistoryPage: async () => ({ items: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")], page: {} }),
       searchJobs: async () => [],
       searchIncidents: async () => [],
     } as any;
@@ -614,7 +696,7 @@ test("failed-job and incident signals carry cockpit run links for their process 
   await withData(async (data) => {
     const engine = {
       searchAgentInstances: async () => [],
-      searchAgentInstanceHistory: async () => [],
+      searchAgentInstanceHistoryPage: async () => ({ items: [], page: {} }),
       searchJobs: async ({ state }: { state: string }) => (state === "FAILED" ? [{ jobKey: "J7", type: "t", processInstanceKey: "P7", retries: 0 }] : []),
       searchIncidents: async () => [{ incidentKey: "I7", processInstanceKey: "P8", errorType: "E", errorMessage: "m" }],
     } as any;
@@ -645,7 +727,7 @@ test("a tool error, failed job and incident of ONE process instance count as one
   await withData(async (data) => {
     const engine = {
       searchAgentInstances: async () => [{ agentInstanceKey: "A1", processInstanceKey: "P1", status: "COMPLETED", completionDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
-      searchAgentInstanceHistory: async () => [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")],
+      searchAgentInstanceHistoryPage: async () => ({ items: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")], page: {} }),
       searchJobs: async ({ state }: { state: string }) => (state === "FAILED" ? [{ jobKey: "J1", type: "t", processInstanceKey: "P1", retries: 0 }] : []),
       searchIncidents: async () => [{ incidentKey: "I1", processInstanceKey: "P1", errorType: "E", errorMessage: "m" }],
     } as any;
@@ -770,7 +852,7 @@ test("an escalation and the transcript signals of one execution count as ONE run
     db.run("INSERT INTO escalations (pr_key, round_no, kind, question, status, asked_at) VALUES ('o/r#9', 1, 'question', 'Blocker', 'open', '2026-01-01T06:00:00.000Z')");
     const engine = {
       searchAgentInstances: async () => [{ agentInstanceKey: "A1", processInstanceKey: "P1", status: "COMPLETED", completionDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
-      searchAgentInstanceHistory: async () => [rec("TOOL_RESULT", "Error: one"), rec("TOOL_RESULT", "Error: two")],
+      searchAgentInstanceHistoryPage: async () => ({ items: [rec("TOOL_RESULT", "Error: one"), rec("TOOL_RESULT", "Error: two")], page: {} }),
       searchJobs: async () => [],
       searchIncidents: async () => [],
     } as any;
@@ -800,7 +882,7 @@ test("a still-THINKING run is collected by lastUpdatedDate, not deferred until i
     const records = [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")];
     const engine = {
       searchAgentInstances: async () => [{ agentInstanceKey: "R1", status: "THINKING", lastUpdatedDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
-      searchAgentInstanceHistory: async () => records,
+      searchAgentInstanceHistoryPage: async () => ({ items: records, page: {} }),
       searchJobs: async () => [],
       searchIncidents: async () => [],
     } as any;
@@ -828,7 +910,7 @@ test("an incident created AND resolved between two sweeps is still collected", a
     let incidents: { incidentKey: string; processInstanceKey: string; errorType: string; errorMessage: string; state: string }[] = [];
     const engine = {
       searchAgentInstances: async () => [],
-      searchAgentInstanceHistory: async () => [],
+      searchAgentInstanceHistoryPage: async () => ({ items: [], page: {} }),
       searchJobs: async () => [],
       searchIncidents: async (f?: { state?: string }) => incidents.filter((i) => !f?.state || i.state === f.state),
     } as any;
@@ -852,7 +934,7 @@ test("a job whose lease expired (TIMED_OUT) is collected as a lease-expiry signa
     const clock = { now: activatedAt };
     const engine = {
       searchAgentInstances: async () => [],
-      searchAgentInstanceHistory: async () => [],
+      searchAgentInstanceHistoryPage: async () => ({ items: [], page: {} }),
       searchJobs: async ({ state }: { state: string }) =>
         state === "TIMED_OUT" && clock.now > activatedAt + leaseMs ? [{ jobKey: "J5", type: "senior:implement", processInstanceKey: "P5", elementId: "impl" }] : [],
       searchIncidents: async () => [],
@@ -933,4 +1015,119 @@ test("dedupe index past the page cap refuses to write instead of duplicating an 
     "dedupe index incomplete",
   );
   assertEquals(created.length, 0);
+});
+
+// ── #1098 review round 2: short pages, overlap starvation, watermark rewind ─────────────────────
+
+test("fetchRunHistory keeps paging past a SHORT page whose cursor still advances (#1098 review)", async () => {
+  const pages = [
+    { items: [rec("ASSISTANT", "a", [], 1)], page: { endCursor: "c1" } },
+    { items: [rec("ASSISTANT", "b", [], 2)], page: { endCursor: "c2" } },
+    { items: [], page: { endCursor: "c2" } },
+  ];
+  let i = 0;
+  const engine = { searchAgentInstanceHistoryPage: async () => pages[Math.min(i++, pages.length - 1)] } as any;
+  const got = await fetchRunHistory(engine, "A1");
+  assertEquals(got.length, 2);
+  assertEquals(i, 3);
+});
+
+test("repeated sweeps under one cap never starve newer runs behind re-read overlap runs (#1098 review)", async () => {
+  await withData(async (data) => {
+    const big = (n: number) => Array.from({ length: 6 }, (_, k) => rec("ASSISTANT", "z".repeat(1000), [], n * 10 + k));
+    const t0 = new Date("2026-01-02T00:00:00.000Z");
+    const runs = [
+      { key: "OLD1", at: new Date(t0.getTime() - 50 * 60_000).toISOString(), records: big(1) },
+      { key: "OLD2", at: new Date(t0.getTime() - 20 * 60_000).toISOString(), records: big(2) },
+    ];
+    const { engine } = engineStub({ runs });
+    const cap = 7000;
+    await collectFriction({ data, engine, sweepKey: "S1", now: t0, config: CONFIG, baseUrl: "http://h" });
+    // A newer run with a signal lands; OLD1/OLD2 sit in the next sweep's overlap hour.
+    runs.push({ key: "NEW", at: new Date(t0.getTime() + 10 * 60_000).toISOString(), records: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")] });
+    const now2 = new Date(t0.getTime() + 20 * 60_000);
+    const s2 = await collectFriction({ data, engine, sweepKey: "S2", now: now2, config: CONFIG, baseUrl: "http://h", historyByteCap: cap });
+    assertEquals(s2.signalCount, 1, "the new run is read despite the overlap runs");
+    assertEquals(readWatermark(data), now2.toISOString());
+  });
+});
+
+test("a capped overlap run never rewinds the watermark (#1098 review)", async () => {
+  await withData(async (data) => {
+    const t0 = new Date("2026-01-02T00:00:00.000Z");
+    const runs: { key: string; at: string; records: AgentHistoryRecord[] }[] = [];
+    const { engine } = engineStub({ runs });
+    await collectFriction({ data, engine, sweepKey: "S1", now: t0, config: CONFIG, baseUrl: "http://h" });
+    runs.push({ key: "OV", at: new Date(t0.getTime() - 30 * 60_000).toISOString(), records: Array.from({ length: 20 }, (_, k) => rec("ASSISTANT", "q".repeat(1000), [], k)) });
+    const now2 = new Date(t0.getTime() + 60 * 60_000);
+    const s2 = await collectFriction({ data, engine, sweepKey: "S2", now: now2, config: CONFIG, baseUrl: "http://h", historyByteCap: 5000 });
+    assert(Date.parse(s2.windowEnd) >= Date.parse(s2.windowStart), `rewound: ${s2.windowStart} -> ${s2.windowEnd}`);
+    assertEquals(readWatermark(data), now2.toISOString());
+  });
+});
+
+// ── #1098 review round 3: timestamp ties and late-visible overlap runs under the byte cap ────────
+
+test("runs sharing a timestamp are each read in full across capped sweeps (#1098 review)", async () => {
+  await withData(async (data) => {
+    const t0 = new Date("2026-01-02T00:00:00.000Z");
+    const at = new Date(t0.getTime() - 30 * 60_000).toISOString();
+    const big = (tag: string) => [
+      ...Array.from({ length: 4 }, (_, k) => rec("ASSISTANT", "z".repeat(1000), [], k)),
+      rec("TOOL_RESULT", `Blocked by nano-coder permissions: ${tag}`, [], 9),
+    ];
+    const runs = [
+      { key: "R1", at, records: big("one") },
+      { key: "R2", at, records: big("two") },
+    ];
+    const { engine } = engineStub({ runs });
+    const cap = 6000; // each run fits alone, both together do not
+    const sweeps = [];
+    for (let i = 0; i < 3; i++) {
+      sweeps.push(
+        await collectFriction({ data, engine, sweepKey: `S${i}`, now: new Date(t0.getTime() + i * 60_000), config: CONFIG, baseUrl: "http://h", historyByteCap: cap }),
+      );
+    }
+    const ids = data.source().db.all<{ excerpt: string }>("SELECT excerpt FROM friction_signals WHERE kind = 'permission_block'").map((r) => r.excerpt);
+    assertEquals(ids.length, 2, `both tied runs collected in full: ${JSON.stringify(ids)}`);
+    assertEquals(readWatermark(data), new Date(t0.getTime() + 2 * 60_000).toISOString());
+  });
+});
+
+test("a late-visible overlap run whose first read is capped is still collected later (#1098 review)", async () => {
+  await withData(async (data) => {
+    const t0 = new Date("2026-01-02T00:00:00.000Z");
+    const runs: { key: string; at: string; records: AgentHistoryRecord[] }[] = [];
+    const { engine } = engineStub({ runs });
+    await collectFriction({ data, engine, sweepKey: "S1", now: t0, config: CONFIG, baseUrl: "http://h" });
+    const fill = Array.from({ length: 4 }, (_, k) => rec("ASSISTANT", "z".repeat(1000), [], k));
+    runs.push({ key: "EARLY", at: new Date(t0.getTime() - 40 * 60_000).toISOString(), records: fill });
+    runs.push({
+      key: "LATE",
+      at: new Date(t0.getTime() - 30 * 60_000).toISOString(),
+      records: [...fill, rec("TOOL_RESULT", "Blocked by nano-coder permissions: late", [], 9)],
+    });
+    const cap = 6000;
+    await collectFriction({ data, engine, sweepKey: "S2", now: new Date(t0.getTime() + 60 * 60_000), config: CONFIG, baseUrl: "http://h", historyByteCap: cap });
+    const s3 = await collectFriction({ data, engine, sweepKey: "S3", now: new Date(t0.getTime() + 61 * 60_000), config: CONFIG, baseUrl: "http://h", historyByteCap: cap });
+    assertEquals(s3.signalCount, 1, "the capped late-visible run is read on the next sweep");
+  });
+});
+
+test("an oversized oldest run never advances the watermark past later unread runs (#1098 adversarial)", async () => {
+  await withData(async (data) => {
+    const t0 = new Date("2026-01-02T00:00:00.000Z");
+    const huge = Array.from({ length: 20 }, (_, k) => rec("ASSISTANT", "q".repeat(1000), [], k));
+    const { engine } = engineStub({
+      runs: [
+        { key: "HUGE", at: new Date(t0.getTime() - 10 * 3600_000).toISOString(), records: huge },
+        { key: "NEXT", at: new Date(t0.getTime() - 5 * 3600_000).toISOString(), records: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: next", [], 9)] },
+      ],
+    });
+    const s1 = await collectFriction({ data, engine, sweepKey: "S1", now: t0, config: CONFIG, baseUrl: "http://h", historyByteCap: 5000 });
+    assert(Date.parse(s1.windowEnd) < Date.parse(new Date(t0.getTime() - 5 * 3600_000).toISOString()), `watermark skipped NEXT: ${s1.windowEnd}`);
+    await collectFriction({ data, engine, sweepKey: "S2", now: new Date(t0.getTime() + 24 * 3600_000), config: CONFIG, baseUrl: "http://h", historyByteCap: 5000 });
+    const ex = data.source().db.all<{ excerpt: string }>("SELECT excerpt FROM friction_signals WHERE kind = 'permission_block'").map((r) => r.excerpt);
+    assert(ex.some((e) => e.includes("next")), `NEXT was dropped: ${JSON.stringify(ex)}`);
+  });
 });

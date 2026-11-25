@@ -299,34 +299,73 @@ export function extractRunSignals(runKey: string, runUrl: string | null, records
   return { signals, tokens, turns: iterations.size };
 }
 
-/** History search has no paging parameter; the engine may cap one unfiltered page. When a page looks
- *  capped, re-read the run one loop iteration at a time so a long run is never silently truncated.
- *
- *  KNOWN LIMITATION: the `EngineClient.searchAgentInstanceHistory` seam returns only COMMITTED history
- *  items — in-flight (uncommitted/pending) records of a still-running agent are not visible here, so a
- *  sweep can under-count friction for runs active at sweep time. Read through the seam only (never the
- *  engine REST API directly). Follow-up nanobpm/nano-workforce#1095 covers all three commit statuses
- *  with proper paging (gated on nano-ide#630). */
-export const HISTORY_PAGE_CAP = 100;
-const MAX_ITERATIONS = 5000;
+/** Every engine commit status a friction sweep reads (issue #1095). The engine defaults a history
+ *  search without a `commitStatus` to COMMITTED only, which hides an in-flight run's PENDING records
+ *  and a superseded attempt's DISCARDED ones — exactly where friction (a failed/expired attempt) lives.
+ *  Each record keeps its unique `historyItemKey`, so signal ids stay idempotent per
+ *  (sweep_key, fingerprint, run_key) across statuses and re-reads. */
+export const HISTORY_COMMIT_STATUSES = ["PENDING", "DISCARDED", "COMMITTED"] as const;
+/** Page size for the paged history read. */
+export const HISTORY_PAGE_SIZE = 100;
+/** Default per-sweep byte budget for history read across ALL runs (bounds a sweep's memory/time). */
+export const HISTORY_SWEEP_BYTE_CAP = 8 * 1024 * 1024;
+const MAX_PAGES = 5000;
 
-export async function fetchRunHistory(engine: EngineClient, agentInstanceKey: string): Promise<AgentHistoryRecord[]> {
-  const first = await engine.searchAgentInstanceHistory(agentInstanceKey);
-  if (first.length < HISTORY_PAGE_CAP) return first;
-  // Retention may expire an early prefix of iterations, so never take the empty-streak exit before
-  // passing the highest iteration the capped first page proved exists.
-  const floor = first.reduce((m, r) => Math.max(m, r.loopIteration), -1);
+/** A mutable per-sweep read budget shared by every `fetchRunHistory` call in one sweep. */
+export interface HistoryBudget {
+  remainingBytes: number;
+  /** Set once the cap stopped a read early (the sweep reports it). */
+  exhausted: boolean;
+}
+
+export function historyBudget(bytes: number = HISTORY_SWEEP_BYTE_CAP): HistoryBudget {
+  return { remainingBytes: bytes, exhausted: false };
+}
+
+function recordBytes(rec: AgentHistoryRecord): number {
+  return Buffer.byteLength(JSON.stringify(rec), "utf8");
+}
+
+/** Read one run's history across PENDING, DISCARDED and COMMITTED through the paged read-model
+ *  query (`EngineClient.searchAgentInstanceHistoryPage`, never the engine REST API directly), following
+ *  the page cursor until exhausted or the sweep's byte `budget` runs out. Records are de-duplicated by
+ *  their unique `historyItemKey` so a page-boundary overlap never double-counts. */
+export async function fetchRunHistory(
+  engine: EngineClient,
+  agentInstanceKey: string,
+  budget: HistoryBudget = historyBudget(),
+): Promise<AgentHistoryRecord[]> {
   const all: AgentHistoryRecord[] = [];
-  let emptyStreak = 0;
-  for (let i = 0; i < MAX_ITERATIONS && (emptyStreak < 3 || i <= floor); i++) {
-    const page = await engine.searchAgentInstanceHistory(agentInstanceKey, { loopIteration: i });
-    if (page.length === 0) emptyStreak++;
-    else {
-      emptyStreak = 0;
-      all.push(...page);
+  const seen = new Set<string>();
+  let after: string | undefined;
+  for (let i = 0; i < MAX_PAGES; i++) {
+    if (budget.remainingBytes <= 0) {
+      budget.exhausted = true;
+      break;
     }
+    const res = await engine.searchAgentInstanceHistoryPage(agentInstanceKey, {
+      filter: { commitStatus: { $in: [...HISTORY_COMMIT_STATUSES] } },
+      page: after === undefined ? { limit: HISTORY_PAGE_SIZE } : { limit: HISTORY_PAGE_SIZE, after },
+    });
+    for (const rec of res.items) {
+      if (seen.has(rec.historyItemKey)) continue;
+      const size = recordBytes(rec);
+      if (size > budget.remainingBytes) {
+        budget.remainingBytes = 0;
+        budget.exhausted = true;
+        return all;
+      }
+      budget.remainingBytes -= size;
+      seen.add(rec.historyItemKey);
+      all.push(rec);
+    }
+    const cursor = res.page.endCursor ?? undefined;
+    // Stop on cursor exhaustion/repetition ONLY: the mapper can drop malformed rows from a page while
+    // keeping its cursor, so a short page is not proof the history ended (#1098 review).
+    if (!cursor || cursor === after) break;
+    after = cursor;
   }
-  return all.length > 0 ? all : first;
+  return all;
 }
 
 /** The instant an agent run last moved, used to place it in a window. Selected by `lastUpdatedDate`
@@ -522,6 +561,8 @@ export interface CollectDeps {
   /** Base for per-run links (`NANO_WORKFORCE_BASE_URL`). */
   baseUrl: string;
   log?: { warn(msg: string, meta?: Record<string, unknown>): void };
+  /** Per-sweep history byte cap (default {@link HISTORY_SWEEP_BYTE_CAP}). */
+  historyByteCap?: number;
 }
 
 export interface CollectResult {
@@ -630,6 +671,22 @@ function warnIfFullPage(log: CollectDeps["log"], what: string, n: number): void 
   }
 }
 
+/** Agent-run `keys` already fully read by an earlier sweep (`friction_swept_runs`), mapped to the
+ *  run instant they were read at. A run whose CURRENT instant differs has gained history since. */
+export function sweptRunKeys(data: DataLayer, keys: readonly string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const db = data.source().db;
+  for (let i = 0; i < keys.length; i += 500) {
+    const chunk = keys.slice(i, i + 500);
+    const rows = db.all<{ run_key: string; run_instant: string }>(
+      `SELECT run_key, run_instant FROM friction_swept_runs WHERE run_key IN (${chunk.map(() => "?").join(", ")})`,
+      chunk,
+    );
+    for (const r of rows) out.set(r.run_key, r.run_instant);
+  }
+  return out;
+}
+
 /** The subset of `ids` already persisted in `friction_signals` (by any earlier sweep). */
 export function recordedSignalIds(data: DataLayer, ids: readonly string[]): Set<string> {
   const out = new Set<string>();
@@ -660,7 +717,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     };
   }
   const priorWatermark = readWatermark(data);
-  const windowEnd = deps.now.toISOString();
+  let windowEnd = deps.now.toISOString();
   const windowStart = priorWatermark ?? new Date(deps.now.getTime() - FIRST_SWEEP_LOOKBACK_MS).toISOString();
   // The READ window reaches SWEEP_OVERLAP_MS behind the watermark (late-visible completions).
   const readStart = priorWatermark === null ? windowStart : new Date(Date.parse(priorWatermark) - SWEEP_OVERLAP_MS).toISOString();
@@ -668,12 +725,55 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
   // ── Read (no writes yet: any throw here leaves the watermark where it was). ──
   const signals: FrictionSignal[] = [];
   const runs: RunSummary[] = [];
+  const budget = historyBudget(deps.historyByteCap);
   const allRuns = await engine.searchAgentInstances();
   warnIfFullPage(deps.log, "agent instances", allRuns.length);
-  for (const run of allRuns) {
-    const instant = runInstant(run);
-    if (!inWindow(instant, readStart, windowEnd)) continue;
-    const history = await fetchRunHistory(engine, run.agentInstanceKey);
+  // Read every run in (readStart, windowEnd] that the per-run ledger (`friction_swept_runs`) does not
+  // already hold, OLDEST-FIRST. Already-swept runs cost no budget (no overlap starvation), and a
+  // late-visible overlap run or a timestamp tie left unread by the byte cap stays a candidate: it is
+  // never recorded in the ledger, and the watermark never advances past it (#1098 review).
+  const swept = sweptRunKeys(data, allRuns.map((r) => r.agentInstanceKey));
+  const byInstant = (a: AgentInstanceSummary, b: AgentInstanceSummary) =>
+    Date.parse(runInstant(a) ?? "") - Date.parse(runInstant(b) ?? "");
+  const candidates = allRuns
+    // Skip a ledgered run only while its instant is unchanged: an active run that gained history
+    // since it was swept is re-read (earlier signals are deduped by id below) — #1098 review.
+    .filter((run) => swept.get(run.agentInstanceKey) !== (runInstant(run) ?? windowEnd) && inWindow(runInstant(run), readStart, windowEnd))
+    .sort(byInstant);
+  const fullyRead: { key: string; instant: string }[] = [];
+  let firstUnread: string | null = null;
+  for (const [i, run] of candidates.entries()) {
+    const instant = runInstant(run) ?? windowEnd;
+    const history = await fetchRunHistory(engine, run.agentInstanceKey, budget);
+    if (budget.exhausted) {
+      if (fullyRead.length === 0) {
+        // Degenerate: the oldest unswept run alone exceeds the cap. Leaving it unread would wedge every
+        // future sweep on it, so keep its truncated signals and record it as swept.
+        deps.log?.warn("friction collect: a single run's history exceeds the byte cap — collected truncated", {
+          run: run.agentInstanceKey,
+        });
+        pushRun(run, instant, history);
+        fullyRead.push({ key: run.agentInstanceKey, instant });
+        // Every LATER candidate is still unread: clamp the watermark to the next one so it is never
+        // skipped past (#1098 adversarial review).
+        const next = candidates[i + 1];
+        if (next) firstUnread = runInstant(next) ?? windowEnd;
+      } else {
+        // Drop the partial read; this run and every later one stay unread for the next sweep.
+        firstUnread = instant;
+      }
+      break;
+    }
+    pushRun(run, instant, history);
+    fullyRead.push({ key: run.agentInstanceKey, instant });
+  }
+  if (firstUnread !== null) {
+    // Never advance past an unread run (but never rewind below the prior watermark either: the
+    // ledger, not the watermark, carries progress through timestamp ties and overlap runs).
+    const clamped = Date.parse(firstUnread) - 1;
+    windowEnd = new Date(Math.max(Date.parse(windowStart), Math.min(Date.parse(windowEnd), clamped))).toISOString();
+  }
+  function pushRun(run: AgentInstanceSummary, instant: string | null, history: AgentHistoryRecord[]): void {
     const ex = extractRunSignals(run.agentInstanceKey, cockpitUrlFor(deps.baseUrl, run.processInstanceKey), history);
     const metricTokens = run.metrics ? run.metrics.inputTokens + run.metrics.outputTokens : 0;
     // Count runs by the CANONICAL run identity (the owning process instance) shared with failed-job and
@@ -689,6 +789,12 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
       tokens: ex.tokens || metricTokens,
       turns: ex.turns,
       signals: ex.signals.length,
+    });
+  }
+  if (firstUnread !== null) {
+    deps.log?.warn("friction collect: history byte cap reached — unread runs re-swept next time", {
+      cap: deps.historyByteCap ?? HISTORY_SWEEP_BYTE_CAP,
+      windowEnd,
     });
   }
   // Engine-wide records carry no timestamp, so they are windowed by "not yet recorded" — the stable
@@ -792,10 +898,6 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
   }
 
   // ── Commit: signals + sweep row + watermark CAS, atomically. ──
-  // KNOWN LIMITATION (maintainer-waived, #1074 review): the watermark advances over a window whose
-  // agent history was read COMMITTED-only (see `fetchRunHistory`), so PENDING/DISCARDED records in it
-  // are not collected. Reading all three statuses with paging before advancing is tracked in
-  // nanobpm/nano-workforce#1095 (readiness-gated on nanobpm/nano-ide#630).
   const counts = countByKind(signals);
   const at = deps.now.toISOString();
   const status: CollectResult["status"] = signals.length > 0 ? "collected" : "noop";
@@ -810,6 +912,18 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
             priorWatermark,
           ]);
     if (cas.changed !== 1) return true; // a concurrent sweep claimed this window — persist nothing
+    for (const r of fullyRead) {
+      await t.exec(`INSERT INTO friction_swept_runs (run_key, run_instant, sweep_key, swept_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(run_key) DO UPDATE SET run_instant = excluded.run_instant, sweep_key = excluded.sweep_key, swept_at = excluded.swept_at`, [
+        r.key,
+        r.instant,
+        sweepKey,
+        at,
+      ]);
+    }
+    // Prune ledger rows the next sweep's read window can no longer reach.
+    const horizon = new Date(Date.parse(windowEnd) - SWEEP_OVERLAP_MS).toISOString();
+    await t.exec("DELETE FROM friction_swept_runs WHERE run_instant <= ?", [horizon]);
     for (const s of signals) {
       await t.exec(
         "INSERT OR IGNORE INTO friction_signals (id, sweep_key, kind, run_key, run_url, fingerprint, excerpt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
