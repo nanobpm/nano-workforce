@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import type { AgentHistoryRecord, AgentInstanceSummary, DataLayer, EngineClient } from "@nanobpm/urban";
 import { publicBaseUrl } from "./blackboard.ts";
 import { readEnvOr } from "./contracts.ts";
+import { fetchFullVariableValue } from "./deliveryGraphProgress.ts";
 import { runGh, useGh } from "./github.ts";
 import { parsePr } from "./prParse.ts";
 
@@ -437,7 +438,10 @@ export function parseFrictionNotes(raw: unknown): { notes: AgentFrictionNote[]; 
     if (item.turnsLost != null && Number.isFinite(turns) && turns >= 0) note.turnsLost = Math.round(turns);
     const fix = optText(item.suggestedFix);
     if (fix) note.suggestedFix = fix;
-    const repo = typeof item.targetRepo === "string" && /^[\w.-]+\/[\w.-]+$/.test(item.targetRepo.trim()) ? item.targetRepo.trim() : undefined;
+    // A repo hint is stored verbatim, so it must pass the redactor UNCHANGED: a credential-shaped
+    // component (e.g. `ghp_…/repo`) would otherwise persist a secret — discard rather than store it.
+    const repoRaw = typeof item.targetRepo === "string" ? item.targetRepo.trim() : "";
+    const repo = /^[\w.-]+\/[\w.-]+$/.test(repoRaw) && redact(repoRaw) === repoRaw ? repoRaw : undefined;
     if (repo) note.targetRepo = repo;
     notes.push(note);
   }
@@ -451,21 +455,35 @@ type FrictionVar = Awaited<ReturnType<EngineClient["searchVariables"]>>[number];
 
 /** Every `friction` variable the capture must see. The global name search is a single, unpaged page, and
  *  finished instances' variables persist — so once history exceeds a page, NEW reports would be silently
- *  cut. When the global page is full, the read additionally probes each ACTIVE instance by key (new
- *  reports live on running instances), so a full history page can never hide a fresh report. Rows are
- *  filtered to the exact name (the engine's name filter is not guaranteed exact) and de-duplicated. */
-export async function readFrictionVariables(engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances">): Promise<FrictionVar[]> {
+ *  cut. When the global page is full, the read additionally probes by key every ACTIVE instance AND every
+ *  instance the previous pass saw ACTIVE (`friction_capture_watch`) — the latter catches an instance that
+ *  completed between passes, whose report is no longer on a running instance. The watch set is replaced
+ *  with the current ACTIVE keys every pass, so a finished instance is probed exactly one final time. Rows
+ *  are filtered to the exact name (the engine's name filter is not guaranteed exact) and de-duplicated. */
+export async function readFrictionVariables(
+  engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances">,
+  data?: DataLayer,
+): Promise<FrictionVar[]> {
   const byKey = new Map<string, FrictionVar>();
   const add = (rows: FrictionVar[]) => {
     for (const r of rows) if (r.name === AGENT_FRICTION_RESULT_KEY) byKey.set(String(r.variableKey), r);
   };
   const global = await engine.searchVariables({ name: AGENT_FRICTION_RESULT_KEY });
   add(global);
+  const active = (await engine.searchProcessInstances({ state: "ACTIVE" })).map((pi) => String(pi.processInstanceKey));
   if (global.length >= FRICTION_SEARCH_PAGE) {
-    const active = await engine.searchProcessInstances({ state: "ACTIVE" });
-    for (const pi of active) {
-      add(await engine.searchVariables({ processInstanceKey: String(pi.processInstanceKey), name: AGENT_FRICTION_RESULT_KEY }));
+    const watched = data
+      ? data.source().db.all<{ process_instance_key: string }>("SELECT process_instance_key FROM friction_capture_watch").map((r) => r.process_instance_key)
+      : [];
+    for (const pik of new Set([...active, ...watched])) {
+      add(await engine.searchVariables({ processInstanceKey: pik, name: AGENT_FRICTION_RESULT_KEY }));
     }
+  }
+  if (data) {
+    await data.open().tx(async (t) => {
+      await t.exec("DELETE FROM friction_capture_watch", []);
+      for (const pik of active) await t.exec("INSERT OR IGNORE INTO friction_capture_watch (process_instance_key) VALUES (?)", [pik]);
+    });
   }
   return [...byKey.values()];
 }
@@ -478,20 +496,24 @@ export async function captureSelfReportedFriction(
   data: DataLayer,
   engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances">,
   now: Date,
+  /** Reads a search-truncated value in full by `variableKey` (test seam; defaults to the engine REST read). */
+  fetchFull: (variableKey: string) => Promise<string | undefined> = (k) => fetchFullVariableValue(k),
 ): Promise<number> {
-  const vars = await readFrictionVariables(engine);
+  const vars = await readFrictionVariables(engine, data);
   const at = now.toISOString();
   const rows: unknown[][] = [];
   for (const v of vars) {
-    if (v.isTruncated) continue;
+    // A long report arrives as a clipped search preview — read it in full rather than drop it forever.
+    const raw = v.isTruncated ? await fetchFull(String(v.variableKey)) : v.value;
+    if (raw === undefined) continue;
     let value: unknown;
     try {
-      value = JSON.parse(v.value);
+      value = JSON.parse(raw);
     } catch {
       continue;
     }
     const { notes } = parseFrictionNotes(value);
-    const base = createHash("sha256").update(`${v.variableKey}\u0000${v.value}`).digest("hex").slice(0, 16);
+    const base = createHash("sha256").update(`${v.variableKey}\u0000${raw}`).digest("hex").slice(0, 16);
     for (const [i, n] of notes.entries()) {
       rows.push([
         `${base}:${i}`,

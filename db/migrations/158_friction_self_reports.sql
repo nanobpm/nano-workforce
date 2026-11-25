@@ -24,3 +24,10 @@ CREATE TABLE IF NOT EXISTS friction_self_reports (
 CREATE INDEX IF NOT EXISTS ix_friction_self_reports_captured ON friction_self_reports (captured_at);
 
 ALTER TABLE friction_sweeps ADD COLUMN self_reported_count INTEGER NOT NULL DEFAULT 0;
+
+-- Instances the capture saw ACTIVE on its last pass. When the global `friction` name page is full, the
+-- capture probes these by key once more after they finish, so a report from an instance that completed
+-- between passes is never lost behind the full history page (PR #1103 review).
+CREATE TABLE IF NOT EXISTS friction_capture_watch (
+  process_instance_key TEXT PRIMARY KEY
+);

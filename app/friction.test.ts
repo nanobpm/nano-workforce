@@ -1183,6 +1183,45 @@ test("readFrictionVariables: a full history page cannot hide a new report on an 
   assertEquals(rows.length, 101);
 });
 
+
+test("parseFrictionNotes: a credential-shaped targetRepo is discarded, never stored", () => {
+  const { notes } = parseFrictionNotes([{ what: "w", surface: "prompt", targetRepo: "ghp_abcdefghijklmnopqrstuvwxyz0123/repo" }]);
+  assertEquals(notes.length, 1);
+  assertEquals(notes[0]?.targetRepo, undefined);
+});
+
+test("readFrictionVariables: an instance that completed between passes is probed once more (full page)", async () => {
+  await withData(async (data) => {
+    const history = Array.from({ length: 100 }, (_, i) => ({ variableKey: `H${i}`, processInstanceKey: `O${i}`, scopeKey: `O${i}`, name: "friction", value: "null", isTruncated: false }));
+    const done = { variableKey: "DONE", processInstanceKey: "GONE", scopeKey: "GONE", name: "friction", value: "[]", isTruncated: false };
+    let active = [{ processInstanceKey: "GONE" }];
+    const engine = {
+      searchVariables: async (f: { processInstanceKey?: string }) => (f.processInstanceKey === "GONE" ? [done] : f.processInstanceKey ? [] : history),
+      searchProcessInstances: async () => active,
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    await readFrictionVariables(engine as any, data);
+    active = [];
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    const rows = await readFrictionVariables(engine as any, data);
+    assert(rows.some((r) => r.variableKey === "DONE"), "completed instance's report captured via watch set");
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    const third = await readFrictionVariables(engine as any, data);
+    assert(!third.some((r) => r.variableKey === "DONE"), "watch set is replaced each pass");
+  });
+});
+
+test("captureSelfReportedFriction reads a truncated report in full instead of skipping it", async () => {
+  await withData(async (data) => {
+    const full = JSON.stringify([{ what: "long report", surface: "prompt" }]);
+    const engine = {
+      searchVariables: async () => [{ variableKey: "T1", processInstanceKey: "P", scopeKey: "P", name: "friction", value: full.slice(0, 10), isTruncated: true }],
+      searchProcessInstances: async () => [],
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), async (k) => (k === "T1" ? full : undefined)), 1);
+  });
+});
 test("captureSelfReportedFriction persists redacted notes with run linkage, idempotently", async () => {
   await withData(async (data) => {
     const engine = varEngine([
