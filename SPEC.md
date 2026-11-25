@@ -1393,13 +1393,19 @@ the subject row) is ever touched; everything else is fail-closed out.
 
 ## 13.5 Friction sweep (`friction-sweep.bpmn`) — issue #1073
 
-Every 12 hours the app reviews what agents did since the last sweep and files deduplicated,
-actionable friction findings to `NANO_FRICTION_REPO` (default `jwulf/friction`).
+When opted in, the app periodically reviews what agents did since the last sweep and files
+deduplicated, actionable friction findings to `NANO_FRICTION_REPO`.
 
-- **One schedule.** The process's `R/PT12H` timer start is the ONLY starter (no API action, poller
-  or boot hook). The interval is a BPMN literal: a timer start has no variables and deploy-time
-  templating is gone (ADR 0062). A changed redeploy replaces the old timer and re-anchors the
-  schedule to the deploy time.
+- **Off unless configured (issue #1100).** `NANO_FRICTION_REPO` is both the switch and the target:
+  unset (or blank) means no sweep instance ever starts. There is no default repo — a deployment
+  names one it owns.
+- **One schedule, driven by the poller.** The process has a none start event; `pollFrictionSweep`
+  (`app/service.ts`, the same pattern as the escalation steward) is the ONLY starter. Each poll pass
+  checks the switch, paces by `NANO_FRICTION_INTERVAL` (default `PT12H`, parsed with the canonical
+  `isoDurationToMs`), and deliberately does NOT gate on ACTIVE instances: an instance wedged on an
+  incident would stay ACTIVE forever and block every later sweep. Overlap is owned by the singleton
+  lease below — an overlapping start records itself as `skipped` and exits. A failed start is
+  retried on the next pass.
 - **Singleton lease.** `pr.friction-lease` takes the one-row `friction_sweep_lock` lease (atomic
   conditional write, holder = the instance key, expiry `NANO_FRICTION_LEASE_MS`, default 6h). A
   firing that finds it held by a live instance records a `skipped` sweep and ends at `skipped`. An

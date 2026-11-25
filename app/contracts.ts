@@ -207,8 +207,15 @@ export const ENV_CONTRACTS = {
     name: "NANO_FRICTION_REPO",
     owner: "app/friction.ts",
     semantics:
-      "The `owner/repo` the 12-hourly friction sweep (issue #1073, resources/processes/friction-sweep.bpmn) files its deduplicated agent-friction findings into, as issues labelled `friction`. Read by `pr.friction-collect` (to list the open findings the analyst dedupes against) and `pr.friction-file` (every GitHub write). The sweep's CADENCE is NOT a config key: it is the `R/PT12H` timeCycle on the process's timer start event — a start timer has no variable scope and deploy-time templating is removed (ADR 0062), so the BPMN literal is the one source of truth.",
-    default: "jwulf/friction",
+      "The friction sweep's opt-in switch AND target (issue #1073, #1100): the `owner/repo` the sweep (resources/processes/friction-sweep.bpmn) files its deduplicated agent-friction findings into, as issues labelled `friction`. UNSET (or blank) means the sweep is OFF — the poller (`pollFrictionSweep`, app/service.ts) never starts an instance. No default: a deployment must name a repo it owns. Read by the poller (switch), `pr.friction-collect` (open findings to dedupe against) and `pr.friction-file` (every GitHub write).",
+  },
+  NANO_FRICTION_INTERVAL: {
+    category: "env",
+    name: "NANO_FRICTION_INTERVAL",
+    owner: "app/friction.ts",
+    semantics:
+      "How often the poller starts a friction sweep when `NANO_FRICTION_REPO` is set (ISO-8601 duration, or an `R/P…` cycle whose period is used), parsed with the canonical `isoDurationToMs` (issue #1100). A malformed or zero value falls back to the default.",
+    default: "PT12H",
   },
   NANO_FRICTION_MIN_OCCURRENCES: {
     category: "env",
@@ -239,7 +246,7 @@ export const ENV_CONTRACTS = {
     name: "NANO_FRICTION_LEASE_MS",
     owner: "app/friction.ts",
     semantics:
-      "Expiry (milliseconds) of the friction sweep's singleton DB lease (issue #1073). Exactly one friction-sweep instance sweeps at a time; a crashed or cancelled holder's lease lapses after this bound so the next 12-hourly firing takes over (the watermark makes the takeover safe).",
+      "Expiry (milliseconds) of the friction sweep's singleton DB lease (issue #1073). Exactly one friction-sweep instance sweeps at a time; a crashed or cancelled holder's lease lapses after this bound so the next poller-started sweep (every NANO_FRICTION_INTERVAL) takes over (the watermark makes the takeover safe).",
     default: "21600000",
   },
   NANO_ESCALATION_STEWARD_MIN_AGE_MS: {

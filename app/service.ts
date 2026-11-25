@@ -43,7 +43,12 @@ import { deriveEffectiveSettings } from "./effectiveSettings.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
 import { ESCALATION_STEWARD_PROCESS_ID } from "./escalationSteward.ts";
 import { blockedFeatureQuestion, deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun, foldKeylessFeatureRun } from "./feature.ts";
-import { FRICTION_SUMMARY_ELEMENT, frictionAppBaseUrl, frictionSummaryMayBeOpen, frictionSweepSummary, frictionSweeps } from "./friction.ts";
+import {
+  FRICTION_PROCESS_ID,
+  FRICTION_SUMMARY_ELEMENT,
+  frictionAppBaseUrl,
+  frictionIntervalMs,
+  frictionRepo, frictionSummaryMayBeOpen, frictionSweepSummary, frictionSweeps } from "./friction.ts";
 import {
   classifyMergeability,
   classifyPrLiveness,
@@ -5959,6 +5964,23 @@ export async function pollEscalationSteward(engine: EngineClient) {
   lastStewardTick = nowMs;
 }
 
+/** Friction-sweep tick (issue #1100) — the same scheduled-agent-loop pattern as
+ * {@link pollEscalationSteward}: start ONE `friction-sweep` instance per `NANO_FRICTION_INTERVAL`
+ * (default 12h) ONLY when the sweep is opted in (`NANO_FRICTION_REPO` set — unset means OFF). It
+ * deliberately does NOT gate on ACTIVE instances: an instance wedged on an incident (or an analyst
+ * that never completes) stays ACTIVE forever and would block every later sweep. Overlap is owned by
+ * the singleton lease + watermark inside the process — an overlapping start records itself as
+ * `skipped`, and a crashed holder's lease lapses after NANO_FRICTION_LEASE_TTL_MS. Best-effort: a
+ * failed start leaves the tick un-advanced so the next pass retries. */
+let lastFrictionTick = 0;
+export async function pollFrictionSweep(_data: DataLayer, engine: EngineClient) {
+  if (frictionRepo() === null) return;
+  const nowMs = Date.now();
+  if (lastFrictionTick !== 0 && nowMs - lastFrictionTick < frictionIntervalMs()) return;
+  await engine.createInstance({ processDefinitionId: FRICTION_PROCESS_ID, variables: {} });
+  lastFrictionTick = nowMs;
+}
+
 /** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
  * (when the engine REST endpoint is supplied) the job-activation visibility pass and the
  * technical-incident surfacing pass. Called on the self-scheduling loop in `main.ts`.
@@ -5990,6 +6012,12 @@ export async function pollOnce(
     await pollEscalationSteward(engine);
   } catch (err) {
     console.error(`[poller] escalation-steward tick: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // The friction sweep is likewise optional and best-effort (issue #1100).
+  try {
+    await pollFrictionSweep(data, engine);
+  } catch (err) {
+    console.error(`[poller] friction-sweep tick: ${err instanceof Error ? err.message : String(err)}`);
   }
   await pollEpicPhase(data, engine, engineRest);
   await pollTasklessPlanTermination(data, engine);

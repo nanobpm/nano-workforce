@@ -1,5 +1,5 @@
 // pr.friction-lease — the friction sweep's FIRST step (issue #1073 operator scope): take the singleton
-// DB lease so exactly one friction-sweep instance sweeps at a time. The R/PT12H timer start does not
+// DB lease so exactly one friction-sweep instance sweeps at a time. The poller-driven start (NANO_FRICTION_INTERVAL) does not
 // serialise firings, so a firing that finds the lease held by a live instance records a "skipped"
 // sweep and the model ends it at its `skipped` end event. A lease whose holder expired or is no longer
 // running (crashed / cancelled) is taken over — the watermark makes that safe (app/friction.ts).
