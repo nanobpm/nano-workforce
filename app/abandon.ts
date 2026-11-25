@@ -140,6 +140,7 @@ export const AGENT_FACING_URLS: Readonly<Record<string, AgentUrlReachability>> =
   blackboardUrl: "advisory", // sibling coordination — off-LAN agents just lose it
   transcriptUrlBase: "display-only", // linked from PR comments / UI, never fetched by the agent
   proposalReviewUrl: "display-only", // human review link for a delivery-graph proposal
+  frictionLinks: "display-only", // friction-sweep run/page links in the digest + operator summary (#1073)
 };
 
 /** The instruction block appended (verbatim, via `appendPrompt`) to each side-effecting agent's

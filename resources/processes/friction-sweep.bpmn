@@ -1,0 +1,334 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_friction_sweep" targetNamespace="http://nanobpm.io/nano-workforce">
+  <bpmn:process id="friction-sweep" name="Friction sweep" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="FrictionLeaseOut" name="Take sweep lease — output">
+          <nano:extend name="leaseAcquired" type="boolean" />
+          <nano:extend name="leaseHeldBy" type="string" />
+        </nano:shape>
+        <nano:shape id="FrictionCollectOut" name="Collect friction — output">
+          <nano:extend name="collectStatus" type="string" />
+          <nano:extend name="windowStart" type="string" />
+          <nano:extend name="windowEnd" type="string" />
+          <nano:extend name="runsSwept" type="integer" />
+          <nano:extend name="signalCount" type="integer" />
+          <nano:extend name="frictionDigest" type="string" />
+          <nano:extend name="openFindings" type="string" list="true" optional="true" />
+          <nano:extend name="agentSlaTimeout" type="string" />
+        </nano:shape>
+        <nano:shape id="FrictionFinding" name="Friction finding (analyst proposal)">
+          <nano:extend name="fingerprint" type="string" />
+          <nano:extend name="title" type="string" />
+          <nano:extend name="occurrences" type="integer" />
+          <nano:extend name="runs" type="integer" />
+          <nano:extend name="fixSurface" type="string" />
+          <nano:extend name="targetRepo" type="string" />
+          <nano:extend name="evidence" type="string" />
+          <nano:extend name="proposedFix" type="string" />
+          <nano:extend name="existingIssue" type="integer" optional="true" />
+          <nano:extend name="signalFingerprints" type="string" list="true" optional="true" />
+        </nano:shape>
+        <nano:shape id="FrictionFileIn" name="File friction findings — input">
+          <nano:reference name="findings" ref="FrictionFinding" list="true" optional="true" />
+          <nano:extend name="windowStart" type="string" />
+          <nano:extend name="windowEnd" type="string" />
+          <nano:extend name="runsSwept" type="integer" optional="true" />
+          <nano:extend name="signalCount" type="integer" optional="true" />
+        </nano:shape>
+        <nano:shape id="FrictionFileOut" name="File friction findings — output">
+          <nano:extend name="fileStatus" type="string" />
+          <nano:extend name="createdIssues" type="string" list="true" />
+          <nano:extend name="updatedIssues" type="string" list="true" />
+          <nano:extend name="createdCount" type="integer" />
+          <nano:extend name="updatedCount" type="integer" />
+          <nano:extend name="skippedCount" type="integer" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
+    <bpmn:startEvent id="tick" name="Every 12h">
+      <bpmn:outgoing>fs_toLease</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_tick">
+        <bpmn:timeCycle xsi:type="bpmn:tFormalExpression">R/PT12H</bpmn:timeCycle>
+      </bpmn:timerEventDefinition>
+    </bpmn:startEvent>
+    <bpmn:serviceTask id="lease" name="Take sweep lease">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.friction-lease" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="FrictionLeaseOut" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>fs_toLease</bpmn:incoming>
+      <bpmn:outgoing>fs_leased</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw_lease" name="lease taken?" default="fs_skip">
+      <bpmn:incoming>fs_leased</bpmn:incoming>
+      <bpmn:outgoing>fs_toCollect</bpmn:outgoing>
+      <bpmn:outgoing>fs_skip</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="skipped" name="Skipped: sweep already running">
+      <bpmn:incoming>fs_skip</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:serviceTask id="collect" name="Collect friction signals">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.friction-collect" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="FrictionCollectOut" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>fs_toCollect</bpmn:incoming>
+      <bpmn:outgoing>fs_collected</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw_any" name="any friction?" default="fs_none">
+      <bpmn:incoming>fs_collected</bpmn:incoming>
+      <bpmn:outgoing>fs_analyse</bpmn:outgoing>
+      <bpmn:outgoing>fs_none</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="analyse" name="Analyse friction (agent)">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:friction-analyst" />
+        <zeebe:agentDefinition agentType="external" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="prompts/friction-analyst.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+        </zeebe:linkedResources>
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;\n\n---\n\n&#34; + frictionDigest" target="appendPrompt" />
+          <zeebe:output source="=if (is defined(findings)) then findings else null" target="findings" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>fs_analyse</bpmn:incoming>
+      <bpmn:outgoing>fs_toFile</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="be_analyst_sla" name="Agent SLA elapsed" attachedToRef="analyse">
+      <bpmn:outgoing>fs_sla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_analyst_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=agentSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:serviceTask id="file" name="File findings">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.friction-file" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="FrictionFileIn" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="FrictionFileOut" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>fs_toFile</bpmn:incoming>
+      <bpmn:outgoing>fs_filed</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="release" name="Release sweep lease">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.friction-release" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>fs_none</bpmn:incoming>
+      <bpmn:incoming>fs_filed</bpmn:incoming>
+      <bpmn:incoming>fs_sla</bpmn:incoming>
+      <bpmn:outgoing>fs_released</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw_summary" name="filed?" default="fs_noSummary">
+      <bpmn:incoming>fs_released</bpmn:incoming>
+      <bpmn:outgoing>fs_toSummary</bpmn:outgoing>
+      <bpmn:outgoing>fs_noSummary</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="friction-summary" name="Friction summary">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="friction-summary" />
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="operators" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>fs_toSummary</bpmn:incoming>
+      <bpmn:outgoing>fs_acked</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:boundaryEvent id="be_summary_expiry" name="Unread for 24h" attachedToRef="friction-summary">
+      <bpmn:outgoing>fs_expired</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_summary_expiry">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">PT24H</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:endEvent id="done" name="Sweep complete">
+      <bpmn:incoming>fs_noSummary</bpmn:incoming>
+      <bpmn:incoming>fs_acked</bpmn:incoming>
+      <bpmn:incoming>fs_expired</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="fs_toLease" sourceRef="tick" targetRef="lease" />
+    <bpmn:sequenceFlow id="fs_leased" sourceRef="lease" targetRef="gw_lease" />
+    <bpmn:sequenceFlow id="fs_toCollect" name="lease taken" sourceRef="gw_lease" targetRef="collect">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=leaseAcquired = true</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="fs_skip" name="sweep already running" sourceRef="gw_lease" targetRef="skipped" />
+    <bpmn:sequenceFlow id="fs_collected" sourceRef="collect" targetRef="gw_any" />
+    <bpmn:sequenceFlow id="fs_analyse" name="signals" sourceRef="gw_any" targetRef="analyse">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=collectStatus = "collected" and signalCount &gt; 0</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="fs_none" name="no-op / failed" sourceRef="gw_any" targetRef="release" />
+    <bpmn:sequenceFlow id="fs_toFile" sourceRef="analyse" targetRef="file" />
+    <bpmn:sequenceFlow id="fs_filed" sourceRef="file" targetRef="release" />
+    <bpmn:sequenceFlow id="fs_released" sourceRef="release" targetRef="gw_summary" />
+    <bpmn:sequenceFlow id="fs_toSummary" name="filed" sourceRef="gw_summary" targetRef="friction-summary">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=fileStatus = "filed"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="fs_noSummary" sourceRef="gw_summary" targetRef="done" />
+    <bpmn:sequenceFlow id="fs_acked" sourceRef="friction-summary" targetRef="done" />
+    <bpmn:sequenceFlow id="fs_expired" name="auto-closed" sourceRef="be_summary_expiry" targetRef="done" />
+    <bpmn:sequenceFlow id="fs_sla" name="agent SLA elapsed" sourceRef="be_analyst_sla" targetRef="release" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_friction-sweep">
+    <bpmndi:BPMNPlane id="BPMNPlane_friction-sweep" bpmnElement="friction-sweep">
+      <bpmndi:BPMNShape id="BPMNShape_tick" bpmnElement="tick">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="65" y="143" width="66" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_lease" bpmnElement="lease">
+        <dc:Bounds x="216" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw_lease" bpmnElement="gw_lease" isMarkerVisible="true">
+        <dc:Bounds x="416" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="399" y="76" width="85" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_skipped" bpmnElement="skipped">
+        <dc:Bounds x="598" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="585" y="143" width="62" height="56" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_collect" bpmnElement="collect">
+        <dc:Bounds x="566" y="720" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw_any" bpmnElement="gw_any" isMarkerVisible="true">
+        <dc:Bounds x="766" y="735" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="758" y="790" width="67" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_analyse" bpmnElement="analyse">
+        <dc:Bounds x="916" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_file" bpmnElement="file">
+        <dc:Bounds x="1116" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_release" bpmnElement="release">
+        <dc:Bounds x="1316" y="720" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw_summary" bpmnElement="gw_summary" isMarkerVisible="true">
+        <dc:Bounds x="1516" y="735" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1518" y="790" width="46" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_friction-summary" bpmnElement="friction-summary">
+        <dc:Bounds x="1666" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_done" bpmnElement="done">
+        <dc:Bounds x="1866" y="742" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1853" y="783" width="63" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_analyst_sla" bpmnElement="be_analyst_sla">
+        <dc:Bounds x="948" y="302" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="870" y="343" width="72" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_summary_expiry" bpmnElement="be_summary_expiry">
+        <dc:Bounds x="1698" y="302" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1620" y="343" width="73" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_toLease" bpmnElement="fs_toLease">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_leased" bpmnElement="fs_leased">
+        <di:waypoint x="316" y="120" />
+        <di:waypoint x="416" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_skip" bpmnElement="fs_skip">
+        <di:waypoint x="466" y="120" />
+        <di:waypoint x="598" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="506" y="73" width="53" height="42" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_none" bpmnElement="fs_none">
+        <di:waypoint x="816" y="760" />
+        <di:waypoint x="1316" y="760" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="866" y="727" width="50" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_released" bpmnElement="fs_released">
+        <di:waypoint x="1416" y="760" />
+        <di:waypoint x="1516" y="760" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_noSummary" bpmnElement="fs_noSummary">
+        <di:waypoint x="1566" y="760" />
+        <di:waypoint x="1866" y="760" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_toCollect" bpmnElement="fs_toCollect">
+        <di:waypoint x="441" y="145" />
+        <di:waypoint x="441" y="760" />
+        <di:waypoint x="566" y="760" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="446" y="446" width="78" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_analyse" bpmnElement="fs_analyse">
+        <di:waypoint x="791" y="735" />
+        <di:waypoint x="791" y="280" />
+        <di:waypoint x="916" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="796" y="501" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_toSummary" bpmnElement="fs_toSummary">
+        <di:waypoint x="1541" y="735" />
+        <di:waypoint x="1541" y="280" />
+        <di:waypoint x="1666" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1546" y="501" width="39" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_collected" bpmnElement="fs_collected">
+        <di:waypoint x="666" y="760" />
+        <di:waypoint x="766" y="760" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_toFile" bpmnElement="fs_toFile">
+        <di:waypoint x="1016" y="280" />
+        <di:waypoint x="1116" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_filed" bpmnElement="fs_filed">
+        <di:waypoint x="1216" y="280" />
+        <di:waypoint x="1366" y="280" />
+        <di:waypoint x="1366" y="720" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_acked" bpmnElement="fs_acked">
+        <di:waypoint x="1766" y="280" />
+        <di:waypoint x="1884" y="280" />
+        <di:waypoint x="1884" y="742" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_expired" bpmnElement="fs_expired">
+        <di:waypoint x="1716" y="338" />
+        <di:waypoint x="1716" y="760" />
+        <di:waypoint x="1866" y="760" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1721" y="542" width="81" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_fs_sla" bpmnElement="fs_sla">
+        <di:waypoint x="966" y="338" />
+        <di:waypoint x="966" y="760" />
+        <di:waypoint x="1316" y="760" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="971" y="535" width="70" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

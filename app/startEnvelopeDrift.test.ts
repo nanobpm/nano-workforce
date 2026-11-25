@@ -80,8 +80,18 @@ function topLevelStart(block: string): string | null {
   return null;
 }
 
+/** A process whose ONLY start is a timer (issue #1073 — the 12-hourly friction sweep) is never started
+ *  via createInstance or a callActivity, and a timer start has no variables to seed, so there is no
+ *  start contract for this guard to pin. */
+function timerOnlyProcess(xml: string): boolean {
+  const { block } = processBlock(xml);
+  return topLevelStart(block) === null && /<bpmn:startEvent\b[^>]*>\s*(?:<bpmn:outgoing>[^<]*<\/bpmn:outgoing>\s*)*<bpmn:timerEventDefinition\b/.test(block);
+}
+
 function startEnvelopes(): StartEnvelope[] {
-  return processFiles().map((file) => {
+  return processFiles()
+    .filter((file) => !timerOnlyProcess(readFileSync(join(PROCESS_DIR, file), "utf8")))
+    .map((file) => {
     const xml = readFileSync(join(PROCESS_DIR, file), "utf8");
     const { id, block } = processBlock(xml);
     const start = topLevelStart(block);

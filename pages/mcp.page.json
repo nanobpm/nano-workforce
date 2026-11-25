@@ -90,6 +90,10 @@
           {
             "label": "Velocity",
             "page": "velocity"
+          },
+          {
+            "label": "Friction",
+            "page": "friction"
           }
         ],
         "sticky": true

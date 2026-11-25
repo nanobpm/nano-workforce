@@ -17,6 +17,7 @@ const MINTERS: Record<string, string> = {
   "app/deliveryGraphProposals.ts::proposalReviewUrl": "proposalReviewUrl",
   "app/agentic/transcript-url.ts::transcriptUrlBaseFor": "transcriptUrlBase",
   "app/agentic/transcript-url.ts::transcriptUrlForJob": "transcriptUrlBase",
+  "app/friction.ts::frictionAppBaseUrl": "frictionLinks",
 };
 
 /** Every `file::symbol` whose body calls `publicBaseUrl(` (the definition itself excluded). */

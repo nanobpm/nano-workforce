@@ -1,0 +1,17 @@
+{
+  "id": "friction-summary",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "text",
+      "text": "A friction sweep finished and filed its findings. Every sweep's window, per-kind counts, and the issues it opened or updated (as links) are on the [Friction page](./friction).",
+      "label": "Friction sweep summary"
+    },
+    {
+      "type": "text",
+      "text": "Informational only \u2014 the findings are already filed. Acknowledge to close this summary (it closes itself after 24h if left unread).",
+      "label": "Note"
+    }
+  ]
+}

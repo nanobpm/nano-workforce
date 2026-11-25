@@ -194,6 +194,46 @@ export const ENV_CONTRACTS = {
       "How often the escalation-steward timer fires (FEEL/ISO-8601 duration or `R/PT…` cycle), pacing the steward tick (issue #889).",
     default: "R/PT30M",
   },
+  NANO_FRICTION_REPO: {
+    category: "env",
+    name: "NANO_FRICTION_REPO",
+    owner: "app/friction.ts",
+    semantics:
+      "The `owner/repo` the 12-hourly friction sweep (issue #1073, resources/processes/friction-sweep.bpmn) files its deduplicated agent-friction findings into, as issues labelled `friction`. Read by `pr.friction-collect` (to list the open findings the analyst dedupes against) and `pr.friction-file` (every GitHub write). The sweep's CADENCE is NOT a config key: it is the `R/PT12H` timeCycle on the process's timer start event — a start timer has no variable scope and deploy-time templating is removed (ADR 0062), so the BPMN literal is the one source of truth.",
+    default: "jwulf/friction",
+  },
+  NANO_FRICTION_MIN_OCCURRENCES: {
+    category: "env",
+    name: "NANO_FRICTION_MIN_OCCURRENCES",
+    owner: "app/friction.ts",
+    semantics:
+      "Friction-sweep filing threshold (issue #1073): `pr.friction-file` skips a proposed finding with fewer than this many occurrences.",
+    default: "3",
+  },
+  NANO_FRICTION_MIN_RUNS: {
+    category: "env",
+    name: "NANO_FRICTION_MIN_RUNS",
+    owner: "app/friction.ts",
+    semantics:
+      "Friction-sweep filing threshold (issue #1073): `pr.friction-file` skips a proposed finding whose evidence spans fewer than this many distinct agent runs (a one-run quirk is not friction).",
+    default: "2",
+  },
+  NANO_FRICTION_DIGEST_MAX_CHARS: {
+    category: "env",
+    name: "NANO_FRICTION_DIGEST_MAX_CHARS",
+    owner: "app/friction.ts",
+    semantics:
+      "Hard cap (characters) on the bounded, redacted friction digest `pr.friction-collect` hands the `senior:friction-analyst` agent (issue #1073). Raw transcripts never leave the collector; over the cap the digest degrades to per-run summaries, then truncates.",
+    default: "24000",
+  },
+  NANO_FRICTION_LEASE_MS: {
+    category: "env",
+    name: "NANO_FRICTION_LEASE_MS",
+    owner: "app/friction.ts",
+    semantics:
+      "Expiry (milliseconds) of the friction sweep's singleton DB lease (issue #1073). Exactly one friction-sweep instance sweeps at a time; a crashed or cancelled holder's lease lapses after this bound so the next 12-hourly firing takes over (the watermark makes the takeover safe).",
+    default: "21600000",
+  },
   NANO_ESCALATION_STEWARD_MIN_AGE_MS: {
     category: "env",
     name: "NANO_ESCALATION_STEWARD_MIN_AGE_MS",

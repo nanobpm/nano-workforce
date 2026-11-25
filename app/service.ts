@@ -43,6 +43,7 @@ import { deriveEffectiveSettings } from "./effectiveSettings.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
 import { ESCALATION_STEWARD_PROCESS_ID } from "./escalationSteward.ts";
 import { blockedFeatureQuestion, deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun, foldKeylessFeatureRun } from "./feature.ts";
+import { FRICTION_SUMMARY_ELEMENT, frictionAppBaseUrl, frictionSummaryMayBeOpen, frictionSweepSummary, frictionSweeps } from "./friction.ts";
 import {
   classifyMergeability,
   classifyPrLiveness,
@@ -5358,7 +5359,7 @@ export async function pollUserTasks(
   // summary for the `conformance-escalation` ack (its instance is tracked on `plan_conformance`, not a
   // delivery aggregate).
   interface Subject {
-    type: "feature" | "plan" | "pr" | "delivery";
+    type: "feature" | "plan" | "pr" | "delivery" | "friction";
     key: string;
     title?: string | null;
     url?: string | null;
@@ -5372,6 +5373,8 @@ export async function pollUserTasks(
      *  escalation question (issue #674): the wait-gate projection on `plans.wait_gate_label`, or the
      *  feature run's `delivery_label` for the inline preflight. */
     waitGateLabel?: string | null;
+    /** A friction sweep's operator summary (issue #1073). */
+    frictionSummary?: string | null;
   }
   const subjectByInstance = new Map<string, Subject>();
   for (const run of await featureRuns(data).all()) {
@@ -5398,9 +5401,22 @@ export async function pollUserTasks(
     if (run.process_key) subjectByInstance.set(run.process_key, { type: "delivery", key: run.run_key, title: run.title, url: null, humanLabels: parseHumanLabels(run.human_labels) });
   }
 
+  // A friction-sweep summary (issue #1073) parks on the sweep's own instance — the sweep row is keyed by
+  // it. Its "Decision context" is the same summary (with every opened/updated issue link) the form renders.
+  for (const sweep of await frictionSweeps(data).all()) {
+    subjectByInstance.set(sweep.sweep_key, {
+      type: "friction",
+      key: sweep.sweep_key,
+      title: `Friction sweep ${sweep.window_start} → ${sweep.window_end}`,
+      url: `${frictionAppBaseUrl()}/app/pages/friction`,
+      frictionSummary: frictionSweepSummary(sweep, frictionAppBaseUrl()),
+    });
+  }
+
   // Per-element subject type for an ORPHANED task (no subject row) — the kind implies its aggregate even
   // when tracking is lost, so the fallback row still buckets correctly on the page.
-  const DEFAULT_SUBJECT_TYPE: Readonly<Record<string, "feature" | "plan" | "pr">> = {
+  const DEFAULT_SUBJECT_TYPE: Readonly<Record<string, "feature" | "plan" | "pr" | "friction">> = {
+    [FRICTION_SUMMARY_ELEMENT]: "friction",
     [FEATURE_ESCALATION_ELEMENT]: "feature",
     [HUMAN_ESCALATION_ELEMENT]: "feature",
     [FEATURE_BLOCKED_ELEMENT]: "feature",
@@ -5469,6 +5485,9 @@ export async function pollUserTasks(
       case PR_WAIT_ANSWER_ELEMENT:
       case PR_WAIT_MERGE_ANSWER_ELEMENT:
         question = latestOpenEscalationQuestion(await prEscalations(data).find({ pr_key: subjectKey, status: "open" }));
+        break;
+      case FRICTION_SUMMARY_ELEMENT:
+        question = subj?.frictionSummary ?? null;
         break;
       case CONFORMANCE_ESCALATION_ELEMENT:
         question = conformanceEscalationQuestion(subj ? { summary: subj.conformanceSummary } : undefined);
@@ -5658,6 +5677,11 @@ export async function pollUserTasks(
     // `delivery-human-task__<node>` gate surfaces on this reduced-capability path exactly as it does on
     // the engine-first sweep — otherwise the typed-seam host silently drops every delivery human gate.
     for (const run of await deliveryGraphRuns(data).find({ status: "running" })) await scanInstance(run.process_key);
+    // A friction sweep's summary task (issue #1073) parks on the sweep's own instance (`sweep_key`) and
+    // auto-closes after 24h, so only a recently filed sweep can still hold one — bound the scan to those.
+    for (const sweep of await frictionSweeps(data).find({ status: "filed" })) {
+      if (frictionSummaryMayBeOpen(sweep, at)) await scanInstance(sweep.sweep_key);
+    }
   }
 
   const desired = [...desiredByKey.values()];
