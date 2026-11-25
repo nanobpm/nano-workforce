@@ -491,8 +491,9 @@ export const FRICTION_FULL_READ_BUDGET_MS = 30_000;
  *  linkage). The engine propagates the agent's result key verbatim as a process variable, so a single
  *  variable search finds them all. Idempotent: the row id hashes the variable key + value, so a re-read
  *  inserts nothing and a later job overwriting the variable with a NEW report is captured as new.
- *  A truncated report on a FINISHED instance that is already captured is never re-read (its value can no
- *  longer change); full reads share {@link FRICTION_FULL_READ_BUDGET_MS}. An instance whose report could
+ *  A truncated report on an instance that was ALREADY FINISHED at the previous pass and is captured is never
+ *  re-read (its value can no longer change); one that finished since is read once more (it may have been
+ *  overwritten); full reads share {@link FRICTION_FULL_READ_BUDGET_MS}. An instance whose report could
  *  not be read (fetch failed / budget spent) is kept in the watch set until a later pass captures it. */
 export async function captureSelfReportedFriction(
   data: DataLayer,
@@ -507,6 +508,11 @@ export async function captureSelfReportedFriction(
   const captured = new Set(
     data.source().db.all<{ variable_key: string }>("SELECT DISTINCT variable_key FROM friction_self_reports").map((r) => String(r.variable_key)),
   );
+  // Instances the PREVIOUS pass saw ACTIVE (or could not capture): their value may have been overwritten
+  // after that pass's read, so a finished one is only final once a pass has read it AFTER it finished.
+  const watchedLastPass = new Set(
+    data.source().db.all<{ process_instance_key: string }>("SELECT process_instance_key FROM friction_capture_watch").map((r) => String(r.process_instance_key)),
+  );
   const retain = new Set<string>();
   const deadline = clock() + FRICTION_FULL_READ_BUDGET_MS;
   const at = now.toISOString();
@@ -515,8 +521,10 @@ export async function captureSelfReportedFriction(
     const pik = String(v.processInstanceKey ?? "");
     let raw: string | undefined = v.value;
     if (v.isTruncated) {
-      // A finished instance's captured report is final — skip the redundant full read.
-      if (!active.has(pik) && captured.has(String(v.variableKey))) continue;
+      // A finished instance's captured report is final ONLY if it was already finished at the previous
+      // pass (not watched): an instance that was active then may have overwritten the variable with a NEW
+      // report before finishing, so it gets one more full read (the row id dedupes an unchanged value).
+      if (pik && !active.has(pik) && !watchedLastPass.has(pik) && captured.has(String(v.variableKey))) continue;
       // A long report arrives as a clipped search preview — read it in full rather than drop it forever.
       raw = clock() < deadline ? await fetchFull(String(v.variableKey)) : undefined;
       if (raw === undefined) {

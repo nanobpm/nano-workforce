@@ -1288,6 +1288,31 @@ test("captureSelfReportedFriction reads a truncated report in full instead of sk
     assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), async (k) => (k === "T1" ? full : undefined)), 1);
   });
 });
+test("captureSelfReportedFriction re-reads a truncated report overwritten before its instance finished between passes", async () => {
+  await withData(async (data) => {
+    const first = JSON.stringify([{ what: "first report", surface: "prompt" }]);
+    const second = JSON.stringify([{ what: "second report", surface: "AGENTS.md" }]);
+    let full = first;
+    let active = [{ processInstanceKey: "P" }];
+    const engine = {
+      searchVariables: async () => [{ variableKey: "T", processInstanceKey: "P", scopeKey: "P", name: "friction", value: "[{", isTruncated: true }],
+      searchProcessInstances: async () => active,
+    };
+    const reads: string[] = [];
+    const fetchFull = async (k: string) => (reads.push(k), full);
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), fetchFull), 1);
+    // The job overwrites the report, then the instance finishes before the next pass.
+    full = second;
+    active = [];
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), fetchFull), 1, "the overwritten report is captured");
+    // Now final (already finished at the previous pass): no further full read.
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), fetchFull), 0);
+    assertEquals(reads.length, 2);
+  });
+});
 test("captureSelfReportedFriction persists redacted notes with run linkage, idempotently", async () => {
   await withData(async (data) => {
     const engine = varEngine([
