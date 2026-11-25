@@ -5964,27 +5964,19 @@ export async function pollEscalationSteward(engine: EngineClient) {
   lastStewardTick = nowMs;
 }
 
-/** Sweep-row statuses that mean an instance has finished sweeping and released its lease — it may
- *  still be ACTIVE, parked on the `friction-summary` user task, which must never block the next sweep. */
-const FRICTION_DONE_STATUSES: ReadonlySet<string> = new Set(["filed", "noop", "failed", "skipped"]);
-
 /** Friction-sweep tick (issue #1100) — the same scheduled-agent-loop pattern as
  * {@link pollEscalationSteward}: start ONE `friction-sweep` instance per `NANO_FRICTION_INTERVAL`
- * (default 12h) ONLY when the sweep is opted in (`NANO_FRICTION_REPO` set — unset means OFF), and
- * never while a previous instance is still sweeping (ACTIVE and not yet past its filing — an
- * instance parked only on the unread summary task has released its lease and does not block). The
- * singleton lease + watermark inside the process remain the authoritative guard. Best-effort: a
+ * (default 12h) ONLY when the sweep is opted in (`NANO_FRICTION_REPO` set — unset means OFF). It
+ * deliberately does NOT gate on ACTIVE instances: an instance wedged on an incident (or an analyst
+ * that never completes) stays ACTIVE forever and would block every later sweep. Overlap is owned by
+ * the singleton lease + watermark inside the process — an overlapping start records itself as
+ * `skipped`, and a crashed holder's lease lapses after NANO_FRICTION_LEASE_TTL_MS. Best-effort: a
  * failed start leaves the tick un-advanced so the next pass retries. */
 let lastFrictionTick = 0;
-export async function pollFrictionSweep(data: DataLayer, engine: EngineClient) {
+export async function pollFrictionSweep(_data: DataLayer, engine: EngineClient) {
   if (frictionRepo() === null) return;
   const nowMs = Date.now();
   if (lastFrictionTick !== 0 && nowMs - lastFrictionTick < frictionIntervalMs()) return;
-  const active = await engine.searchProcessInstances({ processDefinitionId: FRICTION_PROCESS_ID, state: "ACTIVE" });
-  for (const inst of active) {
-    const row = await frictionSweeps(data).get(String(inst.processInstanceKey));
-    if (!row || !FRICTION_DONE_STATUSES.has(row.status)) return;
-  }
   await engine.createInstance({ processDefinitionId: FRICTION_PROCESS_ID, variables: {} });
   lastFrictionTick = nowMs;
 }

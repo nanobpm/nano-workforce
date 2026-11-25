@@ -112,7 +112,7 @@
       "id": "subtitle",
       "props": {
         "variant": "sub",
-        "text": "Every 12-hourly agent friction sweep (issue #1073): the window it covered, how many agent runs it read, what kinds of friction it found (failed tool calls, permission blocks, timeouts, missing nano-generated facades, repeated commands, failed/lease-expired jobs, incidents, escalations), and which findings it opened or updated in the findings repo. Watch the per-kind counts fall as fixes land. Sources are engine records and engine-stored transcripts only; excerpts are redacted."
+        "text": "Every agent friction sweep (issue #1073, opt-in via NANO_FRICTION_REPO, run every NANO_FRICTION_INTERVAL): the window it covered, how many agent runs it read, what kinds of friction it found (failed tool calls, permission blocks, timeouts, missing nano-generated facades, repeated commands, failed/lease-expired jobs, incidents, escalations), and which findings it opened or updated in the findings repo. Watch the per-kind counts fall as fixes land. Sources are engine records and engine-stored transcripts only; excerpts are redacted."
       }
     },
     {

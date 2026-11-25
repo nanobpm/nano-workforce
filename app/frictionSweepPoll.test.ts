@@ -1,5 +1,5 @@
 // Deterministic unit coverage for `pollFrictionSweep` (issue #1100) — the friction sweep's opt-in
-// switch, interval pacing and overlap guard. Drives the exported poller against a stub EngineClient
+// switch and interval pacing (overlap is owned by the in-process lease, not the poller). Drives the exported poller against a stub EngineClient
 // and a stub DataLayer (only `table("friction_sweeps").get` is read).
 //
 // `pollFrictionSweep` paces itself via a MODULE-LEVEL `lastFrictionTick`, so each test imports a
@@ -97,21 +97,13 @@ test("pollFrictionSweep: the interval elapsing allows the next start", async () 
   }
 });
 
-test("pollFrictionSweep: none starts while a previous instance is ACTIVE and still sweeping", async () => {
-  const poll = await freshPoller();
-  const noRow = stubEngine({ active: ["PI-PRIOR"] });
-  await withEnv(ON, () => poll(stubData(), noRow.engine));
-  assertEquals(noRow.created.length, 0, "an ACTIVE instance that hasn't recorded a sweep yet blocks");
-  const collecting = stubEngine({ active: ["PI-PRIOR"] });
-  await withEnv(ON, () => poll(stubData({ "PI-PRIOR": "collected" }), collecting.engine));
-  assertEquals(collecting.created.length, 0, "an ACTIVE sweep still collecting/filing blocks");
-});
-
-test("pollFrictionSweep: an instance parked only on the unread summary does not block", async () => {
-  const poll = await freshPoller();
-  const { engine, created } = stubEngine({ active: ["PI-PRIOR"] });
-  await withEnv(ON, () => poll(stubData({ "PI-PRIOR": "filed" }), engine));
-  assertEquals(created.length, 1, "a finished (lease-released) sweep awaiting its summary doesn't block");
+test("pollFrictionSweep: an ACTIVE (possibly wedged) prior instance never blocks — the lease owns overlap", async () => {
+  for (const rows of [{}, { "PI-PRIOR": "collected" }, { "PI-PRIOR": "filed" }] as Record<string, string>[]) {
+    const poll = await freshPoller();
+    const { engine, created } = stubEngine({ active: ["PI-PRIOR"] });
+    await withEnv(ON, () => poll(stubData(rows), engine));
+    assertEquals(created.length, 1, `an ACTIVE prior instance (${JSON.stringify(rows)}) must not wedge the sweep`);
+  }
 });
 
 test("pollFrictionSweep: a failed start leaves the tick un-advanced so the next pass retries", async () => {

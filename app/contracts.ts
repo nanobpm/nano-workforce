@@ -246,7 +246,7 @@ export const ENV_CONTRACTS = {
     name: "NANO_FRICTION_LEASE_MS",
     owner: "app/friction.ts",
     semantics:
-      "Expiry (milliseconds) of the friction sweep's singleton DB lease (issue #1073). Exactly one friction-sweep instance sweeps at a time; a crashed or cancelled holder's lease lapses after this bound so the next 12-hourly firing takes over (the watermark makes the takeover safe).",
+      "Expiry (milliseconds) of the friction sweep's singleton DB lease (issue #1073). Exactly one friction-sweep instance sweeps at a time; a crashed or cancelled holder's lease lapses after this bound so the next poller-started sweep (every NANO_FRICTION_INTERVAL) takes over (the watermark makes the takeover safe).",
     default: "21600000",
   },
   NANO_ESCALATION_STEWARD_MIN_AGE_MS: {
