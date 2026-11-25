@@ -1479,3 +1479,68 @@ test("capture: concurrent captures are serialised, so a slower pass cannot erase
     );
   });
 });
+
+test("capture: both copies truncated on a finished instance — a later pass does not count the task-local alias", async () => {
+  await withData(async (data) => {
+    const value = JSON.stringify([{ what: "w", surface: "prompt" }]);
+    const vars = [
+      { variableKey: "TASK", processInstanceKey: "P", scopeKey: "TASKSCOPE" },
+      { variableKey: "NODE", processInstanceKey: "P", scopeKey: "NODESCOPE" },
+    ];
+    const engine = {
+      searchVariables: async () => vars.map((v) => ({ ...v, name: "friction", value: "[{", isTruncated: true })),
+      searchProcessInstances: async () => [],
+      searchElementInstances: async () => [{ elementInstanceKey: "NODESCOPE" }],
+    };
+    const elements = async () => ["n1"];
+    const full = async () => value;
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), full, () => 0, elements), 1);
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), full, () => 0, elements), 0, "alias not counted");
+  });
+});
+
+test("capture: empty / null values never trigger node-scope resolution", async () => {
+  await withData(async (data) => {
+    let resolved = 0;
+    const engine = {
+      searchVariables: async () =>
+        ["A", "B"].map((k) => ({ variableKey: k, processInstanceKey: "P", scopeKey: k, name: "friction", value: "null", isTruncated: false })),
+      searchProcessInstances: async () => [],
+      searchElementInstances: async () => {
+        resolved++;
+        return [];
+      },
+    };
+    const elements = async () => {
+      resolved++;
+      return ["n1"];
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), async () => undefined, () => 0, elements), 0);
+    assertEquals(resolved, 0);
+  });
+});
+
+test("readFrictionVariables: the per-node overflow scan is budgeted and leaves the instance incomplete", async () => {
+  await withData(async (data) => {
+    const history = Array.from({ length: 100 }, (_, i) => ({ variableKey: `H${i}`, processInstanceKey: `O${i}`, scopeKey: `O${i}`, name: "friction", value: "null", isTruncated: false }));
+    let t = 0;
+    let searches = 0;
+    const engine = {
+      searchVariables: async (f: { processInstanceKey?: string }) => (f.processInstanceKey === "BIG" ? history.map((h) => ({ ...h, processInstanceKey: "BIG" })) : history),
+      searchElementInstances: async () => {
+        searches++;
+        t += 10_000;
+        return [];
+      },
+      searchProcessInstances: async () => [{ processInstanceKey: "BIG" }],
+    };
+    const elements = async () => Array.from({ length: 256 }, (_, i) => `n${i}`);
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    const { incomplete } = await readFrictionVariables(engine as any, data, elements, () => t);
+    assertEquals([...incomplete], ["BIG"]);
+    assertEquals(searches < 256, true, `bounded (${searches})`);
+  });
+});

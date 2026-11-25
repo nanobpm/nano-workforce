@@ -453,6 +453,11 @@ const FRICTION_SEARCH_PAGE = 100;
 
 type FrictionVar = Awaited<ReturnType<EngineClient["searchVariables"]>>[number];
 
+/** Wall-clock budget for the per-node overflow scan of ONE capture pass (see {@link readFrictionVariables}). */
+export const FRICTION_OVERFLOW_SCAN_BUDGET_MS = 30_000;
+/** Concurrent element searches in the per-node overflow scan. */
+const FRICTION_OVERFLOW_SCAN_CONCURRENCY = 8;
+
 /** Every `friction` variable the capture must see, plus the instances currently ACTIVE. The global name
  *  search is a single, unpaged page, and finished instances' variables persist — so once history exceeds
  *  a page, NEW reports would be silently cut. When the global page is full, the read additionally probes
@@ -466,7 +471,11 @@ export async function readFrictionVariables(
   data?: DataLayer,
   /** The agent-node body elements of a delivery-graph instance (test seam; defaults to the run's graph). */
   agentElements: (data: DataLayer, pik: string) => Promise<string[]> = deliveryRunAgentElements,
-): Promise<{ vars: FrictionVar[]; active: Set<string> }> {
+  /** Monotonic clock for the overflow-scan budget (test seam). */
+  clock: () => number = () => Date.now(),
+): Promise<{ vars: FrictionVar[]; active: Set<string>; incomplete: Set<string> }> {
+  const incomplete = new Set<string>();
+  const scanDeadline = clock() + FRICTION_OVERFLOW_SCAN_BUDGET_MS;
   const byKey = new Map<string, FrictionVar>();
   const add = (rows: FrictionVar[]) => {
     for (const r of rows) if (r.name === AGENT_FRICTION_RESULT_KEY) byKey.set(String(r.variableKey), r);
@@ -484,16 +493,35 @@ export async function readFrictionVariables(
       // The per-instance page is ALSO bounded: a delivery graph has up to 256 agent nodes, each with its
       // own node-scope `friction`. Overflow → read node-by-node by SCOPE KEY (as `readEngineFacts` does),
       // so no node's report sits permanently beyond the page.
-      if (rows.length >= FRICTION_SEARCH_PAGE && data && engine.searchElementInstances) {
-        for (const elementId of await agentElements(data, pik)) {
-          for (const el of await engine.searchElementInstances({ processInstanceKey: pik, elementId })) {
-            add(await engine.searchVariables({ processInstanceKey: pik, scopeKey: String(el.elementInstanceKey), name: AGENT_FRICTION_RESULT_KEY }));
-          }
+      // The scan is BOUNDED (limited concurrency + a shared wall-clock budget) so it can never stall the
+      // poller; an instance whose scan did not finish is reported `incomplete` and stays watched, so a
+      // later pass resumes it.
+      const search = engine.searchElementInstances;
+      if (rows.length >= FRICTION_SEARCH_PAGE && data && search) {
+        if (clock() >= scanDeadline) {
+          incomplete.add(pik);
+          continue;
         }
+        const elements = await agentElements(data, pik);
+        let next = 0;
+        const worker = async () => {
+          while (next < elements.length) {
+            if (clock() >= scanDeadline) {
+              incomplete.add(pik);
+              return;
+            }
+            const elementId = elements[next++];
+            if (elementId === undefined) return;
+            for (const el of await search({ processInstanceKey: pik, elementId })) {
+              add(await engine.searchVariables({ processInstanceKey: pik, scopeKey: String(el.elementInstanceKey), name: AGENT_FRICTION_RESULT_KEY }));
+            }
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(FRICTION_OVERFLOW_SCAN_CONCURRENCY, elements.length) }, worker));
       }
     }
   }
-  return { vars: [...byKey.values()], active };
+  return { vars: [...byKey.values()], active, incomplete };
 }
 
 /** Overall wall-clock budget for full reads of truncated reports in ONE capture pass, so a backlog of long
@@ -576,16 +604,21 @@ async function captureOnce(
   clock: () => number,
   agentElements: (data: DataLayer, pik: string) => Promise<string[]>,
 ): Promise<number> {
-  const { vars, active } = await readFrictionVariables(engine, data, agentElements);
-  const captured = new Set(
-    data.source().db.all<{ variable_key: string }>("SELECT DISTINCT variable_key FROM friction_self_reports").map((r) => String(r.variable_key)),
-  );
+  const { vars, active, incomplete } = await readFrictionVariables(engine, data, agentElements, clock);
+  const capturedRows = data
+    .source()
+    .db.all<{ variable_key: string; process_instance_key: string | null }>("SELECT DISTINCT variable_key, process_instance_key FROM friction_self_reports");
+  const captured = new Set(capturedRows.map((r) => String(r.variable_key)));
+  // Instances with at least one captured report. A finished instance that is no longer watched was
+  // already fully processed by a pass that read it AFTER it finished — including dropping the task-local
+  // alias of each node's report — so an uncaptured truncated copy there is such an alias, never new.
+  const capturedPiks = new Set(capturedRows.map((r) => String(r.process_instance_key ?? "")).filter((k) => k !== ""));
   // Instances the PREVIOUS pass saw ACTIVE (or could not capture): their value may have been overwritten
   // after that pass's read, so a finished one is only final once a pass has read it AFTER it finished.
   const watchedLastPass = new Set(
     data.source().db.all<{ process_instance_key: string }>("SELECT process_instance_key FROM friction_capture_watch").map((r) => String(r.process_instance_key)),
   );
-  const retain = new Set<string>();
+  const retain = new Set<string>(incomplete);
   const deadline = clock() + FRICTION_FULL_READ_BUDGET_MS;
   const at = now.toISOString();
   const reads: { v: FrictionVar; raw: string }[] = [];
@@ -596,13 +629,20 @@ async function captureOnce(
       // A finished instance's captured report is final ONLY if it was already finished at the previous
       // pass (not watched): an instance that was active then may have overwritten the variable with a NEW
       // report before finishing, so it gets one more full read (the row id dedupes an unchanged value).
-      if (pik && !active.has(pik) && !watchedLastPass.has(pik) && captured.has(String(v.variableKey))) continue;
+      if (pik && !active.has(pik) && !watchedLastPass.has(pik) && (captured.has(String(v.variableKey)) || capturedPiks.has(pik))) continue;
       // A long report arrives as a clipped search preview — read it in full rather than drop it forever.
       raw = clock() < deadline ? await fetchFull(String(v.variableKey)) : undefined;
       if (raw === undefined) {
         if (pik) retain.add(pik);
         continue;
       }
+    }
+    // A value with no valid note (the common null seed) reports nothing: skip it BEFORE cross-scope
+    // de-duplication, so empty values never trigger node-scope resolution.
+    try {
+      if (parseFrictionNotes(JSON.parse(raw)).notes.length === 0) continue;
+    } catch {
+      continue;
     }
     reads.push({ v, raw });
   }
