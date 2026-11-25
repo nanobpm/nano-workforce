@@ -699,7 +699,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     };
   }
   const priorWatermark = readWatermark(data);
-  const windowEnd = deps.now.toISOString();
+  let windowEnd = deps.now.toISOString();
   const windowStart = priorWatermark ?? new Date(deps.now.getTime() - FIRST_SWEEP_LOOKBACK_MS).toISOString();
   // The READ window reaches SWEEP_OVERLAP_MS behind the watermark (late-visible completions).
   const readStart = priorWatermark === null ? windowStart : new Date(Date.parse(priorWatermark) - SWEEP_OVERLAP_MS).toISOString();
@@ -710,10 +710,34 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
   const budget = historyBudget(deps.historyByteCap);
   const allRuns = await engine.searchAgentInstances();
   warnIfFullPage(deps.log, "agent instances", allRuns.length);
-  for (const run of allRuns) {
+  // Read runs OLDEST-FIRST so a byte-cap stop leaves a contiguous unread tail that the watermark can
+  // stop short of (#1095 review): the capped run and everything after it are re-swept next time.
+  const windowRuns = allRuns
+    .filter((run) => inWindow(runInstant(run), readStart, windowEnd))
+    .sort((a, b) => Date.parse(runInstant(a) ?? "") - Date.parse(runInstant(b) ?? ""));
+  for (const run of windowRuns) {
     const instant = runInstant(run);
-    if (!inWindow(instant, readStart, windowEnd)) continue;
     const history = await fetchRunHistory(engine, run.agentInstanceKey, budget);
+    if (budget.exhausted) {
+      // This run's history is truncated (or unread). Clamp the window to end just BEFORE its instant
+      // so the watermark never passes an unread run; drop its partial signals (re-read in full later).
+      const clamped = new Date(Date.parse(instant ?? windowEnd) - 1).toISOString();
+      if (Date.parse(clamped) > Date.parse(windowStart)) {
+        windowEnd = clamped;
+      } else {
+        // Degenerate: the oldest unswept run alone exceeds the cap. Advancing nothing would wedge
+        // every future sweep on it, so keep its truncated signals and move past it (logged below).
+        deps.log?.warn("friction collect: a single run's history exceeds the byte cap — collected truncated", {
+          run: run.agentInstanceKey,
+        });
+        windowEnd = instant ?? windowEnd;
+        pushRun(run, instant, history);
+      }
+      break;
+    }
+    pushRun(run, instant, history);
+  }
+  function pushRun(run: AgentInstanceSummary, instant: string | null, history: AgentHistoryRecord[]): void {
     const ex = extractRunSignals(run.agentInstanceKey, cockpitUrlFor(deps.baseUrl, run.processInstanceKey), history);
     const metricTokens = run.metrics ? run.metrics.inputTokens + run.metrics.outputTokens : 0;
     // Count runs by the CANONICAL run identity (the owning process instance) shared with failed-job and
@@ -732,8 +756,9 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     });
   }
   if (budget.exhausted) {
-    deps.log?.warn("friction collect: history byte cap reached — remaining run history not read this sweep", {
+    deps.log?.warn("friction collect: history byte cap reached — window clamped; unread runs re-swept next time", {
       cap: deps.historyByteCap ?? HISTORY_SWEEP_BYTE_CAP,
+      windowEnd,
     });
   }
   // Engine-wide records carry no timestamp, so they are windowed by "not yet recorded" — the stable

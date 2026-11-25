@@ -181,6 +181,27 @@ test("collect advances the watermark, persists signals, and re-running the same 
   });
 });
 
+test("a byte-capped sweep does not advance the watermark past an unread run (#1095 review)", async () => {
+  await withData(async (data) => {
+    const big = (k: number) => rec("ASSISTANT", "y".repeat(4000), [], k);
+    const blocked = (who: string) => rec("TOOL_RESULT", `Blocked by nano-coder permissions: ${who}`, [], 99);
+    const { engine } = engineStub({
+      runs: [
+        // Listed out of instant order on purpose: the sweep must read oldest-first.
+        { key: "R2", at: "2026-01-01T18:00:00.000Z", records: [blocked("r2"), big(1), big(2)] },
+        { key: "R1", at: "2026-01-01T12:00:00.000Z", records: [blocked("r1"), big(1), big(2)] },
+      ],
+    });
+    const cap = 9_000; // fits R1's history, exhausts inside R2's
+    const first = await collectFriction({ data, engine, sweepKey: "S1", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h", historyByteCap: cap });
+    assert(Date.parse(first.windowEnd) < Date.parse("2026-01-01T18:00:00.000Z"), `watermark skipped the unread run: ${first.windowEnd}`);
+    assertEquals(readWatermark(data), first.windowEnd);
+    const second = await collectFriction({ data, engine, sweepKey: "S2", now: new Date("2026-01-02T00:01:00.000Z"), config: CONFIG, baseUrl: "http://h", historyByteCap: cap * 2 });
+    const ids = (await data.source().db.all<{ run_key: string }>("SELECT run_key FROM friction_signals")).map((r) => r.run_key);
+    assert(ids.some((k) => k.includes("R2")), `the capped run was never collected: ${JSON.stringify(ids)} ${JSON.stringify(second)}`);
+  });
+});
+
 test("a failed collect leaves the watermark untouched and persists nothing", async () => {
   await withData(async (data) => {
     const { engine } = engineStub({ fail: true });
