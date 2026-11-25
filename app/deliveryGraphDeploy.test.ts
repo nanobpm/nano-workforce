@@ -20,7 +20,7 @@ import { test } from "node:test";
 import { createWasmEngineClient } from "@nanobpm/urban-testkit";
 import { assert, assertEquals } from "#test-assert";
 import { DELIVERY_CONNECTOR_TASK_TYPE } from "./deliveryConnector.ts";
-import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
+import { CAPTURE_FRICTION_JOB_TYPE, compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
 import { runDeliveryGraph } from "./deliveryRunner.ts";
 import { jobStream } from "./agentic/correlation.ts";
 import {
@@ -59,8 +59,16 @@ const HUMAN_PAYLOAD = { value: "done", note: "ok", resolvedArtifact: "@nanobpm/d
  *  (a node that never advances) into a loud failure instead of a hang. */
 const MAX_ROUNDS = 16;
 
-test("deploy+advance: a well-formed graph deploys through the real engine and every node kind advances to a COMPLETED instance", async () => {
+/** A WASM engine with the in-body `pr.capture-friction` step (issue #1104) served as a no-op, so every
+ *  compiled agent cell's post-agent capture completes like the production host worker does. */
+async function engineWithFrictionCapture(): Promise<Awaited<ReturnType<typeof createWasmEngineClient>>> {
   const engine = await createWasmEngineClient();
+  await engine.registerWorker(CAPTURE_FRICTION_JOB_TYPE, async () => ({}));
+  return engine;
+}
+
+test("deploy+advance: a well-formed graph deploys through the real engine and every node kind advances to a COMPLETED instance", async () => {
+  const engine = await engineWithFrictionCapture();
   try {
     // Serve every service node's job so each node completes NORMALLY (no boundary timeout fires): the
     // agent job, the readiness probe (return `ready: true` so the poll loop exits on its first pass),
@@ -106,7 +114,7 @@ test("deploy+advance: a well-formed graph deploys through the real engine and ev
 });
 
 test("deploy+advance: a stalled service node escalates on its node-timeout boundary onto a human-completable task that advances the instance to COMPLETED", async () => {
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     // A minimal agent → human graph. We deliberately register NO `senior:feature` worker, so the agent
     // node stalls and MUST escalate on its `=nodeTimeout` boundary timer — the exact path a stuck node
@@ -172,7 +180,7 @@ test("deploy+advance: a stalled service node escalates on its node-timeout bound
 });
 
 test("issue #1016: a NEVER-ACTIVATED (or within-budget) agent job is never escalated or cancelled — only an SLA elapsed since activation escalates", async () => {
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     const graph: DeliveryGraph = {
       name: "queued graph",
@@ -230,7 +238,7 @@ test("issue #1016: a NEVER-ACTIVATED (or within-budget) agent job is never escal
 });
 
 test("issue #1016 review: agent completion while an SLA check is still PENDING cancels the check and completes the node", async () => {
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     const graph: DeliveryGraph = {
       name: "pending check graph",
@@ -318,7 +326,7 @@ function instanceVariables(engine: { snapshot(): Record<string, unknown> }, key:
 }
 
 test("#543 transcript correlation: a completed agent job exposes a resolvable instance-scope transcriptUrl", async () => {
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     // A minimal agent→human graph: the agent job completes (emitting its transcript URL the way the
     // real fleet worker does — the seeded base + its own jobKey-scoped stream), then the instance parks
@@ -399,7 +407,7 @@ const GUARDED_ADOPT: DeliveryGraph = {
 };
 
 async function driveGuarded(outcome: "breaking" | "green"): Promise<{ state: string; migrateRan: boolean; releaseRan: boolean }> {
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     let migrateRan = false;
     let releaseRan = false;
@@ -486,7 +494,7 @@ async function driveGuardedRealAgent(outcome: "breaking" | "compatible"): Promis
   migrateRan: boolean;
   releaseRan: boolean;
 }> {
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     let contractDelivered = false;
     let factSurfaced = false;
@@ -569,7 +577,7 @@ test("S7 deploy+route: mutually-exclusive leaves join End on an exclusive merge 
 
   // Default path (surface present): the human leaf is skipped and the instance COMPLETES on its own.
   {
-    const engine = await createWasmEngineClient();
+    const engine = await engineWithFrictionCapture();
     try {
       let doneRan = false;
       await engine.registerWorker("senior:adopt", async () => ({ surface: "present" }));
@@ -598,7 +606,7 @@ test("S7 deploy+route: mutually-exclusive leaves join End on an exclusive merge 
 
   // Guarded path (surface missing): the human leaf parks; `done` never runs.
   {
-    const engine = await createWasmEngineClient();
+    const engine = await engineWithFrictionCapture();
     try {
       let doneRan = false;
       await engine.registerWorker("senior:adopt", async () => ({ surface: "missing" }));
@@ -646,7 +654,7 @@ async function driveBooleanHumanGuard(opts: { bespoke: boolean; entry: Record<st
   noRan: boolean;
   task: string;
 }> {
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     let yesRan = false;
     let noRan = false;
@@ -743,7 +751,7 @@ async function driveNumberHumanGuard(opts: { bespoke: boolean; entry: Record<str
   noRan: boolean;
   task: string;
 }> {
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     let yesRan = false;
     let noRan = false;
@@ -864,7 +872,7 @@ async function driveStringHumanGuard(opts: { entry: Record<string, string>; emit
   task: string;
   published: unknown;
 }> {
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     let yesRan = false;
     let noRan = false;
@@ -963,7 +971,7 @@ test("#863 deploy+route: a BESPOKE single-ARTIFACT human form with a FEEL-builti
   // builtin-named explicit form would publish the `count` builtin FUNCTION as `humanEmitArtifact` absent
   // the `string(<factName>) != null` guard. With the guard the fact-named candidate folds to null and the
   // instance completes instead of parking on an io-mapping incident.
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     let publishedArtifact: unknown = "<<never published>>";
     await engine.registerWorker("senior:sink", async (job) => {
@@ -1026,7 +1034,7 @@ async function driveTypedHumanGuard(opts: { emitName: string; emitType: "version
   state: string;
   published: unknown;
 }> {
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     let published: unknown = "<<never published>>";
     await engine.registerWorker("senior:sink", async (job) => {
@@ -1144,7 +1152,7 @@ async function driveCounted(
   graph: DeliveryGraph,
   facts: Record<string, Record<string, unknown>>,
 ): Promise<{ state: string; runs: Record<string, number> }> {
-  const engine = await createWasmEngineClient();
+  const engine = await engineWithFrictionCapture();
   try {
     const runs: Record<string, number> = {};
     for (const node of graph.nodes) {

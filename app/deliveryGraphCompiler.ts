@@ -2179,6 +2179,10 @@ function agentContractContextFeel(nodeId: string, descriptor: string, requiredEm
  * RESUMABLE with the node's required emits (a human/agent supplies the missing fact, which the
  * subProcess output mapping then publishes as `<el>_<fact>`), mirroring the #514 Defect-B wait resume.
  * Omitted for a `connector` (no self-reported status contract), whose body stays `task → end`. */
+/** The host worker that captures an agent's self-reported friction notes (issue #1101) — the SAME
+ * task type implement-cell.bpmn's `capture-friction` step runs; compiled agent cells get one too (#1104). */
+export const CAPTURE_FRICTION_JOB_TYPE = "pr.capture-friction";
+
 function serviceBodyLines(
   el: string,
   nodeId: string,
@@ -2375,7 +2379,17 @@ function serviceBodyLines(
                 // TERMINATE (scoped to `<el>_work`): the agent's completion must cancel any still-pending SLA
         // check (queued/incidented `pr.agent-sla-check` job), or its live token would keep `<el>_work`
         // open — blocking the contract gate and possibly escalating already-finished work.
-        `        <bpmn:endEvent id="${el}_wend"><bpmn:incoming>${el}_w1</bpmn:incoming><bpmn:terminateEventDefinition id="${el}_wendTerm" /></bpmn:endEvent>`,
+        // Issue #1104: capture the agent's self-reported `friction` notes (issue #1101) on the COMMON
+        // post-agent path — every outcome (success, contract-broken, …) passes through here before the
+        // producer gate. The task maps `friction` out node-locally (AGENT_RESULT_LOCAL_VARS), so this
+        // reads THIS node's notes. It runs the SAME host worker as implement-cell's capture step
+        // (`captureFrictionFromJob`, idempotent + best-effort — it never fails the node).
+        `        <bpmn:serviceTask id="${el}_cf" name="Capture friction notes">`,
+        `          <bpmn:extensionElements><zeebe:taskDefinition type="${CAPTURE_FRICTION_JOB_TYPE}" /></bpmn:extensionElements>`,
+        `          <bpmn:incoming>${el}_w1</bpmn:incoming>`,
+        `          <bpmn:outgoing>${el}_wc</bpmn:outgoing>`,
+        "        </bpmn:serviceTask>",
+        `        <bpmn:endEvent id="${el}_wend"><bpmn:incoming>${el}_wc</bpmn:incoming><bpmn:terminateEventDefinition id="${el}_wendTerm" /></bpmn:endEvent>`,
         `        <bpmn:intermediateCatchEvent id="${el}_be" name="Work SLA check">`,
         `          <bpmn:incoming>${el}_wl</bpmn:incoming>`,
         `          <bpmn:incoming>${el}_s0</bpmn:incoming>`,
@@ -2386,7 +2400,8 @@ function serviceBodyLines(
         `  ${flow(`${el}_wf`, `${el}_wstart`, `${el}_wfork`)}`,
         `  ${flow(`${el}_wl`, `${el}_wfork`, `${el}_be`)}`,
         `  ${flow(`${el}_w0`, `${el}_wfork`, `${el}_task`)}`,
-        `  ${flow(`${el}_w1`, `${el}_task`, `${el}_wend`)}`,
+        `  ${flow(`${el}_w1`, `${el}_task`, `${el}_cf`)}`,
+        `  ${flow(`${el}_wc`, `${el}_cf`, `${el}_wend`)}`,
         "      </bpmn:subProcess>",
         `      <bpmn:boundaryEvent id="${el}_slaBe" name="Work SLA elapsed" attachedToRef="${el}_work">`,
         `        <bpmn:outgoing>${el}_s3</bpmn:outgoing>`,
