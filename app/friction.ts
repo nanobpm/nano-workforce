@@ -671,14 +671,18 @@ function warnIfFullPage(log: CollectDeps["log"], what: string, n: number): void 
   }
 }
 
-/** The subset of agent-run `keys` already fully read by an earlier sweep (`friction_swept_runs`). */
-export function sweptRunKeys(data: DataLayer, keys: readonly string[]): Set<string> {
-  const out = new Set<string>();
+/** Agent-run `keys` already fully read by an earlier sweep (`friction_swept_runs`), mapped to the
+ *  run instant they were read at. A run whose CURRENT instant differs has gained history since. */
+export function sweptRunKeys(data: DataLayer, keys: readonly string[]): Map<string, string> {
+  const out = new Map<string, string>();
   const db = data.source().db;
   for (let i = 0; i < keys.length; i += 500) {
     const chunk = keys.slice(i, i + 500);
-    const rows = db.all<{ run_key: string }>(`SELECT run_key FROM friction_swept_runs WHERE run_key IN (${chunk.map(() => "?").join(", ")})`, chunk);
-    for (const r of rows) out.add(r.run_key);
+    const rows = db.all<{ run_key: string; run_instant: string }>(
+      `SELECT run_key, run_instant FROM friction_swept_runs WHERE run_key IN (${chunk.map(() => "?").join(", ")})`,
+      chunk,
+    );
+    for (const r of rows) out.set(r.run_key, r.run_instant);
   }
   return out;
 }
@@ -732,7 +736,9 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
   const byInstant = (a: AgentInstanceSummary, b: AgentInstanceSummary) =>
     Date.parse(runInstant(a) ?? "") - Date.parse(runInstant(b) ?? "");
   const candidates = allRuns
-    .filter((run) => !swept.has(run.agentInstanceKey) && inWindow(runInstant(run), readStart, windowEnd))
+    // Skip a ledgered run only while its instant is unchanged: an active run that gained history
+    // since it was swept is re-read (earlier signals are deduped by id below) — #1098 review.
+    .filter((run) => swept.get(run.agentInstanceKey) !== (runInstant(run) ?? windowEnd) && inWindow(runInstant(run), readStart, windowEnd))
     .sort(byInstant);
   const fullyRead: { key: string; instant: string }[] = [];
   let firstUnread: string | null = null;
@@ -907,7 +913,8 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
           ]);
     if (cas.changed !== 1) return true; // a concurrent sweep claimed this window — persist nothing
     for (const r of fullyRead) {
-      await t.exec("INSERT OR IGNORE INTO friction_swept_runs (run_key, run_instant, sweep_key, swept_at) VALUES (?, ?, ?, ?)", [
+      await t.exec(`INSERT INTO friction_swept_runs (run_key, run_instant, sweep_key, swept_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(run_key) DO UPDATE SET run_instant = excluded.run_instant, sweep_key = excluded.sweep_key, swept_at = excluded.swept_at`, [
         r.key,
         r.instant,
         sweepKey,

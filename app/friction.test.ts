@@ -421,6 +421,31 @@ test("an agent swept while IDLE and completed in a later window is counted once"
   });
 });
 
+test("a swept active run that gains new history is re-read, its new signal collected (#1098 review)", async () => {
+  await withData(async (data) => {
+    const records = [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x", [], 1)];
+    const run = { agentInstanceKey: "R1", status: "IDLE", lastUpdatedDate: "2026-01-01T12:00:00.000Z", elementId: "implement-task" } as Record<string, unknown>;
+    const engine = {
+      searchAgentInstances: async () => [run],
+      searchAgentInstanceHistoryPage: async () => ({ items: records, page: {} }),
+      searchJobs: async () => [],
+      searchIncidents: async () => [],
+    } as any;
+    const first = await collectFriction({ data, engine, sweepKey: "S1", now: new Date("2026-01-02T00:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(first.signalCount, 1);
+    records.push(rec("TOOL_RESULT", "Blocked by nano-coder permissions: y", [], 2));
+    run.status = "COMPLETED";
+    run.lastUpdatedDate = "2026-01-02T06:00:00.000Z";
+    run.completionDate = "2026-01-02T06:00:00.000Z";
+    const second = await collectFriction({ data, engine, sweepKey: "S2", now: new Date("2026-01-02T06:30:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(second.signalCount, 1, "the new signal is collected; the old one is not re-counted");
+    const [row] = await data.source().db.all<{ run_instant: string }>("SELECT run_instant FROM friction_swept_runs WHERE run_key = ?", ["R1"]);
+    assertEquals(row?.run_instant, "2026-01-02T06:00:00.000Z", "the ledger is refreshed to the re-read instant");
+    const third = await collectFriction({ data, engine, sweepKey: "S3", now: new Date("2026-01-02T06:35:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(third.signalCount, 0);
+  });
+});
+
 test("markFailed records the error without overwriting the digest", async () => {
   await withData(async (data) => {
     const { engine } = engineStub({ runs: [{ key: "R1", at: "2026-01-01T12:00:00.000Z", records: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")] }] });
