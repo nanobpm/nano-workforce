@@ -1,3 +1,9 @@
+## [0.230.0](https://github.com/nanobpm/nano-workforce/compare/v0.229.4...v0.230.0) (2026-11-25)
+
+### Features
+
+* **friction:** 12-hourly agent friction sweep filing findings to jwulf/friction ([#1074](https://github.com/nanobpm/nano-workforce/issues/1074)) ([3decf0f](https://github.com/nanobpm/nano-workforce/commit/3decf0fd27a68b83cfa2769135da7562164a2fc3)), closes [#1073](https://github.com/nanobpm/nano-workforce/issues/1073) [#1075](https://github.com/nanobpm/nano-workforce/issues/1075) [#1076](https://github.com/nanobpm/nano-workforce/issues/1076) [#1077](https://github.com/nanobpm/nano-workforce/issues/1077) [#1078](https://github.com/nanobpm/nano-workforce/issues/1078) [#1095](https://github.com/nanobpm/nano-workforce/issues/1095)
+
 ## [0.229.4](https://github.com/nanobpm/nano-workforce/compare/v0.229.3...v0.229.4) (2026-11-24)
 
 ### Bug Fixes
