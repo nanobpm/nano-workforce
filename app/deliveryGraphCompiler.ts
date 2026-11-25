@@ -2473,7 +2473,7 @@ function serviceBodyLines(
   return [
     ...head,
     `      <bpmn:exclusiveGateway id="${el}_gate" name="producer contract met?" default="${el}_g1">`,
-    `        <bpmn:incoming>${el}_i1</bpmn:incoming>`,
+    `        <bpmn:incoming>${el}_wc</bpmn:incoming>`,
     `        <bpmn:outgoing>${el}_g0</bpmn:outgoing>`,
     `        <bpmn:outgoing>${el}_g1</bpmn:outgoing>`,
     "      </bpmn:exclusiveGateway>",
