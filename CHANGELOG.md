@@ -1,3 +1,9 @@
+## [0.232.0](https://github.com/nanobpm/nano-workforce/compare/v0.231.0...v0.232.0) (2026-11-25)
+
+### Features
+
+* **friction:** read run history in all commit statuses with paging ([#1098](https://github.com/nanobpm/nano-workforce/issues/1098)) ([b09fbd3](https://github.com/nanobpm/nano-workforce/commit/b09fbd385449c84afccb41d271c812dd107afccf)), closes [#1095](https://github.com/nanobpm/nano-workforce/issues/1095)
+
 ## [0.231.0](https://github.com/nanobpm/nano-workforce/compare/v0.230.0...v0.231.0) (2026-11-25)
 
 ### Features
