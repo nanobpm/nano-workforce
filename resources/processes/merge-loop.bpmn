@@ -585,6 +585,7 @@
             <zeebe:output source="=question" target="question" />
             <zeebe:output source="=dependsOn" target="dependsOn" />
             <zeebe:output source="=pushed" target="pushed" />
+            <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_s0</bpmn:incoming>
@@ -801,6 +802,7 @@
             <zeebe:output source="=summary" target="summary" />
             <zeebe:output source="=question" target="question" />
             <zeebe:output source="=dependsOn" target="dependsOn" />
+            <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_s0</bpmn:incoming>

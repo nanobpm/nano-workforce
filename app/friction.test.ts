@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 // Unit tests for the friction sweep core (issue #1073): signal extraction per kind from fixture
 // transcripts, redaction, the watermark (advance / no advance on failure / idempotent re-run), and
 // the filer (new vs existing fingerprint, threshold, no writes when no findings).
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -1232,4 +1232,27 @@ test("collect emits self_reported signals into the digest, counts them, and resp
     const again = await collectFriction({ data, engine, sweepKey: "SR2", now: new Date("2026-01-02T06:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
     assertEquals(again.signalCount, 0, "a later sweep never recounts a self-report");
   });
+});
+
+test("every senior:* agent task with explicit output mappings passes `friction` through (else it stays task-local and is lost)", () => {
+  const dir = resolve(import.meta.dirname, "../resources/processes");
+  let checked = 0;
+  for (const f of readdirSync(dir).filter((n) => n.endsWith(".bpmn"))) {
+    const xml = readFileSync(resolve(dir, f), "utf8");
+    for (const m of xml.matchAll(/<bpmn:serviceTask id="([^"]+)"[\s\S]*?<\/bpmn:serviceTask>/g)) {
+      const block = m[0];
+      if (!block.includes('type="senior:') || !block.includes("<zeebe:output")) continue;
+      checked++;
+      assert(block.includes('target="friction"'), `${f}#${m[1]} must map friction to process scope`);
+    }
+  }
+  assert(checked > 0, "found mapped agent tasks");
+});
+
+test("implement-cell captures friction on the common post-agent path, before the result gateway", () => {
+  const xml = readFileSync(resolve(import.meta.dirname, "../resources/processes/implement-cell.bpmn"), "utf8");
+  assert(xml.includes('sourceRef="implement-task" targetRef="capture-friction"'), "agent -> capture");
+  assert(xml.includes('sourceRef="capture-friction" targetRef="ic_gw"'), "capture -> gateway");
+  const src = readFileSync(resolve(import.meta.dirname, "../workers/capture-friction/worker.ts"), "utf8");
+  assert(src.includes("await captureFrictionFromJob(app.data, job)"));
 });

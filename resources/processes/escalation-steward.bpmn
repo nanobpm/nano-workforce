@@ -54,6 +54,7 @@
         <zeebe:ioMapping>
           <zeebe:input source="=claimed" target="claimedTasks" />
           <zeebe:output source="=if (is defined(resolutions)) then resolutions else null" target="resolutions" />
+          <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>es_dispatch</bpmn:incoming>

@@ -278,6 +278,7 @@
           <zeebe:output source="=status" target="status" />
           <zeebe:output source="=summary" target="summary" />
           <zeebe:output source="=question" target="question" />
+          <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_roundLive</bpmn:incoming>
@@ -463,6 +464,7 @@
           <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
           <zeebe:output source="=guardCustomInstructions" target="customInstructions" />
           <zeebe:output source="=adversarialSummary" target="adversarialSummary" />
+          <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_advLive</bpmn:incoming>
@@ -553,6 +555,7 @@
           <zeebe:output source="=question" target="question" />
           <zeebe:output source="=dependsOn" target="dependsOn" />
           <zeebe:output source="=pushed" target="pushed" />
+          <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_fixCiLive</bpmn:incoming>
@@ -845,6 +848,7 @@
           <zeebe:output source="=guardCustomInstructions" target="customInstructions" />
           <zeebe:output source="=scopeBlocked" target="scopeBlocked" />
           <zeebe:output source="=scopeBlockReason" target="scopeBlockReason" />
+          <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_scopeLive</bpmn:incoming>
