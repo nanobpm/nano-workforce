@@ -360,7 +360,9 @@ export async function fetchRunHistory(
       all.push(rec);
     }
     const cursor = res.page.endCursor ?? undefined;
-    if (res.items.length < HISTORY_PAGE_SIZE || !cursor || cursor === after) break;
+    // Stop on cursor exhaustion/repetition ONLY: the mapper can drop malformed rows from a page while
+    // keeping its cursor, so a short page is not proof the history ended (#1098 review).
+    if (!cursor || cursor === after) break;
     after = cursor;
   }
   return all;
@@ -712,9 +714,15 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
   warnIfFullPage(deps.log, "agent instances", allRuns.length);
   // Read runs OLDEST-FIRST so a byte-cap stop leaves a contiguous unread tail that the watermark can
   // stop short of (#1095 review): the capped run and everything after it are re-swept next time.
-  const windowRuns = allRuns
-    .filter((run) => inWindow(runInstant(run), readStart, windowEnd))
-    .sort((a, b) => Date.parse(runInstant(a) ?? "") - Date.parse(runInstant(b) ?? ""));
+  // In-window runs are read FIRST; the overlap hour (already swept once) only gets the budget they
+  // leave, so re-read overlap runs can never starve newer history, and a capped overlap run never
+  // moves the watermark (it would rewind it below windowStart — #1098 review).
+  const byInstant = (a: AgentInstanceSummary, b: AgentInstanceSummary) =>
+    Date.parse(runInstant(a) ?? "") - Date.parse(runInstant(b) ?? "");
+  const windowRuns = allRuns.filter((run) => inWindow(runInstant(run), windowStart, windowEnd)).sort(byInstant);
+  const overlapRuns = allRuns
+    .filter((run) => !inWindow(runInstant(run), windowStart, windowEnd) && inWindow(runInstant(run), readStart, windowStart))
+    .sort(byInstant);
   for (const run of windowRuns) {
     const instant = runInstant(run);
     const history = await fetchRunHistory(engine, run.agentInstanceKey, budget);
@@ -736,6 +744,14 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
       break;
     }
     pushRun(run, instant, history);
+  }
+  if (!budget.exhausted) {
+    for (const run of overlapRuns) {
+      const history = await fetchRunHistory(engine, run.agentInstanceKey, budget);
+      // A capped overlap run was fully read when it was in-window; drop the partial re-read.
+      if (budget.exhausted) break;
+      pushRun(run, runInstant(run), history);
+    }
   }
   function pushRun(run: AgentInstanceSummary, instant: string | null, history: AgentHistoryRecord[]): void {
     const ex = extractRunSignals(run.agentInstanceKey, cockpitUrlFor(deps.baseUrl, run.processInstanceKey), history);

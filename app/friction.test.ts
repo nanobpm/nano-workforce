@@ -521,7 +521,7 @@ test("fetchRunHistory pages across a page boundary until exhausted (#1095)", asy
   const got = await fetchRunHistory(pagedEngine(records, calls), "A1");
   assertEquals(got.length, records.length);
   assertEquals(new Set(got.map((r) => r.historyItemKey)).size, records.length);
-  assertEquals(calls.length, 3);
+  assertEquals(calls.length, 4, "paging stops on cursor exhaustion, not on a short page");
   assertEquals(calls[1].page?.after, String(HISTORY_PAGE_SIZE));
 });
 
@@ -990,4 +990,53 @@ test("dedupe index past the page cap refuses to write instead of duplicating an 
     "dedupe index incomplete",
   );
   assertEquals(created.length, 0);
+});
+
+// ── #1098 review round 2: short pages, overlap starvation, watermark rewind ─────────────────────
+
+test("fetchRunHistory keeps paging past a SHORT page whose cursor still advances (#1098 review)", async () => {
+  const pages = [
+    { items: [rec("ASSISTANT", "a", [], 1)], page: { endCursor: "c1" } },
+    { items: [rec("ASSISTANT", "b", [], 2)], page: { endCursor: "c2" } },
+    { items: [], page: { endCursor: "c2" } },
+  ];
+  let i = 0;
+  const engine = { searchAgentInstanceHistoryPage: async () => pages[Math.min(i++, pages.length - 1)] } as any;
+  const got = await fetchRunHistory(engine, "A1");
+  assertEquals(got.length, 2);
+  assertEquals(i, 3);
+});
+
+test("repeated sweeps under one cap never starve newer runs behind re-read overlap runs (#1098 review)", async () => {
+  await withData(async (data) => {
+    const big = (n: number) => Array.from({ length: 6 }, (_, k) => rec("ASSISTANT", "z".repeat(1000), [], n * 10 + k));
+    const t0 = new Date("2026-01-02T00:00:00.000Z");
+    const runs = [
+      { key: "OLD1", at: new Date(t0.getTime() - 50 * 60_000).toISOString(), records: big(1) },
+      { key: "OLD2", at: new Date(t0.getTime() - 20 * 60_000).toISOString(), records: big(2) },
+    ];
+    const { engine } = engineStub({ runs });
+    const cap = 7000;
+    await collectFriction({ data, engine, sweepKey: "S1", now: t0, config: CONFIG, baseUrl: "http://h" });
+    // A newer run with a signal lands; OLD1/OLD2 sit in the next sweep's overlap hour.
+    runs.push({ key: "NEW", at: new Date(t0.getTime() + 10 * 60_000).toISOString(), records: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")] });
+    const now2 = new Date(t0.getTime() + 20 * 60_000);
+    const s2 = await collectFriction({ data, engine, sweepKey: "S2", now: now2, config: CONFIG, baseUrl: "http://h", historyByteCap: cap });
+    assertEquals(s2.signalCount, 1, "the new run is read despite the overlap runs");
+    assertEquals(readWatermark(data), now2.toISOString());
+  });
+});
+
+test("a capped overlap run never rewinds the watermark (#1098 review)", async () => {
+  await withData(async (data) => {
+    const t0 = new Date("2026-01-02T00:00:00.000Z");
+    const runs: { key: string; at: string; records: AgentHistoryRecord[] }[] = [];
+    const { engine } = engineStub({ runs });
+    await collectFriction({ data, engine, sweepKey: "S1", now: t0, config: CONFIG, baseUrl: "http://h" });
+    runs.push({ key: "OV", at: new Date(t0.getTime() - 30 * 60_000).toISOString(), records: Array.from({ length: 20 }, (_, k) => rec("ASSISTANT", "q".repeat(1000), [], k)) });
+    const now2 = new Date(t0.getTime() + 60 * 60_000);
+    const s2 = await collectFriction({ data, engine, sweepKey: "S2", now: now2, config: CONFIG, baseUrl: "http://h", historyByteCap: 5000 });
+    assert(Date.parse(s2.windowEnd) >= Date.parse(s2.windowStart), `rewound: ${s2.windowStart} -> ${s2.windowEnd}`);
+    assertEquals(readWatermark(data), now2.toISOString());
+  });
 });
