@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 // Unit tests for the friction sweep core (issue #1073): signal extraction per kind from fixture
 // transcripts, redaction, the watermark (advance / no advance on failure / idempotent re-run), and
 // the filer (new vs existing fingerprint, threshold, no writes when no findings).
@@ -1395,12 +1396,52 @@ test("capture: one report visible under BOTH task-local and node scope is counte
     const engine = {
       searchVariables: async () => vars.map((v) => ({ ...v, name: "friction", isTruncated: false })),
       searchProcessInstances: async () => [],
+      searchElementInstances: async () => [{ elementInstanceKey: "NODESCOPE" }],
     };
+    const elements = async () => ["n1"];
+    const fixed = () => 0;
     // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
-    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date()), 1);
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), async () => undefined, fixed, elements), 1);
     vars = [both[1] as (typeof both)[number]]; // the task-local scope is gone; the node copy remains
     // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
-    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date()), 0, "no re-count across scopes");
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), async () => undefined, fixed, elements), 0, "no re-count across scopes");
+  });
+});
+
+test("capture: two different nodes of one instance filing the same report are both counted", async () => {
+  await withData(async (data) => {
+    const value = JSON.stringify([{ what: "gh auth missing", surface: "prompt" }]);
+    const vars = [
+      { variableKey: "T1", processInstanceKey: "P", scopeKey: "TASK1", value },
+      { variableKey: "N1", processInstanceKey: "P", scopeKey: "NODE1", value },
+      { variableKey: "T2", processInstanceKey: "P", scopeKey: "TASK2", value },
+      { variableKey: "N2", processInstanceKey: "P", scopeKey: "NODE2", value },
+    ];
+    const engine = {
+      searchVariables: async () => vars.map((v) => ({ ...v, name: "friction", isTruncated: false })),
+      searchProcessInstances: async () => [],
+      searchElementInstances: async (f: { elementId: string }) => [{ elementInstanceKey: f.elementId === "a" ? "NODE1" : "NODE2" }],
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    const n = await captureSelfReportedFriction(data, engine as any, new Date(), async () => undefined, () => 0, async () => ["a", "b"]);
+    assertEquals(n, 2, "one per node, task-local copies dropped");
+  });
+});
+
+test("capture: a report already captured under the variable-key row id is not re-inserted", async () => {
+  await withData(async (data) => {
+    const value = JSON.stringify([{ what: "w", surface: "prompt" }]);
+    const engine = {
+      searchVariables: async () => [{ variableKey: "V", processInstanceKey: "P", scopeKey: "P", name: "friction", value, isTruncated: false }],
+      searchProcessInstances: async () => [],
+    };
+    const legacy = createHash("sha256").update(`V\u0000${value}`).digest("hex").slice(0, 16);
+    data.source().db.run(
+      "INSERT INTO friction_self_reports (id, process_instance_key, scope_key, variable_key, what, surface, captured_at) VALUES (?, 'P', 'P', 'V', 'w', 'prompt', '2026-01-01T00:00:00Z')",
+      [`${legacy}:0`],
+    );
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date()), 0);
   });
 });
 

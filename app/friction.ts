@@ -513,6 +513,45 @@ export const FRICTION_FULL_READ_BUDGET_MS = 30_000;
  *  watch the other just added. Every capture runs strictly after the previous one finishes. */
 let captureChain: Promise<unknown> = Promise.resolve();
 
+/** A compiled agent's report is visible under BOTH its task-local scope and its node scope
+ *  (agentResultOutputLines) — one report, which must count once. Only where one instance holds several
+ *  copies of the SAME value are its node scopes resolved: a copy whose scope is not an agent-node scope
+ *  is dropped when a node-scope copy of that value exists. Distinct nodes filing identical text all keep
+ *  their node-scope copies, so recurring friction is never collapsed. The node copy outlives the
+ *  task-local one, so keeping it keeps the row id stable across passes. */
+async function dropTaskLocalCopies(
+  reads: { v: FrictionVar; raw: string }[],
+  data: DataLayer,
+  engine: Partial<Pick<EngineClient, "searchElementInstances">>,
+  agentElements: (data: DataLayer, pik: string) => Promise<string[]>,
+): Promise<{ v: FrictionVar; raw: string }[]> {
+  const groups = new Map<string, { v: FrictionVar; raw: string }[]>();
+  for (const r of reads) {
+    const pik = String(r.v.processInstanceKey ?? "");
+    if (!pik) continue;
+    const k = `${pik}\u0000${r.raw}`;
+    groups.set(k, [...(groups.get(k) ?? []), r]);
+  }
+  const drop = new Set<{ v: FrictionVar; raw: string }>();
+  const nodeScopesByPik = new Map<string, Set<string>>();
+  for (const group of groups.values()) {
+    if (group.length < 2 || !engine.searchElementInstances) continue;
+    const pik = String(group[0]?.v.processInstanceKey);
+    let nodeScopes = nodeScopesByPik.get(pik);
+    if (!nodeScopes) {
+      nodeScopes = new Set<string>();
+      for (const elementId of await agentElements(data, pik)) {
+        for (const el of await engine.searchElementInstances({ processInstanceKey: pik, elementId })) nodeScopes.add(String(el.elementInstanceKey));
+      }
+      nodeScopesByPik.set(pik, nodeScopes);
+    }
+    const scopes = nodeScopes;
+    if (!group.some((r) => scopes.has(String(r.v.scopeKey)))) continue;
+    for (const r of group) if (!scopes.has(String(r.v.scopeKey))) drop.add(r);
+  }
+  return reads.filter((r) => !drop.has(r));
+}
+
 export function captureSelfReportedFriction(
   data: DataLayer,
   engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances"> & Partial<Pick<EngineClient, "searchElementInstances">>,
@@ -521,8 +560,10 @@ export function captureSelfReportedFriction(
   fetchFull: (variableKey: string) => Promise<string | undefined> = (k) => fetchFullVariableValue(k),
   /** Monotonic clock for the full-read budget (test seam). */
   clock: () => number = () => Date.now(),
+  /** The agent-node body elements of a delivery-graph instance (test seam; defaults to the run's graph). */
+  agentElements: (data: DataLayer, pik: string) => Promise<string[]> = deliveryRunAgentElements,
 ): Promise<number> {
-  const run = captureChain.then(() => captureOnce(data, engine, now, fetchFull, clock));
+  const run = captureChain.then(() => captureOnce(data, engine, now, fetchFull, clock, agentElements));
   captureChain = run.catch(() => undefined);
   return run;
 }
@@ -533,8 +574,9 @@ async function captureOnce(
   now: Date,
   fetchFull: (variableKey: string) => Promise<string | undefined>,
   clock: () => number,
+  agentElements: (data: DataLayer, pik: string) => Promise<string[]>,
 ): Promise<number> {
-  const { vars, active } = await readFrictionVariables(engine, data);
+  const { vars, active } = await readFrictionVariables(engine, data, agentElements);
   const captured = new Set(
     data.source().db.all<{ variable_key: string }>("SELECT DISTINCT variable_key FROM friction_self_reports").map((r) => String(r.variable_key)),
   );
@@ -546,8 +588,7 @@ async function captureOnce(
   const retain = new Set<string>();
   const deadline = clock() + FRICTION_FULL_READ_BUDGET_MS;
   const at = now.toISOString();
-  const rows: unknown[][] = [];
-  const seen = new Set<string>();
+  const reads: { v: FrictionVar; raw: string }[] = [];
   for (const v of vars) {
     const pik = String(v.processInstanceKey ?? "");
     let raw: string | undefined = v.value;
@@ -563,6 +604,10 @@ async function captureOnce(
         continue;
       }
     }
+    reads.push({ v, raw });
+  }
+  const rows: unknown[][] = [];
+  for (const { v, raw } of await dropTaskLocalCopies(reads, data, engine, agentElements)) {
     let value: unknown;
     try {
       value = JSON.parse(raw);
@@ -570,12 +615,9 @@ async function captureOnce(
       continue;
     }
     const { notes } = parseFrictionNotes(value);
-    // Identity = originating instance + report value, NOT the variable key: a compiled agent's report is
-    // visible under BOTH its task-local and its node-scope `friction` (agentResultOutputLines), and must
-    // count once — in this pass and across passes, whichever of the two scopes is still readable.
-    const base = createHash("sha256").update(`${pik || `var:${v.variableKey}`}\u0000${raw}`).digest("hex").slice(0, 16);
-    if (seen.has(base)) continue;
-    seen.add(base);
+    // Identity = variable key + value (unchanged scheme, so rows captured before stay deduped): distinct
+    // nodes reporting the same text are distinct reports; a node's task-local copy is dropped above.
+    const base = createHash("sha256").update(`${v.variableKey}\u0000${raw}`).digest("hex").slice(0, 16);
     for (const [i, n] of notes.entries()) {
       rows.push([
         `${base}:${i}`,
