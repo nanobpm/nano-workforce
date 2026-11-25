@@ -2243,7 +2243,8 @@ test("#731 producer status gate: an agent node inserts a post-completion contrac
     r.bpmn.includes(`<bpmn:exclusiveGateway id="${el}_gate" name="producer contract met?" default="${el}_g1">`),
     "the agent task feeds a producer-contract exclusive gate",
   );
-  assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_i1" sourceRef="${el}_work" targetRef="${el}_gate" />`), "the task's work subProcess (#1016) flows into the gate, not straight to end");
+  assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_i1" sourceRef="${el}_work" targetRef="${el}_cf" />`), "the task's work subProcess (#1016) flows into friction capture (#1104) outside the SLA scope");
+  assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_wc" sourceRef="${el}_cf" targetRef="${el}_gate" />`), "capture flows into the gate, not straight to end");
   assert(r.bpmn.includes(`<bpmn:userTask id="delivery-human-task__${el}__contract"`), "a producer-contract escalation task exists, distinct from the __esc timeout twin");
   assert(
     r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="delivery-human-task__${el}__contract" />`),

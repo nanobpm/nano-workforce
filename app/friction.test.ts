@@ -1317,6 +1317,11 @@ test("issue #1104: every compiled agent cell asks for friction notes and runs th
   assert(compiled.ok, "compile");
   const bpmn = compiled.semanticBpmn;
   assert(bpmn.includes(`<zeebe:taskDefinition type="${CAPTURE_FRICTION_JOB_TYPE}" />`), "capture step compiled");
-  assert(/<bpmn:sequenceFlow id="(\w+)_w1" sourceRef="\1_task" targetRef="\1_cf"/.test(bpmn), "agent task -> capture");
+  // Capture runs OUTSIDE the SLA-guarded `<el>_work` scope: an in-flight SLA check can never cancel it.
+  assert(/<bpmn:sequenceFlow id="(\w+)_w1" sourceRef="\1_task" targetRef="\1_wend"/.test(bpmn), "agent task -> terminate _work");
+  assert(/<bpmn:sequenceFlow id="(\w+)_i1" sourceRef="\1_work" targetRef="\1_cf"/.test(bpmn), "_work -> capture");
+  assert(/<bpmn:sequenceFlow id="(\w+)_wc" sourceRef="\1_cf" targetRef="\1_gate"/.test(bpmn), "capture -> producer gate");
+  const work = bpmn.slice(bpmn.indexOf('_work" name='), bpmn.indexOf("</bpmn:subProcess>", bpmn.indexOf('_work" name=')));
+  assert(!work.includes(CAPTURE_FRICTION_JOB_TYPE), "capture is not inside the SLA-guarded _work subProcess");
   assert(/target="friction"/.test(bpmn), "friction mapped out of the agent task node-locally");
 });

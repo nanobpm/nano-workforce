@@ -2379,17 +2379,7 @@ function serviceBodyLines(
                 // TERMINATE (scoped to `<el>_work`): the agent's completion must cancel any still-pending SLA
         // check (queued/incidented `pr.agent-sla-check` job), or its live token would keep `<el>_work`
         // open — blocking the contract gate and possibly escalating already-finished work.
-        // Issue #1104: capture the agent's self-reported `friction` notes (issue #1101) on the COMMON
-        // post-agent path — every outcome (success, contract-broken, …) passes through here before the
-        // producer gate. The task maps `friction` out node-locally (AGENT_RESULT_LOCAL_VARS), so this
-        // reads THIS node's notes. It runs the SAME host worker as implement-cell's capture step
-        // (`captureFrictionFromJob`, idempotent + best-effort — it never fails the node).
-        `        <bpmn:serviceTask id="${el}_cf" name="Capture friction notes">`,
-        `          <bpmn:extensionElements><zeebe:taskDefinition type="${CAPTURE_FRICTION_JOB_TYPE}" /></bpmn:extensionElements>`,
-        `          <bpmn:incoming>${el}_w1</bpmn:incoming>`,
-        `          <bpmn:outgoing>${el}_wc</bpmn:outgoing>`,
-        "        </bpmn:serviceTask>",
-        `        <bpmn:endEvent id="${el}_wend"><bpmn:incoming>${el}_wc</bpmn:incoming><bpmn:terminateEventDefinition id="${el}_wendTerm" /></bpmn:endEvent>`,
+        `        <bpmn:endEvent id="${el}_wend"><bpmn:incoming>${el}_w1</bpmn:incoming><bpmn:terminateEventDefinition id="${el}_wendTerm" /></bpmn:endEvent>`,
         `        <bpmn:intermediateCatchEvent id="${el}_be" name="Work SLA check">`,
         `          <bpmn:incoming>${el}_wl</bpmn:incoming>`,
         `          <bpmn:incoming>${el}_s0</bpmn:incoming>`,
@@ -2400,14 +2390,24 @@ function serviceBodyLines(
         `  ${flow(`${el}_wf`, `${el}_wstart`, `${el}_wfork`)}`,
         `  ${flow(`${el}_wl`, `${el}_wfork`, `${el}_be`)}`,
         `  ${flow(`${el}_w0`, `${el}_wfork`, `${el}_task`)}`,
-        `  ${flow(`${el}_w1`, `${el}_task`, `${el}_cf`)}`,
-        `  ${flow(`${el}_wc`, `${el}_cf`, `${el}_wend`)}`,
+        `  ${flow(`${el}_w1`, `${el}_task`, `${el}_wend`)}`,
         "      </bpmn:subProcess>",
         `      <bpmn:boundaryEvent id="${el}_slaBe" name="Work SLA elapsed" attachedToRef="${el}_work">`,
         `        <bpmn:outgoing>${el}_s3</bpmn:outgoing>`,
         `        <bpmn:conditionalEventDefinition id="${el}_slaCond"><bpmn:condition xsi:type="bpmn:tFormalExpression">=${slaExpiredVar} = true</bpmn:condition></bpmn:conditionalEventDefinition>`,
         "      </bpmn:boundaryEvent>",
         flow(`${el}_s3`, `${el}_slaBe`, esc),
+        // Issue #1104: capture the agent's self-reported `friction` notes (issue #1101) AFTER `<el>_work`
+        // has terminated — OUTSIDE the SLA-guarded scope, so an in-flight SLA check that already saw the
+        // live job can never interrupt capture and route completed work to timeout escalation. Every
+        // completion passes through here before the producer gate. `friction` is node-local
+        // (AGENT_RESULT_LOCAL_VARS); the SAME host worker as implement-cell's capture step runs it
+        // (`captureFrictionFromJob`, idempotent + best-effort — it never fails the node).
+        `      <bpmn:serviceTask id="${el}_cf" name="Capture friction notes">`,
+        `        <bpmn:extensionElements><zeebe:taskDefinition type="${CAPTURE_FRICTION_JOB_TYPE}" /></bpmn:extensionElements>`,
+        `        <bpmn:incoming>${el}_i1</bpmn:incoming>`,
+        `        <bpmn:outgoing>${el}_wc</bpmn:outgoing>`,
+        "      </bpmn:serviceTask>",
         ...timeoutEscalation,
       ]
     : [
@@ -2488,7 +2488,8 @@ function serviceBodyLines(
       .map((f) => `<bpmn:incoming>${f}</bpmn:incoming>`)
       .join("")}</bpmn:endEvent>`,
     flow(`${el}_i0`, `${el}_start`, `${el}_slaArm`),
-    flow(`${el}_i1`, `${el}_work`, `${el}_gate`),
+    flow(`${el}_i1`, `${el}_work`, `${el}_cf`),
+    flow(`${el}_wc`, `${el}_cf`, `${el}_gate`),
     `      <bpmn:sequenceFlow id="${el}_g0" name="contract met" sourceRef="${el}_gate" targetRef="${enrollTarget}"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${proceedCondition}</bpmn:conditionExpression></bpmn:sequenceFlow>`,
     `      <bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="${contractEsc}" />`,
     flow(`${el}_g2`, contractEsc, `${contractEsc}Rg`),
