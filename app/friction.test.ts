@@ -1362,3 +1362,79 @@ test("collect emits self_reported signals into the digest, counts them, and resp
     assertEquals(again.signalCount, 0, "a later sweep never recounts a self-report");
   });
 });
+
+test("readFrictionVariables: an instance with more friction scopes than one page is read node-by-node", async () => {
+  await withData(async (data) => {
+    const history = Array.from({ length: 100 }, (_, i) => ({ variableKey: `H${i}`, processInstanceKey: `O${i}`, scopeKey: `O${i}`, name: "friction", value: "null", isTruncated: false }));
+    // 150 agent nodes on ONE live instance: the per-instance name search clips at 100.
+    const nodeVar = (i: number) => ({ variableKey: `N${i}`, processInstanceKey: "BIG", scopeKey: `EI${i}`, name: "friction", value: "[]", isTruncated: false });
+    const engine = {
+      searchVariables: async (f: { processInstanceKey?: string; scopeKey?: string }) => {
+        if (f.processInstanceKey !== "BIG") return history;
+        if (f.scopeKey) return [nodeVar(Number(f.scopeKey.slice(2)))];
+        return Array.from({ length: 100 }, (_, i) => nodeVar(i));
+      },
+      searchElementInstances: async (f: { elementId: string }) => [{ elementInstanceKey: `EI${f.elementId.slice(1)}` }],
+      searchProcessInstances: async () => [{ processInstanceKey: "BIG" }],
+    };
+    const elements = async () => Array.from({ length: 150 }, (_, i) => `n${i}`);
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    const { vars } = await readFrictionVariables(engine as any, data, elements);
+    assertEquals(vars.filter((v) => v.processInstanceKey === "BIG").length, 150, "every node's report is visible");
+  });
+});
+
+test("capture: one report visible under BOTH task-local and node scope is counted once", async () => {
+  await withData(async (data) => {
+    const value = JSON.stringify([{ what: "w", surface: "prompt" }]);
+    const both = [
+      { variableKey: "TASK", processInstanceKey: "P", scopeKey: "TASKSCOPE", value },
+      { variableKey: "NODE", processInstanceKey: "P", scopeKey: "NODESCOPE", value },
+    ];
+    let vars = both;
+    const engine = {
+      searchVariables: async () => vars.map((v) => ({ ...v, name: "friction", isTruncated: false })),
+      searchProcessInstances: async () => [],
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date()), 1);
+    vars = [both[1] as (typeof both)[number]]; // the task-local scope is gone; the node copy remains
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date()), 0, "no re-count across scopes");
+  });
+});
+
+test("capture: concurrent captures are serialised, so a slower pass cannot erase a newer watch", async () => {
+  await withData(async (data) => {
+    const history = Array.from({ length: 100 }, (_, i) => ({ variableKey: `H${i}`, processInstanceKey: `O${i}`, scopeKey: `O${i}`, name: "friction", value: "null", isTruncated: false }));
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const mk = (active: string[], slow: boolean) => ({
+      searchVariables: async () => history,
+      searchProcessInstances: async () => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        if (slow) await gate;
+        inFlight--;
+        return active.map((processInstanceKey) => ({ processInstanceKey }));
+      },
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    const slow = captureSelfReportedFriction(data, mk([], true) as any, new Date());
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    const fast = captureSelfReportedFriction(data, mk(["NEWER"], false) as any, new Date());
+    release();
+    await Promise.all([slow, fast]);
+    assertEquals(maxInFlight, 1, "never interleaved");
+    const watch = data.source().db.all<{ process_instance_key: string }>("SELECT process_instance_key FROM friction_capture_watch");
+    assertEquals(
+      watch.map((r) => r.process_instance_key),
+      ["NEWER"],
+      "the later caller's watch survives",
+    );
+  });
+});

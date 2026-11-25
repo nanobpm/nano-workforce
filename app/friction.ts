@@ -21,7 +21,7 @@ import { createHash } from "node:crypto";
 import type { AgentHistoryRecord, AgentInstanceSummary, DataLayer, EngineClient } from "@nanobpm/urban";
 import { publicBaseUrl } from "./blackboard.ts";
 import { readEnvOr } from "./contracts.ts";
-import { fetchFullVariableValue } from "./deliveryGraphProgress.ts";
+import { deliveryRunAgentElements, fetchFullVariableValue } from "./deliveryGraphProgress.ts";
 import { runGh, useGh } from "./github.ts";
 import { parsePr } from "./prParse.ts";
 
@@ -462,8 +462,10 @@ type FrictionVar = Awaited<ReturnType<EngineClient["searchVariables"]>>[number];
  *  and de-duplicated. The watch set itself is rewritten by {@link captureSelfReportedFriction}, only once
  *  it knows which reports were captured. */
 export async function readFrictionVariables(
-  engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances">,
+  engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances"> & Partial<Pick<EngineClient, "searchElementInstances">>,
   data?: DataLayer,
+  /** The agent-node body elements of a delivery-graph instance (test seam; defaults to the run's graph). */
+  agentElements: (data: DataLayer, pik: string) => Promise<string[]> = deliveryRunAgentElements,
 ): Promise<{ vars: FrictionVar[]; active: Set<string> }> {
   const byKey = new Map<string, FrictionVar>();
   const add = (rows: FrictionVar[]) => {
@@ -477,7 +479,18 @@ export async function readFrictionVariables(
       ? data.source().db.all<{ process_instance_key: string }>("SELECT process_instance_key FROM friction_capture_watch").map((r) => r.process_instance_key)
       : [];
     for (const pik of new Set([...active, ...watched])) {
-      add(await engine.searchVariables({ processInstanceKey: pik, name: AGENT_FRICTION_RESULT_KEY }));
+      const rows = await engine.searchVariables({ processInstanceKey: pik, name: AGENT_FRICTION_RESULT_KEY });
+      add(rows);
+      // The per-instance page is ALSO bounded: a delivery graph has up to 256 agent nodes, each with its
+      // own node-scope `friction`. Overflow → read node-by-node by SCOPE KEY (as `readEngineFacts` does),
+      // so no node's report sits permanently beyond the page.
+      if (rows.length >= FRICTION_SEARCH_PAGE && data && engine.searchElementInstances) {
+        for (const elementId of await agentElements(data, pik)) {
+          for (const el of await engine.searchElementInstances({ processInstanceKey: pik, elementId })) {
+            add(await engine.searchVariables({ processInstanceKey: pik, scopeKey: String(el.elementInstanceKey), name: AGENT_FRICTION_RESULT_KEY }));
+          }
+        }
+      }
     }
   }
   return { vars: [...byKey.values()], active };
@@ -495,14 +508,31 @@ export const FRICTION_FULL_READ_BUDGET_MS = 30_000;
  *  re-read (its value can no longer change); one that finished since is read once more (it may have been
  *  overwritten); full reads share {@link FRICTION_FULL_READ_BUDGET_MS}. An instance whose report could
  *  not be read (fetch failed / budget spent) is kept in the watch set until a later pass captures it. */
-export async function captureSelfReportedFriction(
+/** Tail of the in-process capture chain: the poller and `pr.friction-collect` both capture, and each pass
+ *  REWRITES the whole watch set from its own engine snapshot — so two interleaved passes could erase a
+ *  watch the other just added. Every capture runs strictly after the previous one finishes. */
+let captureChain: Promise<unknown> = Promise.resolve();
+
+export function captureSelfReportedFriction(
   data: DataLayer,
-  engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances">,
+  engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances"> & Partial<Pick<EngineClient, "searchElementInstances">>,
   now: Date,
   /** Reads a search-truncated value in full by `variableKey` (test seam; defaults to the engine REST read). */
   fetchFull: (variableKey: string) => Promise<string | undefined> = (k) => fetchFullVariableValue(k),
   /** Monotonic clock for the full-read budget (test seam). */
   clock: () => number = () => Date.now(),
+): Promise<number> {
+  const run = captureChain.then(() => captureOnce(data, engine, now, fetchFull, clock));
+  captureChain = run.catch(() => undefined);
+  return run;
+}
+
+async function captureOnce(
+  data: DataLayer,
+  engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances"> & Partial<Pick<EngineClient, "searchElementInstances">>,
+  now: Date,
+  fetchFull: (variableKey: string) => Promise<string | undefined>,
+  clock: () => number,
 ): Promise<number> {
   const { vars, active } = await readFrictionVariables(engine, data);
   const captured = new Set(
@@ -517,6 +547,7 @@ export async function captureSelfReportedFriction(
   const deadline = clock() + FRICTION_FULL_READ_BUDGET_MS;
   const at = now.toISOString();
   const rows: unknown[][] = [];
+  const seen = new Set<string>();
   for (const v of vars) {
     const pik = String(v.processInstanceKey ?? "");
     let raw: string | undefined = v.value;
@@ -539,7 +570,12 @@ export async function captureSelfReportedFriction(
       continue;
     }
     const { notes } = parseFrictionNotes(value);
-    const base = createHash("sha256").update(`${v.variableKey}\u0000${raw}`).digest("hex").slice(0, 16);
+    // Identity = originating instance + report value, NOT the variable key: a compiled agent's report is
+    // visible under BOTH its task-local and its node-scope `friction` (agentResultOutputLines), and must
+    // count once — in this pass and across passes, whichever of the two scopes is still readable.
+    const base = createHash("sha256").update(`${pik || `var:${v.variableKey}`}\u0000${raw}`).digest("hex").slice(0, 16);
+    if (seen.has(base)) continue;
+    seen.add(base);
     for (const [i, n] of notes.entries()) {
       rows.push([
         `${base}:${i}`,
