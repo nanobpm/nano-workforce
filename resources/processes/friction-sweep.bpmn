@@ -93,6 +93,7 @@
           <zeebe:linkedResource resourceId="prompts/friction-analyst.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:ioMapping>
+          <zeebe:input source="=null" target="friction" />
           <zeebe:input source="=&#34;\n\n---\n\n&#34; + frictionDigest" target="appendPrompt" />
           <zeebe:output source="=if (is defined(findings)) then findings else null" target="findings" />
           <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />

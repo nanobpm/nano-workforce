@@ -450,7 +450,9 @@ export function parseFrictionNotes(raw: unknown): { notes: AgentFrictionNote[]; 
 /** The job fields {@link captureFrictionFromJob} reads: the run linkage plus the propagated variables. */
 export interface FrictionJob {
   processInstanceKey?: string | number | null;
+  /** Optional: the Urban nanosdk adapter does not supply it, so `jobKey` is the always-present linkage. */
   elementInstanceKey?: string | number | null;
+  jobKey?: string | number | null;
   variables?: unknown;
 }
 
@@ -466,6 +468,7 @@ export async function captureFrictionFromJob(data: DataLayer, job: FrictionJob, 
     if (notes.length === 0) return 0;
     const pik = job.processInstanceKey != null && String(job.processInstanceKey) !== "" ? String(job.processInstanceKey) : null;
     const scope = job.elementInstanceKey != null ? String(job.elementInstanceKey) : null;
+    const jobKey = job.jobKey != null && String(job.jobKey) !== "" ? String(job.jobKey) : null;
     const at = now.toISOString();
     let inserted = 0;
     await data.open().tx(async (t) => {
@@ -475,9 +478,9 @@ export async function captureFrictionFromJob(data: DataLayer, job: FrictionJob, 
           .digest("hex")
           .slice(0, 24);
         const res = await t.exec(
-          `INSERT OR IGNORE INTO friction_self_reports (id, process_instance_key, scope_key, what, surface, turns_lost,
-             suggested_fix, target_repo, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [id, pik, scope, n.what, n.surface, n.turnsLost ?? null, n.suggestedFix ?? null, n.targetRepo ?? null, at],
+          `INSERT OR IGNORE INTO friction_self_reports (id, process_instance_key, scope_key, job_key, what, surface, turns_lost,
+             suggested_fix, target_repo, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id, pik, scope, jobKey, n.what, n.surface, n.turnsLost ?? null, n.suggestedFix ?? null, n.targetRepo ?? null, at],
         );
         inserted += res.changed;
       }

@@ -529,6 +529,7 @@
             <zeebe:property name="io.nanobpm.dataEnvelope.out" value="FixCiOut" />
           </zeebe:properties>
           <zeebe:ioMapping>
+            <zeebe:input source="=null" target="friction" />
             <zeebe:input source="=(if (failingChecksList = null or failingChecksList = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Failing checks to make green:&#10;&#34; + failingChecksList) + (if (abandonBrief = null) then &#34;&#34; else abandonBrief) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
             <zeebe:input source="=ciFixRound" target="guardCiFixRound" />
             <zeebe:input source="=customInstructions" target="guardCustomInstructions" />
@@ -747,6 +748,7 @@
             <zeebe:property name="io.nanobpm.dataEnvelope.out" value="RebaseOut" />
           </zeebe:properties>
           <zeebe:ioMapping>
+            <zeebe:input source="=null" target="friction" />
             <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
             <zeebe:input source="=ciFixRound" target="guardCiFixRound" />
             <zeebe:input source="=customInstructions" target="guardCustomInstructions" />

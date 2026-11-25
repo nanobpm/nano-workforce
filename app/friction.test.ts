@@ -1163,20 +1163,32 @@ test("parseFrictionNotes: a credential-shaped targetRepo is discarded, never sto
 test("captureFrictionFromJob persists redacted notes with run linkage, idempotent by (processInstanceKey, note)", async () => {
   await withData(async (data) => {
     const now = new Date("2026-01-01T12:00:00.000Z");
-    const job = { processInstanceKey: "P1", elementInstanceKey: "E1", variables: { friction: [{ what: "password hunter2 in docs", surface: "prompt", turnsLost: 2 }] } };
+    const job = { processInstanceKey: "P1", elementInstanceKey: "E1", jobKey: "J1", variables: { friction: [{ what: "password hunter2 in docs", surface: "prompt", turnsLost: 2 }] } };
     assertEquals(await captureFrictionFromJob(data, job, now), 1);
     // A later record worker of the SAME run still sees the propagated variable: nothing new is inserted.
     assertEquals(await captureFrictionFromJob(data, { ...job, elementInstanceKey: "E2" }, now), 0, "re-capture inserts nothing");
     // The same note in a DIFFERENT run is a distinct report.
     assertEquals(await captureFrictionFromJob(data, { ...job, processInstanceKey: "P2" }, now), 1);
-    const rows = data.source().db.all<{ process_instance_key: string; scope_key: string; what: string; turns_lost: number }>(
-      "SELECT process_instance_key, scope_key, what, turns_lost FROM friction_self_reports ORDER BY process_instance_key",
+    const rows = data.source().db.all<{ process_instance_key: string; scope_key: string; job_key: string; what: string; turns_lost: number }>(
+      "SELECT process_instance_key, scope_key, job_key, what, turns_lost FROM friction_self_reports ORDER BY process_instance_key",
     );
     assertEquals(rows.length, 2);
     assertEquals(rows[0]?.process_instance_key, "P1");
     assertEquals(rows[0]?.scope_key, "E1");
+    assertEquals(rows[0]?.job_key, "J1");
     assertEquals(rows[0]?.turns_lost, 2);
     assert(!rows[0]?.what.includes("hunter2"), "stored text is redacted");
+  });
+});
+
+test("captureFrictionFromJob keeps job linkage with the Urban adapter's job shape (no elementInstanceKey)", async () => {
+  await withData(async (data) => {
+    // The Urban nanosdk adapter's handler job carries jobKey + processInstanceKey but NOT elementInstanceKey.
+    const job = { jobKey: "42", processInstanceKey: "P9", type: "pr.capture-friction", variables: { friction: [{ what: "x", surface: "prompt" }] } };
+    assertEquals(await captureFrictionFromJob(data, job), 1);
+    const row = data.source().db.all<{ job_key: string | null; scope_key: string | null }>("SELECT job_key, scope_key FROM friction_self_reports")[0];
+    assertEquals(row?.job_key, "42");
+    assertEquals(row?.scope_key, null);
   });
 });
 
@@ -1244,6 +1256,10 @@ test("every senior:* agent task with explicit output mappings passes `friction` 
       if (!block.includes('type="senior:') || !block.includes("<zeebe:output")) continue;
       checked++;
       assert(block.includes('target="friction"'), `${f}#${m[1]} must map friction to process scope`);
+      // A parent's `friction` propagates into a called child (call-activity variable propagation); without
+      // a task-local null seed, an agent that omits the optional key re-emits the INHERITED note and it is
+      // captured again under the child's processInstanceKey — one report counted N times (PR review #1103).
+      assert(block.includes('<zeebe:input source="=null" target="friction" />'), `${f}#${m[1]} must seed task-local friction to null`);
     }
   }
   assert(checked > 0, "found mapped agent tasks");

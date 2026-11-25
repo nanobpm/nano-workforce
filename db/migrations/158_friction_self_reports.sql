@@ -12,7 +12,8 @@
 CREATE TABLE IF NOT EXISTS friction_self_reports (
   id                   TEXT PRIMARY KEY,  -- sha256(processInstanceKey, note) — idempotent per run + note
   process_instance_key TEXT,              -- the run (canonical run identity `pi:<key>`)
-  scope_key            TEXT,              -- the variable's scope (element instance of the capturing record job)
+  scope_key            TEXT,              -- element instance of the capturing record job (NULL when the adapter omits it)
+  job_key              TEXT,              -- the capturing record job's key (always supplied by the Urban adapter)
   what                 TEXT NOT NULL,     -- redacted
   surface              TEXT NOT NULL,     -- one of FIX_SURFACES
   turns_lost           INTEGER,
