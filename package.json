@@ -67,13 +67,13 @@
   },
   "dependencies": {
     "@nanobpm/agentic": "^0.16.0",
-    "@nanobpm/urban": "^0.100.0",
+    "@nanobpm/urban": "^0.101.0",
     "bpmn-auto-layout": "https://github.com/jwulf/bpmn-auto-layout/releases/download/nano-uncapped-routing-25251a2/bpmn-auto-layout-2.0.0-alpha.2.tgz"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",
-    "@nanobpm/engine-wasm": "0.11.2",
-    "@nanobpm/urban-testkit": "^1.7.1",
+    "@nanobpm/engine-wasm": "0.13.0",
+    "@nanobpm/urban-testkit": "^1.8.0",
     "@nanobpm/workflow": "^0.20.0",
     "@semantic-release/changelog": "^7.0.0",
     "@semantic-release/exec": "^7.1.0",
@@ -87,7 +87,7 @@
     "yaml": "^2.9.0"
   },
   "overrides": {
-    "@nanobpm/engine-wasm": "0.11.2",
+    "@nanobpm/engine-wasm": "0.13.0",
     "@semantic-release/npm": "^13.1.5",
     "bpmn-auto-layout": "$bpmn-auto-layout"
   }

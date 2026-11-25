@@ -24,7 +24,8 @@ import {
   signalRunUrls,
   observedSignalCounts,
   redactStructured,
-  HISTORY_PAGE_CAP,
+  HISTORY_PAGE_SIZE,
+  historyBudget,
   fingerprintMarker,
   escalationSubjectUrl,
   frictionSummaryMayBeOpen,
@@ -147,7 +148,7 @@ function engineStub(opts: { fail?: boolean; runs?: { key: string; at: string; re
       if (opts.fail) throw new Error("engine down");
       return (opts.runs ?? []).map((r) => ({ agentInstanceKey: r.key, status: "COMPLETED", completionDate: r.at, elementId: "implement-task" }));
     },
-    searchAgentInstanceHistory: async (key: string) => (opts.runs ?? []).find((r) => r.key === key)?.records ?? [],
+    searchAgentInstanceHistoryPage: async (key: string) => ({ items: (opts.runs ?? []).find((r) => r.key === key)?.records ?? [], page: {} }),
     searchJobs: async () => [],
     searchIncidents: async () => [],
   } as any;
@@ -385,7 +386,7 @@ test("an agent swept while IDLE and completed in a later window is counted once"
     const run = { agentInstanceKey: "R1", status: "IDLE", lastUpdatedDate: "2026-01-01T12:00:00.000Z", elementId: "implement-task" } as Record<string, unknown>;
     const engine = {
       searchAgentInstances: async () => [run],
-      searchAgentInstanceHistory: async () => records,
+      searchAgentInstanceHistoryPage: async () => ({ items: records, page: {} }),
       searchJobs: async () => [],
       searchIncidents: async () => [],
     } as any;
@@ -467,14 +468,49 @@ test("escalationSubjectUrl links the escalation subject", () => {
   assertEquals(escalationSubjectUrl("garbage"), null);
 });
 
-test("fetchRunHistory reads past an expired history prefix (#1074 review)", async () => {
-  // Iterations 0–9 expired; 10–209 retained, one record each. The first page is capped.
-  const retained = Array.from({ length: 200 }, (_, k) => rec("ASSISTANT", `r${k}`, [], k + 10));
-  const engine = {
-    searchAgentInstanceHistory: async (_key: string, f?: { loopIteration?: number }) =>
-      f?.loopIteration === undefined ? retained.slice(0, HISTORY_PAGE_CAP) : retained.filter((r) => r.loopIteration === f.loopIteration),
+function pagedEngine(records: AgentHistoryRecord[], calls: { filter?: unknown; page?: { limit?: number; after?: string } }[] = []) {
+  return {
+    searchAgentInstanceHistoryPage: async (_key: string, q: { filter?: { commitStatus?: { $in?: string[] } }; page?: { limit?: number; after?: string } }) => {
+      calls.push(q);
+      const wanted = q.filter?.commitStatus?.$in ?? ["COMMITTED"];
+      const matching = records.filter((r) => wanted.includes(r.commitStatus));
+      const from = q.page?.after ? Number(q.page.after) : 0;
+      const limit = q.page?.limit ?? 100;
+      const items = matching.slice(from, from + limit);
+      return { items, page: { totalItems: matching.length, endCursor: items.length ? String(from + items.length) : undefined } };
+    },
   } as any;
-  assertEquals((await fetchRunHistory(engine, "A1")).length, 200);
+}
+
+for (const status of ["PENDING", "DISCARDED", "COMMITTED"]) {
+  test(`fetchRunHistory reads ${status} history records (#1095)`, async () => {
+    const r = { ...rec("TOOL_RESULT", "Blocked by nano-coder permissions: x"), commitStatus: status };
+    const got = await fetchRunHistory(pagedEngine([r]), "A1");
+    assertEquals(got.length, 1);
+    assertEquals(got[0].commitStatus, status);
+    const sig = extractRunSignals("A1", null, got).signals;
+    assertEquals(sig.length, 1);
+  });
+}
+
+test("fetchRunHistory pages across a page boundary until exhausted (#1095)", async () => {
+  const statuses = ["PENDING", "DISCARDED", "COMMITTED"];
+  const records = Array.from({ length: HISTORY_PAGE_SIZE * 2 + 7 }, (_, k) => ({ ...rec("ASSISTANT", `r${k}`, [], k), commitStatus: statuses[k % 3] }));
+  const calls: { page?: { limit?: number; after?: string } }[] = [];
+  const got = await fetchRunHistory(pagedEngine(records, calls), "A1");
+  assertEquals(got.length, records.length);
+  assertEquals(new Set(got.map((r) => r.historyItemKey)).size, records.length);
+  assertEquals(calls.length, 3);
+  assertEquals(calls[1].page?.after, String(HISTORY_PAGE_SIZE));
+});
+
+test("fetchRunHistory stops at the per-sweep byte cap (#1095)", async () => {
+  const records = Array.from({ length: 50 }, (_, k) => rec("ASSISTANT", "y".repeat(1000), [], k));
+  const budget = historyBudget(10_000);
+  const got = await fetchRunHistory(pagedEngine(records), "A1", budget);
+  assert(got.length > 0 && got.length < 10);
+  assert(budget.exhausted);
+  assertEquals((await fetchRunHistory(pagedEngine(records), "A2", budget)).length, 0, "the cap spans the whole sweep");
 });
 
 test("an agent-supplied existingIssue with a different fingerprint is never trusted (#1074 review)", async () => {
@@ -600,7 +636,7 @@ test("run links are browser-facing cockpit links, never the protected history JS
   await withData(async (data) => {
     const engine = {
       searchAgentInstances: async () => [{ agentInstanceKey: "A9", processInstanceKey: "P9", status: "COMPLETED", completionDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
-      searchAgentInstanceHistory: async () => [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")],
+      searchAgentInstanceHistoryPage: async () => ({ items: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")], page: {} }),
       searchJobs: async () => [],
       searchIncidents: async () => [],
     } as any;
@@ -614,7 +650,7 @@ test("failed-job and incident signals carry cockpit run links for their process 
   await withData(async (data) => {
     const engine = {
       searchAgentInstances: async () => [],
-      searchAgentInstanceHistory: async () => [],
+      searchAgentInstanceHistoryPage: async () => ({ items: [], page: {} }),
       searchJobs: async ({ state }: { state: string }) => (state === "FAILED" ? [{ jobKey: "J7", type: "t", processInstanceKey: "P7", retries: 0 }] : []),
       searchIncidents: async () => [{ incidentKey: "I7", processInstanceKey: "P8", errorType: "E", errorMessage: "m" }],
     } as any;
@@ -645,7 +681,7 @@ test("a tool error, failed job and incident of ONE process instance count as one
   await withData(async (data) => {
     const engine = {
       searchAgentInstances: async () => [{ agentInstanceKey: "A1", processInstanceKey: "P1", status: "COMPLETED", completionDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
-      searchAgentInstanceHistory: async () => [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")],
+      searchAgentInstanceHistoryPage: async () => ({ items: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")], page: {} }),
       searchJobs: async ({ state }: { state: string }) => (state === "FAILED" ? [{ jobKey: "J1", type: "t", processInstanceKey: "P1", retries: 0 }] : []),
       searchIncidents: async () => [{ incidentKey: "I1", processInstanceKey: "P1", errorType: "E", errorMessage: "m" }],
     } as any;
@@ -770,7 +806,7 @@ test("an escalation and the transcript signals of one execution count as ONE run
     db.run("INSERT INTO escalations (pr_key, round_no, kind, question, status, asked_at) VALUES ('o/r#9', 1, 'question', 'Blocker', 'open', '2026-01-01T06:00:00.000Z')");
     const engine = {
       searchAgentInstances: async () => [{ agentInstanceKey: "A1", processInstanceKey: "P1", status: "COMPLETED", completionDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
-      searchAgentInstanceHistory: async () => [rec("TOOL_RESULT", "Error: one"), rec("TOOL_RESULT", "Error: two")],
+      searchAgentInstanceHistoryPage: async () => ({ items: [rec("TOOL_RESULT", "Error: one"), rec("TOOL_RESULT", "Error: two")], page: {} }),
       searchJobs: async () => [],
       searchIncidents: async () => [],
     } as any;
@@ -800,7 +836,7 @@ test("a still-THINKING run is collected by lastUpdatedDate, not deferred until i
     const records = [rec("TOOL_RESULT", "Blocked by nano-coder permissions: x")];
     const engine = {
       searchAgentInstances: async () => [{ agentInstanceKey: "R1", status: "THINKING", lastUpdatedDate: "2026-01-01T12:00:00.000Z", elementId: "x" }],
-      searchAgentInstanceHistory: async () => records,
+      searchAgentInstanceHistoryPage: async () => ({ items: records, page: {} }),
       searchJobs: async () => [],
       searchIncidents: async () => [],
     } as any;
@@ -828,7 +864,7 @@ test("an incident created AND resolved between two sweeps is still collected", a
     let incidents: { incidentKey: string; processInstanceKey: string; errorType: string; errorMessage: string; state: string }[] = [];
     const engine = {
       searchAgentInstances: async () => [],
-      searchAgentInstanceHistory: async () => [],
+      searchAgentInstanceHistoryPage: async () => ({ items: [], page: {} }),
       searchJobs: async () => [],
       searchIncidents: async (f?: { state?: string }) => incidents.filter((i) => !f?.state || i.state === f.state),
     } as any;
@@ -852,7 +888,7 @@ test("a job whose lease expired (TIMED_OUT) is collected as a lease-expiry signa
     const clock = { now: activatedAt };
     const engine = {
       searchAgentInstances: async () => [],
-      searchAgentInstanceHistory: async () => [],
+      searchAgentInstanceHistoryPage: async () => ({ items: [], page: {} }),
       searchJobs: async ({ state }: { state: string }) =>
         state === "TIMED_OUT" && clock.now > activatedAt + leaseMs ? [{ jobKey: "J5", type: "senior:implement", processInstanceKey: "P5", elementId: "impl" }] : [],
       searchIncidents: async () => [],
