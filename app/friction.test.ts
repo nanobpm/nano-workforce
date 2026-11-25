@@ -1088,3 +1088,21 @@ test("a late-visible overlap run whose first read is capped is still collected l
     assertEquals(s3.signalCount, 1, "the capped late-visible run is read on the next sweep");
   });
 });
+
+test("an oversized oldest run never advances the watermark past later unread runs (#1098 adversarial)", async () => {
+  await withData(async (data) => {
+    const t0 = new Date("2026-01-02T00:00:00.000Z");
+    const huge = Array.from({ length: 20 }, (_, k) => rec("ASSISTANT", "q".repeat(1000), [], k));
+    const { engine } = engineStub({
+      runs: [
+        { key: "HUGE", at: new Date(t0.getTime() - 10 * 3600_000).toISOString(), records: huge },
+        { key: "NEXT", at: new Date(t0.getTime() - 5 * 3600_000).toISOString(), records: [rec("TOOL_RESULT", "Blocked by nano-coder permissions: next", [], 9)] },
+      ],
+    });
+    const s1 = await collectFriction({ data, engine, sweepKey: "S1", now: t0, config: CONFIG, baseUrl: "http://h", historyByteCap: 5000 });
+    assert(Date.parse(s1.windowEnd) < Date.parse(new Date(t0.getTime() - 5 * 3600_000).toISOString()), `watermark skipped NEXT: ${s1.windowEnd}`);
+    await collectFriction({ data, engine, sweepKey: "S2", now: new Date(t0.getTime() + 24 * 3600_000), config: CONFIG, baseUrl: "http://h", historyByteCap: 5000 });
+    const ex = data.source().db.all<{ excerpt: string }>("SELECT excerpt FROM friction_signals WHERE kind = 'permission_block'").map((r) => r.excerpt);
+    assert(ex.some((e) => e.includes("next")), `NEXT was dropped: ${JSON.stringify(ex)}`);
+  });
+});

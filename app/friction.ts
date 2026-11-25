@@ -736,7 +736,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     .sort(byInstant);
   const fullyRead: { key: string; instant: string }[] = [];
   let firstUnread: string | null = null;
-  for (const run of candidates) {
+  for (const [i, run] of candidates.entries()) {
     const instant = runInstant(run) ?? windowEnd;
     const history = await fetchRunHistory(engine, run.agentInstanceKey, budget);
     if (budget.exhausted) {
@@ -748,6 +748,10 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
         });
         pushRun(run, instant, history);
         fullyRead.push({ key: run.agentInstanceKey, instant });
+        // Every LATER candidate is still unread: clamp the watermark to the next one so it is never
+        // skipped past (#1098 adversarial review).
+        const next = candidates[i + 1];
+        if (next) firstUnread = runInstant(next) ?? windowEnd;
       } else {
         // Drop the partial read; this run and every later one stay unread for the next sweep.
         firstUnread = instant;
