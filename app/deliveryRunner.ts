@@ -25,7 +25,6 @@ import { AGENT_REPO_SPEC_HEADER, AGENT_SLA_CHECK_MAX_INTERVAL, AGENT_TERMINAL_SU
 import { GENERIC_HUMAN_FORM, resolveHumanForm } from "./deliveryHuman.ts";
 import type { DeliveryLayoutInfo, LayoutWithFallbackOptions } from "./deliveryLayout.ts";
 import { deriveEffectiveSettings, type EffectiveSettings } from "./effectiveSettings.ts";
-import { renderFrictionNotes } from "./frictionNotes.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
@@ -669,7 +668,7 @@ function buildNodeInput(
       const enrollmentTarget = agentEnrollmentTarget(node.agent);
       const enrollment = enrollmentTarget !== null ? { enrollment: { target: enrollmentTarget, dedupeKey: `${ctx.runKey}:${ctx.element}:enrollment` } } : {};
       const agentTimeout = isoDuration(node.agent.timeout, ctx.nodeTimeout);
-      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + renderCiWaitContract() + basePrompt + renderEmitContract(emits) + renderProducerContract(requiredEmits) + renderFrictionNotes(), timeout: agentTimeout, slaCheckEvery: agentSlaCheckEvery(agentTimeout), ...enrollment };
+      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + renderCiWaitContract() + basePrompt + renderEmitContract(emits) + renderProducerContract(requiredEmits), timeout: agentTimeout, slaCheckEvery: agentSlaCheckEvery(agentTimeout), ...enrollment };
     }
     case "wait": {
       const probe = parseProbe(node.wait, { allowLateBoundTarget: true });

@@ -21,7 +21,6 @@ import { createHash } from "node:crypto";
 import type { AgentHistoryRecord, AgentInstanceSummary, DataLayer, EngineClient } from "@nanobpm/urban";
 import { publicBaseUrl } from "./blackboard.ts";
 import { readEnvOr } from "./contracts.ts";
-import { deliveryRunAgentElements, fetchFullVariableValue } from "./deliveryGraphProgress.ts";
 import { runGh, useGh } from "./github.ts";
 import { parsePr } from "./prParse.ts";
 
@@ -448,248 +447,46 @@ export function parseFrictionNotes(raw: unknown): { notes: AgentFrictionNote[]; 
   return { notes, malformed };
 }
 
-/** Size at which an engine search page is (possibly) truncated. */
-const FRICTION_SEARCH_PAGE = 100;
-
-type FrictionVar = Awaited<ReturnType<EngineClient["searchVariables"]>>[number];
-
-/** Wall-clock budget for the per-node overflow scan of ONE capture pass (see {@link readFrictionVariables}). */
-export const FRICTION_OVERFLOW_SCAN_BUDGET_MS = 30_000;
-/** Concurrent element searches in the per-node overflow scan. */
-const FRICTION_OVERFLOW_SCAN_CONCURRENCY = 8;
-
-/** Every `friction` variable the capture must see, plus the instances currently ACTIVE. The global name
- *  search is a single, unpaged page, and finished instances' variables persist — so once history exceeds
- *  a page, NEW reports would be silently cut. When the global page is full, the read additionally probes
- *  by key every ACTIVE instance AND every instance in `friction_capture_watch` (those the previous pass saw
- *  ACTIVE, or whose report it could not yet capture) — the latter catches an instance that completed
- *  between passes. Rows are filtered to the exact name (the engine's name filter is not guaranteed exact)
- *  and de-duplicated. The watch set itself is rewritten by {@link captureSelfReportedFriction}, only once
- *  it knows which reports were captured. */
-export async function readFrictionVariables(
-  engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances"> & Partial<Pick<EngineClient, "searchElementInstances">>,
-  data?: DataLayer,
-  /** The agent-node body elements of a delivery-graph instance (test seam; defaults to the run's graph). */
-  agentElements: (data: DataLayer, pik: string) => Promise<string[]> = deliveryRunAgentElements,
-  /** Monotonic clock for the overflow-scan budget (test seam). */
-  clock: () => number = () => Date.now(),
-): Promise<{ vars: FrictionVar[]; active: Set<string>; incomplete: Set<string> }> {
-  const incomplete = new Set<string>();
-  const scanDeadline = clock() + FRICTION_OVERFLOW_SCAN_BUDGET_MS;
-  const byKey = new Map<string, FrictionVar>();
-  const add = (rows: FrictionVar[]) => {
-    for (const r of rows) if (r.name === AGENT_FRICTION_RESULT_KEY) byKey.set(String(r.variableKey), r);
-  };
-  const global = await engine.searchVariables({ name: AGENT_FRICTION_RESULT_KEY });
-  add(global);
-  const active = new Set((await engine.searchProcessInstances({ state: "ACTIVE" })).map((pi) => String(pi.processInstanceKey)));
-  if (global.length >= FRICTION_SEARCH_PAGE) {
-    const watched = data
-      ? data.source().db.all<{ process_instance_key: string }>("SELECT process_instance_key FROM friction_capture_watch").map((r) => r.process_instance_key)
-      : [];
-    for (const pik of new Set([...active, ...watched])) {
-      const rows = await engine.searchVariables({ processInstanceKey: pik, name: AGENT_FRICTION_RESULT_KEY });
-      add(rows);
-      // The per-instance page is ALSO bounded: a delivery graph has up to 256 agent nodes, each with its
-      // own node-scope `friction`. Overflow → read node-by-node by SCOPE KEY (as `readEngineFacts` does),
-      // so no node's report sits permanently beyond the page.
-      // The scan is BOUNDED (limited concurrency + a shared wall-clock budget) so it can never stall the
-      // poller; an instance whose scan did not finish is reported `incomplete` and stays watched, so a
-      // later pass resumes it.
-      const search = engine.searchElementInstances;
-      if (rows.length >= FRICTION_SEARCH_PAGE && data && search) {
-        if (clock() >= scanDeadline) {
-          incomplete.add(pik);
-          continue;
-        }
-        const elements = await agentElements(data, pik);
-        let next = 0;
-        const worker = async () => {
-          while (next < elements.length) {
-            if (clock() >= scanDeadline) {
-              incomplete.add(pik);
-              return;
-            }
-            const elementId = elements[next++];
-            if (elementId === undefined) return;
-            for (const el of await search({ processInstanceKey: pik, elementId })) {
-              add(await engine.searchVariables({ processInstanceKey: pik, scopeKey: String(el.elementInstanceKey), name: AGENT_FRICTION_RESULT_KEY }));
-            }
-          }
-        };
-        await Promise.all(Array.from({ length: Math.min(FRICTION_OVERFLOW_SCAN_CONCURRENCY, elements.length) }, worker));
-      }
-    }
-  }
-  return { vars: [...byKey.values()], active, incomplete };
+/** The job fields {@link captureFrictionFromJob} reads: the run linkage plus the propagated variables. */
+export interface FrictionJob {
+  processInstanceKey?: string | number | null;
+  elementInstanceKey?: string | number | null;
+  variables?: unknown;
 }
 
-/** Overall wall-clock budget for full reads of truncated reports in ONE capture pass, so a backlog of long
- *  reports can never stall the shared poller; unread reports stay watched and are retried next pass. */
-export const FRICTION_FULL_READ_BUDGET_MS = 30_000;
-
-/** Capture every reported `friction` result variable into `friction_self_reports` (redacted, with run
- *  linkage). The engine propagates the agent's result key verbatim as a process variable, so a single
- *  variable search finds them all. Idempotent: the row id hashes the variable key + value, so a re-read
- *  inserts nothing and a later job overwriting the variable with a NEW report is captured as new.
- *  A truncated report on an instance that was ALREADY FINISHED at the previous pass and is captured is never
- *  re-read (its value can no longer change); one that finished since is read once more (it may have been
- *  overwritten); full reads share {@link FRICTION_FULL_READ_BUDGET_MS}. An instance whose report could
- *  not be read (fetch failed / budget spent) is kept in the watch set until a later pass captures it. */
-/** Tail of the in-process capture chain: the poller and `pr.friction-collect` both capture, and each pass
- *  REWRITES the whole watch set from its own engine snapshot — so two interleaved passes could erase a
- *  watch the other just added. Every capture runs strictly after the previous one finishes. */
-let captureChain: Promise<unknown> = Promise.resolve();
-
-/** A compiled agent's report is visible under BOTH its task-local scope and its node scope
- *  (agentResultOutputLines) — one report, which must count once. Only where one instance holds several
- *  copies of the SAME value are its node scopes resolved: a copy whose scope is not an agent-node scope
- *  is dropped when a node-scope copy of that value exists. Distinct nodes filing identical text all keep
- *  their node-scope copies, so recurring friction is never collapsed. The node copy outlives the
- *  task-local one, so keeping it keeps the row id stable across passes. */
-async function dropTaskLocalCopies(
-  reads: { v: FrictionVar; raw: string }[],
-  data: DataLayer,
-  engine: Partial<Pick<EngineClient, "searchElementInstances">>,
-  agentElements: (data: DataLayer, pik: string) => Promise<string[]>,
-): Promise<{ v: FrictionVar; raw: string }[]> {
-  const groups = new Map<string, { v: FrictionVar; raw: string }[]>();
-  for (const r of reads) {
-    const pik = String(r.v.processInstanceKey ?? "");
-    if (!pik) continue;
-    const k = `${pik}\u0000${r.raw}`;
-    groups.set(k, [...(groups.get(k) ?? []), r]);
-  }
-  const drop = new Set<{ v: FrictionVar; raw: string }>();
-  const nodeScopesByPik = new Map<string, Set<string>>();
-  for (const group of groups.values()) {
-    if (group.length < 2 || !engine.searchElementInstances) continue;
-    const pik = String(group[0]?.v.processInstanceKey);
-    let nodeScopes = nodeScopesByPik.get(pik);
-    if (!nodeScopes) {
-      nodeScopes = new Set<string>();
-      for (const elementId of await agentElements(data, pik)) {
-        for (const el of await engine.searchElementInstances({ processInstanceKey: pik, elementId })) nodeScopes.add(String(el.elementInstanceKey));
+/** Capture the self-reported `friction` notes visible to a job (the agent's result key, propagated
+ *  verbatim as a process variable) into `friction_self_reports`, redacted, with run linkage. Called by
+ *  the record worker that follows each agent task, so capture is event-driven (no polling). Idempotent:
+ *  the row id hashes (processInstanceKey, note), so a later record worker of the same run that still
+ *  sees the same variable inserts nothing. Best-effort — never throws. Returns rows inserted. */
+export async function captureFrictionFromJob(data: DataLayer, job: FrictionJob, now: Date = new Date()): Promise<number> {
+  try {
+    const raw = isRecord(job.variables) ? job.variables[AGENT_FRICTION_RESULT_KEY] : undefined;
+    const { notes } = parseFrictionNotes(raw);
+    if (notes.length === 0) return 0;
+    const pik = job.processInstanceKey != null && String(job.processInstanceKey) !== "" ? String(job.processInstanceKey) : null;
+    const scope = job.elementInstanceKey != null ? String(job.elementInstanceKey) : null;
+    const at = now.toISOString();
+    let inserted = 0;
+    await data.open().tx(async (t) => {
+      for (const n of notes) {
+        const id = createHash("sha256")
+          .update(JSON.stringify([pik ?? "", n.what, n.surface, n.turnsLost ?? null, n.suggestedFix ?? null, n.targetRepo ?? null]))
+          .digest("hex")
+          .slice(0, 24);
+        const res = await t.exec(
+          `INSERT OR IGNORE INTO friction_self_reports (id, process_instance_key, scope_key, what, surface, turns_lost,
+             suggested_fix, target_repo, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id, pik, scope, n.what, n.surface, n.turnsLost ?? null, n.suggestedFix ?? null, n.targetRepo ?? null, at],
+        );
+        inserted += res.changed;
       }
-      nodeScopesByPik.set(pik, nodeScopes);
-    }
-    const scopes = nodeScopes;
-    if (!group.some((r) => scopes.has(String(r.v.scopeKey)))) continue;
-    for (const r of group) if (!scopes.has(String(r.v.scopeKey))) drop.add(r);
+    });
+    return inserted;
+  } catch (err) {
+    console.warn("[friction] self-report capture failed", err);
+    return 0;
   }
-  return reads.filter((r) => !drop.has(r));
-}
-
-export function captureSelfReportedFriction(
-  data: DataLayer,
-  engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances"> & Partial<Pick<EngineClient, "searchElementInstances">>,
-  now: Date,
-  /** Reads a search-truncated value in full by `variableKey` (test seam; defaults to the engine REST read). */
-  fetchFull: (variableKey: string) => Promise<string | undefined> = (k) => fetchFullVariableValue(k),
-  /** Monotonic clock for the full-read budget (test seam). */
-  clock: () => number = () => Date.now(),
-  /** The agent-node body elements of a delivery-graph instance (test seam; defaults to the run's graph). */
-  agentElements: (data: DataLayer, pik: string) => Promise<string[]> = deliveryRunAgentElements,
-): Promise<number> {
-  const run = captureChain.then(() => captureOnce(data, engine, now, fetchFull, clock, agentElements));
-  captureChain = run.catch(() => undefined);
-  return run;
-}
-
-async function captureOnce(
-  data: DataLayer,
-  engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances"> & Partial<Pick<EngineClient, "searchElementInstances">>,
-  now: Date,
-  fetchFull: (variableKey: string) => Promise<string | undefined>,
-  clock: () => number,
-  agentElements: (data: DataLayer, pik: string) => Promise<string[]>,
-): Promise<number> {
-  const { vars, active, incomplete } = await readFrictionVariables(engine, data, agentElements, clock);
-  const capturedRows = data
-    .source()
-    .db.all<{ variable_key: string; process_instance_key: string | null }>("SELECT DISTINCT variable_key, process_instance_key FROM friction_self_reports");
-  const captured = new Set(capturedRows.map((r) => String(r.variable_key)));
-  // Instances with at least one captured report. A finished instance that is no longer watched was
-  // already fully processed by a pass that read it AFTER it finished — including dropping the task-local
-  // alias of each node's report — so an uncaptured truncated copy there is such an alias, never new.
-  const capturedPiks = new Set(capturedRows.map((r) => String(r.process_instance_key ?? "")).filter((k) => k !== ""));
-  // Instances the PREVIOUS pass saw ACTIVE (or could not capture): their value may have been overwritten
-  // after that pass's read, so a finished one is only final once a pass has read it AFTER it finished.
-  const watchedLastPass = new Set(
-    data.source().db.all<{ process_instance_key: string }>("SELECT process_instance_key FROM friction_capture_watch").map((r) => String(r.process_instance_key)),
-  );
-  const retain = new Set<string>(incomplete);
-  const deadline = clock() + FRICTION_FULL_READ_BUDGET_MS;
-  const at = now.toISOString();
-  const reads: { v: FrictionVar; raw: string }[] = [];
-  for (const v of vars) {
-    const pik = String(v.processInstanceKey ?? "");
-    let raw: string | undefined = v.value;
-    if (v.isTruncated) {
-      // A finished instance's captured report is final ONLY if it was already finished at the previous
-      // pass (not watched): an instance that was active then may have overwritten the variable with a NEW
-      // report before finishing, so it gets one more full read (the row id dedupes an unchanged value).
-      if (pik && !active.has(pik) && !watchedLastPass.has(pik) && (captured.has(String(v.variableKey)) || capturedPiks.has(pik))) continue;
-      // A long report arrives as a clipped search preview — read it in full rather than drop it forever.
-      raw = clock() < deadline ? await fetchFull(String(v.variableKey)) : undefined;
-      if (raw === undefined) {
-        if (pik) retain.add(pik);
-        continue;
-      }
-    }
-    // A value with no valid note (the common null seed) reports nothing: skip it BEFORE cross-scope
-    // de-duplication, so empty values never trigger node-scope resolution.
-    try {
-      if (parseFrictionNotes(JSON.parse(raw)).notes.length === 0) continue;
-    } catch {
-      continue;
-    }
-    reads.push({ v, raw });
-  }
-  const rows: unknown[][] = [];
-  for (const { v, raw } of await dropTaskLocalCopies(reads, data, engine, agentElements)) {
-    let value: unknown;
-    try {
-      value = JSON.parse(raw);
-    } catch {
-      continue;
-    }
-    const { notes } = parseFrictionNotes(value);
-    // Identity = variable key + value (unchanged scheme, so rows captured before stay deduped): distinct
-    // nodes reporting the same text are distinct reports; a node's task-local copy is dropped above.
-    const base = createHash("sha256").update(`${v.variableKey}\u0000${raw}`).digest("hex").slice(0, 16);
-    for (const [i, n] of notes.entries()) {
-      rows.push([
-        `${base}:${i}`,
-        v.processInstanceKey || null,
-        v.scopeKey || null,
-        v.variableKey,
-        n.what,
-        n.surface,
-        n.turnsLost ?? null,
-        n.suggestedFix ?? null,
-        n.targetRepo ?? null,
-        at,
-      ]);
-    }
-  }
-  let inserted = 0;
-  await data.open().tx(async (t) => {
-    for (const r of rows) {
-      const res = await t.exec(
-        `INSERT OR IGNORE INTO friction_self_reports (id, process_instance_key, scope_key, variable_key, what, surface, turns_lost,
-           suggested_fix, target_repo, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        r,
-      );
-      inserted += res.changed;
-    }
-    // Retire a watch entry only once its report is captured: watch = ACTIVE ∪ not-yet-captured.
-    await t.exec("DELETE FROM friction_capture_watch", []);
-    for (const pik of new Set([...active, ...retain])) {
-      await t.exec("INSERT OR IGNORE INTO friction_capture_watch (process_instance_key) VALUES (?)", [pik]);
-    }
-  });
-  return inserted;
 }
 
 interface SelfReportRow {
@@ -1217,7 +1014,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     });
   }
 
-  // Agent self-reports (issue #1101), captured by the poller with run linkage. Read through the overlap
+  // Agent self-reports (issue #1101), captured by the record workers with run linkage. Read through the overlap
   // like the transcripts; the recorded-id fence below drops anything an earlier sweep counted.
   signals.push(...selfReportedSignals(data, readStart, windowEnd, deps.baseUrl));
 

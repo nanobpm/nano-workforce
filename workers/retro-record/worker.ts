@@ -7,6 +7,7 @@
 // top-level process variables (same as pr.record-plan-review reads `job.variables.approved`), and
 // exposes the raw transcript under the `io.nanobpm.agentResult` envelope's `.output`.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import { recordRetro } from "../../app/retro.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -29,6 +30,8 @@ function asStatus(v: unknown, hasPr: boolean): "filed" | "skipped" | "blocked" {
 }
 
 const handler: AppJobHandler<In> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   const planKey = job.variables.planKey;
 
   const rawPrKey = asStr(job.variables.pr);

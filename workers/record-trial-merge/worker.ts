@@ -3,6 +3,7 @@
 // conflict ordering, while D3 owns clean-merge/combined-suite-red semantic conflicts.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { agentSlaEscalationQuestion } from "../../app/agentSlaEscalation.ts";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import {
   recordTrialMergeAudit,
   type TrialMergeResult,
@@ -44,6 +45,8 @@ function parseResult(v: unknown): TrialMergeResult {
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   const planKey = job.variables.planKey;
   const wave = waveNo(job.variables.trialMergeWave ?? job.variables.currentWave);
   const result = parseResult(job.variables.result);

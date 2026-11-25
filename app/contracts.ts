@@ -655,7 +655,7 @@ export const TYPE_CONTRACTS = {
     name: "AgentFrictionNote",
     owner: "app/friction.ts",
     semantics:
-      "One entry of the OPTIONAL `friction` array in the canonical agent result every `senior:*` job writes to `AGENT_RESULT_FILE` / `report_outcome` (issue #1101): `{ what, turnsLost?, surface, suggestedFix?, targetRepo? }`, `surface` one of `FIX_SURFACES`. One shape for every job type (no per-job variant). Validated + redacted by `parseFrictionNotes`, captured from the propagated `friction` process variable by `captureSelfReportedFriction` (poller + `pr.friction-collect`) into `friction_self_reports`, and read by the collector as the `self_reported` signal kind. The prompt paragraph asking for it is the ONE `FRICTION_NOTES_PROMPT` in app/frictionNotes.ts.",
+      "One entry of the OPTIONAL `friction` array in the canonical agent result every `senior:*` job writes to `AGENT_RESULT_FILE` / `report_outcome` (issue #1101): `{ what, turnsLost?, surface, suggestedFix?, targetRepo? }`, `surface` one of `FIX_SURFACES`. One shape for every job type (no per-job variant). Validated + redacted by `parseFrictionNotes`, captured from the propagated `friction` process variable by `captureFrictionFromJob` (the record worker after each agent task; idempotent by hash(processInstanceKey, note)) into `friction_self_reports`, and read by the collector as the `self_reported` signal kind. The prompt paragraph asking for it is the ONE `FRICTION_NOTES_PROMPT` in app/frictionNotes.ts.",
     module: "app/friction.ts",
   },
   PermissionPolicy: {

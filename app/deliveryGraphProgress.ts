@@ -316,37 +316,6 @@ function pollEveryFromSeed(raw: string | undefined, nodes: readonly ResolvedNode
   return out;
 }
 
-/** The ONE derivation of a dispatched run's resolved node refs from its stored graph digest (shared by the
- *  progress view and the friction capture's per-node fallback read). */
-export async function resolveRunNodes(
-  data: AppApi["data"],
-  digest: string,
-): Promise<{ nodes: ResolvedNodeRef[]; diagram: string } | "missing" | "uncompilable"> {
-  const proposal = await deliveryGraphProposals(data).get(digest);
-  if (!proposal) return "missing";
-  // The stored graph passed `validateDeliveryGraph` at stage time, so it is a well-formed DeliveryGraph.
-  const graph: DeliveryGraph = JSON.parse(proposal.graph);
-  const compiled = await compileDeliveryGraphSemantic(graph);
-  if (!compiled.ok) return "uncompilable";
-  const nodes: ResolvedNodeRef[] = compiled.resolved.nodes.map((n) => ({
-    id: n.id,
-    kind: n.kind,
-    element: n.element,
-    emits: (n.emits ?? []).map((e) => ({ name: e.name, type: e.type })),
-    dependsOn: n.dependsOn ?? [],
-  }));
-  return { nodes, diagram: compiled.diagram };
-}
-
-/** The agent-node body elements of the delivery-graph run whose instance is `pik` (empty when `pik` is not
- *  a delivery-graph run, or its graph can no longer be resolved). */
-export async function deliveryRunAgentElements(data: AppApi["data"], pik: string): Promise<string[]> {
-  const row = data.source().db.all<{ digest: string }>("SELECT digest FROM delivery_graph_runs WHERE process_key = ?", [pik])[0];
-  if (!row) return [];
-  const resolved = await resolveRunNodes(data, row.digest);
-  return typeof resolved === "string" ? [] : resolved.nodes.filter((n) => n.kind === "agent").map((n) => n.element);
-}
-
 /** Load a run's per-node progress from the run row, its dispatched graph and engine truth. Null when no
  * run has that key. */
 export async function loadDeliveryGraphProgress(
@@ -368,14 +337,23 @@ export async function loadDeliveryGraphProgress(
     note: null,
     truncated: false,
   };
-  const resolved = await resolveRunNodes(app.data, run.digest);
-  if (resolved === "missing") return { ...base, note: `the dispatched graph for digest ${run.digest} is no longer stored, so per-node progress cannot be derived` };
-  if (resolved === "uncompilable") return { ...base, note: "the dispatched graph no longer compiles under this version, so per-node progress cannot be derived" };
-  const { nodes, diagram } = resolved;
+  const proposal = await deliveryGraphProposals(app.data).get(run.digest);
+  if (!proposal) return { ...base, note: `the dispatched graph for digest ${run.digest} is no longer stored, so per-node progress cannot be derived` };
+  // The stored graph passed `validateDeliveryGraph` at stage time, so it is a well-formed DeliveryGraph.
+  const graph: DeliveryGraph = JSON.parse(proposal.graph);
+  const compiled = await compileDeliveryGraphSemantic(graph);
+  if (!compiled.ok) return { ...base, note: "the dispatched graph no longer compiles under this version, so per-node progress cannot be derived" };
+  const nodes: ResolvedNodeRef[] = compiled.resolved.nodes.map((n) => ({
+    id: n.id,
+    kind: n.kind,
+    element: n.element,
+    emits: (n.emits ?? []).map((e) => ({ name: e.name, type: e.type })),
+    dependsOn: n.dependsOn ?? [],
+  }));
   const pik = run.process_key;
   if (!pik) {
     const pending = deriveNodeProgress({ nodes, elements: [], variables: [], userTasks: [], incidents: [], processInstanceKey: "" });
-    return { ...base, nodes: pending, mermaid: renderProgressMermaid(diagram, pending) };
+    return { ...base, nodes: pending, mermaid: renderProgressMermaid(compiled.diagram, pending) };
   }
   const read = await readEngineFacts(app.engine, pik, nodes, (k) => fetchFullVariableValue(k));
   const { instances, elements, variables, userTasks, incidents } = read;
@@ -393,7 +371,7 @@ export async function loadDeliveryGraphProgress(
     pollEveryByNode: pollEveryFromSeed(nodeInputs, nodes),
     instanceEnded: instanceState !== null && instanceState !== "ACTIVE",
   });
-  return { ...base, instanceState, nodes: progress, mermaid: renderProgressMermaid(diagram, progress), truncated: read.truncated };
+  return { ...base, instanceState, nodes: progress, mermaid: renderProgressMermaid(compiled.diagram, progress), truncated: read.truncated };
 }
 
 /**

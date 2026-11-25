@@ -308,7 +308,6 @@ export const AGENT_RESULT_LOCAL_VARS = [
   "hasDeviations",
   "slicesMet",
   "slicesReduced",
-  "friction",
   "slicesNotVerified",
   "deviationsRaised",
   "deviationsUnraised",

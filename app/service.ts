@@ -43,7 +43,7 @@ import { deriveEffectiveSettings } from "./effectiveSettings.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
 import { ESCALATION_STEWARD_PROCESS_ID } from "./escalationSteward.ts";
 import { blockedFeatureQuestion, deriveFeatureCompletion, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns, featureRunsTracking, foldCompletedFeatureRun, foldKeylessFeatureRun } from "./feature.ts";
-import { captureSelfReportedFriction, FRICTION_SUMMARY_ELEMENT, frictionAppBaseUrl, frictionSummaryMayBeOpen, frictionSweepSummary, frictionSweeps } from "./friction.ts";
+import { FRICTION_SUMMARY_ELEMENT, frictionAppBaseUrl, frictionSummaryMayBeOpen, frictionSweepSummary, frictionSweeps } from "./friction.ts";
 import {
   classifyMergeability,
   classifyPrLiveness,
@@ -5974,13 +5974,6 @@ export async function pollOnce(
 ) {
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
-  // Issue #1101: capture agents' self-reported `friction` result notes (redacted, run-linked) while the
-  // result variable is still live — a later job in the same instance may overwrite it. Best-effort.
-  try {
-    await captureSelfReportedFriction(data, engine, new Date());
-  } catch (err) {
-    console.warn("[poll] self-reported friction capture failed", err);
-  }
   await pollWaitGate(data);
   await reconcileMissingPrRows(data, token, { engine });
   await pollPromotion(data, engine, token);

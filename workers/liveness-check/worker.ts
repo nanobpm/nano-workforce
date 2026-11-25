@@ -15,6 +15,7 @@
 // `abandonClosedPr` audit. An unreadable state fails OPEN (`prGone = ""`) — a transport hiccup must
 // never end a live loop.
 import type { AppApi, AppJobHandler } from "@nanobpm/urban";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import { classifyPrLiveness, fetchPrState, type PrState } from "../../app/github.ts";
 import { maybeStartRetro } from "../../app/retro.ts";
 import { abandonClosedPr, parsePr } from "../../app/service.ts";
@@ -64,6 +65,8 @@ async function persistGone(
 
 export function makeHandler(deps: { readPrState?: PrStateReader } = {}): AppJobHandler<In, Out> {
   return async (job, app) => {
+    // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+    await captureFrictionFromJob(app.data, job);
     const { prKey, repo, prNumber } = job.variables;
     const parsed = parsePr(prKey);
     const ghRepo = repo ?? parsed?.repo;

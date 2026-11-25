@@ -34,6 +34,7 @@
 // own output — a same-task output-clear would clobber the agent's real verdict — mirroring the merge
 // loop's `arm-merge`, which clears `status` on entry before its agent runs.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import { fetchBranchHead, fetchPrHead } from "../../app/github.ts";
 import { parsePr } from "../../app/service.ts";
 import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io.d.ts";
@@ -50,7 +51,9 @@ const defaultReadHead: HeadReader = makeDefaultReadHead({ fetchPrHead, fetchBran
  * branch-ref-over-stale-`head.sha` reader progress-check uses (#786), keeping the entry-head and the
  * exit-head reads byte-for-byte comparable. */
 export function makeHandler(deps: { readHead: HeadReader }): AppJobHandler<In, Out> {
-  return async (job) => {
+  return async (job, app) => {
+    // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+    await captureFrictionFromJob(app.data, job);
     const { prKey, repo, prNumber } = job.variables;
     // Prefer the carried repo/prNumber; fall back to parsing the canonical `owner/repo#N` prKey so an
     // older in-flight instance still resolves a target. If neither yields one, publish a null baseline

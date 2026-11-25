@@ -12,7 +12,6 @@
 import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import { AGENT_TERMINAL_SUCCESS_STATUSES } from "./deliveryGraphCompiler.ts";
-import { renderFrictionNotes } from "./frictionNotes.ts";
 import { prepareDeliveryGraph, renderCiWaitContract, renderEmitContract, renderIdempotencyPreamble, renderProducerContract, runDeliveryGraph } from "./deliveryRunner.ts";
 import { deriveEffectiveSettings } from "./effectiveSettings.ts";
 import { RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError, agentNodeRepoEnvelope } from "./repoEnvelope.ts";
@@ -81,7 +80,7 @@ test("nodeInputs seeds the exact per-kind fields each node's subProcess ioMappin
   // Every agent node's appendPrompt is prefixed with the idempotency preflight (#551), then the
   // authored prompt, then the (emit-less) producer completion contract (#760) — this node declares no
   // emits, so the emit contract adds nothing but the status block still applies.
-  assertEquals(agent, { jobType: "senior:feature", appendPrompt: renderIdempotencyPreamble() + renderCiWaitContract() + "un-draft + merge #B" + renderEmitContract([]) + renderProducerContract([]) + renderFrictionNotes(), timeout: "PT10M", slaCheckEvery: "PT5M" });
+  assertEquals(agent, { jobType: "senior:feature", appendPrompt: renderIdempotencyPreamble() + renderCiWaitContract() + "un-draft + merge #B" + renderEmitContract([]) + renderProducerContract([]), timeout: "PT10M", slaCheckEvery: "PT5M" });
 
   const wait = byField((v) => "gateKey" in v);
   assertEquals(wait?.gateKey, "run-7:n3");
@@ -183,7 +182,7 @@ test("agent node classifier-emit contract (#506): a declared `emits` threads the
 
   // A node that declares NO facts still carries the preflight and the (emit-less) producer contract,
   // then exactly the authored prompt — the emit contract contributes nothing.
-  assertEquals(plain?.appendPrompt, renderIdempotencyPreamble() + renderCiWaitContract() + "just implement it" + renderEmitContract([]) + renderProducerContract([]) + renderFrictionNotes());
+  assertEquals(plain?.appendPrompt, renderIdempotencyPreamble() + renderCiWaitContract() + "just implement it" + renderEmitContract([]) + renderProducerContract([]));
 });
 
 test("agent node producer completion contract (#760): every agent prompt carries the terminal-status vocabulary derived from AGENT_TERMINAL_SUCCESS_STATUSES + required-emit names; a non-agent node never does", async () => {

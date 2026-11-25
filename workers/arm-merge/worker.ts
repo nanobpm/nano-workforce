@@ -2,6 +2,7 @@
 // evaluates its mergeability and correlates `merge-ready`. Reached both on entry to the merge
 // stage (after dependencies clear) and after a human answers a merge escalation (re-check).
 import type { AppJobHandler } from "@nanobpm/urban";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import { isReviewWaitOpen, REVIEW_WAIT_ENDED_OUTCOME } from "../../app/reviewWait.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -9,6 +10,8 @@ import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 type In = WorkerInputs["pr.arm-merge"];
 
 const handler: AppJobHandler<In> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   const now = new Date().toISOString();
   const prKey = job.variables.prKey;
   // Issue #1034: re-arming ends any open review wait. Close it in the audit trail so /status stops

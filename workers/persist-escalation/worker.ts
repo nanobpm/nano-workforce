@@ -20,6 +20,7 @@ import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { agentSlaEscalationQuestion } from "../../app/agentSlaEscalation.ts";
 import { classifyEscalation } from "../../app/escalationTaxonomy.ts";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import { ensurePr, parsePr } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -51,6 +52,8 @@ function workerOf(vars: Record<string, unknown>): string | undefined {
 }
 
 const handler: AppJobHandler<In> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   const { prKey, round, summary, repo, prNumber, prUrl, abandonUrl } = job.variables;
   // `status` drives the escalation kind (control flow); a blank/absent status is an
   // unclassified escalation -> a question needing input. `question` is returned as a

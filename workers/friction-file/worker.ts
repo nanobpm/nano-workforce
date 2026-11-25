@@ -6,6 +6,7 @@
 // persisted (recordFiled → friction_filings) for the Friction page the summary task links to.
 import type { AppJobHandler } from "@nanobpm/urban";
 import {
+  captureFrictionFromJob,
   fileFindings,
   frictionConfig,
   frictionGithub,
@@ -29,6 +30,8 @@ interface Out extends Record<string, unknown> {
 }
 
 const handler: AppJobHandler<Record<string, unknown>, Out> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   const sweepKey = job.processInstanceKey != null ? String(job.processInstanceKey) : "";
   const v = job.variables;
   const windowStart = typeof v.windowStart === "string" ? v.windowStart : "";
