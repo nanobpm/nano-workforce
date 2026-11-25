@@ -3,6 +3,7 @@
 // is on, or (b) close the PR out as `converged` (review-only mode).
 import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import { withMergePolicyLock } from "../../app/mergePolicyLock.ts";
 import { maybeStartRetro } from "../../app/retro.ts";
 import { AUTO_MERGE, ensurePr, startMerge } from "../../app/service.ts";
@@ -20,6 +21,8 @@ function transcriptOf(vars: Record<string, unknown>): string | null {
 }
 
 const handler: AppJobHandler<In> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   // `summary` is left undefined when absent so the write boundary omits it: the
   // nullable `rounds.summary` stays NULL and `pull_requests.outcome` is untouched
   // rather than being coerced to "".

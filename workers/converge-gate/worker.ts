@@ -51,6 +51,7 @@
 // merge-gating check must escalate-on-uncertainty so #770 cannot recur.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { type ConvergeGateResult, evaluateConvergeGate } from "../../app/convergeGate.ts";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import {
   fetchBranchHead,
   fetchLatestCopilotReview,
@@ -152,7 +153,9 @@ export function makeHandler(deps: {
   readComments?: (repo: string, prNumber: number) => Promise<IssueComment[] | null>;
 }): AppJobHandler<In, Out> {
   const readHeadSha = deps.readHeadSha ?? defaultReadHead;
-  return async (job) => {
+  return async (job, app) => {
+    // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+    await captureFrictionFromJob(app.data, job);
     const { prKey, repo, prNumber } = job.variables;
     // `parsePr` is total on any input (fails closed to `null` on a missing/non-string prKey), so
     // pass it straight through — a malformed prKey degrades to the fail-closed target check below.

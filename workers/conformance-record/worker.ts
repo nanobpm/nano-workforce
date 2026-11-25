@@ -11,6 +11,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { agentSlaEscalationQuestion } from "../../app/agentSlaEscalation.ts";
 import { markConformanceSynthesisSla, recordConformance } from "../../app/conformance.ts";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 const AGENT_RESULT_KEY = "io.nanobpm.agentResult";
@@ -47,6 +48,8 @@ function asStatus(v: unknown, hasComment: boolean): "filed" | "skipped" | "block
 }
 
 const handler: AppJobHandler<In> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   const planKey = job.variables.planKey;
 
   const commentUrl = asStr(job.variables.commentUrl);

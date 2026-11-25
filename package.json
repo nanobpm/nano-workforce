@@ -49,6 +49,8 @@
     "gen:check": "urban gen --check",
     "layout": "node --experimental-strip-types scripts/layout-bpmn.ts",
     "layout:check": "node --experimental-strip-types scripts/layout-bpmn.ts --check",
+    "sync:prompt-fragments": "node --experimental-strip-types scripts/sync-prompt-fragments.ts",
+    "sync:prompt-fragments:check": "node --experimental-strip-types scripts/sync-prompt-fragments.ts --check",
     "sync:nav": "node --experimental-strip-types scripts/sync-nav.ts",
     "sync:nav:check": "node --experimental-strip-types scripts/sync-nav.ts --check",
     "gen:mcp-bodies": "node --experimental-strip-types scripts/inline-mcp-bodies.ts",

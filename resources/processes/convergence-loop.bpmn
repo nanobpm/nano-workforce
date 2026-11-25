@@ -231,6 +231,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrReviewRoundOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
+          <zeebe:input source="=null" target="friction" />
           <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief) + (if (is defined(operatorFeedbackBrief) = false or operatorFeedbackBrief = null) then &#34;&#34; else operatorFeedbackBrief) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
           <zeebe:input source="=round" target="guardRound" />
           <zeebe:input source="=maxRounds" target="guardMaxRounds" />
@@ -278,6 +279,7 @@
           <zeebe:output source="=status" target="status" />
           <zeebe:output source="=summary" target="summary" />
           <zeebe:output source="=question" target="question" />
+          <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_roundLive</bpmn:incoming>
@@ -417,6 +419,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrAdversarialReviewOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
+          <zeebe:input source="=null" target="friction" />
           <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
           <zeebe:input source="=round" target="guardRound" />
           <zeebe:input source="=maxRounds" target="guardMaxRounds" />
@@ -463,6 +466,7 @@
           <zeebe:output source="=guardAbandonBrief" target="abandonBrief" />
           <zeebe:output source="=guardCustomInstructions" target="customInstructions" />
           <zeebe:output source="=adversarialSummary" target="adversarialSummary" />
+          <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_advLive</bpmn:incoming>
@@ -532,6 +536,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="FixCiOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
+          <zeebe:input source="=null" target="friction" />
           <zeebe:input source="=&#34;&#10;&#10;The PR&#39;s review has converged (nothing left to address) but required CI is red — fix it.&#34; + (if (failingChecksList = null or failingChecksList = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Failing checks to make green:&#10;&#34; + failingChecksList) + (if (abandonBrief = null) then &#34;&#34; else abandonBrief) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
           <zeebe:input source="=if (is defined(ciFixRound) = false or ciFixRound = null) then 0 else ciFixRound" target="guardCiFixRound" />
           <zeebe:input source="=round" target="guardRound" />
@@ -553,6 +558,7 @@
           <zeebe:output source="=question" target="question" />
           <zeebe:output source="=dependsOn" target="dependsOn" />
           <zeebe:output source="=pushed" target="pushed" />
+          <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_fixCiLive</bpmn:incoming>
@@ -802,6 +808,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrScopeClassifyOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
+          <zeebe:input source="=null" target="friction" />
           <zeebe:input source="=round" target="guardRound" />
           <zeebe:input source="=maxRounds" target="guardMaxRounds" />
           <zeebe:input source="=advPass" target="guardAdvPass" />
@@ -845,6 +852,7 @@
           <zeebe:output source="=guardCustomInstructions" target="customInstructions" />
           <zeebe:output source="=scopeBlocked" target="scopeBlocked" />
           <zeebe:output source="=scopeBlockReason" target="scopeBlockReason" />
+          <zeebe:output source="=if (is defined(friction)) then friction else null" target="friction" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_scopeLive</bpmn:incoming>

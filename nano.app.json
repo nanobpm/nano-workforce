@@ -233,6 +233,10 @@
       "handler": "workers/retro-gather/worker.ts"
     },
     {
+      "taskType": "pr.capture-friction",
+      "handler": "workers/capture-friction/worker.ts"
+    },
+    {
       "taskType": "pr.retro-record",
       "handler": "workers/retro-record/worker.ts"
     },

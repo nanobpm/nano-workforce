@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 // Unit tests for the friction sweep core (issue #1073): signal extraction per kind from fixture
 // transcripts, redaction, the watermark (advance / no advance on failure / idempotent re-run), and
 // the filer (new vs existing fingerprint, threshold, no writes when no findings).
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -11,6 +12,7 @@ import { bootTestApp } from "@nanobpm/urban-testkit";
 import {
   acquireLease,
   buildDigest,
+  captureFrictionFromJob,
   collectFriction,
   excerptAround,
   extractRunSignals,
@@ -33,6 +35,7 @@ import {
   leaseHolder,
   markFailed,
   parseFindings,
+  parseFrictionNotes,
   parseFingerprintMarker,
   readWatermark,
   recordFiled,
@@ -1130,4 +1133,142 @@ test("an oversized oldest run never advances the watermark past later unread run
     const ex = data.source().db.all<{ excerpt: string }>("SELECT excerpt FROM friction_signals WHERE kind = 'permission_block'").map((r) => r.excerpt);
     assert(ex.some((e) => e.includes("next")), `NEXT was dropped: ${JSON.stringify(ex)}`);
   });
+});
+
+// ── Self-reported friction (issue #1101) ─────────────────────────────────────────────────────
+
+test("parseFrictionNotes: absent/null/blank results are unchanged (no notes); valid notes are typed and redacted", () => {
+  for (const raw of [undefined, null, "", "  ", "null"]) assertEquals(parseFrictionNotes(raw), { notes: [], malformed: 0 });
+  const { notes, malformed } = parseFrictionNotes([
+    { what: "AGENTS.md never says to run npm run gen; token ghp_abcdefghijklmnopqrstuvwxyz0123", turnsLost: 4.4, surface: "AGENTS.md", suggestedFix: "say it", targetRepo: "acme/repo" },
+    { what: "x", surface: "not-a-surface" },
+    { surface: "prompt" },
+    "junk",
+  ]);
+  assertEquals(malformed, 3);
+  assertEquals(notes.length, 1);
+  assertEquals(notes[0]?.surface, "AGENTS.md");
+  assertEquals(notes[0]?.turnsLost, 4);
+  assertEquals(notes[0]?.targetRepo, "acme/repo");
+  assert(!notes[0]?.what.includes("ghp_"), "what is redacted");
+  assertEquals(parseFrictionNotes(JSON.stringify([{ what: "w", surface: "skill" }])).notes, [{ what: "w", surface: "skill" }]);
+});
+
+test("parseFrictionNotes: a credential-shaped targetRepo is discarded, never stored", () => {
+  const { notes } = parseFrictionNotes([{ what: "w", surface: "prompt", targetRepo: "ghp_abcdefghijklmnopqrstuvwxyz0123/repo" }]);
+  assertEquals(notes.length, 1);
+  assertEquals(notes[0]?.targetRepo, undefined);
+});
+
+test("captureFrictionFromJob persists redacted notes with run linkage, idempotent by (processInstanceKey, note)", async () => {
+  await withData(async (data) => {
+    const now = new Date("2026-01-01T12:00:00.000Z");
+    const job = { processInstanceKey: "P1", elementInstanceKey: "E1", jobKey: "J1", variables: { friction: [{ what: "password hunter2 in docs", surface: "prompt", turnsLost: 2 }] } };
+    assertEquals(await captureFrictionFromJob(data, job, now), 1);
+    // A later record worker of the SAME run still sees the propagated variable: nothing new is inserted.
+    assertEquals(await captureFrictionFromJob(data, { ...job, elementInstanceKey: "E2" }, now), 0, "re-capture inserts nothing");
+    // The same note in a DIFFERENT run is a distinct report.
+    assertEquals(await captureFrictionFromJob(data, { ...job, processInstanceKey: "P2" }, now), 1);
+    const rows = data.source().db.all<{ process_instance_key: string; scope_key: string; job_key: string; what: string; turns_lost: number }>(
+      "SELECT process_instance_key, scope_key, job_key, what, turns_lost FROM friction_self_reports ORDER BY process_instance_key",
+    );
+    assertEquals(rows.length, 2);
+    assertEquals(rows[0]?.process_instance_key, "P1");
+    assertEquals(rows[0]?.scope_key, "E1");
+    assertEquals(rows[0]?.job_key, "J1");
+    assertEquals(rows[0]?.turns_lost, 2);
+    assert(!rows[0]?.what.includes("hunter2"), "stored text is redacted");
+  });
+});
+
+test("captureFrictionFromJob keeps job linkage with the Urban adapter's job shape (no elementInstanceKey)", async () => {
+  await withData(async (data) => {
+    // The Urban nanosdk adapter's handler job carries jobKey + processInstanceKey but NOT elementInstanceKey.
+    const job = { jobKey: "42", processInstanceKey: "P9", type: "pr.capture-friction", variables: { friction: [{ what: "x", surface: "prompt" }] } };
+    assertEquals(await captureFrictionFromJob(data, job), 1);
+    const row = data.source().db.all<{ job_key: string | null; scope_key: string | null }>("SELECT job_key, scope_key FROM friction_self_reports")[0];
+    assertEquals(row?.job_key, "42");
+    assertEquals(row?.scope_key, null);
+  });
+});
+
+test("captureFrictionFromJob: absent / null / malformed friction inserts nothing and never throws", async () => {
+  await withData(async (data) => {
+    for (const variables of [undefined, null, {}, { friction: null }, { friction: "" }, { friction: "{not json" }, { friction: [{ what: "x", surface: "nope" }] }, "junk"]) {
+      assertEquals(await captureFrictionFromJob(data, { processInstanceKey: "P", variables }), 0);
+    }
+    assertEquals(data.source().db.all("SELECT id FROM friction_self_reports").length, 0);
+  });
+});
+
+test("captureFrictionFromJob accepts a JSON-encoded friction array (string-typed result variable)", async () => {
+  await withData(async (data) => {
+    const friction = JSON.stringify([{ what: "a", surface: "skill" }, { what: "b", surface: "AGENTS.md" }]);
+    assertEquals(await captureFrictionFromJob(data, { processInstanceKey: 7, variables: { friction } }), 2);
+  });
+});
+
+test("every record worker following a senior:* agent task captures friction", () => {
+  const workers = ["persist-round", "converge-gate", "persist-escalation", "liveness-check", "capture-head", "finalize", "escalation-steward-record", "friction-file", "reconcile-implement", "record-trial-merge", "arm-merge", "record-plan", "record-plan-review", "conformance-record", "retro-record"];
+  for (const w of workers) {
+    const src = readFileSync(resolve(import.meta.dirname, `../workers/${w}/worker.ts`), "utf8");
+    assert(src.includes("await captureFrictionFromJob(app.data, job)"), `${w} captures friction`);
+  }
+});
+
+test("collect emits self_reported signals into the digest, counts them, and respects digestMaxChars", async () => {
+  await withData(async (data) => {
+    const reports = Array.from({ length: 60 }, (_, i) => ({
+      variableKey: `V${i}`,
+      processInstanceKey: `P${i}`,
+      scopeKey: `E${i}`,
+      value: [{ what: `spent turns finding the build recipe ${"y".repeat(200)} ${i}`, surface: "AGENTS.md", suggestedFix: "document it" }],
+    }));
+    for (const r of reports) await captureFrictionFromJob(data, { processInstanceKey: r.processInstanceKey, elementInstanceKey: r.scopeKey, variables: { friction: r.value } }, new Date("2026-01-01T12:00:00.000Z"));
+    const { engine } = engineStub();
+    const res = await collectFriction({
+      data,
+      engine,
+      sweepKey: "SR",
+      now: new Date("2026-01-02T00:00:00.000Z"),
+      config: { ...CONFIG, digestMaxChars: 3000 },
+      baseUrl: "http://h",
+    });
+    assertEquals(res.status, "collected");
+    assertEquals(res.signalCount, 60);
+    assert(res.digest.includes("self_reported=60"), "per-kind count");
+    assert(res.digest.includes("### self_reported"), "self_reported group");
+    assert(res.digest.length <= 3000, "bounded digest");
+    const sweep = data.source().db.all<{ self_reported_count: number }>("SELECT self_reported_count FROM friction_sweeps WHERE sweep_key = 'SR'")[0];
+    assertEquals(sweep?.self_reported_count, 60);
+    const again = await collectFriction({ data, engine, sweepKey: "SR2", now: new Date("2026-01-02T06:00:00.000Z"), config: CONFIG, baseUrl: "http://h" });
+    assertEquals(again.signalCount, 0, "a later sweep never recounts a self-report");
+  });
+});
+
+test("every senior:* agent task with explicit output mappings passes `friction` through (else it stays task-local and is lost)", () => {
+  const dir = resolve(import.meta.dirname, "../resources/processes");
+  let checked = 0;
+  for (const f of readdirSync(dir).filter((n) => n.endsWith(".bpmn"))) {
+    const xml = readFileSync(resolve(dir, f), "utf8");
+    for (const m of xml.matchAll(/<bpmn:serviceTask id="([^"]+)"[\s\S]*?<\/bpmn:serviceTask>/g)) {
+      const block = m[0];
+      if (!block.includes('type="senior:') || !block.includes("<zeebe:output")) continue;
+      checked++;
+      assert(block.includes('target="friction"'), `${f}#${m[1]} must map friction to process scope`);
+      // A parent's `friction` propagates into a called child (call-activity variable propagation); without
+      // a task-local null seed, an agent that omits the optional key re-emits the INHERITED note and it is
+      // captured again under the child's processInstanceKey — one report counted N times (PR review #1103).
+      assert(block.includes('<zeebe:input source="=null" target="friction" />'), `${f}#${m[1]} must seed task-local friction to null`);
+    }
+  }
+  assert(checked > 0, "found mapped agent tasks");
+});
+
+test("implement-cell captures friction on the common post-agent path, before the result gateway", () => {
+  const xml = readFileSync(resolve(import.meta.dirname, "../resources/processes/implement-cell.bpmn"), "utf8");
+  assert(xml.includes('sourceRef="implement-task" targetRef="capture-friction"'), "agent -> capture");
+  assert(xml.includes('sourceRef="capture-friction" targetRef="ic_gw"'), "capture -> gateway");
+  const src = readFileSync(resolve(import.meta.dirname, "../workers/capture-friction/worker.ts"), "utf8");
+  assert(src.includes("await captureFrictionFromJob(app.data, job)"));
 });

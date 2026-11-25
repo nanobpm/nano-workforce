@@ -60,6 +60,8 @@ export const SIGNAL_KINDS = [
   "failed_job",
   "incident",
   "escalation",
+  // Issue #1101: friction an agent reported ITSELF in its result's optional `friction` array.
+  "self_reported",
 ] as const;
 export type SignalKind = (typeof SIGNAL_KINDS)[number];
 
@@ -401,6 +403,149 @@ function inWindow(ts: string | null | undefined, start: string, end: string): bo
   if (!ts) return false;
   const t = Date.parse(ts);
   return Number.isFinite(t) && t > Date.parse(start) && t <= Date.parse(end);
+}
+
+// ── Self-reported friction (issue #1101) ─────────────────────────────────────────────────────────
+
+/** The result key every `senior:*` agent MAY set in its canonical result (`AGENT_RESULT_FILE` /
+ *  `report_outcome`). One shape for every job type — no per-job variant. */
+export const AGENT_FRICTION_RESULT_KEY = "friction";
+
+/** One self-reported friction note: time the agent lost fighting the environment, docs or tooling. */
+export interface AgentFrictionNote {
+  what: string;
+  turnsLost?: number;
+  surface: FixSurface;
+  suggestedFix?: string;
+  targetRepo?: string;
+}
+
+const NOTE_TEXT_MAX = 600;
+
+function isFixSurface(v: unknown): v is FixSurface {
+  return typeof v === "string" && FIX_SURFACES.some((s) => s === v);
+}
+
+function optText(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() !== "" ? redact(v.trim()).slice(0, NOTE_TEXT_MAX) : undefined;
+}
+
+/** Validate an agent result's optional `friction` value (an array, or a JSON-encoded array). Absent /
+ *  null / blank is the common case and yields no notes; malformed entries (no `what`, unknown
+ *  `surface`) are dropped and counted. Every text field is REDACTED here, before anything stores it. */
+export function parseFrictionNotes(raw: unknown): { notes: AgentFrictionNote[]; malformed: number } {
+  let list: unknown = raw;
+  if (raw == null) return { notes: [], malformed: 0 };
+  if (typeof raw === "string") {
+    if (raw.trim() === "") return { notes: [], malformed: 0 };
+    try {
+      list = JSON.parse(raw);
+    } catch {
+      return { notes: [], malformed: 1 };
+    }
+  }
+  if (list == null) return { notes: [], malformed: 0 };
+  if (!Array.isArray(list)) return { notes: [], malformed: 1 };
+  const notes: AgentFrictionNote[] = [];
+  let malformed = 0;
+  for (const item of list) {
+    const what = isRecord(item) ? optText(item.what) : undefined;
+    if (!isRecord(item) || !what || !isFixSurface(item.surface)) {
+      malformed++;
+      continue;
+    }
+    const note: AgentFrictionNote = { what, surface: item.surface };
+    const turns = Number(item.turnsLost);
+    if (item.turnsLost != null && Number.isFinite(turns) && turns >= 0) note.turnsLost = Math.round(turns);
+    const fix = optText(item.suggestedFix);
+    if (fix) note.suggestedFix = fix;
+    // A repo hint is stored verbatim, so it must pass the redactor UNCHANGED: a credential-shaped
+    // component (e.g. `ghp_…/repo`) would otherwise persist a secret — discard rather than store it.
+    const repoRaw = typeof item.targetRepo === "string" ? item.targetRepo.trim() : "";
+    const repo = /^[\w.-]+\/[\w.-]+$/.test(repoRaw) && redact(repoRaw) === repoRaw ? repoRaw : undefined;
+    if (repo) note.targetRepo = repo;
+    notes.push(note);
+  }
+  return { notes, malformed };
+}
+
+/** The job fields {@link captureFrictionFromJob} reads: the run linkage plus the propagated variables. */
+export interface FrictionJob {
+  processInstanceKey?: string | number | null;
+  /** Optional: the Urban nanosdk adapter does not supply it, so `jobKey` is the always-present linkage. */
+  elementInstanceKey?: string | number | null;
+  jobKey?: string | number | null;
+  variables?: unknown;
+}
+
+/** Capture the self-reported `friction` notes visible to a job (the agent's result key, propagated
+ *  verbatim as a process variable) into `friction_self_reports`, redacted, with run linkage. Called by
+ *  the record worker that follows each agent task, so capture is event-driven (no polling). Idempotent:
+ *  the row id hashes (processInstanceKey, note), so a later record worker of the same run that still
+ *  sees the same variable inserts nothing. Best-effort — never throws. Returns rows inserted. */
+export async function captureFrictionFromJob(data: DataLayer, job: FrictionJob, now: Date = new Date()): Promise<number> {
+  try {
+    const raw = isRecord(job.variables) ? job.variables[AGENT_FRICTION_RESULT_KEY] : undefined;
+    const { notes } = parseFrictionNotes(raw);
+    if (notes.length === 0) return 0;
+    const pik = job.processInstanceKey != null && String(job.processInstanceKey) !== "" ? String(job.processInstanceKey) : null;
+    const scope = job.elementInstanceKey != null ? String(job.elementInstanceKey) : null;
+    const jobKey = job.jobKey != null && String(job.jobKey) !== "" ? String(job.jobKey) : null;
+    const at = now.toISOString();
+    let inserted = 0;
+    await data.open().tx(async (t) => {
+      for (const n of notes) {
+        const id = createHash("sha256")
+          .update(JSON.stringify([pik ?? "", n.what, n.surface, n.turnsLost ?? null, n.suggestedFix ?? null, n.targetRepo ?? null]))
+          .digest("hex")
+          .slice(0, 24);
+        const res = await t.exec(
+          `INSERT OR IGNORE INTO friction_self_reports (id, process_instance_key, scope_key, job_key, what, surface, turns_lost,
+             suggested_fix, target_repo, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id, pik, scope, jobKey, n.what, n.surface, n.turnsLost ?? null, n.suggestedFix ?? null, n.targetRepo ?? null, at],
+        );
+        inserted += res.changed;
+      }
+    });
+    return inserted;
+  } catch (err) {
+    console.warn("[friction] self-report capture failed", err);
+    return 0;
+  }
+}
+
+interface SelfReportRow {
+  id: string;
+  process_instance_key: string | null;
+  what: string;
+  surface: string;
+  turns_lost: number | null;
+  suggested_fix: string | null;
+  target_repo: string | null;
+}
+
+/** The `self_reported` signals for the reports captured in `(start, end]`. */
+export function selfReportedSignals(data: DataLayer, start: string, end: string, baseUrl: string): FrictionSignal[] {
+  const rows = data
+    .source()
+    .db.all<SelfReportRow>(
+      "SELECT id, process_instance_key, what, surface, turns_lost, suggested_fix, target_repo FROM friction_self_reports WHERE captured_at > ? AND captured_at <= ? ORDER BY captured_at, id",
+      [start, end],
+    );
+  return rows.map((r) => {
+    const parts = [`[${r.surface}] ${r.what}`];
+    if (r.turns_lost != null) parts.push(`(~${r.turns_lost} turns lost)`);
+    if (r.suggested_fix) parts.push(`— suggested fix: ${r.suggested_fix}`);
+    if (r.target_repo) parts.push(`(repo ${r.target_repo})`);
+    return {
+      id: `self_reported:${r.id}`,
+      kind: "self_reported" as const,
+      runKey: canonicalRunKey(r.process_instance_key, `self:${r.id}`),
+      runUrl: r.process_instance_key ? cockpitUrlFor(baseUrl, r.process_instance_key) : null,
+      fingerprint: `${r.surface}:${normaliseMessage(r.what).slice(0, 120)}`,
+      excerpt: redact(parts.join(" ")).replace(/\s+/g, " ").slice(0, 400),
+    };
+  });
 }
 
 // ── Persistence ──────────────────────────────────────────────────────────────────────────────────
@@ -894,6 +1039,10 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     });
   }
 
+  // Agent self-reports (issue #1101), captured by the record workers with run linkage. Read through the overlap
+  // like the transcripts; the recorded-id fence below drops anything an earlier sweep counted.
+  signals.push(...selfReportedSignals(data, readStart, windowEnd, deps.baseUrl));
+
   // Drop every signal an EARLIER sweep already recorded (issue #1074 review): an agent swept while
   // IDLE re-qualifies once its parent ends and supplies `completionDate`, and its transcript signals
   // would otherwise re-enter this window's digest + counts (the INSERT OR IGNORE below only fences the
@@ -955,8 +1104,8 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
     await t.exec(
       `INSERT INTO friction_sweeps (sweep_key, window_start, window_end, status, runs_swept, signal_count,
          tool_error_count, permission_block_count, timeout_count, missing_generated_count, repeated_command_count,
-         failed_job_count, incident_count, escalation_count, tokens_total, digest, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         failed_job_count, incident_count, escalation_count, self_reported_count, tokens_total, digest, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sweepKey,
         windowStart,
@@ -972,6 +1121,7 @@ export async function collectFriction(deps: CollectDeps): Promise<CollectResult>
         counts.failed_job,
         counts.incident,
         counts.escalation,
+        counts.self_reported,
         runs.reduce((n, r) => n + r.tokens, 0),
         digest || null,
         at,

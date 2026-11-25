@@ -10,6 +10,7 @@
 // `Table<T>` surface — `rounds.insert(...)` / `pull_requests.update(...)`, not hand-written SQL.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import { ensurePr, parsePr } from "../../app/service.ts";
 import { type Effect, isCommitSha, isEffectKind, recordWorldCheckpoint, WorldStore } from "../../app/world/index.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
@@ -86,6 +87,8 @@ export function worldMarkerOf(vars: Record<string, unknown>): WorldMarker | null
 }
 
 const handler: AppJobHandler<In> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   // This worker is the "addressed"/"waiting" path, so `status` resolves to one of those
   // domain values. `summary` is left undefined when absent: the write boundary omits it so the
   // nullable `rounds.summary` column stays NULL rather than being coerced to "".

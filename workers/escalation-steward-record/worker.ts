@@ -34,6 +34,7 @@ import {
   recordResolution,
   renewClaim,
 } from "../../app/escalationSteward.ts";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 
 interface In extends Record<string, unknown> {
   stewardInstanceKey?: string;
@@ -189,6 +190,8 @@ function claimOptions(claim: EscalationAutoResolution): string[] | null {
 }
 
 const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   const raw = typeof job.variables.resolutions === "string" ? job.variables.resolutions : "";
   const decisions: StewardDecision[] = [];
   if (raw.trim() !== "") {

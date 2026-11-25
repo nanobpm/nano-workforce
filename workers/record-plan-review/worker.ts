@@ -24,6 +24,7 @@
 // worker escalates such a verdict to a human immediately instead of burning re-plan rounds.
 
 import type { AppJobHandler } from "@nanobpm/urban";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import {
   MAX_PLAN_REVIEW_ROUNDS,
   type PlanReview,
@@ -68,6 +69,8 @@ export const str = (v: unknown): string => {
 };
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   const planKey = job.variables.planKey;
   const approved = isApproved(job.variables.approved);
   const findings = str(job.variables.findings).trim();

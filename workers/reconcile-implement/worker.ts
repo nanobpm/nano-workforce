@@ -19,6 +19,7 @@
 // passed through so an open PR on the deterministic head branch is only adopted when it targets that
 // base — never a stale/unrelated PR sharing the head branch but aimed at a different base.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import { listPrsForHead } from "../../app/github.ts";
 import { type ReconcileImplementResult, reconcileImplement } from "../../app/implementReconcile.ts";
 
@@ -57,6 +58,8 @@ export function resolveReportedBranch(vars: Record<string, unknown>): string | u
 }
 
 const handler: AppJobHandler<In, ReconcileImplementResult> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   const res = await reconcileImplement(
     {
       status: job.variables.status,

@@ -24,6 +24,7 @@
 // in that case (the edges were invalid).
 import type { AppJobHandler } from "@nanobpm/urban";
 import { type CapabilityNeed, parseCapabilityNeeds } from "../../app/capabilityNeed.ts";
+import { captureFrictionFromJob } from "../../app/friction.ts";
 import { plans, planTaskDeps, planTaskNeeds, planTasks } from "../../app/plan.ts";
 import { computeWaves, WaveError, type WaveTask } from "../../app/waves.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
@@ -60,6 +61,8 @@ const strList = (v: unknown): string[] =>
   Array.isArray(v) ? v.map((x) => str(x).trim()).filter((s) => s !== "") : [];
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
+  // Issue #1101: capture the preceding agent's self-reported `friction` result notes (idempotent, best-effort).
+  await captureFrictionFromJob(app.data, job);
   const { planKey, note } = job.variables;
   const raw = Array.isArray(job.variables.tasks) ? job.variables.tasks : [];
   const ts = new Date().toISOString();
