@@ -224,7 +224,9 @@ evidence-backed findings as GitHub issues labelled `friction`. It is **off by de
   (console project config) — a repo the deployment's GitHub identity can write to. Findings go
   there; each sweep also leaves a **Friction summary** task linking the issues it opened or updated.
 - **Cadence:** `NANO_FRICTION_INTERVAL` (ISO-8601 duration, default `PT12H`). The poller starts at
-  most one sweep per interval and none while a previous sweep is still running.
+  most one sweep instance per interval. It does not check for a still-running sweep: overlap is
+  owned by the singleton `friction_sweep_lock` lease (`NANO_FRICTION_LEASE_MS`, default 6h), so an
+  overlapping instance records itself as `skipped`, and an expired or orphaned lease is taken over.
 - **Turn it off** by unsetting `NANO_FRICTION_REPO`; no new sweep starts.
 
 ---

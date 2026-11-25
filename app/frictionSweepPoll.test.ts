@@ -116,10 +116,11 @@ test("pollFrictionSweep: a failed start leaves the tick un-advanced so the next 
 });
 
 test("pollFrictionSweep: a zero/malformed interval falls back to the default, never free-runs", async () => {
-  const poll = await freshPoller();
-  const { engine, created } = stubEngine();
   for (const iv of ["PT0S", "garbage"]) {
+    const poll = await freshPoller();
+    const { engine, created } = stubEngine();
     await withEnv({ ...ON, NANO_FRICTION_INTERVAL: iv }, () => poll(stubData(), engine));
+    await withEnv({ ...ON, NANO_FRICTION_INTERVAL: iv }, () => poll(stubData(), engine));
+    assertEquals(created.length, 1, `${iv}: the immediate re-tick is suppressed`);
   }
-  assertEquals(created.length, 1, "the immediate re-tick is suppressed");
 });
