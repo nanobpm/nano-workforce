@@ -1,3 +1,9 @@
+## [0.233.0](https://github.com/nanobpm/nano-workforce/compare/v0.232.0...v0.233.0) (2026-11-25)
+
+### Features
+
+* **friction:** make the friction sweep opt-in and poller-driven ([#1102](https://github.com/nanobpm/nano-workforce/issues/1102)) ([b9382a6](https://github.com/nanobpm/nano-workforce/commit/b9382a6ef02ec9c09462dae90dde7454ee756b96)), closes [#1100](https://github.com/nanobpm/nano-workforce/issues/1100)
+
 ## [0.232.0](https://github.com/nanobpm/nano-workforce/compare/v0.231.0...v0.232.0) (2026-11-25)
 
 ### Features
