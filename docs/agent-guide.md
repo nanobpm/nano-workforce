@@ -215,6 +215,18 @@ Every resolution and abstention is recorded for review in **Auto-resolutions** (
 pending count). Read with `listAutoResolutions` (`GET __BASE__/auto-resolutions`), review with
 `reviewAutoResolution` (`{ id, action: "dismiss" | "intervene", note? }`).
 
+### The friction sweep (opt-in)
+
+The friction sweep reviews what agents did since the last sweep and files deduplicated,
+evidence-backed findings as GitHub issues labelled `friction`. It is **off by default**.
+
+- **Turn it on** by setting `NANO_FRICTION_REPO=<owner>/<repo>` in the app's environment
+  (console project config) — a repo the deployment's GitHub identity can write to. Findings go
+  there; each sweep also leaves a **Friction summary** task linking the issues it opened or updated.
+- **Cadence:** `NANO_FRICTION_INTERVAL` (ISO-8601 duration, default `PT12H`). The poller starts at
+  most one sweep per interval and none while a previous sweep is still running.
+- **Turn it off** by unsetting `NANO_FRICTION_REPO`; no new sweep starts.
+
 ---
 
 ## 4. The lifecycle & statuses (so you can reason about state)

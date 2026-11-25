@@ -1,11 +1,12 @@
 // nano-workforce — the agent FRICTION SWEEP (issue #1073): the one canonical module behind
 // `resources/processes/friction-sweep.bpmn`.
 //
-// Every 12h the sweep reads what agents did since the last sweep (engine records + engine-stored
+// When opted in, every `NANO_FRICTION_INTERVAL` (default 12h, started by the poller) the sweep
+// reads what agents did since the last sweep (engine records + engine-stored
 // agent transcripts ONLY — never a host's worker logs) and turns the friction it finds (failed and
 // retried tool calls, permission blocks, bash timeouts, missing generated facades, repeated commands,
 // failed/timed-out jobs, incidents, escalations) into deduplicated, evidence-backed issues in a
-// separate repo (`NANO_FRICTION_REPO`, default the private `jwulf/friction`).
+// separate repo (`NANO_FRICTION_REPO` — unset means the sweep is OFF; issue #1100).
 //
 // Three stages, three owners (no stage is duplicated anywhere else):
 //   1. COLLECT (`pr.friction-collect` → {@link collectFriction}) — deterministic host code. Reads the
@@ -23,6 +24,7 @@ import { publicBaseUrl } from "./blackboard.ts";
 import { readEnvOr } from "./contracts.ts";
 import { runGh, useGh } from "./github.ts";
 import { parsePr } from "./prParse.ts";
+import { isoDurationToMs } from "./reviewWait.ts";
 
 /** The friction-sweep BPMN process id (resources/processes/friction-sweep.bpmn). */
 export const FRICTION_PROCESS_ID = "friction-sweep";
@@ -75,10 +77,30 @@ function positiveInt(raw: string, fallback: number): number {
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
+/** The sweep's opt-in switch AND target (issue #1100): the configured findings repo, or `null` when
+ *  `NANO_FRICTION_REPO` is unset/blank — which means the sweep is OFF. There is deliberately no
+ *  default: nwf is deployed by others, and a baked-in repo would file into one they don't own. */
+export function frictionRepo(): string | null {
+  const repo = readEnvOr("NANO_FRICTION_REPO").trim();
+  return repo === "" ? null : repo;
+}
+
+const DEFAULT_FRICTION_INTERVAL = "PT12H";
+
+/** The sweep cadence in ms (`NANO_FRICTION_INTERVAL`, default 12h), parsed through the ONE canonical
+ *  ISO-8601 parser. An optional `R…/` cycle prefix is stripped; a malformed/zero value falls back to
+ *  the default so the sweep can never free-run on every poll. */
+export function frictionIntervalMs(): number {
+  const raw = readEnvOr("NANO_FRICTION_INTERVAL", DEFAULT_FRICTION_INTERVAL).trim();
+  const period = raw.includes("/") ? raw.slice(raw.lastIndexOf("/") + 1) : raw;
+  const ms = isoDurationToMs(period, DEFAULT_FRICTION_INTERVAL);
+  return ms > 0 ? ms : isoDurationToMs(DEFAULT_FRICTION_INTERVAL, DEFAULT_FRICTION_INTERVAL);
+}
+
 /** The sweep's configuration, read through the ONE typed env schema (app/contracts.ts). */
 export function frictionConfig(): FrictionConfig {
   return {
-    repo: readEnvOr("NANO_FRICTION_REPO").trim() || "jwulf/friction",
+    repo: frictionRepo() ?? "",
     minOccurrences: positiveInt(readEnvOr("NANO_FRICTION_MIN_OCCURRENCES"), 3),
     minRuns: positiveInt(readEnvOr("NANO_FRICTION_MIN_RUNS"), 2),
     digestMaxChars: positiveInt(readEnvOr("NANO_FRICTION_DIGEST_MAX_CHARS"), 24000),

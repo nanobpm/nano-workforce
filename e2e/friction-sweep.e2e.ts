@@ -1,17 +1,17 @@
 // End-to-end proof for the friction sweep (issue #1073): boots the whole Urban app in-process against
-// the WASM engine and drives `resources/processes/friction-sweep.bpmn` from its R/PT12H timer start:
+// the WASM engine and drives `resources/processes/friction-sweep.bpmn` from its none start (the poller's start, issue #1100):
 //
-//   timer fires → pr.friction-collect (REAL handler: reads the window, redacts, persists, advances the
+//   sweep starts → pr.friction-collect (REAL handler: reads the window, redacts, persists, advances the
 //   watermark) → senior:friction-analyst (stubbed agent) → pr.friction-file (REAL handler against a
 //   stubbed GitHub REST transport) → the `friction-summary` user task, whose summary links every issue
-//   opened/updated. Singleton lease (operator scope): a firing that overlaps a running sweep ends
+//   opened/updated. Singleton lease (operator scope): a sweep that overlaps a running sweep ends
 //   "skipped"; the lease is released before the summary task, so an unacknowledged summary never blocks
-//   the next firing, which (with no new runs) is a no-op sweep: no analyst, no GitHub write, no summary.
-//   A failed filing releases the lease too. A changed redeploy leaves exactly one timer schedule.
+//   the next sweep, which (with no new runs) is a no-op sweep: no analyst, no GitHub write, no summary.
+//   A failed filing releases the lease too. (Opt-in switch + interval pacing: app/frictionSweepPoll.test.ts.)
 //
 // Run with `npm run e2e`.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
@@ -20,15 +20,15 @@ import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 
 // The analyst's SLA boundary reads `agentSlaTimeout`, resolved from env when the app modules load —
 // widen it BEFORE importing them so the overlap below (an analyst still running when the next 12h
-// firing lands) is not cut short by the 2h default.
+// sweep lands) is not cut short by the 2h default.
 process.env.NANO_PR_AGENT_SLA_TIMEOUT = "PT48H";
 const { FRICTION_PROCESS_ID, FRICTION_SUMMARY_ELEMENT, frictionSweeps, leaseHolder, normaliseMessage, parseFingerprintMarker } = await import("../app/friction.ts");
 const { pollUserTasks } = await import("../app/service.ts");
 const { userTasks } = await import("../app/userTasks.ts");
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const INTERVAL_MS = 12 * 60 * 60 * 1000;
 const DB_DIR = mkdtempSync(join(tmpdir(), "nwf-friction-e2e-"));
-const TWELVE_HOURS = 12 * 60 * 60 * 1000;
 
 const ENV_OVERRIDES: Record<string, string> = {
   NANO_PR_GITHUB_TRANSPORT: "token",
@@ -52,6 +52,13 @@ function seedEscalations(app: TestApp, tag: string, questions: string[]): void {
   questions.forEach((q, i) => {
     db.run("INSERT INTO feature_escalations (feature_key, question, created_at, job_key) VALUES (?, ?, ?, ?)", [`acme/app#${tag}${i}`, q, at, `${tag}-${i}`]);
   });
+}
+
+/** Start one sweep exactly as the poller's tick does (`pollFrictionSweep`, app/service.ts), after
+ *  letting an interval's worth of engine time pass so each sweep reads a fresh window. */
+async function startSweep(app: TestApp): Promise<void> {
+  await app.advanceTime(INTERVAL_MS);
+  await app.engine.createInstance({ processDefinitionId: FRICTION_PROCESS_ID, variables: {} });
 }
 
 async function sweepInstances(app: TestApp) {
@@ -106,29 +113,29 @@ describe("friction sweep (engine-level)", () => {
     rmSync(DB_DIR, { recursive: true, force: true });
   });
 
-  test("timer → lease → collect → analyse → file → release → summary; overlap skipped; unread summary doesn't block; failure releases", async () => {
+  test("start → lease → collect → analyse → file → release → summary; overlap skipped; unread summary doesn't block; failure releases", async () => {
     seedEscalations(app, "a", ["Which migration prefix should I use? token ghp_abcdefghijklmnopqrstuvwxyz0123456789", "Which migration prefix should I use?"]);
 
-    // ── Firing 1 (12h): the sweep takes the lease, collects, and parks on the analyst (no worker yet).
-    await app.advanceTime(TWELVE_HOURS);
+    // ── Sweep 1: the sweep takes the lease, collects, and parks on the analyst (no worker yet).
+    await startSweep(app);
     await app.settle();
     let sweeps = await frictionSweeps(app.db).all();
-    assert.equal(sweeps.length, 1, "the first timer firing ran one sweep");
+    assert.equal(sweeps.length, 1, "the first start ran one sweep");
     const first = sweeps[0];
     assert.ok(first);
     assert.equal(first.status, "collected");
     assert.equal(first.escalation_count, 2);
     assert.equal(leaseHolder(app.db), first.sweep_key, "the running sweep holds the singleton lease");
 
-    // ── Firing 2 (24h) overlaps the still-running sweep: it must end "skipped" without sweeping.
-    await app.advanceTime(TWELVE_HOURS);
+    // ── Sweep 2 overlaps the still-running sweep: it must end "skipped" without sweeping.
+    await startSweep(app);
     await app.settle();
     sweeps = await frictionSweeps(app.db).all();
     assert.equal(sweeps.length, 2);
     const skipped = sweeps.find((s) => s.sweep_key !== first.sweep_key);
-    assert.equal(skipped?.status, "skipped", "an overlapping firing is recorded as skipped");
+    assert.equal(skipped?.status, "skipped", "an overlapping sweep is recorded as skipped");
     assert.equal(skipped?.signal_count, 0);
-    assert.equal(leaseHolder(app.db), first.sweep_key, "the skipped firing did not take the lease");
+    assert.equal(leaseHolder(app.db), first.sweep_key, "the skipped sweep did not take the lease");
     const skippedInstance = (await sweepInstances(app)).find((i) => i.processInstanceKey === skipped?.sweep_key);
     assert.equal(skippedInstance?.state, "COMPLETED", "the skipped instance ended at once");
     assert.equal(ghCalls.filter((c) => c.method === "POST").length, 0);
@@ -181,12 +188,12 @@ describe("friction sweep (engine-level)", () => {
     assert.match(rows[0]?.question ?? "", /https:\/\/github\.com\/acme\/friction\/issues\/42/);
     assert.match(rows[0]?.question ?? "", /https:\/\/github\.com\/acme\/friction\/issues\/7/);
 
-    // ── Firing 3 (36h): the summary is still unacknowledged, yet the sweep runs — a no-op (no new runs).
+    // ── Sweep 3: the summary is still unacknowledged, yet the sweep runs — a no-op (no new runs).
     const ghBefore = ghCalls.length;
-    await app.advanceTime(TWELVE_HOURS);
+    await startSweep(app);
     await app.settle();
     sweeps = await frictionSweeps(app.db).all();
-    assert.equal(sweeps.length, 3, "the unread summary did not block the next firing");
+    assert.equal(sweeps.length, 3, "the unread summary did not block the next sweep");
     const noop = sweeps.find((s) => s.sweep_key !== first.sweep_key && s.sweep_key !== skipped?.sweep_key);
     assert.equal(noop?.status, "noop");
     assert.equal(analystCalls, 1, "no analyst run on a no-op sweep");
@@ -195,42 +202,16 @@ describe("friction sweep (engine-level)", () => {
     await pollUserTasks(app.db, app.engine);
     assert.equal((await userTasks(app.db).all()).filter((r) => r.element_id === FRICTION_SUMMARY_ELEMENT).length, 1, "no new summary task on a no-op sweep");
 
-    // ── Firing 4 (48h): new friction, but filing fails — the failed sweep still releases the lease.
+    // ── Sweep 4: new friction, but filing fails — the failed sweep still releases the lease.
     failCreates = true;
+    await app.advanceTime(INTERVAL_MS); // the new friction lands after sweep 3's watermark
     seedEscalations(app, "b", ["Which migration prefix should I use?", "Which migration prefix should I use?"]);
-    await app.advanceTime(TWELVE_HOURS);
+    await startSweep(app);
     await app.settle();
     sweeps = await frictionSweeps(app.db).all();
     assert.equal(sweeps.length, 4);
     assert.equal(sweeps.filter((s) => s.status === "failed").length, 1, "the failed filing is recorded");
     assert.equal(leaseHolder(app.db), null, "a failed sweep releases the lease");
     assert.equal((await app.engine.searchIncidents({ state: "ACTIVE" })).length, 0, "a failure ends the sweep, not an incident");
-  });
-});
-
-describe("friction sweep timer schedule (engine-level)", () => {
-  let app: TestApp;
-  const dir = mkdtempSync(join(tmpdir(), "nwf-friction-redeploy-"));
-
-  before(async () => {
-    app = await bootTestApp(APP_ROOT, { env: { NANO_APP_DB_URL: `file:${join(dir, "app.db")}` } });
-  });
-  after(async () => {
-    await app?.stop();
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  test("a changed redeploy replaces the timer subscription: exactly one schedule fires", async () => {
-    await app.advanceTime(6 * 60 * 60 * 1000);
-    const xml = readFileSync(join(APP_ROOT, "resources/processes/friction-sweep.bpmn"), "utf8").replace('name="Friction sweep"', 'name="Friction sweep v2"');
-    await app.engine.deployResources([{ name: "friction-sweep.bpmn", content: xml, contentType: "application/xml" }]);
-    await app.settle();
-    // v1 would have fired at 12h; v2 re-anchors to its deploy (6h) and fires at 18h — once, not twice.
-    await app.advanceTime(6 * 60 * 60 * 1000);
-    await app.settle();
-    assert.equal((await sweepInstances(app)).length, 0, "the replaced v1 timer no longer fires");
-    await app.advanceTime(6 * 60 * 60 * 1000);
-    await app.settle();
-    assert.equal((await sweepInstances(app)).length, 1, "exactly one firing from the single v2 schedule");
   });
 });

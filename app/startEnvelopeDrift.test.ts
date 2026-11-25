@@ -80,7 +80,7 @@ function topLevelStart(block: string): string | null {
   return null;
 }
 
-/** A process whose ONLY start is a timer (issue #1073 — the 12-hourly friction sweep) is never started
+/** A process whose ONLY start is a timer (none today — the friction sweep moved to a poller-started none start in issue #1100) is never started
  *  via createInstance or a callActivity, and a timer start has no variables to seed, so there is no
  *  start contract for this guard to pin. */
 function timerOnlyProcess(xml: string): boolean {

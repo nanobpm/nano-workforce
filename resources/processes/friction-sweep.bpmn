@@ -3,6 +3,7 @@
   <bpmn:process id="friction-sweep" name="Friction sweep" isExecutable="true">
     <bpmn:extensionElements>
       <nano:shapes>
+        <nano:shape id="FrictionStartIn" name="Friction sweep — start (poller seeds nothing)" />
         <nano:shape id="FrictionLeaseOut" name="Take sweep lease — output">
           <nano:extend name="leaseAcquired" type="boolean" />
           <nano:extend name="leaseHeldBy" type="string" />
@@ -46,11 +47,13 @@
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>
-    <bpmn:startEvent id="tick" name="Every 12h">
+    <bpmn:startEvent id="tick" name="Sweep tick (poller)">
+      <bpmn:extensionElements>
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="FrictionStartIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
       <bpmn:outgoing>fs_toLease</bpmn:outgoing>
-      <bpmn:timerEventDefinition id="ted_tick">
-        <bpmn:timeCycle xsi:type="bpmn:tFormalExpression">R/PT12H</bpmn:timeCycle>
-      </bpmn:timerEventDefinition>
     </bpmn:startEvent>
     <bpmn:serviceTask id="lease" name="Take sweep lease">
       <bpmn:extensionElements>
@@ -178,7 +181,7 @@
       <bpmndi:BPMNShape id="BPMNShape_tick" bpmnElement="tick">
         <dc:Bounds x="80" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="65" y="143" width="66" height="14" />
+          <dc:Bounds x="60" y="143" width="76" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_lease" bpmnElement="lease">
