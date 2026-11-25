@@ -1,3 +1,9 @@
+## [0.235.0](https://github.com/nanobpm/nano-workforce/compare/v0.234.0...v0.235.0) (2026-11-25)
+
+### Features
+
+* **friction:** capture self-reported friction from compiled delivery-graph agent cells ([#1105](https://github.com/nanobpm/nano-workforce/issues/1105)) ([27637df](https://github.com/nanobpm/nano-workforce/commit/27637dfe8a67d571abf28a0f02dff8548fedf42e)), closes [#1104](https://github.com/nanobpm/nano-workforce/issues/1104)
+
 ## [0.234.0](https://github.com/nanobpm/nano-workforce/compare/v0.233.0...v0.234.0) (2026-11-25)
 
 ### Features
