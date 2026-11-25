@@ -2179,6 +2179,10 @@ function agentContractContextFeel(nodeId: string, descriptor: string, requiredEm
  * RESUMABLE with the node's required emits (a human/agent supplies the missing fact, which the
  * subProcess output mapping then publishes as `<el>_<fact>`), mirroring the #514 Defect-B wait resume.
  * Omitted for a `connector` (no self-reported status contract), whose body stays `task → end`. */
+/** The host worker that captures an agent's self-reported friction notes (issue #1101) — the SAME
+ * task type implement-cell.bpmn's `capture-friction` step runs; compiled agent cells get one too (#1104). */
+export const CAPTURE_FRICTION_JOB_TYPE = "pr.capture-friction";
+
 function serviceBodyLines(
   el: string,
   nodeId: string,
@@ -2393,6 +2397,17 @@ function serviceBodyLines(
         `        <bpmn:conditionalEventDefinition id="${el}_slaCond"><bpmn:condition xsi:type="bpmn:tFormalExpression">=${slaExpiredVar} = true</bpmn:condition></bpmn:conditionalEventDefinition>`,
         "      </bpmn:boundaryEvent>",
         flow(`${el}_s3`, `${el}_slaBe`, esc),
+        // Issue #1104: capture the agent's self-reported `friction` notes (issue #1101) AFTER `<el>_work`
+        // has terminated — OUTSIDE the SLA-guarded scope, so an in-flight SLA check that already saw the
+        // live job can never interrupt capture and route completed work to timeout escalation. Every
+        // completion passes through here before the producer gate. `friction` is node-local
+        // (AGENT_RESULT_LOCAL_VARS); the SAME host worker as implement-cell's capture step runs it
+        // (`captureFrictionFromJob`, idempotent + best-effort — it never fails the node).
+        `      <bpmn:serviceTask id="${el}_cf" name="Capture friction notes">`,
+        `        <bpmn:extensionElements><zeebe:taskDefinition type="${CAPTURE_FRICTION_JOB_TYPE}" /></bpmn:extensionElements>`,
+        `        <bpmn:incoming>${el}_i1</bpmn:incoming>`,
+        `        <bpmn:outgoing>${el}_wc</bpmn:outgoing>`,
+        "      </bpmn:serviceTask>",
         ...timeoutEscalation,
       ]
     : [
@@ -2458,7 +2473,7 @@ function serviceBodyLines(
   return [
     ...head,
     `      <bpmn:exclusiveGateway id="${el}_gate" name="producer contract met?" default="${el}_g1">`,
-    `        <bpmn:incoming>${el}_i1</bpmn:incoming>`,
+    `        <bpmn:incoming>${el}_wc</bpmn:incoming>`,
     `        <bpmn:outgoing>${el}_g0</bpmn:outgoing>`,
     `        <bpmn:outgoing>${el}_g1</bpmn:outgoing>`,
     "      </bpmn:exclusiveGateway>",
@@ -2473,7 +2488,8 @@ function serviceBodyLines(
       .map((f) => `<bpmn:incoming>${f}</bpmn:incoming>`)
       .join("")}</bpmn:endEvent>`,
     flow(`${el}_i0`, `${el}_start`, `${el}_slaArm`),
-    flow(`${el}_i1`, `${el}_work`, `${el}_gate`),
+    flow(`${el}_i1`, `${el}_work`, `${el}_cf`),
+    flow(`${el}_wc`, `${el}_cf`, `${el}_gate`),
     `      <bpmn:sequenceFlow id="${el}_g0" name="contract met" sourceRef="${el}_gate" targetRef="${enrollTarget}"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${proceedCondition}</bpmn:conditionExpression></bpmn:sequenceFlow>`,
     `      <bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="${contractEsc}" />`,
     flow(`${el}_g2`, contractEsc, `${contractEsc}Rg`),

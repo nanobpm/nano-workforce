@@ -1,7 +1,8 @@
 // The ONE shared friction-notes prompt paragraph (issue #1101). The hand-authored
 // `resources/prompts/*.md` get it materialised between the FRICTION_NOTES markers by
 // `npm run sync:prompt-fragments` (drift-guarded by scripts/sync-prompt-fragments.test.ts, like the nav).
-// Compiled delivery-graph agent cells are not covered yet (issue #1104). Edit it HERE only.
+// Compiled delivery-graph agent cells get it appended to their runtime `appendPrompt` via
+// {@link renderFrictionNotes} (issue #1104). Edit it HERE only.
 //
 // The shape it describes is `AgentFrictionNote` in app/friction.ts; `surface` is one of FIX_SURFACES.
 import { FIX_SURFACES } from "./friction.ts";
@@ -38,3 +39,9 @@ export function withFrictionNotes(md: string): string {
   return `${md.replace(/\s*$/, "")}\n\n${block}\n`;
 }
 
+
+/** The paragraph as a trailing `appendPrompt` section for a compiled delivery-graph agent cell (issue
+ *  #1104) — the cell is prompt-less (no linkedResource), so the runner appends it at seed time. */
+export function renderFrictionNotes(): string {
+  return `\n\n---\n\n${FRICTION_NOTES_PROMPT}\n`;
+}

@@ -339,6 +339,10 @@ export const AGENT_RESULT_LOCAL_VARS = [
   // retry-guidance control is the DISTINCT `escalationNote` (ESCALATION_LOCAL_VARS) precisely so this
   // worker result can never be read back as operator input (PR #863 "Previously missed").
   "note",
+  // `friction` — the OPTIONAL self-reported friction notes every `senior:*` agent may return (issue
+  // #1101, `AgentFrictionNote[]` in app/friction.ts). Node-local so the in-body `pr.capture-friction`
+  // step (issue #1104) captures THIS node's notes, never a parallel sibling's, and a retry clears them.
+  "friction",
 ] as const;
 
 /** The fixed result metadata the delivery-connector worker returns on every job completion

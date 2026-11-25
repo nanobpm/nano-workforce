@@ -9,6 +9,10 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { AgentHistoryRecord, DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
+import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
+import { CAPTURE_FRICTION_JOB_TYPE, compileDeliveryGraphSemantic } from "./deliveryGraphCompiler.ts";
+import { prepareDeliveryGraph, runDeliveryGraph } from "./deliveryRunner.ts";
+import { renderFrictionNotes } from "./frictionNotes.ts";
 import {
   acquireLease,
   buildDigest,
@@ -1271,4 +1275,53 @@ test("implement-cell captures friction on the common post-agent path, before the
   assert(xml.includes('sourceRef="capture-friction" targetRef="ic_gw"'), "capture -> gateway");
   const src = readFileSync(resolve(import.meta.dirname, "../workers/capture-friction/worker.ts"), "utf8");
   assert(src.includes("await captureFrictionFromJob(app.data, job)"));
+});
+
+test("issue #1104: a compiled delivery-graph agent cell's self-reported friction note lands in friction_self_reports", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nwf-friction-graph-"));
+  const app = await bootTestApp(APP_ROOT, { env: { NANO_APP_DB_URL: `file:${join(dir, "app.db")}` } });
+  try {
+    // The fleet agent returns a friction note (with a secret, to prove redaction) in its result. No mock
+    // for `pr.capture-friction`: the app's REAL worker (in-body step after the agent task) captures it.
+    await app.engine.registerWorker("senior:feature", async () => ({
+      status: "opened",
+      friction: [{ what: "graph cell docs were stale; token ghp_abcdefghijklmnopqrstuvwxyz0123", surface: "prompt", turnsLost: 4 }],
+    }));
+    const graph: DeliveryGraph = { name: "friction graph", nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "do it" } }], edges: [] };
+    const run = await runDeliveryGraph(app.engine, graph, { repoless: true });
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    await app.engine.drain();
+    const [pi] = await app.engine.searchProcessInstances({ processInstanceKeys: [run.handle.processInstanceKey] });
+    assertEquals(pi?.state, "COMPLETED", "the capture step must not hold the agent cell open");
+    const rows = app.db.source().db.all<{ process_instance_key: string; what: string; surface: string; turns_lost: number }>(
+      "SELECT process_instance_key, what, surface, turns_lost FROM friction_self_reports",
+    );
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0]?.process_instance_key, String(run.handle.processInstanceKey));
+    assertEquals(rows[0]?.surface, "prompt");
+    assertEquals(rows[0]?.turns_lost, 4);
+    assert(rows[0]?.what.includes("graph cell docs were stale") && !rows[0]?.what.includes("ghp_"), "captured + redacted");
+  } finally {
+    await app.stop?.();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("issue #1104: every compiled agent cell asks for friction notes and runs the capture step after the agent", async () => {
+  const graph: DeliveryGraph = { name: "friction prompt", nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "do it" } }], edges: [] };
+  const prep = await prepareDeliveryGraph(graph, { repoless: true });
+  assert(prep.ok, "prepare");
+  const agent = Object.values(prep.prepared.nodeInputs).find((v) => "jobType" in v) as Record<string, unknown> | undefined;
+  assert(String(agent?.appendPrompt).endsWith(renderFrictionNotes()), "agent appendPrompt carries the friction-notes paragraph");
+  const compiled = await compileDeliveryGraphSemantic(graph);
+  assert(compiled.ok, "compile");
+  const bpmn = compiled.semanticBpmn;
+  assert(bpmn.includes(`<zeebe:taskDefinition type="${CAPTURE_FRICTION_JOB_TYPE}" />`), "capture step compiled");
+  // Capture runs OUTSIDE the SLA-guarded `<el>_work` scope: an in-flight SLA check can never cancel it.
+  assert(/<bpmn:sequenceFlow id="(\w+)_w1" sourceRef="\1_task" targetRef="\1_wend"/.test(bpmn), "agent task -> terminate _work");
+  assert(/<bpmn:sequenceFlow id="(\w+)_i1" sourceRef="\1_work" targetRef="\1_cf"/.test(bpmn), "_work -> capture");
+  assert(/<bpmn:sequenceFlow id="(\w+)_wc" sourceRef="\1_cf" targetRef="\1_gate"/.test(bpmn), "capture -> producer gate");
+  const work = bpmn.slice(bpmn.indexOf('_work" name='), bpmn.indexOf("</bpmn:subProcess>", bpmn.indexOf('_work" name=')));
+  assert(!work.includes(CAPTURE_FRICTION_JOB_TYPE), "capture is not inside the SLA-guarded _work subProcess");
+  assert(/target="friction"/.test(bpmn), "friction mapped out of the agent task node-locally");
 });
