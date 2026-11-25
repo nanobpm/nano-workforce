@@ -89,6 +89,14 @@ export const ENV_CONTRACTS = {
     // `NANO_PR_BASE_URL` was a phantom fallback introduced in #53 (2dcfb8a) and cleaned up per #223.
     rejectedSynonyms: ["NANO_PR_PUBLIC_BASE_URL", "NANO_PR_BASE_URL"],
   },
+  NANO_RUN_WAIT_MAX_WAITERS: {
+    category: "env",
+    name: "NANO_RUN_WAIT_MAX_WAITERS",
+    owner: "operations/waitRun.ts",
+    semantics:
+      "Global cap on concurrently held `GET /run/wait` long-polls (issue #1057). Beyond it the route answers 429 with Retry-After, so reconnecting clients cannot pile up orphan waiters. Positive integer.",
+    default: "64",
+  },
   NANO_PR_POLL_MS: {
     category: "env",
     name: "NANO_PR_POLL_MS",

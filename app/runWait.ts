@@ -1,0 +1,231 @@
+// Long-poll wait on one run (issue #1057): `GET /run/wait?key=<key>&until=<cond>&timeout=<ISO>` holds the
+// request until the run reaches `until`, then returns the SAME `RunView` `GET /run?key=` serves (issue
+// #1054, app/runLookup.ts) — so an agent driving nwf neither re-polls `/status` (token cost) nor guesses
+// a timer. The hold is server-side BOUNDED (`WAIT_MAX_MS`, under common proxy idle cuts): on expiry the
+// body is `{ timedOut: true, view }` and the caller (d8ctl `nwf wait`) simply re-issues the request.
+//
+// Liveness rules (so a waiter can never miss what it must act on, nor hang on an unreachable state):
+//   - an open escalation ALWAYS ends the wait (`reason: "escalated"`), whatever `until` asked for;
+//   - a terminal run ALWAYS ends the wait (`reason: "terminal"`) — e.g. `until=merged` on a PR that was
+//     closed unmerged can never hold, so holding until the timeout would only waste the caller's budget.
+// Reason precedence: `escalated`, then `merged`/`converged` (the outcome the caller asked for, which a
+// terminal run may legitimately satisfy), then `terminal`, then the other reasons (`pr-opened`,
+// `any-change`) — so a run that turns terminal always reports `terminal` unless it ended merged/converged.
+//
+// Derivation over duplication: the view is `lookupRun`; terminality is the view's own `terminal` flag.
+// The clock is injected so the loop is tested with a fake clock (no wall-clock sleeps in tests).
+
+import { MERGE_STAGE_STATUSES } from "./deliveryStatuses.ts";
+import { isoDurationToMs } from "./reviewWait.ts";
+import type { RunView } from "./runLookup.ts";
+
+export const WAIT_UNTIL = ["pr-opened", "converged", "merged", "escalated", "terminal", "any-change"] as const;
+export type WaitUntil = (typeof WAIT_UNTIL)[number];
+
+/** Server-side ceiling for ONE held request (25 min — below typical proxy/LB idle cuts of 30 min+). */
+export const WAIT_MAX_MS = 25 * 60_000;
+/** Default per-request hold when `timeout` is absent/malformed. */
+export const WAIT_DEFAULT_TIMEOUT = "PT25M";
+/** How often the held request re-reads the run (read-model only — cheap, no GitHub calls). */
+export const WAIT_POLL_MS = 2_000;
+
+export function parseWaitUntil(raw: unknown): WaitUntil | null {
+  const s = typeof raw === "string" && raw.trim() !== "" ? raw.trim() : "any-change";
+  return WAIT_UNTIL.find((u) => u === s) ?? null;
+}
+
+/** The effective hold for one request: the requested ISO duration, clamped to `WAIT_MAX_MS`. A caller
+ *  may ask for `PT2H`; it gets ≤ 25 min per request and loops (d8ctl does this for it). */
+export function waitTimeoutMs(raw: unknown): number {
+  const ms = isoDurationToMs(typeof raw === "string" ? raw : undefined, WAIT_DEFAULT_TIMEOUT);
+  return Math.min(Math.max(ms, 0), WAIT_MAX_MS);
+}
+
+/** Converged-or-later: `converged`, `merged`, or any merge-stage status (with auto-merge, pr.finalize
+ *  moves a converged PR straight into waiting_deps, so `converged` itself may never be observed). */
+const SETTLED_PR = new Set(["converged", "merged", ...MERGE_STAGE_STATUSES]);
+const selfAndChildren = (v: RunView): RunView[] => [v, ...v.children];
+
+/** The MEANINGFUL state of one run: every field EXCEPT the volatile bookkeeping (lease/heartbeat
+ *  `leaseUntil`, `activeWorker`, `updatedAt`) — excluded by omission, so a newly added view field
+ *  (settings, a restarted engine instance, acknowledgment, …) is fingerprinted by default and a lease
+ *  renewal on a running agent never ends an `any-change` wait. */
+const meaningful = (v: RunView) => {
+  const { activeWorker: _w, leaseUntil: _l, updatedAt: _u, children: _c, ...rest } = v;
+  return rest;
+};
+
+/** A stable fingerprint of the meaningful run state (self + children), for `any-change`. */
+export function runFingerprint(v: RunView): string {
+  return JSON.stringify({ ...meaningful(v), children: v.children.map(meaningful) });
+}
+
+/** Does the run as a WHOLE satisfy a status predicate? Its own status, or — for a run with children —
+ *  EVERY child (so an epic with one merged slice and one open slice is not yet "merged"). A planned run
+ *  (epic) must also be COMPLETE: `children` lists only slices whose PR exists, so a slice still
+ *  implementing is absent — fail closed unless every planned slice is visible. */
+const wholeRun = (v: RunView, ok: (s: string) => boolean): boolean => {
+  if (ok(v.status)) return true;
+  if (v.children.length === 0) return false;
+  if (v.plannedChildren !== null && v.children.length < v.plannedChildren) return false;
+  return v.children.every((c) => ok(c.status));
+};
+
+export type WaitReason = WaitUntil;
+
+/** Does `view` satisfy the wait? Returns the reason it ended, or null to keep holding. Escalation and
+ *  terminality end EVERY wait (see header). */
+export function waitReason(until: WaitUntil, view: RunView, initialFingerprint: string): WaitReason | null {
+  if (view.openEscalation || selfAndChildren(view).some((r) => r.openEscalation)) return "escalated";
+  const match = untilMatch(until, view, initialFingerprint);
+  if (match === "merged" || match === "converged") return match;
+  if (view.terminal) return "terminal";
+  return match;
+}
+
+/** The `until`-specific match, before escalation/terminal precedence is applied (see header). */
+function untilMatch(until: WaitUntil, view: RunView, initialFingerprint: string): WaitReason | null {
+  const runs = selfAndChildren(view);
+  switch (until) {
+    case "pr-opened":
+      if (runs.some((r) => r.prUrl != null || r.kind === "pr")) return "pr-opened";
+      break;
+    case "converged":
+      if (wholeRun(view, (s) => SETTLED_PR.has(s))) return "converged";
+      break;
+    case "merged":
+      if (wholeRun(view, (s) => s === "merged")) return "merged";
+      break;
+    case "any-change":
+      if (runFingerprint(view) !== initialFingerprint) return "any-change";
+      break;
+    default:
+      break;
+  }
+  return null;
+}
+
+export interface WaitClock {
+  now(): number;
+  /** Sleep `ms`; MUST resolve early once `signal` aborts (client disconnect). */
+  sleep(ms: number, signal?: AbortSignal): Promise<void>;
+}
+
+/** Resolve when `signal` aborts (never, without one); `off()` detaches the listener. */
+function onAbort(signal: AbortSignal | undefined): { done: Promise<void>; off: () => void } {
+  if (!signal) return { done: new Promise<void>(() => {}), off: () => {} };
+  let off = () => {};
+  const done = new Promise<void>((r) => {
+    if (signal.aborted) return r();
+    const h = () => r();
+    signal.addEventListener("abort", h, { once: true });
+    off = () => signal.removeEventListener("abort", h);
+  });
+  return { done, off: () => off() };
+}
+
+export const realClock: WaitClock = {
+  now: () => Date.now(),
+  sleep: (ms, signal) => {
+    if (signal?.aborted) return Promise.resolve();
+    const abort = onAbort(signal);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const slept = new Promise<void>((r) => {
+      timer = setTimeout(r, ms);
+    });
+    return Promise.race([slept, abort.done]).finally(() => {
+      clearTimeout(timer);
+      abort.off();
+    });
+  },
+};
+
+/** Global cap on concurrently held waits (a reconnecting client must not pile up orphan waiters). */
+export const WAIT_MAX_WAITERS_DEFAULT = 64;
+/** `Retry-After` (seconds) advertised on a 429 when the waiter cap is reached. */
+export const WAIT_RETRY_AFTER_S = 5;
+
+/** A counting gate for concurrent waiters. `tryAcquire` returns a release fn (idempotent), or null at
+ *  the cap. */
+export class WaiterGate {
+  #held = 0;
+  readonly cap: number;
+  constructor(cap: number) {
+    this.cap = Number.isInteger(cap) && cap > 0 ? cap : WAIT_MAX_WAITERS_DEFAULT;
+  }
+  get held(): number {
+    return this.#held;
+  }
+  tryAcquire(): (() => void) | null {
+    if (this.#held >= this.cap) return null;
+    this.#held++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#held--;
+    };
+  }
+}
+
+export type WaitResult =
+  | { found: false }
+  | { found: true; timedOut: true; reason: null; until: WaitUntil; view: null }
+  | { found: true; timedOut: boolean; reason: WaitReason | null; until: WaitUntil; view: RunView };
+
+const EXPIRED = Symbol("expired");
+
+/** Minimum budget for the INITIAL lookup, so a zero/near-zero timeout is a non-blocking peek (snapshot
+ *  or 404) rather than an unconditional 504. */
+export const INITIAL_LOOKUP_FLOOR_MS = 5_000;
+
+/** Race `p` against the remaining budget so a stalled lookup can never outlive the wait deadline. */
+async function bounded<T>(start: () => Promise<T>, ms: number, signal?: AbortSignal): Promise<T | typeof EXPIRED> {
+  // Never START a lookup once the budget is exhausted (it could reject unhandled), and absorb a
+  // late rejection from a lookup that lost the race.
+  if (ms <= 0 || signal?.aborted) return EXPIRED;
+  const p = start();
+  p.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<typeof EXPIRED>((r) => {
+    timer = setTimeout(() => r(EXPIRED), ms);
+  });
+  const abort = onAbort(signal);
+  try {
+    return await Promise.race([p, expiry, abort.done.then((): typeof EXPIRED => EXPIRED)]);
+  } finally {
+    clearTimeout(timer);
+    abort.off();
+  }
+}
+
+/** Hold until `until` holds (or escalation/terminal), or `timeoutMs` elapses. `lookup` returns null for
+ *  an unknown key (→ `found:false`, a 404). Every lookup is bounded by the deadline; if the INITIAL
+ *  lookup has not produced a view by then the result is `timedOut` with `view:null`. An aborted
+ *  `signal` (client disconnect) stops the loop before any further lookup. */
+export async function waitForRun(
+  lookup: () => Promise<RunView | null>,
+  until: WaitUntil,
+  timeoutMs: number,
+  clock: WaitClock = realClock,
+  pollMs: number = WAIT_POLL_MS,
+  signal?: AbortSignal,
+): Promise<WaitResult> {
+  const deadline = clock.now() + timeoutMs;
+  const first = await bounded(lookup, Math.max(timeoutMs, INITIAL_LOOKUP_FLOOR_MS), signal);
+  if (first === EXPIRED) return { found: true, timedOut: true, reason: null, until, view: null };
+  if (!first) return { found: false };
+  let view: RunView = first;
+  const initial = runFingerprint(view);
+  for (;;) {
+    const reason = waitReason(until, view, initial);
+    if (reason) return { found: true, timedOut: false, reason, until, view };
+    const left = deadline - clock.now();
+    if (left <= 0 || signal?.aborted) return { found: true, timedOut: true, reason: null, until, view };
+    await clock.sleep(Math.min(pollMs, left), signal);
+    if (signal?.aborted) return { found: true, timedOut: true, reason: null, until, view };
+    const next = await bounded(lookup, deadline - clock.now(), signal);
+    if (next === EXPIRED) return { found: true, timedOut: true, reason: null, until, view };
+    if (next) view = next;
+  }
+}

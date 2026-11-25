@@ -75,6 +75,10 @@ export interface RunView {
   acknowledgedAt: string | null;
   createdAt: string | null;
   updatedAt: string;
+  /** How many child runs the run is PLANNED to have (epic: every planned slice, including slices whose
+   *  PR does not exist yet and so are absent from `children`); null when the run has no plan (feature,
+   *  PR, delivery). Whole-run predicates over `children` MUST check completeness against this. */
+  plannedChildren: number | null;
   /** Child runs (feature → its convergence loop PR; epic → its slice PRs). Children carry no children. */
   children: RunView[];
 }
@@ -196,6 +200,7 @@ async function prViews(
         acknowledgedAt: row.acknowledged_at ?? null,
         createdAt: row.created_at ?? null,
         updatedAt: p.updatedAt,
+        plannedChildren: null,
         children: [],
       };
     }),
@@ -341,6 +346,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       acknowledgedAt: feature.acknowledged_at ?? null,
       createdAt: feature.created_at,
       updatedAt: feature.updated_at,
+      plannedChildren: null,
       children,
     });
   }
@@ -381,6 +387,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       acknowledgedAt: plan.acknowledged_at ?? null,
       createdAt: plan.created_at,
       updatedAt: plan.updated_at,
+      plannedChildren: slices.length,
       children,
     });
   }
@@ -411,6 +418,7 @@ export async function lookupRun(data: DataLayer, engine: Engine | undefined, key
       acknowledgedAt: run.acknowledged_at ?? null,
       createdAt: run.created_at,
       updatedAt: d.updatedAt,
+      plannedChildren: null,
       children: [],
     };
   }

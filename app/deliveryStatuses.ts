@@ -11,3 +11,9 @@
 // the resolved-not-landed state. Everything else (converging, waiting_review, escalated, and the
 // merge-stage waiting_deps/waiting_merge/waiting_lane/queued) is in flight.
 export const TERMINAL_STATUSES: readonly string[] = ["converged", "merged", "abandoned"];
+
+// The merge-stage PR statuses: a PR is here only AFTER review convergence (pr.finalize hands a
+// converged PR to merge-loop, which parks it in waiting_deps → waiting_merge/waiting_lane → queued /
+// merging). A handback into review leaves this set (back to a review status), so membership here
+// implies "converged, not yet landed". Consumed by the run-wait `converged` predicate (app/runWait.ts).
+export const MERGE_STAGE_STATUSES: readonly string[] = ["waiting_deps", "waiting_merge", "waiting_lane", "queued", "merging"];

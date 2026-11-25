@@ -313,7 +313,7 @@ components:
       type: object
       description: "One run looked up by key at any stage (issue #1054) — GET /run?key=."
       additionalProperties: false
-      required: [key, kind, title, status, terminal, stage, settings, processInstanceKey, processInstanceKeys, activeWorker, leaseUntil, prUrl, openEscalation, incident, acknowledgedAt, createdAt, updatedAt, children]
+      required: [key, kind, title, status, terminal, stage, settings, processInstanceKey, processInstanceKeys, activeWorker, leaseUntil, prUrl, openEscalation, incident, acknowledgedAt, createdAt, updatedAt, plannedChildren, children]
       properties:
         key:
           type: string
@@ -376,6 +376,10 @@ components:
           items:
             type: string
           description: This run's engine instance plus its children's.
+        plannedChildren:
+          type: integer
+          nullable: true
+          description: Epic only — the number of planned slices (children lists only slices whose PR exists). Null for other kinds.
         activeWorker:
           type: string
           nullable: true
@@ -5732,6 +5736,106 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
         "404":
           description: nwf has never tracked this key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /run/wait:
+    get:
+      operationId: waitRun
+      x-cli:
+        command: [wait]
+        positional: [key]
+        audience: operator
+      # x-mcp exclusion: a long-poll is not a useful MCP tool (it holds the call for up to 25 min);
+      # agents read `GET /run?key=` instead. CLI-only door.
+      x-mcp:
+        exclude: true
+      summary: "Long-poll ONE run until it reaches a state (issue #1057) — pr-opened, converged, merged, escalated, terminal, or any-change."
+      description: >-
+        `d8ctl nwf wait <key> --until=…`. Holds the request (server-side bounded to at most 25 minutes per
+        request so proxies don't cut it) and returns the same RunView `GET /run?key=` serves as soon as the
+        condition holds. An open escalation (on the run or a child) ALWAYS ends the wait with
+        `reason: escalated`, and a terminal run ALWAYS ends it with `reason: terminal` (a condition that can
+        no longer hold never waits out the timeout). Precedence: `escalated`, then `merged`/`converged`
+        (a terminal run that satisfied the requested outcome reports it), then `terminal`, then `pr-opened` /
+        `any-change` (a run that turns terminal never reports `any-change`). On expiry the body is `{ timedOut: true, view }` with the
+        current view; the caller re-issues the request (d8ctl loops until its own overall deadline).
+        `any-change` returns when any field of the view differs from its state when the request began.
+      parameters:
+        - name: key
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: The run key — `owner/repo#N` (URL-encoded as a query value) or a delivery-graph runKey.
+        - name: until
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pr-opened, converged, merged, escalated, terminal, any-change]
+            default: any-change
+          description: The state to wait for.
+        - name: timeout
+          in: query
+          required: false
+          schema:
+            type: string
+            default: PT25M
+          description: ISO-8601 duration to hold this request; clamped to PT25M.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The condition held (timedOut false) or the bounded hold expired (timedOut true).
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [timedOut, reason, until, view]
+                properties:
+                  timedOut:
+                    type: boolean
+                  reason:
+                    type: string
+                    nullable: true
+                    enum: [pr-opened, converged, merged, escalated, terminal, any-change, null]
+                    description: Why the wait ended; null when it timed out.
+                  until:
+                    type: string
+                  view:
+                    $ref: "#/components/schemas/RunView"
+        "400":
+          description: Unknown `until` value.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: nwf has never tracked this key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "429":
+          description: >-
+            Too many concurrently held waits (global cap `NANO_RUN_WAIT_MAX_WAITERS`, default 64). Retry
+            after the `Retry-After` seconds.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before re-issuing the request.
           content:
             application/json:
               schema:
