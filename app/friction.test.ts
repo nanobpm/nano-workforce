@@ -1040,3 +1040,51 @@ test("a capped overlap run never rewinds the watermark (#1098 review)", async ()
     assertEquals(readWatermark(data), now2.toISOString());
   });
 });
+
+// ── #1098 review round 3: timestamp ties and late-visible overlap runs under the byte cap ────────
+
+test("runs sharing a timestamp are each read in full across capped sweeps (#1098 review)", async () => {
+  await withData(async (data) => {
+    const t0 = new Date("2026-01-02T00:00:00.000Z");
+    const at = new Date(t0.getTime() - 30 * 60_000).toISOString();
+    const big = (tag: string) => [
+      ...Array.from({ length: 4 }, (_, k) => rec("ASSISTANT", "z".repeat(1000), [], k)),
+      rec("TOOL_RESULT", `Blocked by nano-coder permissions: ${tag}`, [], 9),
+    ];
+    const runs = [
+      { key: "R1", at, records: big("one") },
+      { key: "R2", at, records: big("two") },
+    ];
+    const { engine } = engineStub({ runs });
+    const cap = 6000; // each run fits alone, both together do not
+    const sweeps = [];
+    for (let i = 0; i < 3; i++) {
+      sweeps.push(
+        await collectFriction({ data, engine, sweepKey: `S${i}`, now: new Date(t0.getTime() + i * 60_000), config: CONFIG, baseUrl: "http://h", historyByteCap: cap }),
+      );
+    }
+    const ids = data.source().db.all<{ excerpt: string }>("SELECT excerpt FROM friction_signals WHERE kind = 'permission_block'").map((r) => r.excerpt);
+    assertEquals(ids.length, 2, `both tied runs collected in full: ${JSON.stringify(ids)}`);
+    assertEquals(readWatermark(data), new Date(t0.getTime() + 2 * 60_000).toISOString());
+  });
+});
+
+test("a late-visible overlap run whose first read is capped is still collected later (#1098 review)", async () => {
+  await withData(async (data) => {
+    const t0 = new Date("2026-01-02T00:00:00.000Z");
+    const runs: { key: string; at: string; records: AgentHistoryRecord[] }[] = [];
+    const { engine } = engineStub({ runs });
+    await collectFriction({ data, engine, sweepKey: "S1", now: t0, config: CONFIG, baseUrl: "http://h" });
+    const fill = Array.from({ length: 4 }, (_, k) => rec("ASSISTANT", "z".repeat(1000), [], k));
+    runs.push({ key: "EARLY", at: new Date(t0.getTime() - 40 * 60_000).toISOString(), records: fill });
+    runs.push({
+      key: "LATE",
+      at: new Date(t0.getTime() - 30 * 60_000).toISOString(),
+      records: [...fill, rec("TOOL_RESULT", "Blocked by nano-coder permissions: late", [], 9)],
+    });
+    const cap = 6000;
+    await collectFriction({ data, engine, sweepKey: "S2", now: new Date(t0.getTime() + 60 * 60_000), config: CONFIG, baseUrl: "http://h", historyByteCap: cap });
+    const s3 = await collectFriction({ data, engine, sweepKey: "S3", now: new Date(t0.getTime() + 61 * 60_000), config: CONFIG, baseUrl: "http://h", historyByteCap: cap });
+    assertEquals(s3.signalCount, 1, "the capped late-visible run is read on the next sweep");
+  });
+});
