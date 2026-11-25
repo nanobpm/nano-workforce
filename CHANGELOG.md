@@ -1,3 +1,9 @@
+## [0.234.0](https://github.com/nanobpm/nano-workforce/compare/v0.233.0...v0.234.0) (2026-11-25)
+
+### Features
+
+* **friction:** agents self-report friction in their result; sweep ingests it as a signal ([#1103](https://github.com/nanobpm/nano-workforce/issues/1103)) ([a6c12ef](https://github.com/nanobpm/nano-workforce/commit/a6c12ef22d78fce079f93c0d2a7e137fe0ebbd0c)), closes [#1101](https://github.com/nanobpm/nano-workforce/issues/1101)
+
 ## [0.233.0](https://github.com/nanobpm/nano-workforce/compare/v0.232.0...v0.233.0) (2026-11-25)
 
 ### Features
