@@ -1402,9 +1402,10 @@ deduplicated, actionable friction findings to `NANO_FRICTION_REPO`.
 - **One schedule, driven by the poller.** The process has a none start event; `pollFrictionSweep`
   (`app/service.ts`, the same pattern as the escalation steward) is the ONLY starter. Each poll pass
   checks the switch, paces by `NANO_FRICTION_INTERVAL` (default `PT12H`, parsed with the canonical
-  `isoDurationToMs`), and starts nothing while a previous instance is still ACTIVE and sweeping (an
-  instance parked only on the unread summary task has already released its lease and doesn't
-  block). A failed start is retried on the next pass.
+  `isoDurationToMs`), and deliberately does NOT gate on ACTIVE instances: an instance wedged on an
+  incident would stay ACTIVE forever and block every later sweep. Overlap is owned by the singleton
+  lease below — an overlapping start records itself as `skipped` and exits. A failed start is
+  retried on the next pass.
 - **Singleton lease.** `pr.friction-lease` takes the one-row `friction_sweep_lock` lease (atomic
   conditional write, holder = the instance key, expiry `NANO_FRICTION_LEASE_MS`, default 6h). A
   firing that finds it held by a live instance records a `skipped` sweep and ends at `skipped`. An
