@@ -12,6 +12,7 @@ import {
   acquireLease,
   buildDigest,
   captureSelfReportedFriction,
+  readFrictionVariables,
   collectFriction,
   excerptAround,
   extractRunSignals,
@@ -1156,8 +1157,31 @@ test("parseFrictionNotes: absent/null/blank results are unchanged (no notes); va
 function varEngine(vars: { variableKey: string; value: unknown; processInstanceKey: string; scopeKey: string }[]) {
   return {
     searchVariables: async () => vars.map((v) => ({ ...v, name: "friction", value: JSON.stringify(v.value), isTruncated: false })),
+    searchProcessInstances: async () => [],
   };
 }
+
+test("readFrictionVariables: a full history page cannot hide a new report on an active instance; exact-name filter", async () => {
+  const history = Array.from({ length: 100 }, (_, i) => ({
+    variableKey: `H${i}`,
+    processInstanceKey: `OLD${i}`,
+    scopeKey: `OLD${i}`,
+    name: "friction",
+    value: "null",
+    isTruncated: false,
+  }));
+  const fresh = { variableKey: "NEW", processInstanceKey: "LIVE", scopeKey: "LIVE", name: "friction", value: "[]", isTruncated: false };
+  const engine = {
+    searchVariables: async (f: { processInstanceKey?: string }) =>
+      f.processInstanceKey === "LIVE" ? [fresh, { ...fresh, variableKey: "X", name: "frictionX" }] : history,
+    searchProcessInstances: async () => [{ processInstanceKey: "LIVE" }],
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+  const rows = await readFrictionVariables(engine as any);
+  assert(rows.some((r) => r.variableKey === "NEW"), "new report beyond the page is captured");
+  assert(!rows.some((r) => r.name !== "friction"), "only exact-name rows");
+  assertEquals(rows.length, 101);
+});
 
 test("captureSelfReportedFriction persists redacted notes with run linkage, idempotently", async () => {
   await withData(async (data) => {

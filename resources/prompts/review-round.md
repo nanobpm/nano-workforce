@@ -336,7 +336,8 @@ EOF
    ("review 123's finding") ends a single-quoted string and breaks the command.
 
    Write this file **once**, at the very end, with your final result. Keep it a flat
-   JSON object of exactly the variables in the table above.
+   JSON object of exactly the variables in the table above (plus the optional
+   `friction` key, if you hit friction).
 
 2. **Fallback** (only if you truly cannot write the file): print a single line to
    stdout of the form `::nano:result:: {json}` — e.g.

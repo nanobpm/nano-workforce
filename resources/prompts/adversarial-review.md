@@ -79,14 +79,14 @@ global/host state. You may run the project's tests and linters to confirm a susp
 
 ## Result (job result variables)
 
-Return **exactly** these two variables:
+Return **exactly** these two variables (plus the optional `friction` key described below, if you hit friction):
 
 | var                   | type   | meaning                                                      |
 |-----------------------|--------|--------------------------------------------------------------|
 | `adversarialFindings` | string | the findings, one per line: `path:line: what breaks, and the fix (severity)`. **Empty string when there is nothing worth another pass.** A non-empty value sends the PR back to the review-round agent. |
 | `adversarialSummary`  | string | one or two sentences on what you checked                     |
 
-Do **not** return `status`, `summary`, or any other variable. They belong to the
+Do **not** return `status`, `summary`, or any other variable (the optional `friction` key is the sole exception). They belong to the
 review-round agent, and overwriting them corrupts the round record.
 
 ### How to return it (the wire mechanism)

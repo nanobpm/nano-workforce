@@ -145,7 +145,8 @@ EOF
    ```
 
    Write this file **once**, at the very end, with your final result. Keep it a flat
-   JSON object of exactly the variables named in the return contract above.
+   JSON object of exactly the variables named in the return contract above (plus the
+   optional `friction` key, if you hit friction).
 
 2. **Fallback** (only if you truly cannot write the file): print a single line to
    stdout of the form `::nano:result:: {json}` — e.g.

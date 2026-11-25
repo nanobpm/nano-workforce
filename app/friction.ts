@@ -444,16 +444,42 @@ export function parseFrictionNotes(raw: unknown): { notes: AgentFrictionNote[]; 
   return { notes, malformed };
 }
 
+/** Size at which an engine search page is (possibly) truncated. */
+const FRICTION_SEARCH_PAGE = 100;
+
+type FrictionVar = Awaited<ReturnType<EngineClient["searchVariables"]>>[number];
+
+/** Every `friction` variable the capture must see. The global name search is a single, unpaged page, and
+ *  finished instances' variables persist — so once history exceeds a page, NEW reports would be silently
+ *  cut. When the global page is full, the read additionally probes each ACTIVE instance by key (new
+ *  reports live on running instances), so a full history page can never hide a fresh report. Rows are
+ *  filtered to the exact name (the engine's name filter is not guaranteed exact) and de-duplicated. */
+export async function readFrictionVariables(engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances">): Promise<FrictionVar[]> {
+  const byKey = new Map<string, FrictionVar>();
+  const add = (rows: FrictionVar[]) => {
+    for (const r of rows) if (r.name === AGENT_FRICTION_RESULT_KEY) byKey.set(String(r.variableKey), r);
+  };
+  const global = await engine.searchVariables({ name: AGENT_FRICTION_RESULT_KEY });
+  add(global);
+  if (global.length >= FRICTION_SEARCH_PAGE) {
+    const active = await engine.searchProcessInstances({ state: "ACTIVE" });
+    for (const pi of active) {
+      add(await engine.searchVariables({ processInstanceKey: String(pi.processInstanceKey), name: AGENT_FRICTION_RESULT_KEY }));
+    }
+  }
+  return [...byKey.values()];
+}
+
 /** Capture every reported `friction` result variable into `friction_self_reports` (redacted, with run
  *  linkage). The engine propagates the agent's result key verbatim as a process variable, so a single
  *  variable search finds them all. Idempotent: the row id hashes the variable key + value, so a re-read
  *  inserts nothing and a later job overwriting the variable with a NEW report is captured as new. */
 export async function captureSelfReportedFriction(
   data: DataLayer,
-  engine: Pick<EngineClient, "searchVariables">,
+  engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances">,
   now: Date,
 ): Promise<number> {
-  const vars = await engine.searchVariables({ name: AGENT_FRICTION_RESULT_KEY });
+  const vars = await readFrictionVariables(engine);
   const at = now.toISOString();
   const rows: unknown[][] = [];
   for (const v of vars) {

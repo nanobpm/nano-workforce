@@ -24,9 +24,14 @@ interface Out extends Record<string, unknown> {
 const handler: AppJobHandler<Record<string, unknown>, Out> = async (job, app) => {
   const sweepKey = job.processInstanceKey != null ? String(job.processInstanceKey) : `friction-${Date.now()}`;
   let res: Awaited<ReturnType<typeof collectFriction>>;
+  // Fold in any self-reports (issue #1101) the poller has not captured yet, so the window is current.
+  // Best-effort, like the poller's capture: an engine search error must never fail the sweep.
   try {
-    // Fold in any self-reports (issue #1101) the poller has not captured yet, so the window is current.
     await captureSelfReportedFriction(app.data, app.engine, new Date());
+  } catch (err) {
+    app.log.warn("friction self-report capture failed", { sweepKey, error: String(err) });
+  }
+  try {
     res = await collectFriction({
     data: app.data,
     engine: app.engine,
