@@ -453,24 +453,25 @@ const FRICTION_SEARCH_PAGE = 100;
 
 type FrictionVar = Awaited<ReturnType<EngineClient["searchVariables"]>>[number];
 
-/** Every `friction` variable the capture must see. The global name search is a single, unpaged page, and
- *  finished instances' variables persist — so once history exceeds a page, NEW reports would be silently
- *  cut. When the global page is full, the read additionally probes by key every ACTIVE instance AND every
- *  instance the previous pass saw ACTIVE (`friction_capture_watch`) — the latter catches an instance that
- *  completed between passes, whose report is no longer on a running instance. The watch set is replaced
- *  with the current ACTIVE keys every pass, so a finished instance is probed exactly one final time. Rows
- *  are filtered to the exact name (the engine's name filter is not guaranteed exact) and de-duplicated. */
+/** Every `friction` variable the capture must see, plus the instances currently ACTIVE. The global name
+ *  search is a single, unpaged page, and finished instances' variables persist — so once history exceeds
+ *  a page, NEW reports would be silently cut. When the global page is full, the read additionally probes
+ *  by key every ACTIVE instance AND every instance in `friction_capture_watch` (those the previous pass saw
+ *  ACTIVE, or whose report it could not yet capture) — the latter catches an instance that completed
+ *  between passes. Rows are filtered to the exact name (the engine's name filter is not guaranteed exact)
+ *  and de-duplicated. The watch set itself is rewritten by {@link captureSelfReportedFriction}, only once
+ *  it knows which reports were captured. */
 export async function readFrictionVariables(
   engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances">,
   data?: DataLayer,
-): Promise<FrictionVar[]> {
+): Promise<{ vars: FrictionVar[]; active: Set<string> }> {
   const byKey = new Map<string, FrictionVar>();
   const add = (rows: FrictionVar[]) => {
     for (const r of rows) if (r.name === AGENT_FRICTION_RESULT_KEY) byKey.set(String(r.variableKey), r);
   };
   const global = await engine.searchVariables({ name: AGENT_FRICTION_RESULT_KEY });
   add(global);
-  const active = (await engine.searchProcessInstances({ state: "ACTIVE" })).map((pi) => String(pi.processInstanceKey));
+  const active = new Set((await engine.searchProcessInstances({ state: "ACTIVE" })).map((pi) => String(pi.processInstanceKey)));
   if (global.length >= FRICTION_SEARCH_PAGE) {
     const watched = data
       ? data.source().db.all<{ process_instance_key: string }>("SELECT process_instance_key FROM friction_capture_watch").map((r) => r.process_instance_key)
@@ -479,33 +480,50 @@ export async function readFrictionVariables(
       add(await engine.searchVariables({ processInstanceKey: pik, name: AGENT_FRICTION_RESULT_KEY }));
     }
   }
-  if (data) {
-    await data.open().tx(async (t) => {
-      await t.exec("DELETE FROM friction_capture_watch", []);
-      for (const pik of active) await t.exec("INSERT OR IGNORE INTO friction_capture_watch (process_instance_key) VALUES (?)", [pik]);
-    });
-  }
-  return [...byKey.values()];
+  return { vars: [...byKey.values()], active };
 }
+
+/** Overall wall-clock budget for full reads of truncated reports in ONE capture pass, so a backlog of long
+ *  reports can never stall the shared poller; unread reports stay watched and are retried next pass. */
+export const FRICTION_FULL_READ_BUDGET_MS = 30_000;
 
 /** Capture every reported `friction` result variable into `friction_self_reports` (redacted, with run
  *  linkage). The engine propagates the agent's result key verbatim as a process variable, so a single
  *  variable search finds them all. Idempotent: the row id hashes the variable key + value, so a re-read
- *  inserts nothing and a later job overwriting the variable with a NEW report is captured as new. */
+ *  inserts nothing and a later job overwriting the variable with a NEW report is captured as new.
+ *  A truncated report on a FINISHED instance that is already captured is never re-read (its value can no
+ *  longer change); full reads share {@link FRICTION_FULL_READ_BUDGET_MS}. An instance whose report could
+ *  not be read (fetch failed / budget spent) is kept in the watch set until a later pass captures it. */
 export async function captureSelfReportedFriction(
   data: DataLayer,
   engine: Pick<EngineClient, "searchVariables" | "searchProcessInstances">,
   now: Date,
   /** Reads a search-truncated value in full by `variableKey` (test seam; defaults to the engine REST read). */
   fetchFull: (variableKey: string) => Promise<string | undefined> = (k) => fetchFullVariableValue(k),
+  /** Monotonic clock for the full-read budget (test seam). */
+  clock: () => number = () => Date.now(),
 ): Promise<number> {
-  const vars = await readFrictionVariables(engine, data);
+  const { vars, active } = await readFrictionVariables(engine, data);
+  const captured = new Set(
+    data.source().db.all<{ variable_key: string }>("SELECT DISTINCT variable_key FROM friction_self_reports").map((r) => String(r.variable_key)),
+  );
+  const retain = new Set<string>();
+  const deadline = clock() + FRICTION_FULL_READ_BUDGET_MS;
   const at = now.toISOString();
   const rows: unknown[][] = [];
   for (const v of vars) {
-    // A long report arrives as a clipped search preview — read it in full rather than drop it forever.
-    const raw = v.isTruncated ? await fetchFull(String(v.variableKey)) : v.value;
-    if (raw === undefined) continue;
+    const pik = String(v.processInstanceKey ?? "");
+    let raw: string | undefined = v.value;
+    if (v.isTruncated) {
+      // A finished instance's captured report is final — skip the redundant full read.
+      if (!active.has(pik) && captured.has(String(v.variableKey))) continue;
+      // A long report arrives as a clipped search preview — read it in full rather than drop it forever.
+      raw = clock() < deadline ? await fetchFull(String(v.variableKey)) : undefined;
+      if (raw === undefined) {
+        if (pik) retain.add(pik);
+        continue;
+      }
+    }
     let value: unknown;
     try {
       value = JSON.parse(raw);
@@ -529,7 +547,6 @@ export async function captureSelfReportedFriction(
       ]);
     }
   }
-  if (rows.length === 0) return 0;
   let inserted = 0;
   await data.open().tx(async (t) => {
     for (const r of rows) {
@@ -539,6 +556,11 @@ export async function captureSelfReportedFriction(
         r,
       );
       inserted += res.changed;
+    }
+    // Retire a watch entry only once its report is captured: watch = ACTIVE ∪ not-yet-captured.
+    await t.exec("DELETE FROM friction_capture_watch", []);
+    for (const pik of new Set([...active, ...retain])) {
+      await t.exec("INSERT OR IGNORE INTO friction_capture_watch (process_instance_key) VALUES (?)", [pik]);
     }
   });
   return inserted;

@@ -8,11 +8,13 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { AgentHistoryRecord, DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
+import { AGENT_RESULT_LOCAL_VARS } from "./deliveryGraph.ts";
 import {
   acquireLease,
   buildDigest,
   captureSelfReportedFriction,
   readFrictionVariables,
+  FRICTION_FULL_READ_BUDGET_MS,
   collectFriction,
   excerptAround,
   extractRunSignals,
@@ -1177,7 +1179,7 @@ test("readFrictionVariables: a full history page cannot hide a new report on an 
     searchProcessInstances: async () => [{ processInstanceKey: "LIVE" }],
   };
   // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
-  const rows = await readFrictionVariables(engine as any);
+  const { vars: rows } = await readFrictionVariables(engine as any);
   assert(rows.some((r) => r.variableKey === "NEW"), "new report beyond the page is captured");
   assert(!rows.some((r) => r.name !== "friction"), "only exact-name rows");
   assertEquals(rows.length, 101);
@@ -1190,25 +1192,89 @@ test("parseFrictionNotes: a credential-shaped targetRepo is discarded, never sto
   assertEquals(notes[0]?.targetRepo, undefined);
 });
 
-test("readFrictionVariables: an instance that completed between passes is probed once more (full page)", async () => {
+test("capture: an instance that completed between passes is probed once more, then retired (full page)", async () => {
   await withData(async (data) => {
     const history = Array.from({ length: 100 }, (_, i) => ({ variableKey: `H${i}`, processInstanceKey: `O${i}`, scopeKey: `O${i}`, name: "friction", value: "null", isTruncated: false }));
-    const done = { variableKey: "DONE", processInstanceKey: "GONE", scopeKey: "GONE", name: "friction", value: "[]", isTruncated: false };
+    const done = { variableKey: "DONE", processInstanceKey: "GONE", scopeKey: "GONE", name: "friction", value: JSON.stringify([{ what: "w", surface: "prompt" }]), isTruncated: false };
     let active = [{ processInstanceKey: "GONE" }];
     const engine = {
       searchVariables: async (f: { processInstanceKey?: string }) => (f.processInstanceKey === "GONE" ? [done] : f.processInstanceKey ? [] : history),
       searchProcessInstances: async () => active,
     };
     // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
-    await readFrictionVariables(engine as any, data);
+    await captureSelfReportedFriction(data, engine as any, new Date());
     active = [];
     // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
-    const rows = await readFrictionVariables(engine as any, data);
+    const { vars: rows } = await readFrictionVariables(engine as any, data);
     assert(rows.some((r) => r.variableKey === "DONE"), "completed instance's report captured via watch set");
     // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
-    const third = await readFrictionVariables(engine as any, data);
-    assert(!third.some((r) => r.variableKey === "DONE"), "watch set is replaced each pass");
+    await captureSelfReportedFriction(data, engine as any, new Date());
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    const { vars: third } = await readFrictionVariables(engine as any, data);
+    assert(!third.some((r) => r.variableKey === "DONE"), "watch entry retired once captured");
   });
+});
+
+function truncatedHistoryEngine(active: { processInstanceKey: string }[]) {
+  const history = Array.from({ length: 100 }, (_, i) => ({ variableKey: `H${i}`, processInstanceKey: `O${i}`, scopeKey: `O${i}`, name: "friction", value: "null", isTruncated: false }));
+  const long = { variableKey: "LONG", processInstanceKey: "GONE", scopeKey: "GONE", name: "friction", value: "[{", isTruncated: true };
+  return {
+    searchVariables: async (f: { processInstanceKey?: string }) => (f.processInstanceKey === "GONE" ? [long] : f.processInstanceKey ? [] : history),
+    searchProcessInstances: async () => active,
+  };
+}
+
+test("capture: a completed instance's watch is retained until its truncated report is read, then retired", async () => {
+  await withData(async (data) => {
+    const full = JSON.stringify([{ what: "long", surface: "prompt" }]);
+    const active = [{ processInstanceKey: "GONE" }];
+    const engine = truncatedHistoryEngine(active);
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), async () => undefined), 0);
+    active.length = 0;
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), async () => undefined), 0, "read fails again");
+    const watched = () => data.source().db.all<{ process_instance_key: string }>("SELECT process_instance_key FROM friction_capture_watch").map((r) => r.process_instance_key);
+    assertEquals(watched(), ["GONE"], "retained after a failed read");
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), async () => full), 1, "recovered");
+    assertEquals(watched(), [], "retired after capture");
+  });
+});
+
+test("capture: a captured truncated report on a finished instance is not re-read; the full-read budget is bounded", async () => {
+  await withData(async (data) => {
+    const full = JSON.stringify([{ what: "long", surface: "prompt" }]);
+    let reads = 0;
+    const fetch = async () => {
+      reads++;
+      return full;
+    };
+    const engine = {
+      searchVariables: async () => [{ variableKey: "T", processInstanceKey: "P", scopeKey: "P", name: "friction", value: "[{", isTruncated: true }],
+      searchProcessInstances: async () => [],
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine as any, new Date(), fetch), 1);
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    await captureSelfReportedFriction(data, engine as any, new Date(), fetch);
+    assertEquals(reads, 1, "finished + captured report is skipped");
+    // Budget: a clock already past the deadline reads nothing and retains the instance for later.
+    const engine2 = {
+      searchVariables: async () => [{ variableKey: "T2", processInstanceKey: "Q", scopeKey: "Q", name: "friction", value: "[{", isTruncated: true }],
+      searchProcessInstances: async () => [],
+    };
+    let t = 0;
+    const clock = () => (t += FRICTION_FULL_READ_BUDGET_MS + 1);
+    // biome-ignore lint/suspicious/noExplicitAny: minimal engine fake
+    assertEquals(await captureSelfReportedFriction(data, engine2 as any, new Date(), fetch, clock), 0);
+    assertEquals(reads, 1, "no read past the budget");
+    assertEquals(data.source().db.all<{ process_instance_key: string }>("SELECT process_instance_key FROM friction_capture_watch").map((r) => r.process_instance_key), ["Q"]);
+  });
+});
+
+test("friction is a node-local agent result variable (parallel cells never share it)", () => {
+  assert(AGENT_RESULT_LOCAL_VARS.includes("friction"));
 });
 
 test("captureSelfReportedFriction reads a truncated report in full instead of skipping it", async () => {
