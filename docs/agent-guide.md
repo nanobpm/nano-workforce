@@ -308,8 +308,9 @@ the view changed since the request began). Each request is bounded server-side t
 (`timeout` is clamped); on expiry it returns `timedOut: true` with the current view — re-issue it
 (d8ctl loops for you up to its own deadline). **An open escalation always ends the wait**
 (`reason: "escalated"`) whatever you waited for, so you cannot miss one; a **terminal** run also always
-ends it (`reason: "terminal"`), so e.g. `until=merged` on a PR closed unmerged returns at once. Check
-`reason`, not just `timedOut`.
+ends it (`reason: "terminal"`), so e.g. `until=merged` on a PR closed unmerged returns at once. Precedence is
+`escalated` → `merged`/`converged` → `terminal` → `pr-opened`/`any-change`: a run that turns terminal
+reports `terminal` (never `any-change`) unless it ended merged/converged. Check `reason`, not just `timedOut`.
 
 ## 6. Debug the models and the prompts
 

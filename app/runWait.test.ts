@@ -279,3 +279,20 @@ test("WaiterGate: caps concurrent holders; release is idempotent", () => {
   assertEquals(typeof g.tryAcquire(), "function");
   b?.();
 });
+
+test("terminal precedence: escalated, then merged/converged, then terminal, then the rest (#1091)", () => {
+  const fp = runFingerprint(view({ stage: "converging", status: "converging" }));
+  // (a) any-change into a terminal closed state reports terminal, not any-change
+  assertEquals(waitReason("any-change", view({ status: "closed", terminal: true }), fp), "terminal");
+  // (b) a non-terminal change is any-change
+  assertEquals(waitReason("any-change", view({ stage: "pr-open" }), fp), "any-change");
+  // (c) pr-opened on a terminal run with a PR reports terminal
+  assertEquals(waitReason("pr-opened", view({ prUrl: "https://x/pull/9", status: "closed", terminal: true }), fp), "terminal");
+  // (d) merged on a merged terminal run reports merged
+  assertEquals(waitReason("merged", view({ status: "merged", terminal: true }), fp), "merged");
+  // converged on a settled terminal run reports converged
+  assertEquals(waitReason("converged", view({ status: "merged", terminal: true }), fp), "converged");
+  // (e) an open escalation on a terminal run reports escalated
+  const esc = { userTaskKey: "7", kind: "feature", summary: null };
+  assertEquals(waitReason("any-change", view({ status: "closed", terminal: true, openEscalation: esc }), fp), "escalated");
+});

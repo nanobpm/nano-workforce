@@ -5750,7 +5750,9 @@ paths:
         request so proxies don't cut it) and returns the same RunView `GET /run?key=` serves as soon as the
         condition holds. An open escalation (on the run or a child) ALWAYS ends the wait with
         `reason: escalated`, and a terminal run ALWAYS ends it with `reason: terminal` (a condition that can
-        no longer hold never waits out the timeout). On expiry the body is `{ timedOut: true, view }` with the
+        no longer hold never waits out the timeout). Precedence: `escalated`, then `merged`/`converged`
+        (a terminal run that satisfied the requested outcome reports it), then `terminal`, then `pr-opened` /
+        `any-change` (a run that turns terminal never reports `any-change`). On expiry the body is `{ timedOut: true, view }` with the
         current view; the caller re-issues the request (d8ctl loops until its own overall deadline).
         `any-change` returns when any field of the view differs from its state when the request began.
       parameters:

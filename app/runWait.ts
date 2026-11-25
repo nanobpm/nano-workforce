@@ -8,6 +8,9 @@
 //   - an open escalation ALWAYS ends the wait (`reason: "escalated"`), whatever `until` asked for;
 //   - a terminal run ALWAYS ends the wait (`reason: "terminal"`) — e.g. `until=merged` on a PR that was
 //     closed unmerged can never hold, so holding until the timeout would only waste the caller's budget.
+// Reason precedence: `escalated`, then `merged`/`converged` (the outcome the caller asked for, which a
+// terminal run may legitimately satisfy), then `terminal`, then the other reasons (`pr-opened`,
+// `any-change`) — so a run that turns terminal always reports `terminal` unless it ended merged/converged.
 //
 // Derivation over duplication: the view is `lookupRun`; terminality is the view's own `terminal` flag.
 // The clock is injected so the loop is tested with a fake clock (no wall-clock sleeps in tests).
@@ -74,6 +77,14 @@ export type WaitReason = WaitUntil;
  *  terminality end EVERY wait (see header). */
 export function waitReason(until: WaitUntil, view: RunView, initialFingerprint: string): WaitReason | null {
   if (view.openEscalation || selfAndChildren(view).some((r) => r.openEscalation)) return "escalated";
+  const match = untilMatch(until, view, initialFingerprint);
+  if (match === "merged" || match === "converged") return match;
+  if (view.terminal) return "terminal";
+  return match;
+}
+
+/** The `until`-specific match, before escalation/terminal precedence is applied (see header). */
+function untilMatch(until: WaitUntil, view: RunView, initialFingerprint: string): WaitReason | null {
   const runs = selfAndChildren(view);
   switch (until) {
     case "pr-opened":
@@ -91,7 +102,7 @@ export function waitReason(until: WaitUntil, view: RunView, initialFingerprint: 
     default:
       break;
   }
-  return view.terminal ? "terminal" : null;
+  return null;
 }
 
 export interface WaitClock {
