@@ -1,3 +1,9 @@
+## [0.236.0](https://github.com/nanobpm/nano-workforce/compare/v0.235.0...v0.236.0) (2026-11-26)
+
+### Features
+
+* **converge:** close only on full delivery; record who answered a scope escalation ([#1109](https://github.com/nanobpm/nano-workforce/issues/1109)) ([947ac78](https://github.com/nanobpm/nano-workforce/commit/947ac783839c8c94a3a5d9f442097251d3c37233)), closes [#1108](https://github.com/nanobpm/nano-workforce/issues/1108)
+
 ## [0.235.0](https://github.com/nanobpm/nano-workforce/compare/v0.234.0...v0.235.0) (2026-11-25)
 
 ### Features
