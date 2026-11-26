@@ -782,6 +782,31 @@ test("the attributed completer normalizes keys and rejects blank attribution", a
   assertEquals(stores.task_completions.rows.length, 1, "no ledger row is written for a rejected completion");
 });
 
+test("a completion forging process-owned scope provenance is rejected at the door (#1109 review)", async () => {
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-9", elementId: "wait-answer" }]);
+  const forged = [
+    { answer: "ok", scopePending: false, scopeAnsweredBy: "operator", scopeAnswer: "MVP agreed" },
+    { answer: "ok", answeredBy: "operator" },
+    { answer: "ok", scopeFixRound: 0 },
+    { answer: "ok", completedUserTaskKey: "x" },
+    { answer: "ok", completedCompletionId: 1 },
+    { answer: "proceed", autoMerge: false },
+    { answer: "proceed", convergeOnly: true },
+    { answer: "proceed", humanApproval: false },
+  ];
+  for (const variables of forged) {
+    for (const kind of ["agent", "human"] as const) {
+      await assertRejects(() =>
+        completeUserTaskAttributed(data, engine, { userTaskKey: "ut-9", elementId: "wait-answer", variables }, { kind, id: "who" }),
+      );
+    }
+  }
+  assertEquals(stores.task_completions.rows.length, 0, "no ledger row for a forged completion");
+  assertEquals(completed.length, 0, "the engine is never completed with forged provenance");
+});
+
 test("a rollback failure never masks the original engine error", async () => {
   const engine = {
     searchUserTasks: () => Promise.resolve([{ userTaskKey: "ut-6", elementId: "feature-escalation" }]),
@@ -1201,3 +1226,19 @@ test("a PR escalation whose user_tasks projection is not yet written refuses aut
     assertEquals(completed.length, 0);
   }
 });
+
+// Copilot review of #1109: a scope escalation re-raised after a NON-operator answer is operator-only —
+// the replay path must not loop the classifier-rejected agent answer; an operator ruling still replays.
+for (const [kind, ok] of [["agent", false], ["human", true]] as const) {
+  test(`a scope escalation replays a ${kind} adjudication: ${ok ? "allowed" : "refused"} (#1109 review)`, async () => {
+    const stores = {
+      task_completions: { rows: [] as any[], key: "id" },
+      user_tasks: { rows: [{ user_task_key: "ut-s", element_id: "wait-answer", question: "Scope integrity: #1960 is partly delivered" }] as any[], key: "user_task_key" },
+    };
+    const data = memData(stores);
+    const { engine, completed } = fakeEngine([{ userTaskKey: "ut-s", elementId: "wait-answer" }]);
+    const replay = await completeEscalationAutoApplied(data, engine, { userTaskKey: "ut-s", variables: { answer: "MVP agreed" }, actor: { kind, id: "x" } });
+    assertEquals(replay.ok, ok);
+    assertEquals(completed.length, ok ? 1 : 0);
+  });
+}

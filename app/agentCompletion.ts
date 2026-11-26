@@ -28,6 +28,7 @@ import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, isDelivery
 import { FRICTION_SUMMARY_ELEMENT, FRICTION_SUMMARY_FORM } from "./friction.ts";
 import { assessmentHeadFromQuestion } from "./humanAssessment.ts";
 import { withMergePolicyLock } from "./mergePolicyLock.ts";
+import { mayAutoReplayAdjudication } from "./scopeDecision.ts";
 import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, PR_MERGE_APPROVAL_ELEMENT, PR_WAIT_ANSWER_ELEMENT, PR_WAIT_MERGE_ANSWER_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT, userTasks } from "./userTasks.ts";
 
 const now = () => new Date().toISOString();
@@ -450,6 +451,32 @@ export function snapshotUserTaskFormOptions(
  *  may override it. `opts.sourceAdjudicationId` links such a replay back to the adjudication it
  *  re-applied (persisted only when `autoApplied`) so a later revert can invalidate it. Callers must
  *  therefore NOT infer irreversibility from a `human` attribution alone — check `auto_applied`. */
+/** Process-owned variables no completer (human UI, d8ctl, or agent) may supply on a user-task
+ *  completion (Copilot review of #1109). They carry scope-decision provenance and the completion's own
+ *  identity, which the PROCESS and this door derive — a completion that set e.g. `scopePending: false`
+ *  plus `scopeAnsweredBy: "operator"` could otherwise forge an operator scope ruling. Rejected at the
+ *  ONE canonical completion door so every completer path is covered. */
+export const RESERVED_COMPLETION_VARIABLES: readonly string[] = [
+  "scopePending",
+  "scopeAnswer",
+  "scopeAnsweredBy",
+  "scopeFixRound",
+  "answeredBy",
+  "completedUserTaskKey",
+  "completedCompletionId",
+  // Merge-policy inputs: an answer must not flip the merge gate (e.g. `autoMerge: false` letting an
+  // uncertain scope verdict skip human approval while the durable merge policy still merges).
+  "autoMerge",
+  "convergeOnly",
+  "humanApproval",
+];
+
+/** The reserved process-owned keys present on a completion payload (empty when clean). */
+export function reservedCompletionKeys(variables: Record<string, unknown> | null | undefined): string[] {
+  if (!variables) return [];
+  return RESERVED_COMPLETION_VARIABLES.filter((k) => Object.hasOwn(variables, k));
+}
+
 export async function completeUserTaskAttributed(
   data: DataLayer,
   engine: EngineClient,
@@ -468,6 +495,8 @@ export async function completeUserTaskAttributed(
   if (!userTaskKey) throw new Error("userTaskKey is required");
   const actorId = actor.id.trim();
   if (!actorId) throw new Error("actor id is required");
+  const reserved = reservedCompletionKeys(target.variables);
+  if (reserved.length > 0) throw new Error(`completion may not set process-owned variable(s): ${reserved.join(", ")}`);
 
   // An AUTO-APPLIED replay of a prior durable adjudication (issue #806) is always human-overridable,
   // regardless of the original actor kind — a machine re-application must never be an unchallengeable
@@ -778,6 +807,12 @@ export async function completeEscalationAutoApplied(
   if (!resolved.ok) return resolved;
   const humanOnly = await refuseAutomatedAssessment(data, userTaskKey, resolved.elementId, input.question);
   if (humanOnly) return { ok: false, reason: humanOnly };
+  // A scope escalation re-raised after a NON-operator answer is operator-only (Copilot review of #1109):
+  // the classifier rejected that answer, so replaying it would only loop. Fail open to the human.
+  const replayQuestion = (await userTasks(data).get(userTaskKey))?.question ?? input.question;
+  if (!mayAutoReplayAdjudication(replayQuestion, input.actor.kind)) {
+    return { ok: false, reason: `${resolved.elementId}: a scope escalation answered by a non-operator is not auto-replayed` };
+  }
 
   const invalid = validateEscalationVariables(resolved.elementId, input.variables);
   if (invalid) return { ok: false, reason: invalid };

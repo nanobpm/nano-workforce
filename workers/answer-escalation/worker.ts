@@ -19,6 +19,8 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { generationGuard, recordAdjudication } from "../../app/adjudications.ts";
 import { taskCompletions } from "../../app/agentCompletion.ts";
+import { runGh, useGh } from "../../app/github.ts";
+import { answeredByFromActorKind, isOperatorDecision, postAgentScopeDecisionNote, type ScopeNoteDeps } from "../../app/scopeDecision.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 interface Escalation extends Record<string, unknown> {
@@ -58,7 +60,80 @@ function nonBlankInt(v: unknown): number | undefined {
   return undefined;
 }
 
-const handler: AppJobHandler<In> = async (job, app) => {
+/** The real GitHub seam for the "scope reduced by agent decision" note (issue #1108). Honours the
+ *  shared transport selection (`useGh()` — gh vs. `GITHUB_TOKEN` REST, Copilot review of #1109) and
+ *  reads EVERY commit through the paginated PR-commits API: `gh pr view --json commits` caps at 100,
+ *  so an issue referenced only by a later commit would escape the note (scope-classify.md forbids the
+ *  capped read for the same reason). */
+const GH_TIMEOUT_MS = 30_000;
+async function tokenApi(path: string, init: { method?: string; body?: string } = {}): Promise<Response> {
+  const token = process.env.GITHUB_TOKEN ?? "";
+  if (!token) throw new Error("no GitHub transport: gh unavailable and GITHUB_TOKEN unset");
+  const r = await fetch(`https://api.github.com/${path}`, {
+    ...init,
+    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "content-type": "application/json" },
+    signal: AbortSignal.timeout(GH_TIMEOUT_MS),
+  });
+  if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  return r;
+}
+const ghScopeNoteDeps: ScopeNoteDeps = {
+  prReferenceText: async (repo, prNumber) => {
+    if (await useGh()) {
+      const head = await runGh(["pr", "view", String(prNumber), "--repo", repo, "--json", "title,body", "--jq", '[.title, (.body // "")] | join("\\n")'], { timeoutMs: GH_TIMEOUT_MS });
+      const commits = await runGh(["api", "--paginate", `repos/${repo}/pulls/${prNumber}/commits?per_page=100`, "--jq", ".[].commit.message"], { timeoutMs: GH_TIMEOUT_MS });
+      return `${head.trim()}\n${commits.trim()}`;
+    }
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const pr = (await (await tokenApi(`repos/${repo}/pulls/${prNumber}`)).json()) as { title?: string; body?: string | null };
+    const parts: string[] = [pr.title ?? "", pr.body ?? ""];
+    // GitHub's PR-commits endpoint returns at most 250 commits; page until a short page.
+    for (let page = 1; page <= 10; page++) {
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const batch = (await (await tokenApi(`repos/${repo}/pulls/${prNumber}/commits?per_page=100&page=${page}`)).json()) as { commit?: { message?: string } }[];
+      for (const c of batch) parts.push(c.commit?.message ?? "");
+      if (batch.length < 100) break;
+    }
+    return parts.join("\n");
+  },
+  comment: async (repo, number, body) => {
+    if (await useGh()) {
+      await runGh(["issue", "comment", String(number), "--repo", repo, "--body", body], { timeoutMs: GH_TIMEOUT_MS });
+      return;
+    }
+    await tokenApi(`repos/${repo}/issues/${number}/comments`, { method: "POST", body: JSON.stringify({ body }) });
+  },
+  isOpenIssue: async (repo, number) => {
+    if (await useGh()) {
+      const out = await runGh(["api", `repos/${repo}/issues/${number}`, "--jq", '(.state == "open") and (.pull_request == null)'], { timeoutMs: GH_TIMEOUT_MS });
+      return out.trim() === "true";
+    }
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const issue = (await (await tokenApi(`repos/${repo}/issues/${number}`)).json()) as { state?: string; pull_request?: unknown };
+    return issue.state === "open" && issue.pull_request == null;
+  },
+  hasNote: async (repo, number, key) => {
+    if (await useGh()) {
+      const out = await runGh(["api", "--paginate", `repos/${repo}/issues/${number}/comments?per_page=100`, "--jq", ".[].body"], { timeoutMs: GH_TIMEOUT_MS });
+      return out.includes(key);
+    }
+    for (let page = 1; page <= 50; page++) {
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const batch = (await (await tokenApi(`repos/${repo}/issues/${number}/comments?per_page=100&page=${page}`)).json()) as { body?: string }[];
+      if (batch.some((c) => (c.body ?? "").includes(key))) return true;
+      if (batch.length < 100) return false;
+    }
+    // Too many comments to scan: treat as already noted (fail closed — never risk a duplicate).
+    return true;
+  },
+};
+
+/** Build the handler over an injectable GitHub seam (tests pass a fake; production uses `gh`). */
+export function makeAnswerEscalationHandler(scopeNoteDeps: ScopeNoteDeps = ghScopeNoteDeps): AppJobHandler<In> {
+  return (job, app) => answerEscalation(job, app, scopeNoteDeps);
+}
+
+async function answerEscalation(job: Parameters<AppJobHandler<In>>[0], app: Parameters<AppJobHandler<In>>[1], scopeNoteDeps: ScopeNoteDeps): Promise<Record<string, unknown>> {
   const { prKey } = job.variables;
   const answer = nonBlank(job.variables.answer);
   // The exact identity of the `wait-*` completion that resumed THIS token (Copilot review of #806),
@@ -119,7 +194,20 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // resume). If an `escalationId` was carried but no OPEN row bears it, this is a redelivered answer for
   // an escalation that has already been retired (or superseded by a newer question) — no-op rather than
   // misfile the answer under a different escalation's question (Copilot review of #806).
+  // Who answered (issue #1108) — derived from the winning completion's AUTH identity in the ledger,
+  // never from the answer text. `unknown` until a ledger row is correlated (fails safe: non-operator).
+  // Resolved INDEPENDENTLY of the open-row guard below (Copilot review of #1109): if a prior attempt
+  // retired the escalation and then crashed before its completion was accepted, the retry finds no open
+  // target — but the winning completion's ledger identity is unchanged, so the operator's decision must
+  // still be reported as `operator`. The open-row guard keeps fencing the WRITES and the note.
+  const adjudicator = isConvergence
+    ? await latestAdjudicator(app, job.processInstanceKey, answer, completedUserTaskKey, completedCompletionId)
+    : undefined;
+  const answeredBy = answeredByFromActorKind(adjudicator?.kind);
   const target = escalationId != null ? open.find((e) => e.id === escalationId) : open[0];
+  // Whether THIS delivery actually retired the escalation (the guarded UPDATE changed a row) — the
+  // fence for the privileged scope note, not the earlier non-atomic read of `open`.
+  let retiredNow = false;
   if (target !== undefined) {
     const ts = new Date().toISOString();
     // Persist the DURABLE adjudication FIRST, BEFORE the escalation/PR rows transition off `open`
@@ -129,7 +217,6 @@ const handler: AppJobHandler<In> = async (job, app) => {
     // after the rows flip loses the adjudication entirely (the retry finds no open row and returns), so
     // the answered question could re-escalate after restart. Scoped to convergence answers only.
     if (isConvergence) {
-      const adjudicator = await latestAdjudicator(app, job.processInstanceKey, answer, completedUserTaskKey, completedCompletionId);
       await recordAdjudication(app.data, {
         prKey,
         question: target.question,
@@ -158,10 +245,11 @@ const handler: AppJobHandler<In> = async (job, app) => {
     // nothing. Fails open when `jobProcessKey` is undefined, exactly like the gate above.
     const db = app.data.open();
     const guard = generationGuard(prKey, jobProcessKey);
-    await db.exec(
-      `UPDATE "escalations" SET "answer" = ?, "status" = 'answered', "answered_at" = ? WHERE "id" = ? AND ${guard.sql}`,
+    const res = await db.exec(
+      `UPDATE "escalations" SET "answer" = ?, "status" = 'answered', "answered_at" = ? WHERE "id" = ? AND "status" = 'open' AND ${guard.sql}`,
       [answer ?? null, ts, target.id, ...guard.params],
     );
+    retiredNow = (res?.changed ?? 0) > 0;
     // Mark any OTHER still-open row `stale` (a `pr.persist-escalation` retry can leave more than one
     // open for the same question). We retire every open row except the one we just answered so a phantom
     // `activePrs` never keeps deriving while the PR is `escalated`.
@@ -181,8 +269,27 @@ const handler: AppJobHandler<In> = async (job, app) => {
       [ts, prKey, ...guard.params],
     );
   }
-  return {};
-};
+  if (!isConvergence) return {};
+  // A SCOPE escalation answered by anything other than the operator is not an operator decision: post
+  // the visible "scope reduced by agent decision" note on the PR and its linked issues (issue #1108).
+  // Best-effort — a GitHub failure never fails the reconcile. Posted only when THIS delivery's guarded
+  // UPDATE retired the row, or on a retry of the SAME answer to the exact `escalationId` after a crash
+  // between that UPDATE and the post; per-target marker dedupe (inside postAgentScopeDecisionNote)
+  // makes either path post at most once.
+  const repo = nonBlank(job.variables.repo);
+  const prNumber = nonBlankInt(job.variables.prNumber);
+  const crashRetry =
+    !retiredNow &&
+    escalationId != null &&
+    (await escs.find({ pr_key: prKey })).some((e) => e.id === escalationId && e.status === "answered" && (e.answer ?? undefined) === (answer ?? undefined));
+  if ((retiredNow || crashRetry) && job.variables.scopePending === true && !isOperatorDecision(answeredBy) && repo !== undefined && prNumber !== undefined) {
+    await postAgentScopeDecisionNote(
+      { repo, prNumber, prUrl: nonBlank(job.variables.prUrl) ?? `${repo}#${prNumber}`, answeredBy, answer, decisionId: target?.id ?? escalationId },
+      scopeNoteDeps,
+    );
+  }
+  return { answeredBy };
+}
 
 /** Who just completed this `wait-answer`: the `{ id, kind }` of the `task_completions` row that
  *  actually WON the user-task race, so the durable adjudication is attributed to the completion the
@@ -253,4 +360,4 @@ function completionAnswer(variablesJson: unknown): string | undefined {
   }
 }
 
-export default handler;
+export default makeAnswerEscalationHandler();

@@ -14,7 +14,7 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { questionFingerprint } from "../app/github.ts";
-import handler from "../workers/answer-escalation/worker.ts";
+import handler, { makeAnswerEscalationHandler } from "../workers/answer-escalation/worker.ts";
 
 function fakeApp(escalationRows: Record<string, unknown>[], prRows: Record<string, unknown>[] = []) {
   const updates: { key: unknown; patch: Record<string, unknown> }[] = [];
@@ -53,6 +53,12 @@ function fakeApp(escalationRows: Record<string, unknown>[], prRows: Record<strin
       // [answer, answered_at, id, ...guard]
       const [answer, answered_at, id] = params;
       if (fenced && !generationAllows(params[params.length - 2], params[params.length - 1])) return { changed: 0 };
+      // Emulate the `"status" = 'open'` compare-and-set: only the first delivery retires the row.
+      const row = escalationRows.find((r) => r.id === id);
+      if (row && sql.includes(`"status" = 'open'`)) {
+        if (row.status !== "open") return { changed: 0 };
+        Object.assign(row, { answer, status: "answered", answered_at });
+      }
       updates.push({ key: id, patch: { answer, status: "answered", answered_at } });
       return { changed: 1 };
     }
@@ -516,4 +522,108 @@ test("a later known-adjudicator answer heals an earlier uncorrelated (null-prove
   assertEquals(adjudications.length, 1, "still one durable row for the (pr, question)");
   assertEquals(adjudications[0].adjudicated_by, "alice", "provenance healed to the known adjudicator");
   assertEquals(adjudications[0].answer, "Cap at 5.", "the healed row replays the human's answer, not the earlier uncorrelated one");
+});
+
+// --- issue #1108: record WHO answered (from the ledger identity, never the answer text), and post a
+// visible "scope reduced by agent decision" note when a SCOPE escalation is answered by a non-operator. ---
+
+function scopeJob(completionId: number) {
+  return {
+    processInstanceKey: "pi-1",
+    variables: {
+      prKey: "o/r#1984",
+      answer: "MVP scope agreed",
+      answerContext: "convergence",
+      completedUserTaskKey: "ut-1",
+      completedCompletionId: completionId,
+      scopePending: true,
+      repo: "o/r",
+      prNumber: 1984,
+      prUrl: "https://github.com/o/r/pull/1984",
+    },
+  };
+}
+
+function fakeGh() {
+  const comments: { n: number; body: string }[] = [];
+  return {
+    comments,
+    deps: {
+      prReferenceText: async () => "Closes #1960\nFollow-up: #1983",
+      comment: async (_repo: string, n: number, body: string) => {
+        await new Promise((r) => setTimeout(r, 1));
+        comments.push({ n, body });
+      },
+      isOpenIssue: async () => true,
+      hasNote: async (_repo: string, n: number, key: string) => comments.some((c) => c.n === n && c.body.includes(key)),
+    },
+  };
+}
+
+test("#1109 assessment: a concurrent duplicate delivery of an agent scope answer posts the note once per target", async () => {
+  const { app, completions } = fakeApp([{ id: 9, pr_key: "o/r#1984", status: "open", question: "scope?" }]);
+  completions.push({ id: 41, user_task_key: "ut-1", actor_id: "escalation-steward", actor_kind: "agent", variables_json: JSON.stringify({ answer: "MVP scope agreed" }) });
+  const gh = fakeGh();
+  const h = makeAnswerEscalationHandler(gh.deps);
+  const job = scopeJob(41);
+  job.variables.escalationId = 9;
+  await Promise.all([h(job as any, app as any), h(job as any, app as any)]);
+  await h(job as any, app as any); // a later redelivery too
+  assertEquals(gh.comments.map((c) => c.n), [1984, 1960]);
+});
+
+test("#1109 assessment: a retry after a crash between the UPDATE and the post still posts exactly once", async () => {
+  const rows = [{ id: 9, pr_key: "o/r#1984", status: "open", question: "scope?" }];
+  const { app, completions } = fakeApp(rows);
+  completions.push({ id: 41, user_task_key: "ut-1", actor_id: "escalation-steward", actor_kind: "agent", variables_json: JSON.stringify({ answer: "MVP scope agreed" }) });
+  const gh = fakeGh();
+  const crashing = { ...gh.deps, prReferenceText: async (): Promise<string> => { throw new Error("crash"); }, hasNote: async () => { throw new Error("crash"); } };
+  const job = scopeJob(41);
+  job.variables.escalationId = 9;
+  await makeAnswerEscalationHandler(crashing)(job as any, app as any);
+  assertEquals(gh.comments.length, 0, "the first attempt retired the row but posted nothing");
+  assertEquals(rows[0].status, "answered");
+  await makeAnswerEscalationHandler(gh.deps)(job as any, app as any);
+  await makeAnswerEscalationHandler(gh.deps)(job as any, app as any);
+  assertEquals(gh.comments.map((c) => c.n), [1984, 1960]);
+});
+
+test("#1108: an AGENT-answered scope escalation returns answeredBy=agent and posts the note on the PR and issue", async () => {
+  const { app, completions } = fakeApp([{ id: 9, pr_key: "o/r#1984", status: "open", question: "scope?" }]);
+  completions.push({ id: 41, user_task_key: "ut-1", actor_id: "escalation-steward", actor_kind: "agent", variables_json: JSON.stringify({ answer: "MVP scope agreed" }) });
+  const gh = fakeGh();
+  const out = await makeAnswerEscalationHandler(gh.deps)(scopeJob(41) as any, app as any);
+  assertEquals(out, { answeredBy: "agent" });
+  assertEquals(gh.comments.map((c) => c.n), [1984, 1960]);
+  assertEquals(gh.comments[0].body.includes("Scope reduced by agent decision"), true);
+});
+
+test("#1108: an OPERATOR-answered scope escalation returns answeredBy=operator and posts no agent note", async () => {
+  const { app, completions } = fakeApp([{ id: 9, pr_key: "o/r#1984", status: "open", question: "scope?" }]);
+  completions.push({ id: 42, user_task_key: "ut-1", actor_id: "jwulf", actor_kind: "human", variables_json: JSON.stringify({ answer: "MVP scope agreed" }) });
+  const gh = fakeGh();
+  const out = await makeAnswerEscalationHandler(gh.deps)(scopeJob(42) as any, app as any);
+  assertEquals(out, { answeredBy: "operator" });
+  assertEquals(gh.comments.length, 0);
+});
+
+test("#1108: a non-scope escalation answered by an agent posts no scope note", async () => {
+  const { app, completions } = fakeApp([{ id: 9, pr_key: "o/r#1984", status: "open", question: "retry cap?" }]);
+  completions.push({ id: 43, user_task_key: "ut-1", actor_id: "steward", actor_kind: "agent", variables_json: JSON.stringify({ answer: "MVP scope agreed" }) });
+  const gh = fakeGh();
+  const job = scopeJob(43);
+  job.variables.scopePending = false;
+  const out = await makeAnswerEscalationHandler(gh.deps)(job as any, app as any);
+  assertEquals(out, { answeredBy: "agent" });
+  assertEquals(gh.comments.length, 0);
+});
+
+test("#1109: a retry after the escalation was already retired still reports the winning OPERATOR identity, and posts no note", async () => {
+  // A prior attempt retired the row then crashed before completion: no open target remains.
+  const { app, completions } = fakeApp([{ id: 9, pr_key: "o/r#1984", status: "answered", question: "scope?" }]);
+  completions.push({ id: 44, user_task_key: "ut-1", actor_id: "jwulf", actor_kind: "human", variables_json: JSON.stringify({ answer: "MVP scope agreed" }) });
+  const gh = fakeGh();
+  const out = await makeAnswerEscalationHandler(gh.deps)(scopeJob(44) as any, app as any);
+  assertEquals(out, { answeredBy: "operator" });
+  assertEquals(gh.comments.length, 0, "the open-row guard still fences the note");
 });
