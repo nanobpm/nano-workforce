@@ -20,6 +20,7 @@ import type { AppJobHandler } from "@nanobpm/urban";
 import { generationGuard, recordAdjudication } from "../../app/adjudications.ts";
 import { taskCompletions } from "../../app/agentCompletion.ts";
 import { runGh, useGh } from "../../app/github.ts";
+import { SCOPE_DECISION_NOTE_MARKER } from "../../app/operatorFeedback.ts";
 import { answeredByFromActorKind, isOperatorDecision, postAgentScopeDecisionNote, type ScopeNoteDeps } from "../../app/scopeDecision.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -103,6 +104,29 @@ const ghScopeNoteDeps: ScopeNoteDeps = {
     }
     await tokenApi(`repos/${repo}/issues/${number}/comments`, { method: "POST", body: JSON.stringify({ body }) });
   },
+  isOpenIssue: async (repo, number) => {
+    if (await useGh()) {
+      const out = await runGh(["api", `repos/${repo}/issues/${number}`, "--jq", '(.state == "open") and (.pull_request == null)'], { timeoutMs: GH_TIMEOUT_MS });
+      return out.trim() === "true";
+    }
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const issue = (await (await tokenApi(`repos/${repo}/issues/${number}`)).json()) as { state?: string; pull_request?: unknown };
+    return issue.state === "open" && issue.pull_request == null;
+  },
+  hasNote: async (repo, number) => {
+    if (await useGh()) {
+      const out = await runGh(["api", "--paginate", `repos/${repo}/issues/${number}/comments?per_page=100`, "--jq", ".[].body"], { timeoutMs: GH_TIMEOUT_MS });
+      return out.includes(SCOPE_DECISION_NOTE_MARKER);
+    }
+    for (let page = 1; page <= 50; page++) {
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const batch = (await (await tokenApi(`repos/${repo}/issues/${number}/comments?per_page=100&page=${page}`)).json()) as { body?: string }[];
+      if (batch.some((c) => (c.body ?? "").includes(SCOPE_DECISION_NOTE_MARKER))) return true;
+      if (batch.length < 100) return false;
+    }
+    // Too many comments to scan: treat as already noted (fail closed — never risk a duplicate).
+    return true;
+  },
 };
 
 /** Build the handler over an injectable GitHub seam (tests pass a fake; production uses `gh`). */
@@ -182,6 +206,9 @@ async function answerEscalation(job: Parameters<AppJobHandler<In>>[0], app: Para
     : undefined;
   const answeredBy = answeredByFromActorKind(adjudicator?.kind);
   const target = escalationId != null ? open.find((e) => e.id === escalationId) : open[0];
+  // Whether THIS delivery actually retired the escalation (the guarded UPDATE changed a row) — the
+  // fence for the privileged scope note, not the earlier non-atomic read of `open`.
+  let retiredNow = false;
   if (target !== undefined) {
     const ts = new Date().toISOString();
     // Persist the DURABLE adjudication FIRST, BEFORE the escalation/PR rows transition off `open`
@@ -219,10 +246,11 @@ async function answerEscalation(job: Parameters<AppJobHandler<In>>[0], app: Para
     // nothing. Fails open when `jobProcessKey` is undefined, exactly like the gate above.
     const db = app.data.open();
     const guard = generationGuard(prKey, jobProcessKey);
-    await db.exec(
-      `UPDATE "escalations" SET "answer" = ?, "status" = 'answered', "answered_at" = ? WHERE "id" = ? AND ${guard.sql}`,
+    const res = await db.exec(
+      `UPDATE "escalations" SET "answer" = ?, "status" = 'answered', "answered_at" = ? WHERE "id" = ? AND "status" = 'open' AND ${guard.sql}`,
       [answer ?? null, ts, target.id, ...guard.params],
     );
+    retiredNow = (res?.changed ?? 0) > 0;
     // Mark any OTHER still-open row `stale` (a `pr.persist-escalation` retry can leave more than one
     // open for the same question). We retire every open row except the one we just answered so a phantom
     // `activePrs` never keeps deriving while the PR is `escalated`.
@@ -245,11 +273,17 @@ async function answerEscalation(job: Parameters<AppJobHandler<In>>[0], app: Para
   if (!isConvergence) return {};
   // A SCOPE escalation answered by anything other than the operator is not an operator decision: post
   // the visible "scope reduced by agent decision" note on the PR and its linked issues (issue #1108).
-  // Best-effort — a GitHub failure never fails the reconcile. Only for the answer that actually
-  // retired an open escalation (`target`), so a redelivery does not re-post.
+  // Best-effort — a GitHub failure never fails the reconcile. Posted only when THIS delivery's guarded
+  // UPDATE retired the row, or on a retry of the SAME answer to the exact `escalationId` after a crash
+  // between that UPDATE and the post; per-target marker dedupe (inside postAgentScopeDecisionNote)
+  // makes either path post at most once.
   const repo = nonBlank(job.variables.repo);
   const prNumber = nonBlankInt(job.variables.prNumber);
-  if (target !== undefined && job.variables.scopePending === true && !isOperatorDecision(answeredBy) && repo !== undefined && prNumber !== undefined) {
+  const crashRetry =
+    !retiredNow &&
+    escalationId != null &&
+    (await escs.find({ pr_key: prKey })).some((e) => e.id === escalationId && e.status === "answered" && (e.answer ?? undefined) === (answer ?? undefined));
+  if ((retiredNow || crashRetry) && job.variables.scopePending === true && !isOperatorDecision(answeredBy) && repo !== undefined && prNumber !== undefined) {
     await postAgentScopeDecisionNote(
       { repo, prNumber, prUrl: nonBlank(job.variables.prUrl) ?? `${repo}#${prNumber}`, answeredBy, answer },
       scopeNoteDeps,

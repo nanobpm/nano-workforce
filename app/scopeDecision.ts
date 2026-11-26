@@ -56,7 +56,13 @@ export function mayAutoReplayAdjudication(question: string | null | undefined, a
  *  completer) rather than the operator. */
 export function agentScopeDecisionNote(input: { prUrl: string; answeredBy: AnsweredBy; answer: string | undefined }): string {
   const who = input.answeredBy === "agent" ? "an agent (not the operator)" : "an unattributed completer (not a verified operator)";
-  const quoted = (input.answer ?? "(no answer text)").split("\n").map((l) => `> ${l}`).join("\n");
+  // The answer is agent-authored free text landing in a PRIVILEGED (app-token) comment: render it inert
+  // in a fenced code block whose fence is longer than any backtick run in the text, so it cannot close
+  // the fence, @mention anyone, or inject markdown (operator assessment of #1109).
+  const text = input.answer ?? "(no answer text)";
+  const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map((r) => r.length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  const quoted = `${fence}text\n${text}\n${fence}`;
   return [
     SCOPE_DECISION_NOTE_MARKER,
     "⚠️ **Scope reduced by agent decision.**",
@@ -77,6 +83,28 @@ export interface ScopeNoteDeps {
   prReferenceText: (repo: string, prNumber: number) => Promise<string>;
   /** Post a comment on a PR or issue (GitHub treats both as issues for comments). */
   comment: (repo: string, number: number, body: string) => Promise<void>;
+  /** Whether `number` in `repo` is an OPEN ISSUE (not a PR, not closed) — only those get the note. */
+  isOpenIssue: (repo: string, number: number) => Promise<boolean>;
+  /** Whether the PR/issue already carries a comment containing {@link SCOPE_DECISION_NOTE_MARKER}
+   *  (idempotency across redelivery / crash-retry). */
+  hasNote: (repo: string, number: number) => Promise<boolean>;
+}
+
+/** Hard cap on linked-issue targets the privileged note is posted on (besides the PR itself). */
+export const MAX_SCOPE_NOTE_ISSUES = 10;
+
+// Per-PR serialisation of note posting so two in-process deliveries of the same answer cannot both pass
+// the marker check before either posts.
+const noteLocks = new Map<string, Promise<unknown>>();
+function withNoteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = noteLocks.get(key) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  const tail = next.catch(() => undefined);
+  noteLocks.set(key, tail);
+  void tail.then(() => {
+    if (noteLocks.get(key) === tail) noteLocks.delete(key);
+  });
+  return next;
 }
 
 /** Post the agent-decision note on the PR and on every same-repo issue its title, body, or commit
@@ -87,22 +115,36 @@ export async function postAgentScopeDecisionNote(
   input: { repo: string; prNumber: number; prUrl: string; answeredBy: AnsweredBy; answer: string | undefined },
   deps: ScopeNoteDeps,
 ): Promise<{ posted: number[]; failed: number[] }> {
-  const note = agentScopeDecisionNote(input);
-  let issues: number[] = [];
-  try {
-    issues = parseLinkedIssueNumbers(await deps.prReferenceText(input.repo, input.prNumber), input.repo).filter((n) => n !== input.prNumber);
-  } catch {
-    issues = [];
-  }
-  const posted: number[] = [];
-  const failed: number[] = [];
-  for (const n of [input.prNumber, ...issues]) {
+  return withNoteLock(`${input.repo}#${input.prNumber}`, async () => {
+    const note = agentScopeDecisionNote(input);
+    let candidates: number[] = [];
     try {
-      await deps.comment(input.repo, n, note);
-      posted.push(n);
+      candidates = parseLinkedIssueNumbers(await deps.prReferenceText(input.repo, input.prNumber), input.repo).filter((n) => n !== input.prNumber);
     } catch {
-      failed.push(n);
+      candidates = [];
     }
-  }
-  return { posted, failed };
+    // Keep only same-repo OPEN ISSUES, capped, so a PR body cannot fan a privileged write out to
+    // arbitrary PRs/closed issues or an unbounded number of targets.
+    const issues: number[] = [];
+    for (const n of candidates) {
+      if (issues.length >= MAX_SCOPE_NOTE_ISSUES) break;
+      try {
+        if (await deps.isOpenIssue(input.repo, n)) issues.push(n);
+      } catch {
+        // unverifiable target: skip (fail closed)
+      }
+    }
+    const posted: number[] = [];
+    const failed: number[] = [];
+    for (const n of [input.prNumber, ...issues]) {
+      try {
+        if (await deps.hasNote(input.repo, n)) continue;
+        await deps.comment(input.repo, n, note);
+        posted.push(n);
+      } catch {
+        failed.push(n);
+      }
+    }
+    return { posted, failed };
+  });
 }

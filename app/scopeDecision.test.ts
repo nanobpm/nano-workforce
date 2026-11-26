@@ -27,7 +27,36 @@ test("the note names the agent decision and asks for Part of", () => {
   const note = agentScopeDecisionNote({ prUrl: "https://x/pull/1", answeredBy: "agent", answer: "MVP scope agreed" });
   assert(note.includes("Scope reduced by agent decision"));
   assert(note.includes("`Part of #N`"));
-  assert(note.includes("> MVP scope agreed"));
+  assert(note.includes("MVP scope agreed"));
+});
+
+test("#1109 assessment: the quoted answer is fenced inert — no escaping the fence, mentions stay in code", () => {
+  const answer = "ok @someone\n```\n**bold** @other\n`````";
+  const note = agentScopeDecisionNote({ prUrl: "u", answeredBy: "agent", answer });
+  const fence = "``````";
+  const i = note.indexOf(`${fence}text\n`);
+  assert(i >= 0, "fence longer than the longest backtick run");
+  assertEquals(note.slice(i), `${fence}text\n${answer}\n${fence}`);
+  const outside = note.slice(0, i);
+  assert(!outside.includes("@"), "no mention outside the code block");
+});
+
+test("#1109 assessment: linked issue targets are capped at 10 and limited to open issues", async () => {
+  const refs = Array.from({ length: 50 }, (_, k) => `Refs #${k + 1}`).join("\n");
+  const posted: number[] = [];
+  const r = await postAgentScopeDecisionNote(
+    { repo: "o/r", prNumber: 1000, prUrl: "u", answeredBy: "agent", answer: "a" },
+    {
+      prReferenceText: async () => refs,
+      comment: async (_repo, n) => { posted.push(n); },
+      isOpenIssue: async (_repo, n) => n % 2 === 0,
+      hasNote: async () => false,
+    },
+  );
+  assertEquals(posted.length, 11);
+  assertEquals(posted[0], 1000);
+  assert(posted.slice(1).every((n) => n % 2 === 0));
+  assertEquals(r.failed, []);
 });
 
 test("postAgentScopeDecisionNote posts on the PR and each linked issue; failures are swallowed", async () => {
@@ -40,6 +69,8 @@ test("postAgentScopeDecisionNote posts on the PR and each linked issue; failures
         if (n === 1960) throw new Error("boom");
         posted.push(n);
       },
+      isOpenIssue: async () => true,
+      hasNote: async () => false,
     },
   );
   assertEquals(posted, [1984]);
