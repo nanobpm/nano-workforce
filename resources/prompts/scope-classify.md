@@ -158,7 +158,7 @@ the worker fence says held), and do not bother writing a result.
 
 ## Verdict (job result variables)
 
-Return **exactly** these two variables:
+Return these two required variables (plus the optional routing flags below when they apply):
 
 | var               | type    | meaning                                                    |
 |-------------------|---------|------------------------------------------------------------|

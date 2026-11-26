@@ -792,6 +792,9 @@ test("a completion forging process-owned scope provenance is rejected at the doo
     { answer: "ok", scopeFixRound: 0 },
     { answer: "ok", completedUserTaskKey: "x" },
     { answer: "ok", completedCompletionId: 1 },
+    { answer: "proceed", autoMerge: false },
+    { answer: "proceed", convergeOnly: true },
+    { answer: "proceed", humanApproval: false },
   ];
   for (const variables of forged) {
     for (const kind of ["agent", "human"] as const) {

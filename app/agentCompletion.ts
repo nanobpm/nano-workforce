@@ -464,6 +464,11 @@ export const RESERVED_COMPLETION_VARIABLES: readonly string[] = [
   "answeredBy",
   "completedUserTaskKey",
   "completedCompletionId",
+  // Merge-policy inputs: an answer must not flip the merge gate (e.g. `autoMerge: false` letting an
+  // uncertain scope verdict skip human approval while the durable merge policy still merges).
+  "autoMerge",
+  "convergeOnly",
+  "humanApproval",
 ];
 
 /** The reserved process-owned keys present on a completion payload (empty when clean). */
