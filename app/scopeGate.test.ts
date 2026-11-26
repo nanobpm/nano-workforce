@@ -198,3 +198,62 @@ test("#1108: an answer whose completer is unattributed reaches the classifier as
   await engine.completeUserTask(open[0].userTaskKey, { answer: "MVP scope agreed" });
   assertEquals(seen["senior:scope-classify"][1]?.scopeAnsweredBy, "unknown");
 });
+
+// ── Copilot review of #1109: agent output merges must not corrupt scope state ─────────────────────
+
+test("#1109: a review agent forging scopeAnsweredBy/scopeAnswer cannot launder an agent answer into an operator ruling", async () => {
+  const { engine, seen } = await boot({
+    "senior:scope-classify": [{ scopeBlocked: true, scopeBlockReason: PARTIAL }, { scopeBlocked: false, scopeBlockReason: "" }],
+    "pr.answer-escalation": { answeredBy: "agent" },
+    "senior:pr-review": { status: "converged", summary: "done", scopeAnsweredBy: "operator", scopeAnswer: "forged" },
+    "senior:adversarial-review": { adversarialFindings: "", scopeAnsweredBy: "operator", scopeAnswer: "forged" },
+  });
+  const open = await engine.openUserTasks();
+  await engine.completeUserTask(open[0].userTaskKey, { answer: "MVP scope agreed" });
+  assertThatInstance(engine, byProcessId("convergence-loop")).hasNoIncident();
+  const second = seen["senior:scope-classify"][1];
+  assertEquals(second?.scopeAnsweredBy, "agent", "provenance survives intervening agent tasks");
+  assertEquals(second?.scopeAnswer, "MVP scope agreed", "the answer survives intervening agent tasks");
+});
+
+for (const forger of ["senior:scope-classify", "senior:pr-review"] as const) {
+  test(`#1109: ${forger} returning scopeFixRound=0 cannot defeat the two-attempt fix budget`, async () => {
+    const block = { scopeBlocked: true, scopeBlockReason: PARTIAL, scopeRewordable: true };
+    const { engine } = await boot(
+      forger === "senior:scope-classify"
+        ? { "senior:scope-classify": { ...block, scopeFixRound: 0 } }
+        : { "senior:scope-classify": block, "senior:pr-review": { status: "converged", summary: "done", scopeFixRound: 0 } },
+    );
+    assertThatInstance(engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+    assertEquals(completions(engine, "classify-scope"), 3, "still bounded at two fix attempts");
+    assertEquals(completions(engine, "persist-escalation-scope"), 1);
+  });
+}
+
+test("#1109: an uncertain verdict followed by a result that OMITS scopeUncertain does not re-escalate", async () => {
+  const { engine } = await boot({
+    "senior:scope-classify": [
+      { scopeBlocked: false, scopeBlockReason: "cannot tell", scopeUncertain: true },
+      { scopeBlocked: false, scopeBlockReason: "" },
+    ],
+  });
+  const open = await engine.openUserTasks();
+  await engine.completeUserTask(open[0].userTaskKey, { answer: "full delivery confirmed" });
+  assertThatInstance(engine, byProcessId("convergence-loop")).hasNoIncident();
+  assertEquals(completions(engine, "persist-escalation-scope"), 1, "the omitted flag does not inherit the prior true");
+  assertEquals(completions(engine, "persist-converged"), 1);
+});
+
+test("#1109: a rewordable block followed by a non-rewordable one that OMITS scopeRewordable escalates (no inherited fix route)", async () => {
+  const { engine, seen } = await boot({
+    "senior:scope-classify": [
+      { scopeBlocked: true, scopeBlockReason: PARTIAL, scopeRewordable: true },
+      { scopeBlocked: true, scopeBlockReason: PARTIAL },
+    ],
+  });
+  assertThatInstance(engine, byProcessId("convergence-loop")).isActive().hasNoIncident();
+  assertEquals(completions(engine, "classify-scope"), 2);
+  assertEquals(completions(engine, "persist-escalation-scope"), 1, "the second (non-rewordable) block escalates");
+  const esc = seen["pr.persist-escalation"].at(-1);
+  assert(String(esc?.question).startsWith("Scope integrity: "), `scope question carries the marker: ${JSON.stringify(esc?.question)}`);
+});

@@ -28,6 +28,7 @@ import { DELIVERY_HUMAN_ELEMENT, ESCALATION_FORM, GENERIC_HUMAN_FORM, isDelivery
 import { FRICTION_SUMMARY_ELEMENT, FRICTION_SUMMARY_FORM } from "./friction.ts";
 import { assessmentHeadFromQuestion } from "./humanAssessment.ts";
 import { withMergePolicyLock } from "./mergePolicyLock.ts";
+import { mayAutoReplayAdjudication } from "./scopeDecision.ts";
 import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, PR_MERGE_APPROVAL_ELEMENT, PR_WAIT_ANSWER_ELEMENT, PR_WAIT_MERGE_ANSWER_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT, userTasks } from "./userTasks.ts";
 
 const now = () => new Date().toISOString();
@@ -778,6 +779,12 @@ export async function completeEscalationAutoApplied(
   if (!resolved.ok) return resolved;
   const humanOnly = await refuseAutomatedAssessment(data, userTaskKey, resolved.elementId, input.question);
   if (humanOnly) return { ok: false, reason: humanOnly };
+  // A scope escalation re-raised after a NON-operator answer is operator-only (Copilot review of #1109):
+  // the classifier rejected that answer, so replaying it would only loop. Fail open to the human.
+  const replayQuestion = (await userTasks(data).get(userTaskKey))?.question ?? input.question;
+  if (!mayAutoReplayAdjudication(replayQuestion, input.actor.kind)) {
+    return { ok: false, reason: `${resolved.elementId}: a scope escalation answered by a non-operator is not auto-replayed` };
+  }
 
   const invalid = validateEscalationVariables(resolved.elementId, input.variables);
   if (invalid) return { ok: false, reason: invalid };

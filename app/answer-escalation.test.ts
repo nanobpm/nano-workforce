@@ -543,7 +543,7 @@ function fakeGh() {
   return {
     comments,
     deps: {
-      prBody: async () => "Closes #1960\nFollow-up: #1983",
+      prReferenceText: async () => "Closes #1960\nFollow-up: #1983",
       comment: async (_repo: string, n: number, body: string) => {
         comments.push({ n, body });
       },
@@ -579,4 +579,14 @@ test("#1108: a non-scope escalation answered by an agent posts no scope note", a
   const out = await makeAnswerEscalationHandler(gh.deps)(job as any, app as any);
   assertEquals(out, { answeredBy: "agent" });
   assertEquals(gh.comments.length, 0);
+});
+
+test("#1109: a retry after the escalation was already retired still reports the winning OPERATOR identity, and posts no note", async () => {
+  // A prior attempt retired the row then crashed before completion: no open target remains.
+  const { app, completions } = fakeApp([{ id: 9, pr_key: "o/r#1984", status: "answered", question: "scope?" }]);
+  completions.push({ id: 44, user_task_key: "ut-1", actor_id: "jwulf", actor_kind: "human", variables_json: JSON.stringify({ answer: "MVP scope agreed" }) });
+  const gh = fakeGh();
+  const out = await makeAnswerEscalationHandler(gh.deps)(scopeJob(44) as any, app as any);
+  assertEquals(out, { answeredBy: "operator" });
+  assertEquals(gh.comments.length, 0, "the open-row guard still fences the note");
 });

@@ -1201,3 +1201,19 @@ test("a PR escalation whose user_tasks projection is not yet written refuses aut
     assertEquals(completed.length, 0);
   }
 });
+
+// Copilot review of #1109: a scope escalation re-raised after a NON-operator answer is operator-only —
+// the replay path must not loop the classifier-rejected agent answer; an operator ruling still replays.
+for (const [kind, ok] of [["agent", false], ["human", true]] as const) {
+  test(`a scope escalation replays a ${kind} adjudication: ${ok ? "allowed" : "refused"} (#1109 review)`, async () => {
+    const stores = {
+      task_completions: { rows: [] as any[], key: "id" },
+      user_tasks: { rows: [{ user_task_key: "ut-s", element_id: "wait-answer", question: "Scope integrity: #1960 is partly delivered" }] as any[], key: "user_task_key" },
+    };
+    const data = memData(stores);
+    const { engine, completed } = fakeEngine([{ userTaskKey: "ut-s", elementId: "wait-answer" }]);
+    const replay = await completeEscalationAutoApplied(data, engine, { userTaskKey: "ut-s", variables: { answer: "MVP agreed" }, actor: { kind, id: "x" } });
+    assertEquals(replay.ok, ok);
+    assertEquals(completed.length, ok ? 1 : 0);
+  });
+}

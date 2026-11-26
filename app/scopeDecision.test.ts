@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import { parseLinkedIssueNumbers } from "./operatorFeedback.ts";
-import { agentScopeDecisionNote, answeredByFromActorKind, isOperatorDecision, postAgentScopeDecisionNote } from "./scopeDecision.ts";
+import { agentScopeDecisionNote, answeredByFromActorKind, isOperatorDecision, isScopeEscalationQuestion, mayAutoReplayAdjudication, postAgentScopeDecisionNote, SCOPE_ESCALATION_PREFIX } from "./scopeDecision.ts";
 
 test("answeredByFromActorKind maps the ledger identity, failing safe to unknown", () => {
   assertEquals(answeredByFromActorKind("human"), "operator");
@@ -35,7 +35,7 @@ test("postAgentScopeDecisionNote posts on the PR and each linked issue; failures
   const r = await postAgentScopeDecisionNote(
     { repo: "o/r", prNumber: 1984, prUrl: "u", answeredBy: "agent", answer: "a" },
     {
-      prBody: async () => "Closes #1960\nFollow-up: #1983",
+      prReferenceText: async () => "Closes #1960\nFollow-up: #1983",
       comment: async (_repo, n) => {
         if (n === 1960) throw new Error("boom");
         posted.push(n);
@@ -44,4 +44,15 @@ test("postAgentScopeDecisionNote posts on the PR and each linked issue; failures
   );
   assertEquals(posted, [1984]);
   assertEquals(r.failed, [1960]);
+});
+
+test("#1109: a scope escalation answered by a non-operator is never auto-replayed; others replay as before", () => {
+  const q = `${SCOPE_ESCALATION_PREFIX}#1960 is only partly delivered`;
+  assertEquals(isScopeEscalationQuestion(q), true);
+  assertEquals(isScopeEscalationQuestion("retry cap?"), false);
+  assertEquals(isScopeEscalationQuestion(null), false);
+  assertEquals(mayAutoReplayAdjudication(q, "agent"), false);
+  assertEquals(mayAutoReplayAdjudication(q, undefined), false);
+  assertEquals(mayAutoReplayAdjudication(q, "human"), true);
+  assertEquals(mayAutoReplayAdjudication("retry cap?", "agent"), true);
 });

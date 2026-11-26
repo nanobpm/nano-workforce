@@ -62,8 +62,13 @@ function nonBlankInt(v: unknown): number | undefined {
 
 /** The real GitHub seam for the "scope reduced by agent decision" note (issue #1108). */
 const ghScopeNoteDeps: ScopeNoteDeps = {
-  prBody: async (repo, prNumber) =>
-    (await runGh(["pr", "view", String(prNumber), "--repo", repo, "--json", "body", "--jq", ".body"], { timeoutMs: 30_000 })).trim(),
+  prReferenceText: async (repo, prNumber) =>
+    (
+      await runGh(
+        ["pr", "view", String(prNumber), "--repo", repo, "--json", "title,body,commits", "--jq", '[.title, (.body // ""), (.commits[] | .messageHeadline, (.messageBody // ""))] | join("\\n")'],
+        { timeoutMs: 30_000 },
+      )
+    ).trim(),
   comment: async (repo, number, body) => {
     await runGh(["issue", "comment", String(number), "--repo", repo, "--body", body], { timeoutMs: 30_000 });
   },
@@ -137,7 +142,14 @@ async function answerEscalation(job: Parameters<AppJobHandler<In>>[0], app: Para
   // misfile the answer under a different escalation's question (Copilot review of #806).
   // Who answered (issue #1108) — derived from the winning completion's AUTH identity in the ledger,
   // never from the answer text. `unknown` until a ledger row is correlated (fails safe: non-operator).
-  let answeredBy = answeredByFromActorKind(undefined);
+  // Resolved INDEPENDENTLY of the open-row guard below (Copilot review of #1109): if a prior attempt
+  // retired the escalation and then crashed before its completion was accepted, the retry finds no open
+  // target — but the winning completion's ledger identity is unchanged, so the operator's decision must
+  // still be reported as `operator`. The open-row guard keeps fencing the WRITES and the note.
+  const adjudicator = isConvergence
+    ? await latestAdjudicator(app, job.processInstanceKey, answer, completedUserTaskKey, completedCompletionId)
+    : undefined;
+  const answeredBy = answeredByFromActorKind(adjudicator?.kind);
   const target = escalationId != null ? open.find((e) => e.id === escalationId) : open[0];
   if (target !== undefined) {
     const ts = new Date().toISOString();
@@ -148,8 +160,6 @@ async function answerEscalation(job: Parameters<AppJobHandler<In>>[0], app: Para
     // after the rows flip loses the adjudication entirely (the retry finds no open row and returns), so
     // the answered question could re-escalate after restart. Scoped to convergence answers only.
     if (isConvergence) {
-      const adjudicator = await latestAdjudicator(app, job.processInstanceKey, answer, completedUserTaskKey, completedCompletionId);
-      answeredBy = answeredByFromActorKind(adjudicator?.kind);
       await recordAdjudication(app.data, {
         prKey,
         question: target.question,
