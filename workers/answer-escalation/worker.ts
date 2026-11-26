@@ -20,7 +20,6 @@ import type { AppJobHandler } from "@nanobpm/urban";
 import { generationGuard, recordAdjudication } from "../../app/adjudications.ts";
 import { taskCompletions } from "../../app/agentCompletion.ts";
 import { runGh, useGh } from "../../app/github.ts";
-import { SCOPE_DECISION_NOTE_MARKER } from "../../app/operatorFeedback.ts";
 import { answeredByFromActorKind, isOperatorDecision, postAgentScopeDecisionNote, type ScopeNoteDeps } from "../../app/scopeDecision.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -113,15 +112,15 @@ const ghScopeNoteDeps: ScopeNoteDeps = {
     const issue = (await (await tokenApi(`repos/${repo}/issues/${number}`)).json()) as { state?: string; pull_request?: unknown };
     return issue.state === "open" && issue.pull_request == null;
   },
-  hasNote: async (repo, number) => {
+  hasNote: async (repo, number, key) => {
     if (await useGh()) {
       const out = await runGh(["api", "--paginate", `repos/${repo}/issues/${number}/comments?per_page=100`, "--jq", ".[].body"], { timeoutMs: GH_TIMEOUT_MS });
-      return out.includes(SCOPE_DECISION_NOTE_MARKER);
+      return out.includes(key);
     }
     for (let page = 1; page <= 50; page++) {
       // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
       const batch = (await (await tokenApi(`repos/${repo}/issues/${number}/comments?per_page=100&page=${page}`)).json()) as { body?: string }[];
-      if (batch.some((c) => (c.body ?? "").includes(SCOPE_DECISION_NOTE_MARKER))) return true;
+      if (batch.some((c) => (c.body ?? "").includes(key))) return true;
       if (batch.length < 100) return false;
     }
     // Too many comments to scan: treat as already noted (fail closed — never risk a duplicate).
@@ -285,7 +284,7 @@ async function answerEscalation(job: Parameters<AppJobHandler<In>>[0], app: Para
     (await escs.find({ pr_key: prKey })).some((e) => e.id === escalationId && e.status === "answered" && (e.answer ?? undefined) === (answer ?? undefined));
   if ((retiredNow || crashRetry) && job.variables.scopePending === true && !isOperatorDecision(answeredBy) && repo !== undefined && prNumber !== undefined) {
     await postAgentScopeDecisionNote(
-      { repo, prNumber, prUrl: nonBlank(job.variables.prUrl) ?? `${repo}#${prNumber}`, answeredBy, answer },
+      { repo, prNumber, prUrl: nonBlank(job.variables.prUrl) ?? `${repo}#${prNumber}`, answeredBy, answer, decisionId: target?.id ?? escalationId },
       scopeNoteDeps,
     );
   }

@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import { isRunOwnComment, parseLinkedIssueNumbers } from "./operatorFeedback.ts";
-import { agentScopeDecisionNote, answeredByFromActorKind, isOperatorDecision, isScopeEscalationQuestion, mayAutoReplayAdjudication, postAgentScopeDecisionNote, SCOPE_ESCALATION_PREFIX } from "./scopeDecision.ts";
+import { agentScopeDecisionNote, answeredByFromActorKind, MAX_SCOPE_NOTE_CANDIDATES, isOperatorDecision, isScopeEscalationQuestion, mayAutoReplayAdjudication, postAgentScopeDecisionNote, SCOPE_ESCALATION_PREFIX } from "./scopeDecision.ts";
 
 test("answeredByFromActorKind maps the ledger identity, failing safe to unknown", () => {
   assertEquals(answeredByFromActorKind("human"), "operator");
@@ -92,4 +92,47 @@ test("#1109 review: the app-owned scope note is the run's own comment, never ope
   const note = agentScopeDecisionNote({ prUrl: "https://x/pull/1", answeredBy: "agent", answer: "MVP" });
   assertEquals(isRunOwnComment(note), true);
   assertEquals(isRunOwnComment(agentScopeDecisionNote({ prUrl: "u", answeredBy: "unknown", answer: undefined })), true);
+});
+
+test("#1109 review: a note for one PR does not suppress another PR's note on a shared issue", async () => {
+  const comments: { n: number; body: string }[] = [];
+  const deps = {
+    prReferenceText: async () => "Closes #7",
+    comment: async (_r: string, n: number, body: string) => {
+      comments.push({ n, body });
+    },
+    isOpenIssue: async () => true,
+    hasNote: async (_r: string, n: number, key: string) => comments.some((c) => c.n === n && c.body.includes(key)),
+  };
+  await postAgentScopeDecisionNote({ repo: "o/r", prNumber: 1, prUrl: "u1", answeredBy: "agent", answer: "a", decisionId: 1 }, deps);
+  await postAgentScopeDecisionNote({ repo: "o/r", prNumber: 2, prUrl: "u2", answeredBy: "agent", answer: "b", decisionId: 2 }, deps);
+  await postAgentScopeDecisionNote({ repo: "o/r", prNumber: 2, prUrl: "u2", answeredBy: "agent", answer: "c", decisionId: 3 }, deps);
+  await postAgentScopeDecisionNote({ repo: "o/r", prNumber: 2, prUrl: "u2", answeredBy: "agent", answer: "c", decisionId: 3 }, deps);
+  assertEquals(comments.map((c) => c.n), [1, 7, 2, 7, 2, 7]);
+});
+
+test("#1109 review: candidate lookups and total duration are bounded", async () => {
+  let lookups = 0;
+  const refs = Array.from({ length: 100 }, (_, i) => `Closes #${i + 10}`).join("\n");
+  const deps = {
+    prReferenceText: async () => refs,
+    comment: async () => {},
+    isOpenIssue: async () => {
+      lookups++;
+      return false;
+    },
+    hasNote: async () => false,
+  };
+  await postAgentScopeDecisionNote({ repo: "o/r", prNumber: 1, prUrl: "u", answeredBy: "agent", answer: "a" }, deps);
+  assertEquals(lookups, MAX_SCOPE_NOTE_CANDIDATES);
+  let t = 0;
+  lookups = 0;
+  const r = await postAgentScopeDecisionNote(
+    { repo: "o/r", prNumber: 1, prUrl: "u", answeredBy: "agent", answer: "a" },
+    { ...deps, isOpenIssue: async () => { lookups++; t += 50; return true; } },
+    { budgetMs: 100, now: () => t },
+  );
+  assertEquals(lookups, 2);
+  assertEquals(r.posted, []);
+  assertEquals(r.failed.includes(1), true);
 });

@@ -54,7 +54,17 @@ export function mayAutoReplayAdjudication(question: string | null | undefined, a
 
 /** The visible note posted when a scope escalation was answered by an agent (or an unattributed
  *  completer) rather than the operator. */
-export function agentScopeDecisionNote(input: { prUrl: string; answeredBy: AnsweredBy; answer: string | undefined }): string {
+/** The per-decision dedupe marker: scoped to the ORIGINATING PR and the escalation that was answered,
+ *  so a note for PR A never suppresses PR B's note on a shared issue, and a distinct answer (a new
+ *  escalation) on the same PR is recorded too. The generic {@link SCOPE_DECISION_NOTE_MARKER} stays in
+ *  the body for operator-feedback exclusion. */
+export function scopeDecisionNoteKey(input: { repo: string; prNumber: number; decisionId?: string | number | null }): string {
+  const id = String(input.decisionId ?? "unknown").replace(/[^A-Za-z0-9_.-]/g, "_");
+  const repo = input.repo.replace(/[^A-Za-z0-9_./-]/g, "_");
+  return `<!-- nwf:scope-agent-decision-key ${repo}#${input.prNumber}:${id} -->`;
+}
+
+export function agentScopeDecisionNote(input: { prUrl: string; answeredBy: AnsweredBy; answer: string | undefined; key?: string }): string {
   const who = input.answeredBy === "agent" ? "an agent (not the operator)" : "an unattributed completer (not a verified operator)";
   // The answer is agent-authored free text landing in a PRIVILEGED (app-token) comment: render it inert
   // in a fenced code block whose fence is longer than any backtick run in the text, so it cannot close
@@ -65,6 +75,7 @@ export function agentScopeDecisionNote(input: { prUrl: string; answeredBy: Answe
   const quoted = `${fence}text\n${text}\n${fence}`;
   return [
     SCOPE_DECISION_NOTE_MARKER,
+    ...(input.key ? [input.key] : []),
     "⚠️ **Scope reduced by agent decision.**",
     "",
     `The scope-integrity escalation on ${input.prUrl} was answered by ${who}. This is not an operator decision:`,
@@ -85,13 +96,18 @@ export interface ScopeNoteDeps {
   comment: (repo: string, number: number, body: string) => Promise<void>;
   /** Whether `number` in `repo` is an OPEN ISSUE (not a PR, not closed) — only those get the note. */
   isOpenIssue: (repo: string, number: number) => Promise<boolean>;
-  /** Whether the PR/issue already carries a comment containing {@link SCOPE_DECISION_NOTE_MARKER}
-   *  (idempotency across redelivery / crash-retry). */
-  hasNote: (repo: string, number: number) => Promise<boolean>;
+  /** Whether the PR/issue already carries a comment containing `key` (the per-decision
+   *  {@link scopeDecisionNoteKey}) — idempotency across redelivery / crash-retry. */
+  hasNote: (repo: string, number: number, key: string) => Promise<boolean>;
 }
 
 /** Hard cap on linked-issue targets the privileged note is posted on (besides the PR itself). */
 export const MAX_SCOPE_NOTE_ISSUES = 10;
+/** Hard cap on candidate references INSPECTED (each costs a GitHub lookup), so references to closed
+ *  issues/PRs cannot drive an unbounded number of serial lookups. */
+export const MAX_SCOPE_NOTE_CANDIDATES = 20;
+/** Total wall-clock budget for the whole note operation (lookups + posts). */
+export const SCOPE_NOTE_BUDGET_MS = 120_000;
 
 // Per-PR serialisation of note posting so two in-process deliveries of the same answer cannot both pass
 // the marker check before either posts.
@@ -112,14 +128,20 @@ function withNoteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
  *  each post's failure is swallowed (and reported in the result) so a GitHub hiccup never fails the
  *  answer reconcile. Returns the numbers it posted on. */
 export async function postAgentScopeDecisionNote(
-  input: { repo: string; prNumber: number; prUrl: string; answeredBy: AnsweredBy; answer: string | undefined },
+  input: { repo: string; prNumber: number; prUrl: string; answeredBy: AnsweredBy; answer: string | undefined; decisionId?: string | number | null },
   deps: ScopeNoteDeps,
+  opts: { budgetMs?: number; now?: () => number } = {},
 ): Promise<{ posted: number[]; failed: number[] }> {
   return withNoteLock(`${input.repo}#${input.prNumber}`, async () => {
-    const note = agentScopeDecisionNote(input);
+    const now = opts.now ?? Date.now;
+    const deadline = now() + (opts.budgetMs ?? SCOPE_NOTE_BUDGET_MS);
+    const key = scopeDecisionNoteKey(input);
+    const note = agentScopeDecisionNote({ ...input, key });
     let candidates: number[] = [];
     try {
-      candidates = parseLinkedIssueNumbers(await deps.prReferenceText(input.repo, input.prNumber), input.repo).filter((n) => n !== input.prNumber);
+      candidates = parseLinkedIssueNumbers(await deps.prReferenceText(input.repo, input.prNumber), input.repo)
+        .filter((n) => n !== input.prNumber)
+        .slice(0, MAX_SCOPE_NOTE_CANDIDATES);
     } catch {
       candidates = [];
     }
@@ -127,7 +149,7 @@ export async function postAgentScopeDecisionNote(
     // arbitrary PRs/closed issues or an unbounded number of targets.
     const issues: number[] = [];
     for (const n of candidates) {
-      if (issues.length >= MAX_SCOPE_NOTE_ISSUES) break;
+      if (issues.length >= MAX_SCOPE_NOTE_ISSUES || now() >= deadline) break;
       try {
         if (await deps.isOpenIssue(input.repo, n)) issues.push(n);
       } catch {
@@ -137,8 +159,12 @@ export async function postAgentScopeDecisionNote(
     const posted: number[] = [];
     const failed: number[] = [];
     for (const n of [input.prNumber, ...issues]) {
+      if (now() >= deadline) {
+        failed.push(n);
+        continue;
+      }
       try {
-        if (await deps.hasNote(input.repo, n)) continue;
+        if (await deps.hasNote(input.repo, n, key)) continue;
         await deps.comment(input.repo, n, note);
         posted.push(n);
       } catch {

@@ -555,7 +555,7 @@ function fakeGh() {
         comments.push({ n, body });
       },
       isOpenIssue: async () => true,
-      hasNote: async (_repo: string, n: number) => comments.some((c) => c.n === n && c.body.includes("nwf:scope-agent-decision")),
+      hasNote: async (_repo: string, n: number, key: string) => comments.some((c) => c.n === n && c.body.includes(key)),
     },
   };
 }
