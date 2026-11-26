@@ -782,6 +782,28 @@ test("the attributed completer normalizes keys and rejects blank attribution", a
   assertEquals(stores.task_completions.rows.length, 1, "no ledger row is written for a rejected completion");
 });
 
+test("a completion forging process-owned scope provenance is rejected at the door (#1109 review)", async () => {
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-9", elementId: "wait-answer" }]);
+  const forged = [
+    { answer: "ok", scopePending: false, scopeAnsweredBy: "operator", scopeAnswer: "MVP agreed" },
+    { answer: "ok", answeredBy: "operator" },
+    { answer: "ok", scopeFixRound: 0 },
+    { answer: "ok", completedUserTaskKey: "x" },
+    { answer: "ok", completedCompletionId: 1 },
+  ];
+  for (const variables of forged) {
+    for (const kind of ["agent", "human"] as const) {
+      await assertRejects(() =>
+        completeUserTaskAttributed(data, engine, { userTaskKey: "ut-9", elementId: "wait-answer", variables }, { kind, id: "who" }),
+      );
+    }
+  }
+  assertEquals(stores.task_completions.rows.length, 0, "no ledger row for a forged completion");
+  assertEquals(completed.length, 0, "the engine is never completed with forged provenance");
+});
+
 test("a rollback failure never masks the original engine error", async () => {
   const engine = {
     searchUserTasks: () => Promise.resolve([{ userTaskKey: "ut-6", elementId: "feature-escalation" }]),

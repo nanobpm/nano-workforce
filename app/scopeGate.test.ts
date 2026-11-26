@@ -170,6 +170,19 @@ test("#1108: an instance seeded without autoMerge/humanApproval (legacy) routes 
     { autoMerge: undefined, humanApproval: undefined },
   );
   assertThatInstance(engine, byProcessId("convergence-loop")).hasNoIncident();
+  // pr.finalize falls back to `convergeOnly !== true` (merge intent) for a legacy seed, so the gate must
+  // too: an uncertain verdict escalates rather than reaching an unattended auto-merge (#1109 review).
+  assertEquals(completions(engine, "persist-escalation-scope"), 1, "a legacy seed escalates an uncertain verdict");
+  assertEquals(completions(engine, "persist-converged"), 0);
+});
+
+test("#1108: a legacy review-only seed (convergeOnly) does not escalate an uncertain verdict", async () => {
+  const { engine } = await boot(
+    { "senior:scope-classify": { scopeBlocked: false, scopeBlockReason: "", scopeUncertain: true } },
+    { autoMerge: undefined, humanApproval: undefined, convergeOnly: true },
+  );
+  assertThatInstance(engine, byProcessId("convergence-loop")).hasNoIncident();
+  assertEquals(completions(engine, "persist-escalation-scope"), 0);
 });
 
 for (const [who, expected] of [["agent", "agent"], ["operator", "operator"]] as const) {

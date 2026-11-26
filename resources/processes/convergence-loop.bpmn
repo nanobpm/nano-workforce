@@ -984,7 +984,7 @@
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=scopeBlocked = true and scopeRewordable = true and scopeFixRound != null and scopeFixRound &lt;= 2</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_scopeUnsure" name="uncertain under autoMerge" sourceRef="gw-scope-gate" targetRef="persist-escalation-scope">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=scopeBlocked != true and scopeUncertain = true and (is defined(autoMerge) and autoMerge = true) and (is defined(humanApproval) = false or humanApproval != true)</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=scopeBlocked != true and scopeUncertain = true and (if is defined(autoMerge) and autoMerge != null then autoMerge = true else not(is defined(convergeOnly) and convergeOnly = true)) and (is defined(humanApproval) = false or humanApproval != true)</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_scopeOk" name="scope delivered / default" sourceRef="gw-scope-gate" targetRef="gw-approval" />
     <bpmn:sequenceFlow id="f_needApproval" name="approval required" sourceRef="gw-approval" targetRef="merge-approval">

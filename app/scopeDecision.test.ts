@@ -1,7 +1,7 @@
 // Unit tests for the scope-decision provenance helpers (issue #1108).
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { parseLinkedIssueNumbers } from "./operatorFeedback.ts";
+import { isRunOwnComment, parseLinkedIssueNumbers } from "./operatorFeedback.ts";
 import { agentScopeDecisionNote, answeredByFromActorKind, isOperatorDecision, isScopeEscalationQuestion, mayAutoReplayAdjudication, postAgentScopeDecisionNote, SCOPE_ESCALATION_PREFIX } from "./scopeDecision.ts";
 
 test("answeredByFromActorKind maps the ledger identity, failing safe to unknown", () => {
@@ -55,4 +55,10 @@ test("#1109: a scope escalation answered by a non-operator is never auto-replaye
   assertEquals(mayAutoReplayAdjudication(q, undefined), false);
   assertEquals(mayAutoReplayAdjudication(q, "human"), true);
   assertEquals(mayAutoReplayAdjudication("retry cap?", "agent"), true);
+});
+
+test("#1109 review: the app-owned scope note is the run's own comment, never operator feedback", () => {
+  const note = agentScopeDecisionNote({ prUrl: "https://x/pull/1", answeredBy: "agent", answer: "MVP" });
+  assertEquals(isRunOwnComment(note), true);
+  assertEquals(isRunOwnComment(agentScopeDecisionNote({ prUrl: "u", answeredBy: "unknown", answer: undefined })), true);
 });

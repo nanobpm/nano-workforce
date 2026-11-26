@@ -99,6 +99,11 @@ export function isTrustedAuthor(association: string | null | undefined, login: s
   return TRUSTED_ASSOCIATIONS.has(String(association ?? "").toUpperCase());
 }
 
+/** The hidden marker on the app-owned "scope reduced by agent decision" note (app/scopeDecision.ts,
+ *  issue #1108). The note is posted under the operator's credentials, so it is recognised as the run's
+ *  own comment by this marker — never as unacknowledged operator feedback (Copilot review of #1109). */
+export const SCOPE_DECISION_NOTE_MARKER = "<!-- nwf:scope-agent-decision -->";
+
 /** A comment the run itself (or its host) wrote: the claim, the PR-link announcement, or an ack reply.
  *  The agent posts under the operator's own credentials, so authorship cannot tell these apart — the
  *  content markers do. */
@@ -106,6 +111,7 @@ export function isRunOwnComment(body: string): boolean {
   return (
     body.trimStart().startsWith(CLAIM_COMMENT_PREFIX) ||
     body.includes(ISSUE_PR_LINK_MARKER_PREFIX) ||
+    body.includes(SCOPE_DECISION_NOTE_MARKER) ||
     ackLines(body).length > 0 ||
     // A Copilot-advisory ack thread root (`<verdict>. nano-ack: <path> :: <text>`, app/github.ts).
     /nano-ack:\s*\S+\s+::\s+\S/.test(body)

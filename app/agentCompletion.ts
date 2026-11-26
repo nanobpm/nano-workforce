@@ -451,6 +451,27 @@ export function snapshotUserTaskFormOptions(
  *  may override it. `opts.sourceAdjudicationId` links such a replay back to the adjudication it
  *  re-applied (persisted only when `autoApplied`) so a later revert can invalidate it. Callers must
  *  therefore NOT infer irreversibility from a `human` attribution alone — check `auto_applied`. */
+/** Process-owned variables no completer (human UI, d8ctl, or agent) may supply on a user-task
+ *  completion (Copilot review of #1109). They carry scope-decision provenance and the completion's own
+ *  identity, which the PROCESS and this door derive — a completion that set e.g. `scopePending: false`
+ *  plus `scopeAnsweredBy: "operator"` could otherwise forge an operator scope ruling. Rejected at the
+ *  ONE canonical completion door so every completer path is covered. */
+export const RESERVED_COMPLETION_VARIABLES: readonly string[] = [
+  "scopePending",
+  "scopeAnswer",
+  "scopeAnsweredBy",
+  "scopeFixRound",
+  "answeredBy",
+  "completedUserTaskKey",
+  "completedCompletionId",
+];
+
+/** The reserved process-owned keys present on a completion payload (empty when clean). */
+export function reservedCompletionKeys(variables: Record<string, unknown> | null | undefined): string[] {
+  if (!variables) return [];
+  return RESERVED_COMPLETION_VARIABLES.filter((k) => Object.hasOwn(variables, k));
+}
+
 export async function completeUserTaskAttributed(
   data: DataLayer,
   engine: EngineClient,
@@ -469,6 +490,8 @@ export async function completeUserTaskAttributed(
   if (!userTaskKey) throw new Error("userTaskKey is required");
   const actorId = actor.id.trim();
   if (!actorId) throw new Error("actor id is required");
+  const reserved = reservedCompletionKeys(target.variables);
+  if (reserved.length > 0) throw new Error(`completion may not set process-owned variable(s): ${reserved.join(", ")}`);
 
   // An AUTO-APPLIED replay of a prior durable adjudication (issue #806) is always human-overridable,
   // regardless of the original actor kind — a machine re-application must never be an unchallengeable

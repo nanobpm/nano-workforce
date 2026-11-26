@@ -12,7 +12,7 @@
 // loop carries into the scope classifier (`scopeAnsweredBy`), plus the visible "scope reduced by agent
 // decision" note the loop posts on the PR and its linked issues when a scope escalation was answered
 // by anything other than the operator.
-import { parseLinkedIssueNumbers } from "./operatorFeedback.ts";
+import { parseLinkedIssueNumbers, SCOPE_DECISION_NOTE_MARKER } from "./operatorFeedback.ts";
 
 /** Who answered an escalation, derived from the completion's auth identity. `unknown` (no ledger row
  *  could be correlated) is deliberately NOT `operator`: an unattributed answer never counts as an
@@ -58,6 +58,7 @@ export function agentScopeDecisionNote(input: { prUrl: string; answeredBy: Answe
   const who = input.answeredBy === "agent" ? "an agent (not the operator)" : "an unattributed completer (not a verified operator)";
   const quoted = (input.answer ?? "(no answer text)").split("\n").map((l) => `> ${l}`).join("\n");
   return [
+    SCOPE_DECISION_NOTE_MARKER,
     "⚠️ **Scope reduced by agent decision.**",
     "",
     `The scope-integrity escalation on ${input.prUrl} was answered by ${who}. This is not an operator decision:`,

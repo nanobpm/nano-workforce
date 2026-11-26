@@ -19,7 +19,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { generationGuard, recordAdjudication } from "../../app/adjudications.ts";
 import { taskCompletions } from "../../app/agentCompletion.ts";
-import { runGh } from "../../app/github.ts";
+import { runGh, useGh } from "../../app/github.ts";
 import { answeredByFromActorKind, isOperatorDecision, postAgentScopeDecisionNote, type ScopeNoteDeps } from "../../app/scopeDecision.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -60,17 +60,48 @@ function nonBlankInt(v: unknown): number | undefined {
   return undefined;
 }
 
-/** The real GitHub seam for the "scope reduced by agent decision" note (issue #1108). */
+/** The real GitHub seam for the "scope reduced by agent decision" note (issue #1108). Honours the
+ *  shared transport selection (`useGh()` — gh vs. `GITHUB_TOKEN` REST, Copilot review of #1109) and
+ *  reads EVERY commit through the paginated PR-commits API: `gh pr view --json commits` caps at 100,
+ *  so an issue referenced only by a later commit would escape the note (scope-classify.md forbids the
+ *  capped read for the same reason). */
+const GH_TIMEOUT_MS = 30_000;
+async function tokenApi(path: string, init: { method?: string; body?: string } = {}): Promise<Response> {
+  const token = process.env.GITHUB_TOKEN ?? "";
+  if (!token) throw new Error("no GitHub transport: gh unavailable and GITHUB_TOKEN unset");
+  const r = await fetch(`https://api.github.com/${path}`, {
+    ...init,
+    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "content-type": "application/json" },
+    signal: AbortSignal.timeout(GH_TIMEOUT_MS),
+  });
+  if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  return r;
+}
 const ghScopeNoteDeps: ScopeNoteDeps = {
-  prReferenceText: async (repo, prNumber) =>
-    (
-      await runGh(
-        ["pr", "view", String(prNumber), "--repo", repo, "--json", "title,body,commits", "--jq", '[.title, (.body // ""), (.commits[] | .messageHeadline, (.messageBody // ""))] | join("\\n")'],
-        { timeoutMs: 30_000 },
-      )
-    ).trim(),
+  prReferenceText: async (repo, prNumber) => {
+    if (await useGh()) {
+      const head = await runGh(["pr", "view", String(prNumber), "--repo", repo, "--json", "title,body", "--jq", '[.title, (.body // "")] | join("\\n")'], { timeoutMs: GH_TIMEOUT_MS });
+      const commits = await runGh(["api", "--paginate", `repos/${repo}/pulls/${prNumber}/commits?per_page=100`, "--jq", ".[].commit.message"], { timeoutMs: GH_TIMEOUT_MS });
+      return `${head.trim()}\n${commits.trim()}`;
+    }
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const pr = (await (await tokenApi(`repos/${repo}/pulls/${prNumber}`)).json()) as { title?: string; body?: string | null };
+    const parts: string[] = [pr.title ?? "", pr.body ?? ""];
+    // GitHub's PR-commits endpoint returns at most 250 commits; page until a short page.
+    for (let page = 1; page <= 10; page++) {
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const batch = (await (await tokenApi(`repos/${repo}/pulls/${prNumber}/commits?per_page=100&page=${page}`)).json()) as { commit?: { message?: string } }[];
+      for (const c of batch) parts.push(c.commit?.message ?? "");
+      if (batch.length < 100) break;
+    }
+    return parts.join("\n");
+  },
   comment: async (repo, number, body) => {
-    await runGh(["issue", "comment", String(number), "--repo", repo, "--body", body], { timeoutMs: 30_000 });
+    if (await useGh()) {
+      await runGh(["issue", "comment", String(number), "--repo", repo, "--body", body], { timeoutMs: GH_TIMEOUT_MS });
+      return;
+    }
+    await tokenApi(`repos/${repo}/issues/${number}/comments`, { method: "POST", body: JSON.stringify({ body }) });
   },
 };
 
