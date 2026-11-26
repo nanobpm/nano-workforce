@@ -415,6 +415,68 @@ hint (check `CAMUNDA_TOKEN`), not as an unreachable engine.
 > `engine response missing processInstanceKey/key`). The startup `Engine:` line
 > tells you which engine you actually reached, before any such error.
 
+### Run on Camunda 8 with c8run
+
+Nano Workforce also runs on a stock **Camunda 8.10** engine. This was verified with
+[c8run](https://docs.camunda.io/docs/self-managed/quickstart/developer-quickstart/c8run/)
+8.10.9 end to end: implement → converge → merge, with escalations answered through
+the app and no engine incidents.
+
+**Requirements**
+
+- **Camunda 8.10 or later**, started with c8run. Its REST API is at
+  `http://localhost:8080/v2`, unauthenticated by default.
+- **c8ctl-plugin-nano 1.79.2 or later** on every worker (`c8ctl nano update`).
+  Camunda 8.10 names the job lease field `jobLeaseToken`. Older plugins send the
+  legacy `leaseToken`, so Camunda rejects every agent job's completion with
+  `INVALID_STATE … a matching lease token must be provided`. The agent's work is
+  done, but the job never settles.
+
+**1. Start the app against c8run.** c8run already uses port 8080, so give the app
+its own port:
+
+```sh
+export CAMUNDA_REST_ADDRESS=http://localhost:8080/v2
+export PR_REVIEW_PORT=3010
+export NANO_WORKFORCE_BASE_URL=http://localhost:3010   # what agents call back on
+npm start
+```
+
+The startup preflight should print
+`Engine: Camunda 8 (gateway v8.10.x) — REST only …`. The app then deploys every
+resource under `resources/` (processes, forms, and the `prompts/*.md` linked
+resources) to Camunda.
+
+**2. Put a worker on c8run.** Add a c8ctl profile for the local engine, then run
+the worker with it:
+
+```sh
+c8ctl add profile local --baseUrl http://localhost:8080   # c8ctl appends /v2
+NANO_AGENTIC_URL=http://127.0.0.1:3010 \
+  c8ctl nano work <agent-profile> --auto --profile local
+```
+
+Camunda has no Nano console, so the worker can't discover the app's agentic
+visibility channel on its own. Set `NANO_AGENTIC_URL` to the app's address to get
+live terminals and presence.
+
+> **Already running workers against another engine on the same machine?** Use
+> `--profile local` per command rather than `c8ctl use profile`. Switching the
+> active profile would redirect those workers' next commands. If you need a fully
+> separate plugin install and profile store, point `C8CTL_DATA_DIR` at another
+> directory.
+
+**3. Submit work** as usual, for example
+`POST http://localhost:3010/app/api/actions/start/feature` with
+`{"issue":"owner/repo#N","baseBranch":"main","confirmDefaultBase":true,"converge":true,"autoMerge":true}`.
+Escalations show up in the app and are answered there, like on a Nano engine.
+
+**Differences from a Nano engine**
+
+- **REST only.** There's no Falcon streaming, so job activation uses REST long-polling.
+- **No live view by default.** Agentic visibility needs `NANO_AGENTIC_URL` (step 2).
+- **Not yet verified on Camunda:** timer arms firing (review-wait timeout, agent SLA)
+  and plan fan-out epics.
 
 ### Fleet networking (remote workers)
 
